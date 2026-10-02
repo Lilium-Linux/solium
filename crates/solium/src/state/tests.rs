@@ -23828,6 +23828,80 @@ end)
                 );
             }
 
+            /// **A surface the pointer does not reach holds no keyboard**, as
+            /// it holds no grab: nothing could click it to take the keyboard
+            /// back, so the window keeps it, on Russian (#132).
+            #[test]
+            fn a_surface_the_pointer_does_not_reach_holds_no_keyboard() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let mut declared = crate::scripted::Declaration::for_test(
+                    "osd",
+                    std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+                    Scripted::Overlay,
+                    crate::scripted::On::Rect(screen_wide()),
+                );
+                declared.interactive = false;
+                desk.state.declare_surface(declared);
+                let osd = desk.state.surfaces.named("osd").expect("declared");
+                desk.state
+                    .surfaces
+                    .get_mut(osd)
+                    .expect("live")
+                    .stand_in(Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..Stand::solid()
+                    });
+                want(
+                    &mut desk,
+                    osd,
+                    crate::qml::hosted::KeyboardReport::Wanted(vec!["Escape".to_owned()]),
+                );
+                assert_eq!(
+                    (desk.state.hosted_keyboard.is_none(), keyboard_on(&desk)),
+                    (true, Some(window_id(&opened))),
+                    "(no hold, the keyboard)"
+                );
+            }
+
+            /// **A surface declared again out of the pointer's reach while its
+            /// scene holds the keyboard gives it back**: the scene is told to
+            /// let go, and the window it came from has the keyboard again.
+            #[test]
+            fn a_surface_declared_again_out_of_the_pointers_reach_gives_the_keyboard_back() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                let held = desk.state.hosted_keyboard.is_some();
+                let mut declared = desk
+                    .state
+                    .surfaces
+                    .get(shell)
+                    .expect("live")
+                    .declared
+                    .clone();
+                declared.interactive = false;
+                desk.state.declare_surface(declared);
+                assert_eq!(
+                    (
+                        held,
+                        desk.state.hosted_keyboard.is_none(),
+                        let_go(&desk, shell),
+                        keyboard_on(&desk)
+                    ),
+                    (true, true, 1, Some(window_id(&opened))),
+                    "(held, the hold over, the times the scene was told to let go, the keyboard)"
+                );
+            }
+
             /// **A monitor unplugged while its scene holds the keyboard gives
             /// it back**: the hold goes with its monitor, though the surface
             /// is still declared, and the window it came from has the

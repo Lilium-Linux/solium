@@ -437,11 +437,15 @@ impl Solium {
     /// the window that had it, or from the scene that held it, which is told
     /// to let go and whose window it will be given back to; the instance
     /// holding it letting go gives the keyboard back. The one held is then
-    /// let go of if its scene is gone, with its surface or its monitor.
+    /// let go of if its scene is gone, with its surface or its monitor, or
+    /// its surface is declared out of the pointer's reach: such a surface
+    /// holds no keyboard, as it holds no grab, since nothing could click it.
     /// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_keyboard_back`,
-    /// `state::tests::real_client::reflow_on_close::hosted::a_monitor_unplugged_while_its_scene_holds_the_keyboard_gives_it_back`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_monitor_unplugged_while_its_scene_holds_the_keyboard_gives_it_back`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_keyboard`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_gives_the_keyboard_back`.
     fn settle_keyboard(&mut self) {
         // Behind the lock the keyboard is the lock screen's: what a scene
         // says of it is read once the lock is gone, as its grabs are.
@@ -461,12 +465,12 @@ impl Solium {
                 })
                 .map(|(output, _)| output.name())
                 .collect();
-            let policy = surface.declared.keyboard;
+            let (policy, interactive) = (surface.declared.keyboard, surface.interactive());
             for (monitor, report) in surface.take_keyboards(&on) {
-                reports.push((surface.id(), policy, monitor, report));
+                reports.push((surface.id(), policy, interactive, monitor, report));
             }
         }
-        for (id, policy, monitor, report) in reports {
+        for (id, policy, interactive, monitor, report) in reports {
             let ours = self
                 .hosted_keyboard
                 .as_ref()
@@ -477,6 +481,9 @@ impl Solium {
                         held.claims = claims;
                     }
                 }
+                // A surface the pointer does not reach takes no keyboard.
+                // `state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_keyboard`.
+                KeyboardReport::Wanted(_) if !interactive => {}
                 KeyboardReport::Wanted(claims) => {
                     let Some(output) = self
                         .space
@@ -516,7 +523,7 @@ impl Solium {
                 || self
                     .surfaces
                     .get(held.surface)
-                    .is_none_or(|surface| !surface.hosts_on(&held.output))
+                    .is_none_or(|surface| !surface.interactive() || !surface.hosts_on(&held.output))
         });
         if gone {
             self.end_keyboard_hold(true);

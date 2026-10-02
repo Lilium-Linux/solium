@@ -319,6 +319,11 @@ One scene holds it at a time
 (`state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`),
 and a scene whose monitor is unplugged gives it back
 (`state::tests::real_client::reflow_on_close::hosted::a_monitor_unplugged_while_its_scene_holds_the_keyboard_gives_it_back`).
+A surface the pointer does not reach, declared `interactive = false`, holds
+no keyboard, as it holds no grab, since nothing could click it to take the
+keyboard back; one declared so while its scene holds it gives it back
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_keyboard`,
+`state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_gives_the_keyboard_back`).
 The compositor's own Qt loads no input method from your session, so IBus and
 the like do not run inside it
 (`launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`);
