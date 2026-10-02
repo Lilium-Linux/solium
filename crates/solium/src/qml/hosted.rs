@@ -1,7 +1,8 @@
 //! The compositor's half of what a hosted scene and the compositor say to each
 //! other: properties written in place, the monitor it is on, the models' rows,
-//! pointer events, and, from later tasks, what it claims, what it reserves, its
-//! grabs, its keyboard wants and its actions.
+//! pointer events, and what its items claim of the pointer
+//! (`tests::the_item_tree_decides_what_a_point_claims`). What it reserves
+//! (#162), its grabs and its keyboard wants (#163) are still to come.
 
 use std::{
     ffi::{CString, c_char, c_int},
@@ -70,6 +71,9 @@ pub(crate) enum Model {
 /// `tests::a_refused_batch_takes_none_of_its_steps`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn apply_rows(model: Model, ops: &str) -> bool {
+    // A row a binding reads can move a scene's items.
+    // `surface::tests::a_cached_hit_follows_published_rows_and_a_taken_action`.
+    touched();
     let Ok(ops) = CString::new(ops) else {
         return false;
     };
@@ -192,10 +196,17 @@ impl Asking {
 }
 
 /// How many times Qt may have changed an item tree: every tick, drain,
-/// resize, property write and delivery. A hit cached at one generation is
-/// good until the next, which is how one item walk serves a whole frame's
-/// questions about a still pointer.
-/// `surface::tests::a_cached_hit_follows_the_scene_once_qt_has_run`.
+/// resize, property write, row batch, string taken and delivery. A hit cached
+/// at one generation is good until the next, which is how one item walk
+/// serves a whole frame's questions about a still pointer.
+///
+/// Qt also moves items when it polishes them, which is where a `Row`, a
+/// `Column` or a layout places its children, and it polishes them as the
+/// frame is rendered, after the tick's bump. So nothing may ask a hit between
+/// `qml::tick` and that render, or it would be cached against the tree
+/// before the polish.
+/// `surface::tests::a_cached_hit_follows_the_scene_once_qt_has_run`,
+/// `surface::tests::a_cached_hit_follows_published_rows_and_a_taken_action`.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn touched() {

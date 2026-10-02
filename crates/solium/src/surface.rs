@@ -600,6 +600,71 @@ mod tests {
         });
     }
 
+    /// **A cached hit follows what moves the scene's items without a write
+    /// from the compositor**: a monitor row published, which a binding in the
+    /// scene reads, and an `action` taken, whose clearing runs the scene's
+    /// own handler.
+    #[test]
+    fn a_cached_hit_follows_published_rows_and_a_taken_action() {
+        use crate::models::diff::{Row, diff, render};
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-cached-rows");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    property string action: "go"
+                    MouseArea { x: Solium.monitor.present ? 40 : 0; width: 20; height: 20 }
+                    MouseArea { id: second; x: 100; width: 20; height: 20 }
+                    onActionChanged: if (action === "") second.x = 140
+                }
+                "#,
+            )
+            .expect("writing the scene");
+            let mut surface =
+                ShellSurface::hosted(path, "{}", "cached-rows-1").expect("the scene builds");
+            let area = smithay::utils::Rectangle::new((0, 0).into(), (400, 30).into());
+            let at = |x: f64| smithay::utils::Point::from((x, 10.0));
+            let first = surface.hit(area, at(10.0));
+
+            let row = Row {
+                key: "cached-rows-1".to_owned(),
+                values: std::collections::BTreeMap::from([(
+                    "name",
+                    crate::json::Json::Text("cached-rows-1".to_owned()),
+                )]),
+            };
+            assert!(crate::qml::hosted::apply_rows(
+                crate::qml::hosted::Model::Monitors,
+                &render(&diff(&[], &[row]))
+            ));
+            let published = surface.hit(area, at(10.0));
+            let second = surface.hit(area, at(110.0));
+            let taken = surface.taken_action();
+            let after_the_action = surface.hit(area, at(110.0));
+            drop(surface);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first, published, second, taken.as_deref(), after_the_action),
+                (
+                    Hit::Press,
+                    Hit::Nothing,
+                    Hit::Press,
+                    Some("go"),
+                    Hit::Nothing
+                ),
+                "(the first button, there again once its monitor was published, the second, \
+                 the action taken, the second's place after that)"
+            );
+        });
+    }
+
     /// **A scene rebuilt for an edit stays on its monitor**: the reload builds
     /// it hosted on the same monitor it was first built for.
     #[test]

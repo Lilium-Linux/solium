@@ -1481,6 +1481,10 @@ impl Scene {
     /// fork's drawer made.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn take_string(&mut self, name: &str) -> Option<String> {
+        // Clearing the property runs the scene's handlers for it, which can
+        // move its items.
+        // `surface::tests::a_cached_hit_follows_published_rows_and_a_taken_action`.
+        hosted::touched();
         let name = CString::new(name).ok()?;
         // SAFETY: `name` outlives the call.
         let value = unsafe { ffi::solium_qml_scene_take_string(self.scene, name.as_ptr()) };
