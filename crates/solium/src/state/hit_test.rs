@@ -797,9 +797,11 @@ impl Solium {
         }
 
         // A press a hosted scene took holds the pointer for that scene until
-        // every button is up (Ruling 7), so no client has it meanwhile.
-        // `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
-        if pointer && self.scene_press.is_some() {
+        // every button is up (Ruling 7), and a grab one holds holds it until
+        // it is let go of (Ruling 12), so no client has it meanwhile.
+        // `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`,
+        // `tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`.
+        if pointer && (self.scene_press.is_some() || self.hosted_grab.is_some()) {
             return None;
         }
 
@@ -1032,12 +1034,13 @@ impl Solium {
 
     /// Whether the window frames are kept from the pointer at `location`:
     /// something over the windows is what it is on there
-    /// ([`Self::pointed_above`]), or a scene holds a press (Ruling 7). A
-    /// scene that takes only hover leaves the frame under it the pointer, as
-    /// it leaves the window its press (Ruling 8).
-    /// `tests::real_client::reflow_on_close::hosted::the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press`.
+    /// ([`Self::pointed_above`]), or a scene holds a press (Ruling 7) or a
+    /// grab (Ruling 12). A scene that takes only hover leaves the frame under
+    /// it the pointer, as it leaves the window its press (Ruling 8).
+    /// `tests::real_client::reflow_on_close::hosted::the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press`,
+    /// `tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`.
     pub(crate) fn frames_kept_from(&self, location: Point<f64, Logical>) -> bool {
-        self.scene_press.is_some() || self.pointed_above(location)
+        self.scene_press.is_some() || self.hosted_grab.is_some() || self.pointed_above(location)
     }
 
     /// Whether a client's layer surface is what is on top at `location`, over
@@ -1104,7 +1107,13 @@ impl Solium {
     /// chrome too, and the press is the client's, which is what
     /// `pointer_button` does with it.
     /// `an_overlay_mapped_before_a_bar_is_drawn_over_it_and_takes_the_press`.
+    /// While a scene holds a grab, a press anywhere is that scene's to take
+    /// or to be dismissed by, so it is the surface's claim everywhere.
+    /// `tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`.
     pub(crate) fn claim_under(&self, location: Point<f64, Logical>) -> Claim {
+        if self.hosted_grab.is_some() {
+            return claim_of(true, self.script_grab, None);
+        }
         let above = self.topmost_above(location, Some(Asking::Press));
         let chrome = if matches!(above, Some(Above::Client(..))) {
             None

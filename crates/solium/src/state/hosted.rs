@@ -3,10 +3,43 @@
 
 use std::collections::BTreeMap;
 
-use smithay::output::Output;
+use smithay::{
+    input::pointer::MotionEvent,
+    output::Output,
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
+};
 
-use crate::scripted::Edges;
-use crate::state::Solium;
+use crate::{
+    qml::hosted::{GrabReport, PointerKind, ScenePointer},
+    scripted::{Edges, Outside, SurfaceId},
+    state::{ScenePress, Solium},
+};
+
+/// The one grab a hosted scene holds the pointer with (Ruling 12): whose,
+/// on which monitor, where that instance is drawn now, and its name, which
+/// picks what a press outside it does (Ruling 13).
+/// `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`,
+/// `state::tests::real_client::reflow_on_close::hosted::a_grab_follows_its_scene_to_where_it_is_drawn`,
+/// `state::tests::real_client::reflow_on_close::hosted::a_policy_named_for_the_grab_beats_the_default`.
+#[derive(Clone, Debug)]
+pub(crate) struct HostedGrab {
+    pub(crate) surface: SurfaceId,
+    pub(crate) output: Output,
+    pub(crate) area: Rectangle<i32, Logical>,
+    pub(crate) name: String,
+}
+
+/// What became of a button, with a grab held or a press swallowed.
+/// `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GrabRoute {
+    /// Neither had a say in it: it goes where it always would.
+    NoGrab,
+    /// The grab's scene took it, or it was swallowed.
+    Taken,
+    /// It dismissed the grab, and goes on to what is under it.
+    Passed,
+}
 
 /// What hosted surfaces reserve, by monitor, leaving out every monitor on
 /// which they reserve nothing.
@@ -21,8 +54,10 @@ pub(crate) type Reserves = BTreeMap<String, Edges>;
 const SETTLE_ROUNDS: usize = 4;
 
 impl Solium {
-    /// Read what every hosted scene reports, reserves first, then (later
-    /// tasks) grabs and keyboard wants, and then the actions they asked for.
+    /// Read what every hosted scene reports, reserves first, then grabs
+    /// (`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`),
+    /// then (a later task) keyboard wants, and then the actions they asked
+    /// for.
     /// Called after anything that can run QML code in a dispatch -- the end
     /// of an input dispatch and a frame's settle among them -- once a
     /// declaration has been applied, and once the surfaces are placed on
@@ -56,6 +91,7 @@ impl Solium {
                 self.redraw = true;
                 self.trigger_relayout();
             }
+            self.settle_grabs();
             self.settle_surfaces();
             if !self.scenes_to_settle {
                 break;
@@ -81,6 +117,241 @@ impl Solium {
             self.settle_scenes();
         } else {
             self.scenes_to_settle = true;
+        }
+    }
+
+    /// Read every scene's grab (Ruling 12). One is held at a time: a grab
+    /// another instance reports dismisses the one held, and the instance
+    /// holding it letting go of it ends it. The one held is then placed
+    /// where its scene is drawn now, and a scene that is gone, with its
+    /// surface, its monitor or its placement there, lets go of it.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_lets_go_of_its_grab`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_follows_its_scene_to_where_it_is_drawn`.
+    fn settle_grabs(&mut self) {
+        // Behind the lock the pointer is the lock screen's: what a scene
+        // says of its grabs is read once the lock is gone.
+        // `state::tests::real_client::lock_focus::a_grab_a_scene_takes_behind_the_lock_is_held_once_it_is_gone`.
+        if self.lock.is_some() {
+            return;
+        }
+        let (outputs, primary) = (self.monitor_rects(), self.primary_output());
+        let mut reports = Vec::new();
+        for surface in self.surfaces.iter_mut() {
+            let on: Vec<String> = outputs
+                .iter()
+                .filter(|(output, geometry)| {
+                    surface
+                        .area_on(output, *geometry, primary.as_ref())
+                        .is_some()
+                })
+                .map(|(output, _)| output.name())
+                .collect();
+            for (monitor, report) in surface.take_grabs(&on) {
+                reports.push((surface.id(), monitor, report));
+            }
+        }
+        for (id, monitor, report) in reports {
+            let ours = self
+                .hosted_grab
+                .as_ref()
+                .is_some_and(|held| held.surface == id && held.output.name() == monitor);
+            match report {
+                GrabReport::Held(name) => {
+                    if !ours {
+                        self.dismiss_hosted_grab();
+                    }
+                    if let Some(grab) = self.hosted_grab_for(id, &monitor, name) {
+                        self.hosted_grab = Some(grab);
+                        if !ours {
+                            self.unpoint_clients();
+                        }
+                    }
+                }
+                GrabReport::Released if ours => self.hosted_grab = None,
+                GrabReport::Released | GrabReport::Unchanged => {}
+            }
+        }
+        if let Some(held) = self.hosted_grab.take() {
+            let monitor = held.output.name();
+            self.hosted_grab = self.hosted_grab_for(held.surface, &monitor, held.name);
+        }
+    }
+
+    /// The grab named `name` of `id`'s instance on the monitor named
+    /// `monitor`, where that instance is drawn now, if it is there.
+    fn hosted_grab_for(&self, id: SurfaceId, monitor: &str, name: String) -> Option<HostedGrab> {
+        let output = self
+            .space
+            .outputs()
+            .find(|output| output.name() == monitor)?
+            .clone();
+        let geometry = self.space.output_geometry(&output)?;
+        let primary = self.primary_output();
+        let surface = self
+            .surfaces
+            .get(id)
+            .filter(|surface| surface.hosts_on(&output))?;
+        let area = surface.area_on(&output, geometry, primary.as_ref())?;
+        Some(HostedGrab {
+            surface: id,
+            area: self.carried(id, &output, area),
+            output,
+            name,
+        })
+    }
+
+    /// No client keeps the pointer while a grab is held, and a client's
+    /// pointer lock or confinement goes with it, as smithay lets one go when
+    /// its surface loses the pointer; the motion after the one that brings
+    /// the pointer back grants it again, as it grants every constraint
+    /// (Ruling 12).
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`.
+    fn unpoint_clients(&mut self) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        if pointer.current_focus().is_none() {
+            return;
+        }
+        let location = pointer.current_location();
+        let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
+        pointer.motion(
+            self,
+            None,
+            &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(self);
+    }
+
+    /// Dismiss the hosted grab: its scene hears every active grab of its
+    /// dismissed, newest first.
+    /// `state::tests::real_client::reflow_on_close::hosted::locking_the_session_dismisses_a_hosted_grab`.
+    pub(crate) fn dismiss_hosted_grab(&mut self) {
+        if let Some(grab) = self.hosted_grab.take()
+            && let Some(surface) = self.surfaces.get_mut(grab.surface)
+        {
+            surface.dismiss(&grab.output);
+            self.redraw = true;
+        }
+    }
+
+    /// Motion and the wheel while a grab is held: the grab's scene's,
+    /// wherever the pointer is. True when it took them. A press a scene
+    /// holds keeps them until its release, as it keeps the release (Ruling
+    /// 7).
+    /// `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`,
+    /// `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_wheel_is_the_scenes`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release`.
+    pub(crate) fn grab_pointer(
+        &mut self,
+        location: Point<f64, Logical>,
+        event: ScenePointer,
+    ) -> bool {
+        if self.scene_press.is_some() {
+            return false;
+        }
+        let Some(grab) = self.hosted_grab.clone() else {
+            return false;
+        };
+        if let Some(surface) = self.surfaces.get_mut(grab.surface) {
+            surface.deliver(&grab.output, grab.area, location, event);
+        }
+        if event.kind == PointerKind::Motion {
+            self.scene_hover_seen = Some((grab.surface, grab.output));
+        }
+        self.redraw = true;
+        true
+    }
+
+    /// A button while a grab is held, or the release of a press the
+    /// compositor swallowed. A press inside an active grab's target is the
+    /// grab's scene's, and holds the pointer for it until the release; one
+    /// outside dismisses the grab and is swallowed, with its release, or
+    /// passed on to what is under it, as the policy for the grab's name
+    /// says. A press a scene holds has the buttons until it is let go of.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+    /// `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_inside_the_grab_target_reaches_the_scene`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release`.
+    pub(crate) fn grab_button(
+        &mut self,
+        location: Point<f64, Logical>,
+        code: u32,
+        pressed: bool,
+        event: Option<ScenePointer>,
+    ) -> GrabRoute {
+        if !pressed && self.swallowed.remove(&code) {
+            return GrabRoute::Taken;
+        }
+        if !pressed || self.scene_press.is_some() {
+            return GrabRoute::NoGrab;
+        }
+        let Some(grab) = self.hosted_grab.clone() else {
+            return GrabRoute::NoGrab;
+        };
+        let inside = self
+            .surfaces
+            .get(grab.surface)
+            .is_some_and(|surface| surface.grab_contains(&grab.output, grab.area, location));
+        if inside {
+            match event {
+                Some(event) => {
+                    if let Some(surface) = self.surfaces.get_mut(grab.surface) {
+                        surface.deliver(&grab.output, grab.area, location, event);
+                    }
+                    self.scene_press = Some(ScenePress {
+                        surface: grab.surface,
+                        output: grab.output,
+                        area: grab.area,
+                    });
+                }
+                // A button Qt has no name for is told to no scene (Ruling 9),
+                // and is nobody else's inside the grab either.
+                // `state::tests::real_client::reflow_on_close::hosted::an_unnamed_button_pressed_in_a_grab_swallows_its_release`.
+                None => {
+                    self.swallowed.insert(code);
+                }
+            }
+            self.redraw = true;
+            return GrabRoute::Taken;
+        }
+        let policy = self
+            .surfaces
+            .get(grab.surface)
+            .map(|surface| surface.declared.outside_click.for_grab(&grab.name))
+            .unwrap_or_default();
+        self.dismiss_hosted_grab();
+        match policy {
+            Outside::Swallow => {
+                self.swallowed.insert(code);
+                GrabRoute::Taken
+            }
+            Outside::Pass => {
+                // The pointer was the grab's: it goes back to what is under
+                // it, so the press that goes on reaches that client.
+                // `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`.
+                if let Some(pointer) = self.seat.get_pointer() {
+                    let under = self.surface_under(location);
+                    let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
+                    pointer.motion(
+                        self,
+                        under,
+                        &MotionEvent {
+                            location,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time,
+                        },
+                    );
+                    pointer.frame(self);
+                }
+                GrabRoute::Passed
+            }
         }
     }
 

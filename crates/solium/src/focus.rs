@@ -174,6 +174,9 @@ impl Solium {
     /// matching serial and gives the keyboard to the menu's window. Once the
     /// keyboard grab is gone there is nothing left for it to match.
     pub(crate) fn release_grabs(&mut self) {
+        // A hosted scene's grab goes first, as the menus do.
+        // `state::tests::real_client::reflow_on_close::hosted::locking_the_session_dismisses_a_hosted_grab`.
+        self.dismiss_hosted_grab();
         if let Some(mut grab) = self.popup_grab.take() {
             grab.ungrab(PopupUngrabStrategy::All);
         }

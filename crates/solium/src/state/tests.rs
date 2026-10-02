@@ -1482,8 +1482,8 @@ mod real_client {
     use std::os::unix::net::UnixStream;
     use wayland_client::protocol::{
         wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
-        wl_data_offer, wl_keyboard, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-        wl_subcompositor, wl_subsurface, wl_surface,
+        wl_data_offer, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm,
+        wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
     };
     use wayland_client::{Connection, Dispatch, QueueHandle};
     use wayland_protocols::ext::idle_notify::v1::client::{
@@ -1494,6 +1494,9 @@ mod real_client {
     };
     use wayland_protocols::wp::idle_inhibit::zv1::client::{
         zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1,
+    };
+    use wayland_protocols::wp::pointer_constraints::zv1::client::{
+        zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
     };
     use wayland_protocols::xdg::activation::v1::client::{
         xdg_activation_token_v1, xdg_activation_v1,
@@ -1710,6 +1713,48 @@ mod real_client {
         /// Every global the registry has taken away, by name. A monitor
         /// that is only off must never be one.
         globals_removed: Vec<u32>,
+        /// For a hosted grab: what a game locks the pointer with.
+        pointer_constraints: Option<zwp_pointer_constraints_v1::ZwpPointerConstraintsV1>,
+        /// Every `wl_pointer.button` this client was sent, as the evdev code
+        /// and whether it was a press, once it has asked for a pointer with
+        /// [`Self::seat_pointer`]: a button a window was never told went
+        /// down must not be told it came up either.
+        buttons: Vec<(u32, bool)>,
+    }
+
+    impl Client {
+        /// The seat's pointer, asked for now: only the tests that read what
+        /// reached a window's pointer have one.
+        fn seat_pointer(&self, qh: &QueueHandle<Self>) -> wl_pointer::WlPointer {
+            self.seat
+                .as_ref()
+                .expect("wl_seat bound")
+                .get_pointer(qh, ())
+        }
+    }
+
+    /// See [`Client::buttons`].
+    impl Dispatch<wl_pointer::WlPointer, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _pointer: &wl_pointer::WlPointer,
+            event: wl_pointer::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let wl_pointer::Event::Button {
+                button,
+                state: button_state,
+                ..
+            } = event
+            {
+                state.buttons.push((
+                    button,
+                    button_state == wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed),
+                ));
+            }
+        }
     }
 
     /// A `wl_surface.frame` callback, told apart from a round trip's
@@ -1860,6 +1905,9 @@ mod real_client {
                 }
                 "zwlr_layer_shell_v1" => {
                     state.layer_shell = Some(registry.bind(name, 1, qh, ()));
+                }
+                "zwp_pointer_constraints_v1" => {
+                    state.pointer_constraints = Some(registry.bind(name, 1, qh, ()));
                 }
                 _ => {}
             }
@@ -2105,6 +2153,8 @@ mod real_client {
     }
     wayland_client::delegate_noop!(Client: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
     wayland_client::delegate_noop!(Client: ignore zwlr_layer_surface_v1::ZwlrLayerSurfaceV1);
+    wayland_client::delegate_noop!(Client: ignore zwp_pointer_constraints_v1::ZwpPointerConstraintsV1);
+    wayland_client::delegate_noop!(Client: ignore zwp_locked_pointer_v1::ZwpLockedPointerV1);
 
     /// The two events this fixture does not ignore. See
     /// [`Client::configures`] and [`Client::closes`].
@@ -10818,6 +10868,54 @@ end)"#,
                 ),
                 "(the hold let go, the last the scene was told, which ends its press as Qt \
                  ends one let go of unseen, how many times it heard the pointer leave)"
+            );
+        }
+
+        /// **No hosted grab is held behind the lock, and one a scene took
+        /// there is held once the lock is gone** (Ruling 12): behind the lock
+        /// the pointer is the lock screen's, and a popup the shell opened
+        /// meanwhile has it after the unlock. Tested with the Cyrillic group
+        /// active (#132); the scene is stood in for, beside these real
+        /// clients (the #99 test).
+        #[test]
+        fn a_grab_a_scene_takes_behind_the_lock_is_held_once_it_is_gone() {
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let menu = stand_in(
+                &mut session.state,
+                "menu",
+                crate::scripted::Layer::Top,
+                Rectangle::new((0, 0).into(), (1920, 1080).into()),
+                crate::scripted::Stand {
+                    hit: |_| crate::qml::hosted::Hit::Nothing,
+                    ..crate::scripted::Stand::solid()
+                },
+            );
+            let lock = session.lock();
+            if let Some(stand) = session
+                .state
+                .surfaces
+                .get_mut(menu)
+                .and_then(crate::scripted::Surface::stand_mut)
+            {
+                stand.grab = Some(crate::qml::hosted::GrabReport::Held("tray-menu".to_owned()));
+            }
+            session.state.settle_scenes();
+            let behind = session.state.hosted_grab.is_some();
+            lock.unlock_and_destroy();
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            session.state.settle_scenes();
+            assert_eq!(
+                (
+                    behind,
+                    session.state.lock.is_none(),
+                    session.state.hosted_grab.is_some()
+                ),
+                (false, true, true),
+                "(a grab held behind the lock, the session unlocked, the grab held after it)"
             );
         }
 
@@ -22816,6 +22914,494 @@ end)
                     ),
                     (true, true, true),
                     "(the scene heard the wheel, it heard the release, the hold let go)"
+                );
+            }
+
+            fn inside_the_menu(at: Point<f64, Logical>) -> bool {
+                (100.0..300.0).contains(&at.x) && (30.0..230.0).contains(&at.y)
+            }
+
+            /// A full-screen scene holding the grab `tray-menu`, whose target
+            /// is 100..300 x 30..230, with `policy`, over a window at 600,500;
+            /// focus follows clicks only, so a window focused is one pressed.
+            fn grabbing(
+                policy: crate::scripted::OutsideClick,
+            ) -> (Desk, Opened, crate::scripted::SurfaceId) {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                desk.state.profile.focus_follows_mouse = false;
+                desk.state.remove_surface("shell");
+                let mut declared = crate::scripted::Declaration::for_test(
+                    "menu",
+                    std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+                    Scripted::Top,
+                    crate::scripted::On::Rect(screen_wide()),
+                );
+                declared.outside_click = policy;
+                desk.state.declare_surface(declared);
+                let id = desk.state.surfaces.named("menu").expect("declared");
+                desk.state
+                    .surfaces
+                    .get_mut(id)
+                    .expect("live")
+                    .stand_in(Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        grab: Some(crate::qml::hosted::GrabReport::Held("tray-menu".to_owned())),
+                        inside: inside_the_menu,
+                        ..Stand::solid()
+                    });
+                desk.state.settle_scenes();
+                assert!(desk.state.hosted_grab.is_some(), "the grab was not taken");
+                (desk, opened, id)
+            }
+
+            fn dismissed(desk: &Desk, id: crate::scripted::SurfaceId) -> u32 {
+                desk.state
+                    .surfaces
+                    .get(id)
+                    .and_then(crate::scripted::Surface::stand)
+                    .map_or(0, |stand| stand.dismissed)
+            }
+
+            /// Report `grab` from the stand-in for surface `id`, and settle.
+            fn report(
+                desk: &mut Desk,
+                id: crate::scripted::SurfaceId,
+                grab: crate::qml::hosted::GrabReport,
+            ) {
+                if let Some(stand) = desk
+                    .state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    stand.grab = Some(grab);
+                }
+                desk.state.settle_scenes();
+            }
+
+            /// **A press outside a grab dismisses it and is swallowed, by
+            /// default** (Q2), and so is its release, wherever it lands: the
+            /// window under it neither takes the keyboard nor is told of a
+            /// button.
+            #[test]
+            fn a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                move_pointer(&mut desk.state, (631.0, 531.0), 12);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    13,
+                );
+                desk.pump();
+                assert_eq!(
+                    (
+                        dismissed(&desk, menu),
+                        desk.state.hosted_grab.is_none(),
+                        presses(&desk, menu),
+                        desk.state.focused_window().is_none(),
+                        desk.client.buttons.clone(),
+                    ),
+                    (1, true, 0, true, Vec::new()),
+                    "(the grab's dismissals, the grab let go, the presses its scene was told, \
+                     no window focused, the buttons the window was told)"
+                );
+            }
+
+            /// **With `outside_click = "pass"`, the dismissing press reaches
+            /// what is under it**: the window is clicked, press and release.
+            #[test]
+            fn with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it() {
+                let policy = crate::scripted::OutsideClick {
+                    default: crate::scripted::Outside::Pass,
+                    ..Default::default()
+                };
+                let (mut desk, opened, menu) = grabbing(policy);
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                click(&mut desk, (630.0, 530.0), 10);
+                desk.pump();
+                let focused = desk.state.focused_window().and_then(|window| {
+                    window
+                        .wl_surface()
+                        .map(|surface| surface.id().protocol_id())
+                });
+                assert_eq!(
+                    (dismissed(&desk, menu), focused, desk.client.buttons.clone()),
+                    (
+                        1,
+                        Some(window_id(&opened)),
+                        vec![(0x110, true), (0x110, false)]
+                    ),
+                    "(the grab's dismissals, the window focused, the buttons it was told)"
+                );
+            }
+
+            /// **A policy named for the grab beats the default.**
+            #[test]
+            fn a_policy_named_for_the_grab_beats_the_default() {
+                let policy = crate::scripted::OutsideClick {
+                    default: crate::scripted::Outside::Swallow,
+                    named: std::collections::BTreeMap::from([(
+                        "tray-menu".to_owned(),
+                        crate::scripted::Outside::Pass,
+                    )]),
+                };
+                let (mut desk, opened, _) = grabbing(policy);
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                click(&mut desk, (630.0, 530.0), 10);
+                let focused = desk.state.focused_window().and_then(|window| {
+                    window
+                        .wl_surface()
+                        .map(|surface| surface.id().protocol_id())
+                });
+                assert_eq!(focused, Some(window_id(&opened)));
+            }
+
+            /// **A press inside the grab's target reaches its scene**, where
+            /// no item of it takes one, and holds the pointer for it until
+            /// the release.
+            #[test]
+            fn a_press_inside_the_grab_target_reaches_the_scene() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                click(&mut desk, (150.0, 100.0), 10);
+                let released = scene_events(&desk.state, menu)
+                    .iter()
+                    .any(|event| matches!(event.kind, PointerKind::Release(0x1)));
+                assert_eq!(
+                    (
+                        dismissed(&desk, menu),
+                        presses(&desk, menu),
+                        released,
+                        desk.state.hosted_grab.is_some(),
+                        desk.state.scene_press.is_none(),
+                    ),
+                    (0, 1, true, true, true),
+                    "(the grab's dismissals, the presses its scene was told, the release reached it, \
+                     the grab still held, the press let go)"
+                );
+            }
+
+            /// **A button Qt has no name for, pressed inside a grab, swallows
+            /// its release**: the scene is not told of it, and when the grab
+            /// has gone by the release, the window the release lands on is not
+            /// told of it either.
+            #[test]
+            fn an_unnamed_button_pressed_in_a_grab_swallows_its_release() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                move_pointer(&mut desk.state, (150.0, 100.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x100, ButtonState::Pressed, 11);
+                report(&mut desk, menu, crate::qml::hosted::GrabReport::Released);
+                move_pointer(&mut desk.state, (630.0, 530.0), 12);
+                let on_the_window = pointer_on(&desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x100,
+                    ButtonState::Released,
+                    13,
+                );
+                desk.pump();
+                assert_eq!(
+                    (
+                        on_the_window.is_some(),
+                        presses(&desk, menu),
+                        dismissed(&desk, menu),
+                        desk.client.buttons.clone(),
+                    ),
+                    (true, 0, 0, Vec::new()),
+                    "(the window had the pointer at the release, the presses the scene was told, \
+                     the grab's dismissals, the buttons the window was told)"
+                );
+            }
+
+            /// **A press a scene holds when a grab begins keeps the pointer
+            /// until its release** (Ruling 7): a bar button whose press opens
+            /// a menu hears the motion and the release, the menu's scene hears
+            /// neither and is not dismissed, and the motion after the release
+            /// is the menu's.
+            #[test]
+            fn a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                let menu = stand_in(
+                    &mut desk.state,
+                    "menu",
+                    Scripted::Overlay,
+                    screen_wide(),
+                    Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        inside: inside_the_menu,
+                        ..Stand::solid()
+                    },
+                );
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                report(
+                    &mut desk,
+                    menu,
+                    crate::qml::hosted::GrabReport::Held("tray-menu".to_owned()),
+                );
+                move_pointer(&mut desk.state, (150.0, 100.0), 12);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    13,
+                );
+                let menu_heard_before = scene_events(&desk.state, menu).len();
+                move_pointer(&mut desk.state, (151.0, 101.0), 14);
+                let shell_heard: Vec<PointerKind> = scene_events(&desk.state, shell)
+                    .into_iter()
+                    .map(|event| event.kind)
+                    .collect();
+                assert_eq!(
+                    (
+                        shell_heard
+                            .iter()
+                            .filter(|kind| matches!(kind, PointerKind::Motion))
+                            .count(),
+                        shell_heard.last().copied(),
+                        menu_heard_before,
+                        dismissed(&desk, menu),
+                        desk.state.hosted_grab.is_some(),
+                        scene_events(&desk.state, menu)
+                            .iter()
+                            .any(|event| event.kind == PointerKind::Motion),
+                    ),
+                    (2, Some(PointerKind::Release(0x1)), 0, 0, true, true),
+                    "(the motions the bar heard, the last thing it heard, what the menu heard \
+                     before the release, the menu's dismissals, the grab still held, the menu \
+                     heard the motion after the release)"
+                );
+            }
+
+            /// **While a grab is held the pointer is the scene's**: it hears
+            /// the motion anywhere, and no window has the pointer.
+            #[test]
+            fn while_a_grab_is_held_the_pointer_is_the_scenes() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let focus = desk
+                    .state
+                    .seat
+                    .get_pointer()
+                    .and_then(|pointer| pointer.current_focus());
+                assert_eq!(
+                    (
+                        pointer_on(&desk),
+                        focus.is_none(),
+                        scene_events(&desk.state, menu)
+                            .iter()
+                            .any(|event| event.kind == PointerKind::Motion),
+                    ),
+                    (None, true, true),
+                    "(the surface under the pointer, the seat's pointer on nothing, the scene heard the motion)"
+                );
+            }
+
+            /// **While a grab is held no window takes the keyboard, the frame
+            /// or the cursor from the pointer** (Ruling 8): with focus
+            /// following the mouse the window under the pointer is not
+            /// focused, its frame is kept from it, and its corner offers no
+            /// resize, since a press there would dismiss the grab.
+            #[test]
+            fn while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer() {
+                let (mut desk, _, _) = grabbing(crate::scripted::OutsideClick::default());
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                desk.state.profile.focus_follows_mouse = true;
+                let corner = Point::<f64, Logical>::from((663.0, 563.0));
+                move_pointer(&mut desk.state, (corner.x, corner.y), 10);
+                assert_eq!(
+                    (
+                        desk.state.focused_window().is_none(),
+                        desk.state.frames_kept_from(corner),
+                        desk.state.claim_under(corner).cursor().is_none(),
+                    ),
+                    (true, true, true),
+                    "(no window focused, the frame kept from the pointer, no resize offered)"
+                );
+            }
+
+            /// **While a grab is held the wheel is the scene's**, over the
+            /// window too.
+            #[test]
+            fn while_a_grab_is_held_the_wheel_is_the_scenes() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 11);
+                assert!(
+                    scene_events(&desk.state, menu)
+                        .iter()
+                        .any(|event| matches!(event.kind, PointerKind::Wheel { .. })),
+                    "the grab's scene did not hear the wheel"
+                );
+            }
+
+            /// **One grab is held at a time** (Ruling 12): a grab another
+            /// surface's scene takes dismisses the one held.
+            #[test]
+            fn a_grab_another_scene_takes_dismisses_the_one_held() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let search = stand_in(
+                    &mut desk.state,
+                    "search",
+                    Scripted::Overlay,
+                    screen_wide(),
+                    Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..Stand::solid()
+                    },
+                );
+                report(
+                    &mut desk,
+                    search,
+                    crate::qml::hosted::GrabReport::Held("search".to_owned()),
+                );
+                let held = desk
+                    .state
+                    .hosted_grab
+                    .as_ref()
+                    .map(|grab| (grab.surface, grab.name.clone()));
+                assert_eq!(
+                    (dismissed(&desk, menu), held),
+                    (1, Some((search, "search".to_owned()))),
+                    "(the first grab's dismissals, the grab held)"
+                );
+            }
+
+            /// **A grab follows its scene to where it is drawn now**: the menu's
+            /// surface declared again further right hears the pointer in its
+            /// new coordinates.
+            #[test]
+            fn a_grab_follows_its_scene_to_where_it_is_drawn() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let mut moved = crate::scripted::Declaration::for_test(
+                    "menu",
+                    std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+                    Scripted::Top,
+                    crate::scripted::On::Rect(Rectangle::new((100, 0).into(), (1820, 1080).into())),
+                );
+                moved.outside_click = crate::scripted::OutsideClick::default();
+                desk.state.declare_surface(moved);
+                move_pointer(&mut desk.state, (150.0, 100.0), 10);
+                let last = desk
+                    .state
+                    .surfaces
+                    .get(menu)
+                    .and_then(crate::scripted::Surface::stand)
+                    .and_then(|stand| stand.seen.last().map(|(at, _)| *at));
+                assert_eq!(
+                    last,
+                    Some(Point::from((50.0, 100.0))),
+                    "where in its own coordinates the moved scene heard the pointer"
+                );
+            }
+
+            /// **A surface taken away lets go of its grab**: the window under
+            /// where it was is clicked again.
+            #[test]
+            fn a_surface_taken_away_lets_go_of_its_grab() {
+                let (mut desk, opened, _) = grabbing(crate::scripted::OutsideClick::default());
+                desk.state.remove_surface("menu");
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                click(&mut desk, (630.0, 530.0), 10);
+                let focused = desk.state.focused_window().and_then(|window| {
+                    window
+                        .wl_surface()
+                        .map(|surface| surface.id().protocol_id())
+                });
+                assert_eq!(
+                    (desk.state.hosted_grab.is_none(), focused),
+                    (true, Some(window_id(&opened))),
+                    "(the grab let go, the window the click focused)"
+                );
+            }
+
+            /// **Locking the session dismisses a hosted grab**, as every grab is
+            /// released at the lock.
+            #[test]
+            fn locking_the_session_dismisses_a_hosted_grab() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                desk.state.release_grabs();
+                assert_eq!(
+                    (dismissed(&desk, menu), desk.state.hosted_grab.is_none()),
+                    (1, true),
+                    "(the grab's dismissals, the grab let go)"
+                );
+            }
+
+            /// **A grab suspends a client's pointer lock, and the lock comes
+            /// back once the grab is gone** (Ruling 12): the screenshot UI over
+            /// a game needs the pointer (02, primitive 5). A lock is granted
+            /// at the motion after the one that entered the window, and holds
+            /// the pointer where that motion found it.
+            #[test]
+            fn a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after() {
+                use zwp_pointer_constraints_v1::Lifetime;
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                report(&mut desk, menu, crate::qml::hosted::GrabReport::Released);
+                let pointer = desk.client.seat_pointer(&desk.qh);
+                let constraints = desk
+                    .client
+                    .pointer_constraints
+                    .clone()
+                    .expect("zwp_pointer_constraints_v1 bound");
+                let _locked = constraints.lock_pointer(
+                    &opened.surface,
+                    &pointer,
+                    None,
+                    Lifetime::Persistent,
+                    &desk.qh,
+                    (),
+                );
+                desk.pump();
+                let at = |desk: &Desk| {
+                    desk.state
+                        .seat
+                        .get_pointer()
+                        .map(|pointer| pointer.current_location())
+                        .unwrap_or_default()
+                };
+                move_pointer(&mut desk.state, (630.0, 530.0), 20);
+                move_pointer(&mut desk.state, (631.0, 531.0), 21);
+                move_pointer(&mut desk.state, (700.0, 700.0), 22);
+                let locked = at(&desk);
+
+                report(
+                    &mut desk,
+                    menu,
+                    crate::qml::hosted::GrabReport::Held("shot".to_owned()),
+                );
+                move_pointer(&mut desk.state, (700.0, 700.0), 23);
+                let grabbed = at(&desk);
+
+                report(&mut desk, menu, crate::qml::hosted::GrabReport::Released);
+                move_pointer(&mut desk.state, (640.0, 540.0), 24);
+                move_pointer(&mut desk.state, (641.0, 541.0), 25);
+                move_pointer(&mut desk.state, (800.0, 800.0), 26);
+                assert_eq!(
+                    (locked, grabbed, at(&desk)),
+                    (
+                        Point::from((630.0, 530.0)),
+                        Point::from((700.0, 700.0)),
+                        Point::from((640.0, 540.0)),
+                    ),
+                    "(where the lock held the pointer, where it went while a grab was held, \
+                     where the lock held it after the grab)"
                 );
             }
 

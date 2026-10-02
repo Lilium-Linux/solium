@@ -118,6 +118,7 @@ use hit_test::{
     Claim, PaneHit, chrome_of, chrome_offered, claim_of, on_frame, pane_hit_of, shown_at,
     topmost_chrome,
 };
+pub(crate) use hosted::{GrabRoute, HostedGrab};
 #[cfg(test)]
 use monitors::anywhere_on;
 use open::Claimed;
@@ -404,6 +405,13 @@ pub(crate) struct Solium {
     /// to be settled once that dispatch is done.
     /// `tests::real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`.
     scenes_to_settle: bool,
+    /// The one grab a hosted scene holds the pointer with (Ruling 12).
+    /// `tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`.
+    pub(crate) hosted_grab: Option<HostedGrab>,
+    /// The buttons whose press the compositor swallowed, by evdev code, so
+    /// their release is swallowed too, wherever it lands.
+    /// `tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
+    pub(crate) swallowed: std::collections::HashSet<u32>,
     // A window on its way out, and one that has been asked to close and not
     // gone, used to be two `HashMap<PaneId, Duration>` here. They are
     // `Pane::closing_at` and `Pane::asked_at` now: a timer about one window is
@@ -946,6 +954,8 @@ impl Solium {
             settling_scenes: false,
             laid_out_reserves: hosted::Reserves::new(),
             scenes_to_settle: false,
+            hosted_grab: None,
+            swallowed: std::collections::HashSet::new(),
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
