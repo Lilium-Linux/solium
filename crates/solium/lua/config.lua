@@ -185,7 +185,7 @@ local defaults = {
             --              that line draws none.
             --   "surface"  on a surface of its own over everything, at the
             --              caret on screen.
-            --   false      nowhere.
+            --   false      nowhere; `indicator = false` says the same.
             -- The caret is known only from applications that say where it
             -- is, through the `text-input-v3` protocol; for the rest, see
             -- `fallback`.
