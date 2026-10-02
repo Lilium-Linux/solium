@@ -280,7 +280,10 @@ is spelled as `sol.bind` spells a key. `shell.keyboard.bindings` in
 `"none"` gives the shell every key
 (`input::tests::with_bindings_all_a_claimed_binding_wins`,
 `input::tests::with_bindings_none_even_super_bindings_reach_the_scene`,
-`script::tests::the_shell_takes_its_keyboard_bindings_from_the_configuration`).
+`script::tests::the_shell_takes_its_keyboard_bindings_from_the_configuration`),
+and a reload that changes it applies from the next key, while the shell holds
+the keyboard
+(`state::tests::real_client::reflow_on_close::hosted::a_bindings_policy_redeclared_while_the_shell_holds_the_keyboard_applies_at_once`).
 The Ctrl+Alt escapes always work
 (`input::tests::the_escape_hatches_beat_a_shell_that_holds_the_keyboard`).
 Clicking a window or `sol.focus` takes the keyboard back

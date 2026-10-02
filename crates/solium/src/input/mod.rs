@@ -297,11 +297,13 @@ fn press(
     // item claims is the scene's, then the bindings, and every other key is
     // the scene's. Claims and bindings alike are tried under both of
     // `combos_for`'s names, so `super+q` binds on Russian and a claim of
-    // `Escape` holds on any layout.
+    // `Escape` holds on any layout. The policy is the surface's as it is
+    // declared now, so a reload that changes it applies from the next key.
     // `tests::a_claimed_key_reaches_the_scene_and_not_its_binding`,
     // `tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,
     // `tests::with_bindings_all_a_claimed_binding_wins`,
-    // `tests::with_bindings_none_even_super_bindings_reach_the_scene`.
+    // `tests::with_bindings_none_even_super_bindings_reach_the_scene`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_bindings_policy_redeclared_while_the_shell_holds_the_keyboard_applies_at_once`.
     if let Some(holder) = state.hosted_keyboard.as_ref() {
         let combos = combos_for(
             modifiers,
@@ -322,7 +324,11 @@ fn press(
                     .cloned()
             })
         };
-        let binding = match holder.policy {
+        let policy = state
+            .surfaces
+            .get(holder.surface)
+            .map_or(holder.policy, |surface| surface.declared.keyboard);
+        let binding = match policy {
             KeyPolicy::ExceptClaimed if claimed => None,
             KeyPolicy::ExceptClaimed | KeyPolicy::All => bound(),
             KeyPolicy::NoBindings => None,

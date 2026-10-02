@@ -23763,6 +23763,51 @@ end)
                 );
             }
 
+            /// **The bindings policy is the surface's as it is declared now**:
+            /// one redeclared while its scene holds the keyboard applies from
+            /// the next key, so `bindings = "none"` gives the scene even a
+            /// `super` binding's key, on Russian (#132).
+            #[test]
+            fn a_bindings_policy_redeclared_while_the_shell_holds_the_keyboard_applies_at_once() {
+                const Q: u32 = 24;
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(r#"sol.bind("super+q", function() sol.status("super+q") end)"#);
+                want(
+                    &mut desk,
+                    shell,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                desk.state.declare_surface(crate::scripted::Declaration {
+                    keyboard: crate::scripted::KeyPolicy::NoBindings,
+                    ..crate::scripted::Declaration::for_test(
+                        "shell",
+                        std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+                        Scripted::Top,
+                        crate::scripted::On::Rect(screen_wide()),
+                    )
+                });
+                for (code, key_state, time) in [
+                    (SUPER_L, KeyState::Pressed, 20),
+                    (Q, KeyState::Pressed, 21),
+                    (Q, KeyState::Released, 22),
+                    (SUPER_L, KeyState::Released, 23),
+                ] {
+                    crate::input::key(&mut desk.state, code.into(), key_state, time);
+                }
+                assert_eq!(
+                    (
+                        desk.state.hosted_keyboard.is_some(),
+                        std::mem::take(&mut desk.state.status),
+                        desk.state
+                            .scene_keys
+                            .iter()
+                            .any(|key| key.pressed && key.code == Q),
+                    ),
+                    (true, String::new(), true),
+                    "(still held, what the binding left, the key told the scene)"
+                );
+            }
+
             /// **A window that leaves while the shell holds the keyboard is not
             /// given it back**: its close was asked for, and when the shell
             /// lets go the keyboard goes where it would have gone at the close,

@@ -17,9 +17,11 @@ use crate::{
 };
 
 /// The scene holding the keyboard (Ruling 14): whose, on which monitor, the
-/// keys its holding item claims, its surface's policy for the bindings, and
-/// the surface to give the keyboard back to.
-/// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`.
+/// keys its holding item claims, its surface's policy for the bindings when
+/// it took the keyboard, which a press reads from the surface again, and the
+/// surface to give the keyboard back to.
+/// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`,
+/// `state::tests::real_client::reflow_on_close::hosted::a_bindings_policy_redeclared_while_the_shell_holds_the_keyboard_applies_at_once`.
 #[derive(Clone, Debug)]
 pub(crate) struct HostedKeyboard {
     pub(crate) surface: SurfaceId,
