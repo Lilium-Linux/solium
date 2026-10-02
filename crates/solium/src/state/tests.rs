@@ -22097,6 +22097,26 @@ end)
                 );
             }
 
+            /// **The wheel where the shell draws nothing is the window's**: the
+            /// scene is not told of it, and the window under it has the
+            /// pointer the wheel goes to.
+            #[test]
+            fn the_wheel_where_the_shell_draws_nothing_is_the_windows_under_it() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                move_pointer(&mut desk.state, (630.0, 555.0), 10);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 11);
+                let wheels = scene_events(&desk.state, shell)
+                    .iter()
+                    .filter(|event| matches!(event.kind, PointerKind::Wheel { .. }))
+                    .count();
+                assert_eq!(
+                    (wheels, pointer_on(&desk)),
+                    (0, Some(window_id(&opened))),
+                    "(the wheel turns the shell was told, the surface the pointer is on)"
+                );
+            }
+
             /// **#173: a press on a shell button does not reach the window.**
             #[test]
             fn a_press_on_a_shell_button_does_not_reach_the_window() {

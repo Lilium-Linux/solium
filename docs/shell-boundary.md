@@ -195,11 +195,12 @@ asked to
 and a modal one takes every point of its scene while it is open, as Qt's own
 modality does
 (`qml::hosted::tests::a_modal_popup_takes_every_point_of_its_scene_while_it_is_open`).
-Everywhere else the window under the shell gets the press, and where the
-scene takes a press, the window under it does not have the pointer, nor the
-keyboard when focus follows the mouse. A press the scene took is its until
-every button is up, wherever the pointer goes meanwhile, and the pointer keeps
-the shape it had at the press
+Everywhere else the window under the shell gets the press and the wheel
+(`state::tests::real_client::reflow_on_close::hosted::the_wheel_where_the_shell_draws_nothing_is_the_windows_under_it`),
+and where the scene takes a press, the window under it does not have the
+pointer, nor the keyboard when focus follows the mouse. A press the scene
+took is its until every button is up, wherever the pointer goes meanwhile,
+and the pointer keeps the shape it had at the press
 (`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`,
 `state::tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`,
 `state::tests::real_client::reflow_on_close::hosted::a_press_a_scene_holds_keeps_its_shape_over_a_resize_border`,
