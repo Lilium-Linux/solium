@@ -439,8 +439,9 @@ keyboard = {
 ```
 
 `sol.keyboard()` reads all of it back to Lua — the layout names, which is
-active and its short name (`RU`), whether Caps Lock and Num Lock are on, and
-the repeat settings — and `sol.keyboard{ caps = false }` sets a lock.
+active and its names (`layout_name`, `Russian`; `layout_short`, `RU`), whether
+Caps Lock and Num Lock are on, and the repeat settings — and
+`sol.keyboard{ caps = false }` sets a lock.
 `sol.on("keyboard", function(state, changed) end)` hears the layout or a lock
 change, however it changed, and never ordinary typing. QML reads the same as
 the `Keyboard` singleton, in a hosted scene and a pane style alike.

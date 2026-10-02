@@ -160,11 +160,11 @@ local defaults = {
     --     end)
     --
     -- `sol.keyboard()` with no argument returns the layout names, which one is
-    -- active and its short name (`short`, "RU"), whether Caps Lock and Num
-    -- Lock are on, and the repeat settings. `sol.on("keyboard", function(state,
-    -- changed) end)` hears the layout or a lock change, however it changed,
-    -- and a hosted scene or a pane style reads the same in QML as the
-    -- `Keyboard` singleton.
+    -- active and its names (`layout_name`, "Russian", and `layout_short`,
+    -- "RU"), whether Caps Lock and Num Lock are on, and the repeat settings.
+    -- `sol.on("keyboard", function(state, changed) end)` hears the layout or a
+    -- lock change, however it changed, and a hosted scene or a pane style
+    -- reads the same in QML as the `Keyboard` singleton.
     keyboard = {
         -- The keyboard pill: a small capsule near where you are typing that
         -- says Caps Lock is on (`⇪`) or which layout you just switched to

@@ -2034,10 +2034,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
                 table.set("layouts", layouts)?;
                 table.set("active", keyboard.active)?;
-                // `keymap::tests::sol_keyboard_names_the_live_layout_and_its_short_name`,
+                // The live layout's names, as `layout_name` and `layout_short`
+                // and not as `layout`, which is the xkb names a keymap is
+                // compiled from: a table read here and handed back to
+                // `sol.keyboard{ ... }` compiles no keymap.
+                // `tests::sol_keyboard_handed_back_what_it_read_compiles_no_keymap`,
                 // `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
-                table.set("layout", keyboard.layout())?;
-                table.set("short", keyboard.short_name())?;
+                table.set("layout_name", keyboard.layout())?;
+                table.set("layout_short", keyboard.short_name())?;
                 table.set("caps", keyboard.caps)?;
                 table.set("num", keyboard.num)?;
                 table.set("repeat_rate", keyboard.repeat_rate)?;
@@ -4858,9 +4862,10 @@ mod tests {
                 -- `decoration`, and answering a typo with a deprecated spelling
                 -- walks somebody past the key that actually works (#117 review).
                 decoraton = "border",
-                -- Not typos, and must not be reported: `keyboard` is empty on
-                -- purpose, so its keys cannot be checked against the defaults,
-                -- and a binding combination is whatever you press. `active`
+                -- Not typos, and must not be reported: `keyboard` leaves its
+                -- xkb names out on purpose, so they cannot be checked against
+                -- the defaults, and a binding combination is whatever you
+                -- press. `active`
                 -- belongs with a dual layout and is exactly the pair that used
                 -- to be called a typo.
                 keyboard = { layout = "us,ua", active = 2 },
@@ -6540,12 +6545,12 @@ mod tests {
 
     /// **A keyboard section that says what layout to start on is not a typo.**
     ///
-    /// `config.lua` restates `sol.keyboard`'s key set, because `keyboard = {}`
-    /// is empty on purpose and so cannot be the list. The restatement left
-    /// `active` out, and `sol.keyboard` reads it -- so a dual-layout
-    /// configuration, the only kind that has an `active` to name, was told its
-    /// working setting is read by nothing and `solium --check` exited 1 (#117
-    /// review).
+    /// `config.lua` restates `sol.keyboard`'s key set, because `keyboard`
+    /// leaves the xkb names out on purpose and so cannot be the list. The
+    /// restatement left `active` out, and `sol.keyboard` reads it -- so a
+    /// dual-layout configuration, the only kind that has an `active` to name,
+    /// was told its working setting is read by nothing and `solium --check`
+    /// exited 1 (#117 review).
     ///
     /// That is worse than the silence #117 replaced. `--check` answers "did my
     /// configuration work", and a check that is wrong about a setting people
@@ -6578,6 +6583,85 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`keyboard.indicator` is known to `--check`**, setting by setting:
+    /// every one the shipped `config.lua` documents is accepted beside the xkb
+    /// names, and a misspelt one inside it is reported by its whole path, with
+    /// the setting it was near.
+    #[test]
+    fn the_keyboard_indicator_settings_are_known_to_check() {
+        let Some((directory, scripts)) = shipped_init_with_user(
+            "solium-script-test-keyboard-indicator",
+            r#"
+            return {
+                keyboard = {
+                    layout = "us,ru",
+                    indicator = {
+                        show = "surface",
+                        on = { layout = true, caps = false, num = true },
+                        caps_on_focus = false,
+                        fallback = false,
+                        position = "top",
+                        durration = 900,
+                    },
+                },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        let reported: Vec<(String, Option<String>)> = scripts
+            .unknown_settings()
+            .into_iter()
+            .map(|setting| (setting.key, setting.meant))
+            .collect();
+        assert_eq!(
+            reported,
+            vec![(
+                "keyboard.indicator.durration".to_owned(),
+                Some("keyboard.indicator.duration".to_owned())
+            )],
+            "every documented `keyboard.indicator` setting is one `--check` knows, and \
+             only the misspelt one is reported"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **What `sol.keyboard()` reads, handed back to `sol.keyboard{ ... }`,
+    /// compiles no keymap**: the live layout's names come back as
+    /// `layout_name` and `layout_short`, and `layout` is only ever the xkb
+    /// names a keymap is compiled from.
+    #[test]
+    fn sol_keyboard_handed_back_what_it_read_compiles_no_keymap() {
+        let directory = std::env::temp_dir().join("solium-script-test-keyboard-round-trip");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.bind("Super+P", function() sol.keyboard(sol.keyboard()) end)"#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+p", empty_snapshot());
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let requests: Vec<&crate::keymap::Request> = outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Keyboard(request) => Some(request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), 1, "what was read is handed back as a request");
+        assert_eq!(
+            requests[0].keymap, None,
+            "and it names no keymap to compile: `layout` is not the live layout's name"
+        );
     }
 
     /// **`fullscreen.covers` reaches the compositor from the shipped

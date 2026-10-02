@@ -88,8 +88,8 @@
 ---@class sol.KeyboardState
 ---@field layouts string[] The layout names, in order.
 ---@field active integer Which of them is live, counting from 1.
----@field layout string The live layout's name, such as `"Russian"`; `""` before the keymap is known.
----@field short string The live layout's short name, such as `"RU"`: the `shortDescription` xkb's rules give it, upper-cased, or its first two letters.
+---@field layout_name string The live layout's name, such as `"Russian"`; `""` before the keymap is known. Not `layout`, which `sol.keyboard{ ... }` takes as the xkb names to compile, so a table read here can be handed back.
+---@field layout_short string The live layout's short name, such as `"RU"`: the `shortDescription` xkb's rules give it, upper-cased, or its first two letters.
 ---@field caps boolean Whether Caps Lock is on.
 ---@field num boolean Whether Num Lock is on.
 ---@field repeat_rate integer Repeats per second.

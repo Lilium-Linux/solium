@@ -107,13 +107,14 @@ mod tests {
     use crate::script::Scripts;
     use crate::state::Solium;
 
-    /// Every `keyboard` event as `changed:active:layout:caps:num`, in
+    /// Every `keyboard` event as `changed:active:name:short:caps:num`, in
     /// `seen`, and a binding that switches to the second layout.
     const RECORDER: &str = r#"
         seen = {}
         sol.on("keyboard", function(state, changed)
-            seen[#seen + 1] = string.format("%s:%d:%s:%s:%s", changed, state.active,
-                state.layout, tostring(state.caps), tostring(state.num))
+            seen[#seen + 1] = string.format("%s:%d:%s:%s:%s:%s", changed, state.active,
+                tostring(state.layout_name), tostring(state.layout_short),
+                tostring(state.caps), tostring(state.num))
         end)
         sol.bind("super+k", function() sol.keyboard{ active = 2 } end)
         sol.bind("super+l", function() sol.keyboard{ layout = "us,ru,de" } end)
@@ -148,17 +149,17 @@ mod tests {
         tap(&mut state, &[A]);
         assert_eq!(seen(&state), "", "a letter is no change");
         tap(&mut state, &[CAPS]);
-        assert_eq!(seen(&state), "caps:2:Russian:true:false");
+        assert_eq!(seen(&state), "caps:2:Russian:RU:true:false");
         tap(&mut state, &[A]);
         assert_eq!(seen(&state), "", "a letter with Caps on is no change");
         tap(&mut state, &[CAPS]);
-        assert_eq!(seen(&state), "caps:2:Russian:false:false");
+        assert_eq!(seen(&state), "caps:2:Russian:RU:false:false");
         tap(&mut state, &[NUM]);
-        assert_eq!(seen(&state), "num:2:Russian:false:true");
+        assert_eq!(seen(&state), "num:2:Russian:RU:false:true");
         tap(&mut state, &[ALT, SHIFT]);
-        assert_eq!(seen(&state), "layout:1:English (US):false:true");
+        assert_eq!(seen(&state), "layout:1:English (US):EN:false:true");
         tap(&mut state, &[ALT, SHIFT]);
-        assert_eq!(seen(&state), "layout:2:Russian:false:true");
+        assert_eq!(seen(&state), "layout:2:Russian:RU:false:true");
     }
 
     /// **`sol.keyboard{ active = 2 }` from a binding is told as a layout
@@ -168,7 +169,7 @@ mod tests {
         let (_display, mut state) = us_ru(0);
         configured(&mut state, "active", RECORDER);
         state.trigger("super+k");
-        assert_eq!(seen(&state), "layout:2:Russian:false:false");
+        assert_eq!(seen(&state), "layout:2:Russian:RU:false:false");
         state.trigger("super+k");
         assert_eq!(seen(&state), "", "the layout already live");
     }
@@ -186,7 +187,7 @@ mod tests {
         );
         assert_eq!(seen(&state), "", "the configuration's own start");
         state.trigger("super+k");
-        assert_eq!(seen(&state), "layout:2:Russian:false:false");
+        assert_eq!(seen(&state), "layout:2:Russian:RU:false:false");
         state.trigger("super+l");
         assert_eq!(
             seen(&state),
@@ -194,7 +195,7 @@ mod tests {
             "a keymap compiled back to its first layout"
         );
         tap(&mut state, &[CAPS]);
-        assert_eq!(seen(&state), "caps:1:English (US):true:false");
+        assert_eq!(seen(&state), "caps:1:English (US):EN:true:false");
     }
 
     /// **A change a `keyboard` handler makes itself is not told back to it**,
