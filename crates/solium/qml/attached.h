@@ -209,6 +209,12 @@ public:
     /* When it last came to want the keyboard, by a counter that only goes up.
      * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`. */
     quint64 wantedAt() const { return m_wanted_at; }
+    /* The compositor took the keyboard back while it wanted it: it holds
+     * none until it asks anew, by coming to want it, being shown again or
+     * taking active focus again, whatever `wants` is bound to.
+     * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`. */
+    void letGo();
+    bool isLetGo() const { return m_let_go; }
     /* Its scene's hosting record is going, before it is. */
     void detach() { m_hosting = nullptr; }
 signals:
@@ -222,6 +228,7 @@ private:
     bool m_wants = false;
     QStringList m_claims;
     quint64 m_wanted_at = 0;
+    bool m_let_go = false;
 };
 
 /* What one hosted scene carries beside its object tree.
@@ -313,10 +320,12 @@ void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting);
  * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
 int solium_claim_at(QQuickItem *item, const QPointF &scene_point);
 /* The item of a hosted scene holding the keyboard: of the visible items
- * that want it, the one with active focus, else the one that came to want it
- * last; null when none does. Ruling 14.
+ * that want it and have not been let go of since, the one with active
+ * focus, else the one that came to want it last; null when none does.
+ * Ruling 14.
  * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`,
- * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+ * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`,
+ * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`. */
 SoliumKeyboard *solium_keyboard_holder(SoliumHosting *hosting);
 /* The row for a connector name: until the compositor publishes one, an
  * absent row carrying the name. Created on first ask and never freed, so a

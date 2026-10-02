@@ -2491,10 +2491,21 @@ extern "C" void solium_qml_scene_key(SoliumQmlScene *scene, int pressed, int qt_
 
 extern "C" void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene)
 {
-    if (scene == nullptr) {
+    if (scene == nullptr || scene->hosting == nullptr) {
         return;
     }
+    /* Every item that wants the keyboard is let go of, not only the one
+     * holding it, so the scene does not take it back through another, nor
+     * through one whose `wants` is not bound to its focus: each holds none
+     * until it asks anew. The holder loses its focus too.
+     * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`,
+     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     SoliumKeyboard *holder = solium_keyboard_holder(scene->hosting);
+    for (const QPointer<SoliumKeyboard> &each : scene->hosting->keyboards) {
+        if (each != nullptr && each->wants()) {
+            each->letGo();
+        }
+    }
     if (holder != nullptr && holder->item() != nullptr) {
         holder->item()->setFocus(false);
     }

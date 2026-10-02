@@ -427,7 +427,9 @@ impl Scene {
     }
 
     /// The compositor has taken the keyboard back: the item holding it
-    /// loses its focus. `tests::a_field_that_wants_the_keyboard_reports_its_claims`.
+    /// loses its focus, and no item that wanted it holds it again until it
+    /// asks anew. `tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+    /// `tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn let_go_keyboard(&mut self) {
         touched();
@@ -719,6 +721,62 @@ pub(crate) mod tests {
                 ),
                 "(the take with the popup closed, once it is open, what the field typed, \
                  the take once it is closed again)"
+            );
+        });
+    }
+
+    /// **A scene the compositor took the keyboard from takes it again only
+    /// when asked anew** (Ruling 14): an item whose `wants` is not bound to
+    /// its focus, let go of, wants nothing, so the window just clicked keeps
+    /// the keyboard; it wants it again once it comes to want it again, and
+    /// once it is shown again.
+    #[test]
+    fn a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-let-go",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property bool shown: true
+                    property bool asking: true
+                    Item {
+                        focus: true
+                        visible: root.shown
+                        Solium.keyboard.wants: root.asking
+                        Solium.keyboard.claims: [ "Escape" ]
+                    }
+                }
+                "#,
+                "let-go-1",
+            );
+            let first = scene.take_keyboard();
+            scene.let_go_keyboard();
+            let let_go = scene.take_keyboard();
+            scene.set_bool("asking", false);
+            scene.set_bool("asking", true);
+            let asked_again = scene.take_keyboard();
+            scene.let_go_keyboard();
+            let let_go_again = scene.take_keyboard();
+            scene.set_bool("shown", false);
+            scene.set_bool("shown", true);
+            let shown_again = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let wanted = KeyboardReport::Wanted(vec!["Escape".to_owned()]);
+            assert_eq!(
+                (first, let_go, asked_again, let_go_again, shown_again),
+                (
+                    wanted.clone(),
+                    KeyboardReport::LetGo,
+                    wanted.clone(),
+                    KeyboardReport::LetGo,
+                    wanted,
+                ),
+                "(the first take, after the let-go, after wanting it again, after a second \
+                 let-go, after being shown again)"
             );
         });
     }

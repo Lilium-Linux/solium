@@ -193,11 +193,23 @@ SoliumKeyboard::SoliumKeyboard(QQuickItem *item, SoliumHosting *hosting)
         m_hosting->keyboards.append(this);
     }
     /* Whether it holds the keyboard follows whether it is visible and
-     * whether it has active focus.
-     * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+     * whether it has active focus, and being shown again or taking active
+     * focus again is asking anew after a let-go.
+     * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`,
+     * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`. */
     if (item != nullptr) {
-        QObject::connect(item, &QQuickItem::visibleChanged, this, [this]() { mark(); });
-        QObject::connect(item, &QQuickItem::activeFocusChanged, this, [this]() { mark(); });
+        QObject::connect(item, &QQuickItem::visibleChanged, this, [this]() {
+            if (m_item != nullptr && m_item->isVisible()) {
+                m_let_go = false;
+            }
+            mark();
+        });
+        QObject::connect(item, &QQuickItem::activeFocusChanged, this, [this]() {
+            if (m_item != nullptr && m_item->hasActiveFocus()) {
+                m_let_go = false;
+            }
+            mark();
+        });
     }
 }
 
@@ -222,10 +234,17 @@ void SoliumKeyboard::setWants(bool wants)
         m_wants = wants;
         if (wants) {
             m_wanted_at = ++g_wants;
+            m_let_go = false;
         }
         mark();
         emit wantsChanged();
     }
+}
+
+void SoliumKeyboard::letGo()
+{
+    m_let_go = true;
+    mark();
 }
 
 void SoliumKeyboard::setClaims(const QStringList &claims)
@@ -244,7 +263,7 @@ SoliumKeyboard *solium_keyboard_holder(SoliumHosting *hosting)
         return holder;
     }
     for (const QPointer<SoliumKeyboard> &each : hosting->keyboards) {
-        if (each == nullptr || !each->wants() || each->item() == nullptr
+        if (each == nullptr || !each->wants() || each->isLetGo() || each->item() == nullptr
             || !each->item()->isVisible()) {
             continue;
         }
