@@ -183,6 +183,7 @@ private:
     void mark();
     QString m_name;
     QPointer<QObject> m_target;
+    bool m_target_warned = false;
     bool m_active = false;
     quint64 m_activated = 0;
     SoliumHosting *m_hosting = nullptr;

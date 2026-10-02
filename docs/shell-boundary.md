@@ -217,7 +217,9 @@ pointer, nor its frame, nor the keyboard when focus follows the mouse
 (`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`,
 `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_wheel_is_the_scenes`,
 `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`).
-Its `target` is an item or a Qt Quick Controls `Popup`, a `Menu` among them
+Its `target` is an item or a Qt Quick Controls `Popup`, a `Menu` among them;
+anything else has no points, so every press dismisses the grab, and the log
+says so
 (`qml::hosted::tests::a_controls_popup_is_a_grabs_target`).
 A press inside its target is the scene's, even where no item there takes
 input

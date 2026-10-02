@@ -1568,7 +1568,8 @@ pub(crate) mod tests {
     /// a point on the popup is inside it, whether the target is the `Popup`
     /// itself or the item Qt draws it as. A `Popup` is no item, and without
     /// this its grab has no target, so every press on the open menu would
-    /// dismiss it.
+    /// dismiss it. A target that is neither, which QML takes, has no points,
+    /// and the log says so.
     #[test]
     fn a_controls_popup_is_a_grabs_target() {
         const POPUP: &str = r"
@@ -1577,6 +1578,7 @@ pub(crate) mod tests {
             import Solium
             Item {
                 readonly property int targeted: grab.target !== null ? 1 : 0
+                QtObject { id: notAnItem }
                 Popup {
                     id: menu
                     x: 10; y: 0; width: 20; height: 20; padding: 0
@@ -1605,14 +1607,24 @@ pub(crate) mod tests {
             let as_item = (item.get_int("targeted"), item.grab_contains(20.0, 10.0));
             drop(item);
             let _ = std::fs::remove_dir_all(&second);
+            let (third, mut object) = hosted(
+                "solium-hosted-grab-popup-object",
+                &POPUP.replace("TARGET", "notAnItem"),
+                "grab-popup-3",
+            );
+            let as_object = (object.get_int("targeted"), object.grab_contains(20.0, 10.0));
+            drop(object);
+            let _ = std::fs::remove_dir_all(&third);
             assert_eq!(
-                (as_popup, as_item),
-                ((1, true), (1, true)),
+                (as_popup, as_item, as_object),
+                ((1, true), (1, true), (1, false)),
                 "((the Popup as the target: set, a point on it inside), \
-                 (its item as the target: set, a point on it inside))"
+                 (its item as the target: set, a point on it inside), \
+                 (an object neither: set, a point on the popup not inside))"
             );
         });
     }
+
     const BUTTONS: &str = r"
         import QtQuick
         Item {

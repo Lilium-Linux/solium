@@ -131,6 +131,16 @@ void SoliumGrab::setTarget(QObject *target)
 {
     if (target != m_target) {
         m_target = target;
+        /* A target that is neither an item nor a Popup has no points, so
+         * every press dismisses the grab: the log says so, once.
+         * `qml::hosted::tests::a_controls_popup_is_a_grabs_target`. */
+        if (target != nullptr && !m_target_warned && qobject_cast<QQuickItem *>(target) == nullptr
+            && !target->inherits("QQuickPopup")) {
+            m_target_warned = true;
+            qWarning("a Grab's target is an item or a Popup; this %s has no points, so every "
+                     "press dismisses the grab",
+                     target->metaObject()->className());
+        }
         emit targetChanged();
     }
 }
