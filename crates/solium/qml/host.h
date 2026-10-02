@@ -277,6 +277,16 @@ int solium_qml_scene_watch_for_test(SoliumQmlScene *scene, int fd, const char *n
  */
 int solium_qml_theme_mark_for_test(const char *import_path);
 
+/*
+ * For tests: the class name of the platform input context Qt built, or
+ * "none". Qt has no public way to ask, so this goes through libQt6Gui's
+ * exported private symbols, as spike SVC-S13 did; "?" when they are not
+ * there. Valid until the next call.
+ * `launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`,
+ * whose control run is how a probe that sees nothing is told apart.
+ */
+const char *solium_qml_input_context_for_test(void);
+
 /* Returned by a render that was skipped because nothing had changed. */
 #define SOLIUM_QML_UNCHANGED 2
 

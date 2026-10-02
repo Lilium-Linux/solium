@@ -101,8 +101,15 @@ mod tests {
     const DIRECTORY: &str = "SOLIUM_LAUNCH_CHILD";
     /// How the child starts `sh`: `spawn` or `plain`.
     const ROLE: &str = "SOLIUM_LAUNCH_CHILD_ROLE";
+    /// Set for a control child, which starts as `main` did before SVC-S13:
+    /// noting its environment and leaving it as it was.
+    const UNSCRUBBED: &str = "SOLIUM_LAUNCH_CHILD_UNSCRUBBED";
     /// A variable of the user's, set before the compositor started.
     const USERS: &str = "SOLIUM_LAUNCH_USERS_OWN";
+    /// The user's own input method, as a session names it: the compose
+    /// plugin, which Qt builds a context from with no daemon to reach, so a
+    /// Qt that read it has one.
+    const INPUT_METHOD: &str = "compose";
     const SOCKET: &str = "wayland-solium-launch-test";
 
     /// What the compositor and the libraries it loads write into its
@@ -137,7 +144,11 @@ mod tests {
         let role = std::env::var(ROLE).unwrap_or_default();
 
         // The first line of `main`.
-        remember();
+        if std::env::var_os(UNSCRUBBED).is_some() {
+            remember();
+        } else {
+            crate::prepare_environment();
+        }
         // SAFETY: this process runs this one test, and nothing else in it has
         // started a thread yet.
         #[expect(unsafe_code, reason = "std::env::set_var is unsafe in edition 2024")]
@@ -149,6 +160,28 @@ mod tests {
         // The real host, which writes `QT_QPA_PLATFORM=offscreen` and
         // `QT_QUICK_BACKEND=software` over whatever was there.
         crate::qml::start().expect("Qt starts");
+        // What this compositor's own Qt took from the session: its input
+        // context, the input-method plugins mapped into it, and what is left
+        // of the two names it chooses them by.
+        let plugins: Vec<String> = std::fs::read_to_string("/proc/self/maps")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(5))
+            .filter(|path| path.contains("/platforminputcontexts/"))
+            .map(str::to_owned)
+            .collect();
+        let own = |name: &str| std::env::var(name).unwrap_or_else(|_| "unset".to_owned());
+        std::fs::write(
+            directory.join("qt"),
+            format!(
+                "context={}\nplugins={}\nQT_IM_MODULE={}\nQT_IM_MODULES={}\n",
+                crate::qml::input_context_for_test(),
+                plugins.join(","),
+                own("QT_IM_MODULE"),
+                own("QT_IM_MODULES"),
+            ),
+        )
+        .expect("writing what Qt took");
         // As Qt's eglfs makes one inside `QGuiApplication`.
         let _pair = socketpair(
             AddressFamily::UNIX,
@@ -192,15 +225,22 @@ mod tests {
         }
     }
 
-    /// What `sh` was given.
+    /// What `sh` was given, and what the compositor's own Qt took.
     struct Given {
         environment: HashMap<String, String>,
         descriptors: Vec<String>,
+        qt: HashMap<String, String>,
     }
 
     /// What `sh` was given, in a child compositor playing `role`, for the test
     /// called `test`.
     fn started_in(role: &str, test: &str) -> Given {
+        started(role, test, true)
+    }
+
+    /// [`started_in`], in a child that starts as `main` does when `scrubbed`,
+    /// and as it did before SVC-S13 when not.
+    fn started(role: &str, test: &str, scrubbed: bool) -> Given {
         let directory =
             std::env::temp_dir().join(format!("solium-launch-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
@@ -213,6 +253,9 @@ mod tests {
             child.env_remove(name);
         }
         child.env_remove("QT_QUICK_BACKEND");
+        if !scrubbed {
+            child.env(UNSCRUBBED, "1");
+        }
         let output = child
             .args([
                 "--exact",
@@ -224,6 +267,8 @@ mod tests {
             .env(ROLE, role)
             // The user's own, which the software host writes over.
             .env("QT_QPA_PLATFORM", "wayland")
+            .env("QT_IM_MODULE", INPUT_METHOD)
+            .env("QT_IM_MODULES", INPUT_METHOD)
             .env(USERS, "kept")
             .env_remove("RUST_LOG")
             .stdin(Stdio::null())
@@ -245,6 +290,11 @@ mod tests {
             descriptors: read(&directory.join("fd"))
                 .split_whitespace()
                 .map(str::to_owned)
+                .collect(),
+            qt: read(&directory.join("qt"))
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
                 .collect(),
         };
         let _ = std::fs::remove_dir_all(&directory);
@@ -289,6 +339,60 @@ mod tests {
             "and the session's own variables"
         );
         assert!(value("XDG_ACTIVATION_TOKEN").is_some());
+    }
+
+    /// **The compositor's own Qt takes no input method from the session**
+    /// (SVC-S13): with the user's `QT_IM_MODULE` and `QT_IM_MODULES` both
+    /// naming one, it builds no input context and maps no plugin from
+    /// `platforminputcontexts/`. Otherwise the first hosted field to take the
+    /// keyboard would bring IBus and its D-Bus thread into the compositor.
+    /// `QT_IM_MODULES` beats `QT_IM_MODULE`, so both have to go.
+    ///
+    /// A control child that leaves the environment as it was shows the
+    /// probe sees a context that is there.
+    #[test]
+    fn the_compositors_qt_takes_no_input_method_from_the_session() {
+        let control = started("spawn", "input-method-control", false);
+        let scrubbed = started_in("spawn", "input-method");
+        let seen = |given: &Given| {
+            (
+                given.qt.get("context").cloned().unwrap_or_default(),
+                given
+                    .qt
+                    .get("plugins")
+                    .is_some_and(|plugins| !plugins.is_empty()),
+            )
+        };
+        assert_eq!(
+            (seen(&control), seen(&scrubbed)),
+            (
+                ("QComposeInputContext".to_owned(), true),
+                ("none".to_owned(), false)
+            ),
+            "((the context, whether a plugin was mapped) left as it was, and as `main` \
+             starts)"
+        );
+    }
+
+    /// **A program the compositor starts gets the user's input method**,
+    /// which the compositor's own Qt does not: the names are noted before
+    /// they are taken out, and a program is given what was noted (#175).
+    #[test]
+    fn a_spawned_program_gets_the_input_method_the_compositors_qt_does_not() {
+        let given = started_in("spawn", "input-method-child");
+        let child = |name: &str| given.environment.get(name).map(String::as_str);
+        let own = |name: &str| given.qt.get(name).map(String::as_str);
+        assert_eq!(
+            (
+                (child("QT_IM_MODULE"), child("QT_IM_MODULES")),
+                (own("QT_IM_MODULE"), own("QT_IM_MODULES")),
+            ),
+            (
+                (Some(INPUT_METHOD), Some(INPUT_METHOD)),
+                (Some("unset"), Some("unset")),
+            ),
+            "((the program's QT_IM_MODULE and QT_IM_MODULES), (the compositor's own))"
+        );
     }
 
     /// **A program `sol.spawn` starts holds no descriptor beyond stdio.**

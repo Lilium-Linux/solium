@@ -127,6 +127,8 @@ mod ffi {
         ) -> c_int;
         #[cfg(test)]
         pub(super) fn solium_qml_theme_mark_for_test(import_path: *const c_char) -> c_int;
+        #[cfg(test)]
+        pub(super) fn solium_qml_input_context_for_test() -> *const c_char;
         pub(super) fn solium_qml_scene_render(scene: *mut Scene) -> c_int;
         pub(super) fn solium_qml_scene_pixels(scene: *const Scene, stride: *mut c_int)
         -> *const u8;
@@ -823,6 +825,46 @@ fn theme_mark_for_test(import_path: &std::ffi::OsStr) -> Option<i32> {
     // SAFETY: `path` outlives the call, which keeps nothing of it.
     let mark = unsafe { ffi::solium_qml_theme_mark_for_test(path.as_ptr()) };
     (mark != c_int::MIN).then_some(mark)
+}
+
+/// The class of the platform input context Qt built, `"none"`, or `"?"` when
+/// the probe could not ask. Qt has to have started.
+/// `launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`.
+#[cfg(test)]
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn input_context_for_test() -> String {
+    // SAFETY: the host returns a NUL-terminated string it keeps until its
+    // next call, copied here first.
+    unsafe { CStr::from_ptr(ffi::solium_qml_input_context_for_test()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Take the session's input method out of the compositor's own Qt (spike
+/// SVC-S13).
+///
+/// Qt picks its input method inside `QGuiApplication`'s constructor, from
+/// `QT_IM_MODULES` when that is set and from `QT_IM_MODULE` otherwise, loads
+/// the plugin it names into the compositor and builds an input context from
+/// it: with IBus in the session, IBus's own client, which the spike measured
+/// starting a D-Bus thread. A hosted field types what the compositor's own
+/// keyboard state says, so it needs none. Both names go, because either one
+/// alone still loads a plugin; with neither, Qt builds no input context.
+/// `launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`.
+///
+/// The programs Solium starts still get the user's own: `main` notes the
+/// environment first, and they are given what it noted.
+/// `launch::tests::a_spawned_program_gets_the_input_method_the_compositors_qt_does_not`.
+pub(crate) fn keep_input_methods_out() {
+    // SAFETY: `remove_var` is unsound only against another thread reading
+    // the environment at the same time. This runs from the top of `main`,
+    // before any thread starts (`crate::prepare_environment`), and in a test
+    // child that runs nothing else.
+    #[expect(unsafe_code, reason = "std::env::remove_var is unsafe in edition 2024")]
+    unsafe {
+        std::env::remove_var("QT_IM_MODULE");
+        std::env::remove_var("QT_IM_MODULES");
+    }
 }
 
 /// Where QML modules are found, `Solium` among them.

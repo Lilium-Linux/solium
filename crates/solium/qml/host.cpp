@@ -2021,6 +2021,42 @@ extern "C" int solium_qml_theme_mark_for_test(const char *import_path)
     return ok ? mark : std::numeric_limits<int>::min();
 }
 
+extern "C" const char *solium_qml_input_context_for_test()
+{
+    static QByteArray name;
+    /* QGuiApplicationPrivate::platform_integration, and the slot of
+     * QPlatformIntegration::inputContext() in its vtable, found where the
+     * base class's own vtable holds the base implementation. Itanium ABI: an
+     * object's vptr points two entries past its vtable's symbol. */
+    auto **integration = static_cast<void **>(
+        dlsym(RTLD_DEFAULT, "_ZN22QGuiApplicationPrivate20platform_integrationE"));
+    void *base = dlsym(RTLD_DEFAULT, "_ZNK20QPlatformIntegration12inputContextEv");
+    auto **vtable = static_cast<void **>(dlsym(RTLD_DEFAULT, "_ZTV20QPlatformIntegration"));
+    if (integration == nullptr || *integration == nullptr || base == nullptr
+        || vtable == nullptr) {
+        name = QByteArrayLiteral("?");
+        return name.constData();
+    }
+    void **entries = vtable + 2;
+    int slot = -1;
+    for (int each = 0; each < 128; ++each) {
+        if (entries[each] == base) {
+            slot = each;
+            break;
+        }
+    }
+    if (slot < 0) {
+        name = QByteArrayLiteral("?");
+        return name.constData();
+    }
+    void **vptr = *static_cast<void ***>(*integration);
+    using InputContext = QObject *(*)(const void *);
+    QObject *context = reinterpret_cast<InputContext>(vptr[slot])(*integration);
+    name = context != nullptr ? QByteArray(context->metaObject()->className())
+                              : QByteArrayLiteral("none");
+    return name.constData();
+}
+
 /* Whether Qt has asked for this scene to be drawn again. */
 extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
 {
