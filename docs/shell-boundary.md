@@ -293,7 +293,9 @@ The pointer crossing a window does not take it back, even with focus
 following the mouse
 (`state::tests::real_client::reflow_on_close::hosted::the_pointer_crossing_a_window_does_not_end_the_shells_hold`).
 One scene holds it at a time
-(`state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`).
+(`state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`),
+and a scene whose monitor is unplugged gives it back
+(`state::tests::real_client::reflow_on_close::hosted::a_monitor_unplugged_while_its_scene_holds_the_keyboard_gives_it_back`).
 The compositor's own Qt loads no input method from your session, so IBus and
 the like do not run inside it
 (`launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`);

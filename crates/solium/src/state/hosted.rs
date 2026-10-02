@@ -393,7 +393,8 @@ impl Solium {
     /// let go of if its scene is gone, with its surface or its monitor.
     /// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`,
-    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_keyboard_back`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_keyboard_back`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_monitor_unplugged_while_its_scene_holds_the_keyboard_gives_it_back`.
     fn settle_keyboard(&mut self) {
         // Behind the lock the keyboard is the lock screen's: what a scene
         // says of it is read once the lock is gone, as its grabs are.

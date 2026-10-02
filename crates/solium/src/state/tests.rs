@@ -23713,6 +23713,56 @@ end)
                 );
             }
 
+            /// **A monitor unplugged while its scene holds the keyboard gives
+            /// it back**: the hold goes with its monitor, though the surface
+            /// is still declared, and the window it came from has the
+            /// keyboard again.
+            #[test]
+            fn a_monitor_unplugged_while_its_scene_holds_the_keyboard_gives_it_back() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let right = a_screen(&mut desk.state, "hold-right", (1920, 0));
+                desk.state.settle_monitors();
+                let search = stand_in(
+                    &mut desk.state,
+                    "search",
+                    Scripted::Top,
+                    Rectangle::new((1920, 0).into(), (1920, 1080).into()),
+                    Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..Stand::solid()
+                    },
+                );
+                want(
+                    &mut desk,
+                    search,
+                    crate::qml::hosted::KeyboardReport::Wanted(Vec::new()),
+                );
+                let held = desk
+                    .state
+                    .hosted_keyboard
+                    .as_ref()
+                    .map(|held| held.output.name());
+                desk.state.space.unmap_output(&right);
+                desk.state.settle_monitors();
+                desk.state.settle_scenes();
+                assert_eq!(
+                    (
+                        held,
+                        desk.state.hosted_keyboard.is_none(),
+                        keyboard_on(&desk)
+                    ),
+                    (
+                        Some("hold-right".to_owned()),
+                        true,
+                        Some(window_id(&opened))
+                    ),
+                    "(the monitor the hold was on, the hold over, the keyboard)"
+                );
+            }
+
             /// **A window that leaves while the shell holds the keyboard is not
             /// given it back**: its close was asked for, and when the shell
             /// lets go the keyboard goes where it would have gone at the close,
