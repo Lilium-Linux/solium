@@ -368,11 +368,14 @@ pub(crate) mod tests {
         });
     }
 
-    /// **A `Text` takes a press only on a link**, as Qt gives it one: every
-    /// `Text` accepts the left button, to look for a link under a press, and
-    /// lets the press go where there is none. So a link takes the press,
-    /// with a `HoverHandler` beside it for the pointer's shape too; the rest
-    /// of that `Text` is only its hover; and a plain label takes nothing.
+    /// **A `Text` takes a press only on a link it handles**, as Qt gives it
+    /// one: every `Text` accepts the left button, to look for a link under a
+    /// press, and lets the press go where there is none, or where nothing
+    /// hears `linkActivated`. So a link takes the press, with a
+    /// `HoverHandler` beside it for the pointer's shape too; the rest of that
+    /// `Text` is only its hover; a link nothing handles is only hover too, as
+    /// Qt gives a styled `Text` the hover for its links; and a plain label
+    /// takes nothing.
     #[test]
     fn a_text_takes_a_press_only_on_a_link() {
         on_the_qt_thread(|| {
@@ -388,18 +391,24 @@ pub(crate) mod tests {
                         onLinkActivated: (link) => {}
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
                     }
-                    Text { x: 0; y: 16; width: 64; height: 16; text: "label" }
+                    Text { x: 0; y: 16; width: 32; height: 16; text: "label" }
+                    Text {
+                        x: 32; y: 16; width: 32; height: 16
+                        textFormat: Text.StyledText
+                        text: "<a href=\"x\">xx</a>"
+                    }
                 }
                 "#,
                 "link-1",
             );
-            let got = [(2.0, 8.0), (60.0, 8.0), (5.0, 24.0)].map(|(x, y)| scene.hit(x, y));
+            let got =
+                [(2.0, 8.0), (60.0, 8.0), (5.0, 24.0), (34.0, 24.0)].map(|(x, y)| scene.hit(x, y));
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
             assert_eq!(
                 got,
-                [Hit::Press, Hit::Hover, Hit::Nothing],
-                "[on the link, on its Text beside it, on a plain label]"
+                [Hit::Press, Hit::Hover, Hit::Nothing, Hit::Hover],
+                "[on the link, on its Text beside it, on a plain label, on a link nothing handles]"
             );
         });
     }

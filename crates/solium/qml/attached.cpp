@@ -146,14 +146,31 @@ int declared_input(QQuickItem *item)
     return -1;
 }
 
+/* Whether something hears `object`'s `signal`, a normalized signature, a
+ * handler in QML included. QObject::isSignalConnected is protected; a
+ * pointer to it formed through a class derived from QObject may be called
+ * on any QObject.
+ * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
+struct SignalPeek : QObject {
+    static bool heard(const QObject *object, const char *signal)
+    {
+        const QMetaObject *meta = object->metaObject();
+        const int index = meta->indexOfSignal(signal);
+        return index >= 0 && (object->*(&SignalPeek::isSignalConnected))(meta->method(index));
+    }
+};
+
 /* Whether `item` is a Text with a link at `local`, a point in its own
- * coordinates. Qt gives every Text the left button (QQuickTextPrivate::init)
- * and lets a press go unless a link is under it (QQuickText::mousePressEvent
- * asks the same linkAt), so a Text takes a press there and nowhere else.
+ * coordinates, that something hears activated. Qt gives every Text the left
+ * button (QQuickTextPrivate::init) and lets a press go unless linkActivated
+ * has a receiver and a link is under it (QQuickText::mousePressEvent,
+ * qquicktext.cpp:2975-2979, asks isLinkActivatedConnected, then the
+ * anchorAt that linkAt asks too, :3082), so a Text takes a press there and
+ * nowhere else.
  * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
 bool on_a_link(QQuickItem *item, const QPointF &local)
 {
-    if (!item->inherits("QQuickText")) {
+    if (!item->inherits("QQuickText") || !SignalPeek::heard(item, "linkActivated(QString)")) {
         return false;
     }
     QString link;
@@ -168,7 +185,7 @@ bool on_a_link(QQuickItem *item, const QPointF &local)
  * the handlers, so an item with only a HoverHandler accepts every button and
  * still takes no press itself, and neither does one whose handlers are all
  * disabled, since Qt hands a disabled handler nothing. A Text takes a press
- * only on a link.
+ * only on a link it handles.
  * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
  * `qml::hosted::tests::a_disabled_handler_claims_nothing`,
  * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
