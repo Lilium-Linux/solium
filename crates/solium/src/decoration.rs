@@ -189,6 +189,9 @@ pub(crate) struct Look<'a> {
     /// pane's own space: `caret` on every layer.
     /// `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
     pub(crate) caret: Option<Rectangle<i32, Logical>>,
+    /// What the configuration hands every layer, as `values`.
+    /// `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+    pub(crate) values: &'a Values,
 }
 
 /// What a frame shows.
@@ -211,6 +214,8 @@ struct Shown {
     size: (i32, i32),
     /// The caret last written, `None` once it was taken away.
     caret: Option<Rectangle<i32, Logical>>,
+    /// Which generation of the configuration's values was last written.
+    values: u64,
 }
 
 /// How a rasterised frame reaches the screen.
@@ -817,7 +822,16 @@ impl Decoration {
             focused,
             pointer_inside,
             caret,
+            values,
         } = *look;
+        // The configuration's values the same way, once per change:
+        // `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+        if self.shown.values != values.generation {
+            for layer in &mut self.layers {
+                layer.scene.set_json("values", &values.object);
+            }
+            self.shown.values = values.generation;
+        }
         // The caret on its own, written in place whenever it moves, comes or
         // goes, and not on the frames in between:
         // `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
@@ -1398,9 +1412,71 @@ pub(crate) struct Decorations {
     /// Which decoration to build, as a script named it. `None` is whatever
     /// the environment or the default says.
     style: Option<String>,
+    /// What the configuration hands every layer as `values`.
+    /// `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+    values: Values,
+}
+
+/// Values the configuration hands every layer of every pane, as one object,
+/// `values`: `sol.pane_values{ key = value }`. A general channel from Lua to
+/// the decorations, so a setting the configuration reads can reach the QML
+/// that draws by it without the compositor knowing what the setting is.
+/// Each call merges its keys into what is there, so two scripts each handing
+/// their own keys keep both; a key, once given, keeps its last value.
+/// `tests::pane_values_merge_by_key_and_count_only_changes`.
+#[derive(Debug)]
+pub(crate) struct Values {
+    fields: std::collections::BTreeMap<String, crate::json::Json>,
+    /// The fields as the object a layer is handed.
+    object: crate::json::Json,
+    /// How many times they changed, so a layer is written once per change and
+    /// a frame built later is written too.
+    generation: u64,
+}
+
+impl Values {
+    /// Merge `fields` in; whether anything changed.
+    /// `tests::pane_values_merge_by_key_and_count_only_changes`.
+    pub(crate) fn merge(
+        &mut self,
+        fields: std::collections::BTreeMap<String, crate::json::Json>,
+    ) -> bool {
+        let before = self.fields.clone();
+        self.fields.extend(fields);
+        if self.fields == before {
+            return false;
+        }
+        self.object = crate::json::Json::Object(self.fields.clone());
+        self.generation += 1;
+        true
+    }
+}
+
+impl Default for Values {
+    fn default() -> Self {
+        Self {
+            fields: std::collections::BTreeMap::new(),
+            object: crate::json::Json::Object(std::collections::BTreeMap::new()),
+            generation: 0,
+        }
+    }
 }
 
 impl Decorations {
+    /// What the configuration hands every layer.
+    pub(crate) const fn values(&self) -> &Values {
+        &self.values
+    }
+
+    /// Merge what `sol.pane_values{ ... }` handed over; whether it changed.
+    /// `tests::pane_values_merge_by_key_and_count_only_changes`.
+    pub(crate) fn merge_values(
+        &mut self,
+        fields: std::collections::BTreeMap<String, crate::json::Json>,
+    ) -> bool {
+        self.values.merge(fields)
+    }
+
     /// Start decorating a window, if it is not decorated already.
     /// Choose the decoration every window is framed with.
     ///
@@ -2302,6 +2378,7 @@ mod tests {
                     focused: false,
                     pointer_inside: false,
                     caret: None,
+                    values: &Values::default(),
                 },
                 60,
                 120,
@@ -2891,11 +2968,13 @@ mod tests {
             );
             let style = crate::style::load(&dir).expect("the fixture loads");
             let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let values = Values::default();
             let look = |caret| Look {
                 title: "",
                 focused: true,
                 pointer_inside: false,
                 caret,
+                values: &values,
             };
             let read = |decoration: &mut Decoration| {
                 let [delegated, inline] = &mut decoration.layers[..] else {
@@ -2927,6 +3006,148 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&dir);
         });
+    }
+
+    /// **A layer is told the configuration's values, and told again when they
+    /// change**: what `sol.pane_values{ ... }` handed over reaches a delegated
+    /// layer's root and an inline layer's `PaneStyle` as one object,
+    /// `values`, and a later change reaches both again.
+    #[test]
+    fn a_layer_is_told_the_configurations_values_and_told_again_when_they_change() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-values",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            readonly property int sawLevel: values.level !== undefined ? values.level : -1
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer { depth: "above"; name: "inline"; Item {} }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var values: ({})
+                            readonly property int sawLevel: values.level !== undefined ? values.level : -1
+                            readonly property int sawDeep: values.deep && values.deep.on ? 1 : 0
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let mut values = Values::default();
+            let read = |decoration: &mut Decoration| {
+                let [delegated, inline] = &mut decoration.layers[..] else {
+                    panic!("two layers")
+                };
+                [
+                    delegated.scene.get_int("sawLevel"),
+                    delegated.scene.get_int("sawDeep"),
+                    inline.scene.get_int("sawLevel"),
+                ]
+            };
+            let tell = |decoration: &mut Decoration, values: &Values| {
+                decoration.tell(
+                    &Look {
+                        title: "",
+                        focused: true,
+                        pointer_inside: false,
+                        caret: None,
+                        values,
+                    },
+                    60,
+                    88,
+                );
+            };
+
+            tell(&mut decoration, &values);
+            assert_eq!(
+                read(&mut decoration),
+                [-1, 0, -1],
+                "nothing handed over yet"
+            );
+
+            values.merge(std::collections::BTreeMap::from([
+                ("level".to_owned(), crate::json::Json::Number(3.0)),
+                (
+                    "deep".to_owned(),
+                    crate::json::Json::Object(std::collections::BTreeMap::from([(
+                        "on".to_owned(),
+                        crate::json::Json::Bool(true),
+                    )])),
+                ),
+            ]));
+            tell(&mut decoration, &values);
+            assert_eq!(read(&mut decoration), [3, 1, 3]);
+
+            values.merge(std::collections::BTreeMap::from([(
+                "level".to_owned(),
+                crate::json::Json::Number(4.0),
+            )]));
+            tell(&mut decoration, &values);
+            assert_eq!(
+                read(&mut decoration),
+                [4, 1, 4],
+                "changed, and the rest kept"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **Pane values merge by key, and count only changes**: a second call
+    /// keeps the first call's keys, the same values again are no change, and
+    /// `sol.pane_values{ ... }` from a configuration is what reaches them.
+    #[test]
+    fn pane_values_merge_by_key_and_count_only_changes() {
+        use crate::json::Json;
+        use std::collections::BTreeMap;
+
+        let mut values = Values::default();
+        assert!(values.merge(BTreeMap::from([("a".to_owned(), Json::Number(1.0))])));
+        assert!(
+            !values.merge(BTreeMap::from([("a".to_owned(), Json::Number(1.0))])),
+            "the same again"
+        );
+        assert!(values.merge(BTreeMap::from([("b".to_owned(), Json::Bool(true))])));
+        assert_eq!(values.generation, 2);
+        assert_eq!(values.object.render(), r#"{"a":1,"b":true}"#);
+
+        let display = smithay::reexports::wayland_server::Display::<crate::state::Solium>::new()
+            .expect("a test display");
+        let mut state = crate::state::Solium::new(display.handle());
+        let directory = std::env::temp_dir().join("solium-pane-values");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.pane_values{ mine = { show = "pane" } }
+            sol.pane_values{ theirs = 2 }
+            "#,
+        )
+        .expect("writing the script");
+        let scripts = crate::script::Scripts::load(&config).expect("loading the script");
+        state.start_scripts(Some(scripts));
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            state.decorations.values().object.render(),
+            r#"{"mine":{"show":"pane"},"theirs":2}"#
+        );
     }
 
     /// A bundle declaring a client radius and a delegated layer to read it.
@@ -3842,6 +4063,7 @@ mod tests {
                         focused: true,
                         pointer_inside: false,
                         caret: None,
+                        values: &Values::default(),
                     },
                     300,
                     200,

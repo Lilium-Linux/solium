@@ -393,6 +393,9 @@ pub(crate) enum Command {
     Decoration {
         name: Option<String>,
     },
+    /// Hand every pane's layers these values, merged into what they have.
+    /// `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
+    PaneValues(std::collections::BTreeMap<String, crate::json::Json>),
     /// End the session.
     Quit,
     /// Read the configuration again.
@@ -2572,6 +2575,20 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Decoration { name });
+            })
+        })?,
+    )?;
+
+    // Values for every pane's layers, read there as one object, `values`: the
+    // configuration's way to hand its own settings to the QML that draws by
+    // them, whatever they are. Merged by key.
+    // `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
+    sol.set(
+        "pane_values",
+        lua.create_function(|lua, values: mlua::Table| {
+            let fields = crate::json::Json::object_from_lua(&values)?;
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::PaneValues(fields));
             })
         })?,
     )?;

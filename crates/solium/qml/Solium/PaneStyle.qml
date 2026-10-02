@@ -172,6 +172,13 @@ Item {
     // `decoration::tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
     property var caret: ({ valid: false, x: 0, y: 0, width: 0, height: 0 })
 
+    // Whatever the configuration hands every pane with
+    // `sol.pane_values{ key = value }`, as one object: a general channel from
+    // Lua to the QML that draws, so a setting the configuration reads reaches
+    // the layer that draws by it, and the compositor never knows what it is.
+    // `decoration::tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+    property var values: ({})
+
     // Where the window's own rectangle is inside this scene.
     //
     // A layer is laid out on its **canvas** — the pane's outer rect grown by

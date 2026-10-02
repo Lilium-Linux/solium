@@ -412,6 +412,11 @@ impl Solium {
                         self.trigger_relayout();
                     }
                 }
+                Command::PaneValues(fields) => {
+                    if self.decorations.merge_values(fields) {
+                        self.redraw = true;
+                    }
+                }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Reload => self.request = Some(Request::Reload),
                 Command::Keyboard(request) => {
