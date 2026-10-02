@@ -23552,6 +23552,42 @@ end)
                 );
             }
 
+            /// **A surface the pointer does not reach holds no grab**, nor
+            /// does its grab dismiss the one held: `interactive = false` is
+            /// "the pointer reaches it not at all", a `Grab` in its scene too.
+            #[test]
+            fn a_surface_the_pointer_does_not_reach_holds_no_grab() {
+                let (mut desk, _, menu) = grabbing(crate::scripted::OutsideClick::default());
+                let mut declared = crate::scripted::Declaration::for_test(
+                    "osd",
+                    std::path::PathBuf::from("/nonexistent/hosted-test.qml"),
+                    Scripted::Overlay,
+                    crate::scripted::On::Rect(screen_wide()),
+                );
+                declared.interactive = false;
+                desk.state.declare_surface(declared);
+                let osd = desk.state.surfaces.named("osd").expect("declared");
+                desk.state
+                    .surfaces
+                    .get_mut(osd)
+                    .expect("live")
+                    .stand_in(Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..Stand::solid()
+                    });
+                report(
+                    &mut desk,
+                    osd,
+                    crate::qml::hosted::GrabReport::Held("osd".to_owned()),
+                );
+                let held = desk.state.hosted_grab.as_ref().map(|grab| grab.surface);
+                assert_eq!(
+                    (held, dismissed(&desk, menu), dismissed(&desk, osd)),
+                    (Some(menu), 0, 0),
+                    "(whose grab is held, the menu's dismissals, the osd's)"
+                );
+            }
+
             /// A surface on every monitor reserving `reserve`, its scene stood
             /// in for by `stand`.
             fn reserving(

@@ -158,11 +158,15 @@ impl Solium {
                 .as_ref()
                 .is_some_and(|held| held.surface == id && held.output.name() == monitor);
             match report {
+                // A grab that cannot be placed, of a surface the pointer does
+                // not reach or of a scene that is not drawn there, is not
+                // held, nor does it dismiss the one that is.
+                // `state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`.
                 GrabReport::Held(name) => {
-                    if !ours {
-                        self.dismiss_hosted_grab();
-                    }
                     if let Some(grab) = self.hosted_grab_for(id, &monitor, name) {
+                        if !ours {
+                            self.dismiss_hosted_grab();
+                        }
                         self.hosted_grab = Some(grab);
                         if !ours {
                             self.unpoint_clients();
@@ -180,7 +184,9 @@ impl Solium {
     }
 
     /// The grab named `name` of `id`'s instance on the monitor named
-    /// `monitor`, where that instance is drawn now, if it is there.
+    /// `monitor`, where that instance is drawn now, if it is there and the
+    /// pointer reaches its surface at all.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`.
     fn hosted_grab_for(&self, id: SurfaceId, monitor: &str, name: String) -> Option<HostedGrab> {
         let output = self
             .space
@@ -192,7 +198,7 @@ impl Solium {
         let surface = self
             .surfaces
             .get(id)
-            .filter(|surface| surface.hosts_on(&output))?;
+            .filter(|surface| surface.interactive() && surface.hosts_on(&output))?;
         let area = surface.area_on(&output, geometry, primary.as_ref())?;
         Some(HostedGrab {
             surface: id,

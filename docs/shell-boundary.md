@@ -236,6 +236,9 @@ default, and a table names grabs, `{ default = "swallow", ["tray-menu"] =
 `state::tests::real_client::reflow_on_close::hosted::a_policy_named_for_the_grab_beats_the_default`).
 One grab is held at a time, and one another scene takes dismisses it
 (`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`).
+A surface the pointer does not reach, declared `interactive = false`, holds
+no grab, and its scene's grabs dismiss none
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`).
 A press the scene already held when its grab began keeps the pointer until
 its release, so a button whose press opens a menu is let go of as usual
 (`state::tests::real_client::reflow_on_close::hosted::a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release`).
