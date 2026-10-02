@@ -116,7 +116,8 @@ namespace {
 bool takes_presses_itself(const QQuickItem *item)
 {
     for (const char *type : {"QQuickMouseArea", "QQuickControl", "QQuickFlickable",
-                             "QQuickTextInput", "QQuickTextEdit"}) {
+                             "QQuickPathView", "QQuickMultiPointTouchArea", "QQuickTextInput",
+                             "QQuickTextEdit"}) {
         if (item->inherits(type)) {
             return true;
         }

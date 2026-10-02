@@ -289,6 +289,8 @@ pub(crate) mod tests {
             MouseArea { x: 42; y: 22; width: 6; height: 10; HoverHandler {} }
             Button { x: 60; y: 0; width: 2; height: 10; HoverHandler {} }
             TextInput { x: 60; y: 11; width: 2; height: 10; HoverHandler {} }
+            PathView { x: 60; y: 22; width: 2; height: 10; HoverHandler {} }
+            MultiPointTouchArea { x: 62; y: 0; width: 2; height: 20; HoverHandler {} }
         }
     "#;
 
@@ -323,6 +325,12 @@ pub(crate) mod tests {
                 ((44.0, 27.0), Hit::Press, "a MouseArea with a HoverHandler"),
                 ((61.0, 5.0), Hit::Press, "a Button with a HoverHandler"),
                 ((61.0, 15.0), Hit::Press, "a TextInput with a HoverHandler"),
+                ((61.0, 27.0), Hit::Press, "a PathView with a HoverHandler"),
+                (
+                    (63.0, 5.0),
+                    Hit::Press,
+                    "a MultiPointTouchArea with a HoverHandler",
+                ),
             ];
             let wrong: Vec<String> = cases
                 .iter()
