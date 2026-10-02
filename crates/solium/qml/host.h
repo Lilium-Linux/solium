@@ -427,6 +427,13 @@ int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, double y);
  * `qml::hosted::tests::a_left_scene_drops_its_hover`. */
 void solium_qml_scene_pointer_leave(SoliumQmlScene *scene);
 
+/* The scene's reserve, when it changed since the last take: returns 1 and
+ * writes top, right, bottom and left into `edges` (negative is unset). 0
+ * when it did not change, or for a scene that is not hosted.
+ * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`,
+ * `qml::hosted::tests::an_unhosted_scene_may_bind_a_reserve_and_reserves_nothing`. */
+int solium_qml_scene_take_reserve(SoliumQmlScene *scene, int *edges);
+
 /* The models hosted scenes read, by number.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0

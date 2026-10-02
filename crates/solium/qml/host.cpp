@@ -726,7 +726,7 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
      * its monitor for the next scene.
      * `qml::hosted::tests::the_host_consumes_the_monitor_even_for_a_build_that_fails`. */
     if (g_next_hosted) {
-        scene->hosting = new SoliumHosting{g_next_monitor};
+        scene->hosting = new SoliumHosting(g_next_monitor);
         scene->context = new QQmlContext(g_engine->rootContext());
         solium_hosting_mark(scene->context, scene->hosting);
         g_next_hosted = false;
@@ -2330,6 +2330,20 @@ extern "C" const unsigned char *solium_qml_scene_pixels(const SoliumQmlScene *sc
         *stride = static_cast<int>(scene->image.bytesPerLine());
     }
     return scene->image.constBits();
+}
+
+extern "C" int solium_qml_scene_take_reserve(SoliumQmlScene *scene, int *edges)
+{
+    if (scene == nullptr || scene->hosting == nullptr || edges == nullptr) {
+        return 0;
+    }
+    SoliumReserve *reserve = scene->hosting->surface_info.reserve();
+    if (!reserve->dirty) {
+        return 0;
+    }
+    reserve->dirty = false;
+    std::copy(reserve->edges(), reserve->edges() + 4, edges);
+    return 1;
 }
 
 extern "C" const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name)

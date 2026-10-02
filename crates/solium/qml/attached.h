@@ -20,6 +20,8 @@
 #include <QtCore/QVariantMap>
 #include <QtQml/qqml.h>
 
+#include <utility>
+
 class QQmlContext;
 
 /* The URI every native type is registered under: "Solium", the URI the
@@ -77,11 +79,69 @@ signals:
     void changed();
 };
 
+/* `Solium.surface.reserve`: what this instance takes out of its monitor's
+ * work area, per edge, in logical pixels; a negative edge is unset, and
+ * leaves the edge to the `sol.surface` declaration. Ruling 10.
+ * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
+class SoliumReserve : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(int top READ top WRITE setTop NOTIFY changed)
+    Q_PROPERTY(int right READ right WRITE setRight NOTIFY changed)
+    Q_PROPERTY(int bottom READ bottom WRITE setBottom NOTIFY changed)
+    Q_PROPERTY(int left READ left WRITE setLeft NOTIFY changed)
+public:
+    using QObject::QObject;
+    int top() const { return m_edges[0]; }
+    int right() const { return m_edges[1]; }
+    int bottom() const { return m_edges[2]; }
+    int left() const { return m_edges[3]; }
+    void setTop(int value) { set(0, value); }
+    void setRight(int value) { set(1, value); }
+    void setBottom(int value) { set(2, value); }
+    void setLeft(int value) { set(3, value); }
+    const int *edges() const { return m_edges; }
+    /* Whether an edge changed since the last take: true from the start, so
+     * a scene that never sets one still says so once.
+     * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
+    bool dirty = true;
+signals:
+    void changed();
+
+private:
+    void set(int edge, int value)
+    {
+        if (m_edges[edge] != value) {
+            m_edges[edge] = value;
+            dirty = true;
+            emit changed();
+        }
+    }
+    int m_edges[4] = {-1, -1, -1, -1};
+};
+
+/* `Solium.surface`: this instance of its `sol.surface`, as a whole.
+ * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
+class SoliumSurfaceInfo : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(SoliumReserve *reserve READ reserve CONSTANT)
+public:
+    using QObject::QObject;
+    SoliumReserve *reserve() { return &m_reserve; }
+
+private:
+    SoliumReserve m_reserve;
+};
+
 /* What one hosted scene carries beside its object tree.
- * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
+ * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
+ * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
 struct SoliumHosting
 {
+    explicit SoliumHosting(QString monitor_name) : monitor(std::move(monitor_name)) {}
     QString monitor;
+    SoliumSurfaceInfo surface_info;
 };
 
 /* What every item reads as `Solium.<name>`.
@@ -94,9 +154,13 @@ class SoliumAttached : public QObject
      * item out. Unset, the item's own handlers decide. Ruling 6.
      * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
     Q_PROPERTY(QVariant input READ input WRITE setInput NOTIFY inputChanged)
+    /* `Solium.surface`: the instance this scene is, its reserve above all.
+     * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
+    Q_PROPERTY(SoliumSurfaceInfo *surface READ surface CONSTANT)
 public:
     explicit SoliumAttached(QObject *item);
     SoliumMonitor *monitor() const;
+    SoliumSurfaceInfo *surface() const;
     QVariant input() const;
     void setInput(const QVariant &value);
     /* -1 unset, 0 opted out, 1 hover, 2 press, as solium_claim_at reads it.

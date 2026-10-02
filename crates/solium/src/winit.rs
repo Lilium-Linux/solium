@@ -122,6 +122,7 @@ pub(crate) fn run() -> Result<()> {
         |state: &Solium| state.clock.now(),
         |state: &mut Solium, changed| {
             state.redraw |= changed;
+            state.settle_scenes();
         },
     )?;
 

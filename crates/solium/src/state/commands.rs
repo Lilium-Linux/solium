@@ -511,6 +511,12 @@ impl Solium {
         if self.dispatching == 0 && self.monitors_rearranged {
             self.sync_instances();
         }
+        // And what its declarations made the scenes say, once it is all
+        // applied (`Solium::settle_scenes_once_dispatched`):
+        // `real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`.
+        if self.dispatching == 0 && self.scenes_to_settle {
+            self.settle_scenes();
+        }
     }
 
     /// The window a script means by an id.
@@ -676,6 +682,10 @@ impl Solium {
     }
 
     pub(crate) fn trigger_relayout(&mut self) {
+        // What this pass lays the windows out against, so a reserve that
+        // changes later runs it again, and one that has not does not
+        // (`real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`).
+        self.laid_out_reserves = self.reserves();
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;

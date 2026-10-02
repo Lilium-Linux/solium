@@ -1863,6 +1863,12 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `action` string and a `sol.on("surface", …)` handler is told about it,
     // which is how the tweaks panel works and how a bar's buttons would.
     //
+    // `reserve = { bottom = 48 }` takes those edges out of the work area of
+    // every monitor it is on, whatever its size, and the scene's own
+    // `Solium.surface.reserve` wins for an edge it sets
+    // (`tests::sol_surface_reads_the_edges_it_reserves`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`).
+    //
     // `sol.surface(name, false)` takes one away. Re-declaring the same name
     // changes the surface in place, writing what changed into its live scene,
     // and only a new scene file replaces it, so running the configuration
@@ -1934,6 +1940,28 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 None => crate::scripted::Properties::default(),
             };
             let interactive = options.get::<Option<bool>>("interactive")?.unwrap_or(false);
+            // `tests::sol_surface_reads_the_edges_it_reserves`,
+            // `tests::a_negative_reserve_is_refused`.
+            let reserve = match options.get::<Option<Table>>("reserve")? {
+                Some(edges) => {
+                    let edge = |name: &str| -> mlua::Result<i32> {
+                        let value = edges.get::<Option<i32>>(name)?.unwrap_or(0);
+                        if value < 0 {
+                            return Err(mlua::Error::runtime(format!(
+                                "reserve.{name} is {value}; a reserve is never negative"
+                            )));
+                        }
+                        Ok(value)
+                    };
+                    crate::scripted::Edges {
+                        top: edge("top")?,
+                        right: edge("right")?,
+                        bottom: edge("bottom")?,
+                        left: edge("left")?,
+                    }
+                }
+                None => crate::scripted::Edges::default(),
+            };
 
             with_pending(lua, |pending| {
                 pending
@@ -1945,6 +1973,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         on: on.clone(),
                         properties: properties.clone(),
                         interactive,
+                        reserve,
                     })));
             })?;
             Ok(Value::Nil)
@@ -4867,6 +4896,56 @@ mod tests {
             })
             .collect();
         assert_eq!(declared, vec![r#"{"a":{"x":"s","y":1},"b":2}"#.to_owned()]);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`reserve` names the edges a surface takes out of the work area**,
+    /// an edge it leaves out reserving nothing (#162, Ruling 10).
+    #[test]
+    fn sol_surface_reads_the_edges_it_reserves() {
+        let directory = std::env::temp_dir().join("solium-script-test-reserve");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.surface("bar", { scene = "/solium-fixture/bar.qml", reserve = { bottom = 48, left = 4 } })"#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let reserves: Vec<crate::scripted::Edges> = scripts
+            .startup()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) => Some(declared.reserve),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reserves,
+            vec![crate::scripted::Edges {
+                bottom: 48,
+                left: 4,
+                ..Default::default()
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_negative_reserve_is_refused() {
+        let directory = std::env::temp_dir().join("solium-script-test-reserve-negative");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.surface("bar", { scene = "/solium-fixture/bar.qml", reserve = { top = -1 } })"#,
+        )
+        .expect("writing the test script");
+        assert!(
+            Scripts::load(&config).is_err(),
+            "a negative reserve must fail the load, as a half rect does"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

@@ -148,6 +148,59 @@ pub(crate) struct Declaration {
     /// every click on the desktop, and the symptom would be "windows stopped
     /// responding" rather than anything mentioning wallpapers.
     pub(crate) interactive: bool,
+    /// What it takes out of the work area of every monitor it is on, per
+    /// edge, whatever its size or placement (#162, Ruling 10).
+    /// `state::tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`.
+    pub(crate) reserve: Edges,
+}
+
+/// Logical pixels on each edge of a monitor.
+/// `state::monitors::tests::a_reserve_adds_to_the_layer_zone_on_its_edge`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Edges {
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
+    pub(crate) left: i32,
+}
+
+impl Edges {
+    /// Both, edge by edge: two bars on one edge reserve the two together.
+    /// `state::tests::real_client::reflow_on_close::hosted::two_surfaces_reserving_one_edge_take_both`.
+    pub(crate) fn add(self, other: Self) -> Self {
+        Self {
+            top: self.top + other.top,
+            right: self.right + other.right,
+            bottom: self.bottom + other.bottom,
+            left: self.left + other.left,
+        }
+    }
+}
+
+/// What a scene says it reserves, per edge: `None` for an edge it has not
+/// set, which the declaration keeps (Ruling 10).
+/// `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SceneReserve {
+    pub(crate) top: Option<i32>,
+    pub(crate) right: Option<i32>,
+    pub(crate) bottom: Option<i32>,
+    pub(crate) left: Option<i32>,
+}
+
+impl SceneReserve {
+    /// Per edge, the scene's value once it has set one, else the declared
+    /// one (Ruling 10).
+    /// `state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`.
+    pub(crate) fn over(self, declared: Edges) -> Edges {
+        let edge = |scene: Option<i32>, declared: i32| scene.map_or(declared, |value| value.max(0));
+        Edges {
+            top: edge(self.top, declared.top),
+            right: edge(self.right, declared.right),
+            bottom: edge(self.bottom, declared.bottom),
+            left: edge(self.left, declared.left),
+        }
+    }
 }
 
 /// A surface's property bag, as values.
@@ -211,6 +264,7 @@ impl Declaration {
             on,
             properties: Properties::default(),
             interactive: true,
+            reserve: Edges::default(),
         }
     }
 }
@@ -241,6 +295,9 @@ pub(crate) struct Surface {
     /// beside a real Wayland client: see [`Stand`].
     #[cfg(test)]
     stand: Option<Stand>,
+    /// The reserve its stand-in last reported.
+    #[cfg(test)]
+    stood_reserve: SceneReserve,
 }
 
 impl Surface {
@@ -253,6 +310,8 @@ impl Surface {
             missing_logged: false,
             #[cfg(test)]
             stand: None,
+            #[cfg(test)]
+            stood_reserve: SceneReserve::default(),
         }
     }
 
@@ -338,6 +397,44 @@ impl Surface {
     #[cfg(test)]
     pub(crate) fn stand(&self) -> Option<&Stand> {
         self.stand.as_ref()
+    }
+
+    /// The same, to change what it reports.
+    #[cfg(test)]
+    pub(crate) fn stand_mut(&mut self) -> Option<&mut Stand> {
+        self.stand.as_mut()
+    }
+
+    /// Read what every instance's scene reserves now.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`.
+    pub(crate) fn take_reserves(&mut self) {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            if let Some(reserve) = stand.reserve.take() {
+                self.stood_reserve = reserve;
+            }
+            return;
+        }
+        for instance in self.instances.values_mut() {
+            instance.take_reserve();
+        }
+    }
+
+    /// What this surface reserves on one monitor: the declaration, under what
+    /// the instance there has set. The declaration counts whether or not the
+    /// scene loaded (Ruling 10).
+    /// `state::tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`.
+    pub(crate) fn reserve_on(&self, output: &Output) -> Edges {
+        #[cfg(test)]
+        if self.stand.is_some() {
+            return self.stood_reserve.over(self.declared.reserve);
+        }
+        self.instances
+            .get(&output.name())
+            .map_or(self.declared.reserve, |instance| {
+                instance.scene_reserve().over(self.declared.reserve)
+            })
     }
 
     /// Whatever the scene asked for since it was last looked at.
@@ -489,6 +586,8 @@ pub(crate) struct Stand {
     pub(crate) seen: Vec<(Point<f64, Logical>, ScenePointer)>,
     /// How many times the pointer was told it left.
     pub(crate) left: u32,
+    /// The reserve the scene reports at the next settle, taken once.
+    pub(crate) reserve: Option<SceneReserve>,
 }
 
 #[cfg(test)]
@@ -500,6 +599,7 @@ impl Stand {
             hit: |_| Hit::Press,
             seen: Vec::new(),
             left: 0,
+            reserve: None,
         }
     }
 }
