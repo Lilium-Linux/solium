@@ -263,7 +263,10 @@ changed it, and the windows glide into the new work area with the layout's
 own motion from that instant, on the compositor's clock, which is the clock
 the bar's animation runs on too
 (`state::tests::real_client::reflow_on_close::hosted::a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant`,
-`state::tests::real_client::reflow_on_close::hosted::a_reserve_declared_again_or_taken_away_reflows_the_windows_once_each`).
+`state::tests::real_client::reflow_on_close::hosted::a_reserve_declared_again_or_taken_away_reflows_the_windows_once_each`),
+and that includes a change a `sol.on("surface", ...)` handler makes, which
+re-flows the windows at the click that sent the action
+(`state::tests::real_client::a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch`).
 So bind it to where the bar is going, never to an animated value. A change
 the scene makes on its own, from a `Timer`, is read after the frame it was
 made in

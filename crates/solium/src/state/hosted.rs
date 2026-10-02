@@ -13,6 +13,12 @@ use crate::state::Solium;
 /// `state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`.
 pub(crate) type Reserves = BTreeMap<String, Edges>;
 
+/// How many times one settle reads the scenes again for what its own layout
+/// pass and action handlers declared, before it leaves the rest to the next
+/// settle, so handlers that keep changing a reserve cannot hold a dispatch.
+/// `state::tests::real_client::a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch`.
+const SETTLE_ROUNDS: usize = 4;
+
 impl Solium {
     /// Read what every hosted scene reports, reserves first, then (later
     /// tasks) grabs and keyboard wants, and then the actions they asked for.
@@ -28,20 +34,31 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_reserve_declared_again_or_taken_away_reflows_the_windows_once_each`.
+    ///
+    /// What the layout pass and the actions' handlers run here declare is
+    /// read here too, in another round, and not at the next settle: a bar
+    /// button whose handler hides the bar re-flows the windows at the
+    /// release that pressed it.
+    /// `state::tests::real_client::a_reserve_an_action_handler_changes_reflows_the_windows_in_the_clicks_dispatch`.
     pub(crate) fn settle_scenes(&mut self) {
         if self.settling_scenes {
             return;
         }
         self.settling_scenes = true;
-        self.scenes_to_settle = false;
-        for surface in self.surfaces.iter_mut() {
-            surface.take_reserves();
+        for _ in 0..SETTLE_ROUNDS {
+            self.scenes_to_settle = false;
+            for surface in self.surfaces.iter_mut() {
+                surface.take_reserves();
+            }
+            if self.reserves() != self.laid_out_reserves {
+                self.redraw = true;
+                self.trigger_relayout();
+            }
+            self.settle_surfaces();
+            if !self.scenes_to_settle {
+                break;
+            }
         }
-        if self.reserves() != self.laid_out_reserves {
-            self.redraw = true;
-            self.trigger_relayout();
-        }
-        self.settle_surfaces();
         self.settling_scenes = false;
     }
 
@@ -53,7 +70,7 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_reserve_declared_again_or_taken_away_reflows_the_windows_once_each`.
     pub(crate) fn settle_scenes_once_dispatched(&mut self) {
-        if self.dispatching == 0 {
+        if self.dispatching == 0 && !self.settling_scenes {
             self.settle_scenes();
         } else {
             self.scenes_to_settle = true;
