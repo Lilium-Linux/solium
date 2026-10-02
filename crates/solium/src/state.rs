@@ -1844,6 +1844,10 @@ impl Solium {
     /// dispatch
     /// (`tests::real_client::a_click_on_a_hosted_button_is_acted_on_at_its_release`).
     ///
+    /// `event` is `None` for a button Qt has no name for: a scene that takes
+    /// a press where it is swallows it, and is not told of it (Ruling 9;
+    /// `tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`).
+    ///
     /// Returns whether one took it. None does while the session is locked:
     /// the pointer is the lock screen's, and nothing of the session's may
     /// notice it going past
@@ -1852,26 +1856,35 @@ impl Solium {
         &mut self,
         above_windows: bool,
         location: Point<f64, Logical>,
-        event: ScenePointer,
+        event: Option<ScenePointer>,
     ) -> bool {
         if self.lock.is_some() {
             return false;
         }
         if let Some(held) = self.scene_press.clone() {
-            if let Some(surface) = self.surfaces.get_mut(held.surface) {
-                surface.deliver(&held.output, held.area, location, event);
-            }
-            if matches!(event.kind, PointerKind::Release(_)) && event.buttons == 0 {
-                self.scene_press = None;
+            if let Some(event) = event {
+                if let Some(surface) = self.surfaces.get_mut(held.surface) {
+                    surface.deliver(&held.output, held.area, location, event);
+                }
+                if matches!(event.kind, PointerKind::Release(_)) && event.buttons == 0 {
+                    self.scene_press = None;
+                }
             }
             self.redraw = true;
             self.settle_surfaces();
             return true;
         }
-        let Some((output, id, area)) =
-            self.surface_claiming(above_windows, location, Asking::of(event.kind))
+        let asking = event.map_or(Asking::Press, |event| Asking::of(event.kind));
+        let Some((output, id, area)) = self.surface_claiming(above_windows, location, asking)
         else {
             return false;
+        };
+        // A button Qt has no name for is not told to a scene (Ruling 9), and
+        // a scene that takes a press there still keeps it from what is under
+        // it.
+        // `tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`.
+        let Some(event) = event else {
+            return true;
         };
         let Some(surface) = self.surfaces.get_mut(id) else {
             return false;

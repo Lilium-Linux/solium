@@ -450,10 +450,10 @@ fn pointer_motion<B: InputBackend>(
         // (`state::tests::real_client::reflow_on_close::hosted::a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it`).
         // Then the ones below, if none above took it.
         let motion = scene_event(state, PointerKind::Motion);
-        let above = state.surface_pointer(true, location, motion);
+        let above = state.surface_pointer(true, location, Some(motion));
         hover_frame(state, location);
         if !above {
-            state.surface_pointer(false, location, motion);
+            state.surface_pointer(false, location, Some(motion));
         }
         follow_pointer(state, location, pointer.is_grabbed());
         state.finish_scene_motion();
@@ -534,10 +534,10 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // on the hardware and nowhere else.
         if state.lock.is_none() {
             let motion = scene_event(state, PointerKind::Motion);
-            let above = state.surface_pointer(true, location, motion);
+            let above = state.surface_pointer(true, location, Some(motion));
             hover_frame(state, location);
             if !above {
-                state.surface_pointer(false, location, motion);
+                state.surface_pointer(false, location, Some(motion));
             }
             follow_pointer(state, location, pointer.is_grabbed());
             state.finish_scene_motion();
@@ -878,18 +878,26 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // lock guard covers the border too, which makes this the second of two
     // rather than the only one -- and it stays, because everything below it is
     // an interpretation and not all of it goes through `chrome_under`.
+    let forward = ButtonEvent {
+        button,
+        state: button_state,
+        serial,
+        time: event.time_msec(),
+    };
     if state.lock.is_some() {
-        pointer.button(
-            state,
-            &ButtonEvent {
-                button,
-                state: button_state,
-                serial,
-                time: event.time_msec(),
-            },
-        );
-        pointer.frame(state);
-        state.redraw = true;
+        forward_button(state, &pointer, &forward);
+        return;
+    }
+
+    // A button Qt has no name for, while a scene holds a press, is none of
+    // the compositor's to interpret either: the pointer is the scene's until
+    // every button is up (Ruling 7), and no scene is told of such a button
+    // (Ruling 9), so it goes on as it is, to no client, since none has the
+    // pointer meanwhile.
+    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_during_a_scenes_press_is_not_the_compositors`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
+    if scene.is_none() && state.scene_press.is_some() {
+        forward_button(state, &pointer, &forward);
         return;
     }
 
@@ -911,8 +919,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // compositor knows what none of them are for. A press a scene holds goes
     // first, even through a grab smithay started during it (Ruling 7):
     // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
+    // A button Qt has no name for is swallowed where a scene takes a press,
+    // and the scene is not told of it:
+    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`.
     if (state.scene_press.is_some() || !pointer.is_grabbed())
-        && let Some(scene) = scene
         && state.surface_pointer(true, location, scene)
     {
         return;
@@ -1143,34 +1153,27 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // Scripted surfaces *below* the windows, which is where a dock or a
     // desktop menu lives: they get the press only because nothing above
     // wanted it.
-    if !pointer.is_grabbed()
-        && !on_a_client
-        && let Some(scene) = scene
-        && state.surface_pointer(false, location, scene)
-    {
+    if !pointer.is_grabbed() && !on_a_client && state.surface_pointer(false, location, scene) {
         return;
     }
 
-    pointer.button(
-        state,
-        &ButtonEvent {
-            button,
-            state: button_state,
-            serial,
-            time: event.time_msec(),
-        },
-    );
-    pointer.frame(state);
-    // The compositor draws the cursor, so the cursor moving is the screen
-    // changing. Without this the pointer only moved when something else
-    // happened to want a frame -- which on a still screen is never.
-    state.redraw = true;
+    forward_button(state, &pointer, &forward);
 
     // Outside the grab now: the pointer's lock is released, so a script may
     // ask where the pointer is without stopping the compositor.
     if let Some((window, x, y)) = state.pending_drop.take() {
         state.trigger_drop(&window, x, y);
     }
+}
+
+/// A button, on to whoever has the pointer, as it is.
+fn forward_button(state: &mut Solium, pointer: &PointerHandle<Solium>, event: &ButtonEvent) {
+    pointer.button(state, event);
+    pointer.frame(state);
+    // The compositor draws the cursor, so the cursor moving is the screen
+    // changing. Without this the pointer only moved when something else
+    // happened to want a frame -- which on a still screen is never.
+    state.redraw = true;
 }
 
 fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEvent<B>) {
@@ -1240,8 +1243,9 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
     // during it, as `pointer_button` gives it the buttons:
     // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
     if (state.scene_press.is_some() || !pointer.is_grabbed())
-        && (state.surface_pointer(true, location, wheel)
-            || (pointer.current_focus().is_none() && state.surface_pointer(false, location, wheel)))
+        && (state.surface_pointer(true, location, Some(wheel))
+            || (pointer.current_focus().is_none()
+                && state.surface_pointer(false, location, Some(wheel))))
     {
         return;
     }

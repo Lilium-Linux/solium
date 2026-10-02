@@ -2742,10 +2742,10 @@ mod real_client {
                 time: 0,
             };
             assert!(
-                state.surface_pointer(true, at, event(PointerKind::Press(0x1), 0x1)),
+                state.surface_pointer(true, at, Some(event(PointerKind::Press(0x1), 0x1))),
                 "the premise: the button takes the press"
             );
-            assert!(state.surface_pointer(true, at, event(PointerKind::Release(0x1), 0)));
+            assert!(state.surface_pointer(true, at, Some(event(PointerKind::Release(0x1), 0))));
             assert_eq!(state.status, "bar clicked");
             let _ = std::fs::remove_dir_all(&directory);
         });
@@ -22391,6 +22391,77 @@ end)
                 assert!(
                     !desk.state.pointer.assert(None),
                     "the pointer offered a resize for a press the scene holds"
+                );
+            }
+
+            /// A window at 600,500 under a shell with a button over it, and
+            /// another window, which has the keyboard; click-to-focus on and
+            /// focus-follows-mouse off, so only a press moves the keyboard.
+            fn the_keyboard_beside_a_shell_button()
+            -> (Desk, Opened, Opened, crate::scripted::SurfaceId) {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                let other = desk.open_surface();
+                let other_window = desk
+                    .state
+                    .panes
+                    .get(other.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.click_to_focus = true;
+                desk.state.profile.focus_follows_mouse = false;
+                (desk, opened, other, shell)
+            }
+
+            /// **A button Qt has no name for, pressed on a shell button, is
+            /// swallowed** (Ruling 9): the scene is not told of it, and it
+            /// does not pass through the scene to the window under it, which
+            /// is neither focused nor sent it.
+            #[test]
+            fn a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press() {
+                let (mut desk, opened, other, shell) = the_keyboard_beside_a_shell_button();
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x100, ButtonState::Pressed, 11);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x100,
+                    ButtonState::Released,
+                    12,
+                );
+                assert_eq!(
+                    (desk.focused(), presses(&desk, shell), pointer_on(&desk)),
+                    (other.pane, 0, None),
+                    "(the window with the keyboard, the presses the scene was told, the surface \
+                     the pointer is on) after BTN_0 on a shell button over window {}",
+                    window_id(&opened)
+                );
+            }
+
+            /// **A button Qt has no name for, pressed while a scene holds a
+            /// press, is none of the compositor's** (Ruling 7): dragged off
+            /// the shell button onto the window, a side button there neither
+            /// focuses the window nor starts a drag of it; it goes on as it
+            /// is, as the pointer is nobody else's until every button is up.
+            #[test]
+            fn a_button_qt_has_no_name_for_during_a_scenes_press_is_not_the_compositors() {
+                let (mut desk, _, other, shell) = the_keyboard_beside_a_shell_button();
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                move_pointer(&mut desk.state, (630.0, 545.0), 12);
+                crate::synth::send_button(&mut desk.state, region, 0x120, ButtonState::Pressed, 13);
+                assert_eq!(
+                    (desk.focused(), presses(&desk, shell)),
+                    (other.pane, 1),
+                    "(the window with the keyboard, the presses the scene was told)"
                 );
             }
 
