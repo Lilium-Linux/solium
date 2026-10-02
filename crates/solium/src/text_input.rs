@@ -378,6 +378,7 @@ impl Solium {
 /// window's own space, the one its geometry is measured from: down through
 /// every subsurface to its root, and from a popup's root to the toplevel it
 /// was opened from, as the renderer places them.
+/// `tests::a_caret_in_a_subsurface_is_where_the_subsurface_is`,
 /// `tests::a_caret_in_a_popup_is_where_the_popup_is`.
 fn surface_in_window(state: &Solium, surface: &WlSurface) -> Option<(Window, Point<i32, Logical>)> {
     let mut offset = Point::<i32, Logical>::default();

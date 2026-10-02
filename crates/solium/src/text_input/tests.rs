@@ -9,7 +9,8 @@ use smithay::desktop::Window;
 use smithay::reexports::wayland_server::Display;
 use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER};
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+    wl_subcompositor, wl_subsurface, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::wp::text_input::zv3::client::{
@@ -27,6 +28,7 @@ use crate::state::{ClientState, Solium};
 #[derive(Debug, Default)]
 struct Client {
     compositor: Option<wl_compositor::WlCompositor>,
+    subcompositor: Option<wl_subcompositor::WlSubcompositor>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
     shm: Option<wl_shm::WlShm>,
     seat: Option<wl_seat::WlSeat>,
@@ -54,6 +56,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Client {
         };
         match interface.as_str() {
             "wl_compositor" => state.compositor = Some(registry.bind(name, 1, qh, ())),
+            "wl_subcompositor" => state.subcompositor = Some(registry.bind(name, 1, qh, ())),
             "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
             "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
             "wl_seat" => state.seat = Some(registry.bind(name, 1, qh, ())),
@@ -121,6 +124,8 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for Client {
 }
 
 wayland_client::delegate_noop!(Client: ignore wl_compositor::WlCompositor);
+wayland_client::delegate_noop!(Client: ignore wl_subcompositor::WlSubcompositor);
+wayland_client::delegate_noop!(Client: ignore wl_subsurface::WlSubsurface);
 wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
 wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
 wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
@@ -664,4 +669,45 @@ fn a_caret_in_a_popup_is_where_the_popup_is() {
     desk.pump();
     let caret = desk.state.text_field().and_then(|field| field.caret);
     assert_eq!(caret, Some(rect(315.0, 216.0, 2.0, 10.0)));
+}
+
+/// **A caret in a subsurface is where the subsurface is**: the subsurface's
+/// place on its parent, plus the caret's in the subsurface.
+#[test]
+fn a_caret_in_a_subsurface_is_where_the_subsurface_is() {
+    let mut desk = Desk::new();
+    let (window, surface, _xdg) = desk.window();
+    desk.state
+        .space
+        .map_element(window.clone(), (300, 200), false);
+    let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+    let subcompositor = desk
+        .client
+        .subcompositor
+        .clone()
+        .expect("wl_subcompositor bound");
+    let child = compositor.create_surface(&desk.qh, ());
+    let subsurface = subcompositor.get_subsurface(&child, &surface, &desk.qh, ());
+    subsurface.set_position(7, 9);
+    desk.buffer(&child, 20, 20);
+    // A subsurface's place is its parent's state, applied when that commits.
+    surface.commit();
+    desk.pump();
+
+    let toplevel = window
+        .toplevel()
+        .map(|toplevel| toplevel.wl_surface().clone())
+        .expect("an xdg toplevel");
+    let sub = smithay::wayland::compositor::get_children(&toplevel)
+        .into_iter()
+        .next()
+        .expect("the subsurface is on its parent");
+    desk.state
+        .give_keyboard(Some(sub), SERIAL_COUNTER.next_serial());
+    desk.pump();
+    let text_input = desk.text_input();
+    enable(&text_input, (5, 6, 2, 10));
+    desk.pump();
+    let caret = desk.state.text_field().and_then(|field| field.caret);
+    assert_eq!(caret, Some(rect(312.0, 215.0, 2.0, 10.0)));
 }
