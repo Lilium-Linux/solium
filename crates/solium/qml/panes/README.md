@@ -122,7 +122,7 @@ When they change, in place, and to a frame built later as well:
 | property | |
 |---|---|
 | `caret` | where the focused text field's caret is, when this window has it: `{ valid, x, y, width, height }` in the pane's own space -- the space a layer with no bleed is laid out in -- and `valid: false` when the field goes or the keyboard leaves the window. Known from applications that say where their caret is, through `text-input-v3`. Declared on `PaneStyle`; a delegated layer that wants it declares `property var caret: ({ valid: false })` |
-| `values` | whatever the configuration handed every pane with `sol.pane_values{ key = value }`, as one object. A general channel from Lua to the frames: a setting the configuration reads reaches the layer that draws by it, and the compositor never knows what it is. Declared on `PaneStyle`; a delegated layer declares `property var values: ({})` |
+| `values` | whatever the configuration handed every pane with `sol.pane_values{ key = value }`, as one object. A general channel from Lua to the frames: a setting the configuration reads reaches the layer that draws by it, and the compositor never knows what it is. A reload starts it empty, so a key the reloaded configuration no longer hands over is gone. Declared on `PaneStyle`; a delegated layer declares `property var values: ({})` |
 
 A layer drawing at the caret is drawn with its window, so whatever the window
 is doing -- moving, scaling in a thumbnail, fading -- the drawing does too.

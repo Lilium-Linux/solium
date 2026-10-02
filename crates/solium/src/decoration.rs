@@ -1520,8 +1520,10 @@ pub(crate) struct Decorations {
 /// the decorations, so a setting the configuration reads can reach the QML
 /// that draws by it without the compositor knowing what the setting is.
 /// Each call merges its keys into what is there, so two scripts each handing
-/// their own keys keep both; a key, once given, keeps its last value.
-/// `tests::pane_values_merge_by_key_and_count_only_changes`.
+/// their own keys keep both; a key, once given, keeps its last value until
+/// the configuration is reloaded, which starts with none.
+/// `tests::pane_values_merge_by_key_and_count_only_changes`,
+/// `tests::a_reload_starts_the_frames_values_afresh`.
 #[derive(Debug)]
 pub(crate) struct Values {
     fields: std::collections::BTreeMap<String, crate::json::Json>,
@@ -1554,6 +1556,18 @@ impl Values {
         self.generation += 1;
         true
     }
+
+    /// Forget every value, as a reload does: they were the configuration's
+    /// that handed them. A change like any other, so every frame is told.
+    /// `tests::a_reload_starts_the_frames_values_afresh`.
+    fn clear(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.fields.clear();
+        self.object = crate::json::Json::Object(std::collections::BTreeMap::new());
+        self.generation += 1;
+    }
 }
 
 impl Default for Values {
@@ -1570,6 +1584,12 @@ impl Decorations {
     /// What the configuration hands every layer.
     pub(crate) const fn values(&self) -> &Values {
         &self.values
+    }
+
+    /// Forget what every `sol.pane_values{ ... }` handed over, for a reload.
+    /// `tests::a_reload_starts_the_frames_values_afresh`.
+    pub(crate) fn clear_values(&mut self) {
+        self.values.clear();
     }
 
     /// Merge what `sol.pane_values{ ... }` handed over; whether it changed.
@@ -3435,6 +3455,48 @@ mod tests {
             state.decorations.values().object.render(),
             r#"{"mine":{"show":"pane"},"theirs":2}"#
         );
+    }
+
+    /// **A reload starts the frames' values afresh**: what a configuration
+    /// handed every pane was its own, so the one a reload brings starts with
+    /// none, and a key it no longer hands over is not left behind -- every
+    /// frame is told again, with only what the new one handed. On the Qt
+    /// thread, as every reload test is, for the engine a reload clears.
+    #[test]
+    fn a_reload_starts_the_frames_values_afresh() {
+        on_the_qt_thread(|| {
+            let display =
+                smithay::reexports::wayland_server::Display::<crate::state::Solium>::new()
+                    .expect("a test display");
+            let mut state = crate::state::Solium::new(display.handle());
+            let directory = std::env::temp_dir().join("solium-pane-values-reload");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let config = directory.join("init.lua");
+            std::fs::write(&config, r#"sol.pane_values{ held = { what = "caps" } }"#)
+                .expect("writing the script");
+            let scripts = crate::script::Scripts::load(&config).expect("loading the script");
+            state.start_scripts(Some(scripts));
+            assert_eq!(
+                state.decorations.values().object.render(),
+                r#"{"held":{"what":"caps"}}"#,
+                "the premise"
+            );
+            let before = state.decorations.values().generation;
+
+            std::fs::write(&config, "sol.pane_values{ kept = 1 }\n").expect("rewriting it");
+            state.reload_from(&config);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                state.decorations.values().object.render(),
+                r#"{"kept":1}"#,
+                "only what the reloaded configuration handed over"
+            );
+            assert!(
+                state.decorations.values().generation > before,
+                "and every frame is told again"
+            );
+        });
     }
 
     /// A bundle declaring a client radius and a delegated layer to read it.

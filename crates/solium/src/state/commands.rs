@@ -613,6 +613,11 @@ impl Solium {
                 // below have said where it now is
                 // (`a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`).
                 self.dispatching += 1;
+                // What the old configuration handed every frame was its own:
+                // the new one starts with none, so a key it no longer hands
+                // over is not left on screen
+                // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
+                self.decorations.clear_values();
                 self.start_scripts(Some(scripts));
                 // The re-announcement, in the order the doc comment states.
                 // Three dispatches and not one, each with its own snapshot,

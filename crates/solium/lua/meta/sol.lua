@@ -452,9 +452,10 @@ sol.decoration = sol.pane
 ---(`property var values: ({})`): so a setting the configuration reads can
 ---reach the QML that draws by it, and the compositor never knows what the
 ---setting is. Each call merges its keys into what is there, so two scripts
----each handing their own keep both; a key, once given, keeps its last value.
----Values are what `sol.surface`'s `properties` take. A window opened later
----is told them too.
+---each handing their own keep both; a key, once given, keeps its last value
+---until the configuration is reloaded, which starts with none. Values are
+---what `sol.surface`'s `properties` take. A window opened later is told them
+---too.
 ---@param values table
 ---@return nil
 function sol.pane_values(values) end
