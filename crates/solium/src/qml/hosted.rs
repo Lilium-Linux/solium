@@ -355,6 +355,68 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A disabled pointer handler claims nothing** (Ruling 6): Qt hands it
+    /// no event, though its item still accepts every button on its behalf,
+    /// so a press there is what is under the scene's.
+    #[test]
+    fn a_disabled_handler_claims_nothing() {
+        on_the_qt_thread(|| {
+            let (directory, scene) = hosted(
+                "solium-hosted-disabled",
+                r"
+                import QtQuick
+                Item {
+                    Item {
+                        x: 0; y: 0; width: 20; height: 20
+                        TapHandler { enabled: false }
+                    }
+                    Item {
+                        x: 20; y: 0; width: 20; height: 20
+                        HoverHandler { enabled: false }
+                    }
+                    Item {
+                        x: 40; y: 0; width: 20; height: 20
+                        TapHandler { enabled: false }
+                        HoverHandler {}
+                    }
+                    MouseArea {
+                        x: 0; y: 20; width: 20; height: 12
+                        TapHandler { enabled: false }
+                    }
+                }
+                ",
+                "disabled-1",
+            );
+            let cases = [
+                ((10.0, 10.0), Hit::Nothing, "a disabled TapHandler"),
+                ((30.0, 10.0), Hit::Nothing, "a disabled HoverHandler"),
+                (
+                    (50.0, 10.0),
+                    Hit::Hover,
+                    "a disabled TapHandler beside a HoverHandler",
+                ),
+                (
+                    (10.0, 25.0),
+                    Hit::Press,
+                    "a MouseArea whose TapHandler is disabled",
+                ),
+            ];
+            let wrong: Vec<String> = cases
+                .iter()
+                .filter(|((x, y), wanted, _)| scene.hit(*x, *y) != *wanted)
+                .map(|((x, y), wanted, what)| {
+                    format!(
+                        "{what} at ({x}, {y}): wanted {wanted:?}, got {:?}",
+                        scene.hit(*x, *y)
+                    )
+                })
+                .collect();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(wrong.is_empty(), "{wrong:#?}");
+        });
+    }
+
     /// **A scene told the pointer left un-hovers what it hovered.**
     #[test]
     fn a_left_scene_drops_its_hover() {

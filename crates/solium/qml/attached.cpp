@@ -127,8 +127,11 @@ bool takes_presses_itself(const QQuickItem *item)
 /* What one item claims for itself, before its children are asked. Its
  * handlers first: Qt gives an item with any pointer handler every mouse
  * button, to hand presses on to the handlers, so an item with only a
- * HoverHandler accepts every button and still takes no press itself.
- * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
+ * HoverHandler accepts every button and still takes no press itself, and
+ * neither does one whose handlers are all disabled, since Qt hands a
+ * disabled handler nothing.
+ * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
+ * `qml::hosted::tests::a_disabled_handler_claims_nothing`. */
 int own_claim(QQuickItem *item)
 {
     auto *attached = qobject_cast<SoliumAttached *>(
@@ -136,16 +139,27 @@ int own_claim(QQuickItem *item)
     if (attached != nullptr && attached->inputClaim() >= 0) {
         return attached->inputClaim();
     }
+    bool handlers = false;
     bool hover_handler = false;
     for (QObject *child : item->children()) {
+        if (!child->inherits("QQuickPointerHandler")) {
+            continue;
+        }
+        handlers = true;
+        if (!child->property("enabled").toBool()) {
+            continue;
+        }
         if (child->inherits("QQuickHoverHandler")) {
             hover_handler = true;
-        } else if (child->inherits("QQuickPointerHandler")) {
+        } else {
             return 2;
         }
     }
-    if (hover_handler) {
-        return takes_presses_itself(item) ? 2 : 1;
+    if (handlers) {
+        if (takes_presses_itself(item)) {
+            return 2;
+        }
+        return hover_handler ? 1 : 0;
     }
     if (item->acceptedMouseButtons() != Qt::NoButton) {
         return 2;
