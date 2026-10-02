@@ -1,6 +1,7 @@
 #include "attached.h"
 
 #include "host.h"
+#include "keyboard.h"
 #include "rows.h"
 
 #include <QtQml/QQmlContext>
@@ -283,4 +284,7 @@ void solium_qml_register_types()
      * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
     qmlRegisterAnonymousType<SoliumSurfaceInfo>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumReserve>(SOLIUM_NATIVE_URI, 1);
+    /* `Keyboard`, unqualified like `Theme`, in every scene.
+     * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`. */
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Keyboard", solium_keyboard());
 }

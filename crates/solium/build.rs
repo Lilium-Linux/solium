@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// The headers moc runs on: every one that declares a Q_OBJECT type.
 /// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
-const MOC_HEADERS: &[&str] = &["qml/attached.h", "qml/rows.h"];
+const MOC_HEADERS: &[&str] = &["qml/attached.h", "qml/rows.h", "qml/keyboard.h"];
 
 fn main() {
     // The datadir a packager bakes in, read by `option_env!` in `assets.rs`.
@@ -24,6 +24,8 @@ fn main() {
     println!("cargo:rerun-if-changed=qml/attached.h");
     println!("cargo:rerun-if-changed=qml/rows.cpp");
     println!("cargo:rerun-if-changed=qml/rows.h");
+    println!("cargo:rerun-if-changed=qml/keyboard.cpp");
+    println!("cargo:rerun-if-changed=qml/keyboard.h");
 
     let mut build = cc::Build::new();
     build
@@ -36,6 +38,7 @@ fn main() {
         .file("qml/host.cpp")
         .file("qml/attached.cpp")
         .file("qml/rows.cpp")
+        .file("qml/keyboard.cpp")
         .include("qml");
 
     // Qt6Quick pulls in Core, Gui and Qml transitively.
@@ -71,11 +74,13 @@ fn main() {
         }
     }
 
-    // attached.h and rows.h declare Q_OBJECT types -- the attached `Solium`
-    // object, the rows it hands out and the store they are kept in -- so they
-    // need moc, which host.cpp itself still does not.
+    // attached.h, rows.h and keyboard.h declare Q_OBJECT types -- the
+    // attached `Solium` object, the rows it hands out and the store they are
+    // kept in, and the `Keyboard` singleton -- so they need moc, which
+    // host.cpp itself still does not.
     // `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
-    // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
+    // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`,
+    // `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
     let out: PathBuf = std::env::var_os("OUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_default();
