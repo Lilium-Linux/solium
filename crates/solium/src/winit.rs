@@ -354,6 +354,7 @@ pub(crate) fn run() -> Result<()> {
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
     let mut drags = dev::drags();
+    let mut keys = dev::keys();
     let mut screen_changes = dev::outputs_at();
     let mut loadings = dev::loading_at();
     // Reversed so `last` is the *earliest*, which is what the `while ... pop`
@@ -365,6 +366,7 @@ pub(crate) fn run() -> Result<()> {
     clicks.reverse();
     loadings.reverse();
     drags.reverse();
+    keys.reverse();
     screen_changes.reverse();
 
     // Frame pacing, reported periodically. Latency is the thing this
@@ -535,6 +537,15 @@ pub(crate) fn run() -> Result<()> {
                 let region = crate::monitor::union(&state.space)
                     .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
                 synth::drag(&mut state, region, from.into(), to.into(), 12);
+            }
+        }
+        while keys.last().is_some_and(|(at, _)| now >= *at) {
+            if let Some((at, combo)) = keys.pop() {
+                tracing::info!(combo, "scripted key");
+                let region = crate::monitor::union(&state.space)
+                    .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
+                let time = u64::try_from(at.as_millis()).unwrap_or(u64::MAX);
+                synth::key(&mut state, region, &combo, time);
             }
         }
         while loadings.last().is_some_and(|(at, _)| now >= *at) {

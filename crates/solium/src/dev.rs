@@ -98,6 +98,20 @@ pub(crate) fn triggers() -> Vec<(Duration, String)> {
     parse_list("SOLIUM_TRIGGER_AT", |value| Some(value.to_owned()))
 }
 
+/// Keys to press and let go, as `<ms>:<key>` separated by commas, a key being
+/// keysym names joined by `+`.
+///
+/// ```sh
+/// SOLIUM_KEY_AT="1500:caps_lock,3000:shift+alt_l"
+/// ```
+///
+/// Through the real input path, not to a binding: `SOLIUM_TRIGGER_AT` runs
+/// a binding, and Caps Lock and a layout switch are xkb's, not a binding's.
+/// See `synth::key`.
+pub(crate) fn keys() -> Vec<(Duration, String)> {
+    parse_list("SOLIUM_KEY_AT", |value| Some(value.to_owned()))
+}
+
 /// Pointer clicks to fire, as `<ms>:<x>,<y>` separated by semicolons.
 ///
 /// ```sh

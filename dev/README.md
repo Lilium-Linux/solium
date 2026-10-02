@@ -199,6 +199,7 @@ reads one that file does not list.
 | `SOLIUM_CAPTURE_AT=<ms>` | Capture at this moment after startup instead of once a window has settled. Naming a moment is what makes capturing an *animation* possible. | yes |
 | `SOLIUM_CAPTURE_FRAMES=<n>`, `SOLIUM_CAPTURE_INTERVAL=<ms>` | A burst of `n` frames, `<ms>` apart (16 by default), written beside the path with a number on its stem: `/tmp/tile.ppm` gives `/tmp/tile-000.ppm`, `/tmp/tile-001.ppm`, … One frame shows a pose; a burst shows whether the motion is smooth. | yes |
 | `SOLIUM_TRIGGER_AT=<ms>:<combo>,...` | Run what these combinations are bound to, at these moments: `5200:super+space,6200:super+space`. Not a keypress: the binding is looked up by the name written, so it fires while the screen is locked, cannot press Ctrl+Alt+Backspace, and cannot show whether a binding works under another keyboard layout. | yes |
+| `SOLIUM_KEY_AT=<ms>:<key>,...` | Press real keys, by keysym name, through the real input path: `1500:caps_lock,3000:shift+alt_l`. Caps Lock locks, an xkb layout switch switches, and a bound combination runs its binding. See *Keys by name*. | yes |
 | `SOLIUM_DRAG_AT=<ms>:<x1>,<y1>><x2>,<y2>;...` | Drag the pointer through the real input path: the real grab, hit-testing and layout scripts. A drag from a point to itself is a click. | yes |
 | `SOLIUM_CLICK_AT=<ms>:<x>,<y>;...` | Hand a press to the mode holding the pointer, such as overview. It never touches the input path; see *Driving it without a keyboard*. | yes |
 | `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, 1 to 4, side by side in its one window. See *Two monitors, without a second monitor*. | yes |
@@ -297,6 +298,26 @@ first. A binding under a Cyrillic layout, which answers to its key cap as well
 as its keysym, can only be checked with a real keyboard with the second layout
 active; `wl-probe`'s `WL_PROBE_KEYBOARD` shows which layout the client was told
 is live.
+
+### Keys by name
+
+`SOLIUM_KEY_AT` is the keyboard's `SOLIUM_DRAG_AT`: real key events, through
+`input::handle`, the keyboard filter and xkb, so it does what a key on the
+keyboard does. That is the only way to exercise what xkb does by itself --
+Caps Lock, a layout switch through an option such as `grp:alt_shift_toggle`
+-- since none of that is a binding `SOLIUM_TRIGGER_AT` could run:
+
+```sh
+SOLIUM_KEY_AT="3000:caps_lock,5000:caps_lock,6000:shift+alt_l" dev/run-nested.sh
+```
+
+A key is keysym names joined by `+`, case aside, as xkb spells them:
+`caps_lock`, `num_lock`, `alt_l`, `return`, `a`. `shift`, `ctrl`, `alt` and
+`super` are the left-hand keys. Each name is looked up in the live keymap, in
+any of its layouts, so `a` is the same key with Russian live; a name no key of
+the keymap types presses nothing and says so in the log. The keyboard is the
+nested session's own: the configuration's `keyboard` section, or the
+`XKB_DEFAULT_*` environment.
 
 ## Checking an animation frame by frame
 

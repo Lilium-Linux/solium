@@ -173,6 +173,15 @@ SOLIUM_TRIGGER_AT=<ms>:<combo>,...
     the Ctrl+Alt chords, the lock screen and the key-cap lookup that keeps
     bindings working under another keyboard layout.
 
+SOLIUM_KEY_AT=<ms>:<key>,...
+    **Nested only.** Press a key and let it go at these moments, through the
+    real input path: `1500:caps_lock,3000:shift+alt_l`. A key is keysym names
+    joined by `+`, pressed in the order written and let go in reverse;
+    `shift`, `ctrl`, `alt` and `super` are the left-hand keys. Each is found
+    in the live keymap, in any of its layouts, so Caps Lock locks Caps, an
+    xkb layout-switch option switches the layout, and a combination a binding
+    claims runs it, exactly as from the keyboard.
+
 SOLIUM_CLICK_AT=<ms>:<x>,<y>;...
     **Nested only.** Hand a press at these moments and places, separated by
     semicolons, to the mode that is holding the pointer, such as overview. It
