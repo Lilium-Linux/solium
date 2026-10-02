@@ -34,8 +34,10 @@ pub(crate) fn qt_button(code: u32) -> Option<u32> {
         .map(|bit| 1 << bit)
 }
 
-/// The named keys, as Qt numbers them (qnamespace.h, `Qt::Key_Escape` on).
-const NAMED: [(Keysym, i32); 30] = [
+/// The named keys, as Qt numbers them (qnamespace.h, `Qt::Key_Escape` on),
+/// and as `QXkbCommon::keysymToQtKey` names them: AltGr, Meta, Hyper and
+/// Compose too. `tests::the_named_keys_map_to_qt_keys`.
+const NAMED: [(Keysym, i32); 37] = [
     (Keysym::Escape, 0x0100_0000),
     (Keysym::Tab, 0x0100_0001),
     (Keysym::ISO_Left_Tab, 0x0100_0002),
@@ -58,6 +60,8 @@ const NAMED: [(Keysym, i32); 30] = [
     (Keysym::Shift_R, 0x0100_0020),
     (Keysym::Control_L, 0x0100_0021),
     (Keysym::Control_R, 0x0100_0021),
+    (Keysym::Meta_L, 0x0100_0022),
+    (Keysym::Meta_R, 0x0100_0022),
     (Keysym::Alt_L, 0x0100_0023),
     (Keysym::Alt_R, 0x0100_0023),
     (Keysym::Caps_Lock, 0x0100_0024),
@@ -66,6 +70,11 @@ const NAMED: [(Keysym, i32); 30] = [
     (Keysym::Super_L, 0x0100_0053),
     (Keysym::Super_R, 0x0100_0054),
     (Keysym::Menu, 0x0100_0055),
+    (Keysym::Hyper_L, 0x0100_0056),
+    (Keysym::Hyper_R, 0x0100_0057),
+    (Keysym::ISO_Level3_Shift, 0x0100_1103),
+    (Keysym::Multi_key, 0x0100_1120),
+    (Keysym::Mode_switch, 0x0100_117e),
 ];
 
 /// `Qt::Key_unknown`.
@@ -120,8 +129,9 @@ mod tests {
         );
     }
 
-    /// **The named keys are Qt's**, the function keys counted from F1, and a
-    /// key that is neither named nor types anything is `Qt::Key_unknown`.
+    /// **The named keys are Qt's**, the function keys counted from F1, AltGr
+    /// and Meta among the modifiers, and a key that is neither named nor
+    /// types anything is `Qt::Key_unknown`.
     #[test]
     fn the_named_keys_map_to_qt_keys() {
         assert_eq!(
@@ -133,6 +143,9 @@ mod tests {
                 Keysym::F1,
                 Keysym::F12,
                 Keysym::Super_L,
+                Keysym::ISO_Level3_Shift,
+                Keysym::Meta_L,
+                Keysym::Multi_key,
                 Keysym::XF86_AudioMute,
             ]
             .map(|sym| qt_key(sym, "")),
@@ -144,6 +157,9 @@ mod tests {
                 0x0100_0030,
                 0x0100_003b,
                 0x0100_0053,
+                0x0100_1103,
+                0x0100_0022,
+                0x0100_1120,
                 0x01ff_ffff,
             ]
         );

@@ -542,13 +542,11 @@ impl Solium {
         {
             surface.key(&held.output, &key);
         }
-        // Shift, Control, Alt, the locks and Super do not repeat.
-        // `input::tests::a_held_modifier_does_not_repeat_into_the_scene`.
-        let modifier = matches!(
-            key.qt_key,
-            0x0100_0020..=0x0100_0026 | 0x0100_0053 | 0x0100_0054
-        );
-        if key.pressed && !modifier && self.hosted_keyboard.is_some() {
+        // A key the keymap says does not repeat, a modifier or a group
+        // toggle, does not.
+        // `input::tests::a_held_modifier_does_not_repeat_into_the_scene`,
+        // `input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
+        if key.pressed && key.repeats && self.hosted_keyboard.is_some() {
             let delay =
                 Duration::from_millis(u64::try_from(self.keyboard.repeat_delay).unwrap_or(600));
             self.scene_repeat = Some(SceneRepeat {

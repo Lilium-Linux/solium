@@ -369,6 +369,10 @@ pub(crate) struct SceneKey {
     /// `input::tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`.
     pub(crate) text: String,
     pub(crate) autorepeat: bool,
+    /// Whether it repeats while held, as the keymap says: no modifier does,
+    /// nor a group toggle.
+    /// `input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
+    pub(crate) repeats: bool,
     /// The xkb keycode, so a release finds its press and a repeat its key.
     /// `input::tests::a_release_follows_its_press_to_the_scene`.
     pub(crate) code: u32,
@@ -516,6 +520,7 @@ pub(crate) mod tests {
                 modifiers: 0,
                 text: text.to_owned(),
                 autorepeat: false,
+                repeats: true,
                 code,
             });
         }

@@ -406,6 +406,16 @@ fn press(
 /// `ctrl+v` work with Russian active; its text stays the active group's.
 /// `tests::with_control_held_a_cyrillic_letter_is_told_by_its_latin_name`,
 /// `tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`.
+///
+/// Whether it repeats while held is the keymap's, as every Wayland client
+/// asks it: no modifier does, AltGr and Meta among them, nor a group toggle
+/// such as `grp:alt_shift_toggle`'s, whatever Qt calls it.
+/// `tests::a_held_modifier_does_not_repeat_into_the_scene`,
+/// `tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
+#[expect(
+    unsafe_code,
+    reason = "asking smithay's xkb keymap whether a key repeats"
+)]
 fn scene_key(
     handle: &smithay::input::keyboard::KeysymHandle<'_>,
     modifiers: &ModifiersState,
@@ -417,13 +427,20 @@ fn scene_key(
         Some(latin) if modifiers.ctrl && sym.raw() > 0xff && latin.raw() <= 0xff => latin,
         _ => sym,
     };
+    let code = handle.raw_code();
+    let repeats = handle.xkb().lock().is_ok_and(|held| {
+        // SAFETY: the keymap is borrowed for this one call, under the lock,
+        // and nothing of it outlives the `Xkb` it belongs to.
+        unsafe { held.keymap() }.key_repeats(code)
+    });
     crate::qml::hosted::SceneKey {
         pressed,
         qt_key: crate::qml::keys::qt_key(named, &xkb::keysym_to_utf8(named)),
         modifiers: crate::qml::keys::qt_modifiers(modifiers),
         text,
         autorepeat: false,
-        code: handle.raw_code().raw(),
+        repeats,
+        code: code.raw(),
     }
 }
 
@@ -1846,6 +1863,18 @@ mod tests {
         script: &str,
         run: impl FnOnce(&mut Solium) -> T,
     ) -> T {
+        with_keymap(name, layout, None, group, script, run)
+    }
+
+    /// [`with_keyboard`], with the xkb `options` too, such as a group toggle.
+    fn with_keymap<T>(
+        name: &str,
+        layout: &str,
+        options: Option<&str>,
+        group: u32,
+        script: &str,
+        run: impl FnOnce(&mut Solium) -> T,
+    ) -> T {
         use smithay::input::keyboard::{Layout, XkbConfig};
 
         let directory = std::env::temp_dir().join(format!("solium-keys-{name}"));
@@ -1862,6 +1891,7 @@ mod tests {
                 &mut state,
                 XkbConfig {
                     layout,
+                    options: options.map(str::to_owned),
                     ..Default::default()
                 },
             )
@@ -2729,6 +2759,45 @@ mod tests {
                 "(repeats of shift alone, what repeated once a letter was held with it)"
             );
         });
+    }
+
+    /// **A held group toggle does not repeat into the scene** (#132): with
+    /// `grp:alt_shift_toggle` on `us,ru` and Russian active, shift pressed
+    /// with alt held is `ISO_Next_Group`, which Qt has no name for, and
+    /// holding it repeats nothing, as the keymap says of it.
+    #[test]
+    fn a_held_group_toggle_does_not_repeat_into_the_scene() {
+        with_keymap(
+            "held-group-toggle",
+            "us,ru",
+            Some("grp:alt_shift_toggle"),
+            1,
+            "",
+            |state| {
+                holding(state, &[], KeyPolicy::ExceptClaimed);
+                for code in [ALT_L, SHIFT] {
+                    super::keyboard(
+                        state,
+                        Key {
+                            code,
+                            state: KeyState::Pressed,
+                        },
+                    );
+                }
+                let toggle = state
+                    .scene_keys
+                    .last()
+                    .map(|key| (key.code, key.qt_key, key.text.clone()));
+                let late = state.clock.now() + std::time::Duration::from_secs(5);
+                state.repeat_scene_key(late);
+                let repeats = state.scene_keys.iter().filter(|key| key.autorepeat).count();
+                assert_eq!(
+                    (toggle, repeats),
+                    (Some((SHIFT, 0x01ff_ffff, String::new())), 0),
+                    "((the toggle's keycode, Qt key and text), its repeats)"
+                );
+            },
+        );
     }
 
     /// **#132, through the compositor: typing on Russian reaches a hosted
