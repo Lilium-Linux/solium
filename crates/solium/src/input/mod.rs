@@ -402,8 +402,8 @@ fn press(
 ///
 /// With Control held, a key whose symbol is not Latin-1 is named by the
 /// Latin-1 letter a Latin layout has on it, as Qt names it itself
-/// (`QXkbCommon::keysymToQtKey`), so a field's `ctrl+a`, `ctrl+c` and
-/// `ctrl+v` work with Russian active; its text stays the active group's.
+/// (`QXkbCommon::keysymToQtKey`), so a field's `ctrl+a` and `ctrl+z` work
+/// with Russian active; its text stays the active group's.
 /// `tests::with_control_held_a_cyrillic_letter_is_told_by_its_latin_name`,
 /// `tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`.
 ///

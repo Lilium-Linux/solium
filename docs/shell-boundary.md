@@ -290,8 +290,8 @@ Text comes from the compositor's own keyboard state, so typing works with any
 layout active, Russian included
 (`input::tests::russian_typed_through_the_compositor_reaches_a_hosted_text_field`,
 `input::tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`),
-and with Control held a key is named by its Latin letter, as Qt names it, so
-`ctrl+a`, `ctrl+c` and `ctrl+v` work on any layout
+and with Control held a letter is named by the one your Latin layout has on
+that key, as Qt names it, so `ctrl+a` and `ctrl+z` work with Russian active
 (`input::tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`),
 and a key held repeats at the keyboard's own rate
 (`input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`,
@@ -416,6 +416,9 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 
 - **No compose or dead keys** in a hosted field, and no input method: a
   field types what the key types.
+- **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
+  field copy and paste within the compositor's own Qt: what a window copied
+  cannot be pasted into it, nor the other way round.
 - **No window list, and no icons.** Nothing tells a hosted scene which
   windows exist, and there is no `image://` provider for the icon theme.
   Driving the compositor goes through `action` and Lua.
