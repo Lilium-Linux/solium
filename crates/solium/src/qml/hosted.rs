@@ -558,6 +558,54 @@ pub(crate) mod tests {
         });
     }
 
+    /// **`Solium.input` on a Qt Quick Controls popup is its item's**: a
+    /// `Popup` is not an item, and Qt draws it with one of its own, so
+    /// `Solium.input` written on the `Popup` opts that item out, or makes it
+    /// hover-only, as it does any item's.
+    #[test]
+    fn solium_input_on_a_controls_popup_is_its_items() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-popup-input",
+                r#"
+                import QtQuick
+                import QtQuick.Controls
+                import Solium
+                Item {
+                    readonly property int opened: (osd.opened ? 1 : 0) + (tip.opened ? 1 : 0)
+                    Popup {
+                        id: osd
+                        x: 0; y: 0; width: 20; height: 20; padding: 0
+                        visible: true; enter: null; exit: null
+                        closePolicy: Popup.NoAutoClose
+                        Solium.input: false
+                    }
+                    Popup {
+                        id: tip
+                        x: 30; y: 0; width: 20; height: 20; padding: 0
+                        visible: true; enter: null; exit: null
+                        closePolicy: Popup.NoAutoClose
+                        Solium.input: "hover"
+                    }
+                }
+                "#,
+                "popup-input-1",
+            );
+            let got = (
+                scene.get_int("opened"),
+                scene.hit(10.0, 10.0),
+                scene.hit(40.0, 10.0),
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                (2, Hit::Nothing, Hit::Hover),
+                "(both popups are open, the opted-out one, the hover-only one)"
+            );
+        });
+    }
+
     /// **A scene told the pointer left un-hovers what it hovered.**
     #[test]
     fn a_left_scene_drops_its_hover() {

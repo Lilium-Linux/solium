@@ -126,6 +126,26 @@ bool takes_presses_itself(const QQuickItem *item)
     return false;
 }
 
+/* What `Solium.input` says of an item: -1 unset, else its claim. A Qt Quick
+ * Controls `Popup` is not an item, and Qt draws it with an item of its own,
+ * the popup's child, so what a scene writes on the `Popup` is read there.
+ * `qml::hosted::tests::solium_input_on_a_controls_popup_is_its_items`. */
+int declared_input(QQuickItem *item)
+{
+    QObject *popup = item->inherits("QQuickPopupItem") ? item->parent() : nullptr;
+    for (QObject *owner : {static_cast<QObject *>(item), popup}) {
+        if (owner == nullptr) {
+            continue;
+        }
+        auto *attached = qobject_cast<SoliumAttached *>(
+            qmlAttachedPropertiesObject<SoliumAttachedType>(owner, false));
+        if (attached != nullptr && attached->inputClaim() >= 0) {
+            return attached->inputClaim();
+        }
+    }
+    return -1;
+}
+
 /* Whether `item` is a Text with a link at `local`, a point in its own
  * coordinates. Qt gives every Text the left button (QQuickTextPrivate::init)
  * and lets a press go unless a link is under it (QQuickText::mousePressEvent
@@ -154,10 +174,9 @@ bool on_a_link(QQuickItem *item, const QPointF &local)
  * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
 int own_claim(QQuickItem *item, const QPointF &local)
 {
-    auto *attached = qobject_cast<SoliumAttached *>(
-        qmlAttachedPropertiesObject<SoliumAttachedType>(item, false));
-    if (attached != nullptr && attached->inputClaim() >= 0) {
-        return attached->inputClaim();
+    const int declared = declared_input(item);
+    if (declared >= 0) {
+        return declared;
     }
     bool handlers = false;
     bool hover_handler = false;

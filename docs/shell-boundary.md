@@ -182,7 +182,9 @@ the whole item, its bounds too. A disabled handler takes nothing
 Quick Controls popup, a `Popup`, a `Menu` or a `ComboBox`'s list, takes the
 points it is drawn on, though Qt draws it in the window's overlay rather than
 under the scene's root
-(`qml::hosted::tests::an_open_controls_popup_claims_its_press`).
+(`qml::hosted::tests::an_open_controls_popup_claims_its_press`), and
+`Solium.input` written on the `Popup` is that item's
+(`qml::hosted::tests::solium_input_on_a_controls_popup_is_its_items`).
 Everywhere else the window under the shell gets the press, and where the
 scene takes a press, the window under it does not have the pointer, nor the
 keyboard when focus follows the mouse. A press the scene took is its until
