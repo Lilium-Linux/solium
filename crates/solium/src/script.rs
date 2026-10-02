@@ -1869,6 +1869,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // (`tests::sol_surface_reads_the_edges_it_reserves`,
     // `state::tests::real_client::reflow_on_close::hosted::a_scene_reserve_overrides_its_edge_and_reflows_the_layout_once`).
     //
+    // `outside_click` is what a press outside an open `Grab` of its scene
+    // does once it has dismissed it: `"swallow"`, the default, or `"pass"`
+    // to also click what is under it, or a table naming grabs,
+    // `{ default = "swallow", ["tray-menu"] = "pass" }`
+    // (`tests::sol_surface_reads_outside_click_as_a_word_or_a_table`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+    // `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`).
+    //
     // `sol.surface(name, false)` takes one away. Re-declaring the same name
     // changes the surface in place, writing what changed into its live scene,
     // and only a new scene file replaces it, so running the configuration
@@ -1962,6 +1970,41 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
                 None => crate::scripted::Edges::default(),
             };
+            // `tests::sol_surface_reads_outside_click_as_a_word_or_a_table`,
+            // `tests::an_unknown_outside_click_is_refused`.
+            let outside = |word: &str| -> mlua::Result<crate::scripted::Outside> {
+                match word {
+                    "swallow" => Ok(crate::scripted::Outside::Swallow),
+                    "pass" => Ok(crate::scripted::Outside::Pass),
+                    other => Err(mlua::Error::runtime(format!(
+                        "outside_click is \"swallow\" or \"pass\", not {other:?}"
+                    ))),
+                }
+            };
+            let outside_click = match options.get::<Value>("outside_click")? {
+                Value::Nil => crate::scripted::OutsideClick::default(),
+                Value::String(word) => crate::scripted::OutsideClick {
+                    default: outside(&word.to_str()?)?,
+                    named: std::collections::BTreeMap::new(),
+                },
+                Value::Table(table) => {
+                    let mut policy = crate::scripted::OutsideClick::default();
+                    for pair in table.pairs::<String, String>() {
+                        let (name, word) = pair?;
+                        if name == "default" {
+                            policy.default = outside(&word)?;
+                        } else {
+                            policy.named.insert(name, outside(&word)?);
+                        }
+                    }
+                    policy
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "outside_click is \"swallow\", \"pass\" or a table of them",
+                    ));
+                }
+            };
 
             with_pending(lua, |pending| {
                 pending
@@ -1974,6 +2017,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         properties: properties.clone(),
                         interactive,
                         reserve,
+                        outside_click: outside_click.clone(),
                     })));
             })?;
             Ok(Value::Nil)
@@ -4950,6 +4994,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **`outside_click` is a word or a table of them** (Ruling 13): a word
+    /// is every grab's policy, and a table names grabs, with `default` for
+    /// the rest; a surface that says nothing swallows.
+    #[test]
+    fn sol_surface_reads_outside_click_as_a_word_or_a_table() {
+        let directory = std::env::temp_dir().join("solium-script-test-outside");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.surface("a", { scene = "/solium-fixture/a.qml", outside_click = "pass" })
+            sol.surface("b", { scene = "/solium-fixture/b.qml", outside_click = { default = "swallow", ["tray-menu"] = "pass" } })
+            sol.surface("c", { scene = "/solium-fixture/c.qml" })
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let policies: Vec<crate::scripted::OutsideClick> = scripts
+            .startup()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) => Some(declared.outside_click.clone()),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        use crate::scripted::Outside;
+        let [a, b, c] = policies.as_slice() else {
+            panic!("expected three surfaces, got {policies:?}");
+        };
+        assert_eq!(
+            [
+                a.for_grab("anything"),
+                b.for_grab("tray-menu"),
+                b.for_grab("search"),
+                c.for_grab("anything"),
+            ],
+            [
+                Outside::Pass,
+                Outside::Pass,
+                Outside::Swallow,
+                Outside::Swallow
+            ],
+            "[a word, a grab the table names, one it does not, a surface that says nothing]"
+        );
+    }
+
+    /// **An `outside_click` that is neither word fails the load**, as a
+    /// negative reserve does, rather than quietly swallowing.
+    #[test]
+    fn an_unknown_outside_click_is_refused() {
+        let directory = std::env::temp_dir().join("solium-script-test-outside-unknown");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        let mut refused = Vec::new();
+        for options in [
+            r#"outside_click = "through""#,
+            r#"outside_click = { ["tray-menu"] = "through" }"#,
+            "outside_click = 1",
+        ] {
+            std::fs::write(
+                &config,
+                format!(
+                    r#"sol.surface("bar", {{ scene = "/solium-fixture/bar.qml", {options} }})"#
+                ),
+            )
+            .expect("writing the test script");
+            refused.push(Scripts::load(&config).is_err());
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            refused,
+            [true, true, true],
+            "[an unknown word, an unknown word for a named grab, not a word or a table]"
+        );
+    }
+
     /// **A `properties` table with a list part keeps its named keys**: the
     /// bag is always read as an object, so `{ "x", label = "y" }` loses
     /// nothing, as it did not before properties became values.
@@ -5061,6 +5184,60 @@ mod tests {
             assert!(
                 !placed.is_empty() && placed.iter().all(|on| **on == expected),
                 "{user}: {placed:?}"
+            );
+        }
+    }
+
+    /// **The hosted shell's outside press is the user's to configure**
+    /// (Q2, Ruling 13): `shell.outside_click` in `config.lua` is the shell's
+    /// `outside_click`, a word or a table naming grabs, and swallows by
+    /// default.
+    #[test]
+    fn the_shell_takes_its_outside_click_from_the_configuration() {
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
+            return;
+        }
+        use crate::scripted::Outside;
+        for (user, tray_menu, search) in [
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml" } }"#,
+                Outside::Swallow,
+                Outside::Swallow,
+            ),
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml", outside_click = "pass" } }"#,
+                Outside::Pass,
+                Outside::Pass,
+            ),
+            (
+                r#"return { shell = { scene = "/solium-fixture/shell.qml", outside_click = { default = "swallow", ["tray-menu"] = "pass" } } }"#,
+                Outside::Pass,
+                Outside::Swallow,
+            ),
+        ] {
+            let Some((scripts, commands)) =
+                shell_after_monitors("solium-script-test-shell-outside", user)
+            else {
+                return;
+            };
+            assert!(
+                scripts.unknown_settings().is_empty(),
+                "`shell.outside_click` was reported as unrecognised"
+            );
+            let (declared, _) = shell_surfaces(&commands);
+            let policies: Vec<(Outside, Outside)> = declared
+                .iter()
+                .map(|shell| {
+                    (
+                        shell.outside_click.for_grab("tray-menu"),
+                        shell.outside_click.for_grab("search"),
+                    )
+                })
+                .collect();
+            assert!(
+                !policies.is_empty()
+                    && policies.iter().all(|policy| *policy == (tray_menu, search)),
+                "{user}: {policies:?}"
             );
         }
     }

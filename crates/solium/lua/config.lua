@@ -101,6 +101,15 @@ local defaults = {
     -- `Solium.surface.reserve.bottom: 48`, and quick settings growing out
     -- of it move no window. See `a_panel_growing_out_of_the_bar_moves_no_window`.
     --
+    -- `outside_click`: what a press outside an open popup of the shell does,
+    -- after closing it: "swallow" (macOS and iOS do this), or "pass" to also
+    -- click what is under it. A table names popups by their grab's name:
+    --
+    --     outside_click = { default = "swallow", ["tray-menu"] = "pass" },
+    --
+    -- See `the_shell_takes_its_outside_click_from_the_configuration` and
+    -- `a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
+    --
     -- What a hosted shell does not have yet: keyboard focus (#163).
     --
     -- A layer-shell bar (Waybar and the like) needs nothing here: it is an
@@ -108,6 +117,7 @@ local defaults = {
     shell = {
         scene = false,
         on = "every-monitor",
+        outside_click = "swallow",
     },
 
     -- The keyboard.
