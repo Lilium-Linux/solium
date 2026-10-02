@@ -1,7 +1,8 @@
 /*
  * The keyboard, as every scene reads it: `Keyboard` in `import Solium`,
  * written unqualified like `Theme`. The live layout, its names, the locks,
- * and `changed(what)` once for each real change of one of them.
+ * and `changed(what)` once in each frame in which one of them really changed:
+ * two Caps toggles inside one frame, which only a script can make, are one.
  * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
  *
  * A singleton because there is one keyboard and every scene, a window's frame
