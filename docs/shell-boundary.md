@@ -164,11 +164,16 @@ hidden dock; `Solium.input: false` takes an item out. An item's shape counts,
 through its `containmentMask`, so a rounded popup's corners pass clicks
 through; a mask written in QML has to be typed,
 `function contains(point: point): bool`, or Qt ignores it, and it answers for
-the whole item, its bounds too. Everywhere else the window under the shell
-gets the press, and where the scene takes a press, the window under it does
-not have the pointer, nor the keyboard when focus follows the mouse. A press
-the scene took is its until every button is up, wherever the pointer goes
-meanwhile
+the whole item, its bounds too. A disabled handler takes nothing
+(`qml::hosted::tests::a_disabled_handler_claims_nothing`), and an open Qt
+Quick Controls popup, a `Popup`, a `Menu` or a `ComboBox`'s list, takes the
+points it is drawn on, though Qt draws it in the window's overlay rather than
+under the scene's root
+(`qml::hosted::tests::an_open_controls_popup_claims_its_press`).
+Everywhere else the window under the shell gets the press, and where the
+scene takes a press, the window under it does not have the pointer, nor the
+keyboard when focus follows the mouse. A press the scene took is its until
+every button is up, wherever the pointer goes meanwhile
 (`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`,
 `state::tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`,
 `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
