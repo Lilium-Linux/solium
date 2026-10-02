@@ -417,6 +417,47 @@ pub(crate) mod tests {
         });
     }
 
+    /// **An open Qt Quick Controls popup claims its press**, though Qt draws
+    /// it in the window's overlay, beside the scene's root rather than under
+    /// it; and the overlay around it, which takes every button for itself,
+    /// claims nothing.
+    #[test]
+    fn an_open_controls_popup_claims_its_press() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-popup",
+                r"
+                import QtQuick
+                import QtQuick.Controls
+                Item {
+                    readonly property int opened: menu.opened ? 1 : 0
+                    Popup {
+                        id: menu
+                        x: 10; y: 0; width: 20; height: 20; padding: 0
+                        visible: true
+                        enter: null; exit: null
+                        closePolicy: Popup.NoAutoClose
+                        contentItem: MouseArea {}
+                    }
+                }
+                ",
+                "popup-1",
+            );
+            let got = (
+                scene.get_int("opened"),
+                scene.hit(20.0, 10.0),
+                scene.hit(50.0, 10.0),
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                got,
+                (1, Hit::Press, Hit::Nothing),
+                "(the popup is open, what it claims, what the overlay beside it claims)"
+            );
+        });
+    }
+
     /// **A scene told the pointer left un-hovers what it hovered.**
     #[test]
     fn a_left_scene_drops_its_hover() {

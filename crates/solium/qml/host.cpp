@@ -2576,7 +2576,35 @@ extern "C" int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, doubl
     if (scene == nullptr || scene->root == nullptr) {
         return 0;
     }
-    return solium_claim_at(scene->root, QPointF(x, y));
+    const QPointF at(x, y);
+    int claim = solium_claim_at(scene->root, at);
+    if (scene->window == nullptr) {
+        return claim;
+    }
+    // A Qt Quick Controls popup (a Popup, a Menu, a ComboBox's list) is drawn
+    // in the window's overlay, beside the root rather than under it. The
+    // overlay itself takes every button, to close popups on a press outside
+    // them, so only the popups in it are asked.
+    // `qml::hosted::tests::an_open_controls_popup_claims_its_press`.
+    for (QQuickItem *beside : scene->window->contentItem()->childItems()) {
+        if (claim == 2) {
+            break;
+        }
+        if (beside == scene->root) {
+            continue;
+        }
+        if (!beside->inherits("QQuickOverlay")) {
+            claim = std::max(claim, solium_claim_at(beside, at));
+            continue;
+        }
+        for (QQuickItem *popup : beside->childItems()) {
+            if (claim == 2) {
+                break;
+            }
+            claim = std::max(claim, solium_claim_at(popup, at));
+        }
+    }
+    return claim;
 }
 
 extern "C" void solium_qml_scene_pointer_leave(SoliumQmlScene *scene)
