@@ -116,6 +116,19 @@ Every frame:
 | `contentWidth`, `contentHeight` | the client's size, inside the insets |
 | `paneWidth`, `paneHeight` | the window's own outer size |
 
+When they change, in place, and to a frame built later as well:
+
+| property | |
+|---|---|
+| `caret` | where the focused text field's caret is, when this window has it: `{ valid, x, y, width, height }` in the pane's own space -- the space a layer with no bleed is laid out in -- and `valid: false` when the field goes or the keyboard leaves the window. Known from applications that say where their caret is, through `text-input-v3`. Declared on `PaneStyle`; a delegated layer that wants it declares `property var caret: ({ valid: false })` |
+| `values` | whatever the configuration handed every pane with `sol.pane_values{ key = value }`, as one object. A general channel from Lua to the frames: a setting the configuration reads reaches the layer that draws by it, and the compositor never knows what it is. Declared on `PaneStyle`; a delegated layer declares `property var values: ({})` |
+
+A layer drawing at the caret is drawn with its window, so whatever the window
+is doing -- moving, scaling in a thumbnail, fading -- the drawing does too.
+Every layer can also read the keyboard, `Keyboard` in `import Solium`: the
+live layout, its names, and whether Caps Lock and Num Lock are on
+(`docs/shell-boundary.md`, "The keyboard, live").
+
 Once, at build, because neither ever changes for a style:
 
 | property | |
@@ -215,7 +228,8 @@ demonstration do, and an unfocused window costs nothing.
 window.
 
 Each of those eight is one `frame` layer, which is what every decoration was
-before styles had layers. The rest are here to show what layers add:
+before styles had layers, and the keyboard pill's layer, described below. The
+rest are here to show what layers add:
 
 | folder | |
 |---|---|
@@ -234,6 +248,33 @@ puts one on every window:
 | `sandwich/` | one layer behind the client and one above it, in colours that cannot be confused |
 | `wave/` | sine waves flowing round the whole window, outside it, all `bleed` at `behind` and nothing reserved |
 | `bleedy/` | what bleed does to hit-testing, and to the window next door |
+
+## The keyboard pill
+
+Every style here ends with one line:
+
+```qml
+PaneStyle {
+    Layer { depth: "frame"; source: "Frame.qml" }
+    KeyboardPillLayer {}
+}
+```
+
+`KeyboardPillLayer`, in `import Solium`, is an inline layer at `above` that
+draws `KeyboardPill` -- the small capsule saying Caps Lock is on, or which
+layout you just switched to -- just below the pane's `caret`, or above it
+when the pane has no room below. It shows what the configuration hands it,
+`values.keyboard_indicator`, and nothing when that says not to: the policy is
+`lua/keyboard_indicator.lua`, set by `keyboard.indicator` in `config.lua`,
+and `docs/ricing.md` has the whole of it. A style of your own gets the pill by
+adding the same line, and a style without it has none.
+
+It is a layer of its own because it draws over the client, and in software a
+`frame` layer that reserves a band copies only that band. So it costs one more
+scene per window, which idles at a flag read and is redrawn only when the pill
+changes; a style that leaves the line out pays nothing for it.
+`crates/solium/tests/scenarios/keyboard-pane-drawn.lua` draws it in `top` and
+reads its pixels.
 
 ## One QML file is still a decoration
 

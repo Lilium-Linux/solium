@@ -439,9 +439,56 @@ keyboard = {
 ```
 
 `sol.keyboard()` reads all of it back to Lua — the layout names, which is
-active, and the repeat settings. Nothing tells a script when the layout
-changes, though, and a hosted shell's QML cannot call it, so a layout
-indicator can only be updated by the binding that switches the layout.
+active and its short name (`RU`), whether Caps Lock and Num Lock are on, and
+the repeat settings — and `sol.keyboard{ caps = false }` sets a lock.
+`sol.on("keyboard", function(state, changed) end)` hears the layout or a lock
+change, however it changed, and never ordinary typing. QML reads the same as
+the `Keyboard` singleton, in a hosted scene and a pane style alike.
+
+### The keyboard pill
+
+Switch layout, or press Caps Lock, and a small capsule in the accent colour
+appears just below where you are typing: `⇪` while Caps Lock is on, `EN` or
+`RU` for a moment after a switch, after the one macOS shows.
+
+It is not a compositor feature. It is the shipped configuration's example of
+doing something with what the compositor publishes, and it is two ways of
+doing the same thing, so you can see both:
+
+- **Inside the window** (`show = "pane"`, the default). Every shipped pane
+  style ends with one line, `KeyboardPillLayer {}`, a layer above the client
+  that draws the pill at the pane's `caret` — where the focused text field's
+  caret is, in the pane's own space. Because it is part of the pane, it moves,
+  scales and fades with its window. Your own style gets it by adding the same
+  line.
+- **On a surface of its own** (`show = "surface"`): an overlay `sol.surface`
+  that `lua/keyboard_indicator.lua` places at the caret in the global space,
+  from `sol.text_input()`.
+
+The policy is the Lua file: it listens to `sol.on("keyboard")` and
+`sol.on("text_input")` and decides what shows and where. The look is QML,
+`KeyboardPill` in `import Solium`, on `Theme`. The compositor provides the
+data underneath — `text-input-v3` for the caret, the keyboard's state and its
+events — and knows nothing about pills. It is configured in `config.lua`:
+
+```lua
+keyboard = { indicator = {
+    show = "pane",            -- "pane", "surface", or false
+    on = { layout = true, caps = true, num = false },
+    caps_on_focus = true,     -- Caps' pill again when a field is focused with Caps on
+    fallback = "surface",     -- with no caret: on the screen, or false
+    position = "bottom",      -- where on the screen: "bottom", "center" or "top"
+    duration = 1200,          -- ms a layout's pill stays
+} }
+```
+
+The caret comes only from applications that say where it is through
+`text-input-v3`; for the others, `fallback = "surface"` shows the pill on the
+focused window's monitor instead. To try it nested, `SOLIUM_KEY_AT` presses
+Caps Lock and a layout switch for you ([`dev/README.md`](../dev/README.md)).
+To change it, copy `lua/keyboard_indicator.lua` or `KeyboardPill.qml` next to
+your configuration; to have none, take `require("keyboard_indicator")` out of
+your `init.lua`.
 
 ### Your monitors
 

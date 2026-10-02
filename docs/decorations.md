@@ -113,7 +113,10 @@ becomes an overlay: it draws over the client and never moves it.
 they change, so reacting to focus or to the cursor is a binding rather than a
 subscription. `pointerInside` is true while the pointer is anywhere over the
 window, *including over the client*, which is how a border can follow a cursor
-that is over a text editor.
+that is over a text editor. So are `caret`, where the focused text field's
+caret is when this window has it, and `values`, whatever the configuration
+handed every pane with `sol.pane_values{ ... }`; the `Keyboard` singleton is
+there to read as well. The panes README says what each holds.
 
 **`action` is how a button asks for something.** Set it to `"close"` or
 `"maximize"`; the compositor takes it and clears it, so a press is acted on

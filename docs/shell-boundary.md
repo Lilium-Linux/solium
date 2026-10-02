@@ -242,6 +242,20 @@ A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
 `"flipped270"`, and not `"90"` or `"flipped-90"` as `sol.monitors{ ... }` takes
 it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smithay_does`).
 
+**The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
+keyboard every scene reads, a window's frame as much as a shell: `layout`
+(the live layout's index into `layouts`, from 0), `layoutName` (`"Russian"`),
+`layoutShort` (`"RU"`, the short name xkb's own rules give it), `layouts`,
+`caps` and `num`, each notifying as it changes, and `changed(what)` once for
+each real change of the layout, Caps Lock or Num Lock, `what` being
+`"layout"`, `"caps"` or `"num"`, and never for ordinary typing
+(`models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`).
+It is published once a frame, beside the monitors. It has no row types of its
+own, so the one name it takes in `import Solium` is `Keyboard` itself, as
+`Theme` takes `Theme`. Lua hears the same changes through
+`sol.on("keyboard", ...)`, and reads the focused text field's caret with
+`sol.text_input()`.
+
 **Room of its own.** A surface reserves edges of its monitor whatever its
 size. Lua declares it, `reserve = { bottom = 48 }` on `sol.surface`, and the
 scene can say it too, `Solium.surface.reserve.bottom: bar.hidden ? 0 : 48`,
