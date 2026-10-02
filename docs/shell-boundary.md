@@ -269,7 +269,8 @@ and with Control held a key is named by its Latin letter, as Qt names it, so
 `ctrl+a`, `ctrl+c` and `ctrl+v` work on any layout
 (`input::tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`),
 and a key held repeats at the keyboard's own rate
-(`input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`).
+(`input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`,
+`input::tests::a_held_key_noticed_late_still_repeats_at_the_keyboards_rate`).
 The compositor's bindings keep working, `super+q` on Russian among them,
 except the keys the item claims, which are the field's
 (`input::tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,

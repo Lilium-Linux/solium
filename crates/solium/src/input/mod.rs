@@ -2649,6 +2649,42 @@ mod tests {
         });
     }
 
+    /// **A held key keeps the keyboard's rate though the loop notices it
+    /// late**: each repeat is due an interval after the last was due, not
+    /// after the loop got to it, so the up to 16 ms a loop sleeps between
+    /// looks does not slow it down (Ruling 14).
+    #[test]
+    fn a_held_key_noticed_late_still_repeats_at_the_keyboards_rate() {
+        with_keyboard("held-repeat-late", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            super::keyboard(
+                state,
+                Key {
+                    code: Q,
+                    state: KeyState::Pressed,
+                },
+            );
+            let due = state.clock.now()
+                + std::time::Duration::from_millis(
+                    u64::try_from(state.keyboard.repeat_delay).unwrap_or(600),
+                );
+            let interval = std::time::Duration::from_millis(
+                1000 / u64::try_from(state.keyboard.repeat_rate).unwrap_or(25),
+            );
+            state.repeat_scene_key(due + std::time::Duration::from_millis(15));
+            state.repeat_scene_key(due + interval + std::time::Duration::from_millis(1));
+            assert_eq!(
+                state
+                    .scene_keys
+                    .iter()
+                    .filter(|key| key.autorepeat && key.text == "й")
+                    .count(),
+                2,
+                "repeats, looked for 15 ms late and then an interval after the first was due"
+            );
+        });
+    }
+
     /// **A held modifier does not repeat into the scene**, and a letter
     /// pressed after it does, with the modifier still down.
     #[test]

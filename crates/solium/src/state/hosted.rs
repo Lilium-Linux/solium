@@ -516,8 +516,10 @@ impl Solium {
 
     /// A key held for the scene holding the keyboard repeats at the
     /// keyboard's rate after its delay, checked once per loop iteration, as
-    /// idleness is (Ruling 14).
-    /// `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
+    /// idleness is (Ruling 14). Each repeat is due an interval after the last
+    /// was due, so a loop that looks late does not slow the rate.
+    /// `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`,
+    /// `input::tests::a_held_key_noticed_late_still_repeats_at_the_keyboards_rate`.
     pub(crate) fn repeat_scene_key(&mut self, now: Duration) {
         let Some(repeat) = self.scene_repeat.as_mut() else {
             return;
@@ -530,7 +532,11 @@ impl Solium {
         if now < repeat.next {
             return;
         }
-        repeat.next = now + Duration::from_millis(1000 / rate);
+        let interval = Duration::from_millis(1000 / rate);
+        repeat.next += interval;
+        if repeat.next <= now {
+            repeat.next = now + interval;
+        }
         let key = repeat.key.clone();
         #[cfg(test)]
         self.scene_keys.push(key.clone());
