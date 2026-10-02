@@ -14,11 +14,14 @@
 #include <QtCore/QObject>
 #include <QtCore/QByteArray>
 #include <QtCore/QList>
+#include <QtCore/QPointer>
 #include <QtCore/QRectF>
 #include <QtCore/QString>
 #include <QtCore/QVariant>
 #include <QtCore/QVariantMap>
+#include <QtQml/QQmlParserStatus>
 #include <QtQml/qqml.h>
+#include <QtQuick/QQuickItem>
 
 #include <utility>
 
@@ -134,14 +137,70 @@ private:
     SoliumReserve m_reserve;
 };
 
+struct SoliumHosting;
+
+/* `Grab { name; target; active; onDismissed }`: while active, its scene
+ * holds the pointer; a press outside every active target of the scene
+ * dismisses them all, newest first. Ruling 12.
+ * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`,
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+class SoliumGrab : public QObject, public QQmlParserStatus
+{
+    Q_OBJECT
+    Q_INTERFACES(QQmlParserStatus)
+    Q_PROPERTY(QString name READ name WRITE setName NOTIFY nameChanged)
+    Q_PROPERTY(QQuickItem *target READ target WRITE setTarget NOTIFY targetChanged)
+    Q_PROPERTY(bool active READ active WRITE setActive NOTIFY activeChanged)
+public:
+    explicit SoliumGrab(QObject *parent = nullptr) : QObject(parent) {}
+    ~SoliumGrab() override;
+    void classBegin() override {}
+    void componentComplete() override;
+    QString name() const { return m_name; }
+    void setName(const QString &name);
+    QQuickItem *target() const { return m_target; }
+    void setTarget(QQuickItem *target);
+    bool active() const { return m_active; }
+    void setActive(bool active);
+    /* When it last became active, by a counter that only goes up.
+     * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+    quint64 activated() const { return m_activated; }
+    /* Its scene's hosting record is going, before the grab is. */
+    void detach() { m_hosting = nullptr; }
+signals:
+    void nameChanged();
+    void targetChanged();
+    void activeChanged();
+    void dismissed();
+
+private:
+    void mark();
+    QString m_name;
+    QPointer<QQuickItem> m_target;
+    bool m_active = false;
+    quint64 m_activated = 0;
+    SoliumHosting *m_hosting = nullptr;
+};
+
 /* What one hosted scene carries beside its object tree.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
  * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
 struct SoliumHosting
 {
     explicit SoliumHosting(QString monitor_name) : monitor(std::move(monitor_name)) {}
+    ~SoliumHosting();
+    SoliumHosting(const SoliumHosting &) = delete;
+    SoliumHosting &operator=(const SoliumHosting &) = delete;
     QString monitor;
     SoliumSurfaceInfo surface_info;
+    /* Every Grab of the scene, active or not.
+     * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
+    QList<QPointer<SoliumGrab>> grabs;
+    /* Whether its grabs changed since the last take: true from the start, so
+     * a scene with none active says so once, and a scene rebuilt for an edit
+     * lets go of the grab the one before it held.
+     * `qml::hosted::tests::a_scene_with_no_active_grab_says_so_once`. */
+    bool grab_dirty = true;
 };
 
 /* What every item reads as `Solium.<name>`.
@@ -193,7 +252,6 @@ SoliumHosting *solium_hosting_of(QObject *object);
  * object created in it or in a context below it.
  * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`. */
 void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting);
-class QQuickItem;
 /* What the items under `scene_point` claim: 0 nothing, 1 hover, 2 a press.
  * The strongest claim of every visible, enabled, non-transparent item there,
  * inside its ancestors' clips and its own contains(), as Qt's own delivery

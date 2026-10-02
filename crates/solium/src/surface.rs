@@ -38,7 +38,7 @@ use crate::{
     json::Json,
     qml::{
         self,
-        hosted::{Hit, ScenePointer},
+        hosted::{GrabReport, Hit, ScenePointer},
         paint::{Gpu, Placement},
     },
     render::{Drawn, Element},
@@ -227,6 +227,29 @@ impl ShellSurface {
 
     pub(crate) fn scene_reserve(&self) -> SceneReserve {
         self.scene_reserve
+    }
+
+    /// What the scene says of its grabs since it was last asked.
+    /// `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`.
+    pub(crate) fn take_grab(&mut self) -> GrabReport {
+        self.scene.take_grab()
+    }
+
+    /// Whether a point in compositor coordinates is inside an active grab's
+    /// target of the scene drawn across `area`.
+    /// `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
+    pub(crate) fn grab_contains(
+        &self,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+    ) -> bool {
+        let local = location - area.loc.to_f64();
+        self.scene.grab_contains(local.x, local.y)
+    }
+
+    /// Dismiss the scene's grabs. `a_cached_hit_follows_a_dismissal`.
+    pub(crate) fn dismiss(&mut self) {
+        self.scene.dismiss();
     }
 
     /// Set a whole-number property on the scene.
@@ -545,6 +568,38 @@ mod tests {
     use super::ShellSurface;
     use crate::qml::hosted::{Hit, PointerKind, ScenePointer};
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **A cached hit follows a dismissal**: the menu its `onDismissed`
+    /// closed takes nothing at the point it took a press at a moment ago.
+    #[test]
+    fn a_cached_hit_follows_a_dismissal() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-cached-dismissal");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    MouseArea { id: menu; width: 20; height: 20 }\n    Grab { target: menu; active: menu.visible; onDismissed: menu.visible = false }\n}\n",
+            )
+            .expect("writing the scene");
+            let mut surface =
+                ShellSurface::hosted(path, "{}", "cached-dismissal-1").expect("the scene builds");
+            let area = smithay::utils::Rectangle::new((0, 0).into(), (400, 30).into());
+            let point = smithay::utils::Point::from((10.0, 10.0));
+            let open = surface.hit(area, point);
+            surface.dismiss();
+            let dismissed = surface.hit(area, point);
+            drop(surface);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (open, dismissed),
+                (Hit::Press, Hit::Nothing),
+                "(the open menu, the place it was once dismissed)"
+            );
+        });
+    }
 
     /// **A hit is cached only until Qt next runs**: asked again at the same
     /// point, it is what the scene's items say now, after a property write

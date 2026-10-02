@@ -434,6 +434,26 @@ void solium_qml_scene_pointer_leave(SoliumQmlScene *scene);
  * `qml::hosted::tests::an_unhosted_scene_may_bind_a_reserve_and_reserves_nothing`. */
 int solium_qml_scene_take_reserve(SoliumQmlScene *scene, int *edges);
 
+/* The scene's grab, when it changed since the last take: 1 and the newest
+ * active grab's name in `*name` (valid until the next call), 0 when none is
+ * active, -1 when nothing changed or for a scene that is not hosted. A scene
+ * says what it has at its first take, whatever it is.
+ * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`,
+ * `qml::hosted::tests::a_scene_with_no_active_grab_says_so_once`,
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+int solium_qml_scene_take_grab(SoliumQmlScene *scene, const char **name);
+
+/* Whether a point in scene coordinates is inside any active grab's visible
+ * target, by the target's own `contains()`.
+ * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`,
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+int solium_qml_scene_grab_contains(const SoliumQmlScene *scene, double x, double y);
+
+/* Dismiss every active grab of the scene, newest first: each hears
+ * `dismissed`.
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+void solium_qml_scene_dismiss(SoliumQmlScene *scene);
+
 /* The models hosted scenes read, by number.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0

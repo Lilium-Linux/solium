@@ -1,8 +1,9 @@
 //! The compositor's half of what a hosted scene and the compositor say to each
 //! other: properties written in place, the monitor it is on, the models' rows,
 //! pointer events, what its items claim of the pointer
-//! (`tests::the_item_tree_decides_what_a_point_claims`), and what it reserves
-//! (`tests::a_scene_reserve_is_reported_once_per_change`). Its grabs and its
+//! (`tests::the_item_tree_decides_what_a_point_claims`), what it reserves
+//! (`tests::a_scene_reserve_is_reported_once_per_change`), and its grabs
+//! (`tests::a_grab_is_held_while_active_and_dismissed_on_request`). Its
 //! keyboard wants (#163) are still to come.
 
 use std::{
@@ -52,6 +53,16 @@ mod ffi {
             scene: *mut super::super::ffi::Scene,
             edges: *mut c_int,
         ) -> c_int;
+        pub(super) fn solium_qml_scene_take_grab(
+            scene: *mut super::super::ffi::Scene,
+            name: *mut *const c_char,
+        ) -> c_int;
+        pub(super) fn solium_qml_scene_grab_contains(
+            scene: *const super::super::ffi::Scene,
+            x: f64,
+            y: f64,
+        ) -> c_int;
+        pub(super) fn solium_qml_scene_dismiss(scene: *mut super::super::ffi::Scene);
     }
 }
 
@@ -263,6 +274,60 @@ impl Scene {
     }
 }
 
+/// What a scene says of its grabs since it was last asked (Ruling 12).
+/// `tests::a_grab_is_held_while_active_and_dismissed_on_request`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GrabReport {
+    Unchanged,
+    /// No grab is active now.
+    Released,
+    /// One is, and this is the newest's name.
+    /// `tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
+    Held(String),
+}
+
+impl Scene {
+    /// The scene's grab, when it changed since it was last asked; a scene
+    /// says what it has at its first take.
+    /// `tests::a_grab_is_held_while_active_and_dismissed_on_request`,
+    /// `tests::a_scene_with_no_active_grab_says_so_once`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn take_grab(&mut self) -> GrabReport {
+        let mut name: *const c_char = std::ptr::null();
+        // SAFETY: the scene is live for as long as `self`, and the host sets
+        // `name` only when it returns 1.
+        match unsafe { ffi::solium_qml_scene_take_grab(self.scene, &raw mut name) } {
+            1 if !name.is_null() => {
+                // SAFETY: a NUL-terminated string the host keeps valid until
+                // its next call, copied here before any.
+                let held = unsafe { std::ffi::CStr::from_ptr(name) };
+                GrabReport::Held(held.to_string_lossy().into_owned())
+            }
+            0 => GrabReport::Released,
+            _ => GrabReport::Unchanged,
+        }
+    }
+
+    /// Whether a point in scene coordinates is inside any active grab's
+    /// target. `tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn grab_contains(&self, x: f64, y: f64) -> bool {
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_grab_contains(self.scene, x, y) != 0 }
+    }
+
+    /// Dismiss every active grab, newest first.
+    /// `tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn dismiss(&mut self) {
+        // `onDismissed` runs the scene's own code, which can move its items.
+        // `surface::tests::a_cached_hit_follows_a_dismissal`.
+        touched();
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_dismiss(self.scene) }
+    }
+}
+
 /// What a pointer event is, for a scene.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum PointerKind {
@@ -296,7 +361,7 @@ pub(crate) struct ScenePointer {
 pub(crate) mod tests {
     use std::path::PathBuf;
 
-    use super::{Hit, PointerKind, ScenePointer};
+    use super::{GrabReport, Hit, PointerKind, ScenePointer};
     use crate::qml::{Scene, qt_test::on_the_qt_thread};
     use crate::scripted::SceneReserve;
 
@@ -931,6 +996,128 @@ pub(crate) mod tests {
                 ),
                 "(the bar's reserve, the panel's place while it is closed, \
                  (what opening it reported, the panel's place once it is open))"
+            );
+        });
+    }
+
+    const MENU: &str = r#"
+        import QtQuick
+        import Solium
+        Item {
+            id: root
+            property bool open: true
+            property int dismissed: 0
+            Rectangle { id: menu; x: 10; y: 10; width: 20; height: 10; visible: root.open }
+            Grab {
+                name: "tray-menu"
+                target: menu
+                active: menu.visible
+                onDismissed: { root.dismissed += 1; root.open = false }
+            }
+        }
+    "#;
+
+    /// **A grab is reported with its name while active, and released when it
+    /// is not**; a point inside its target is inside, and dismissing it
+    /// signals it (Ruling 12).
+    #[test]
+    fn a_grab_is_held_while_active_and_dismissed_on_request() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-grab", MENU, "grab-1");
+            let held = scene.take_grab();
+            let again = scene.take_grab();
+            let inside = scene.grab_contains(15.0, 15.0);
+            let outside = scene.grab_contains(50.0, 25.0);
+            scene.dismiss();
+            let dismissed = scene.get_int("dismissed");
+            let released = scene.take_grab();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (held, again, inside, outside, dismissed, released),
+                (
+                    GrabReport::Held("tray-menu".to_owned()),
+                    GrabReport::Unchanged,
+                    true,
+                    false,
+                    1,
+                    GrabReport::Released,
+                ),
+                "(the first take, a second with no change, inside the menu, outside it, \
+                 the dismissals the scene heard, the take after onDismissed closed the menu)"
+            );
+        });
+    }
+
+    /// **A scene's newest grab is the one reported, and every active one
+    /// counts** (Ruling 12): a point inside either target is inside, and a
+    /// dismissal reaches both, newest first.
+    #[test]
+    fn a_scenes_newest_grab_is_reported_and_every_active_one_counts() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-two-grabs",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property bool late: false
+                    property string order: ""
+                    Rectangle { id: first; x: 0; y: 0; width: 10; height: 10 }
+                    Rectangle { id: second; x: 20; y: 0; width: 10; height: 10 }
+                    Grab { name: "first"; target: first; active: true; onDismissed: root.order += "first," }
+                    Grab { name: "second"; target: second; active: root.late; onDismissed: root.order += "second," }
+                }
+                "#,
+                "two-grabs-1",
+            );
+            let alone = scene.take_grab();
+            scene.set_bool("late", true);
+            let newest = scene.take_grab();
+            let inside = (
+                scene.grab_contains(5.0, 5.0),
+                scene.grab_contains(25.0, 5.0),
+            );
+            let between = scene.grab_contains(15.0, 5.0);
+            scene.dismiss();
+            let order = scene.take_string("order");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (alone, newest, inside, between, order.as_deref()),
+                (
+                    GrabReport::Held("first".to_owned()),
+                    GrabReport::Held("second".to_owned()),
+                    (true, true),
+                    false,
+                    Some("second,first,"),
+                ),
+                "(the first alone, the newest once both are active, inside each target, \
+                 between them, the order they heard the dismissal in)"
+            );
+        });
+    }
+
+    /// **A scene with no active grab says so at its first take, and once**:
+    /// a scene rebuilt for an edit with no popup open lets go of the grab
+    /// the scene before it held.
+    #[test]
+    fn a_scene_with_no_active_grab_says_so_once() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-no-grab",
+                "import QtQuick\nItem {}\n",
+                "no-grab-1",
+            );
+            let first = scene.take_grab();
+            let again = scene.take_grab();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first, again),
+                (GrabReport::Released, GrabReport::Unchanged),
+                "(the first take, the second)"
             );
         });
     }

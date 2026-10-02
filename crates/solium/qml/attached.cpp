@@ -71,6 +71,77 @@ SoliumMonitor *solium_monitor_row(const QString &name)
     return absent;
 }
 
+SoliumHosting::~SoliumHosting()
+{
+    for (const QPointer<SoliumGrab> &grab : grabs) {
+        if (grab != nullptr) {
+            grab->detach();
+        }
+    }
+}
+
+namespace {
+
+/* How many times a grab has become active, so the newest of a scene's
+ * active grabs is the one that counted last.
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+quint64 g_activations = 0;
+
+} // namespace
+
+void SoliumGrab::componentComplete()
+{
+    m_hosting = solium_hosting_of(this);
+    if (m_hosting != nullptr) {
+        m_hosting->grabs.append(this);
+        mark();
+    }
+}
+
+SoliumGrab::~SoliumGrab()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->grabs.removeAll(this);
+        m_hosting->grab_dirty = true;
+    }
+}
+
+void SoliumGrab::mark()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->grab_dirty = true;
+    }
+}
+
+void SoliumGrab::setName(const QString &name)
+{
+    if (name != m_name) {
+        m_name = name;
+        mark();
+        emit nameChanged();
+    }
+}
+
+void SoliumGrab::setTarget(QQuickItem *target)
+{
+    if (target != m_target) {
+        m_target = target;
+        emit targetChanged();
+    }
+}
+
+void SoliumGrab::setActive(bool active)
+{
+    if (active != m_active) {
+        m_active = active;
+        if (active) {
+            m_activated = ++g_activations;
+        }
+        mark();
+        emit activeChanged();
+    }
+}
+
 SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item) {}
 
 SoliumMonitor *SoliumAttached::monitor() const
@@ -283,4 +354,7 @@ void solium_qml_register_types()
      * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
     qmlRegisterAnonymousType<SoliumSurfaceInfo>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumReserve>(SOLIUM_NATIVE_URI, 1);
+    /* Named, since a scene writes one: `Grab { ... }`.
+     * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
+    qmlRegisterType<SoliumGrab>(SOLIUM_NATIVE_URI, 1, 0, "Grab");
 }

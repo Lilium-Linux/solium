@@ -2346,6 +2346,71 @@ extern "C" int solium_qml_scene_take_reserve(SoliumQmlScene *scene, int *edges)
     return 1;
 }
 
+namespace {
+
+/* The scene's active grabs, newest first.
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+QList<SoliumGrab *> active_grabs(const SoliumQmlScene *scene)
+{
+    QList<SoliumGrab *> out;
+    if (scene == nullptr || scene->hosting == nullptr) {
+        return out;
+    }
+    for (const QPointer<SoliumGrab> &grab : scene->hosting->grabs) {
+        if (grab != nullptr && grab->active()) {
+            out.append(grab.data());
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](SoliumGrab *a, SoliumGrab *b) { return a->activated() > b->activated(); });
+    return out;
+}
+
+} // namespace
+
+extern "C" int solium_qml_scene_take_grab(SoliumQmlScene *scene, const char **name)
+{
+    if (scene == nullptr || scene->hosting == nullptr || !scene->hosting->grab_dirty) {
+        return -1;
+    }
+    scene->hosting->grab_dirty = false;
+    const QList<SoliumGrab *> active = active_grabs(scene);
+    if (active.isEmpty()) {
+        return 0;
+    }
+    static QByteArray held;
+    held = active.first()->name().toUtf8();
+    if (name != nullptr) {
+        *name = held.constData();
+    }
+    return 1;
+}
+
+extern "C" int solium_qml_scene_grab_contains(const SoliumQmlScene *scene, double x, double y)
+{
+    for (SoliumGrab *grab : active_grabs(scene)) {
+        QQuickItem *target = grab->target();
+        if (target != nullptr && target->isVisible()
+            && target->contains(target->mapFromScene(QPointF(x, y)))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+extern "C" void solium_qml_scene_dismiss(SoliumQmlScene *scene)
+{
+    QList<QPointer<SoliumGrab>> newest_first;
+    for (SoliumGrab *grab : active_grabs(scene)) {
+        newest_first.append(grab);
+    }
+    for (const QPointer<SoliumGrab> &grab : newest_first) {
+        if (grab != nullptr) {
+            emit grab->dismissed();
+        }
+    }
+}
+
 extern "C" const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name)
 {
     if (scene == nullptr || scene->object == nullptr) {
