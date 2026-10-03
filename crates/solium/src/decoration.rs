@@ -185,6 +185,13 @@ pub(crate) struct Look<'a> {
     pub(crate) focused: bool,
     /// Whether the pointer is anywhere over the window, frame or client.
     pub(crate) pointer_inside: bool,
+    /// The focused text field's caret, when this pane's window has it, in the
+    /// pane's own space: `caret` on every layer.
+    /// `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+    pub(crate) caret: Option<Rectangle<i32, Logical>>,
+    /// What the configuration hands every layer, as `values`.
+    /// `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+    pub(crate) values: &'a Values,
 }
 
 /// What a frame shows.
@@ -205,6 +212,10 @@ struct Shown {
     /// keeps the sizes it had when its title last changed, which
     /// `panes/reactive/Frame.qml` reads to size its own content.
     size: (i32, i32),
+    /// The caret last written, `None` once it was taken away.
+    caret: Option<Rectangle<i32, Logical>>,
+    /// Which generation of the configuration's values was last written.
+    values: u64,
 }
 
 /// How a rasterised frame reaches the screen.
@@ -423,6 +434,10 @@ struct LayerScene {
     /// date by whichever depth was drawn first, and the other two would read
     /// "not resized" on the one frame they had to copy everything.
     buffer_size: (i32, i32),
+    /// Whether this layer said at its last frame that it had nothing to draw,
+    /// and so has let go of what it is drawn with: see [`LayerScene::sleeps`].
+    /// `tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+    asleep: bool,
 }
 
 /// A decoration animates on its own clock -- a border easing to a new colour, a
@@ -458,6 +473,17 @@ fn at<L: std::ops::Deref<Target = LayerScene>>(
     depth: Depth,
 ) -> impl Iterator<Item = L> {
     layers.rev().filter(move |layer| layer.depth == depth)
+}
+
+/// The layers of one depth a frame draws, in [`at`]'s order: all of them but a
+/// layer that says it is dormant, which is put to sleep as it is passed over.
+/// See [`LayerScene::sleeps`].
+/// `tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+fn awake_at<'a>(
+    layers: impl DoubleEndedIterator<Item = &'a mut LayerScene>,
+    depth: Depth,
+) -> impl Iterator<Item = &'a mut LayerScene> {
+    at(layers, depth).filter_map(LayerScene::awake)
 }
 
 /// One window's frame: every layer its style declares, each its own scene.
@@ -584,6 +610,7 @@ impl Decoration {
                 bleed: Bleed::default(),
                 overlay,
                 buffer_size: (0, 0),
+                asleep: false,
             }],
             insets,
             // A single QML file has no manifest either, and `client.radius` is
@@ -727,7 +754,7 @@ impl Decoration {
 
         let insets = self.insets;
         let mut animating = false;
-        for layer in at(self.layers.iter_mut(), depth) {
+        for layer in awake_at(self.layers.iter_mut(), depth) {
             // Per layer, because this is the whole of bleed: its own canvas,
             // its own buffer, and its own rectangle on screen.
             let spread = spread(drawing, layer.bleed);
@@ -782,7 +809,9 @@ impl Decoration {
     ///
     /// What [`Decoration::layer_elements`] draws, without a renderer — the same
     /// selection through the same [`at`], so the two cannot come to disagree
-    /// about which layers a depth has or which of them is on top.
+    /// about which layers a depth has or which of them is on top. Every layer
+    /// the style declares there, a dormant one included: which of them a
+    /// given frame draws is [`awake_at`]'s.
     pub(crate) fn layers_at(&self, depth: Depth) -> impl Iterator<Item = &str> {
         at(self.layers.iter(), depth).map(|layer| layer.name.as_str())
     }
@@ -810,7 +839,30 @@ impl Decoration {
             title,
             focused,
             pointer_inside,
+            caret,
+            values,
         } = *look;
+        // The caret on its own, written in place whenever it moves, comes or
+        // goes, and not on the frames in between:
+        // `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+        if self.shown.caret != caret {
+            let value = caret_json(caret);
+            for layer in &mut self.layers {
+                layer.scene.set_json("caret", &value);
+            }
+            self.shown.caret = caret;
+        }
+        // The configuration's values the same way, once per change:
+        // `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+        // After the caret, so a layer handed both in one frame reads the
+        // values with the caret they came with:
+        // `tests::values_handed_with_a_caret_are_read_with_that_caret`.
+        if self.shown.values != values.generation {
+            for layer in &mut self.layers {
+                layer.scene.set_json("values", &values.object);
+            }
+            self.shown.values = values.generation;
+        }
         if self.shown.title == title
             && self.shown.focused == focused
             && self.shown.pointer_inside == pointer_inside
@@ -964,6 +1016,66 @@ impl Decoration {
             crate::render::Piece::Client => {}
         });
         asked.first().copied()
+    }
+}
+
+/// The caret as a layer reads it: `{ valid, x, y, width, height }`, in the
+/// pane's own space, all zero and not `valid` when there is none.
+/// `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+fn caret_json(caret: Option<Rectangle<i32, Logical>>) -> crate::json::Json {
+    use crate::json::Json;
+    let rect = caret.unwrap_or_default();
+    Json::Object(
+        [
+            ("valid", Json::Bool(caret.is_some())),
+            ("x", Json::Number(f64::from(rect.loc.x))),
+            ("y", Json::Number(f64::from(rect.loc.y))),
+            ("width", Json::Number(f64::from(rect.size.w))),
+            ("height", Json::Number(f64::from(rect.size.h))),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect(),
+    )
+}
+
+/// What `scenario` asks of a decoration, which no frame does: to be told
+/// without being drawn, and each layer's own picture.
+#[cfg(test)]
+impl Decoration {
+    /// Tell every layer what a frame tells it.
+    pub(crate) fn tell_as_a_frame_would(&mut self, look: &Look<'_>, width: i32, height: i32) {
+        self.tell(look, width, height);
+    }
+
+    /// The name of every layer whose scene says it is `dormant` now: what
+    /// [`awake_at`] would leave out of the next frame.
+    pub(crate) fn dormant_layers(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.scene.get_bool("dormant"))
+            .map(|layer| layer.name.clone())
+            .collect()
+    }
+
+    /// Every layer rendered in software, by name: its pixels, premultiplied
+    /// ARGB32 (`B G R A` in memory), and the stride. Nothing on the GPU path,
+    /// whose scenes have no image to read.
+    pub(crate) fn rendered_layers(&mut self) -> Vec<(String, Vec<u8>, usize)> {
+        if qml::on_gpu() {
+            return Vec::new();
+        }
+        self.layers
+            .iter_mut()
+            .filter_map(|layer| {
+                let rendered = layer.scene.render().ok()?;
+                Some((
+                    layer.name.clone(),
+                    rendered.pixels.to_vec(),
+                    rendered.stride,
+                ))
+            })
+            .collect()
     }
 }
 
@@ -1184,7 +1296,44 @@ impl LayerScene {
             bleed: spec.bleed,
             overlay,
             buffer_size: (0, 0),
+            asleep: false,
         })
+    }
+
+    /// Whether this layer has nothing to draw this frame, as its root's
+    /// `dormant` says -- and if so, nothing kept to draw it with.
+    ///
+    /// A layer that is almost always empty -- something shown for a moment
+    /// at a caret -- otherwise costs what any layer costs, all the time: a
+    /// buffer the size of its canvas, an element blended over the client
+    /// wherever the client damages, and in software the whole canvas copied
+    /// and uploaded at every step of a resize. A dormant one is not drawn at all,
+    /// and on the frame it goes to sleep it lets go of what it was drawn with:
+    /// in software its image, shrunk to one pixel, and the buffer it was
+    /// uploaded through, so waking is a resize that builds both again. On the
+    /// GPU path its scene keeps the buffer Qt last drew it into until it is
+    /// drawn again, and a layer dormant from its first frame never has one
+    /// larger than the pixel it is built at.
+    ///
+    /// A root that declares no `dormant` reads false, so a layer that never
+    /// says so is drawn as it always was.
+    /// `tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+    fn sleeps(&mut self) -> bool {
+        let dormant = self.scene.get_bool("dormant");
+        if dormant && !self.asleep {
+            self.buffer_size = (0, 0);
+            if let Backing::Memory(slot) = &mut self.backing {
+                *slot = None;
+                self.scene.resize(1, 1, 1.0);
+            }
+        }
+        self.asleep = dormant;
+        dormant
+    }
+
+    /// This layer, unless it is dormant: what [`awake_at`] keeps.
+    fn awake(&mut self) -> Option<&mut Self> {
+        if self.sleeps() { None } else { Some(self) }
     }
 
     /// This layer, drawn across `placement`, as an element.
@@ -1361,9 +1510,97 @@ pub(crate) struct Decorations {
     /// Which decoration to build, as a script named it. `None` is whatever
     /// the environment or the default says.
     style: Option<String>,
+    /// What the configuration hands every layer as `values`.
+    /// `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+    values: Values,
+}
+
+/// Values the configuration hands every layer of every pane, as one object,
+/// `values`: `sol.pane_values{ key = value }`. A general channel from Lua to
+/// the decorations, so a setting the configuration reads can reach the QML
+/// that draws by it without the compositor knowing what the setting is.
+/// Each call merges its keys into what is there, so two scripts each handing
+/// their own keys keep both; a key, once given, keeps its last value until
+/// the configuration is reloaded, which starts with none.
+/// `tests::pane_values_merge_by_key_and_count_only_changes`,
+/// `tests::a_reload_starts_the_frames_values_afresh`.
+#[derive(Debug)]
+pub(crate) struct Values {
+    fields: std::collections::BTreeMap<String, crate::json::Json>,
+    /// The fields as the object a layer is handed.
+    object: crate::json::Json,
+    /// How many times they changed, so a layer is written once per change and
+    /// a frame built later is written too.
+    generation: u64,
+}
+
+impl Values {
+    /// The values as the object a layer is handed, for `scenario`.
+    #[cfg(test)]
+    pub(crate) const fn object(&self) -> &crate::json::Json {
+        &self.object
+    }
+
+    /// Merge `fields` in; whether anything changed.
+    /// `tests::pane_values_merge_by_key_and_count_only_changes`.
+    pub(crate) fn merge(
+        &mut self,
+        fields: std::collections::BTreeMap<String, crate::json::Json>,
+    ) -> bool {
+        let before = self.fields.clone();
+        self.fields.extend(fields);
+        if self.fields == before {
+            return false;
+        }
+        self.object = crate::json::Json::Object(self.fields.clone());
+        self.generation += 1;
+        true
+    }
+
+    /// Forget every value, as a reload does: they were the configuration's
+    /// that handed them. A change like any other, so every frame is told.
+    /// `tests::a_reload_starts_the_frames_values_afresh`.
+    fn clear(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.fields.clear();
+        self.object = crate::json::Json::Object(std::collections::BTreeMap::new());
+        self.generation += 1;
+    }
+}
+
+impl Default for Values {
+    fn default() -> Self {
+        Self {
+            fields: std::collections::BTreeMap::new(),
+            object: crate::json::Json::Object(std::collections::BTreeMap::new()),
+            generation: 0,
+        }
+    }
 }
 
 impl Decorations {
+    /// What the configuration hands every layer.
+    pub(crate) const fn values(&self) -> &Values {
+        &self.values
+    }
+
+    /// Forget what every `sol.pane_values{ ... }` handed over, for a reload.
+    /// `tests::a_reload_starts_the_frames_values_afresh`.
+    pub(crate) fn clear_values(&mut self) {
+        self.values.clear();
+    }
+
+    /// Merge what `sol.pane_values{ ... }` handed over; whether it changed.
+    /// `tests::pane_values_merge_by_key_and_count_only_changes`.
+    pub(crate) fn merge_values(
+        &mut self,
+        fields: std::collections::BTreeMap<String, crate::json::Json>,
+    ) -> bool {
+        self.values.merge(fields)
+    }
+
     /// Start decorating a window, if it is not decorated already.
     /// Choose the decoration every window is framed with.
     ///
@@ -2264,6 +2501,8 @@ mod tests {
                     title: "",
                     focused: false,
                     pointer_inside: false,
+                    caret: None,
+                    values: &Values::default(),
                 },
                 60,
                 120,
@@ -2686,6 +2925,123 @@ mod tests {
         });
     }
 
+    /// The names of the layers a frame draws at `depth`, through the same
+    /// [`awake_at`] the draw goes through, so a dormant layer is put to sleep
+    /// here as it is there.
+    fn drawn_at(decoration: &mut Decoration, depth: Depth) -> Vec<String> {
+        awake_at(decoration.layers.iter_mut(), depth)
+            .map(|layer| layer.name.clone())
+            .collect()
+    }
+
+    /// **A dormant layer draws nothing and holds no buffer.** A layer whose
+    /// `dormant` is true -- an inline layer's `Layer`, read through
+    /// `PaneStyle`, or a delegated layer's own root -- is left out of what a
+    /// frame draws, and lets go of what it was drawn with: its next draw is a
+    /// resize, and in software its image is one pixel. Woken, it is drawn
+    /// again; a layer that never says so is drawn as it always was.
+    #[test]
+    fn a_dormant_layer_draws_nothing_and_holds_no_buffer() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "dormant",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            id: style
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer {
+                                depth: "above"
+                                name: "hint"
+                                dormant: style.values.hint !== true
+                                Item {}
+                            }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var values: ({})
+                            readonly property bool dormant: values.bar === false
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let mut values = Values::default();
+            let tell = |decoration: &mut Decoration, values: &Values| {
+                decoration.tell(
+                    &Look {
+                        title: "",
+                        focused: true,
+                        pointer_inside: false,
+                        caret: None,
+                        values,
+                    },
+                    60,
+                    88,
+                );
+            };
+            // What a draw at the pane's size leaves each layer holding.
+            for layer in &mut decoration.layers {
+                layer.buffer_size = (60, 88);
+            }
+
+            tell(&mut decoration, &values);
+            assert_eq!(
+                drawn_at(&mut decoration, Depth::Frame),
+                ["bar"],
+                "a layer that never says is drawn"
+            );
+            assert!(
+                drawn_at(&mut decoration, Depth::Above).is_empty(),
+                "a dormant one is not"
+            );
+            let [bar, hint] = &mut decoration.layers[..] else {
+                panic!("two layers")
+            };
+            assert_eq!(bar.buffer_size, (60, 88), "the one drawn keeps its own");
+            assert_eq!(
+                hint.buffer_size,
+                (0, 0),
+                "the dormant one's next draw is a resize"
+            );
+            if !qml::on_gpu() {
+                let rendered = hint.scene.render().expect("it renders");
+                assert_eq!(
+                    (rendered.stride, rendered.pixels.len()),
+                    (4, 4),
+                    "its image is one pixel"
+                );
+            }
+
+            values.merge(std::collections::BTreeMap::from([
+                ("hint".to_owned(), crate::json::Json::Bool(true)),
+                ("bar".to_owned(), crate::json::Json::Bool(false)),
+            ]));
+            tell(&mut decoration, &values);
+            assert_eq!(drawn_at(&mut decoration, Depth::Above), ["hint"], "woken");
+            assert!(
+                drawn_at(&mut decoration, Depth::Frame).is_empty(),
+                "and a delegated layer sleeps by its own root"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
     /// **The old spelling of the per-run override still names a style.**
     ///
     /// `SOLIUM_DECORATION` was the knob until the pane-styles work renamed it,
@@ -2805,6 +3161,341 @@ mod tests {
             assert_eq!(layer.scene.get_int("sawLeft"), 170);
 
             let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A layer is told the caret, and told again when it goes**: the
+    /// focused field's caret, in the pane's own space, reaches a delegated
+    /// layer's root and an inline layer's `PaneStyle` as `caret`, moves in
+    /// place, and reads `valid: false` once there is none. Read through
+    /// bindings, for the reason `a_delegated_layer_is_told_the_styles_insets`
+    /// gives.
+    #[test]
+    fn a_layer_is_told_the_caret_and_told_again_when_it_goes() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-caret",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            readonly property int sawX: caret.valid ? caret.x : -1
+                            readonly property int sawHeight: caret.valid ? caret.height : -1
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer { depth: "above"; name: "inline"; Item {} }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var caret: ({ valid: false })
+                            readonly property int sawX: caret.valid ? caret.x : -1
+                            readonly property int sawY: caret.valid ? caret.y : -1
+                            readonly property int sawWidth: caret.valid ? caret.width : -1
+                            readonly property int sawHeight: caret.valid ? caret.height : -1
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let values = Values::default();
+            let look = |caret| Look {
+                title: "",
+                focused: true,
+                pointer_inside: false,
+                caret,
+                values: &values,
+            };
+            let read = |decoration: &mut Decoration| {
+                let [delegated, inline] = &mut decoration.layers[..] else {
+                    panic!("two layers")
+                };
+                (
+                    ["sawX", "sawY", "sawWidth", "sawHeight"]
+                        .map(|name| delegated.scene.get_int(name)),
+                    ["sawX", "sawHeight"].map(|name| inline.scene.get_int(name)),
+                )
+            };
+
+            decoration.tell(
+                &look(Some(Rectangle::new((5, 7).into(), (2, 16).into()))),
+                60,
+                88,
+            );
+            assert_eq!(read(&mut decoration), ([5, 7, 2, 16], [5, 16]));
+
+            decoration.tell(
+                &look(Some(Rectangle::new((25, 7).into(), (2, 16).into()))),
+                60,
+                88,
+            );
+            assert_eq!(read(&mut decoration), ([25, 7, 2, 16], [25, 16]), "moved");
+
+            decoration.tell(&look(None), 60, 88);
+            assert_eq!(read(&mut decoration), ([-1, -1, -1, -1], [-1, -1]), "gone");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A layer is told the configuration's values, and told again when they
+    /// change**: what `sol.pane_values{ ... }` handed over reaches a delegated
+    /// layer's root and an inline layer's `PaneStyle` as one object,
+    /// `values`, and a later change reaches both again.
+    #[test]
+    fn a_layer_is_told_the_configurations_values_and_told_again_when_they_change() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-values",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            readonly property int sawLevel: values.level !== undefined ? values.level : -1
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer { depth: "above"; name: "inline"; Item {} }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var values: ({})
+                            readonly property int sawLevel: values.level !== undefined ? values.level : -1
+                            readonly property int sawDeep: values.deep && values.deep.on ? 1 : 0
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let mut values = Values::default();
+            let read = |decoration: &mut Decoration| {
+                let [delegated, inline] = &mut decoration.layers[..] else {
+                    panic!("two layers")
+                };
+                [
+                    delegated.scene.get_int("sawLevel"),
+                    delegated.scene.get_int("sawDeep"),
+                    inline.scene.get_int("sawLevel"),
+                ]
+            };
+            let tell = |decoration: &mut Decoration, values: &Values| {
+                decoration.tell(
+                    &Look {
+                        title: "",
+                        focused: true,
+                        pointer_inside: false,
+                        caret: None,
+                        values,
+                    },
+                    60,
+                    88,
+                );
+            };
+
+            tell(&mut decoration, &values);
+            assert_eq!(
+                read(&mut decoration),
+                [-1, 0, -1],
+                "nothing handed over yet"
+            );
+
+            values.merge(std::collections::BTreeMap::from([
+                ("level".to_owned(), crate::json::Json::Number(3.0)),
+                (
+                    "deep".to_owned(),
+                    crate::json::Json::Object(std::collections::BTreeMap::from([(
+                        "on".to_owned(),
+                        crate::json::Json::Bool(true),
+                    )])),
+                ),
+            ]));
+            tell(&mut decoration, &values);
+            assert_eq!(read(&mut decoration), [3, 1, 3]);
+
+            values.merge(std::collections::BTreeMap::from([(
+                "level".to_owned(),
+                crate::json::Json::Number(4.0),
+            )]));
+            tell(&mut decoration, &values);
+            assert_eq!(
+                read(&mut decoration),
+                [4, 1, 4],
+                "changed, and the rest kept"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **Values handed in the same frame as a caret are read with that
+    /// caret**: a layer that acts when `values` change finds the `caret` of
+    /// the frame they came in, not the one before it.
+    #[test]
+    fn values_handed_with_a_caret_are_read_with_that_caret() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-caret-then-values",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var caret: ({ valid: false })
+                            property var values: ({})
+                            property int caretAtValues: -2
+                            onValuesChanged: caretAtValues = caret.valid ? caret.x : -1
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let mut values = Values::default();
+            values.merge(std::collections::BTreeMap::from([(
+                "level".to_owned(),
+                crate::json::Json::Number(1.0),
+            )]));
+            decoration.tell(
+                &Look {
+                    title: "",
+                    focused: true,
+                    pointer_inside: false,
+                    caret: Some(Rectangle::new((25, 7).into(), (2, 16).into())),
+                    values: &values,
+                },
+                60,
+                88,
+            );
+            let [layer] = &mut decoration.layers[..] else {
+                panic!("one layer")
+            };
+            assert_eq!(
+                layer.scene.get_int("caretAtValues"),
+                25,
+                "the values were read with the caret of their own frame"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **Pane values merge by key, and count only changes**: a second call
+    /// keeps the first call's keys, the same values again are no change, and
+    /// `sol.pane_values{ ... }` from a configuration is what reaches them.
+    #[test]
+    fn pane_values_merge_by_key_and_count_only_changes() {
+        use crate::json::Json;
+        use std::collections::BTreeMap;
+
+        let mut values = Values::default();
+        assert!(values.merge(BTreeMap::from([("a".to_owned(), Json::Number(1.0))])));
+        assert!(
+            !values.merge(BTreeMap::from([("a".to_owned(), Json::Number(1.0))])),
+            "the same again"
+        );
+        assert!(values.merge(BTreeMap::from([("b".to_owned(), Json::Bool(true))])));
+        assert_eq!(values.generation, 2);
+        assert_eq!(values.object.render(), r#"{"a":1,"b":true}"#);
+
+        let display = smithay::reexports::wayland_server::Display::<crate::state::Solium>::new()
+            .expect("a test display");
+        let mut state = crate::state::Solium::new(display.handle());
+        let directory = std::env::temp_dir().join("solium-pane-values");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.pane_values{ mine = { show = "pane" } }
+            sol.pane_values{ theirs = 2 }
+            "#,
+        )
+        .expect("writing the script");
+        let scripts = crate::script::Scripts::load(&config).expect("loading the script");
+        state.start_scripts(Some(scripts));
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            state.decorations.values().object.render(),
+            r#"{"mine":{"show":"pane"},"theirs":2}"#
+        );
+    }
+
+    /// **A reload starts the frames' values afresh**: what a configuration
+    /// handed every pane was its own, so the one a reload brings starts with
+    /// none, and a key it no longer hands over is not left behind -- every
+    /// frame is told again, with only what the new one handed. On the Qt
+    /// thread, as every reload test is, for the engine a reload clears.
+    #[test]
+    fn a_reload_starts_the_frames_values_afresh() {
+        on_the_qt_thread(|| {
+            let display =
+                smithay::reexports::wayland_server::Display::<crate::state::Solium>::new()
+                    .expect("a test display");
+            let mut state = crate::state::Solium::new(display.handle());
+            let directory = std::env::temp_dir().join("solium-pane-values-reload");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let config = directory.join("init.lua");
+            std::fs::write(&config, r#"sol.pane_values{ held = { what = "caps" } }"#)
+                .expect("writing the script");
+            let scripts = crate::script::Scripts::load(&config).expect("loading the script");
+            state.start_scripts(Some(scripts));
+            assert_eq!(
+                state.decorations.values().object.render(),
+                r#"{"held":{"what":"caps"}}"#,
+                "the premise"
+            );
+            let before = state.decorations.values().generation;
+
+            std::fs::write(&config, "sol.pane_values{ kept = 1 }\n").expect("rewriting it");
+            state.reload_from(&config);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                state.decorations.values().object.render(),
+                r#"{"kept":1}"#,
+                "only what the reloaded configuration handed over"
+            );
+            assert!(
+                state.decorations.values().generation > before,
+                "and every frame is told again"
+            );
         });
     }
 
@@ -3180,8 +3871,11 @@ mod tests {
         }
         on_the_qt_thread(|| {
             let plain = build(Some("top"), 300, 200).expect("the shipped default builds");
-            assert_eq!(plain.layers.len(), 1, "a titlebar is one layer");
-            assert_eq!(plain.layers[0].depth, Depth::Frame);
+            assert_eq!(
+                plain.layers_at(Depth::Frame).collect::<Vec<_>>(),
+                ["bar"],
+                "a titlebar, at `frame`"
+            );
             assert_eq!(
                 plain.insets().top,
                 TITLEBAR_HEIGHT,
@@ -3720,6 +4414,8 @@ mod tests {
                         title: "before the reload",
                         focused: true,
                         pointer_inside: false,
+                        caret: None,
+                        values: &Values::default(),
                     },
                     300,
                     200,

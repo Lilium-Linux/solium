@@ -1,0 +1,58 @@
+-- The overlay surface's scene, `qml/indicator/keyboard.qml`, as
+-- `keyboard-surface.lua`'s policy declares it: 112 by 56, the capsule in the
+-- middle of it, drawn from the cue it is handed.
+--
+-- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- software. The capsule is 28 high and at least 32 wide, centred: its middle
+-- row is y = 28, and (44, 28) is on it, clear of the glyph in its middle.
+
+-- `Theme.accent`, opaque, whatever it is set to -- #0060c0 today, #936DFF
+-- once the theme turns violet: blue the strongest channel by a clear
+-- margin, which neither the white glyph nor the shadow is.
+local function accent(r, g, b, a)
+    return a == 255 and b > r + 24 and b > g + 24
+end
+
+return {
+    qt = true,
+    steps = {
+        { scene = "indicator/keyboard.qml", size = { 112, 56 } },
+        {
+            expect = function(world)
+                local _, _, _, a = world.pixel("scene", 44, 28)
+                assert(a == 0, "built showing nothing")
+            end,
+        },
+
+        { set = { cue = { what = "caps", serial = 1, hold = true, duration = 1200 } } },
+        { wait = 300 },
+        {
+            expect = function(world)
+                local r, g, b, a = world.pixel("scene", 44, 28)
+                assert(accent(r, g, b, a), string.format("the capsule: %d %d %d %d", r, g, b, a))
+                local _, _, _, corner = world.pixel("scene", 2, 2)
+                assert(corner == 0, "and room around it")
+            end,
+        },
+
+        -- Hidden at once with an empty cue.
+        { set = { cue = { what = "", serial = 2 } } },
+        { wait = 300 },
+        {
+            expect = function(world)
+                local _, _, _, a = world.pixel("scene", 44, 28)
+                assert(a == 0, "hidden")
+            end,
+        },
+
+        -- The same cue again is nothing new, and shows nothing.
+        { set = { cue = { what = "caps", serial = 2, hold = true } } },
+        { wait = 300 },
+        {
+            expect = function(world)
+                local _, _, _, a = world.pixel("scene", 44, 28)
+                assert(a == 0, "a cue already seen is not shown again")
+            end,
+        },
+    },
+}

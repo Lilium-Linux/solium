@@ -5,6 +5,7 @@
 //! `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
 
 pub(crate) mod diff;
+pub(crate) mod keyboard;
 pub(crate) mod monitors;
 
 use crate::qml::hosted::Model;
@@ -13,6 +14,8 @@ use crate::qml::hosted::Model;
 #[derive(Debug, Default)]
 pub(crate) struct Published {
     monitors: Vec<diff::Row>,
+    /// `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
+    keyboard: keyboard::Published,
 }
 
 impl crate::state::Solium {
@@ -20,6 +23,9 @@ impl crate::state::Solium {
     /// `tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
     /// `tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
     pub(crate) fn publish_models(&mut self) {
+        // The caret each decoration is told this frame:
+        // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
+        self.settle_caret();
         let monitors = monitors::rows(self);
         publish(
             Model::Monitors,
@@ -27,6 +33,11 @@ impl crate::state::Solium {
             monitors,
             crate::qml::hosted::apply_rows,
         );
+        // The `Keyboard` singleton:
+        // `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
+        let mut keyboard = std::mem::take(&mut self.published.keyboard);
+        keyboard::publish(self, &mut keyboard);
+        self.published.keyboard = keyboard;
     }
 }
 

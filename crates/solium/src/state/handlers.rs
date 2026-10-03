@@ -1278,7 +1278,11 @@ impl SeatHandler for Solium {
         self.pointer.show(image);
         self.redraw = true;
     }
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    /// Text-input focus follows the keyboard's:
+    /// `text_input::tests::a_field_whose_window_loses_the_keyboard_is_gone`.
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        self.text_input_focus(focused);
+    }
 }
 
 /// Required by smithay's `wp_cursor_shape_v1` dispatch, and empty on purpose.

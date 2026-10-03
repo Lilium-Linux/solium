@@ -128,11 +128,12 @@ local defaults = {
 
     -- The keyboard.
     --
-    -- Empty means "whatever the session already said". Every name here is an
-    -- xkb name, and leaving one blank makes xkbcommon fall back to the
-    -- matching `XKB_DEFAULT_*` environment variable -- which is where a
-    -- display manager or a `~/.profile` usually puts it, and which worked
-    -- before any of this existed. Naming one here takes precedence.
+    -- No xkb name is set here, and that means "whatever the session already
+    -- said". Every name below is an xkb name, and leaving one out makes
+    -- xkbcommon fall back to the matching `XKB_DEFAULT_*` environment
+    -- variable -- which is where a display manager or a `~/.profile` usually
+    -- puts it, and which worked before any of this existed. Naming one here
+    -- takes precedence.
     --
     --     keyboard = {
     --         layout  = "us,ua",
@@ -155,6 +156,10 @@ local defaults = {
     --            back to the environment.
     --   active    which of the layouts is live, counting from 1. A number past
     --            the last layout is warned about and changes nothing.
+    --   caps      Caps Lock on or off, and `num` the same for Num Lock: `num =
+    --            true` here starts every session with Num Lock on. Set by
+    --            pressing the keymap's own key inside the compositor, so the
+    --            layout stays where it was.
     --
     -- The repeat rate is the compositor's own, not xkb's, so no environment
     -- variable reaches it and this is the only place it can be set:
@@ -171,10 +176,58 @@ local defaults = {
     --     end)
     --
     -- `sol.keyboard()` with no argument returns the layout names, which one is
-    -- active, and the repeat settings. Nothing tells a script when the layout
-    -- changes, and a hosted shell cannot call it, so a layout indicator can
-    -- only be updated by the binding that switches the layout.
-    keyboard = {},
+    -- active and its names (`layout_name`, "Russian", and `layout_short`,
+    -- "RU"), whether Caps Lock and Num Lock are on, and the repeat settings.
+    -- `sol.on("keyboard", function(state, changed) end)` hears the layout or a
+    -- lock change, however it changed, and a hosted scene or a pane style
+    -- reads the same in QML as the `Keyboard` singleton.
+    keyboard = {
+        -- The keyboard pill: a small capsule near where you are typing that
+        -- says Caps Lock is on (`⇪`) or which layout you just switched to
+        -- (`EN`, `RU`), after the one macOS shows. It is configuration and
+        -- not a compositor feature -- `lua/keyboard_indicator.lua` is its
+        -- policy and reads this table; the QML draws it from the data the
+        -- compositor publishes, in Theme's accent -- so it is the example to
+        -- copy for anything of your own that reacts to the keyboard or the
+        -- caret. Delete `require("keyboard_indicator")` from `init.lua` and
+        -- it is gone. See docs/ricing.md, "The keyboard pill".
+        indicator = {
+            -- Where it is drawn:
+            --   "pane"     inside the window, just below the text field's
+            --              caret, or above it when there is no room. Each
+            --              shipped pane style draws it with one line,
+            --              `KeyboardPillLayer {}`, and moves, scales and fades
+            --              it with the window. A style of your own without
+            --              that line draws none. A window drawn with no frame
+            --              -- fullscreen, or one drawing its own decorations --
+            --              gets the "surface" pill at its caret instead.
+            --   "surface"  on a surface of its own over everything, at the
+            --              caret on screen, moved after it as the
+            --              application says its caret has moved.
+            --   false      nowhere; `indicator = false` says the same.
+            -- The caret is known only from applications that say where it
+            -- is, through the `text-input-v3` protocol; for the rest, see
+            -- `fallback`.
+            show = "pane",
+            -- Which changes show it: switching layout, Caps Lock, Num Lock.
+            -- A lock's pill stays while the lock is on and goes the moment it
+            -- is off; a layout's goes after `duration`, and hands back to the
+            -- lock's if one is on.
+            on = { layout = true, caps = true, num = false },
+            -- Show Caps Lock's pill again when a text field is focused while
+            -- Caps Lock is on, as macOS does.
+            caps_on_focus = true,
+            -- With no caret to go to -- an application that says nothing about
+            -- one, or no text field focused -- "surface" draws it on the
+            -- focused window's monitor, and false draws nothing.
+            fallback = "surface",
+            -- Where on the monitor that is: "bottom", "center" or "top",
+            -- centred across it.
+            position = "bottom",
+            -- How long a layout's pill stays, in milliseconds.
+            duration = 1200,
+        },
+    },
 
     -- The keys, and what they do.
     --
@@ -1008,12 +1061,14 @@ end
 -- reported wrongly by that rule, and each needs saying out loud rather than
 -- being quietly skipped:
 --
---   keyboard, cursor   empty on purpose, because empty *means* "whatever the
---                      session already said" -- see their comments. Their real
---                      key sets belong to `sol.keyboard` and `sol.cursor_theme`
---                      in the compositor, so they are written out here: the
---                      defaults cannot carry them without changing what an
---                      empty table means.
+--   keyboard, cursor   their xkb and cursor keys are left out on purpose,
+--                      because leaving them out *means* "whatever the session
+--                      already said" -- see their comments. Those key sets
+--                      belong to `sol.keyboard` and `sol.cursor_theme` in the
+--                      compositor, so they are written out here: the defaults
+--                      cannot carry them without changing what leaving them
+--                      out means. `keyboard.indicator` is the one key the
+--                      defaults do define, and is checked against them.
 --   bindings           open by construction. A key combination is whatever you
 --                      press, so there is no list to check one against.
 --
@@ -1047,6 +1102,10 @@ local open_sections = {
         -- Which of several layouts is live. `sol.keyboard{ active = 2 }` is
         -- also how the cycle binding in `init.lua` switches it.
         active = true,
+        -- Caps Lock and Num Lock, on or off. `sol.keyboard{ caps = false }`
+        -- from a binding turns Caps Lock off.
+        caps = true,
+        num = true,
     },
     cursor = { theme = true, size = true },
     -- `true` rather than a set of names: everything is accepted.

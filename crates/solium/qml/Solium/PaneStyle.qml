@@ -164,6 +164,21 @@ Item {
     property int contentWidth: 0
     property int contentHeight: 0
 
+    // The focused text field's caret, when this pane's window has it, in the
+    // pane's own space: `{ valid, x, y, width, height }`, written in place as
+    // the caret moves and with `valid: false` when the field goes. A layer
+    // drawing at the caret is drawn with its window, so whatever the window
+    // is doing -- moving, scaling, fading -- the drawing does too.
+    // `decoration::tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
+    property var caret: ({ valid: false, x: 0, y: 0, width: 0, height: 0 })
+
+    // Whatever the configuration hands every pane with
+    // `sol.pane_values{ key = value }`, as one object: a general channel from
+    // Lua to the QML that draws, so a setting the configuration reads reaches
+    // the layer that draws by it, and the compositor never knows what it is.
+    // `decoration::tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+    property var values: ({})
+
     // Where the window's own rectangle is inside this scene.
     //
     // A layer is laid out on its **canvas** — the pane's outer rect grown by
@@ -193,6 +208,14 @@ Item {
     // *takes* `action`, clearing it — see `Decoration::take_action`.
     property bool onButton: false
     property string action: ""
+
+    // The `dormant` of the inline layer this scene draws, at the root where
+    // the compositor reads it: while it is true the layer is not drawn and
+    // keeps no image (`Layer.qml`). False in a manifest, which draws nothing.
+    // `decoration::tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
+    readonly property bool dormant: style.layerIndex >= 0
+        && style.layerIndex < style.layers.length
+        && style.layers[style.layerIndex].dormant === true
 
     Component.onCompleted: style.showOneLayer()
     onLayerIndexChanged: style.showOneLayer()

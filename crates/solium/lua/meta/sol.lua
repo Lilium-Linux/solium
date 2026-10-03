@@ -88,8 +88,25 @@
 ---@class sol.KeyboardState
 ---@field layouts string[] The layout names, in order.
 ---@field active integer Which of them is live, counting from 1.
+---@field layout_name string The live layout's name, such as `"Russian"`; `""` before the keymap is known. Not `layout`, which `sol.keyboard{ ... }` takes as the xkb names to compile, so a table read here can be handed back.
+---@field layout_short string The live layout's short name, such as `"RU"`: the `shortDescription` xkb's rules give it, upper-cased, or its first two letters.
+---@field caps boolean Whether Caps Lock is on.
+---@field num boolean Whether Num Lock is on.
 ---@field repeat_rate integer Repeats per second.
 ---@field repeat_delay integer Milliseconds a key is held before it repeats.
+
+---The focused text field, as `sol.text_input()` answers: the window it is
+---in, whether that window is framed, and its caret in the global space. The
+---four numbers are there only once the application has said where its caret
+---is, through `text-input-v3`; an application that never does has a field and
+---no caret.
+---@class sol.TextField
+---@field window integer The window's id, as `sol.windows()` gives it.
+---@field framed boolean Whether the window is drawn in a frame of the compositor's, or will be once its frame is built, so its pane style's layers are drawn with it. False for a window drawn bare: fullscreen, one drawing its own decorations, every window under the pane style `"none"`.
+---@field x? number The caret's rectangle, where it is drawn: its window's place and scale on screen are in it, presentation transforms included.
+---@field y? number
+---@field w? number
+---@field h? number
 
 ---What `sol.keyboard{ ... }` may change. Every key is optional and one left
 ---out is left as it is. The first five are xkb names; setting any of them
@@ -104,6 +121,8 @@
 ---@field repeat_rate? integer Repeats per second.
 ---@field repeat_delay? integer Milliseconds before repeating starts.
 ---@field active? integer Which layout is live, counting from 1.
+---@field caps? boolean Caps Lock on or off. Done by pressing the keymap's own Caps Lock key inside the compositor, so the window with the keyboard is told and the layout stays; a keymap with no such key cannot have it, and the log says so.
+---@field num? boolean Num Lock on or off, the same way.
 
 ---A QML scene for `sol.surface` to draw.
 ---@class sol.SurfaceOptions
@@ -265,6 +284,8 @@
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
 ---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
+---| "text_input" # The focused text field changed: `(field, why)`, `field` being what `sol.text_input()` answers at that moment and `why` what changed -- `"field"`, one was enabled, or focused again by its window getting the keyboard back; `"caret"`, its client moved its caret; `"framed"`, its window started or stopped being drawn in a frame, as one going fullscreen does. Told at most once a pass of the event loop, before the frame is drawn, as the most that changed: a caret moved twice since the last frame is told once, where it is now, and a field enabled and then given its caret, as kitty gives it with its first key, is told once as `"field"`. A window moving with its field in it is not told.
+---| "keyboard" # The live layout, Caps Lock or Num Lock changed, by a key or by `sol.keyboard{ ... }`: `(state, changed)`, `state` being what `sol.keyboard()` answers now and `changed` `"layout"`, `"caps"` or `"num"`. Never for ordinary typing, a new keymap or a configuration starting, nor while the session is locked: what is pressed at the lock screen is the lock screen's, and a lock screen that wants a Caps Lock warning draws its own. A change a `keyboard` listener makes is not told back to it.
 
 -- sol ------------------------------------------------------------------------
 
@@ -317,13 +338,26 @@ function sol.surface(name, options) end
 
 ---Read the keyboard, or change it.
 ---
----With no argument, answers the layouts, which one is live and how keys
----repeat. With a table, changes what it names and leaves the rest alone, so a
----binding that switches layout does not reset the repeat rate.
+---With no argument, answers the layouts, which one is live, its short name,
+---whether Caps Lock and Num Lock are on, and how keys repeat. With a table,
+---changes what it names and leaves the rest alone, so a binding that switches
+---layout does not reset the repeat rate. `sol.on("keyboard", ...)` hears the
+---layout and the locks change.
 ---@overload fun(): sol.KeyboardState
 ---@param options? sol.KeyboardOptions
 ---@return sol.KeyboardState|nil
 function sol.keyboard(options) end
+
+---The focused text field and where its caret is, or `nil` when the window
+---with the keyboard has no text field enabled.
+---
+---Kept by the `text-input-v3` protocol: an application with a text field
+---focused says so, and says where its caret is. Applications that do not
+---speak it, and X11 ones, never have one. `sol.on("text_input", ...)` hears a
+---field being enabled or focused, its caret moving, and its window being
+---framed or left bare.
+---@return sol.TextField|nil
+function sol.text_input() end
 
 ---Read the monitors, or arrange them.
 ---
@@ -413,6 +447,21 @@ function sol.pane(name) end
 ---The old name for `sol.pane`, from when a style was a single QML file. The
 ---same function.
 sol.decoration = sol.pane
+
+---Hand values of the configuration's own to every layer of every pane.
+---
+---Every layer's root reads them as one object, `values`, which `PaneStyle`
+---declares for an inline layer and a delegated layer declares itself
+---(`property var values: ({})`): so a setting the configuration reads can
+---reach the QML that draws by it, and the compositor never knows what the
+---setting is. Each call merges its keys into what is there, so two scripts
+---each handing their own keep both; a key, once given, keeps its last value
+---until the configuration is reloaded, which starts with none. Values are
+---what `sol.surface`'s `properties` take. A window opened later is told them
+---too.
+---@param values table
+---@return nil
+function sol.pane_values(values) end
 
 ---Every frame style `sol.pane` could be given, found in the folders the
 ---compositor looks in: sorted, bundles first, each name once.
@@ -644,6 +693,8 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "surface", handler: fun(name: string, action: string))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore", handler: fun())
+---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))
+---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
 ---@param event sol.Event
 ---@param handler function
 ---@return nil

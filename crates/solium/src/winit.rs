@@ -354,6 +354,7 @@ pub(crate) fn run() -> Result<()> {
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
     let mut drags = dev::drags();
+    let mut keys = dev::keys();
     let mut screen_changes = dev::outputs_at();
     let mut loadings = dev::loading_at();
     // Reversed so `last` is the *earliest*, which is what the `while ... pop`
@@ -365,6 +366,7 @@ pub(crate) fn run() -> Result<()> {
     clicks.reverse();
     loadings.reverse();
     drags.reverse();
+    keys.reverse();
     screen_changes.reverse();
 
     // Frame pacing, reported periodically. Latency is the thing this
@@ -537,6 +539,15 @@ pub(crate) fn run() -> Result<()> {
                 synth::drag(&mut state, region, from.into(), to.into(), 12);
             }
         }
+        while keys.last().is_some_and(|(at, _)| now >= *at) {
+            if let Some((at, combo)) = keys.pop() {
+                tracing::info!(combo, "scripted key");
+                let region = crate::monitor::union(&state.space)
+                    .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
+                let time = u64::try_from(at.as_millis()).unwrap_or(u64::MAX);
+                synth::key(&mut state, region, &combo, time);
+            }
+        }
         while loadings.last().is_some_and(|(at, _)| now >= *at) {
             if let Some((_, program)) = loadings.pop() {
                 tracing::info!(program, "scripted loading window");
@@ -593,6 +604,10 @@ pub(crate) fn run() -> Result<()> {
         // applied once, here, however many times the mouse reported it. See
         // `settle_resize`.
         state.settle_resize();
+        // What the focused text field said since the last pass, told to the
+        // configuration once, so a pill it moves to the caret is in this
+        // frame: `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+        state.settle_text_input();
         // And a Wayland client waiting on an X11 client's clipboard. Here
         // because this is where a loop handle exists; see `settle_selection`.
         crate::xwayland::settle_selection(&mut state, &loop_handle);

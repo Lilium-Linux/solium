@@ -254,6 +254,9 @@ pub(crate) struct Snapshot {
     /// to be nowhere", as the compositor's own walk does.
     /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
     pub(crate) screens: Vec<Rectangle<i32, Logical>>,
+    /// The focused text field and its caret, for `sol.text_input()`:
+    /// `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`.
+    pub(crate) text_input: Option<crate::text_input::Field>,
 }
 
 /// How a batch of transforms should animate.
@@ -390,6 +393,9 @@ pub(crate) enum Command {
     Decoration {
         name: Option<String>,
     },
+    /// Hand every pane's layers these values, merged into what they have.
+    /// `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
+    PaneValues(std::collections::BTreeMap<String, crate::json::Json>),
     /// End the session.
     Quit,
     /// Read the configuration again.
@@ -1097,6 +1103,33 @@ impl Scripts {
     /// Focus moved to a window.
     pub(crate) fn focused(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "focus", id))
+    }
+
+    /// The keyboard's layout, Caps Lock or Num Lock changed: `(state,
+    /// changed)`, `state` being what `sol.keyboard()` answers and `changed`
+    /// `"layout"`, `"caps"` or `"num"`.
+    /// `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
+    pub(crate) fn keyboard_changed(
+        &mut self,
+        changed: &'static str,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.dispatch(snapshot, move |sol| {
+            let state: Value = sol.get::<mlua::Function>("keyboard")?.call(())?;
+            call_listeners(sol, "keyboard", (state, changed))
+        })
+    }
+
+    /// The focused text field changed: `(field, why)`, `field` being what
+    /// `sol.text_input()` answers and `why` `"field"`, `"caret"` or
+    /// `"framed"`, as `text_input::Why` names it.
+    /// `text_input::tests::text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused`,
+    /// `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+    pub(crate) fn text_input(&mut self, why: &'static str, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| {
+            let field: Value = sol.get::<mlua::Function>("text_input")?.call(())?;
+            call_listeners(sol, "text_input", (field, why))
+        })
     }
 
     /// A window asked to be brought forward, and the compositor has answered
@@ -2080,6 +2113,16 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
                 table.set("layouts", layouts)?;
                 table.set("active", keyboard.active)?;
+                // The live layout's names, as `layout_name` and `layout_short`
+                // and not as `layout`, which is the xkb names a keymap is
+                // compiled from: a table read here and handed back to
+                // `sol.keyboard{ ... }` compiles no keymap.
+                // `tests::sol_keyboard_handed_back_what_it_read_compiles_no_keymap`,
+                // `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
+                table.set("layout_name", keyboard.layout())?;
+                table.set("layout_short", keyboard.short_name())?;
+                table.set("caps", keyboard.caps)?;
+                table.set("num", keyboard.num)?;
                 table.set("repeat_rate", keyboard.repeat_rate)?;
                 table.set("repeat_delay", keyboard.repeat_delay)?;
                 return Ok(Value::Table(table));
@@ -2127,6 +2170,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 keymap,
                 repeat,
                 active: options.get::<Option<usize>>("active")?,
+                // `keymap::tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`.
+                caps: options.get::<Option<bool>>("caps")?,
+                num: options.get::<Option<bool>>("num")?,
             };
             if request == crate::keymap::Request::default() {
                 return Ok(Value::Nil);
@@ -2135,6 +2181,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 pending.commands.push(Command::Keyboard(request.clone()));
             })?;
             Ok(Value::Nil)
+        })?,
+    )?;
+
+    // The focused text field: the window it is in, whether that window is
+    // framed, and its caret in the global space once the client has said where
+    // that is. Nothing when no window has a text field enabled.
+    // `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`,
+    // `text_input::tests::a_field_says_whether_its_window_is_framed`.
+    sol.set(
+        "text_input",
+        lua.create_function(|lua, ()| {
+            let Some(field) = snapshot(lua)?.text_input else {
+                return Ok(Value::Nil);
+            };
+            let table = lua.create_table()?;
+            table.set("window", field.window)?;
+            table.set("framed", field.framed)?;
+            if let Some(caret) = field.caret {
+                table.set("x", caret.loc.x)?;
+                table.set("y", caret.loc.y)?;
+                table.set("w", caret.size.w)?;
+                table.set("h", caret.size.h)?;
+            }
+            Ok(Value::Table(table))
         })?,
     )?;
 
@@ -2590,6 +2660,20 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Decoration { name });
+            })
+        })?,
+    )?;
+
+    // Values for every pane's layers, read there as one object, `values`: the
+    // configuration's way to hand its own settings to the QML that draws by
+    // them, whatever they are. Merged by key.
+    // `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
+    sol.set(
+        "pane_values",
+        lua.create_function(|lua, values: mlua::Table| {
+            let fields = crate::json::Json::object_from_lua(&values)?;
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::PaneValues(fields));
             })
         })?,
     )?;
@@ -4383,6 +4467,7 @@ mod tests {
             },
             cursor: (0.0, 0.0),
             screens: Vec::new(),
+            text_input: None,
         };
 
         let outcome = scripts.key("super+space", snapshot);
@@ -4858,9 +4943,10 @@ mod tests {
                 -- `decoration`, and answering a typo with a deprecated spelling
                 -- walks somebody past the key that actually works (#117 review).
                 decoraton = "border",
-                -- Not typos, and must not be reported: `keyboard` is empty on
-                -- purpose, so its keys cannot be checked against the defaults,
-                -- and a binding combination is whatever you press. `active`
+                -- Not typos, and must not be reported: `keyboard` leaves its
+                -- xkb names out on purpose, so they cannot be checked against
+                -- the defaults, and a binding combination is whatever you
+                -- press. `active`
                 -- belongs with a dual layout and is exactly the pair that used
                 -- to be called a typo.
                 keyboard = { layout = "us,ua", active = 2 },
@@ -6039,6 +6125,7 @@ mod tests {
             work_area: Rect::default(),
             cursor: (0.0, 0.0),
             screens: Vec::new(),
+            text_input: None,
         }
     }
 
@@ -6519,6 +6606,7 @@ mod tests {
             },
             cursor: (0.0, 0.0),
             screens: Vec::new(),
+            text_input: None,
         }
     }
 
@@ -6787,12 +6875,12 @@ mod tests {
 
     /// **A keyboard section that says what layout to start on is not a typo.**
     ///
-    /// `config.lua` restates `sol.keyboard`'s key set, because `keyboard = {}`
-    /// is empty on purpose and so cannot be the list. The restatement left
-    /// `active` out, and `sol.keyboard` reads it -- so a dual-layout
-    /// configuration, the only kind that has an `active` to name, was told its
-    /// working setting is read by nothing and `solium --check` exited 1 (#117
-    /// review).
+    /// `config.lua` restates `sol.keyboard`'s key set, because `keyboard`
+    /// leaves the xkb names out on purpose and so cannot be the list. The
+    /// restatement left `active` out, and `sol.keyboard` reads it -- so a
+    /// dual-layout configuration, the only kind that has an `active` to name,
+    /// was told its working setting is read by nothing and `solium --check`
+    /// exited 1 (#117 review).
     ///
     /// That is worse than the silence #117 replaced. `--check` answers "did my
     /// configuration work", and a check that is wrong about a setting people
@@ -6825,6 +6913,63 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **What `sol.keyboard()` reads, handed back to `sol.keyboard{ ... }`,
+    /// compiles no keymap**, with `us,ru` and Russian live: the live layout's
+    /// names come back as `layout_name` and `layout_short`, and `layout` is
+    /// only ever the xkb names a keymap is compiled from.
+    #[test]
+    fn sol_keyboard_handed_back_what_it_read_compiles_no_keymap() {
+        let directory = std::env::temp_dir().join("solium-script-test-keyboard-round-trip");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+P", function()
+                local read = sol.keyboard()
+                sol.status(tostring(read.layout_name) .. " " .. tostring(read.layout_short))
+                sol.keyboard(read)
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+        let mut snapshot = empty_snapshot();
+        snapshot.keyboard = crate::keymap::State {
+            layouts: vec!["English (US)".to_owned(), "Russian".to_owned()],
+            short: vec!["EN".to_owned(), "RU".to_owned()],
+            active: 2,
+            ..crate::keymap::State::initial()
+        };
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+p", snapshot);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("Russian RU"),
+            "the live layout's names"
+        );
+
+        let requests: Vec<&crate::keymap::Request> = outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Keyboard(request) => Some(request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requests.len(),
+            1,
+            "what was read is handed back as a request"
+        );
+        assert_eq!(
+            requests[0].keymap, None,
+            "and it names no keymap to compile: `layout` is not the live layout's name"
+        );
     }
 
     /// **`fullscreen.covers` reaches the compositor from the shipped

@@ -1,6 +1,7 @@
 #include "attached.h"
 
 #include "host.h"
+#include "keyboard.h"
 #include "rows.h"
 
 #include <QtQml/QQmlContext>
@@ -535,4 +536,7 @@ void solium_qml_register_types()
     /* Named, since a scene writes one: `Grab { ... }`.
      * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
     qmlRegisterType<SoliumGrab>(SOLIUM_NATIVE_URI, 1, 0, "Grab");
+    /* `Keyboard`, unqualified like `Theme`, in every scene.
+     * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`. */
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Keyboard", solium_keyboard());
 }

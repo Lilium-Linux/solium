@@ -13,13 +13,17 @@
 //! and late.
 //!
 //! Deliberately not a general robot: it drives the pointer, because that is
-//! what could not be reached. Keys already had `SOLIUM_TRIGGER_AT`.
+//! what could not be reached, and keys by name for `SOLIUM_KEY_AT`, because
+//! `SOLIUM_TRIGGER_AT` runs a binding and a key that xkb itself acts on --
+//! Caps Lock, a layout switch -- is not one.
+//! `tests::a_scripted_key_is_pressed_through_the_real_input_path_with_russian_active`.
 
 use smithay::{
     backend::input::{
-        ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent, PointerButtonEvent,
-        PointerMotionEvent, UnusedEvent,
+        ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent, KeyState,
+        KeyboardKeyEvent, Keycode, PointerButtonEvent, PointerMotionEvent, UnusedEvent,
     },
+    input::keyboard::xkb,
     utils::{Logical, Point, Rectangle},
 };
 
@@ -106,6 +110,36 @@ impl PointerButtonEvent<Synthetic> for Button {
     }
     fn state(&self) -> ButtonState {
         self.state
+    }
+}
+
+/// One key going down or up, by xkb keycode, the shape both real backends
+/// report.
+#[derive(Debug)]
+pub(crate) struct Key {
+    code: Keycode,
+    state: KeyState,
+    time: u64,
+}
+
+impl Event<Synthetic> for Key {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> SynthDevice {
+        SynthDevice
+    }
+}
+
+impl KeyboardKeyEvent<Synthetic> for Key {
+    fn key_code(&self) -> Keycode {
+        self.code
+    }
+    fn state(&self) -> KeyState {
+        self.state
+    }
+    fn count(&self) -> u32 {
+        u32::from(self.state == KeyState::Pressed)
     }
 }
 
@@ -206,7 +240,7 @@ impl smithay::backend::input::TouchUpEvent<Synthetic> for Touch {}
 
 impl InputBackend for Synthetic {
     type Device = SynthDevice;
-    type KeyboardKeyEvent = UnusedEvent;
+    type KeyboardKeyEvent = Key;
     #[cfg(test)]
     type PointerAxisEvent = Axis;
     #[cfg(not(test))]
@@ -291,6 +325,72 @@ pub(crate) fn drag(
         ButtonState::Released,
         tick(&mut time),
     );
+}
+
+/// Press a key combination and let it go, through the real input path:
+/// each key down in the order written, then up in reverse, as fingers do.
+/// `combo` is keysym names joined by `+`, as `SOLIUM_KEY_AT` takes them:
+/// `caps_lock`, `shift+alt_l`, `super+return`; `shift`, `ctrl`, `alt` and
+/// `super` are the left-hand keys. Each name is found in the live keymap, in
+/// any of its layouts, so the key is the one a person would press whichever
+/// layout is live. A name the keymap has no key for presses nothing, and
+/// says so. `time` is the moment, in milliseconds, of the first press.
+/// `tests::a_scripted_key_is_pressed_through_the_real_input_path_with_russian_active`.
+pub(crate) fn key(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    combo: &str,
+    time: u64,
+) -> bool {
+    let mut codes = Vec::new();
+    for name in combo
+        .split('+')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let name = match name.to_ascii_lowercase().as_str() {
+            "shift" => "Shift_L".to_owned(),
+            "ctrl" | "control" => "Control_L".to_owned(),
+            "alt" => "Alt_L".to_owned(),
+            "super" | "logo" => "Super_L".to_owned(),
+            _ => name.to_owned(),
+        };
+        let keysym = xkb::keysym_from_name(&name, xkb::KEYSYM_CASE_INSENSITIVE);
+        let Some(code) = (keysym.raw() != 0)
+            .then(|| crate::keymap::keycode_of(state, keysym))
+            .flatten()
+        else {
+            tracing::warn!(
+                combo,
+                key = name,
+                "no key in this keymap types that, so nothing was pressed"
+            );
+            return false;
+        };
+        codes.push(code);
+    }
+    let mut at = time * 1000;
+    let mut send = |state: &mut Solium, code: Keycode, key_state: KeyState| {
+        at += 8_000;
+        crate::input::handle::<Synthetic>(
+            state,
+            region,
+            InputEvent::Keyboard {
+                event: Key {
+                    code,
+                    state: key_state,
+                    time: at,
+                },
+            },
+        );
+    };
+    for &code in &codes {
+        send(state, code, KeyState::Pressed);
+    }
+    for &code in codes.iter().rev() {
+        send(state, code, KeyState::Released);
+    }
+    true
 }
 
 fn current(state: &Solium) -> Point<f64, Logical> {
@@ -411,4 +511,50 @@ pub(crate) fn send_touch(
             event: Touch { at, time: time + 1 },
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use smithay::utils::Rectangle;
+
+    use crate::keymap::live;
+    use crate::keymap::tests::us_ru;
+
+    /// **A scripted key is pressed through the real input path, with
+    /// `us,ru` and Russian active**: Caps Lock by name locks Caps, Shift and
+    /// the left Alt switch the layout through the keymap's own option, and a
+    /// combination a binding claims runs the binding -- the filter, xkb and
+    /// all, as a key on the keyboard would. A name no key types presses
+    /// nothing.
+    #[test]
+    fn a_scripted_key_is_pressed_through_the_real_input_path_with_russian_active() {
+        let (_display, mut state) = us_ru(1);
+        let directory = std::env::temp_dir().join("solium-synth-key");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"pressed = 0
+            sol.bind("super+k", function() pressed = pressed + 1 end)"#,
+        )
+        .expect("writing the script");
+        let scripts = crate::script::Scripts::load(&config).expect("loading the script");
+        state.start_scripts(Some(scripts));
+        let _ = std::fs::remove_dir_all(&directory);
+        let region = Rectangle::from_size((1920, 1080).into());
+
+        assert!(super::key(&mut state, region, "caps_lock", 0));
+        assert_eq!(live(&mut state), (2, true, false), "Caps on, Russian kept");
+        assert!(super::key(&mut state, region, "shift+alt_l", 10));
+        assert_eq!(live(&mut state), (1, true, false), "the layout switched");
+        assert!(super::key(&mut state, region, "super+k", 20));
+        let pressed = state
+            .scripts
+            .as_ref()
+            .map(|scripts| scripts.evaluate("return tostring(pressed)"));
+        assert_eq!(pressed.as_deref(), Some("1"), "the binding ran");
+        assert!(!super::key(&mut state, region, "no_such_key", 30));
+        assert_eq!(live(&mut state), (1, true, false), "and pressed nothing");
+    }
 }

@@ -684,6 +684,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // one is applied once, here, however many times the mouse
             // reported it. See `settle_resize`.
             state.solium.settle_resize();
+            // What the focused text field said since the last pass, told to the
+            // configuration once, so a pill it moves to the caret is in this
+            // frame: `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+            state.solium.settle_text_input();
             if state.solium.redraw || state.animating {
                 state.render();
             }
