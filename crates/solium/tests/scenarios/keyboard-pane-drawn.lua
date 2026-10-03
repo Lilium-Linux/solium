@@ -121,7 +121,13 @@ return {
 
         -- A layout's pill shown over Caps Lock's hands back to it when it
         -- goes, held, rather than leaving Caps Lock on with nothing shown.
-        { tell = { caret = { 100, 60, 2, 16 }, values = cue("layout", 6, false, 500, "caps") } },
+        -- `show` comes back on its own first, as it is in a session, where
+        -- it only changes with a reload: one `values` write turning `show`
+        -- on and handing a new cue would leave `take()` reading `accepts`
+        -- before or after its binding has caught up, as Qt's notify order
+        -- falls, and this step is about the hand-back, not that order.
+        { tell = { caret = { 100, 60, 2, 16 }, values = cue("", 6, false, 500) } },
+        { tell = { values = cue("layout", 7, false, 500, "caps") } },
         { wait = 300 },
         {
             expect = function(world)
