@@ -1120,13 +1120,15 @@ impl Scripts {
         })
     }
 
-    /// A text field was enabled, or focused again: `(field)`, what
-    /// `sol.text_input()` answers.
-    /// `text_input::tests::text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused`.
-    pub(crate) fn text_input(&mut self, snapshot: Snapshot) -> Outcome {
+    /// The focused text field changed: `(field, why)`, `field` being what
+    /// `sol.text_input()` answers and `why` `"field"`, `"caret"` or
+    /// `"framed"`, as `text_input::Why` names it.
+    /// `text_input::tests::text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused`,
+    /// `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+    pub(crate) fn text_input(&mut self, why: &'static str, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |sol| {
             let field: Value = sol.get::<mlua::Function>("text_input")?.call(())?;
-            call_listeners(sol, "text_input", field)
+            call_listeners(sol, "text_input", (field, why))
         })
     }
 

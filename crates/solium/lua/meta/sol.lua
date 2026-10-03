@@ -282,7 +282,7 @@
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
 ---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
----| "text_input" # A text field was enabled, or focused again by its window getting the keyboard back: `(field)`, what `sol.text_input()` answers at that moment.
+---| "text_input" # The focused text field changed: `(field, why)`, `field` being what `sol.text_input()` answers at that moment and `why` what changed -- `"field"`, one was enabled, or focused again by its window getting the keyboard back; `"caret"`, its client moved its caret; `"framed"`, its window started or stopped being drawn in a frame, as one going fullscreen does. Told at most once a pass of the event loop, before the frame is drawn, as the most that changed: a caret moved twice since the last frame is told once, where it is now, and a field enabled and then given its caret, as kitty gives it with its first key, is told once as `"field"`. A window moving with its field in it is not told.
 ---| "keyboard" # The live layout, Caps Lock or Num Lock changed, by a key or by `sol.keyboard{ ... }`: `(state, changed)`, `state` being what `sol.keyboard()` answers now and `changed` `"layout"`, `"caps"` or `"num"`. Never for ordinary typing, a new keymap or a configuration starting; a change a `keyboard` listener makes is not told back to it.
 
 -- sol ------------------------------------------------------------------------
@@ -352,7 +352,8 @@ function sol.keyboard(options) end
 ---Kept by the `text-input-v3` protocol: an application with a text field
 ---focused says so, and says where its caret is. Applications that do not
 ---speak it, and X11 ones, never have one. `sol.on("text_input", ...)` hears a
----field being enabled or focused.
+---field being enabled or focused, its caret moving, and its window being
+---framed or left bare.
 ---@return sol.TextField|nil
 function sol.text_input() end
 
@@ -690,7 +691,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "surface", handler: fun(name: string, action: string))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore", handler: fun())
----@overload fun(event: "text_input", handler: fun(field: sol.TextField))
+---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))
 ---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
 ---@param event sol.Event
 ---@param handler function

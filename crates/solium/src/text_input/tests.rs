@@ -184,13 +184,16 @@ impl Desk {
         }
     }
 
-    /// One round trip, made safe to block on by a `sync`.
+    /// One round trip, made safe to block on by a `sync`, and the end of the
+    /// pass it was dispatched in, as both loops end one: what the focused
+    /// field said in it is told to the configuration once.
     pub(crate) fn pump(&mut self) {
         self.conn.display().sync(&self.qh, ());
         self.conn.flush().expect("flushing the round trip");
         self.display
             .dispatch_clients(&mut self.state)
             .expect("dispatching the round trip");
+        self.state.settle_text_input();
         self.display.flush_clients().expect("flushing the events");
         self.queue
             .blocking_dispatch(&mut self.client)
@@ -550,10 +553,20 @@ fn a_field_whose_window_leaves_the_keyboard_on_nothing_is_gone() {
     );
 }
 
+/// Every `text_input` event as `x,y:why`, in `seen`; `-` for a field with no
+/// caret.
+const TOLD: &str = r#"
+    seen = {}
+    sol.on("text_input", function(field, why)
+        local at = field.x and string.format("%g,%g", field.x, field.y) or "-"
+        seen[#seen + 1] = at .. ":" .. tostring(why)
+    end)
+"#;
+
 /// **`text_input` is told when a field is enabled and when it is focused**:
-/// once for the enable, nothing for a caret that only moves, and once more
-/// when its window gets the keyboard back and the client enables it again,
-/// as clients do on `enter`.
+/// once for the enable, as `"field"`, and once more when its window gets
+/// the keyboard back and the client enables it again, as clients do on
+/// `enter`.
 #[test]
 fn text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused() {
     let mut desk = Desk::new();
@@ -561,30 +574,93 @@ fn text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused() {
     let (second, _b, _xb) = desk.window();
     desk.state.space.map_element(first.clone(), (0, 0), false);
     desk.focus(&first);
-    desk.configure(
-        "event",
-        r#"
-        seen = {}
-        sol.on("text_input", function(field)
-            seen[#seen + 1] = string.format("%g,%g", field.x, field.y)
-        end)
-        "#,
-    );
+    desk.configure("event", TOLD);
     let text_input = desk.text_input();
     enable(&text_input, (10, 20, 2, 16));
     desk.pump();
-    assert_eq!(desk.seen(), "10,20", "enabled");
-
-    text_input.set_cursor_rectangle(30, 20, 2, 16);
-    text_input.commit();
-    desk.pump();
-    assert_eq!(desk.seen(), "", "a caret that moves is not a field");
+    assert_eq!(desk.seen(), "10,20:field", "enabled");
 
     desk.focus(&second);
     desk.focus(&first);
     enable(&text_input, (40, 20, 2, 16));
     desk.pump();
-    assert_eq!(desk.seen(), "40,20", "focused again");
+    assert_eq!(desk.seen(), "40,20:field", "focused again");
+}
+
+/// **`text_input` is told when the caret moves, once a pass**: a client
+/// moving its caret is told as `"caret"`, however many times it moved
+/// since the last pass, with where it is now; a commit that leaves it where
+/// it was is told nothing. A field enabled with no caret, and given one by
+/// a later commit in the same pass, is told once, as `"field"`, with the
+/// caret.
+#[test]
+fn text_input_is_told_when_the_caret_moves_once_a_pass() {
+    let mut desk = Desk::new();
+    let (window, _surface, _xdg) = desk.window();
+    desk.state.space.map_element(window.clone(), (0, 0), false);
+    desk.focus(&window);
+    desk.configure("caret", TOLD);
+    let text_input = desk.text_input();
+    enable(&text_input, (10, 20, 2, 16));
+    desk.pump();
+    assert_eq!(desk.seen(), "10,20:field");
+
+    text_input.set_cursor_rectangle(30, 20, 2, 16);
+    text_input.commit();
+    text_input.set_cursor_rectangle(50, 20, 2, 16);
+    text_input.commit();
+    desk.pump();
+    assert_eq!(
+        desk.seen(),
+        "50,20:caret",
+        "two moves in one pass, told once"
+    );
+
+    text_input.set_cursor_rectangle(50, 20, 2, 16);
+    text_input.commit();
+    desk.pump();
+    assert_eq!(desk.seen(), "", "a caret that did not move");
+
+    text_input.disable();
+    text_input.commit();
+    text_input.enable();
+    text_input.commit();
+    text_input.set_cursor_rectangle(60, 20, 2, 16);
+    text_input.commit();
+    desk.pump();
+    assert_eq!(
+        desk.seen(),
+        "60,20:field",
+        "a field, then its caret, in one pass"
+    );
+}
+
+/// **`text_input` is told when the field's window is framed or bare**, as
+/// `"framed"`: a window going fullscreen is left bare, and one leaving it
+/// may have a frame again. Nothing while it stays as it was.
+#[test]
+fn text_input_is_told_when_the_fields_window_is_framed_or_bare() {
+    let mut desk = Desk::new();
+    let (window, _surface, _xdg) = desk.window();
+    desk.state.space.map_element(window.clone(), (0, 0), false);
+    desk.focus(&window);
+    desk.configure("framed", TOLD);
+    let text_input = desk.text_input();
+    text_input.enable();
+    text_input.commit();
+    desk.pump();
+    assert_eq!(desk.seen(), "-:field", "a field with no caret yet");
+
+    let id = desk.state.panes.id_of(&window).expect("a pane");
+    desk.state.decorations.unset_bare(&mut desk.state.panes, id);
+    desk.pump();
+    assert_eq!(desk.seen(), "-:framed", "framed");
+    desk.pump();
+    assert_eq!(desk.seen(), "", "and still framed");
+
+    desk.state.decorations.set_bare(&mut desk.state.panes, id);
+    desk.pump();
+    assert_eq!(desk.seen(), "-:framed", "bare again");
 }
 
 /// **Only the pane whose window has the caret is given it**, in its own

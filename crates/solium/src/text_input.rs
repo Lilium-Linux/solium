@@ -10,6 +10,22 @@
 //! pane's own space for its decoration (`caret`), and draws nothing of its own
 //! with it. `tests::an_enabled_field_has_its_caret_in_the_global_space`.
 //!
+//! ## When the configuration is told
+//!
+//! `sol.on("text_input", function(field, why) end)` hears three things, each
+//! named by `why`: a field enabled, or enabled again on its window getting
+//! the keyboard back (`"field"`); its caret moved, as its client says it
+//! (`"caret"`); and its window starting or stopping being drawn in a frame,
+//! as one going fullscreen does (`"framed"`). Once a pass of the event loop
+//! at most, before the frame is decided, as the most that changed in it: a
+//! client may commit its caret several times between two frames, and kitty
+//! enables its field with no caret and sends one a few milliseconds later,
+//! with its first key. [`Solium::settle_text_input`];
+//! `tests::text_input_is_told_when_the_caret_moves_once_a_pass`,
+//! `tests::text_input_is_told_when_the_fields_window_is_framed_or_bare`.
+//! A window moving with its field in it is not a caret moving, and is not
+//! told.
+//!
 //! ## Why not smithay's
 //!
 //! Smithay 0.7 has a text-input module, `wayland/text_input/`, and it is half
@@ -59,6 +75,41 @@ pub(crate) struct TextInputs {
     /// last worked out for the decorations: once a frame, by
     /// [`Solium::settle_caret`].
     pane_caret: Option<(PaneId, Rectangle<i32, Logical>)>,
+    /// What the configuration is owed a `text_input` event for since the
+    /// last pass, the most of it: [`Solium::settle_text_input`] tells it.
+    /// `tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+    owed: Option<Why>,
+    /// The pane of the focused field as the last pass saw it, and whether
+    /// its window was framed then, so a window going bare or framed under a
+    /// field is told.
+    /// `tests::text_input_is_told_when_the_fields_window_is_framed_or_bare`.
+    seen_framed: Option<(PaneId, bool)>,
+}
+
+/// Why the configuration is told `text_input`, as its second argument names
+/// it. In the order of how much it says, so that a pass in which several
+/// happened is told the most of them, once: a field enabled is news of its
+/// caret and its frame too.
+/// `tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Why {
+    /// The field's caret moved, as its client says it.
+    Caret,
+    /// The field's window started or stopped being drawn in a frame.
+    Framed,
+    /// A field was enabled, or enabled again on its window getting the
+    /// keyboard back.
+    Field,
+}
+
+impl Why {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Caret => "caret",
+            Self::Framed => "framed",
+            Self::Field => "field",
+        }
+    }
 }
 
 /// One `zwp_text_input_v3`.
@@ -109,6 +160,8 @@ impl TextInputs {
             instances: Vec::new(),
             focus: None,
             pane_caret: None,
+            owed: None,
+            seen_framed: None,
         }
     }
 
@@ -229,8 +282,14 @@ impl Dispatch<ZwpTextInputV3, ()> for Solium {
                     "a text field committed"
                 );
                 let changed = was != (instance.enabled, instance.cursor);
-                let enabled = pending.enable == Some(true) && instance.enabled;
-                state.text_field_changed(changed, enabled);
+                let why = if pending.enable == Some(true) && instance.enabled {
+                    Some(Why::Field)
+                } else if instance.cursor.is_some() && instance.cursor != was.1 {
+                    Some(Why::Caret)
+                } else {
+                    None
+                };
+                state.text_field_changed(changed, why);
             }
             // The surrounding text, its change cause and the content type are
             // an input method's to read, and there is none.
@@ -246,7 +305,7 @@ impl Dispatch<ZwpTextInputV3, ()> for Solium {
             .retain(|instance| &instance.object != object);
         // `tests::a_field_whose_window_loses_the_keyboard_is_gone`.
         let gone = before && state.text_inputs.active().is_none();
-        state.text_field_changed(gone, false);
+        state.text_field_changed(gone, None);
     }
 }
 
@@ -279,31 +338,68 @@ impl Solium {
                 instance.entered = Some(surface.clone());
             }
         }
-        self.text_field_changed(had, false);
+        self.text_field_changed(had, None);
     }
 
     /// What a text field changing means: a frame, so a decoration drawing
-    /// at the caret moves with it, and a `text_input` event for the
-    /// configuration when a field was enabled or focused.
-    /// `tests::text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused`.
-    fn text_field_changed(&mut self, changed: bool, enabled: bool) {
-        if changed || enabled {
+    /// at the caret moves with it, and a `text_input` event owed to the
+    /// configuration for `why`, told at the end of the pass.
+    /// `tests::text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused`,
+    /// `tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+    fn text_field_changed(&mut self, changed: bool, why: Option<Why>) {
+        if changed || why.is_some() {
             self.redraw = true;
         }
-        if enabled && self.text_field().is_some() {
-            self.trigger_text_input();
+        self.text_inputs.owed = self.text_inputs.owed.max(why);
+    }
+
+    /// Once a pass of the event loop, before the frame is decided: tell the
+    /// configuration what the focused field owes it, once, as the most that
+    /// happened since the last pass, and only while there is a field to
+    /// tell it about. A window that went bare or framed under the field
+    /// since the last pass is owed `"framed"`; that is looked at here, where
+    /// every way a window loses or regains its frame has already happened,
+    /// rather than at each of those ways.
+    /// `tests::text_input_is_told_when_the_caret_moves_once_a_pass`,
+    /// `tests::text_input_is_told_when_the_fields_window_is_framed_or_bare`.
+    pub(crate) fn settle_text_input(&mut self) {
+        let framed = self.field_framed();
+        let reframed = matches!(
+            (self.text_inputs.seen_framed, framed),
+            (Some(was), Some(now)) if was.0 == now.0 && was.1 != now.1
+        );
+        self.text_inputs.seen_framed = framed;
+        let owed = self
+            .text_inputs
+            .owed
+            .take()
+            .max(reframed.then_some(Why::Framed));
+        if let Some(why) = owed
+            && framed.is_some()
+        {
+            self.trigger_text_input(why);
         }
     }
 
     /// Run the `text_input` listeners, and apply what they asked for.
-    fn trigger_text_input(&mut self) {
+    fn trigger_text_input(&mut self, why: Why) {
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;
         };
-        let outcome = scripts.text_input(snapshot);
+        let outcome = scripts.text_input(why.name(), snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
+    }
+
+    /// The pane of the focused field, and whether its window is drawn in a
+    /// frame: what [`Field::framed`] says, without working out the caret.
+    fn field_framed(&self) -> Option<(PaneId, bool)> {
+        let (_, surface) = self.text_inputs.active()?;
+        let (window, _) = surface_in_window(self, surface)?;
+        let id = self.panes.id_of(&window)?;
+        let pane = self.panes.get(id)?;
+        Some((id, framed(pane)))
     }
 
     /// The focused text field, with its caret in the global space: the
@@ -341,7 +437,7 @@ impl Solium {
         Some(Field {
             window: id.get(),
             caret,
-            framed: !matches!(pane.frame(), crate::pane::Frame::None),
+            framed: framed(pane),
         })
     }
 
@@ -372,6 +468,13 @@ impl Solium {
             .filter(|(id, _)| *id == pane)
             .map(|(_, caret)| caret)
     }
+}
+
+/// Whether `pane`'s window is drawn in a frame of the compositor's, or will be
+/// once its frame is built: [`Field::framed`].
+/// `tests::a_field_says_whether_its_window_is_framed`.
+fn framed(pane: &crate::pane::Pane) -> bool {
+    !matches!(pane.frame(), crate::pane::Frame::None)
 }
 
 /// The window `surface` belongs to, and where the surface's origin is in that

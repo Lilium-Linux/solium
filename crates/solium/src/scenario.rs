@@ -30,6 +30,7 @@
 //! | `focus = n` | the n-th window opened, given the keyboard |
 //! | `field = { x, y, w, h }` | the client enables a text field with its caret there, in its surface |
 //! | `field = true` | the client enables a text field and says nothing about a caret |
+//! | `caret = { x, y, w, h }` | the client says its field's caret has moved there, as kitty does after a key, without enabling it again |
 //! | `disable = true` | the client disables it |
 //! | `framed = n` | the n-th window opened may have a frame again, as one leaving fullscreen may: its frame is on its way, and no Qt here builds it |
 //! | `bare = n` | the n-th window opened is drawn bare, as a fullscreen window and one drawing its own decorations are; every window opens bare here, under the style `"none"` |
@@ -300,12 +301,20 @@ fn with_a_client(path: &Path) {
                 }
             }
             desk.pump();
+        } else if let Ok(Some(caret)) = step.get::<Option<Table>>("caret") {
+            let (x, y, w, h) = rect_of(&caret).expect("x, y, w, h");
+            let input = text_input.as_ref().expect("a field to move the caret of");
+            input.set_cursor_rectangle(x, y, w, h);
+            input.commit();
+            desk.pump();
         } else if let Ok(Some(n)) = step.get::<Option<usize>>("framed") {
             let id = pane_of(&desk, &windows, n);
             desk.state.decorations.unset_bare(&mut desk.state.panes, id);
+            desk.pump();
         } else if let Ok(Some(n)) = step.get::<Option<usize>>("bare") {
             let id = pane_of(&desk, &windows, n);
             desk.state.decorations.set_bare(&mut desk.state.panes, id);
+            desk.pump();
         } else if step.get::<Option<bool>>("disable").ok().flatten() == Some(true) {
             if let Some(input) = text_input.as_ref() {
                 input.disable();

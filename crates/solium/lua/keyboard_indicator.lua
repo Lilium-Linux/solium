@@ -232,8 +232,12 @@ sol.on("keyboard", function(state, changed)
 end)
 
 -- A field enabled or focused: Caps Lock's pill again if it is on, as macOS
--- does, and otherwise nothing left over from the last field.
-sol.on("text_input", function()
+-- does, and otherwise nothing left over from the last field. Not its caret
+-- moving, nor its window framed or bare.
+sol.on("text_input", function(_, why)
+    if why ~= "field" then
+        return
+    end
     local s = settings()
     if s.caps and s.caps_on_focus and sol.keyboard().caps then
         indicator.show("caps")

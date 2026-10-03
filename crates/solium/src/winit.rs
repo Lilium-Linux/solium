@@ -604,6 +604,10 @@ pub(crate) fn run() -> Result<()> {
         // applied once, here, however many times the mouse reported it. See
         // `settle_resize`.
         state.settle_resize();
+        // What the focused text field said since the last pass, told to the
+        // configuration once, so a pill it moves to the caret is in this
+        // frame: `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
+        state.settle_text_input();
         // And a Wayland client waiting on an X11 client's clipboard. Here
         // because this is where a loop handle exists; see `settle_selection`.
         crate::xwayland::settle_selection(&mut state, &loop_handle);
