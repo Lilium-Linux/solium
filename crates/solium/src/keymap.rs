@@ -478,10 +478,18 @@ pub(crate) mod tests {
     pub(crate) fn us_ru(group: u32) -> (Display<Solium>, Solium) {
         let display = Display::<Solium>::new().expect("a test display");
         let mut state = Solium::new(display.handle());
+        set_us_ru(&mut state, group);
+        (display, state)
+    }
+
+    /// `state`'s keyboard put on `us,ru` with Alt+Shift switching layout,
+    /// its group locked to `group`, as [`us_ru`] makes it: for a test with a
+    /// `Solium` of its own making.
+    pub(crate) fn set_us_ru(state: &mut Solium, group: u32) {
         let keyboard = state.seat.get_keyboard().expect("the seat has a keyboard");
         keyboard
             .set_xkb_config(
-                &mut state,
+                state,
                 XkbConfig {
                     layout: "us,ru",
                     options: Some("grp:alt_shift_toggle".to_owned()),
@@ -489,7 +497,7 @@ pub(crate) mod tests {
                 },
             )
             .expect("compiling us,ru; xkb data is missing, so this proves nothing");
-        let active = keyboard.with_xkb_state(&mut state, |mut context| {
+        let active = keyboard.with_xkb_state(state, |mut context| {
             context.set_layout(Layout(group));
             context
                 .xkb()
@@ -498,8 +506,7 @@ pub(crate) mod tests {
                 .expect("reading the group back")
         });
         assert_eq!(active, group, "locking us,ru to group {group} did not take");
-        state.keyboard = describe(&mut state);
-        (display, state)
+        state.keyboard = describe(state);
     }
 
     /// Press `codes` in order and let go in reverse, through the real input

@@ -5,6 +5,8 @@
 //! Told on a real change of the xkb group, Caps Lock or Num Lock, from a key
 //! or from `sol.keyboard{ ... }`, and never for ordinary typing:
 //! `tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
+//! Nor while the session is locked, to the configuration:
+//! `state::tests::real_client::lock_focus::a_caps_toggle_at_the_lock_screen_is_not_told_to_the_configuration`.
 
 use crate::state::Solium;
 
@@ -81,7 +83,15 @@ impl Solium {
             // `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
             self.redraw = true;
             self.keyboard_told.serials[change as usize] += 1;
-            if !self.keyboard_told.telling {
+            // Not while the session is locked. A key pressed at the lock
+            // screen is the lock screen's -- it may be part of a password --
+            // and a configuration acting on it would show a pill behind the
+            // lock, still there when it lifts. A lock screen that wants a
+            // Caps Lock warning draws its own, as `swaylock
+            // --indicator-caps-lock` does. The change is taken as seen all
+            // the same, so the unlock does not tell it late.
+            // `state::tests::real_client::lock_focus::a_caps_toggle_at_the_lock_screen_is_not_told_to_the_configuration`.
+            if !self.keyboard_told.telling && self.lock.is_none() {
                 self.keyboard_told.telling = true;
                 self.trigger_keyboard(change);
                 self.keyboard_told.telling = false;
@@ -102,14 +112,14 @@ impl Solium {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::keymap::tests::{A, ALT, CAPS, NUM, SHIFT, tap, us_ru};
     use crate::script::Scripts;
     use crate::state::Solium;
 
     /// Every `keyboard` event as `changed:active:name:short:caps:num`, in
     /// `seen`, and a binding that switches to the second layout.
-    const RECORDER: &str = r#"
+    pub(crate) const RECORDER: &str = r#"
         seen = {}
         sol.on("keyboard", function(state, changed)
             seen[#seen + 1] = string.format("%s:%d:%s:%s:%s:%s", changed, state.active,
@@ -121,7 +131,7 @@ mod tests {
     "#;
 
     /// `script` loaded into `state` as its configuration.
-    fn configured(state: &mut Solium, name: &str, script: &str) {
+    pub(crate) fn configured(state: &mut Solium, name: &str, script: &str) {
         let directory = std::env::temp_dir().join(format!("solium-keyboard-change-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a temporary directory");
@@ -133,7 +143,7 @@ mod tests {
     }
 
     /// What the scripts have been told, and cleared.
-    fn seen(state: &Solium) -> String {
+    pub(crate) fn seen(state: &Solium) -> String {
         state.scripts.as_ref().map_or_else(String::new, |scripts| {
             scripts.evaluate("local all = table.concat(seen, ' '); seen = {}; return all")
         })

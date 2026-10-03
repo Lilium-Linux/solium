@@ -10039,6 +10039,42 @@ end)"#,
             session.assert_unlocks(lock);
         }
 
+        /// **What is pressed at the lock screen is not told to the
+        /// configuration.** A Caps Lock toggled there, with `us,ru` and
+        /// Russian live, reaches no `keyboard` listener, so no pill policy
+        /// runs behind the lock and nothing it showed is waiting when the lock
+        /// lifts; and the unlock does not tell it late. A toggle after the
+        /// unlock is told as ever. The lock screen draws its own Caps Lock
+        /// warning, if it wants one.
+        #[test]
+        fn a_caps_toggle_at_the_lock_screen_is_not_told_to_the_configuration() {
+            use crate::keyboard_change::tests::{RECORDER, configured, seen};
+            use crate::keymap::tests::{CAPS, set_us_ru, tap};
+
+            let mut session = Session::new();
+            set_us_ru(&mut session.state, 1);
+            configured(&mut session.state, "locked", RECORDER);
+            session.app.open(&mut session.display, &mut session.state);
+            let lock = session.lock();
+
+            tap(&mut session.state, &[CAPS]);
+            assert!(session.state.keyboard.caps, "Caps Lock went on at the lock");
+            assert_eq!(
+                seen(&session.state),
+                "",
+                "and the configuration was not told"
+            );
+
+            session.assert_unlocks(lock);
+            assert_eq!(seen(&session.state), "", "nor told once the lock lifted");
+            tap(&mut session.state, &[CAPS]);
+            assert_eq!(
+                seen(&session.state),
+                "caps:2:Russian:RU:false:false",
+                "a toggle after the unlock is told"
+            );
+        }
+
         /// **A window asking to be brought forward while locked.** A token
         /// says the request came from something the user was using, not
         /// that anyone is at the machine now. `request_activation` focuses

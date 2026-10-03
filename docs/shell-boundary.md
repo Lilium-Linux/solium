@@ -253,10 +253,11 @@ being `"layout"`, `"caps"` or `"num"`, and never for ordinary typing
 It is published once a frame, beside the monitors. It has no row types of its
 own, so the one name it takes in `import Solium` is `Keyboard` itself, as
 `Theme` takes `Theme`. Lua hears the same changes through
-`sol.on("keyboard", ...)`, and reads the focused text field's caret with
-`sol.text_input()`, hearing it move through `sol.on("text_input", ...)`, once
-a pass of the event loop at most
-(`text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`).
+`sol.on("keyboard", ...)`, but for those made at the lock screen
+(`state::tests::real_client::lock_focus::a_caps_toggle_at_the_lock_screen_is_not_told_to_the_configuration`),
+and reads the focused text field's caret with `sol.text_input()`, hearing it
+move through `sol.on("text_input", ...)`, once a pass of the event loop at
+most (`text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`).
 
 **Room of its own.** A surface reserves edges of its monitor whatever its
 size. Lua declares it, `reserve = { bottom = 48 }` on `sol.surface`, and the

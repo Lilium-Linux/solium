@@ -443,12 +443,13 @@ active and its names (`layout_name`, `Russian`; `layout_short`, `RU`), whether
 Caps Lock and Num Lock are on, and the repeat settings — and
 `sol.keyboard{ caps = false }` sets a lock.
 `sol.on("keyboard", function(state, changed) end)` hears the layout or a lock
-change, however it changed, and never ordinary typing. QML reads the same as
-the `Keyboard` singleton, in a hosted scene and a pane style alike.
-`sol.on("text_input", function(field, why) end)` hears the focused text field:
-`why` is `"field"` when one is enabled or focused, `"caret"` when its caret
-moves and `"framed"` when its window goes fullscreen or comes back. A caret
-that moves twice before the next frame is told once, where it ended up.
+change, however it changed, and never ordinary typing, nor what is pressed at
+the lock screen. QML reads the same as the `Keyboard` singleton, in a hosted
+scene and a pane style alike. `sol.on("text_input", function(field, why) end)`
+hears the focused text field: `why` is `"field"` when one is enabled or
+focused, `"caret"` when its caret moves and `"framed"` when its window goes
+fullscreen or comes back. A caret that moves twice before the next frame is
+told once, where it ended up.
 
 ### The keyboard pill
 
