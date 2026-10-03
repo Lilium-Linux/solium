@@ -12,7 +12,9 @@ the line, and it is not where a Wayland tutorial would put it.
   file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
   The shipped configuration names none.
 - A shell is QML written against Solium's own API: `import Solium` for
-  `Theme`, and an `action` property for what it asks Lua to do
+  `Theme`, `Keyboard`, `Grab` and the attached `Solium` object
+  (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
+  `Solium.keyboard`), and an `action` property for what it asks Lua to do
   ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
   (#172); Quickshell itself may add Solium support on its own side.
 - A shell that runs as its own program — Waybar, a Quickshell instance run
@@ -95,8 +97,10 @@ the windows and across the whole monitor; each instance reads its own monitor
 as `Solium.monitor`. `shell = { on = "primary" }`, or a connector name, draws
 one instance instead
 (`script::tests::the_shell_is_on_every_monitor_unless_the_configuration_names_one`).
-It takes the pointer there — all of it, which
-[What it is not given](#what-it-is-not-given) spells out. `super+shift+r` picks up
+It takes the pointer only where its items take input, as "Clickable only
+where it takes input" under
+[What a hosted shell is given](#what-a-hosted-shell-is-given) says; everywhere
+else the pointer goes to the windows under it. `super+shift+r` picks up
 a change to the setting, and tries again a scene that would not load, so a
 typo in the shell costs a reload rather than the session
 (`state::tests::real_client::a_reload_tries_again_a_scene_that_would_not_load`).
@@ -167,9 +171,13 @@ It reads where it is from `Solium.monitor`, below; `screenInfo` is gone.
 
 **Clickable only where it takes input.** The compositor asks the live item
 tree under the pointer, so a point is the scene's only where a visible,
-enabled item that is not fully transparent takes input: a `MouseArea`, a
-pointer handler, a link in a `Text` with an `onLinkActivated` handler, or an
-item marked `Solium.input: true`.
+enabled item that is not fully transparent takes input: any item that accepts
+mouse buttons — a `MouseArea`, a Qt Quick Controls control such as a `Button`
+or a `TextField`, a `TextInput` or `TextEdit`, a `Flickable` (a `ListView`
+among them), a `PathView`, a `MultiPointTouchArea` — a pointer handler other
+than `HoverHandler`, such as a `TapHandler` or a `DragHandler`, a link in a
+`Text` with an `onLinkActivated` handler, or an item marked
+`Solium.input: true`.
 An item at opacity 0, itself or through an ancestor, takes nothing, though Qt
 would still deliver to it
 (`qml::hosted::tests::the_item_tree_decides_what_a_point_claims`). The rest of
@@ -178,7 +186,9 @@ label takes nothing at all
 (`qml::hosted::tests::a_text_takes_a_press_only_on_a_link`).
 `Solium.input: "hover"` takes the pointer's motion and
 leaves presses to what is under it, which is how an edge strip reveals a
-hidden dock; `Solium.input: false` takes an item out. An item's shape counts,
+hidden dock. A `HoverHandler` on an item that takes no press itself takes only
+the motion in the same way, and a press there goes to what is under it.
+`Solium.input: false` takes an item out. An item's shape counts,
 through its `containmentMask`, so a rounded popup's corners pass clicks
 through; a mask written in QML has to be typed,
 `function contains(point: point): bool`, or Qt ignores it, and it answers for
@@ -224,6 +234,10 @@ says so
 A press inside its target is the scene's, even where no item there takes
 input
 (`state::tests::real_client::reflow_on_close::hosted::a_press_inside_the_grab_target_reaches_the_scene`).
+With more than one `Grab` of a scene active, a press inside any of their
+targets is the scene's, and the newest one's `name` is the one `outside_click`
+is looked up by
+(`qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`).
 A press outside it dismisses it: every active `Grab` of the scene hears
 `dismissed`, newest first
 (`qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`),
@@ -242,6 +256,8 @@ default, and a table names grabs, `{ default = "swallow", ["tray-menu"] =
 "pass" }`
 (`script::tests::the_shell_takes_its_outside_click_from_the_configuration`,
 `state::tests::real_client::reflow_on_close::hosted::a_policy_named_for_the_grab_beats_the_default`).
+Any other value, in the word or in the table, fails the configuration's load
+(`script::tests::an_unknown_outside_click_is_refused`).
 One grab is held at a time, and one another scene takes dismisses it
 (`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`).
 A surface the pointer does not reach, declared `interactive = false`, holds
@@ -266,8 +282,12 @@ lock is gone
 activeFocus; Solium.keyboard.claims: [ "Escape", "Return", "Up", "Down" ] }`
 takes the keyboard while it is visible and wants it
 (`qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
-`qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`). Every
-hosted scene's window is active from the start, so `focus: true` gives a
+`qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`). When
+more than one visible item of a scene wants it, the one with active focus
+holds it, else the one that came to want it last, and only that item's
+`claims` count
+(`qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`).
+Every hosted scene's window is active from the start, so `focus: true` gives a
 field `activeFocus`; bind `wants` to it, because the compositor takes the
 keyboard back by taking that focus away. Whatever `wants` is bound to, a
 scene the keyboard was taken back from does not take it again until an item
@@ -305,11 +325,14 @@ except the keys the item claims, which are the field's
 (`input::tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,
 `input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`); a claim
 is spelled as `sol.bind` spells a key. `shell.keyboard.bindings` in
-`config.lua` changes that: `"all"` keeps every binding, claimed or not, and
+`config.lua` is `"except_claimed"` by default, which is that: every binding
+but the claimed keys. `"all"` keeps every binding, claimed or not, and
 `"none"` gives the shell every key
 (`input::tests::with_bindings_all_a_claimed_binding_wins`,
 `input::tests::with_bindings_none_even_super_bindings_reach_the_scene`,
-`script::tests::the_shell_takes_its_keyboard_bindings_from_the_configuration`),
+`script::tests::the_shell_takes_its_keyboard_bindings_from_the_configuration`).
+Any other value fails the load too
+(`script::tests::an_unknown_keyboard_bindings_is_refused`),
 and a reload that changes it applies from the next key, while the shell holds
 the keyboard
 (`state::tests::real_client::reflow_on_close::hosted::a_bindings_policy_redeclared_while_the_shell_holds_the_keyboard_applies_at_once`).
@@ -348,14 +371,35 @@ is ready, with no frame drawn unless the scene changed. A `Timer` is on that
 same clock, so one beside an animation nothing draws still fires.
 
 **The `Solium` QML module.** `Theme` above all: the colours, fonts and
-metrics the frames are drawn with. Beside it, `import Solium` brings the
-attached `Solium` object, which any item can read: `Solium.monitor` is the
-monitor this instance of the scene is on
+metrics the frames are drawn with. Everything `import Solium` brings is
+written unqualified, as `Theme` is: the singletons `Theme` and `Keyboard`
+("The keyboard, live", below); the type `Grab` ("Popups that hold the
+pointer", above); the pane-style types `PaneStyle` and `Layer`, and the
+keyboard pill's `KeyboardPill` and `KeyboardPillLayer` (the
+[panes README](../crates/solium/qml/panes/README.md)); and the attached
+`Solium` object, which any item can read, with exactly four members:
+`Solium.monitor`, the monitor this instance of the scene is on (below);
+`Solium.input`, `true`, `false` or `"hover"` (above);
+`Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
+below); and `Solium.keyboard.wants` and `claims` (above)
 (`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
-The module's types are written unqualified, as `Theme` is. A `Theme.qml` of
-your own in `~/.config/solium/qml/Solium/` is meant to override it, and does
-not yet: the shipped module is found first
+Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
+internal, and the row types have no name, so a shell's own `Monitor.qml` is
+not shadowed
+(`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`).
+A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
+override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
+The attached `Solium` object and `Grab` belong to a hosted scene, which
+`sol.surface` builds on a monitor. Elsewhere (a pane's layers, the loading
+window, the fallback pointer) they build and do nothing: `Solium.monitor` is an
+absent row with an empty `name` and `present: false`, `Solium.surface.reserve`
+reserves nothing, and `Solium.keyboard` and a `Grab` hold nothing
+(`qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`,
+`qml::hosted::tests::an_unhosted_scene_may_bind_a_reserve_and_reserves_nothing`,
+`qml::hosted::tests::an_unhosted_scene_may_bind_the_keyboard_and_holds_nothing`).
+`Solium.input` changes nothing there either, since a pane's layers are given
+every pointer event. `Theme` and `Keyboard` are the same in every scene.
 
 **Its monitor, live.** `Solium.monitor` is the row of the monitor this
 instance is on: `name`, `whole` and `area` (rectangles in the global space,
@@ -376,11 +420,13 @@ it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smitha
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
 (the live layout's index into `layouts`, from 0), `layoutName` (`"Russian"`),
-`layoutShort` (`"RU"`, the short name xkb's own rules give it), `layouts`,
-`caps` and `num`, each notifying as it changes, and `changed(what)` once in
-each frame in which the layout, Caps Lock or Num Lock really changed, `what`
-being `"layout"`, `"caps"` or `"num"`, and never for ordinary typing
+`layoutShort` (`"RU"`, the short name xkb's own rules give it), `layouts`
+(every layout's name, in order, as `layoutName` spells each), `caps` and
+`num`, each notifying as it changes, and `changed(what)` once in each frame in
+which the layout, Caps Lock or Num Lock really changed, `what` being
+`"layout"`, `"caps"` or `"num"`, and never for ordinary typing
 (`models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`).
+Before the keymap is known, `layoutName` and `layoutShort` read `""`.
 It is published once a frame, beside the monitors. It has no row types of its
 own, so the one name it takes in `import Solium` is `Keyboard` itself, as
 `Theme` takes `Theme`. It says what the keyboard is, where
@@ -440,9 +486,20 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 - **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
   field copy and paste within the compositor's own Qt: what a window copied
   cannot be pasted into it, nor the other way round.
-- **No window list, and no icons.** Nothing tells a hosted scene which
-  windows exist, and there is no `image://` provider for the icon theme.
-  Driving the compositor goes through `action` and Lua.
+- **No window list, no workspaces, no other monitors, and no icons.**
+  Nothing tells a hosted scene which windows or workspaces exist; a scene
+  reads its own monitor as `Solium.monitor` and has no list of the others; and
+  there is no `image://` provider for the icon theme
+  ([#166](https://github.com/Lilium-Linux/solium/issues/166)). Driving the
+  compositor goes through `action` and Lua.
+- **No touch.** A scene takes no touch: a tap where it takes a press triggers
+  nothing there, and neither reaches nor focuses the window under it;
+  elsewhere a touch reaches the window under the shell, as the pointer would
+  (`state::tests::real_client::reflow_on_close::hosted::a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it`).
+  Scenes getting touch is
+  [#181](https://github.com/Lilium-Linux/solium/issues/181); gestures are the
+  touch epic [#7](https://github.com/Lilium-Linux/solium/issues/7), after
+  v0.1.0.
 
 ## What is still a client
 

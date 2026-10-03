@@ -34,7 +34,8 @@ a titlebar is.
 | the loading window | `qml/loading/*.qml` | `loading = { scene = "window" }` |
 | the wallpaper | `qml/wallpaper.qml` | `wallpaper = ...` (see [ricing.md](ricing.md)) |
 | a shell (bar, dock, launcher) | nothing ships | `shell = { scene = ... }` |
-| any other scene | nothing ships | `sol.surface(name, { scene = ... })` |
+| the keyboard pill, on a surface of its own | `qml/indicator/keyboard.qml` | `keyboard.indicator` in `config.lua` (`lua/keyboard_indicator.lua` declares it through `sol.surface`) |
+| any other scene | `qml/tweaks.qml`, the Developer Tweaks panel (`--debug-mode` only) | `sol.surface(name, { scene = ... })` |
 | the pointer, with no cursor theme | `qml/cursor.qml` | `SOLIUM_QML_CURSOR`, for one run |
 
 Your own directory is `~/.config/solium/qml/`, and for everything in that
@@ -69,8 +70,13 @@ PaneStyle {
     requires: []
 
     Layer { depth: "frame"; name: "border"; source: "Frame.qml" }
+    KeyboardPillLayer {}
 }
 ```
+
+The last line is the keyboard pill every shipped style draws at the focused
+text field's caret; leave it out and the style draws none (the panes README,
+"The keyboard pill").
 
 ```qml
 // panes/border/Frame.qml, shortened
@@ -260,6 +266,12 @@ whether the scene has anything new, and the compositor draws only then. Bleed
 is paid for in full, because every pixel of the larger canvas is drawn each
 time the layer changes, so a bar throwing spikes upward should ask for
 `bleed: { "top": 48 }` rather than `48`.
+
+A layer that is usually empty, as the keyboard pill's is, can bind `dormant`
+to "nothing to show". While it is true the layer is not drawn, keeps no image
+and is not blended over the client. The
+[panes README](../crates/solium/qml/panes/README.md#what-it-costs), "What it
+costs", has the details.
 
 **On the GPU**, each layer is drawn by Qt's OpenGL scene graph straight into a
 buffer the compositor allocated, and nothing is copied or uploaded. A window

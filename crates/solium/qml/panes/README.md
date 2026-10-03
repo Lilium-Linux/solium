@@ -23,7 +23,9 @@ new style left it.
 Everything the shipped layers draw with -- colours, fonts, spacing -- comes
 from `Solium.Theme`, the same singleton the loading window reads, and a hosted
 shell that imports `Solium` can read it too. The fallback pointer and the
-default wallpaper do not: their colours are fixed. A `Solium/Theme.qml` of
+default wallpaper do not: their colours are fixed. Nor, in part, does the
+keyboard pill: its capsule is `Theme.accent`, but its glyph and label are
+fixed white and its shadow fixed black. A `Solium/Theme.qml` of
 your own in `~/.config/solium/qml/` is meant to restyle all of them without
 touching anything that ships, and does not yet, because the shipped module is
 found first ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
@@ -90,7 +92,7 @@ that; one already left bare stays bare until it is opened again.
 | `bleed` | how far past the pane this layer may paint. `24` for every side, or `{ "top": 48 }` for one. Zero by default |
 | `source` | a QML file in this folder, when the content is not inline |
 | `name` | for diagnostics: which layer a warning is about |
-| `dormant` | `true` while the layer has nothing to draw. False unless bound. See "What it costs" |
+| `dormant` | `true` while the layer has nothing to draw. False unless bound. Read on an inline layer's `Layer`; a layer with `source:` declares `property bool dormant` on its own file's root instead, and one written on its `Layer` is ignored. See "What it costs" |
 
 Content is written inline or delegated with `source:`, and the syntax does not
 change between the two. Each layer is rasterised into a scene of its own and
@@ -122,13 +124,16 @@ When they change, in place, and to a frame built later as well:
 | property | |
 |---|---|
 | `caret` | where the focused text field's caret is, when this window has it: `{ valid, x, y, width, height }` in the pane's own space -- the space a layer with no bleed is laid out in -- and `valid: false` when the field goes or the keyboard leaves the window. Known from applications that say where their caret is, through `text-input-v3`. Exact while the window is at rest: it takes the client to sit just inside the insets, so while a resize places the client otherwise for a moment, it can be off by that much. Declared on `PaneStyle`; a delegated layer that wants it declares `property var caret: ({ valid: false })` |
-| `values` | whatever the configuration handed every pane with `sol.pane_values{ key = value }`, as one object. A general channel from Lua to the frames: a setting the configuration reads reaches the layer that draws by it, and the compositor never knows what it is. A reload starts it empty, so a key the reloaded configuration no longer hands over is gone. Declared on `PaneStyle`; a delegated layer declares `property var values: ({})` |
+| `values` | whatever the configuration handed every pane with `sol.pane_values{ key = value }`, as one object. Each call merges its top-level keys into what is there, a key's value replaced whole, so two scripts that hand keys of their own both reach the layer. A general channel from Lua to the frames: a setting the configuration reads reaches the layer that draws by it, and the compositor never knows what it is. A reload starts it empty, so a key the reloaded configuration no longer hands over is gone. Declared on `PaneStyle`; a delegated layer declares `property var values: ({})` |
 
 A layer drawing at the caret is drawn with its window, so whatever the window
 is doing -- moving, scaling in a thumbnail, fading -- the drawing does too.
 Every layer can also read the keyboard, `Keyboard` in `import Solium`: the
 live layout, its names, and whether Caps Lock and Num Lock are on
-(`docs/shell-boundary.md`, "The keyboard, live").
+(`docs/shell-boundary.md`, "The keyboard, live"). The attached `Solium` object
+and `Grab` are a hosted shell's. In a layer they build and do nothing, and
+`Solium.monitor` reads an absent row with an empty `name`
+(`docs/shell-boundary.md`, "The `Solium` QML module").
 
 Once, at build, because neither ever changes for a style:
 
@@ -138,6 +143,13 @@ Once, at build, because neither ever changes for a style:
 | `bleedLeft`, `bleedTop` | where the window's own corner is inside this layer's canvas |
 | `clientRadiusTopLeft`, `clientRadiusTopRight`, `clientRadiusBottomLeft`, `clientRadiusBottomRight` | what the compositor is cutting each corner of the client to, in logical pixels, so a bar or a border can hug that curve. Written on every layer of every style, zeroes included — a corner left unwritten reads back 0, which is indistinguishable from one the style really squared |
 | `clientRadius` | the **largest** of the four above, for a layer that wants one number. Its use is an outward hug (`radius: clientRadius + 2`), and a hug has to clear the biggest cut; a layer that needs one particular corner reads it by name. Written on every layer of every style, zero included. `rounded/Frame.qml` is the worked example |
+
+Of these, `PaneStyle` declares only `bleedLeft` and `bleedTop`. The four
+`inset` names and the five `clientRadius` names reach only a delegated layer
+that declares them on its root. An inline layer reads its manifest instead:
+`insets.top` and the other three, `client.radius`, and `client.radiusTopLeft`
+and the other corners, where `-1` means the corner follows `client.radius`. It
+has no `clientRadius`.
 
 Read back by the compositor:
 
@@ -169,7 +181,9 @@ layer with bleed is given the pointer in **its own canvas**, so a click lands on
 whatever that layer drew there. **Presses are narrower than hover**: they reach
 the layers only inside the band the insets reserve, so a button drawn over the
 client, out in the bleed, or in a style that reserves nothing cannot be
-pressed.
+pressed. Touch reaches no layer: a finger on a frame's close or maximize
+button, or on its edge, does nothing
+([#181](https://github.com/Lilium-Linux/solium/issues/181)).
 
 ## What it costs
 
@@ -287,6 +301,19 @@ adding the same line, and a style without it has none. A window drawn bare --
 fullscreen, or one drawing its own decorations -- has no style around it at
 all, and the configuration draws its pill on a surface instead.
 
+`KeyboardPill` shows what its `cue` says and decides nothing. `cue` is
+`{ what, serial, hold, duration, after }`. `what` is `"caps"` (an outlined
+⇪), `"layout"` (`Keyboard.layoutShort`), `"num"` (⇭), or `""` to hide at
+once. A cue is taken only when its `serial` is new, so handing the same cue
+again shows nothing. With `hold: true` it stays until the next cue. Otherwise
+it hides after `duration` milliseconds (1200 when not given), or, when `after`
+names one of the three, shows that one instead, held. While `accepts` is
+`false`, a new cue hides it rather than showing. It is the capsule, 28 high and
+at least 32 wide, in `Theme.accent`, with a `margin` of 14 on every side for
+its shadow, and it centres the capsule in itself. `KeyboardPillLayer` hands it
+`values.keyboard_indicator`, which the configuration sets as `{ show, cue }`,
+and draws only while `show` is `true` and the pane's `caret` is `valid`.
+
 It is a layer of its own because it draws over the client, and in software a
 `frame` layer that reserves a band copies only that band. So it costs one more
 scene per window. While no pill is on show it is `dormant`, which is nearly
@@ -302,7 +329,11 @@ A style can also be a single `.qml` file with an `Item` at its root, under
 `~/.config/solium/qml/decorations/`, named the same way. It is one layer at
 `frame`, and it declares its own `insetTop`/`insetRight`/`insetBottom`/
 `insetLeft` rather than being told them -- a single file has no manifest, so it
-is the only place those numbers can live.
+is the only place those numbers can live. It has no manifest to add
+`KeyboardPillLayer {}` to either, so with `keyboard.indicator.show = "pane"`
+its windows show no keyboard pill: draw one at `caret` yourself (with
+`property bool overlay: true`, since it paints over the client), or set
+`show = "surface"`.
 
 Nothing ships as one any more: the eight above were single files until the
 pane-styles work moved them into folders. The path stays because those files
