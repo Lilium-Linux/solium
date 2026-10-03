@@ -212,10 +212,9 @@ true, so nothing of it is blended or uploaded, and on the frame it goes to
 sleep it lets go of its image, so waking is a resize that draws it afresh. On
 the GPU its scene keeps the buffer it was last drawn into until it is drawn
 again, and one dormant from its first frame never has one larger than a
-pixel. It
-is a general mechanism -- any layer may bind it, and nothing in the
-compositor knows what a layer is for -- and the keyboard pill below is the
-shipped user. Wake it from something it is told (`values`, `caret`,
+pixel. It is a general mechanism -- any layer may bind it, and nothing in
+the compositor knows what a layer is for -- and the keyboard pill below is
+the shipped user. Wake it from something it is told (`values`, `caret`,
 `focused`): a dormant layer's own animations ask for no frames.
 
 Animations need nothing declared. Qt is asked each frame whether the scene has
