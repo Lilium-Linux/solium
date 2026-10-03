@@ -1,7 +1,8 @@
 # The road to a public preview
 
 **Written 2026-09-07. Revised 2026-09-18**, after the first day of using it
-for real work rather than developing it, **and again 2026-09-30.** Where the
+for real work rather than developing it, **and again 2026-09-30, and again
+2026-10-04.** Where the
 compositor stands, what has to be true before strangers run it, and the order
 to do it in.
 
@@ -11,7 +12,8 @@ instead that the three things Solium is actually *for* each had something in
 them that made the experience worse than the architecture deserved. Most of
 that is fixed now, and is listed under
 [Done since this was written](#done-since-this-was-written). What blocks a
-preview today is mostly where the compositor meets the rest of a user session.
+preview today is the native preview shell, which is not written yet, and
+otherwise mostly where the compositor meets the rest of a user session.
 
 ## Where it stands
 
@@ -48,24 +50,35 @@ that trust once is enough to lose it.
 A **public preview**, aimed at people who want to hack on a compositor rather
 than people looking for a desktop, is honest and achievable. It also gets the
 first-contact bugs sooner and smaller, from people who will not be angry about
-them. Nobody but the author has run this yet, on one machine and one monitor
-layout. First contact with other GPUs and drivers, laptop panels and other
-people's configurations will produce a burst of bugs that no amount of local
-testing predicts.
+them. Nobody but the author has run this yet, on two machines: a desktop with
+an NVIDIA RTX 3070 and a Microsoft Surface Pro 7 (Intel Ice Lake graphics),
+both Fedora 44. First contact with other GPUs and drivers and other people's
+configurations will produce a burst of bugs that no amount of local testing
+predicts.
 
 ## What still blocks
+
+**The public preview is v0.1.0**, a preview release. It is cut only once the
+desktop is daily-drivable (the issues labelled
+[`daily-drive`](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20state%3Aopen%20label%3Adaily-drive)),
+the native preview shell exists (a bar at the bottom, a dock at the top, quick
+search, desktop icons, widgets with real data and a native lock screen), and
+there are packages, then an open beta. It is not cut until that is done. The
+native preview shell is not built yet: the shipped configuration hosts no
+shell.
 
 **Blocking, by which of Solium's own ideas it breaks.** A preview exists to
 show what a compositor is *for*. Solium's three claims are that its layouts
 are scripts, that its chrome is QML and belongs to one design system, and that
-you can change either while it runs. Two of the three still have something in
-them that undermines the claim. The third is clear.
+you can change either while it runs. One of the three, the chrome
+([#102](https://github.com/Lilium-Linux/solium/issues/102)), still has
+something in it that undermines the claim. The other two are clear.
 
 ### The layouts are the pitch
 
-| | why |
-|---|---|
-| fullscreen fires no event | a script cannot see that a window is fullscreen or maximised, so the next relayout — a window opening, a layer surface arriving — puts a fullscreen video back into its tile. No issue tracks it yet |
+Nothing blocks here any more. A layout's pass leaves a fullscreen or maximised
+window where it is, so a window opening no longer puts a fullscreen video back
+into its tile; see [below](#done-since-this-was-written).
 
 ### The chrome is the differentiator
 
@@ -87,12 +100,18 @@ change" is the sentence a preview is sold on, and it is now true.
 | [#66](https://github.com/Lilium-Linux/solium/issues/66) packages | a preview nobody can install is a preview nobody tries. **Done:** an installed binary finds its own QML and Lua, and `dev/install.sh` installs from a checkout into `~/.local` on Fedora 44 and prints the one `sudo` line that puts the session file where the login screen reads it (`dev/install-check.sh` checks it). `dev/rpm.sh` builds a Fedora 44 package of a checkout, a development snapshot that dnf installs under `/usr`. **Left:** packages in a repository — COPR, an Arch `PKGBUILD` — plus `--config` ([#106](https://github.com/Lilium-Linux/solium/issues/106)) and the configuration directory's name ([#107](https://github.com/Lilium-Linux/solium/issues/107)), which are worth settling before the recipes are written |
 | [#65](https://github.com/Lilium-Linux/solium/issues/65) a soak | the compositor has never been left running unattended for hours, with window churn, on a real session. `SOLIUM_SOAK_TTY=1 dev/soak.sh` can do it now; what is missing is the run. A preview that dies after six hours is worse than one that is missing a feature |
 | [#64](https://github.com/Lilium-Linux/solium/issues/64) suspend and resume | never tried at all, which is the same sentence about laptops |
-| screens off, on hardware | [#54](https://github.com/Lilium-Linux/solium/issues/54)'s DRM path — black, then a modeset back — was merged without a run on hardware |
 
 ### Done since this was written
 
 | | |
 |---|---|
+| [#161](https://github.com/Lilium-Linux/solium/issues/161), [#173](https://github.com/Lilium-Linux/solium/issues/173), [#163](https://github.com/Lilium-Linux/solium/issues/163), [#162](https://github.com/Lilium-Linux/solium/issues/162) a hosted shell | one instance per monitor, each reading `Solium.monitor`; clickable only where its items take input; every button, the wheel and the modifiers; popups that hold the pointer with `Grab`; the keyboard when an item asks with `Solium.keyboard`; an edge reserved whatever the scene's size. What it still lacks is [#166](https://github.com/Lilium-Linux/solium/issues/166): no window list and no workspaces |
+| [#164](https://github.com/Lilium-Linux/solium/issues/164) a hosted shell's timers | fire on an idle desktop, on the compositor's clock |
+| [#174](https://github.com/Lilium-Linux/solium/issues/174) Escape | reaches applications; the overview binds it only while it is up |
+| [#175](https://github.com/Lilium-Linux/solium/issues/175) what a program inherits | programs Solium starts get the environment Solium started with and no descriptor beyond stdio |
+| [#177](https://github.com/Lilium-Linux/solium/issues/177) relaunching | relaunching a running single-instance application brings its window forward where it is; `sol.on("activate")` tells the scripts |
+| [#178](https://github.com/Lilium-Linux/solium/issues/178) the caret and the keyboard as data | `text-input-v3` caret positions, `sol.text_input()`, `sol.on("keyboard")` and `sol.on("text_input")`, caps and num in `sol.keyboard()`, the `Keyboard` QML singleton, `sol.pane_values`, and a Caps Lock and layout pill written in Lua and QML only, set with `keyboard.indicator` |
+| [#150](https://github.com/Lilium-Linux/solium/issues/150) fullscreen kept | a layout's pass leaves a fullscreen or maximised window where it is, and leaving fullscreen goes back into the tile the layout gave last |
 | [#113](https://github.com/Lilium-Linux/solium/issues/113) resize | a resize is the rectangle you drag, tiled or floating: while an edge is held the pane's slot is the authority, not the client's size, so the edge you grab is the one that moves (with #120, #123 and #124) |
 | [#116](https://github.com/Lilium-Linux/solium/issues/116), [#118](https://github.com/Lilium-Linux/solium/issues/118), [#129](https://github.com/Lilium-Linux/solium/issues/129) reload | `super+shift+r` keeps the session: workspaces, the mode in charge, and every tiling tree and scrolling strip, desks not in view included. See [modes.md](modes.md#what-survives-supershiftr) |
 | [#117](https://github.com/Lilium-Linux/solium/issues/117) the configuration says what it does | `bindings = {}` in `user.lua` adds, replaces or removes a binding; every setting `config.lua` advertises is read; and `solium --check` names a setting nothing reads, suggests the one you meant, and exits 1 |
@@ -103,7 +122,7 @@ change" is the sentence a preview is sold on, and it is now true.
 | [#121](https://github.com/Lilium-Linux/solium/issues/121), [#132](https://github.com/Lilium-Linux/solium/issues/132) keys | bindings fire under a non-Latin layout, and a shifted binding on a non-letter key, `super+shift+1` included, is reachable |
 | [#149](https://github.com/Lilium-Linux/solium/issues/149) frame callbacks | layer-shell and lock surfaces are told when to draw again, so a bar or a locker keeps drawing |
 | [#147](https://github.com/Lilium-Linux/solium/issues/147) QML on the GPU | the default on the hardware, once a trial render in a child process has passed; software otherwise, and in nested sessions |
-| [#54](https://github.com/Lilium-Linux/solium/issues/54) screens off | `wlr-output-power-management`, `sol.monitor_power`, and the screens going off by themselves after `idle.screens_off_after` |
+| [#54](https://github.com/Lilium-Linux/solium/issues/54) screens off | `wlr-output-power-management`, `sol.monitor_power`, and the screens going off by themselves after `idle.screens_off_after`; and seen working on hardware, idle screen-off on an NVIDIA RTX 3070 desktop and a Surface Pro 7, with `swaylock` locking on both |
 | the lock, hardened | only the lock surface can have the keyboard, and `locked` is sent only once every monitor shows the lock |
 | [#53](https://github.com/Lilium-Linux/solium/issues/53) keyboard layout | in `config.keyboard`, with the repeat rate — which was the part that genuinely could not be changed. The layout could always be set through `XKB_DEFAULT_LAYOUT` |
 | [#150](https://github.com/Lilium-Linux/solium/issues/150) keyboard navigation | `super` with the arrows or `h` `j` `k` `l` moves focus, and with `shift` moves the window; `super+f` is fullscreen, `super+shift+m` maximised and `super+shift+space` floating. The layout in charge decides what a direction means |
@@ -135,15 +154,15 @@ the QML GPU check. Two gates testing different things is one gate.
 
 1. **The session: [#153](https://github.com/Lilium-Linux/solium/issues/153)**, so that `loginctl lock-session`
    locks and the screen is locked before the machine sleeps.
-2. **The layouts: the fullscreen yank.** It undoes the one thing somebody
-   watching a video asked for.
-3. **[#102](https://github.com/Lilium-Linux/solium/issues/102)**, the decoration
+2. **[#102](https://github.com/Lilium-Linux/solium/issues/102)**, the decoration
    policy.
-4. **Soak and suspend on hardware,
+3. **Soak and suspend on hardware,
    [#65](https://github.com/Lilium-Linux/solium/issues/65) and
-   [#64](https://github.com/Lilium-Linux/solium/issues/64)**, with #54's DRM
-   path tried alongside. These are the difference between working here and
-   working anywhere.
+   [#64](https://github.com/Lilium-Linux/solium/issues/64)**. These are the
+   difference between working here and working anywhere.
+4. **The native preview shell**: a bar at the bottom, a dock at the top, quick
+   search, desktop icons, widgets with real data and a native lock screen,
+   hosted in Solium.
 5. **Packages, [#66](https://github.com/Lilium-Linux/solium/issues/66)**, once
    #106 and #107 are settled.
 6. Then the P3s, after the preview is out.

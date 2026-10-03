@@ -18,7 +18,12 @@ asked to draw its own and was let. The wallpaper is a QML file too.
 
 ## Status
 
-**Alpha, and not yet anyone's daily desktop.** It is being readied for daily
+**Alpha, and not yet anyone's daily desktop.** The first release, v0.1.0,
+will be a preview release, and it is not cut until the desktop is
+daily-drivable (the `daily-drive` label), the native preview shell is written
+(a bar at the bottom, a dock at the top, quick search, desktop icons, widgets
+with real data and a native lock screen), and there are packages, then an open
+beta: [docs/beta.md](docs/beta.md) is that road. It is being readied for daily
 use, and the trial on real hardware that decides whether it is ready has not
 happened yet. What stands in the way is the
 [`daily-drive` label][daily-drive], and the honest reasons are specific:
@@ -27,9 +32,7 @@ happened yet. What stands in the way is the
   workspaces ([#166]).
 - Suspend and resume have never been tested ([#64]), and a session on the
   hardware sometimes starts with no input devices and stops itself ([#48]).
-- Nothing has run unattended for hours on the hardware ([#65]), and turning
-  screens off, which happens by default after ten minutes, has never been
-  tried there ([#54]).
+- Nothing has run unattended for hours on the hardware ([#65]).
 - There is no explicit sync, so Vulkan and NVIDIA clients can stutter ([#59]).
 - There are no touchpad settings, so no tap-to-click ([#157]); no volume,
   brightness, media or screenshot keys by default ([#151]); and logind's lock
@@ -39,6 +42,14 @@ happened yet. What stands in the way is the
 - Two tiling bugs found in use are fixed, and stay open until real use bears
   that out: a window drawing past its tile over its neighbours ([#133]), and a
   closing window keeping its tile until its client had gone ([#128]).
+
+Short of that trial, it has been checked on the hardware at commit `dfc95ce`,
+on a desktop with an NVIDIA RTX 3070 and on a Microsoft Surface Pro 7 (Intel
+Ice Lake integrated graphics), both on Fedora 44. On both, QML renders on the
+GPU and its animations run, closing the lid turns the screen off, the screens
+go off when idle, `swaylock` locks, and the Caps Lock and layout pill works
+with the shipped configuration. Touch reaches applications' windows, but
+nothing Solium draws itself reacts to touch yet ([#181]).
 
 And a bug in a compositor takes the session with it. The ones that get found
 are the ones real use finds, which is why the trial matters more than the test
@@ -53,34 +64,53 @@ suite.
   move by direction, and floating and fullscreen toggles ([#150]); and a reload
   that keeps every layout as it was ([#116], [#118]).
 - **Windows.** A window exists from the keypress that launches it, and shows a
-  loading window until its application has drawn. Closing and quitting fade out
-  ([#126], [#127]); a resize follows the drag ([#113]); a modal dialog floats
-  over its parent ([#72]); a drag shows its icon ([#57]); and one stacking
-  order serves drawing and clicks, with a fullscreen window covering the bars
-  ([#141], [#142]) and getting its place back after ([#92]). X11 clients work
-  through XWayland, and menus and tooltips are placed, grabbed and kept on
-  screen.
+  loading window until its application has drawn; an X11 application's window
+  does not yet replace its loading window ([#180]). Relaunching a
+  single-instance application that is already running brings its existing
+  window forward where it is, instead of moving it into a new slot ([#177]).
+  Closing and quitting fade out ([#126], [#127]); a resize follows the drag
+  ([#113]); a modal dialog floats over its parent ([#72]); a drag shows its
+  icon ([#57]); and one stacking order serves drawing and clicks, with a
+  fullscreen window covering the bars ([#141], [#142]) and getting its place
+  back after ([#92]). X11 clients work through XWayland, and menus and
+  tooltips are placed, grabbed and kept on screen.
 - **Chrome.** Eleven pane styles and per-corner rounding, QML on the GPU by
   default with a software fallback ([#147]), and cursor themes and the shapes
   clients ask for ([#81], [#24]).
 - **Shells.** `shell = { scene = … }` hosts one in the compositor's own QML
-  engine, and any layer-shell client works too; bars and lockers both get the
-  frame callbacks they rely on ([#149]), and a hosted scene's timers fire on an
-  idle desktop ([#164]).
+  engine, one instance on every monitor (or on the one `shell = { on = … }`
+  names), each reading its own monitor live as `Solium.monitor` ([#161]). It
+  takes the pointer only where its items take input, so the windows under it
+  can still be clicked ([#173]). It gets every mouse button, the wheel and the
+  modifiers, a popup holds the pointer with `Grab`, and an item that asks with
+  `Solium.keyboard` gets the keyboard ([#163]). A bar reserves its edge,
+  whatever the scene's size, with `reserve` on `sol.surface` or
+  `Solium.surface.reserve` from QML ([#162]). Any layer-shell client works
+  too; bars and lockers both get the frame callbacks they rely on ([#149]),
+  and a hosted scene's timers fire on an idle desktop ([#164]).
 - **Monitors.** Several at once, each at its own refresh rate, arranged from
   the configuration or guessed; plugged in and unplugged while the session runs
   ([#43]); scaled, worked out from the panel or set. Screens go dark after ten
   minutes with nobody at the machine, and `wlopm` and `swayidle` can turn them
-  off too ([#54]), though the hardware half of that has never been run.
+  off too ([#54]); the ten-minute screen-off has been seen working on both
+  machines named above.
 - **Input.** Keyboard layouts, with bindings that keep working under a
-  non-Latin one ([#132]) and on shifted keys ([#121]); touch screens.
+  non-Latin one ([#132]) and on shifted keys ([#121]). Escape reaches
+  applications: the overview binds it only while it is open ([#174]). A small
+  pill near the text field's caret says Caps Lock is on, or which layout you
+  just switched to; it is written in Lua and QML as configuration rather than
+  in the compositor, and set with `keyboard.indicator` ([#178]). On touch
+  screens, touch reaches applications' windows and a tap focuses the window
+  under it, but nothing Solium draws itself answers touch yet ([#181]).
 - **The lock and idle.** The lock fails safe: the session is locked before the
   locker has drawn, and stays locked if the locker crashes. An idle inhibitor
   counts only while its window is on screen, and a browser's D-Bus inhibitor
   holds the screens on too ([#152]).
 - **The session.** Started from the login screen, Solium tells systemd and
   D-Bus where its display is and starts `graphical-session.target` and XDG
-  autostart, and stops them when it ends ([#146]).
+  autostart, and stops them when it ends ([#146]). Programs Solium starts get
+  the environment Solium itself was started with, not the settings Qt has
+  written into it since, and inherit no descriptor beyond stdio ([#175]).
 - **Protocols.** `xdg-shell`, `xdg-decoration`, `xdg-output`,
   `xdg-activation`, `xdg-dialog`, `wlr-layer-shell`, `wlr-screencopy`,
   `wlr-output-power-management`, `ext-session-lock`, `ext-idle-notify`,
@@ -101,7 +131,10 @@ light ([#69]); a virtual machine or a remote desktop cannot have Super
 ([#67]). Screenshots and recording come from `wlr-screencopy`, so `grim` and
 `wf-recorder` should work, but the portals, screen sharing included, have never
 been tested end to end ([#83]). `--help`, and any flag Solium does not know,
-starts a compositor instead of answering ([#156]).
+starts a compositor instead of answering ([#156]). Nothing the compositor
+draws reacts to touch yet (frame buttons, a hosted shell, the overview, window
+edges), though touch reaches applications' windows ([#181]); touch gestures
+are the touch epic ([#7]) and come after v0.1.0.
 [docs/gaps.md](docs/gaps.md) is everything not built yet, at length.
 
 ## Building
@@ -186,6 +219,10 @@ Nested, as a window inside an existing session, for development:
 ```sh
 ./target/debug/solium
 ```
+
+Once installed (the Fedora package or `dev/install.sh`, below), the command is
+`solium`: from a text console run `solium --tty`, and `solium --probe`, which
+is safe inside a running desktop, first shows what the hardware offers.
 
 Three flags worth knowing:
 
@@ -272,7 +309,8 @@ capture to `xdg-desktop-portal-wlr`, which Fedora packages separately
 (`sudo dnf install xdg-desktop-portal-wlr`). The Fedora package puts the
 units in `/usr/lib/systemd/user` and the portal file in
 `/usr/share/xdg-desktop-portal` instead, and recommends
-`xdg-desktop-portal-wlr`, so dnf installs it. A polkit agent, a keyring,
+`xdg-desktop-portal-wlr`, so dnf installs it; it also recommends `foot`, the
+terminal `super+return` opens, so dnf installs that too. A polkit agent, a keyring,
 applets and other separate programs start through XDG autostart or a user unit
 with `PartOf=graphical-session.target`.
 [docs/shell-boundary.md](docs/shell-boundary.md#how-the-rest-of-the-desktop-starts)
@@ -480,6 +518,7 @@ pull request template carries the one sentence that does it. What came from
 other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 [daily-drive]: https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20state%3Aopen%20label%3Adaily-drive
+[#7]: https://github.com/Lilium-Linux/solium/issues/7
 [#24]: https://github.com/Lilium-Linux/solium/issues/24
 [#26]: https://github.com/Lilium-Linux/solium/issues/26
 [#43]: https://github.com/Lilium-Linux/solium/issues/43
@@ -521,7 +560,17 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#153]: https://github.com/Lilium-Linux/solium/issues/153
 [#156]: https://github.com/Lilium-Linux/solium/issues/156
 [#157]: https://github.com/Lilium-Linux/solium/issues/157
+[#161]: https://github.com/Lilium-Linux/solium/issues/161
+[#162]: https://github.com/Lilium-Linux/solium/issues/162
+[#163]: https://github.com/Lilium-Linux/solium/issues/163
 [#164]: https://github.com/Lilium-Linux/solium/issues/164
 [#166]: https://github.com/Lilium-Linux/solium/issues/166
 [#169]: https://github.com/Lilium-Linux/solium/issues/169
 [#172]: https://github.com/Lilium-Linux/solium/issues/172
+[#173]: https://github.com/Lilium-Linux/solium/issues/173
+[#174]: https://github.com/Lilium-Linux/solium/issues/174
+[#175]: https://github.com/Lilium-Linux/solium/issues/175
+[#177]: https://github.com/Lilium-Linux/solium/issues/177
+[#178]: https://github.com/Lilium-Linux/solium/issues/178
+[#180]: https://github.com/Lilium-Linux/solium/issues/180
+[#181]: https://github.com/Lilium-Linux/solium/issues/181

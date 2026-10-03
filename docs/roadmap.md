@@ -12,7 +12,7 @@ compositor. Overview needed no new Rust at all. Tiling and scrolling choose
 among arrangements that are Rust, in `crates/layout`; the Lua decides which,
 and when.
 
-E7 to E10 are open. So is the work that turns a working compositor into a usable
+E7 to E11 are open. So is the work that turns a working compositor into a usable
 one. The [`daily-drive`
 label](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20is%3Aopen%20label%3Adaily-drive)
 is that list, prioritised by whether an application can be used at all without
@@ -102,6 +102,13 @@ defaults. niri is the reference for touch on Smithay.
 Done when: the same binary is usable by touch on a tablet and by pointer on a
 desktop, with no code fork.
 
+**Status.** Open. Touch reaches applications' windows and a tap focuses the
+window under it (seen on a Surface Pro 7), but nothing the compositor draws
+(frame buttons, a hosted shell, the overview, window edges) reacts to touch,
+and scripts hear none
+([#181](https://github.com/Lilium-Linux/solium/issues/181)). Gesture
+recognition is still this epic and comes after v0.1.0.
+
 ## E8 — Settings
 
 Settings surface reading tunables declared by scripts rather than a fixed
@@ -149,6 +156,28 @@ groups (`sol.group`, `sol.present_group`), stacking from a script (`z` in
 `sol.present`), and an opacity in the transform. Paths, an input grab scoped to
 part of the screen, and blur behind a window
 ([#78](https://github.com/Lilium-Linux/solium/issues/78)) have not.
+
+### [E11](https://github.com/Lilium-Linux/solium/issues/169) — A shell hosted inside Solium is a complete daily desktop
+
+A shell running inside Solium as configuration, hosted in the compositor's QML
+engine, is a full daily desktop.
+
+**Status.** Open. Milestone 1 of the native shell platform has landed: one
+instance per monitor, each reading `Solium.monitor`
+([#161](https://github.com/Lilium-Linux/solium/issues/161)); input only
+where its items take it
+([#173](https://github.com/Lilium-Linux/solium/issues/173)); every
+button, the wheel, `Grab` popups and the keyboard on demand
+([#163](https://github.com/Lilium-Linux/solium/issues/163)); edges
+reserved whatever the scene's size
+([#162](https://github.com/Lilium-Linux/solium/issues/162)); timers on
+an idle desktop ([#164](https://github.com/Lilium-Linux/solium/issues/164));
+and the right environment for the programs it starts
+([#165](https://github.com/Lilium-Linux/solium/issues/165)). The
+Quickshell compatibility layer was removed
+([#172](https://github.com/Lilium-Linux/solium/issues/172)). What is
+left is [#166](https://github.com/Lilium-Linux/solium/issues/166): a
+hosted shell has no window list and sees no workspaces.
 
 ---
 
@@ -217,7 +246,10 @@ is why this project exists.
 - **[E7](https://github.com/Lilium-Linux/solium/issues/7) — touch, gestures, form factors.** One binary usable by touch on a
   tablet and by pointer on a desktop. The animation engine already takes an
   initial velocity precisely so a gesture's throw can be handed to it; nothing
-  yet hands it one.
+  yet hands it one. Touch already reaches applications, but not what the
+  compositor draws
+  ([#181](https://github.com/Lilium-Linux/solium/issues/181)), and
+  gestures come after v0.1.0.
 - **[E8](https://github.com/Lilium-Linux/solium/issues/8) — settings.** A surface built from what scripts declare rather than a
   fixed schema, so adding a mode adds its settings.
 - **The dock, and the morph.** `sol.present_from` still does what
@@ -238,7 +270,10 @@ third is tier one.
 
 **Honest position on evidence.** Most of tiers one and two is judged from nested
 runs and from reading. Some has been confirmed on the hardware: hotplug, popups
-and menus, and the drag icon. The hardware backend brings up more than one
+and menus, and the drag icon; and, at `dfc95ce` on an NVIDIA RTX 3070 desktop
+and a Surface Pro 7 (Intel Ice Lake), QML on the GPU with animations running,
+the screen going off when the lid closes and when idle, `swaylock`, and the
+Caps Lock and layout pill. The hardware backend brings up more than one
 monitor, picks modes and CRTCs, and has been used with real applications on a
 TTY — but no soak, no leak measurement and no screencopy test has ever run on
 it. That is not a small caveat and it belongs in the plan rather than in a

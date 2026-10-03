@@ -9,11 +9,11 @@ This page carries no status: a row leaves when its gap is closed.
 Written by asking the compositor rather than by remembering: the "have" list
 below is `wayland-info` against a running Solium, and the "missing" list is
 every protocol in `wayland-protocols`, `wayland-protocols-wlr` and
-`wayland-protocols-misc` that is not in it. Twenty-six globals in, about forty
-out; the list below is the count.
+`wayland-protocols-misc` that is not in it. Twenty-seven globals in, about
+forty out; the list below is the count.
 
-Everything here is on the tracker except the dock row near the end: writing
-this page found thirty-one gaps that were not, and they were filed as #53–#83.
+Everything here is on the tracker: writing this page found thirty-one gaps
+that were not, and they were filed as #53–#83.
 
 A shell can run inside Solium, hosted in its QML engine, or as a program of its
 own over `wlr-layer-shell` (see [shell-boundary.md](shell-boundary.md)). Where a
@@ -31,8 +31,8 @@ says otherwise.
 `wp_viewporter` · `wp_fractional_scale_manager_v1` · `zwp_linux_dmabuf_v1` ·
 `xdg_wm_dialog_v1` · `wp_single_pixel_buffer_manager_v1` ·
 `zwp_relative_pointer_manager_v1` · `zwp_pointer_constraints_v1` ·
-`zwp_primary_selection_device_manager_v1` · `wp_cursor_shape_manager_v1`, plus
-`xwayland_shell_v1` to the X server only.
+`zwp_primary_selection_device_manager_v1` · `wp_cursor_shape_manager_v1` ·
+`zwp_text_input_manager_v3`, plus `xwayland_shell_v1` to the X server only.
 
 ---
 
@@ -43,7 +43,7 @@ Each of these is a day where somebody stops using the compositor.
 | | what breaks without it |
 |---|---|
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) `input-method-v2` | no CJK, no emoji picker, no on-screen keyboard — and the on-screen keyboard is what a phone is. `text-input-v3` is answered, but only to learn where the focused field's caret is: no text goes back to it. A compose key does work meanwhile: `keyboard = { options = "compose:ralt" }` |
-| [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a shell cannot list windows, so it cannot have a task switcher; switching to one needs `zwlr_foreign_toplevel_management_v1` as well. A hosted shell has no window list either |
+| [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a shell cannot list windows, so it cannot have a task switcher; switching to one needs `zwlr_foreign_toplevel_management_v1` as well. A hosted shell has no window list either ([#166](https://github.com/Lilium-Linux/solium/issues/166)) |
 | [#51](https://github.com/Lilium-Linux/solium/issues/51) `wlr-output-management` | monitors are arranged by the configuration: `sol.monitors` places and scales them, and `super+shift+r` applies a change. No client can do it, so `kanshi` and a settings panel cannot work, and a monitor's mode and rotation are read only when it is added |
 | [#52](https://github.com/Lilium-Linux/solium/issues/52) data-control | no clipboard manager can work |
 | [#55](https://github.com/Lilium-Linux/solium/issues/55) `zwp_virtual_keyboard_v1` | the other half of an on-screen keyboard. `input-method-v2` says what was typed; this is how anything types it |
@@ -59,7 +59,7 @@ Not a whole day lost — one application, or one workflow, that does not work.
 | [#59](https://github.com/Lilium-Linux/solium/issues/59) `linux-drm-syncobj` (explicit sync) | modern Vulkan and NVIDIA clients. Its absence is stutter and the occasional torn frame, and it is the single most-reported "your compositor is broken" on other projects |
 | [#67](https://github.com/Lilium-Linux/solium/issues/67) `xdg-foreign-v2` | a file chooser or a screen-share dialog that has to be parented to the window that opened it. Otherwise it lands wherever the layout puts it |
 | [#68](https://github.com/Lilium-Linux/solium/issues/68) `wp-security-context-v1` | how a Flatpak identifies itself. Without it there is no way to treat sandboxed clients differently, ever |
-| [#60](https://github.com/Lilium-Linux/solium/issues/60) `ext-workspace-v1` | Solium *has* workspaces, in `workspaces.lua`, and no client can see or switch them. A shell cannot show which one you are on |
+| [#60](https://github.com/Lilium-Linux/solium/issues/60) `ext-workspace-v1` | Solium *has* workspaces, in `workspaces.lua`, and no client can see or switch them. A shell cannot show which one you are on, nor can a hosted shell ([#166](https://github.com/Lilium-Linux/solium/issues/166)) |
 | [#69](https://github.com/Lilium-Linux/solium/issues/69) `zwlr_gamma_control_v1` | night light. `gammastep` and `redshift` speak only this |
 | [#61](https://github.com/Lilium-Linux/solium/issues/61) KDE `server-decoration` | some Qt applications ask for decorations with this and nothing else, and draw none when it is missing |
 | [#62](https://github.com/Lilium-Linux/solium/issues/62) `zwp_tablet_manager_v2` | drawing tablets, and the stylus on any 2-in-1 — which is a form factor this project is explicitly for |
@@ -92,6 +92,7 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 | | |
 |---|---|
 | [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | the `Lock` and `PrepareForSleep` signals are ignored, so `loginctl lock-session` and whatever locks that way do nothing, and locking before suspend is up to `swayidle -w` |
+| [#151](https://github.com/Lilium-Linux/solium/issues/151) media keys | no volume, brightness, media, screenshot or lock keys are bound by default |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput device settings | none are set: no tap-to-click, which libinput leaves off, so tapping a touchpad does nothing; no acceleration profile or speed, disable-while-typing, left-handed mode or middle-button emulation; and natural scrolling comes only from the form factor, for every device at once |
 
 ### The backend
@@ -112,7 +113,6 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 |---|---|
 | [#48](https://github.com/Lilium-Linux/solium/issues/48) the seat flake | three of forty-three logged sessions got no input devices. Devices arrive within a few seconds or not at all, so a longer watchdog would not have saved one; the cause is not known |
 | [#65](https://github.com/Lilium-Linux/solium/issues/65) a hardware soak | the compositor has never run unattended for hours on a real session. `SOLIUM_SOAK_TTY=1 dev/soak.sh` can do it, though only its clients churn there, since the TTY backend ignores the scripted key presses; no run is recorded |
-| [#38](https://github.com/Lilium-Linux/solium/issues/38) synthetic drags | they happen in one instant, so no timing-dependent test means anything |
 | [#40](https://github.com/Lilium-Linux/solium/issues/40) xwayland selection flush | a workaround waiting on Smithay |
 | [#66](https://github.com/Lilium-Linux/solium/issues/66) packaging | `dev/install.sh` installs from a checkout and `dev/rpm.sh` builds a Fedora 44 package of one, but there are no packages in a repository: no COPR, no Arch `PKGBUILD`. `--config` ([#106](https://github.com/Lilium-Linux/solium/issues/106)) and the configuration directory's name ([#107](https://github.com/Lilium-Linux/solium/issues/107)) are worth settling first |
 | [#82](https://github.com/Lilium-Linux/solium/issues/82) crash recovery | the compositor dying takes the session with it. There is no supervisor and nothing to come back to |
@@ -121,9 +121,10 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 
 | | |
 |---|---|
-| [E7](https://github.com/Lilium-Linux/solium/issues/7) touch, gestures, form factors | the animation engine takes an initial velocity precisely so a gesture's throw can be handed to it. Nothing yet hands it one |
+| [E7](https://github.com/Lilium-Linux/solium/issues/7) touch, gestures, form factors | the animation engine takes an initial velocity precisely so a gesture's throw can be handed to it. Nothing yet hands it one, and gestures come after v0.1.0 |
+| [#181](https://github.com/Lilium-Linux/solium/issues/181) touch on the compositor's own UI | touch reaches applications' windows and a tap focuses the window under it, but nothing the compositor draws reacts to a finger (frame buttons, a hosted shell scene, the overview, window edges), because touch goes only to client surfaces; a script hears no touch either |
 | [E8](https://github.com/Lilium-Linux/solium/issues/8) settings | a surface built from what scripts declare rather than a fixed schema |
-| **the dock, and the morph** | `sol.present_from` already grows a window out of the rectangle an icon occupied, and a genie can aim at a window or a scripted surface. What is missing is a dock icon to aim at. A dock hosted in the compositor is in the same engine, and the plan is for its QML to name the icon so an animation can follow it while it moves; nothing of that is built, and no issue tracks it yet. Only a dock that runs as its own program would need a protocol to hand the rectangle over |
+| **the dock, and the morph** | `sol.present_from` already grows a window out of the rectangle an icon occupied, and a genie can aim at a window or a scripted surface. What is missing is a dock icon to aim at. A dock hosted in the compositor is in the same engine, and the plan is for its QML to name the icon so an animation can follow it while it moves; nothing of that is built, and it is tracked under Later in [#169](https://github.com/Lilium-Linux/solium/issues/169). Only a dock that runs as its own program would need a protocol to hand the rectangle over |
 | [#49](https://github.com/Lilium-Linux/solium/issues/49) fullscreen animation | entering fullscreen snaps |
 | [#30](https://github.com/Lilium-Linux/solium/issues/30) a minimise state | so the genie animation means something |
 | [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | `xdg-desktop-portal-wlr` can screen-share through `wlr-screencopy`, but nothing has been configured or tested end to end, and file chooser and settings portals are separate again |
