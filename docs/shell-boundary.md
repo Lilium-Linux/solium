@@ -383,7 +383,11 @@ being `"layout"`, `"caps"` or `"num"`, and never for ordinary typing
 (`models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`).
 It is published once a frame, beside the monitors. It has no row types of its
 own, so the one name it takes in `import Solium` is `Keyboard` itself, as
-`Theme` takes `Theme`. Lua hears the same changes through
+`Theme` takes `Theme`. It says what the keyboard is, where
+`Solium.keyboard`, above, is how an item asks for it, and a switch made while
+a scene holds the keyboard is told all the same
+(`keyboard_change::tests::a_switch_made_while_a_scene_holds_the_keyboard_is_told_and_the_scene_types_with_it`).
+Lua hears the same changes through
 `sol.on("keyboard", ...)`, but for those made at the lock screen
 (`state::tests::real_client::lock_focus::a_caps_toggle_at_the_lock_screen_is_not_told_to_the_configuration`),
 and reads the focused text field's caret with `sol.text_input()`, hearing it

@@ -172,6 +172,55 @@ pub(crate) mod tests {
         assert_eq!(seen(&state), "layout:2:Russian:RU:false:true");
     }
 
+    /// **A layout switch and a Caps toggle made while a scene holds the
+    /// keyboard are told once each, with `us,ru` and Russian active**, and
+    /// the scene still types with the keyboard as it now is: the keys go to
+    /// the scene (#163), and the change is told all the same (#178).
+    #[test]
+    fn a_switch_made_while_a_scene_holds_the_keyboard_is_told_and_the_scene_types_with_it() {
+        use smithay::output::{Output, PhysicalProperties, Subpixel};
+        let (_display, mut state) = us_ru(1);
+        configured(&mut state, "held", RECORDER);
+        state.hosted_keyboard = Some(crate::state::HostedKeyboard {
+            surface: crate::scripted::SurfaceId::from_raw(0),
+            output: Output::new(
+                "held-1".to_owned(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_owned(),
+                    model: "held".to_owned(),
+                },
+            ),
+            claims: Vec::new(),
+            policy: crate::scripted::KeyPolicy::ExceptClaimed,
+            returns_to: None,
+        });
+        let typed = |state: &mut Solium| -> Vec<String> {
+            state
+                .scene_keys
+                .drain(..)
+                .filter(|key| key.pressed && !key.text.is_empty())
+                .map(|key| key.text)
+                .collect()
+        };
+
+        tap(&mut state, &[CAPS]);
+        assert_eq!(seen(&state), "caps:2:Russian:RU:true:false");
+        tap(&mut state, &[A]);
+        assert_eq!(seen(&state), "", "a letter is no change");
+        assert_eq!(typed(&mut state), ["Ф"], "Russian, with Caps on");
+
+        tap(&mut state, &[ALT, SHIFT]);
+        assert_eq!(seen(&state), "layout:1:English (US):EN:true:false");
+        tap(&mut state, &[A]);
+        assert_eq!(typed(&mut state), ["A"], "English, with Caps on");
+        assert!(
+            state.hosted_keyboard.is_some(),
+            "the scene still holds the keyboard"
+        );
+    }
+
     /// **`sol.keyboard{ active = 2 }` from a binding is told as a layout
     /// change**, and asking for the layout already live is told nothing.
     #[test]
