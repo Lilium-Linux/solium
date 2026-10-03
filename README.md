@@ -23,8 +23,8 @@ use, and the trial on real hardware that decides whether it is ready has not
 happened yet. What stands in the way is the
 [`daily-drive` label][daily-drive], and the honest reasons are specific:
 
-- A hosted shell is not yet a whole desktop ([#169]). It gets no keyboard
-  ([#163]), and it sees no windows or workspaces ([#166]).
+- A hosted shell is not yet a whole desktop ([#169]): it sees no windows or
+  workspaces ([#166]).
 - Suspend and resume have never been tested ([#64]), and a session on the
   hardware sometimes starts with no input devices and stops itself ([#48]).
 - Nothing has run unattended for hours on the hardware ([#65]), and turning
@@ -518,7 +518,6 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#153]: https://github.com/Lilium-Linux/solium/issues/153
 [#156]: https://github.com/Lilium-Linux/solium/issues/156
 [#157]: https://github.com/Lilium-Linux/solium/issues/157
-[#163]: https://github.com/Lilium-Linux/solium/issues/163
 [#164]: https://github.com/Lilium-Linux/solium/issues/164
 [#166]: https://github.com/Lilium-Linux/solium/issues/166
 [#169]: https://github.com/Lilium-Linux/solium/issues/169

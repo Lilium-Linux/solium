@@ -208,6 +208,137 @@ and the pointer keeps the shape it had at the press
 `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
 `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`).
 
+**Popups that hold the pointer.** `Grab { name: "tray-menu"; target: menu;
+active: menu.visible; onDismissed: menu.close() }` holds the pointer for the
+scene while it is active
+(`qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`):
+motion and the wheel go to it wherever the pointer is, and no window has the
+pointer, nor its frame, nor the keyboard when focus follows the mouse
+(`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`,
+`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_wheel_is_the_scenes`,
+`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`).
+Its `target` is an item or a Qt Quick Controls `Popup`, a `Menu` among them;
+anything else has no points, so every press dismisses the grab, and the log
+says so
+(`qml::hosted::tests::a_controls_popup_is_a_grabs_target`).
+A press inside its target is the scene's, even where no item there takes
+input
+(`state::tests::real_client::reflow_on_close::hosted::a_press_inside_the_grab_target_reaches_the_scene`).
+A press outside it dismisses it: every active `Grab` of the scene hears
+`dismissed`, newest first
+(`qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`),
+and the press is then swallowed, its release with it, or passed on to
+whatever is under it when `outside_click` says `"pass"`
+(`state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+`state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`).
+However a grab ends, swallowed, passed, or let go of by its scene, the window
+under the pointer has the pointer back at once, so a click there with no
+motion before it reaches it
+(`state::tests::real_client::reflow_on_close::hosted::a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`).
+`shell.outside_click` in `config.lua` is the hosted shell's, `"swallow"` by
+default, and a table names grabs, `{ default = "swallow", ["tray-menu"] =
+"pass" }`
+(`script::tests::the_shell_takes_its_outside_click_from_the_configuration`,
+`state::tests::real_client::reflow_on_close::hosted::a_policy_named_for_the_grab_beats_the_default`).
+One grab is held at a time, and one another scene takes dismisses it
+(`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`).
+A surface the pointer does not reach, declared `interactive = false`, holds
+no grab, and its scene's grabs dismiss none
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`);
+one declared so while it holds a grab hears it dismissed
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_dismisses_the_grab_it_held`).
+A press the scene already held when its grab began keeps the pointer until
+its release, so a button whose press opens a menu is let go of as usual
+(`state::tests::real_client::reflow_on_close::hosted::a_press_held_when_a_grab_begins_keeps_the_pointer_until_its_release`).
+A game's pointer lock is let go while a grab is held, at once even while a
+press of the game's own still keeps the pointer on it, and comes back after it
+(`state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
+`state::tests::real_client::reflow_on_close::hosted::a_grab_begun_during_a_press_on_a_locked_window_lets_go_of_the_lock_at_once`),
+and locking the session dismisses it
+(`state::tests::real_client::reflow_on_close::hosted::locking_the_session_dismisses_a_hosted_grab`).
+No grab is held behind the lock; one a scene takes there is held once the
+lock is gone
+(`state::tests::real_client::lock_focus::a_grab_a_scene_takes_behind_the_lock_is_held_once_it_is_gone`).
+
+**The keyboard, when an item asks.** `TextField { Solium.keyboard.wants:
+activeFocus; Solium.keyboard.claims: [ "Escape", "Return", "Up", "Down" ] }`
+takes the keyboard while it is visible and wants it
+(`qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+`qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`). Every
+hosted scene's window is active from the start, so `focus: true` gives a
+field `activeFocus`; bind `wants` to it, because the compositor takes the
+keyboard back by taking that focus away. Whatever `wants` is bound to, a
+scene the keyboard was taken back from does not take it again until an item
+asks anew: it comes to want it, is shown again, or takes active focus again
+(`qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`).
+Written on a Qt Quick Controls
+`Popup`, which is no item, `Solium.keyboard` is the popup's own, its
+`activeFocus` and its being open, so a search popup is `Popup { focus: true;
+Solium.keyboard.wants: activeFocus; TextField { focus: true } }`
+(`qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`);
+on anything that is neither an item nor a `Popup` it holds nothing, and the
+log says so. Such a popup holds the pointer with a `Grab` and the keyboard at
+once: a press outside it dismisses it and the window under the pointer has
+the pointer back, and the keyboard once the field lets go
+(`state::tests::real_client::reflow_on_close::hosted::a_search_popup_holding_the_pointer_and_the_keyboard_gives_both_back_when_dismissed`). The
+window that had the keyboard loses it meanwhile, still reads as the focused
+window and is drawn focused, and gets it back when the field lets go
+(`state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`).
+Text comes from the compositor's own keyboard state, so typing works with any
+layout active, Russian included
+(`input::tests::russian_typed_through_the_compositor_reaches_a_hosted_text_field`,
+`input::tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`),
+and with Control held a letter is named by the one your Latin layout has on
+that key, as Qt names it, so `ctrl+a` and `ctrl+z` work with Russian active
+(`input::tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`),
+and a key held repeats at the keyboard's own rate
+(`input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`,
+`input::tests::a_held_key_noticed_late_still_repeats_at_the_keyboards_rate`),
+unless your keymap says it does not, as it says of a modifier, AltGr among
+them, and of a group toggle such as `grp:alt_shift_toggle`
+(`input::tests::a_held_modifier_does_not_repeat_into_the_scene`,
+`input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`).
+The compositor's bindings keep working, `super+q` on Russian among them,
+except the keys the item claims, which are the field's
+(`input::tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,
+`input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`); a claim
+is spelled as `sol.bind` spells a key. `shell.keyboard.bindings` in
+`config.lua` changes that: `"all"` keeps every binding, claimed or not, and
+`"none"` gives the shell every key
+(`input::tests::with_bindings_all_a_claimed_binding_wins`,
+`input::tests::with_bindings_none_even_super_bindings_reach_the_scene`,
+`script::tests::the_shell_takes_its_keyboard_bindings_from_the_configuration`),
+and a reload that changes it applies from the next key, while the shell holds
+the keyboard
+(`state::tests::real_client::reflow_on_close::hosted::a_bindings_policy_redeclared_while_the_shell_holds_the_keyboard_applies_at_once`).
+The Ctrl+Alt escapes always work
+(`input::tests::the_escape_hatches_beat_a_shell_that_holds_the_keyboard`).
+Clicking a window or `sol.focus` takes the keyboard back
+(`state::tests::real_client::reflow_on_close::hosted::clicking_a_window_ends_the_shells_hold`,
+`state::tests::real_client::reflow_on_close::hosted::sol_focus_ends_the_shells_hold`),
+and so does locking the session; no scene holds it behind the lock, and one
+that asks there has it once the lock is gone
+(`state::tests::real_client::lock_focus::no_scene_holds_the_keyboard_while_the_session_is_locked`).
+The pointer crossing a window does not take it back, even with focus
+following the mouse
+(`state::tests::real_client::reflow_on_close::hosted::the_pointer_crossing_a_window_does_not_end_the_shells_hold`).
+One scene holds it at a time
+(`state::tests::real_client::reflow_on_close::hosted::a_hold_another_scene_takes_returns_to_the_window_the_first_took_it_from`),
+and a scene whose monitor is unplugged gives it back
+(`state::tests::real_client::reflow_on_close::hosted::a_monitor_unplugged_while_its_scene_holds_the_keyboard_gives_it_back`).
+A surface the pointer does not reach, declared `interactive = false`, holds
+no keyboard, as it holds no grab, since nothing could click it to take the
+keyboard back; one declared so while its scene holds it gives it back
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_keyboard`,
+`state::tests::real_client::reflow_on_close::hosted::a_surface_declared_again_out_of_the_pointers_reach_gives_the_keyboard_back`).
+The compositor's own Qt loads no input method from your session, so IBus and
+the like do not run inside it
+(`launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`);
+the programs it starts still get yours
+(`launch::tests::a_spawned_program_gets_the_input_method_the_compositors_qt_does_not`).
+
 **The compositor's clock and frames.** Its animations advance on the same
 clock as every window transform, a running animation asks for the next frame,
 and the scene is redrawn only when Qt says it changed. Qt is served between
@@ -283,8 +414,11 @@ workspaces, any binding — a hosted shell can ask for this way.
 
 Said plainly, because a shell that loads is easy to mistake for one that works:
 
-- **No keyboard.** No keyboard focus and no grabs (#85): a launcher's text
-  field cannot be typed into.
+- **No compose or dead keys** in a hosted field, and no input method: a
+  field types what the key types.
+- **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
+  field copy and paste within the compositor's own Qt: what a window copied
+  cannot be pasted into it, nor the other way round.
 - **No window list, and no icons.** Nothing tells a hosted scene which
   windows exist, and there is no `image://` provider for the icon theme.
   Driving the compositor goes through `action` and Lua.

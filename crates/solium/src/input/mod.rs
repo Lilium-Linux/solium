@@ -38,7 +38,8 @@ use crate::{
     pane::Pane,
     qml::hosted::{PointerKind, ScenePointer},
     script,
-    state::{Chrome, Request, Solium},
+    scripted::KeyPolicy,
+    state::{Chrome, GrabRoute, Request, Solium},
 };
 
 use grab::MoveGrab;
@@ -57,6 +58,9 @@ enum Action {
     Bound(String),
     /// A backend request: switch VT, or stop.
     Backend(Request),
+    /// A key for the scene holding the keyboard.
+    /// `tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`.
+    Scene(crate::qml::hosted::SceneKey),
 }
 
 /// Route one backend event to the seat.
@@ -182,6 +186,15 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
             let sealed = locked && !state.keys_may_pass();
 
             if !pressed {
+                // The release of a key whose press went to a scene goes to
+                // no window, which never saw the press, whether or not the
+                // scene still holds the keyboard.
+                // `tests::a_release_whose_press_went_to_a_scene_reaches_no_window`.
+                if state.keys_to_scene.remove(&code.raw()) && !sealed {
+                    return FilterResult::Intercept(Some(Action::Scene(scene_key(
+                        &handle, modifiers, false,
+                    ))));
+                }
                 // Releases are never bindings, but they must still reach a
                 // client that received the press, or it holds the key forever.
                 // So the question is whether the *press* was forwarded, not
@@ -200,8 +213,14 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
             }
 
             let result = press(state, modifiers, handle, locked, sealed);
-            if matches!(result, FilterResult::Forward) {
-                state.keys_forwarded.insert(code.raw());
+            match result {
+                FilterResult::Forward => {
+                    state.keys_forwarded.insert(code.raw());
+                }
+                FilterResult::Intercept(Some(Action::Scene(_))) => {
+                    state.keys_to_scene.insert(code.raw());
+                }
+                FilterResult::Intercept(_) => {}
             }
             result
         },
@@ -215,6 +234,7 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
             tracing::info!(?request, "backend request from a key");
             state.request = Some(request);
         }
+        Some(Some(Action::Scene(key))) => state.deliver_scene_key(key),
         _ => {}
     }
 
@@ -272,6 +292,53 @@ fn press(
         };
     }
 
+    // A scene holding the keyboard (primitive 6). The escape hatches and the
+    // lock gate are above; then, by its surface's policy, a key the holding
+    // item claims is the scene's, then the bindings, and every other key is
+    // the scene's. Claims and bindings alike are tried under both of
+    // `combos_for`'s names, so `super+q` binds on Russian and a claim of
+    // `Escape` holds on any layout. The policy is the surface's as it is
+    // declared now, so a reload that changes it applies from the next key.
+    // `tests::a_claimed_key_reaches_the_scene_and_not_its_binding`,
+    // `tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,
+    // `tests::with_bindings_all_a_claimed_binding_wins`,
+    // `tests::with_bindings_none_even_super_bindings_reach_the_scene`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_bindings_policy_redeclared_while_the_shell_holds_the_keyboard_applies_at_once`.
+    if let Some(holder) = state.hosted_keyboard.as_ref() {
+        let combos = combos_for(
+            modifiers,
+            handle.modified_sym(),
+            handle.raw_latin_sym_or_raw_current_sym(),
+        );
+        let claimed = combos.iter().any(|combo| {
+            holder
+                .claims
+                .iter()
+                .any(|claim| script::normalise_combo(claim) == *combo)
+        });
+        let bound = || {
+            state.scripts.as_ref().and_then(|scripts| {
+                combos
+                    .iter()
+                    .find(|combo| scripts.has_binding(combo))
+                    .cloned()
+            })
+        };
+        let policy = state
+            .surfaces
+            .get(holder.surface)
+            .map_or(holder.policy, |surface| surface.declared.keyboard);
+        let binding = match policy {
+            KeyPolicy::ExceptClaimed if claimed => None,
+            KeyPolicy::ExceptClaimed | KeyPolicy::All => bound(),
+            KeyPolicy::NoBindings => None,
+        };
+        return FilterResult::Intercept(Some(match binding {
+            Some(combo) => Action::Bound(combo),
+            None => Action::Scene(scene_key(&handle, modifiers, true)),
+        }));
+    }
+
     // A press answers to two names, tried in order -- see
     // `combos_for` for why both, why this order, and why the second is
     // the key as a Latin layout names it rather than the active one.
@@ -324,6 +391,56 @@ fn press(
         FilterResult::Intercept(None)
     } else {
         FilterResult::Forward
+    }
+}
+
+/// A key as the scene holding the keyboard is told it: what it types from
+/// the compositor's own xkb state, with the active group, so `ru` types
+/// Cyrillic; Qt's name for it; the modifiers held; and its keycode.
+/// `tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`,
+/// `tests::the_scene_is_told_each_key_as_qt_names_it`.
+///
+/// With Control held, a key whose symbol is not Latin-1 is named by the
+/// Latin-1 letter a Latin layout has on it, as Qt names it itself
+/// (`QXkbCommon::keysymToQtKey`), so a field's `ctrl+a` and `ctrl+z` work
+/// with Russian active; its text stays the active group's.
+/// `tests::with_control_held_a_cyrillic_letter_is_told_by_its_latin_name`,
+/// `tests::ctrl_a_selects_all_in_a_hosted_text_field_on_russian`.
+///
+/// Whether it repeats while held is the keymap's, as every Wayland client
+/// asks it: no modifier does, AltGr and Meta among them, nor a group toggle
+/// such as `grp:alt_shift_toggle`'s, whatever Qt calls it.
+/// `tests::a_held_modifier_does_not_repeat_into_the_scene`,
+/// `tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
+#[expect(
+    unsafe_code,
+    reason = "asking smithay's xkb keymap whether a key repeats"
+)]
+fn scene_key(
+    handle: &smithay::input::keyboard::KeysymHandle<'_>,
+    modifiers: &ModifiersState,
+    pressed: bool,
+) -> crate::qml::hosted::SceneKey {
+    let sym = handle.modified_sym();
+    let text = xkb::keysym_to_utf8(sym);
+    let named = match handle.raw_latin_sym_or_raw_current_sym() {
+        Some(latin) if modifiers.ctrl && sym.raw() > 0xff && latin.raw() <= 0xff => latin,
+        _ => sym,
+    };
+    let code = handle.raw_code();
+    let repeats = handle.xkb().lock().is_ok_and(|held| {
+        // SAFETY: the keymap is borrowed for this one call, under the lock,
+        // and nothing of it outlives the `Xkb` it belongs to.
+        unsafe { held.keymap() }.key_repeats(code)
+    });
+    crate::qml::hosted::SceneKey {
+        pressed,
+        qt_key: crate::qml::keys::qt_key(named, &xkb::keysym_to_utf8(named)),
+        modifiers: crate::qml::keys::qt_modifiers(modifiers),
+        text,
+        autorepeat: false,
+        repeats,
+        code: code.raw(),
     }
 }
 
@@ -448,13 +565,17 @@ fn pointer_motion<B: InputBackend>(
     // password field of is no use -- but nothing of the session's may notice
     // it going past.
     if state.lock.is_none() {
-        // Scripted surfaces above the windows see the pointer first, so a
-        // button on a bar lights up on hover. Then frames, every time, so one
-        // a shell's button came over hears the pointer leave it
+        // A scene holding a grab hears the motion wherever it is, and nothing
+        // else does
+        // (`state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`).
+        // Otherwise scripted surfaces above the windows see the pointer
+        // first, so a button on a bar lights up on hover. Then frames, every
+        // time, so one a shell's button came over hears the pointer leave it
         // (`state::tests::real_client::reflow_on_close::hosted::a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it`).
         // Then the ones below, if none above took it.
         let motion = scene_event(state, PointerKind::Motion);
-        let above = state.surface_pointer(true, location, Some(motion));
+        let above = state.grab_pointer(location, motion)
+            || state.surface_pointer(true, location, Some(motion));
         hover_frame(state, location);
         if !above {
             state.surface_pointer(false, location, Some(motion));
@@ -538,7 +659,8 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         // on the hardware and nowhere else.
         if state.lock.is_none() {
             let motion = scene_event(state, PointerKind::Motion);
-            let above = state.surface_pointer(true, location, Some(motion));
+            let above = state.grab_pointer(location, motion)
+                || state.surface_pointer(true, location, Some(motion));
             hover_frame(state, location);
             if !above {
                 state.surface_pointer(false, location, Some(motion));
@@ -598,6 +720,14 @@ fn held(
     wanted: Point<f64, Logical>,
     was: Point<f64, Logical>,
 ) -> (Point<f64, Logical>, bool) {
+    // While a hosted scene holds a grab, no window's constraint holds the
+    // pointer, nor is one granted: not even the one of a window a press
+    // still keeps the pointer on, through the grab smithay started for it
+    // (Ruling 12).
+    // `state::tests::real_client::reflow_on_close::hosted::a_grab_begun_during_a_press_on_a_locked_window_has_the_pointer_after_the_release`.
+    if state.hosted_grab.is_some() {
+        return (wanted, false);
+    }
     let Some(surface) = pointer.current_focus() else {
         return (wanted, false);
     };
@@ -777,13 +907,20 @@ pub(crate) fn scene_event(state: &Solium, kind: PointerKind) -> ScenePointer {
 /// And over a client's layer surface on top of a window, which is what the
 /// pointer is on there, as it is for a press (`pointer_button`'s
 /// `on_a_client`), and over a hosted scene where it takes a press, or while
-/// it holds one (Rulings 7 and 8). `focus_follows_mouse_does_not_reach_through_a_bar`,
-/// `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`.
+/// it holds one (Rulings 7 and 8), or holds a grab (Ruling 12), or holds the
+/// keyboard, which a click takes back and the pointer passing does not
+/// (Ruling 14).
+/// `focus_follows_mouse_does_not_reach_through_a_bar`,
+/// `state::tests::real_client::reflow_on_close::hosted::focus_follows_the_mouse_through_a_shell_only_where_it_takes_no_press`,
+/// `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_no_window_takes_focus_frame_or_cursor_from_the_pointer`,
+/// `state::tests::real_client::reflow_on_close::hosted::the_pointer_crossing_a_window_does_not_end_the_shells_hold`.
 pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, grabbed: bool) {
     if !state.profile.focus_follows_mouse
         || grabbed
         || state.script_grab
         || state.scene_press.is_some()
+        || state.hosted_grab.is_some()
+        || state.hosted_keyboard.is_some()
         || state.pointed_above(location)
     {
         return;
@@ -893,6 +1030,18 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         return;
     }
 
+    // A grab a scene holds has the press first, and a press the compositor
+    // swallowed has its release swallowed, wherever it lands (Ruling 12).
+    // `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_swallowed_unnamed_press_swallows_its_release_off_the_scene`.
+    match state.grab_button(location, button, pressed, scene) {
+        GrabRoute::Taken => {
+            state.redraw = true;
+            return;
+        }
+        GrabRoute::Passed | GrabRoute::NoGrab => {}
+    }
+
     // A button Qt has no name for, while a scene holds a press, is none of
     // the compositor's to interpret either: the pointer is the scene's until
     // every button is up (Ruling 7), and no scene is told of such a button
@@ -924,11 +1073,16 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // first, even through a grab smithay started during it (Ruling 7):
     // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
     // A button Qt has no name for is swallowed where a scene takes a press,
-    // and the scene is not told of it:
-    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`.
+    // and the scene is not told of it, and so is its release, wherever it
+    // lands:
+    // `state::tests::real_client::reflow_on_close::hosted::a_button_qt_has_no_name_for_is_swallowed_where_a_shell_takes_a_press`,
+    // `state::tests::real_client::reflow_on_close::hosted::a_swallowed_unnamed_press_swallows_its_release_off_the_scene`.
     if (state.scene_press.is_some() || !pointer.is_grabbed())
         && state.surface_pointer(true, location, scene)
     {
+        if scene.is_none() && pressed {
+            state.swallowed.insert(button);
+        }
         return;
     }
 
@@ -1158,6 +1312,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // desktop menu lives: they get the press only because nothing above
     // wanted it.
     if !pointer.is_grabbed() && !on_a_client && state.surface_pointer(false, location, scene) {
+        if scene.is_none() && pressed {
+            state.swallowed.insert(button);
+        }
         return;
     }
 
@@ -1248,6 +1405,11 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
         .iter()
         .any(|delta| *delta != 0.0);
     let wheel = scene_event(state, PointerKind::Wheel { angle, pixels });
+    // A scene holding a grab has the wheel wherever the pointer is.
+    // `state::tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_wheel_is_the_scenes`.
+    if moves && state.grab_pointer(location, wheel) {
+        return;
+    }
     // A press a scene holds has the wheel too, through a grab smithay started
     // during it, as `pointer_button` gives it the buttons:
     // `state::tests::real_client::reflow_on_close::hosted::a_grab_started_during_a_scenes_press_leaves_it_the_wheel_and_the_release`.
@@ -1701,6 +1863,18 @@ mod tests {
         script: &str,
         run: impl FnOnce(&mut Solium) -> T,
     ) -> T {
+        with_keymap(name, layout, None, group, script, run)
+    }
+
+    /// [`with_keyboard`], with the xkb `options` too, such as a group toggle.
+    fn with_keymap<T>(
+        name: &str,
+        layout: &str,
+        options: Option<&str>,
+        group: u32,
+        script: &str,
+        run: impl FnOnce(&mut Solium) -> T,
+    ) -> T {
         use smithay::input::keyboard::{Layout, XkbConfig};
 
         let directory = std::env::temp_dir().join(format!("solium-keys-{name}"));
@@ -1717,6 +1891,7 @@ mod tests {
                 &mut state,
                 XkbConfig {
                     layout,
+                    options: options.map(str::to_owned),
                     ..Default::default()
                 },
             )
@@ -2234,5 +2409,572 @@ mod tests {
             dead.is_empty(),
             "shipped bindings that do not fire from their own key on `us,ru`: {dead:#?}"
         );
+    }
+
+    use crate::scripted::KeyPolicy;
+    use smithay::backend::input::KeyState;
+
+    const ESCAPE: u32 = 9;
+    const BACKSPACE: u32 = 22;
+    const CTRL: u32 = 37;
+    const ALT_L: u32 = 64;
+    const W: u32 = 25;
+
+    /// A scene holding the keyboard, with no scene behind it: what reaches it
+    /// is `Solium::scene_keys`.
+    fn holding(state: &mut Solium, claims: &[&str], policy: KeyPolicy) {
+        use smithay::output::{Output, PhysicalProperties, Subpixel};
+        let output = Output::new(
+            "held-1".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "solium".to_owned(),
+                model: "held".to_owned(),
+            },
+        );
+        state.hosted_keyboard = Some(crate::state::HostedKeyboard {
+            surface: crate::scripted::SurfaceId::from_raw(0),
+            output,
+            claims: claims.iter().map(|claim| (*claim).to_owned()).collect(),
+            policy,
+            returns_to: None,
+        });
+    }
+
+    /// The text of every press the scene was told, in order, clearing them.
+    fn typed(state: &mut Solium) -> Vec<String> {
+        state
+            .scene_keys
+            .drain(..)
+            .filter(|key| key.pressed && !key.text.is_empty())
+            .map(|key| key.text)
+            .collect()
+    }
+
+    /// **#132: while the shell holds the keyboard, Russian letters reach it as
+    /// Cyrillic**, and Latin ones as Latin, shifted ones in capitals.
+    #[test]
+    fn while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic() {
+        for (group, expected) in [(0, ["q", "W"]), (1, ["й", "Ц"])] {
+            with_keyboard(&format!("held-text-{group}"), "us,ru", group, "", |state| {
+                holding(state, &[], KeyPolicy::ExceptClaimed);
+                chord(state, &[Q]);
+                chord(state, &[SHIFT, W]);
+                assert_eq!(typed(state), expected.map(str::to_owned), "group {group}");
+            });
+        }
+    }
+
+    /// **The scene is told the key as Qt names it, with the modifiers held**:
+    /// `й` is Qt's `Й`, and shift is Qt's shift.
+    #[test]
+    fn the_scene_is_told_each_key_as_qt_names_it() {
+        with_keyboard("held-qt-key", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            chord(state, &[SHIFT, Q]);
+            let pressed: Vec<(i32, u32, u32)> = state
+                .scene_keys
+                .iter()
+                .filter(|key| key.pressed)
+                .map(|key| (key.qt_key, key.modifiers, key.code))
+                .collect();
+            assert_eq!(
+                pressed,
+                [
+                    (0x0100_0020, crate::qml::keys::QT_SHIFT, SHIFT),
+                    (0x0419, crate::qml::keys::QT_SHIFT, Q),
+                ],
+                "(the Qt key, the Qt modifiers, the xkb keycode) of shift and of Q"
+            );
+        });
+    }
+
+    /// **A key the holder claims is the scene's, not its binding's**, on the
+    /// Cyrillic group too, matched however the scene spelled it.
+    #[test]
+    fn a_claimed_key_reaches_the_scene_and_not_its_binding() {
+        let script = r#"sol.bind("Escape", function() sol.status("bound") end)"#;
+        with_keyboard("held-claimed", "us,ru", 1, script, |state| {
+            holding(state, &["Escape"], KeyPolicy::ExceptClaimed);
+            assert_eq!(
+                chord(state, &[ESCAPE]),
+                "",
+                "the binding took a claimed key"
+            );
+            assert!(
+                state
+                    .scene_keys
+                    .iter()
+                    .any(|key| key.pressed && key.qt_key == 0x0100_0000),
+                "Escape did not reach the scene"
+            );
+        });
+    }
+
+    /// **An unclaimed binding still fires while the shell holds the
+    /// keyboard**, and the key is not typed into the scene as well.
+    #[test]
+    fn an_unclaimed_binding_still_fires_while_the_shell_holds_the_keyboard() {
+        let script = r#"sol.bind("Escape", function() sol.status("bound") end)"#;
+        with_keyboard("held-unclaimed", "us,ru", 1, script, |state| {
+            holding(state, &["Return"], KeyPolicy::ExceptClaimed);
+            assert_eq!(chord(state, &[ESCAPE]), "bound");
+            assert!(
+                !state.scene_keys.iter().any(|key| key.code == ESCAPE),
+                "the bound key reached the scene as well"
+            );
+        });
+    }
+
+    /// **An unclaimed `super` binding still fires on Russian while the shell
+    /// holds the keyboard**, by its Latin name (#132).
+    #[test]
+    fn an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard() {
+        let script = r#"sol.bind("super+q", function() sol.status("super+q") end)"#;
+        with_keyboard("held-super", "us,ru", 1, script, |state| {
+            holding(state, &["Escape"], KeyPolicy::ExceptClaimed);
+            assert_eq!(chord(state, &[SUPER, Q]), "super+q");
+            assert!(
+                !typed(state).contains(&"й".to_owned()),
+                "the bound key was typed into the scene as well"
+            );
+        });
+    }
+
+    /// **A key nobody bound goes to the scene**, and not to the window that
+    /// had the keyboard, which a mode would swallow it from otherwise.
+    #[test]
+    fn a_key_nobody_bound_goes_to_the_scene() {
+        with_keyboard("held-unbound", "us,ru", 1, "", |state| {
+            holding(state, &["Escape"], KeyPolicy::ExceptClaimed);
+            chord(state, &[Q]);
+            assert!(
+                state.keys_forwarded.is_empty() && !state.scene_keys.is_empty(),
+                "(forwarded {:?}, told the scene {:?})",
+                state.keys_forwarded,
+                state.scene_keys
+            );
+        });
+    }
+
+    /// **With `bindings = "all"`, a claimed key's binding wins.**
+    #[test]
+    fn with_bindings_all_a_claimed_binding_wins() {
+        let script = r#"sol.bind("Escape", function() sol.status("bound") end)"#;
+        with_keyboard("held-all", "us,ru", 1, script, |state| {
+            holding(state, &["Escape"], KeyPolicy::All);
+            assert_eq!(chord(state, &[ESCAPE]), "bound");
+        });
+    }
+
+    /// **With `bindings = "none"`, even a `super` binding's key reaches the
+    /// scene.**
+    #[test]
+    fn with_bindings_none_even_super_bindings_reach_the_scene() {
+        let script = r#"sol.bind("super+q", function() sol.status("super+q") end)"#;
+        with_keyboard("held-none", "us,ru", 1, script, |state| {
+            holding(state, &[], KeyPolicy::NoBindings);
+            assert_eq!(chord(state, &[SUPER, Q]), "");
+            assert!(
+                state
+                    .scene_keys
+                    .iter()
+                    .any(|key| key.pressed && key.code == Q),
+                "the key did not reach the scene"
+            );
+        });
+    }
+
+    /// **The escape hatches beat a shell that holds the keyboard**: they are
+    /// the only keys that must work when everything else is broken, claimed
+    /// or not, whatever the policy.
+    #[test]
+    fn the_escape_hatches_beat_a_shell_that_holds_the_keyboard() {
+        with_keyboard("held-escape-hatch", "us,ru", 1, "", |state| {
+            holding(state, &["ctrl+alt+BackSpace"], KeyPolicy::NoBindings);
+            let _ = chord(state, &[CTRL, ALT_L, BACKSPACE]);
+            assert!(
+                matches!(state.request, Some(Request::Quit)),
+                "ctrl+alt+BackSpace did not reach the compositor"
+            );
+        });
+    }
+
+    /// **A release follows its press away from the windows**, even once the
+    /// hold is over, so no window hears the release of a key it never saw
+    /// pressed.
+    #[test]
+    fn a_release_whose_press_went_to_a_scene_reaches_no_window() {
+        with_keyboard("held-release", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            super::keyboard(
+                state,
+                Key {
+                    code: Q,
+                    state: KeyState::Pressed,
+                },
+            );
+            state.hosted_keyboard = None;
+            super::keyboard(
+                state,
+                Key {
+                    code: Q,
+                    state: KeyState::Released,
+                },
+            );
+            assert!(
+                state
+                    .scene_keys
+                    .iter()
+                    .any(|key| !key.pressed && key.code == Q),
+                "the release went elsewhere"
+            );
+            assert!(
+                state.keys_to_scene.is_empty(),
+                "the release was not counted as the scene's"
+            );
+        });
+    }
+
+    /// **A key held for the scene repeats at the keyboard's rate** (Ruling 14):
+    /// not before the delay, once after it, again an interval later, and not
+    /// once it is let go.
+    #[test]
+    fn a_held_key_repeats_into_the_scene_at_the_keyboards_rate() {
+        with_keyboard("held-repeat", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            super::keyboard(
+                state,
+                Key {
+                    code: Q,
+                    state: KeyState::Pressed,
+                },
+            );
+            let start = state.clock.now();
+            let delay = std::time::Duration::from_millis(
+                u64::try_from(state.keyboard.repeat_delay).unwrap_or(600),
+            );
+            let interval = std::time::Duration::from_millis(
+                1000 / u64::try_from(state.keyboard.repeat_rate).unwrap_or(25),
+            );
+            let repeats = |state: &Solium| {
+                state
+                    .scene_keys
+                    .iter()
+                    .filter(|key| key.autorepeat && key.text == "й")
+                    .count()
+            };
+            state.repeat_scene_key(start + delay / 2);
+            let before = repeats(state);
+            state.repeat_scene_key(start + delay + std::time::Duration::from_millis(1));
+            state.repeat_scene_key(start + delay + interval + std::time::Duration::from_millis(2));
+            let held = repeats(state);
+            super::keyboard(
+                state,
+                Key {
+                    code: Q,
+                    state: KeyState::Released,
+                },
+            );
+            state.repeat_scene_key(start + delay + interval * 3);
+            assert_eq!(
+                (before, held, repeats(state)),
+                (0, 2, 2),
+                "(repeats before the delay, after it and an interval on, after the release)"
+            );
+        });
+    }
+
+    /// **A held key keeps the keyboard's rate though the loop notices it
+    /// late**: each repeat is due an interval after the last was due, not
+    /// after the loop got to it, so the up to 16 ms a loop sleeps between
+    /// looks does not slow it down (Ruling 14).
+    #[test]
+    fn a_held_key_noticed_late_still_repeats_at_the_keyboards_rate() {
+        with_keyboard("held-repeat-late", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            super::keyboard(
+                state,
+                Key {
+                    code: Q,
+                    state: KeyState::Pressed,
+                },
+            );
+            let due = state.clock.now()
+                + std::time::Duration::from_millis(
+                    u64::try_from(state.keyboard.repeat_delay).unwrap_or(600),
+                );
+            let interval = std::time::Duration::from_millis(
+                1000 / u64::try_from(state.keyboard.repeat_rate).unwrap_or(25),
+            );
+            state.repeat_scene_key(due + std::time::Duration::from_millis(15));
+            state.repeat_scene_key(due + interval + std::time::Duration::from_millis(1));
+            assert_eq!(
+                state
+                    .scene_keys
+                    .iter()
+                    .filter(|key| key.autorepeat && key.text == "й")
+                    .count(),
+                2,
+                "repeats, looked for 15 ms late and then an interval after the first was due"
+            );
+        });
+    }
+
+    /// **A held modifier does not repeat into the scene**, and a letter
+    /// pressed after it does, with the modifier still down.
+    #[test]
+    fn a_held_modifier_does_not_repeat_into_the_scene() {
+        with_keyboard("held-modifier", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            super::keyboard(
+                state,
+                Key {
+                    code: SHIFT,
+                    state: KeyState::Pressed,
+                },
+            );
+            let start = state.clock.now();
+            let late = start + std::time::Duration::from_secs(5);
+            state.repeat_scene_key(late);
+            let alone = state.scene_keys.iter().filter(|key| key.autorepeat).count();
+            super::keyboard(
+                state,
+                Key {
+                    code: Q,
+                    state: KeyState::Pressed,
+                },
+            );
+            state.repeat_scene_key(late + std::time::Duration::from_secs(5));
+            let repeated: Vec<String> = state
+                .scene_keys
+                .iter()
+                .filter(|key| key.autorepeat)
+                .map(|key| key.text.clone())
+                .collect();
+            assert_eq!(
+                (alone, repeated),
+                (0, vec!["Й".to_owned()]),
+                "(repeats of shift alone, what repeated once a letter was held with it)"
+            );
+        });
+    }
+
+    /// **A held group toggle does not repeat into the scene** (#132): with
+    /// `grp:alt_shift_toggle` on `us,ru` and Russian active, shift pressed
+    /// with alt held is `ISO_Next_Group`, which Qt has no name for, and
+    /// holding it repeats nothing, as the keymap says of it.
+    #[test]
+    fn a_held_group_toggle_does_not_repeat_into_the_scene() {
+        with_keymap(
+            "held-group-toggle",
+            "us,ru",
+            Some("grp:alt_shift_toggle"),
+            1,
+            "",
+            |state| {
+                holding(state, &[], KeyPolicy::ExceptClaimed);
+                for code in [ALT_L, SHIFT] {
+                    super::keyboard(
+                        state,
+                        Key {
+                            code,
+                            state: KeyState::Pressed,
+                        },
+                    );
+                }
+                let toggle = state
+                    .scene_keys
+                    .last()
+                    .map(|key| (key.code, key.qt_key, key.text.clone()));
+                let late = state.clock.now() + std::time::Duration::from_secs(5);
+                state.repeat_scene_key(late);
+                let repeats = state.scene_keys.iter().filter(|key| key.autorepeat).count();
+                assert_eq!(
+                    (toggle, repeats),
+                    (Some((SHIFT, 0x01ff_ffff, String::new())), 0),
+                    "((the toggle's keycode, Qt key and text), its repeats)"
+                );
+            },
+        );
+    }
+
+    /// **#132, through the compositor: typing on Russian reaches a hosted
+    /// `TextField` as Cyrillic.** A real scene on a monitor, its field
+    /// focused and wanting the keyboard, takes it at the settle, and the keys
+    /// pressed through the real filter on `us,ru` with Russian active type
+    /// `й` and, with shift, `Ц` into it.
+    #[test]
+    fn russian_typed_through_the_compositor_reaches_a_hosted_text_field() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+            let directory = std::env::temp_dir().join("solium-keys-held-field-scene");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a directory for the scene");
+            let path = directory.join("Search.qml");
+            std::fs::write(
+                &path,
+                r#"
+                import QtQuick
+                import QtQuick.Controls
+                import Solium
+                Item {
+                    readonly property string typed: field.text
+                    TextField {
+                        id: field
+                        width: 200; height: 30
+                        focus: true
+                        Solium.keyboard.wants: activeFocus
+                        Solium.keyboard.claims: [ "Escape" ]
+                    }
+                }
+                "#,
+            )
+            .expect("writing the scene");
+            let typed = with_keyboard("held-field", "us,ru", 1, "", |state| {
+                let output = Output::new(
+                    "held-field-1".to_owned(),
+                    PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: Subpixel::Unknown,
+                        make: "solium".to_owned(),
+                        model: "held-field".to_owned(),
+                    },
+                );
+                output.change_current_state(
+                    Some(Mode {
+                        size: (640, 480).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    Some(Scale::Fractional(1.0)),
+                    None,
+                );
+                state.space.map_output(&output, (0, 0));
+                state.declare_surface(crate::scripted::Declaration::for_test(
+                    "search",
+                    path.clone(),
+                    crate::scripted::Layer::Top,
+                    crate::scripted::On::EveryMonitor,
+                ));
+                state.settle_scenes();
+                assert!(
+                    state.hosted_keyboard.is_some(),
+                    "the focused field did not take the keyboard"
+                );
+                chord(state, &[Q]);
+                chord(state, &[SHIFT, W]);
+                let id = state.surfaces.named("search").expect("declared");
+                state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(|surface| surface.instance_mut(&output))
+                    .map(|instance| instance.scene_for_test().get_string_for_test("typed"))
+            });
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(typed.as_deref(), Some("йЦ"));
+        });
+    }
+
+    const A: u32 = 38;
+    const E: u32 = 26;
+
+    /// **With Control held, a letter of a layout that is not Latin is told
+    /// by its Latin name**, as Qt itself names it (`QXkbCommon::keysymToQtKey`),
+    /// so a field's `ctrl+a`, `ctrl+c` and `ctrl+v` work with Russian active
+    /// (#132); what the key types is still the Cyrillic letter.
+    #[test]
+    fn with_control_held_a_cyrillic_letter_is_told_by_its_latin_name() {
+        with_keyboard("held-ctrl", "us,ru", 1, "", |state| {
+            holding(state, &[], KeyPolicy::ExceptClaimed);
+            chord(state, &[CTRL, A]);
+            let pressed: Vec<(i32, u32, String)> = state
+                .scene_keys
+                .iter()
+                .filter(|key| key.pressed && key.code == A)
+                .map(|key| (key.qt_key, key.modifiers, key.text.clone()))
+                .collect();
+            assert_eq!(
+                pressed,
+                [(0x41, crate::qml::keys::QT_CONTROL, "ф".to_owned())],
+                "(the Qt key, the Qt modifiers, the text) of ctrl and the key that is A on us"
+            );
+        });
+    }
+
+    /// **#132, through the compositor: `ctrl+a` selects all in a hosted
+    /// `TextField` with Russian active**, so what is typed next replaces it.
+    #[test]
+    fn ctrl_a_selects_all_in_a_hosted_text_field_on_russian() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+            let directory = std::env::temp_dir().join("solium-keys-ctrl-field-scene");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a directory for the scene");
+            let path = directory.join("Search.qml");
+            std::fs::write(
+                &path,
+                r#"
+                import QtQuick
+                import QtQuick.Controls
+                import Solium
+                Item {
+                    readonly property string typed: field.text
+                    TextField {
+                        id: field
+                        width: 200; height: 30
+                        focus: true
+                        Solium.keyboard.wants: activeFocus
+                    }
+                }
+                "#,
+            )
+            .expect("writing the scene");
+            let typed = with_keyboard("ctrl-field", "us,ru", 1, "", |state| {
+                let output = Output::new(
+                    "ctrl-field-1".to_owned(),
+                    PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: Subpixel::Unknown,
+                        make: "solium".to_owned(),
+                        model: "ctrl-field".to_owned(),
+                    },
+                );
+                output.change_current_state(
+                    Some(Mode {
+                        size: (640, 480).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    Some(Scale::Fractional(1.0)),
+                    None,
+                );
+                state.space.map_output(&output, (0, 0));
+                state.declare_surface(crate::scripted::Declaration::for_test(
+                    "search",
+                    path.clone(),
+                    crate::scripted::Layer::Top,
+                    crate::scripted::On::EveryMonitor,
+                ));
+                state.settle_scenes();
+                chord(state, &[Q]);
+                chord(state, &[W]);
+                chord(state, &[CTRL, A]);
+                chord(state, &[E]);
+                let id = state.surfaces.named("search").expect("declared");
+                state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(|surface| surface.instance_mut(&output))
+                    .map(|instance| instance.scene_for_test().get_string_for_test("typed"))
+            });
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                typed.as_deref(),
+                Some("у"),
+                "йц, then ctrl+a, then у: the selection replaced"
+            );
+        });
     }
 }

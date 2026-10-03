@@ -71,7 +71,253 @@ SoliumMonitor *solium_monitor_row(const QString &name)
     return absent;
 }
 
+SoliumHosting::~SoliumHosting()
+{
+    for (const QPointer<SoliumGrab> &grab : grabs) {
+        if (grab != nullptr) {
+            grab->detach();
+        }
+    }
+    for (const QPointer<SoliumKeyboard> &keyboard : keyboards) {
+        if (keyboard != nullptr) {
+            keyboard->detach();
+        }
+    }
+}
+
+namespace {
+
+/* How many times a grab has become active, so the newest of a scene's
+ * active grabs is the one that counted last.
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+quint64 g_activations = 0;
+
+} // namespace
+
+void SoliumGrab::componentComplete()
+{
+    m_hosting = solium_hosting_of(this);
+    if (m_hosting != nullptr) {
+        m_hosting->grabs.append(this);
+        mark();
+    }
+}
+
+SoliumGrab::~SoliumGrab()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->grabs.removeAll(this);
+        m_hosting->grab_dirty = true;
+    }
+}
+
+void SoliumGrab::mark()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->grab_dirty = true;
+    }
+}
+
+void SoliumGrab::setName(const QString &name)
+{
+    if (name != m_name) {
+        m_name = name;
+        mark();
+        emit nameChanged();
+    }
+}
+
+void SoliumGrab::setTarget(QObject *target)
+{
+    if (target != m_target) {
+        m_target = target;
+        /* A target that is neither an item nor a Popup has no points, so
+         * every press dismisses the grab: the log says so, once.
+         * `qml::hosted::tests::a_controls_popup_is_a_grabs_target`. */
+        if (target != nullptr && !m_target_warned && qobject_cast<QQuickItem *>(target) == nullptr
+            && !target->inherits("QQuickPopup")) {
+            m_target_warned = true;
+            qWarning("a Grab's target is an item or a Popup; this %s has no points, so every "
+                     "press dismisses the grab",
+                     target->metaObject()->className());
+        }
+        emit targetChanged();
+    }
+}
+
+QQuickItem *SoliumGrab::target_item() const
+{
+    if (auto *item = qobject_cast<QQuickItem *>(m_target.data())) {
+        return item;
+    }
+    if (m_target != nullptr && m_target->inherits("QQuickPopup")) {
+        auto *content = m_target->property("contentItem").value<QQuickItem *>();
+        return content != nullptr ? content->parentItem() : nullptr;
+    }
+    return nullptr;
+}
+
+void SoliumGrab::setActive(bool active)
+{
+    if (active != m_active) {
+        m_active = active;
+        if (active) {
+            m_activated = ++g_activations;
+        }
+        mark();
+        emit activeChanged();
+    }
+}
+
+namespace {
+
+/* How many times an item has come to want the keyboard, so the one that did
+ * last is known.
+ * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`. */
+quint64 g_wants = 0;
+
+/* The item Qt draws a Qt Quick Controls `Popup` as: its child of type
+ * QQuickPopupItem, which the popup makes with itself, so it is there from
+ * the popup's first binding, before any content item is; null for any
+ * other object.
+ * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
+QQuickItem *popup_item_of(QObject *object)
+{
+    if (object == nullptr || !object->inherits("QQuickPopup")) {
+        return nullptr;
+    }
+    for (QObject *child : object->children()) {
+        if (child->inherits("QQuickPopupItem")) {
+            return qobject_cast<QQuickItem *>(child);
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+SoliumKeyboard::SoliumKeyboard(QQuickItem *item, SoliumHosting *hosting)
+    : QObject(item), m_item(item), m_hosting(hosting)
+{
+    if (m_hosting != nullptr) {
+        m_hosting->keyboards.append(this);
+    }
+    /* Whether it holds the keyboard follows whether it is visible and
+     * whether it has active focus, and being shown again or taking active
+     * focus again is asking anew after a let-go.
+     * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`,
+     * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`. */
+    if (item != nullptr) {
+        QObject::connect(item, &QQuickItem::visibleChanged, this, [this]() {
+            if (m_item != nullptr && m_item->isVisible()) {
+                m_let_go = false;
+            }
+            mark();
+        });
+        QObject::connect(item, &QQuickItem::activeFocusChanged, this, [this]() {
+            if (m_item != nullptr && m_item->hasActiveFocus()) {
+                m_let_go = false;
+            }
+            mark();
+        });
+    }
+}
+
+SoliumKeyboard::~SoliumKeyboard()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->keyboards.removeAll(this);
+        m_hosting->keyboard_dirty = true;
+    }
+}
+
+void SoliumKeyboard::mark()
+{
+    if (m_hosting != nullptr) {
+        m_hosting->keyboard_dirty = true;
+    }
+}
+
+void SoliumKeyboard::setWants(bool wants)
+{
+    if (wants != m_wants) {
+        m_wants = wants;
+        if (wants) {
+            m_wanted_at = ++g_wants;
+            m_let_go = false;
+        }
+        mark();
+        emit wantsChanged();
+    }
+}
+
+void SoliumKeyboard::letGo()
+{
+    m_let_go = true;
+    mark();
+}
+
+void SoliumKeyboard::setClaims(const QStringList &claims)
+{
+    if (claims != m_claims) {
+        m_claims = claims;
+        mark();
+        emit claimsChanged();
+    }
+}
+
+SoliumKeyboard *solium_keyboard_holder(SoliumHosting *hosting)
+{
+    SoliumKeyboard *holder = nullptr;
+    if (hosting == nullptr) {
+        return holder;
+    }
+    for (const QPointer<SoliumKeyboard> &each : hosting->keyboards) {
+        if (each == nullptr || !each->wants() || each->isLetGo() || each->item() == nullptr
+            || !each->item()->isVisible()) {
+            continue;
+        }
+        if (each->item()->hasActiveFocus()) {
+            return each.data();
+        }
+        if (holder == nullptr || each->wantedAt() > holder->wantedAt()) {
+            holder = each.data();
+        }
+    }
+    return holder;
+}
+
 SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item) {}
+
+SoliumKeyboard *SoliumAttached::keyboard()
+{
+    /* On an item, the item's. On a Qt Quick Controls `Popup`, which is no
+     * item, the item Qt draws it as, whose visibility and active focus are
+     * the popup's own, as `Solium.input` and a `Grab`'s target read a popup.
+     * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`.
+     * In a scene that is not hosted, one nothing reads.
+     * `qml::hosted::tests::an_unhosted_scene_may_bind_the_keyboard_and_holds_nothing`.
+     * On any other object of a hosted scene, one nothing reads either, and
+     * the log says so, once for the object.
+     * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
+    if (m_keyboard == nullptr) {
+        QQuickItem *item = qobject_cast<QQuickItem *>(m_item);
+        if (item == nullptr) {
+            item = popup_item_of(m_item);
+        }
+        SoliumHosting *hosting = solium_hosting_of(m_item);
+        if (item == nullptr && hosting != nullptr) {
+            qWarning("Solium.keyboard holds the keyboard only on an item or a Popup; "
+                     "this %s will hold nothing",
+                     m_item != nullptr ? m_item->metaObject()->className() : "object");
+        }
+        m_keyboard = new SoliumKeyboard(item, item != nullptr ? hosting : nullptr);
+        if (item == nullptr) {
+            m_keyboard->setParent(this);
+        }
+    }
+    return m_keyboard;
+}
 
 SoliumMonitor *SoliumAttached::monitor() const
 {
@@ -283,4 +529,10 @@ void solium_qml_register_types()
      * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
     qmlRegisterAnonymousType<SoliumSurfaceInfo>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumReserve>(SOLIUM_NATIVE_URI, 1);
+    /* `Solium.keyboard`'s group, nameless for the same reason.
+     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    qmlRegisterAnonymousType<SoliumKeyboard>(SOLIUM_NATIVE_URI, 1);
+    /* Named, since a scene writes one: `Grab { ... }`.
+     * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
+    qmlRegisterType<SoliumGrab>(SOLIUM_NATIVE_URI, 1, 0, "Grab");
 }

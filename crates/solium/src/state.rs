@@ -118,6 +118,7 @@ use hit_test::{
     Claim, PaneHit, chrome_of, chrome_offered, claim_of, on_frame, pane_hit_of, shown_at,
     topmost_chrome,
 };
+pub(crate) use hosted::{GrabRoute, HostedGrab, HostedKeyboard, SceneRepeat};
 #[cfg(test)]
 use monitors::anywhere_on;
 use open::Claimed;
@@ -404,6 +405,30 @@ pub(crate) struct Solium {
     /// to be settled once that dispatch is done.
     /// `tests::real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`.
     scenes_to_settle: bool,
+    /// The one grab a hosted scene holds the pointer with (Ruling 12).
+    /// `tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`.
+    pub(crate) hosted_grab: Option<HostedGrab>,
+    /// The buttons whose press the compositor swallowed, by evdev code, so
+    /// their release is swallowed too, wherever it lands; forgotten at the
+    /// lock, behind which a release is the lock screen's.
+    /// `tests::real_client::reflow_on_close::hosted::a_swallowed_unnamed_press_swallows_its_release_off_the_scene`,
+    /// `tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+    /// `tests::real_client::reflow_on_close::hosted::the_lock_forgets_the_presses_a_shell_swallowed`.
+    pub(crate) swallowed: std::collections::HashSet<u32>,
+    /// The scene holding the keyboard, and the window it took the keyboard
+    /// from (Ruling 14).
+    /// `tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`.
+    pub(crate) hosted_keyboard: Option<HostedKeyboard>,
+    /// The keys whose press went to a scene, by xkb keycode, so their
+    /// release does too and never reaches a window.
+    /// `crate::input::tests::a_release_whose_press_went_to_a_scene_reaches_no_window`.
+    pub(crate) keys_to_scene: std::collections::HashSet<u32>,
+    /// The key held for the scene holding the keyboard, and when it repeats
+    /// next. `crate::input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
+    pub(crate) scene_repeat: Option<SceneRepeat>,
+    /// Every key told to the scene holding the keyboard, for the tests.
+    #[cfg(test)]
+    pub(crate) scene_keys: Vec<crate::qml::hosted::SceneKey>,
     // A window on its way out, and one that has been asked to close and not
     // gone, used to be two `HashMap<PaneId, Duration>` here. They are
     // `Pane::closing_at` and `Pane::asked_at` now: a timer about one window is
@@ -946,6 +971,13 @@ impl Solium {
             settling_scenes: false,
             laid_out_reserves: hosted::Reserves::new(),
             scenes_to_settle: false,
+            hosted_grab: None,
+            swallowed: std::collections::HashSet::new(),
+            hosted_keyboard: None,
+            keys_to_scene: std::collections::HashSet::new(),
+            scene_repeat: None,
+            #[cfg(test)]
+            scene_keys: Vec::new(),
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,

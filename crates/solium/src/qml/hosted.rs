@@ -1,9 +1,12 @@
 //! The compositor's half of what a hosted scene and the compositor say to each
 //! other: properties written in place, the monitor it is on, the models' rows,
 //! pointer events, what its items claim of the pointer
-//! (`tests::the_item_tree_decides_what_a_point_claims`), and what it reserves
-//! (`tests::a_scene_reserve_is_reported_once_per_change`). Its grabs and its
-//! keyboard wants (#163) are still to come.
+//! (`tests::the_item_tree_decides_what_a_point_claims`), what it reserves
+//! (`tests::a_scene_reserve_is_reported_once_per_change`), and its grabs
+//! (`tests::a_grab_is_held_while_active_and_dismissed_on_request`), and its
+//! keyboard wants and the keys it is told
+//! (`tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+//! `tests::text_typed_on_russian_reaches_the_field`).
 
 use std::{
     ffi::{CString, c_char, c_int},
@@ -52,6 +55,30 @@ mod ffi {
             scene: *mut super::super::ffi::Scene,
             edges: *mut c_int,
         ) -> c_int;
+        pub(super) fn solium_qml_scene_take_grab(
+            scene: *mut super::super::ffi::Scene,
+            name: *mut *const c_char,
+        ) -> c_int;
+        pub(super) fn solium_qml_scene_grab_contains(
+            scene: *const super::super::ffi::Scene,
+            x: f64,
+            y: f64,
+        ) -> c_int;
+        pub(super) fn solium_qml_scene_dismiss(scene: *mut super::super::ffi::Scene);
+        pub(super) fn solium_qml_scene_take_keyboard(
+            scene: *mut super::super::ffi::Scene,
+            claims: *mut *const c_char,
+        ) -> c_int;
+        pub(super) fn solium_qml_scene_key(
+            scene: *mut super::super::ffi::Scene,
+            pressed: c_int,
+            qt_key: c_int,
+            modifiers: u32,
+            text: *const c_char,
+            autorepeat: c_int,
+            scan_code: u32,
+        );
+        pub(super) fn solium_qml_scene_let_go_keyboard(scene: *mut super::super::ffi::Scene);
     }
 }
 
@@ -263,6 +290,167 @@ impl Scene {
     }
 }
 
+/// What a scene says of its grabs since it was last asked (Ruling 12).
+/// `tests::a_grab_is_held_while_active_and_dismissed_on_request`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GrabReport {
+    Unchanged,
+    /// No grab is active now.
+    Released,
+    /// One is, and this is the newest's name.
+    /// `tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
+    Held(String),
+}
+
+impl Scene {
+    /// The scene's grab, when it changed since it was last asked; a scene
+    /// says what it has at its first take.
+    /// `tests::a_grab_is_held_while_active_and_dismissed_on_request`,
+    /// `tests::a_scene_with_no_active_grab_says_so_once`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn take_grab(&mut self) -> GrabReport {
+        let mut name: *const c_char = std::ptr::null();
+        // SAFETY: the scene is live for as long as `self`, and the host sets
+        // `name` only when it returns 1.
+        match unsafe { ffi::solium_qml_scene_take_grab(self.scene, &raw mut name) } {
+            1 if !name.is_null() => {
+                // SAFETY: a NUL-terminated string the host keeps valid until
+                // its next call, copied here before any.
+                let held = unsafe { std::ffi::CStr::from_ptr(name) };
+                GrabReport::Held(held.to_string_lossy().into_owned())
+            }
+            0 => GrabReport::Released,
+            _ => GrabReport::Unchanged,
+        }
+    }
+
+    /// Whether a point in scene coordinates is inside any active grab's
+    /// target. `tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn grab_contains(&self, x: f64, y: f64) -> bool {
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_grab_contains(self.scene, x, y) != 0 }
+    }
+
+    /// Dismiss every active grab, newest first.
+    /// `tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn dismiss(&mut self) {
+        // `onDismissed` runs the scene's own code, which can move its items.
+        // `surface::tests::a_cached_hit_follows_a_dismissal`.
+        touched();
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_dismiss(self.scene) }
+    }
+}
+
+/// What a scene says of its keyboard wants since it was last asked (Ruling
+/// 14). `tests::a_field_that_wants_the_keyboard_reports_its_claims`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum KeyboardReport {
+    Unchanged,
+    /// No visible item wants the keyboard now.
+    /// `tests::an_invisible_field_does_not_hold_the_keyboard`.
+    LetGo,
+    /// One does, and these are the keys it claims, as the scene spells them.
+    Wanted(Vec<String>),
+}
+
+/// One key as a scene is told it.
+/// `tests::text_typed_on_russian_reaches_the_field`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SceneKey {
+    pub(crate) pressed: bool,
+    /// A `Qt::Key`.
+    pub(crate) qt_key: i32,
+    /// Qt's `KeyboardModifiers`.
+    pub(crate) modifiers: u32,
+    /// What it types, from the compositor's xkb state with the active group.
+    /// `input::tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`.
+    pub(crate) text: String,
+    pub(crate) autorepeat: bool,
+    /// Whether it repeats while held, as the keymap says: no modifier does,
+    /// nor a group toggle.
+    /// `input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
+    pub(crate) repeats: bool,
+    /// The xkb keycode, so a release finds its press and a repeat its key.
+    /// `input::tests::a_release_whose_press_went_to_a_scene_reaches_no_window`.
+    pub(crate) code: u32,
+}
+
+impl Scene {
+    /// Who in the scene wants the keyboard, when that changed since it was
+    /// last asked; a scene says what it has at its first take.
+    /// `tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+    /// `tests::an_invisible_field_does_not_hold_the_keyboard`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn take_keyboard(&mut self) -> KeyboardReport {
+        let mut claims: *const c_char = std::ptr::null();
+        // SAFETY: the scene is live for as long as `self`, and the host sets
+        // `claims` only when it returns 1.
+        match unsafe { ffi::solium_qml_scene_take_keyboard(self.scene, &raw mut claims) } {
+            1 if !claims.is_null() => {
+                // SAFETY: a NUL-terminated string the host keeps valid until
+                // its next call, copied here before any.
+                let text = unsafe { std::ffi::CStr::from_ptr(claims) }.to_string_lossy();
+                KeyboardReport::Wanted(
+                    text.split('\n')
+                        .filter(|claim| !claim.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                )
+            }
+            0 => KeyboardReport::LetGo,
+            _ => KeyboardReport::Unchanged,
+        }
+    }
+
+    /// Tell the scene one key.
+    /// `tests::text_typed_on_russian_reaches_the_field`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn key(&mut self, key: &SceneKey) {
+        // A key's handlers are the scene's own code, which can move its items.
+        // `tests::a_key_the_scene_hears_moves_its_items_for_the_next_hit`.
+        touched();
+        let Ok(text) = CString::new(key.text.as_str()) else {
+            return;
+        };
+        // SAFETY: the scene is live for as long as `self`, and `text`
+        // outlives the call.
+        unsafe {
+            ffi::solium_qml_scene_key(
+                self.scene,
+                c_int::from(key.pressed),
+                key.qt_key,
+                key.modifiers,
+                text.as_ptr(),
+                c_int::from(key.autorepeat),
+                key.code,
+            );
+        }
+    }
+
+    /// The compositor has taken the keyboard back: the item holding it
+    /// loses its focus, and no item that wanted it holds it again until it
+    /// asks anew. `tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+    /// `tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn let_go_keyboard(&mut self) {
+        touched();
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_let_go_keyboard(self.scene) }
+    }
+
+    /// A one-value string property, read as a list of one.
+    #[cfg(test)]
+    pub(crate) fn get_string_for_test(&self, name: &str) -> String {
+        self.string_list(name)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+}
+
 /// What a pointer event is, for a scene.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum PointerKind {
@@ -296,9 +484,328 @@ pub(crate) struct ScenePointer {
 pub(crate) mod tests {
     use std::path::PathBuf;
 
-    use super::{Hit, PointerKind, ScenePointer};
+    use super::{GrabReport, Hit, KeyboardReport, PointerKind, SceneKey, ScenePointer};
     use crate::qml::{Scene, qt_test::on_the_qt_thread};
     use crate::scripted::SceneReserve;
+
+    /// A field that wants the keyboard while it has the focus, claiming two
+    /// keys, and a button beside it that hides on Escape.
+    const FIELD: &str = r#"
+        import QtQuick
+        import QtQuick.Controls
+        import Solium
+        Item {
+            property bool shown: true
+            property bool buttonShown: true
+            readonly property string typed: field.text
+            TextField {
+                id: field
+                width: 40; height: 20
+                visible: parent.shown
+                focus: true
+                Solium.keyboard.wants: activeFocus
+                Solium.keyboard.claims: [ "Escape", "Return" ]
+                Keys.onEscapePressed: parent.buttonShown = false
+            }
+            MouseArea { x: 44; width: 20; height: 20; visible: parent.buttonShown }
+        }
+    "#;
+
+    /// One key pressed and let go, as the compositor tells it.
+    fn tap(scene: &mut Scene, code: u32, qt_key: i32, text: &str) {
+        for pressed in [true, false] {
+            scene.key(&SceneKey {
+                pressed,
+                qt_key,
+                modifiers: 0,
+                text: text.to_owned(),
+                autorepeat: false,
+                repeats: true,
+                code,
+            });
+        }
+    }
+
+    /// **A field that wants the keyboard reports its claims** (Ruling 14:
+    /// the hosted window is active from the start, so `focus: true` is
+    /// enough), once, as the scene spells them, and letting go takes its
+    /// focus, so it lets go of the keyboard too.
+    #[test]
+    fn a_field_that_wants_the_keyboard_reports_its_claims() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-field", FIELD, "field-1");
+            let wanted = scene.take_keyboard();
+            let again = scene.take_keyboard();
+            scene.let_go_keyboard();
+            let let_go = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (wanted, again, let_go),
+                (
+                    KeyboardReport::Wanted(vec!["Escape".to_owned(), "Return".to_owned()]),
+                    KeyboardReport::Unchanged,
+                    KeyboardReport::LetGo,
+                ),
+                "(the first take, a second with no change, the take after letting go)"
+            );
+        });
+    }
+
+    /// **Text typed on Russian reaches a `TextField` as Cyrillic** (#132): the
+    /// text is the compositor's, from xkb with the active group, and the
+    /// field types what it is told.
+    #[test]
+    fn text_typed_on_russian_reaches_the_field() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-russian", FIELD, "russian-1");
+            let _ = scene.take_keyboard();
+            for (code, text) in [(41_u32, "п"), (27, "р"), (44, "о")] {
+                let qt_key =
+                    crate::qml::keys::qt_key(smithay::input::keyboard::Keysym::NoSymbol, text);
+                tap(&mut scene, code, qt_key, text);
+            }
+            // BackSpace, which the field takes as a named key.
+            tap(&mut scene, 22, 0x0100_0003, "\u{8}");
+            let typed = scene.get_string_for_test("typed");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(typed, "пр");
+        });
+    }
+
+    /// **A field that is hidden lets go of the keyboard**: only a visible
+    /// item holds it.
+    #[test]
+    fn an_invisible_field_does_not_hold_the_keyboard() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) =
+                hosted("solium-hosted-hidden-field", FIELD, "hidden-field-1");
+            let shown = scene.take_keyboard();
+            scene.set_bool("shown", false);
+            let hidden = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (matches!(shown, KeyboardReport::Wanted(_)), hidden),
+                (true, KeyboardReport::LetGo),
+                "(the field shown wanted it, the take once it is hidden)"
+            );
+        });
+    }
+
+    /// **The item holding the keyboard is the wanting one with active focus,
+    /// else the one that came to want it last** (Ruling 14): its claims are
+    /// the ones reported.
+    #[test]
+    fn the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-holder",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property bool first: false
+                    property bool second: false
+                    property bool focusFirst: false
+                    Item {
+                        focus: root.focusFirst
+                        Solium.keyboard.wants: root.first
+                        Solium.keyboard.claims: [ "Up" ]
+                    }
+                    Item {
+                        Solium.keyboard.wants: root.second
+                        Solium.keyboard.claims: [ "Down" ]
+                    }
+                }
+                "#,
+                "holder-1",
+            );
+            let none = scene.take_keyboard();
+            scene.set_bool("first", true);
+            let first = scene.take_keyboard();
+            scene.set_bool("second", true);
+            let second = scene.take_keyboard();
+            scene.set_bool("focusFirst", true);
+            let focused = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let claims = |claim: &str| KeyboardReport::Wanted(vec![claim.to_owned()]);
+            assert_eq!(
+                (none, first, second, focused),
+                (
+                    KeyboardReport::LetGo,
+                    claims("Up"),
+                    claims("Down"),
+                    claims("Up")
+                ),
+                "(nobody wanting, the first wanting, the second too, the first focused)"
+            );
+        });
+    }
+
+    /// **A scene that is not hosted may bind `Solium.keyboard` and holds
+    /// nothing**: a window frame, or a `QtObject` in one, that writes it
+    /// builds, and says nothing to take.
+    #[test]
+    fn an_unhosted_scene_may_bind_the_keyboard_and_holds_nothing() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-keyboard-none");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    focus: true\n    Solium.keyboard.wants: true\n    QtObject { Solium.keyboard.wants: true }\n}\n",
+            )
+            .expect("writing the scene");
+            let mut scene = Scene::for_host(&path, 16, 16, None).expect("the scene builds");
+            let taken = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(taken, KeyboardReport::Unchanged);
+        });
+    }
+
+    /// **A field in a Qt Quick Controls `Popup` that wants the keyboard
+    /// takes the keys** (Ruling 14): `Solium.keyboard` written on the
+    /// `Popup`, which is no item, is the item's Qt draws it as, so the open
+    /// search popup wants the keyboard with its claims, the field in it
+    /// types Russian, and the closed popup lets go. A `QtObject` beside it
+    /// that writes `Solium.keyboard` holds nothing.
+    #[test]
+    fn a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-popup-keyboard",
+                r#"
+                import QtQuick
+                import QtQuick.Controls
+                import Solium
+                Item {
+                    id: root
+                    property bool open: false
+                    readonly property string typed: field.text
+                    QtObject { Solium.keyboard.wants: true }
+                    Popup {
+                        x: 0; y: 0; width: 40; height: 20; padding: 0
+                        visible: root.open
+                        focus: true
+                        enter: null; exit: null
+                        closePolicy: Popup.NoAutoClose
+                        Solium.keyboard.wants: activeFocus
+                        Solium.keyboard.claims: [ "Escape" ]
+                        TextField { id: field; anchors.fill: parent; focus: true }
+                    }
+                }
+                "#,
+                "popup-keyboard-1",
+            );
+            let closed = scene.take_keyboard();
+            scene.set_bool("open", true);
+            let opened = scene.take_keyboard();
+            for (code, text) in [(41_u32, "п"), (27, "р")] {
+                let qt_key =
+                    crate::qml::keys::qt_key(smithay::input::keyboard::Keysym::NoSymbol, text);
+                tap(&mut scene, code, qt_key, text);
+            }
+            let typed = scene.get_string_for_test("typed");
+            scene.set_bool("open", false);
+            let closed_again = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (closed, opened, typed.as_str(), closed_again),
+                (
+                    KeyboardReport::LetGo,
+                    KeyboardReport::Wanted(vec!["Escape".to_owned()]),
+                    "пр",
+                    KeyboardReport::LetGo,
+                ),
+                "(the take with the popup closed, once it is open, what the field typed, \
+                 the take once it is closed again)"
+            );
+        });
+    }
+
+    /// **A scene the compositor took the keyboard from takes it again only
+    /// when asked anew** (Ruling 14): an item whose `wants` is not bound to
+    /// its focus, let go of, wants nothing, so the window just clicked keeps
+    /// the keyboard; it wants it again once it comes to want it again, and
+    /// once it is shown again.
+    #[test]
+    fn a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-let-go",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property bool shown: true
+                    property bool asking: true
+                    Item {
+                        focus: true
+                        visible: root.shown
+                        Solium.keyboard.wants: root.asking
+                        Solium.keyboard.claims: [ "Escape" ]
+                    }
+                }
+                "#,
+                "let-go-1",
+            );
+            let first = scene.take_keyboard();
+            scene.let_go_keyboard();
+            let let_go = scene.take_keyboard();
+            scene.set_bool("asking", false);
+            scene.set_bool("asking", true);
+            let asked_again = scene.take_keyboard();
+            scene.let_go_keyboard();
+            let let_go_again = scene.take_keyboard();
+            scene.set_bool("shown", false);
+            scene.set_bool("shown", true);
+            let shown_again = scene.take_keyboard();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let wanted = KeyboardReport::Wanted(vec!["Escape".to_owned()]);
+            assert_eq!(
+                (first, let_go, asked_again, let_go_again, shown_again),
+                (
+                    wanted.clone(),
+                    KeyboardReport::LetGo,
+                    wanted.clone(),
+                    KeyboardReport::LetGo,
+                    wanted,
+                ),
+                "(the first take, after the let-go, after wanting it again, after a second \
+                 let-go, after being shown again)"
+            );
+        });
+    }
+
+    /// **A key the scene hears moves its items for the next hit**: Escape
+    /// hides the button beside the field, and the point it covered claims
+    /// nothing once the key is told.
+    #[test]
+    fn a_key_the_scene_hears_moves_its_items_for_the_next_hit() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-key-moves", FIELD, "key-moves-1");
+            let _ = scene.take_keyboard();
+            let before = (crate::qml::hosted::generation(), scene.hit(50.0, 10.0));
+            tap(&mut scene, 9, 0x0100_0000, "\u{1b}");
+            let after = (crate::qml::hosted::generation(), scene.hit(50.0, 10.0));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (before.1, after.1, after.0 > before.0),
+                (Hit::Press, Hit::Nothing, true),
+                "(the button before Escape, the point after it, whether the generation moved)"
+            );
+        });
+    }
 
     const CLAIMS: &str = r#"
         import QtQuick
@@ -931,6 +1438,189 @@ pub(crate) mod tests {
                 ),
                 "(the bar's reserve, the panel's place while it is closed, \
                  (what opening it reported, the panel's place once it is open))"
+            );
+        });
+    }
+
+    const MENU: &str = r#"
+        import QtQuick
+        import Solium
+        Item {
+            id: root
+            property bool open: true
+            property int dismissed: 0
+            Rectangle { id: menu; x: 10; y: 10; width: 20; height: 10; visible: root.open }
+            Grab {
+                name: "tray-menu"
+                target: menu
+                active: menu.visible
+                onDismissed: { root.dismissed += 1; root.open = false }
+            }
+        }
+    "#;
+
+    /// **A grab is reported with its name while active, and released when it
+    /// is not**; a point inside its target is inside, and dismissing it
+    /// signals it (Ruling 12).
+    #[test]
+    fn a_grab_is_held_while_active_and_dismissed_on_request() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted("solium-hosted-grab", MENU, "grab-1");
+            let held = scene.take_grab();
+            let again = scene.take_grab();
+            let inside = scene.grab_contains(15.0, 15.0);
+            let outside = scene.grab_contains(50.0, 25.0);
+            scene.dismiss();
+            let dismissed = scene.get_int("dismissed");
+            let released = scene.take_grab();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (held, again, inside, outside, dismissed, released),
+                (
+                    GrabReport::Held("tray-menu".to_owned()),
+                    GrabReport::Unchanged,
+                    true,
+                    false,
+                    1,
+                    GrabReport::Released,
+                ),
+                "(the first take, a second with no change, inside the menu, outside it, \
+                 the dismissals the scene heard, the take after onDismissed closed the menu)"
+            );
+        });
+    }
+
+    /// **A scene's newest grab is the one reported, and every active one
+    /// counts** (Ruling 12): a point inside either target is inside, and a
+    /// dismissal reaches both, newest first.
+    #[test]
+    fn a_scenes_newest_grab_is_reported_and_every_active_one_counts() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-two-grabs",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property bool late: false
+                    property string order: ""
+                    Rectangle { id: first; x: 0; y: 0; width: 10; height: 10 }
+                    Rectangle { id: second; x: 20; y: 0; width: 10; height: 10 }
+                    Grab { name: "first"; target: first; active: true; onDismissed: root.order += "first," }
+                    Grab { name: "second"; target: second; active: root.late; onDismissed: root.order += "second," }
+                }
+                "#,
+                "two-grabs-1",
+            );
+            let alone = scene.take_grab();
+            scene.set_bool("late", true);
+            let newest = scene.take_grab();
+            let inside = (
+                scene.grab_contains(5.0, 5.0),
+                scene.grab_contains(25.0, 5.0),
+            );
+            let between = scene.grab_contains(15.0, 5.0);
+            scene.dismiss();
+            let order = scene.take_string("order");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (alone, newest, inside, between, order.as_deref()),
+                (
+                    GrabReport::Held("first".to_owned()),
+                    GrabReport::Held("second".to_owned()),
+                    (true, true),
+                    false,
+                    Some("second,first,"),
+                ),
+                "(the first alone, the newest once both are active, inside each target, \
+                 between them, the order they heard the dismissal in)"
+            );
+        });
+    }
+
+    /// **A scene with no active grab says so at its first take, and once**:
+    /// a scene rebuilt for an edit with no popup open lets go of the grab
+    /// the scene before it held.
+    #[test]
+    fn a_scene_with_no_active_grab_says_so_once() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-no-grab",
+                "import QtQuick\nItem {}\n",
+                "no-grab-1",
+            );
+            let first = scene.take_grab();
+            let again = scene.take_grab();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first, again),
+                (GrabReport::Released, GrabReport::Unchanged),
+                "(the first take, the second)"
+            );
+        });
+    }
+
+    /// **A Qt Quick Controls `Popup` is a grab's target**, as an item is:
+    /// a point on the popup is inside it, whether the target is the `Popup`
+    /// itself or the item Qt draws it as. A `Popup` is no item, and without
+    /// this its grab has no target, so every press on the open menu would
+    /// dismiss it. A target that is neither, which QML takes, has no points,
+    /// and the log says so.
+    #[test]
+    fn a_controls_popup_is_a_grabs_target() {
+        const POPUP: &str = r"
+            import QtQuick
+            import QtQuick.Controls
+            import Solium
+            Item {
+                readonly property int targeted: grab.target !== null ? 1 : 0
+                QtObject { id: notAnItem }
+                Popup {
+                    id: menu
+                    x: 10; y: 0; width: 20; height: 20; padding: 0
+                    visible: true
+                    enter: null; exit: null
+                    closePolicy: Popup.NoAutoClose
+                    contentItem: MouseArea {}
+                }
+                Grab { id: grab; name: 'menu'; target: TARGET; active: menu.visible; onDismissed: menu.close() }
+            }
+        ";
+        on_the_qt_thread(|| {
+            let (first, mut popup) = hosted(
+                "solium-hosted-grab-popup",
+                &POPUP.replace("TARGET", "menu"),
+                "grab-popup-1",
+            );
+            let as_popup = (popup.get_int("targeted"), popup.grab_contains(20.0, 10.0));
+            drop(popup);
+            let _ = std::fs::remove_dir_all(&first);
+            let (second, mut item) = hosted(
+                "solium-hosted-grab-popup-item",
+                &POPUP.replace("TARGET", "menu.contentItem.parent"),
+                "grab-popup-2",
+            );
+            let as_item = (item.get_int("targeted"), item.grab_contains(20.0, 10.0));
+            drop(item);
+            let _ = std::fs::remove_dir_all(&second);
+            let (third, mut object) = hosted(
+                "solium-hosted-grab-popup-object",
+                &POPUP.replace("TARGET", "notAnItem"),
+                "grab-popup-3",
+            );
+            let as_object = (object.get_int("targeted"), object.grab_contains(20.0, 10.0));
+            drop(object);
+            let _ = std::fs::remove_dir_all(&third);
+            assert_eq!(
+                (as_popup, as_item, as_object),
+                ((1, true), (1, true), (1, false)),
+                "((the Popup as the target: set, a point on it inside), \
+                 (its item as the target: set, a point on it inside), \
+                 (an object neither: set, a point on the popup not inside))"
             );
         });
     }

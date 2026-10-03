@@ -254,11 +254,22 @@ fn check_qml(path: Option<String>) -> Result<()> {
     }
 }
 
+/// What `main` does first, before any thread starts: note the environment
+/// every program Solium starts is given, and only then take the session's
+/// input method out of the compositor's own Qt.
+/// `launch::tests::the_compositors_qt_takes_no_input_method_from_the_session`,
+/// `launch::tests::a_spawned_program_gets_the_input_method_the_compositors_qt_does_not`.
+fn prepare_environment() {
+    launch::remember();
+    qml::keep_input_methods_out();
+}
+
 fn main() -> Result<()> {
     // First, before Qt, EGL or a library they load has written anything into
-    // the environment: it is what every program Solium starts is given. See
+    // the environment, and before any thread starts: it is what every program
+    // Solium starts is given. See
     // `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`.
-    launch::remember();
+    prepare_environment();
     let backend = std::env::args().nth(1);
     // Before logging starts: the probe's child answers in one line.
     if backend.as_deref() == Some(qml::renderer::PROBE) {

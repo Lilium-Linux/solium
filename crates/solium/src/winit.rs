@@ -978,6 +978,11 @@ pub(crate) fn run() -> Result<()> {
         // a notification that arrives up to one frame late is a notification
         // about somebody having left the room.
         crate::idle::settle(&mut state);
+        // And a key held for the scene holding the keyboard repeats, on the
+        // same once-a-loop check (Ruling 14).
+        // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
+        let now = state.clock.now();
+        state.repeat_scene_key(now);
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!(?err, "flushing clients failed");
         }

@@ -333,6 +333,9 @@ dropped when the monitor goes, and inside it `Solium.monitor` is that monitor.
 a `MouseArea`, a pointer handler, or an item marked `Solium.input: true`.
 Everywhere else the pointer goes to what is under it
 (`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`).
+A surface without it holds neither a `Grab` nor the keyboard
+(`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`,
+`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_keyboard`).
 The scene sets an `action` string, the compositor takes it, and whoever is
 listening is told:
 

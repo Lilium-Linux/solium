@@ -29,11 +29,16 @@
 //! `state::tests::real_client::reflow_on_close::hosted::the_wheel_over_a_scene_reaches_it`),
 //! where its scene's items take input, and the rest goes to what is under it
 //! (`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`).
-//! Keyboard focus, grabs and everything else a real client gets are a bigger
-//! question than this — they need the scoped grab in #85. A hosted shell is
-//! one of these surfaces and has the same limits (`docs/shell-boundary.md`,
-//! "What it is not given"); until #85, a surface that needs a keyboard has to
-//! be a layer-shell client.
+//! A `Grab` in its scene holds the pointer for it, and a press outside the
+//! grab's target dismisses it and is swallowed or passed on as the surface's
+//! `outside_click` says
+//! (`state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`).
+//! An item of its scene that asks for the keyboard holds it, and the keys
+//! reach it as its surface's `keyboard.bindings` says
+//! (`input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`,
+//! `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`).
+//! A hosted shell is one of these surfaces and has the same limits
+//! (`docs/shell-boundary.md`, "What it is not given").
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -79,7 +84,7 @@ use smithay::{
 
 use crate::{
     json::Json,
-    qml::hosted::{Hit, ScenePointer},
+    qml::hosted::{GrabReport, Hit, KeyboardReport, SceneKey, ScenePointer},
     surface::ShellSurface,
 };
 
@@ -152,6 +157,58 @@ pub(crate) struct Declaration {
     /// edge, whatever its size or placement (#162, Ruling 10).
     /// `state::tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`.
     pub(crate) reserve: Edges,
+    /// What a press outside an open grab of its scene does once it has
+    /// dismissed it (Ruling 13).
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
+    pub(crate) outside_click: OutsideClick,
+    /// Which compositor bindings still work while its scene holds the
+    /// keyboard (Q3, Ruling 14).
+    /// `input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`.
+    pub(crate) keyboard: KeyPolicy,
+}
+
+/// Which compositor bindings still work while a scene holds the keyboard:
+/// every one but the keys the holding item claims (the default), every one,
+/// or none, so the scene has every key but the escape hatches (Q3).
+/// `input::tests::a_claimed_key_reaches_the_scene_and_not_its_binding`,
+/// `input::tests::with_bindings_all_a_claimed_binding_wins`,
+/// `input::tests::with_bindings_none_even_super_bindings_reach_the_scene`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum KeyPolicy {
+    #[default]
+    ExceptClaimed,
+    All,
+    NoBindings,
+}
+
+/// What a press outside a grab does after dismissing it: swallowed, as macOS
+/// and iOS do, or passed on to what is under it (Q2, Ruling 13).
+/// `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
+/// `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Outside {
+    #[default]
+    Swallow,
+    Pass,
+}
+
+/// A surface's outside-press policy: one for every grab, and one per grab
+/// name that has its own.
+/// `script::tests::sol_surface_reads_outside_click_as_a_word_or_a_table`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OutsideClick {
+    pub(crate) default: Outside,
+    pub(crate) named: BTreeMap<String, Outside>,
+}
+
+impl OutsideClick {
+    /// What a press outside the grab named `name` does: its own entry, else
+    /// the default.
+    /// `script::tests::sol_surface_reads_outside_click_as_a_word_or_a_table`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_policy_named_for_the_grab_beats_the_default`.
+    pub(crate) fn for_grab(&self, name: &str) -> Outside {
+        self.named.get(name).copied().unwrap_or(self.default)
+    }
 }
 
 /// Logical pixels on each edge of a monitor.
@@ -266,6 +323,8 @@ impl Declaration {
             properties: Properties::default(),
             interactive: true,
             reserve: Edges::default(),
+            outside_click: OutsideClick::default(),
+            keyboard: KeyPolicy::default(),
         }
     }
 }
@@ -438,6 +497,118 @@ impl Surface {
             })
     }
 
+    /// What each instance's scene says of its grabs since it was last asked,
+    /// by the name of its monitor, leaving out those with nothing new. `on`
+    /// is every monitor the surface is on, which a stand-in reports for the
+    /// first of.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`.
+    pub(crate) fn take_grabs(&mut self, on: &[String]) -> Vec<(String, GrabReport)> {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            return match (stand.grab.take(), on.first()) {
+                (Some(report), Some(monitor)) => vec![(monitor.clone(), report)],
+                _ => Vec::new(),
+            };
+        }
+        #[cfg(not(test))]
+        let _ = on;
+        self.instances
+            .iter_mut()
+            .map(|(monitor, instance)| (monitor.clone(), instance.take_grab()))
+            .filter(|(_, report)| *report != GrabReport::Unchanged)
+            .collect()
+    }
+
+    /// What each instance's scene says of its keyboard wants since it was
+    /// last asked, by the name of its monitor, leaving out those with
+    /// nothing new. `on` is every monitor the surface is on, which a
+    /// stand-in reports for the first of.
+    /// `state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`.
+    pub(crate) fn take_keyboards(&mut self, on: &[String]) -> Vec<(String, KeyboardReport)> {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            return match (stand.keyboard.take(), on.first()) {
+                (Some(report), Some(monitor)) => vec![(monitor.clone(), report)],
+                _ => Vec::new(),
+            };
+        }
+        #[cfg(not(test))]
+        let _ = on;
+        self.instances
+            .iter_mut()
+            .map(|(monitor, instance)| (monitor.clone(), instance.take_keyboard()))
+            .filter(|(_, report)| *report != KeyboardReport::Unchanged)
+            .collect()
+    }
+
+    /// Tell this surface's scene on one monitor one key.
+    /// `input::tests::russian_typed_through_the_compositor_reaches_a_hosted_text_field`.
+    pub(crate) fn key(&mut self, output: &Output, key: &SceneKey) {
+        #[cfg(test)]
+        if self.stand.is_some() {
+            return;
+        }
+        if let Some(instance) = self.instance_mut(output) {
+            instance.key(key);
+        }
+    }
+
+    /// Tell this surface's scene on one monitor that the compositor took the
+    /// keyboard back.
+    /// `state::tests::real_client::reflow_on_close::hosted::clicking_a_window_ends_the_shells_hold`.
+    pub(crate) fn let_go_keyboard(&mut self, output: &Output) {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            stand.let_go += 1;
+            return;
+        }
+        if let Some(instance) = self.instance_mut(output) {
+            instance.let_go_keyboard();
+        }
+    }
+
+    /// Whether a point in compositor coordinates is inside an active grab's
+    /// target of this surface's scene on one monitor, drawn across `area`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_inside_the_grab_target_reaches_the_scene`.
+    pub(crate) fn grab_contains(
+        &self,
+        output: &Output,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+    ) -> bool {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_ref() {
+            return (stand.inside)(location);
+        }
+        self.instances
+            .get(&output.name())
+            .is_some_and(|instance| instance.grab_contains(area, location))
+    }
+
+    /// Dismiss the grabs of this surface's scene on one monitor.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
+    pub(crate) fn dismiss(&mut self, output: &Output) {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            stand.dismissed += 1;
+            return;
+        }
+        if let Some(instance) = self.instance_mut(output) {
+            instance.dismiss();
+        }
+    }
+
+    /// Whether it has a scene on one monitor to hold a grab with.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_lets_go_of_its_grab`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_scene_that_goes_from_a_monitor_lets_go_of_its_grab`.
+    pub(crate) fn hosts_on(&self, output: &Output) -> bool {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_ref() {
+            return stand.hosts;
+        }
+        self.instances.contains_key(&output.name())
+    }
+
     /// Whatever the scene asked for since it was last looked at.
     ///
     /// The same one-way channel the window frames and the tweaks panel use:
@@ -589,6 +760,19 @@ pub(crate) struct Stand {
     pub(crate) left: u32,
     /// The reserve the scene reports at the next settle, taken once.
     pub(crate) reserve: Option<SceneReserve>,
+    /// The grab the scene reports at the next settle, taken once.
+    pub(crate) grab: Option<GrabReport>,
+    /// Whether a point, in compositor coordinates, is inside an active
+    /// grab's target.
+    pub(crate) inside: fn(Point<f64, Logical>) -> bool,
+    /// How many times its grabs were dismissed.
+    pub(crate) dismissed: u32,
+    /// Whether it has a scene on the monitors it is on.
+    pub(crate) hosts: bool,
+    /// The keyboard wants the scene reports at the next settle, taken once.
+    pub(crate) keyboard: Option<KeyboardReport>,
+    /// How many times the compositor took the keyboard back from it.
+    pub(crate) let_go: u32,
 }
 
 #[cfg(test)]
@@ -601,6 +785,12 @@ impl Stand {
             seen: Vec::new(),
             left: 0,
             reserve: None,
+            grab: None,
+            inside: |_| false,
+            dismissed: 0,
+            hosts: true,
+            keyboard: None,
+            let_go: 0,
         }
     }
 }

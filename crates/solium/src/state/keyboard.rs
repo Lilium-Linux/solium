@@ -32,8 +32,16 @@ impl Solium {
     /// Lua layout saw no focused window, and `settle_focus` treated the gap as
     /// "nothing is focused" and moved the selection. The menu is a part of its
     /// window, not a rival to it.
+    ///
+    /// While a scene holds the keyboard, the window it took the keyboard from
+    /// is still the focused window: the keyboard goes back to it, and it is
+    /// drawn focused (Ruling 14).
+    /// `tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`.
     pub(crate) fn focused_window(&self) -> Option<Window> {
-        let surface = self.seat.get_keyboard()?.current_focus()?;
+        let surface = match self.hosted_keyboard.as_ref() {
+            Some(held) => held.returns_to.clone()?,
+            None => self.seat.get_keyboard()?.current_focus()?,
+        };
         if let Some(window) = self.window_for(&surface) {
             return Some(window);
         }
@@ -125,6 +133,11 @@ impl Solium {
         if self.refocus_on_release {
             return;
         }
+        // A scene holding the keyboard has it until it lets go.
+        // `tests::real_client::reflow_on_close::hosted::nothing_settles_the_keyboard_onto_a_window_while_the_shell_holds_it`.
+        if self.hosted_keyboard.is_some() {
+            return;
+        }
         if self.focused_window().is_some() {
             return;
         }
@@ -204,6 +217,13 @@ impl Solium {
         if !self.is_focused(leaving) {
             return;
         }
+        // A scene holding the keyboard does not give it back to a window on
+        // its way out: when it lets go, the keyboard goes where it goes when
+        // a window goes.
+        // `tests::real_client::reflow_on_close::hosted::a_window_closed_while_the_shell_holds_the_keyboard_is_not_given_it_back`.
+        if let Some(held) = self.hosted_keyboard.as_mut() {
+            held.returns_to = None;
+        }
         // The window's own menu first: its grab would refuse the line below.
         // See `release_grabs_of`.
         self.release_grabs_of(leaving);
@@ -226,6 +246,11 @@ impl Solium {
             tracing::debug!("refused to focus a window: the session is locked");
             return;
         }
+        // Any explicit focus ends a scene's hold on the keyboard, a click on a
+        // window and `sol.focus` among them (Ruling 14).
+        // `tests::real_client::reflow_on_close::hosted::clicking_a_window_ends_the_shells_hold`,
+        // `tests::real_client::reflow_on_close::hosted::sol_focus_ends_the_shells_hold`.
+        self.end_keyboard_hold(false);
         // Frames are drawn differently focused and unfocused, and restacking
         // changes what covers what. Both are the screen changing.
         self.redraw = true;

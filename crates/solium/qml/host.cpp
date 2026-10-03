@@ -79,6 +79,8 @@
 #include <QtGui/QStyleHints>
 #include <QtGui/QImage>
 #include <QtCore/QString>
+#include <QtGui/QFocusEvent>
+#include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QWheelEvent>
 #include <QtGui/QOpenGLContext>
@@ -793,6 +795,15 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     scene->root->setParentItem(scene->window->contentItem());
     scene->root->setWidth(scene->width);
     scene->root->setHeight(scene->height);
+
+    /* A hosted scene's window is active from the start, so an item with
+     * `focus: true` has active focus and `Solium.keyboard.wants: activeFocus`
+     * works; which scene holds the keyboard is the compositor's to decide.
+     * Ruling 14. `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    if (scene->hosting != nullptr) {
+        QFocusEvent focus(QEvent::FocusIn, Qt::OtherFocusReason);
+        QCoreApplication::sendEvent(scene->window, &focus);
+    }
 
     // Qt tells us when the scene needs redrawing, so an idle bar costs one
     // comparison per frame instead of a rasterisation and an upload.
@@ -2021,6 +2032,42 @@ extern "C" int solium_qml_theme_mark_for_test(const char *import_path)
     return ok ? mark : std::numeric_limits<int>::min();
 }
 
+extern "C" const char *solium_qml_input_context_for_test()
+{
+    static QByteArray name;
+    /* QGuiApplicationPrivate::platform_integration, and the slot of
+     * QPlatformIntegration::inputContext() in its vtable, found where the
+     * base class's own vtable holds the base implementation. Itanium ABI: an
+     * object's vptr points two entries past its vtable's symbol. */
+    auto **integration = static_cast<void **>(
+        dlsym(RTLD_DEFAULT, "_ZN22QGuiApplicationPrivate20platform_integrationE"));
+    void *base = dlsym(RTLD_DEFAULT, "_ZNK20QPlatformIntegration12inputContextEv");
+    auto **vtable = static_cast<void **>(dlsym(RTLD_DEFAULT, "_ZTV20QPlatformIntegration"));
+    if (integration == nullptr || *integration == nullptr || base == nullptr
+        || vtable == nullptr) {
+        name = QByteArrayLiteral("?");
+        return name.constData();
+    }
+    void **entries = vtable + 2;
+    int slot = -1;
+    for (int each = 0; each < 128; ++each) {
+        if (entries[each] == base) {
+            slot = each;
+            break;
+        }
+    }
+    if (slot < 0) {
+        name = QByteArrayLiteral("?");
+        return name.constData();
+    }
+    void **vptr = *static_cast<void ***>(*integration);
+    using InputContext = QObject *(*)(const void *);
+    QObject *context = reinterpret_cast<InputContext>(vptr[slot])(*integration);
+    name = context != nullptr ? QByteArray(context->metaObject()->className())
+                              : QByteArrayLiteral("none");
+    return name.constData();
+}
+
 /* Whether Qt has asked for this scene to be drawn again. */
 extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
 {
@@ -2344,6 +2391,124 @@ extern "C" int solium_qml_scene_take_reserve(SoliumQmlScene *scene, int *edges)
     reserve->dirty = false;
     std::copy(reserve->edges(), reserve->edges() + 4, edges);
     return 1;
+}
+
+namespace {
+
+/* The scene's active grabs, newest first.
+ * `qml::hosted::tests::a_scenes_newest_grab_is_reported_and_every_active_one_counts`. */
+QList<SoliumGrab *> active_grabs(const SoliumQmlScene *scene)
+{
+    QList<SoliumGrab *> out;
+    if (scene == nullptr || scene->hosting == nullptr) {
+        return out;
+    }
+    for (const QPointer<SoliumGrab> &grab : scene->hosting->grabs) {
+        if (grab != nullptr && grab->active()) {
+            out.append(grab.data());
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](SoliumGrab *a, SoliumGrab *b) { return a->activated() > b->activated(); });
+    return out;
+}
+
+} // namespace
+
+extern "C" int solium_qml_scene_take_grab(SoliumQmlScene *scene, const char **name)
+{
+    if (scene == nullptr || scene->hosting == nullptr || !scene->hosting->grab_dirty) {
+        return -1;
+    }
+    scene->hosting->grab_dirty = false;
+    const QList<SoliumGrab *> active = active_grabs(scene);
+    if (active.isEmpty()) {
+        return 0;
+    }
+    static QByteArray held;
+    held = active.first()->name().toUtf8();
+    if (name != nullptr) {
+        *name = held.constData();
+    }
+    return 1;
+}
+
+extern "C" int solium_qml_scene_grab_contains(const SoliumQmlScene *scene, double x, double y)
+{
+    for (SoliumGrab *grab : active_grabs(scene)) {
+        QQuickItem *target = grab->target_item();
+        if (target != nullptr && target->isVisible()
+            && target->contains(target->mapFromScene(QPointF(x, y)))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+extern "C" void solium_qml_scene_dismiss(SoliumQmlScene *scene)
+{
+    QList<QPointer<SoliumGrab>> newest_first;
+    for (SoliumGrab *grab : active_grabs(scene)) {
+        newest_first.append(grab);
+    }
+    for (const QPointer<SoliumGrab> &grab : newest_first) {
+        if (grab != nullptr) {
+            emit grab->dismissed();
+        }
+    }
+}
+
+extern "C" int solium_qml_scene_take_keyboard(SoliumQmlScene *scene, const char **claims)
+{
+    if (scene == nullptr || scene->hosting == nullptr || !scene->hosting->keyboard_dirty) {
+        return -1;
+    }
+    scene->hosting->keyboard_dirty = false;
+    SoliumKeyboard *holder = solium_keyboard_holder(scene->hosting);
+    if (holder == nullptr) {
+        return 0;
+    }
+    static QByteArray held;
+    held = holder->claims().join(QLatin1Char('\n')).toUtf8();
+    if (claims != nullptr) {
+        *claims = held.constData();
+    }
+    return 1;
+}
+
+extern "C" void solium_qml_scene_key(SoliumQmlScene *scene, int pressed, int qt_key,
+                                     unsigned modifiers, const char *text, int autorepeat,
+                                     unsigned scan_code)
+{
+    if (scene == nullptr || scene->window == nullptr) {
+        return;
+    }
+    QKeyEvent event(pressed != 0 ? QEvent::KeyPress : QEvent::KeyRelease, qt_key,
+                    Qt::KeyboardModifiers::fromInt(static_cast<int>(modifiers)), scan_code, 0, 0,
+                    QString::fromUtf8(text != nullptr ? text : ""), autorepeat != 0, 1);
+    QCoreApplication::sendEvent(scene->window, &event);
+}
+
+extern "C" void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene)
+{
+    if (scene == nullptr || scene->hosting == nullptr) {
+        return;
+    }
+    /* Every item that wants the keyboard is let go of, not only the one
+     * holding it, so the scene does not take it back through another, nor
+     * through one whose `wants` is not bound to its focus: each holds none
+     * until it asks anew. The holder loses its focus too.
+     * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`,
+     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
+    SoliumKeyboard *holder = solium_keyboard_holder(scene->hosting);
+    for (const QPointer<SoliumKeyboard> &each : scene->hosting->keyboards) {
+        if (each != nullptr && each->wants()) {
+            each->letGo();
+        }
+    }
+    if (holder != nullptr && holder->item() != nullptr) {
+        holder->item()->setFocus(false);
+    }
 }
 
 extern "C" const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name)
