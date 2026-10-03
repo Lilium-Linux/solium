@@ -8,6 +8,10 @@
 -- is at (100, 40), 2 by 16: on screen that is (400, 240) once the window is
 -- bare, so the surface -- 112 by 56 -- is centred under the caret at
 -- (345, 248), as in `keyboard-surface.lua`.
+--
+-- And a window going bare, or framed again, with Caps Lock's pill on show,
+-- as one going fullscreen and leaving it does: the pill goes with it, to the
+-- surface and back to the pane, rather than going with the frame.
 
 local function handed(world)
     local values = world.panes.keyboard_indicator
@@ -52,8 +56,32 @@ return {
                     string.format("the caret at %s,%s", world.field.x, world.field.y))
                 assert(handed(world).what == "", "no pane draws it")
                 local surface, cue = pill(world)
-                assert(cue.what == "caps" and cue.hold == false,
-                    "the Caps pill on the surface, timed, as it cannot follow the caret")
+                assert(cue.what == "caps" and cue.hold == true,
+                    "the Caps pill on the surface, held, as it follows the caret")
+                assert(surface.x == 345 and surface.y == 248,
+                    string.format("at the caret: %s,%s", surface.x, surface.y))
+            end,
+        },
+
+        -- Framed again, as a window leaving fullscreen is: back in the pane.
+        { framed = 1 },
+        {
+            expect = function(world)
+                local cue = handed(world)
+                assert(cue.what == "caps" and cue.hold == true, "the pane draws the Caps pill again")
+                local _, shown = pill(world)
+                assert(shown.what == "", "and the surface shows nothing")
+            end,
+        },
+
+        -- Bare again, with the pill in the pane: to the surface at the caret,
+        -- rather than gone with the frame.
+        { bare = 1 },
+        {
+            expect = function(world)
+                assert(handed(world).what == "", "no pane draws it")
+                local surface, cue = pill(world)
+                assert(cue.what == "caps" and cue.hold == true, "the Caps pill on the surface")
                 assert(surface.x == 345 and surface.y == 248,
                     string.format("at the caret: %s,%s", surface.x, surface.y))
             end,

@@ -18,18 +18,20 @@
 --              own decorations -- has no pane style around it to draw one,
 --              so it gets the surface below at its caret instead.
 --   "surface"  on an overlay `sol.surface` of its own, at the caret in the
---              global space (`qml/indicator/keyboard.qml`). Placed once, it
---              cannot follow the caret as you type, so a lock's pill there
---              goes after `duration` like a layout's.
+--              global space (`qml/indicator/keyboard.qml`), moved there
+--              again whenever the client says its caret has moved.
 --
 -- Either way, a window that says nothing about a caret gets the pill on its
--- screen instead, when `fallback = "surface"`.
+-- screen instead, when `fallback = "surface"`, until it does: kitty says
+-- where its caret is only with its first key, a few milliseconds after the
+-- key that showed the pill, and the pill then goes to the caret.
 --
 -- Played, key by key with `us,ru` and Russian live, by the scenarios in
 -- `crates/solium/tests/scenarios/`: `keyboard-surface.lua` (placed at the
--- caret, and on screen with none), `keyboard-pane.lua` (what the panes are
+-- caret, and on screen with none), `keyboard-follow.lua` (after the caret,
+-- and to it from the screen), `keyboard-pane.lua` (what the panes are
 -- handed, Caps again on focus), `keyboard-pane-bare.lua` (a window with no
--- frame), `keyboard-off.lua` (`show = false`) and
+-- frame, and one going fullscreen), `keyboard-off.lua` (`show = false`) and
 -- `keyboard-indicator-false.lua` (`indicator = false`), through
 -- `scenario::tests::every_scenario_with_a_client_passes`.
 
@@ -128,6 +130,10 @@ local placed = nil
 -- (`keyboard-pane.lua`, "nothing showing").
 local showing = ""
 
+-- The last cue shown, and where it went: "pane", "caret" (the surface at the
+-- caret) or "screen" (the surface, with no caret to go to); nil once hidden.
+local shown = nil
+
 -- Declare the overlay surface showing `cue`, at `rect` or where it already
 -- is. The same scene each time, so the live one takes the new place and the
 -- new cue in place, and is built again only on a monitor it newly reaches.
@@ -151,8 +157,28 @@ local function panes(want, cue)
     sol.pane_values({ keyboard_indicator = { show = want, cue = cue } })
 end
 
+-- Where a pill goes now, with `s` the settings and `field` what
+-- `sol.text_input()` answers: "pane", "caret" or "screen", and the caret;
+-- nil where it goes nowhere.
+local function destination(s, field)
+    local caret = field and field.x and field or nil
+    -- In the pane only where a frame is drawn around it: a window drawn bare
+    -- has no pane style to draw it, so the surface goes to its caret instead
+    -- (`keyboard-pane-bare.lua`).
+    if caret and s.show == "pane" and field.framed == true then
+        return "pane", caret
+    elseif caret then
+        return "caret", caret
+    elseif s.fallback == "surface" then
+        return "screen", nil
+    end
+    return nil, nil
+end
+
 -- Show `what` ("caps", "layout", "num") where it belongs, or hide the pill
--- everywhere with "". A timed pill hands back to `after`, held, when it goes.
+-- everywhere with "". A lock's pill stays while the lock is on, and a
+-- layout's goes after `duration`, handing back to `after`, held, if a lock
+-- is on (`keyboard-surface.lua`, `keyboard-pane-drawn.lua`).
 function indicator.show(what, after)
     local s = settings()
     if s.show ~= "pane" and s.show ~= "surface" then
@@ -164,35 +190,58 @@ function indicator.show(what, after)
     showing = what
     kept.serial = kept.serial + 1
     local field = sol.text_input()
-    local caret = field and field.x and field or nil
     local area = sol.monitor(field and field.window or focused())
+    local to, caret = destination(s, field)
+    if what == "" then
+        to = nil
+    end
 
-    -- In the pane only where a frame is drawn around it: a window drawn bare
-    -- has no pane style to draw it, so the surface goes to its caret instead
-    -- (`keyboard-pane-bare.lua`).
-    local in_pane = s.show == "pane" and caret ~= nil and field.framed == true
-    local on_surface = what ~= ""
-        and ((caret ~= nil and not in_pane) or (caret == nil and s.fallback == "surface"))
-
-    -- A lock's pill stays while the lock is on, and a layout's goes. Except
-    -- on the surface at a caret: placed once, it cannot follow the caret as
-    -- you type, so a lock's goes too rather than sit on the next line, and
-    -- nothing is handed back to after a layout's (`keyboard-surface.lua`).
-    local stays = not (on_surface and caret ~= nil)
     local cue = {
         what = what,
         serial = kept.serial,
-        hold = (what == "caps" or what == "num") and stays,
+        hold = what == "caps" or what == "num",
         duration = s.duration,
-        after = stays and after or nil,
+        after = after,
     }
-    panes(s.show == "pane", in_pane and cue or { what = "", serial = kept.serial })
+    shown = to and { cue = cue, to = to } or nil
+    panes(s.show == "pane", to == "pane" and cue or { what = "", serial = kept.serial })
 
-    if on_surface then
-        surface(caret and at_caret(caret, area) or on_screen(s.position, area), cue)
+    if to == "caret" then
+        surface(at_caret(caret, area), cue)
+    elseif to == "screen" then
+        surface(on_screen(s.position, area), cue)
     else
         -- Hidden where it is, so the scene stays built for the next one.
         surface(nil, { what = "", serial = kept.serial })
+    end
+end
+
+-- The focused field's caret moved, or its window was framed or left bare:
+-- take a pill on show along. In the pane there is nothing to do, as the
+-- pane reads the caret itself. On the surface, it moves to the caret with
+-- the same cue, so a layout's pill keeps its time and one already gone stays
+-- gone -- from the screen too, where it went for want of a caret. A lock's
+-- pill whose place is now another, the pane or the surface, is shown there
+-- afresh; so is the lock's pill a layout's hands back to, if the layout's was
+-- in a pane that is gone (`keyboard-follow.lua`, `keyboard-pane-bare.lua`).
+function indicator.follow()
+    if not shown then
+        return
+    end
+    local s = settings()
+    local field = sol.text_input()
+    local to, caret = destination(s, field)
+    local cue = shown.cue
+    if to == shown.to and to ~= "caret" then
+        return
+    end
+    if to ~= shown.to and cue.hold then
+        indicator.show(cue.what)
+    elseif shown.to ~= "pane" and caret then
+        shown.to = "caret"
+        surface(at_caret(caret, sol.monitor(field.window)), cue)
+    elseif shown.to == "pane" and cue.after then
+        indicator.show(cue.after)
     end
 end
 
@@ -200,6 +249,7 @@ end
 function indicator.apply()
     local s = settings()
     showing = ""
+    shown = nil
     if s.show ~= "pane" and s.show ~= "surface" then
         if s.show then
             sol.log("keyboard.indicator.show is \"pane\", \"surface\" or false, not " .. tostring(s.show))
@@ -233,10 +283,11 @@ sol.on("keyboard", function(state, changed)
 end)
 
 -- A field enabled or focused: Caps Lock's pill again if it is on, as macOS
--- does, and otherwise nothing left over from the last field. Not its caret
--- moving, nor its window framed or bare.
+-- does, and otherwise nothing left over from the last field. Its caret moved,
+-- or its window framed or bare: whatever is on show follows it.
 sol.on("text_input", function(_, why)
     if why ~= "field" then
+        indicator.follow()
         return
     end
     local s = settings()

@@ -186,7 +186,8 @@ local defaults = {
             --              -- fullscreen, or one drawing its own decorations --
             --              gets the "surface" pill at its caret instead.
             --   "surface"  on a surface of its own over everything, at the
-            --              caret on screen.
+            --              caret on screen, moved after it as the
+            --              application says its caret has moved.
             --   false      nowhere; `indicator = false` says the same.
             -- The caret is known only from applications that say where it
             -- is, through the `text-input-v3` protocol; for the rest, see
@@ -194,9 +195,8 @@ local defaults = {
             show = "pane",
             -- Which changes show it: switching layout, Caps Lock, Num Lock.
             -- A lock's pill stays while the lock is on and goes the moment it
-            -- is off; a layout's goes after `duration`. On a surface at the
-            -- caret, which cannot follow the caret as you type, a lock's goes
-            -- after `duration` too.
+            -- is off; a layout's goes after `duration`, and hands back to the
+            -- lock's if one is on.
             on = { layout = true, caps = true, num = false },
             -- Show Caps Lock's pill again when a text field is focused while
             -- Caps Lock is on, as macOS does.

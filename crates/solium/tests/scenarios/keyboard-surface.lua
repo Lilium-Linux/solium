@@ -28,16 +28,15 @@ return {
             end,
         },
 
-        -- Caps Lock on: the Caps pill at the caret, for `duration` -- placed
-        -- once, it cannot follow the caret as you type.
+        -- Caps Lock on: the Caps pill at the caret, held while Caps is on,
+        -- as the surface follows the caret (`keyboard-follow.lua`).
         { key = "caps_lock" },
         {
             expect = function(world)
                 local surface, cue = pill(world)
                 assert(surface.x == 345 and surface.y == 248 and surface.w == 112 and surface.h == 56,
                     string.format("placed at %s,%s %sx%s", surface.x, surface.y, surface.w, surface.h))
-                assert(cue.what == "caps" and cue.hold == false and cue.duration == 1200,
-                    "the Caps pill, timed")
+                assert(cue.what == "caps" and cue.hold == true, "the Caps pill, held")
                 assert(world.panes.keyboard_indicator.show == false, "and no pane draws one")
             end,
         },
@@ -52,18 +51,17 @@ return {
         },
 
         -- A layout switch with Caps Lock on: the layout's pill, handing back
-        -- to nothing at a caret it cannot follow.
+        -- to Caps Lock's, held, when it goes.
         { key = "shift+alt_l" },
         {
             expect = function(world)
                 local _, cue = pill(world)
-                assert(cue.what == "layout" and cue.after == nil,
-                    "the layout's pill, handing back to nothing here")
+                assert(cue.what == "layout" and cue.after == "caps",
+                    "the layout's pill, handing back to Caps Lock's")
             end,
         },
 
-        -- On screen, with no caret to follow, the layout's pill hands back
-        -- to Caps Lock's, held, when it goes.
+        -- On screen, with no caret to go to, the same.
         { field = true },
         { key = "shift+alt_l" },
         {
@@ -86,13 +84,15 @@ return {
             end,
         },
 
-        -- A layout switch by key: the layout's pill, for `duration`.
+        -- A layout switch by key: the layout's pill, for `duration`, handing
+        -- back to nothing with no lock on.
         { key = "shift+alt_l" },
         {
             expect = function(world)
                 local surface, cue = pill(world)
                 assert(cue.what == "layout" and not cue.hold and cue.duration == 1200,
                     "the layout's pill, timed")
+                assert(cue.after == nil, "handing back to nothing")
                 assert(surface.x == 345 and surface.y == 248, "at the caret")
             end,
         },

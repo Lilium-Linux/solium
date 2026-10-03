@@ -471,11 +471,14 @@ doing the same thing, so you can see both:
   its caret instead: `sol.text_input()` says which, as `framed`.
 - **On a surface of its own** (`show = "surface"`): an overlay `sol.surface`
   that `lua/keyboard_indicator.lua` places at the caret in the global space,
-  from `sol.text_input()`. Placed once, it cannot follow the caret as you
-  type, so there Caps Lock's pill goes after `duration` like a layout's.
+  from `sol.text_input()`, and moves again each time `sol.on("text_input")`
+  says the caret moved.
 
 The policy is the Lua file: it listens to `sol.on("keyboard")` and
-`sol.on("text_input")` and decides what shows and where. The look is QML,
+`sol.on("text_input")` and decides what shows and where. An application that
+says where its caret is only after a key, as kitty does, gets the pill on its
+screen for the first key and at its caret a few milliseconds later, when it
+says. The look is QML,
 `KeyboardPill` in `import Solium`, on `Theme`. The compositor provides the
 data underneath — `text-input-v3` for the caret, the keyboard's state and its
 events — and knows nothing about pills. It is configured in `config.lua`:
