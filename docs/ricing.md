@@ -478,7 +478,9 @@ The policy is the Lua file: it listens to `sol.on("keyboard")` and
 `sol.on("text_input")` and decides what shows and where. An application that
 says where its caret is only after a key, as kitty does, gets the pill on its
 screen for the first key and at its caret a few milliseconds later, when it
-says. The look is QML,
+says. Kitty says so only as it handles each key, before the shell has echoed
+it, so a pill that stays while you type, Caps Lock's, can sit a cell behind
+the cursor until the next key. The look is QML,
 `KeyboardPill` in `import Solium`, on `Theme`. The compositor provides the
 data underneath — `text-input-v3` for the caret, the keyboard's state and its
 events — and knows nothing about pills. It is configured in `config.lua`:
