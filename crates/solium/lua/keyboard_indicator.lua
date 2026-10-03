@@ -43,9 +43,10 @@ local SCENE = "indicator/keyboard.qml"
 
 -- The surface's size: the capsule, with room for its shadow on every side.
 -- Big enough for a short layout name; `KeyboardPill` centres itself in it.
-local BOX_W, BOX_H = 112, 48
--- The capsule's height inside it, and the gap between the caret and it.
-local PILL_H, GAP = 24, 6
+local BOX_W, BOX_H = 112, 56
+-- The capsule's height inside it, as `KeyboardPill.capsuleHeight` says, and
+-- the gap between the caret and it.
+local PILL_H, GAP = 28, 6
 
 -- Which pill was shown last, counted across reloads, so a cue a scene has
 -- seen is never mistaken for a new one.

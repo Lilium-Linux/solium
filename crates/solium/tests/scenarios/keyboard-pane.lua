@@ -85,7 +85,7 @@ return {
                 assert(handed(world).what == "", "no pane has the caret")
                 local declared, cue = surface(world)
                 assert(cue.what == "layout", "the layout's pill, on screen")
-                assert(declared.x == 904 and declared.y == 946,
+                assert(declared.x == 904 and declared.y == 938,
                     string.format("at %s,%s", declared.x, declared.y))
             end,
         },

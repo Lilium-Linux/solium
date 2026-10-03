@@ -6,8 +6,8 @@
 -- Played by `scenario::tests::every_scenario_with_a_client_passes`, with
 -- `us,ru` and Russian live. A window at (300, 200) whose client says its caret
 -- is at (100, 40), 2 by 16: on screen that is (400, 240) once the window is
--- bare, so the surface -- 112 by 48 -- is centred under the caret at
--- (345, 250), as in `keyboard-surface.lua`.
+-- bare, so the surface -- 112 by 56 -- is centred under the caret at
+-- (345, 248), as in `keyboard-surface.lua`.
 
 local function handed(world)
     local values = world.panes.keyboard_indicator
@@ -54,7 +54,7 @@ return {
                 local surface, cue = pill(world)
                 assert(cue.what == "caps" and cue.hold == false,
                     "the Caps pill on the surface, timed, as it cannot follow the caret")
-                assert(surface.x == 345 and surface.y == 250,
+                assert(surface.x == 345 and surface.y == 248,
                     string.format("at the caret: %s,%s", surface.x, surface.y))
             end,
         },

@@ -4,9 +4,10 @@
 --
 -- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
 -- software. The pane is 400 by 300, its bar 32 high. A caret at (100, 60),
--- 2 by 16, in the pane: the capsule is 24 high, its top 6 below the caret,
--- so its middle row is y = 94, and it is centred on x = 101, at least 42
--- wide. (86, 94) is on the capsule, clear of the glyph in its middle.
+-- 2 by 16, in the pane: the capsule is 28 high, its top 6 below the caret,
+-- so its middle row is y = 96, and it is centred on x = 101, at least 32
+-- wide. (89, 96) is on the capsule, clear of the glyph or label in its
+-- middle.
 --
 -- And whether the layer is `dormant`, which spares a frame with no pill on
 -- show the layer's image and its blending over the client: dormant whenever
@@ -39,7 +40,7 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                local _, _, _, a = world.pixel("keyboard", 86, 94)
+                local _, _, _, a = world.pixel("keyboard", 89, 96)
                 assert(a == 0, "a cue from before the caret came is not shown late")
                 assert(world.dormant.keyboard == true, "and the layer is dormant")
             end,
@@ -50,7 +51,7 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                local r, g, b, a = world.pixel("keyboard", 86, 94)
+                local r, g, b, a = world.pixel("keyboard", 89, 96)
                 assert(accent(r, g, b, a), string.format("the capsule below the caret: %d %d %d %d", r, g, b, a))
                 local _, _, _, above = world.pixel("keyboard", 86, 50)
                 assert(above == 0, "and nothing above it")
@@ -62,7 +63,7 @@ return {
         { wait = 1500 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 86, 94)), "a held pill stays")
+                assert(accent(world.pixel("keyboard", 89, 96)), "a held pill stays")
             end,
         },
 
@@ -70,7 +71,7 @@ return {
         { tell = { caret = false } },
         {
             expect = function(world)
-                local _, _, _, a = world.pixel("keyboard", 86, 94)
+                local _, _, _, a = world.pixel("keyboard", 89, 96)
                 assert(a == 0, "gone with the caret")
                 assert(world.dormant.keyboard == true, "and dormant at once")
             end,
@@ -81,13 +82,13 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 86, 94)), "the layout's pill")
+                assert(accent(world.pixel("keyboard", 89, 96)), "the layout's pill")
             end,
         },
         { wait = 600 },
         {
             expect = function(world)
-                local _, _, _, a = world.pixel("keyboard", 86, 94)
+                local _, _, _, a = world.pixel("keyboard", 89, 96)
                 assert(a == 0, "gone after its duration")
                 assert(world.dormant.keyboard == true, "and dormant once it has faded")
             end,
@@ -98,8 +99,8 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                -- Its bottom 6 above the caret: rows 250 to 274, middle 262.
-                assert(accent(world.pixel("keyboard", 86, 262)), "above the caret")
+                -- Its bottom 6 above the caret: rows 246 to 274, middle 260.
+                assert(accent(world.pixel("keyboard", 89, 260)), "above the caret")
             end,
         },
 
@@ -113,7 +114,7 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                local _, _, _, a = world.pixel("keyboard", 86, 94)
+                local _, _, _, a = world.pixel("keyboard", 89, 96)
                 assert(a == 0, "not drawn when the panes are told not to")
                 assert(world.dormant.keyboard == true, "and dormant")
             end,
@@ -131,13 +132,13 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 86, 94)), "the layout's pill")
+                assert(accent(world.pixel("keyboard", 89, 96)), "the layout's pill")
             end,
         },
         { wait = 1000 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 86, 94)), "Caps Lock's, past the layout's duration")
+                assert(accent(world.pixel("keyboard", 89, 96)), "Caps Lock's, past the layout's duration")
                 assert(world.dormant.keyboard == nil, "and still awake")
             end,
         },

@@ -1,6 +1,8 @@
 // A small capsule saying what the keyboard just did: `⇪` while Caps Lock is
 // on, the short name of a layout just switched to (EN, RU), `⇭` for Num Lock.
-// After macOS's Caps Lock indicator, in `Theme`'s accent.
+// After macOS's Caps Lock indicator, in `Theme`'s accent: a round capsule a
+// little taller than a line, an outlined arrow over a bar drawn as a path
+// rather than read from a font, and a soft shadow falling below it.
 //
 // It shows what it is handed and decides nothing. `lua/keyboard_indicator.lua`
 // is the policy -- which changes show it, for how long, where -- and hands it
@@ -23,6 +25,7 @@
 // `scenario::tests::every_scenario_on_the_qt_thread_passes`.
 
 import QtQuick
+import QtQuick.Shapes
 import Solium
 
 Item {
@@ -38,10 +41,15 @@ Item {
     property bool accepts: true
 
     // The room around the capsule its shadow falls in, on every side.
-    readonly property int margin: 12
+    readonly property int margin: 14
 
-    // The capsule's own height: about one line of text.
-    readonly property int capsuleHeight: 24
+    // The capsule's own height, and the least width: round, as macOS's is,
+    // and a little taller than a line of text.
+    readonly property int capsuleHeight: 28
+    readonly property int capsuleWidth: 32
+
+    // How thick the arrow's outline is, and the label's letters with it.
+    readonly property real stroke: 1.6
 
     // What is on show now, which the label reads rather than the cue, so the
     // pill keeps its glyph while it fades out.
@@ -50,8 +58,9 @@ Item {
     property int seen: 0
     property bool ready: false
 
-    readonly property string label: pill.shown === "caps" ? "⇪"
-        : pill.shown === "num" ? "⇭"
+    // The label, for what is not drawn as a path: a layout's short name, and
+    // Num Lock's glyph.
+    readonly property string label: pill.shown === "num" ? "⇭"
         : pill.shown === "layout" ? Keyboard.layoutShort
         : ""
 
@@ -110,18 +119,23 @@ Item {
         }
     }
 
-    // A soft shadow, from stacked rectangles: no shader, so it draws the same
-    // in software.
+    // A soft shadow below the capsule, from stacked capsules: no shader, so it
+    // draws the same in software. Each is a pixel wider all round than the
+    // last and fainter towards the edge, so together they fall off smoothly
+    // instead of reading as rings.
     Repeater {
-        model: 4
+        model: pill.margin - 2
         Rectangle {
+            id: ring
             required property int index
+            // How far out this one is, from 0 at the capsule to 1 at the edge.
+            readonly property real out: (ring.index + 1) / (pill.margin - 2)
             anchors.centerIn: capsule
-            anchors.verticalCenterOffset: 2
-            width: capsule.width + (index + 1) * 4
-            height: capsule.height + (index + 1) * 4
+            anchors.verticalCenterOffset: 4
+            width: capsule.width + 2 * (ring.index + 1)
+            height: capsule.height + 2 * (ring.index + 1)
             radius: height / 2
-            color: Qt.rgba(0, 0, 0, 0.09 - index * 0.02)
+            color: Qt.rgba(0, 0, 0, 0.028 * (1 - ring.out) * (1 - ring.out) + 0.003)
         }
     }
 
@@ -129,9 +143,42 @@ Item {
         id: capsule
         anchors.centerIn: parent
         height: pill.capsuleHeight
-        width: Math.max(Math.round(pill.capsuleHeight * 1.75), text.implicitWidth + 20)
+        width: Math.max(pill.capsuleWidth, Math.ceil(text.implicitWidth) + 16)
         radius: height / 2
         color: Theme.accent
+
+        // ⇪, as macOS draws it: an outlined arrow, and a bar below it.
+        Shape {
+            id: caps
+            anchors.centerIn: parent
+            width: 16
+            height: 16
+            visible: pill.shown === "caps"
+            preferredRendererType: Shape.CurveRenderer
+
+            ShapePath {
+                strokeColor: "#ffffff"
+                strokeWidth: pill.stroke
+                fillColor: "transparent"
+                joinStyle: ShapePath.RoundJoin
+                capStyle: ShapePath.RoundCap
+                startX: 8; startY: 1.2
+                PathLine { x: 14.6; y: 6.8 }
+                PathLine { x: 11; y: 6.8 }
+                PathLine { x: 11; y: 9.2 }
+                PathLine { x: 5; y: 9.2 }
+                PathLine { x: 5; y: 6.8 }
+                PathLine { x: 1.4; y: 6.8 }
+                PathLine { x: 8; y: 1.2 }
+            }
+            ShapePath {
+                strokeColor: "#ffffff"
+                strokeWidth: pill.stroke
+                fillColor: "transparent"
+                joinStyle: ShapePath.RoundJoin
+                PathRectangle { x: 5; y: 12.2; width: 6; height: 2.4; radius: 1 }
+            }
+        }
 
         Text {
             id: text
@@ -139,7 +186,7 @@ Item {
             text: pill.label
             color: "#ffffff"
             font.family: Theme.fontFamily
-            font.bold: true
+            font.weight: Font.Medium
             font.pixelSize: pill.shown === "layout" ? 13 : 17
         }
     }

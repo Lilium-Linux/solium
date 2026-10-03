@@ -1,10 +1,10 @@
 -- The overlay surface's scene, `qml/indicator/keyboard.qml`, as
--- `keyboard-surface.lua`'s policy declares it: 112 by 48, the capsule in the
+-- `keyboard-surface.lua`'s policy declares it: 112 by 56, the capsule in the
 -- middle of it, drawn from the cue it is handed.
 --
 -- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
--- software. The capsule is 24 high and at least 42 wide, centred: its middle
--- row is y = 24, and (40, 24) is on it, clear of the glyph in its middle.
+-- software. The capsule is 28 high and at least 32 wide, centred: its middle
+-- row is y = 28, and (44, 28) is on it, clear of the glyph in its middle.
 
 -- `Theme.accent`, opaque, whatever it is set to -- #0060c0 today, #936DFF
 -- once the theme turns violet: blue the strongest channel by a clear
@@ -16,10 +16,10 @@ end
 return {
     qt = true,
     steps = {
-        { scene = "indicator/keyboard.qml", size = { 112, 48 } },
+        { scene = "indicator/keyboard.qml", size = { 112, 56 } },
         {
             expect = function(world)
-                local _, _, _, a = world.pixel("scene", 40, 24)
+                local _, _, _, a = world.pixel("scene", 44, 28)
                 assert(a == 0, "built showing nothing")
             end,
         },
@@ -28,7 +28,7 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                local r, g, b, a = world.pixel("scene", 40, 24)
+                local r, g, b, a = world.pixel("scene", 44, 28)
                 assert(accent(r, g, b, a), string.format("the capsule: %d %d %d %d", r, g, b, a))
                 local _, _, _, corner = world.pixel("scene", 2, 2)
                 assert(corner == 0, "and room around it")
@@ -40,7 +40,7 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                local _, _, _, a = world.pixel("scene", 40, 24)
+                local _, _, _, a = world.pixel("scene", 44, 28)
                 assert(a == 0, "hidden")
             end,
         },
@@ -50,7 +50,7 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                local _, _, _, a = world.pixel("scene", 40, 24)
+                local _, _, _, a = world.pixel("scene", 44, 28)
                 assert(a == 0, "a cue already seen is not shown again")
             end,
         },
