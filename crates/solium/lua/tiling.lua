@@ -1070,8 +1070,8 @@ function tiling.move_direction(dir)
         else
             rejoin(tree, from.id, nil, nil, nil, options(name), true)
         end
-        if crossed and workspaces.of[from.id] ~= nil then
-            workspaces.of[from.id] = workspaces.on(name)
+        if crossed then
+            workspaces.carry(from.id, name)
         end
     end
     tiling.apply(config.tiling.snap)

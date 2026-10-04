@@ -437,6 +437,17 @@ function workspaces.declare()
     })
 end
 
+-- A window a layout moved onto another monitor goes to the workspace that
+-- monitor shows, if it belonged to one, and the compositor is told at once:
+-- no `layout` follows a move by key. See
+-- `a_window_moved_onto_the_other_monitor_is_declared_on_the_workspace_it_shows`.
+function workspaces.carry(id, monitor)
+    if workspaces.of[id] ~= nil then
+        workspaces.of[id] = workspaces.on(monitor)
+        workspaces.declare()
+    end
+end
+
 -- Send one window to a workspace on its own monitor: `windows.send` from a
 -- scene, which names the window rather than meaning the focused one. See
 -- `a_windows_send_from_a_scene_moves_the_window_it_names`.

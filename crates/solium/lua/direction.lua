@@ -274,9 +274,7 @@ function floating.move(dir)
         there.y + across(from.y - here.y, here.h, there.h),
         name
     )
-    if workspaces.of[from.id] ~= nil then
-        workspaces.of[from.id] = workspaces.on(name)
-    end
+    workspaces.carry(from.id, name)
 end
 
 sol.on("direction", function(verb, dir)

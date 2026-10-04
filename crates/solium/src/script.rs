@@ -14465,6 +14465,44 @@ mod directions {
         assert_eq!(desk.workspace_of(1), "nil", "floating");
     }
 
+    /// **A window moved by key onto the other monitor is declared on the
+    /// workspace that monitor shows**, by the press that moves it, in
+    /// tiling, in scrolling and with no layout: nothing runs `layout` after
+    /// a move, so without it a hosted shell would count the window on the
+    /// workspace it left.
+    #[test]
+    fn a_window_moved_onto_the_other_monitor_is_declared_on_the_workspace_it_shows() {
+        let declared = |commands: &[Command]| {
+            commands.iter().rev().find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.get(&2).cloned()),
+                _ => None,
+            })
+        };
+        let mut moved = Vec::new();
+        for layout in ["super+t", "super+s", ""] {
+            let mut desk = Desk::new("", two_screens());
+            assert_eq!(
+                desk.scripts
+                    .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 2 return \"\""),
+                ""
+            );
+            if !layout.is_empty() {
+                desk.press(layout);
+            }
+            desk.open(1, "DP-1", (1280.0, 720.0));
+            desk.open(2, "DP-1", (2000.0, 720.0));
+            desk.focus(2);
+            let commands = desk.press("super+shift+right");
+            moved.push((desk.monitor(2), declared(&commands)));
+        }
+        let there = ("DP-2".to_owned(), Some(Some(vec!["2".to_owned()])));
+        assert_eq!(
+            moved,
+            vec![there.clone(), there.clone(), there],
+            "(window 2's monitor, where the press declared it) in tiling, scrolling and floating"
+        );
+    }
+
     /// **In scrolling, the directions are the strip's own keys.** #150.
     ///
     /// Left and right are the columns and up and down the windows in one,
