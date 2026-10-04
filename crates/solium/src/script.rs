@@ -1115,8 +1115,13 @@ impl Scripts {
 
         let source = std::fs::read_to_string(config)
             .with_context(|| format!("reading {}", config.display()))?;
+        // Named `@` and the path, as Lua names a file: its messages then say
+        // `<path>:<line>:` rather than `[string "<path>"]:<line>:`, and a
+        // stopped listener is logged with the whole path.
+        // `tests::an_error_in_the_configuration_names_it_as_a_file`,
+        // `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
         lua.load(&source)
-            .set_name(config.to_string_lossy().as_ref())
+            .set_name(format!("@{}", config.to_string_lossy()))
             .exec()
             .map_err(failed("running the configuration"))?;
 
@@ -1949,8 +1954,17 @@ fn call_listeners(
                 let count = strikes.get::<Option<u32>>(&listener)?.unwrap_or(0) + 1;
                 strikes.set(&listener, count)?;
                 let info = listener.info();
-                let file = info.source.unwrap_or_default();
-                let file = file.trim_start_matches('@');
+                // A file by its whole path, and a chunk of text by the short
+                // name Lua's own messages give it.
+                // `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+                // `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
+                let file = info
+                    .source
+                    .as_deref()
+                    .and_then(|source| source.strip_prefix('@'))
+                    .map(str::to_owned)
+                    .or(info.short_src)
+                    .unwrap_or_default();
                 let line = info.line_defined.unwrap_or_default();
                 tracing::error!(
                     %err,
@@ -8045,6 +8059,53 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
             .map(|bytes| bytes.clone())
             .unwrap_or_default();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// **An error in the configuration names it as Lua names a file**,
+    /// `<path>:<line>:`, not as a string chunk, `[string "<path>"]:<line>:`.
+    /// Lua shortens a long path from the front, so only its end is asserted.
+    #[test]
+    fn an_error_in_the_configuration_names_it_as_a_file() {
+        let directory = std::env::temp_dir().join("solium-script-test-config-error-where");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        let _ = std::fs::write(&config, "\nerror(\"mine\")\n");
+        let said = Scripts::load(&config)
+            .err()
+            .map(|err| err.to_string())
+            .unwrap_or_default();
+        assert!(
+            said.contains("init.lua:2: mine") && !said.contains("[string"),
+            "{said}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A listener written in a chunk of text is logged by the chunk's
+    /// short name**, as Lua's own messages name it: an `=name` chunk as
+    /// `name`, and one with no name by its first line, not its whole text.
+    #[test]
+    fn a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-where-chunk",
+            r#"
+            sol.on("layout", load("return function() while true do end end", "=mine")())
+            sol.on("layout", load("return function()\n while true do end\n end")())
+            "#,
+        );
+        let log = logged_while(|| {
+            let _ = scripts.relayout(one_screen(&[]));
+        });
+        for at in [
+            "file=mine line=1",
+            r#"file=[string "return function()..."] line=1"#,
+        ] {
+            assert!(
+                log.lines().any(|line| line.contains(at)),
+                "no line names {at}:\n{log}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// **A stopped listener is logged with its file and line**, and so is
