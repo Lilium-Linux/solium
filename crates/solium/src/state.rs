@@ -372,7 +372,9 @@ pub(crate) struct Solium {
     /// The active mode's name, as a script last reported it with `sol.status`
     /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
     /// reads it back). The compositor does not know what modes exist; it keeps
-    /// the name and logs it when it changes, and nothing draws it.
+    /// the name and logs it when it changes, draws nothing with it, and hands
+    /// it to hosted scenes as `Solium.status`
+    /// (`crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`).
     pub(crate) status: String,
 
     /// Whether a mode owns input. While it does, keys and clicks belong to the
