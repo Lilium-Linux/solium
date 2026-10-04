@@ -25258,6 +25258,31 @@ end)"#,
                     "unknown-window;unknown-window;unknown-window;nil;"
                 );
             }
+
+            /// **An action the compositor does not know is kept, and so
+            /// warned of, the first time only**: asked for twice, it is one
+            /// name, and both `done`s still hear `unknown-action`.
+            #[test]
+            fn an_unknown_action_is_warned_of_the_first_time_only() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(reason) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                queue(
+                    &mut desk,
+                    shell,
+                    &[("windows.fly", "null"), ("windows.fly", "null")],
+                );
+                desk.state.settle_scenes();
+                assert_eq!(
+                    (desk.state.status.as_str(), desk.state.unknown_actions.len()),
+                    ("unknown-action;unknown-action;", 1),
+                    "(what the dones heard, the names kept to warn of)"
+                );
+            }
         }
     }
 

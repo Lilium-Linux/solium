@@ -1942,9 +1942,12 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     //         properties = { source = "…" },
     //     })
     //
-    // `interactive = true` lets the pointer reach it: the scene sets an
-    // `action` string and a `sol.on("surface", …)` handler is told about it,
-    // which is how the tweaks panel works and how a bar's buttons would.
+    // `interactive = true` lets the pointer reach it: the scene calls
+    // `Solium.send(action, data)`, and a `sol.on("surface", …)` handler is
+    // told the surface's name, the action and its data, which is how the
+    // tweaks panel works and how a bar's buttons would
+    // (`tests::a_surface_action_reaches_lua_with_its_data`,
+    // `state::tests::real_client::a_click_on_a_hosted_button_is_acted_on_at_its_release`).
     //
     // `reserve = { bottom = 48 }` takes those edges out of the work area of
     // every monitor it is on, whatever its size, and the scene's own

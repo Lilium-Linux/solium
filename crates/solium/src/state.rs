@@ -401,7 +401,7 @@ pub(crate) struct Solium {
     pub(crate) settled_attempts: Vec<crate::script::Settled>,
     /// The actions `sol.act` was asked for that the compositor does not know,
     /// each logged the first time only.
-    /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+    /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
     pub(crate) unknown_actions: std::collections::HashSet<String>,
     /// Whether the settled attempts are being told, so what a `done` asks
     /// for is told by that loop and not from inside it.

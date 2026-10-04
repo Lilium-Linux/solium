@@ -330,8 +330,8 @@ SoliumKeyboard *SoliumAttached::keyboard()
 
 void SoliumAttached::send(const QString &action, const QJSValue &data)
 {
-    /* A scene that is not hosted has no surface to send from: the log says
-     * so once, and nothing is queued.
+    /* A scene that is not hosted has no surface to send from, so nothing is
+     * queued.
      * `qml::hosted::tests::an_unhosted_scene_may_send_and_queues_nothing`. */
     SoliumHosting *hosting = solium_hosting_of(m_item);
     if (hosting == nullptr) {

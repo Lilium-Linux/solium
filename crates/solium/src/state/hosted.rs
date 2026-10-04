@@ -362,6 +362,7 @@ impl Solium {
     /// `windows.close` reaches a window still loading: the others act on its
     /// client, which it does not have yet.
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+    /// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`,
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`.
     pub(crate) fn act(&mut self, action: &str, data: &Json) -> Result<Command, &'static str> {
