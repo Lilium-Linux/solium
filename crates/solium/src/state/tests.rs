@@ -25293,8 +25293,15 @@ end)"#,
                 );
                 desk.state.settle_scenes();
                 assert_eq!(
-                    desk.state.status,
-                    "unknown-window;unknown-window;unknown-window;nil;"
+                    (
+                        desk.state.status.as_str(),
+                        desk.state
+                            .panes
+                            .get(loading)
+                            .is_some_and(crate::pane::Pane::leaving)
+                    ),
+                    ("unknown-window;unknown-window;unknown-window;nil;", true),
+                    "(what the dones heard, whether the loading window is closing)"
                 );
             }
 
