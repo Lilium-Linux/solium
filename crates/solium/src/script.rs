@@ -1012,6 +1012,40 @@ impl Scripts {
             },
         )
         .map_err(failed("installing the handler deadline"))?;
+        // `pcall` and `xpcall` hand the stop on rather than catch it: a
+        // handler that calls one in a loop would otherwise catch it every
+        // time, and run for ever. They catch every other error as they did.
+        // Each is wrapped in Lua, and only the look at its results is Rust,
+        // so a coroutine can still yield inside one.
+        // `tests::a_listener_that_retries_with_pcall_is_stopped`,
+        // `tests::a_listener_that_retries_with_xpcall_is_stopped`,
+        // `tests::pcall_still_catches_an_ordinary_error_in_a_handler`,
+        // `tests::a_coroutine_can_still_yield_inside_pcall`.
+        let hand_on = lua
+            .create_function(|lua, results: mlua::MultiValue| {
+                if late(lua) && matches!(results.front(), Some(Value::Boolean(false))) {
+                    return Err(mlua::Error::runtime(STOPPED));
+                }
+                Ok(results)
+            })
+            .map_err(failed("wrapping `pcall` and `xpcall`"))?;
+        for name in ["pcall", "xpcall"] {
+            let catcher: mlua::Function = lua
+                .globals()
+                .get(name)
+                .map_err(failed("reading `pcall` and `xpcall`"))?;
+            let handing_on: mlua::Function = lua
+                .load(format!(
+                    "local {name}, hand_on = ...\n\
+                     return function(...) return hand_on({name}(...)) end"
+                ))
+                .set_name(format!("={name}"))
+                .call((catcher, hand_on.clone()))
+                .map_err(failed("wrapping `pcall` and `xpcall`"))?;
+            lua.globals()
+                .set(name, handing_on)
+                .map_err(failed("wrapping `pcall` and `xpcall`"))?;
+        }
 
         // So a script can `require` its neighbours.
         if let Some(directory) = config.parent().and_then(|path| path.to_str()) {
@@ -7706,6 +7740,106 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
             started.elapsed() < std::time::Duration::from_secs(2),
             "took {:?}",
             started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A loop that catches the stop with `pcall` is still stopped**, and
+    /// the stop counts against the listener.
+    #[test]
+    fn a_listener_that_retries_with_pcall_is_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-pcall",
+            r#"
+            sol.on("layout", function() repeat until pcall(function() while true do end end) end)
+            sol.on("layout", function() sol.status("ran") end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            (
+                outcome.status.as_deref(),
+                scripts.evaluate(
+                    "local n = 0 for _, count in pairs(sol._strikes) do n = n + count end return tostring(n)"
+                )
+            ),
+            (Some("ran"), "1".to_owned()),
+            "(what the next listener said, the strikes counted)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A loop that catches the stop with `xpcall` is still stopped.**
+    #[test]
+    fn a_listener_that_retries_with_xpcall_is_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-xpcall",
+            r#"
+            sol.on("layout", function()
+                repeat until xpcall(function() while true do end end, function(err) return err end)
+            end)
+            sol.on("layout", function() sol.status("ran") end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome.status.as_deref(), Some("ran"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`pcall` and `xpcall` still catch an ordinary error in a handler**,
+    /// and still hand back every value.
+    #[test]
+    fn pcall_still_catches_an_ordinary_error_in_a_handler() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-pcall-ordinary",
+            r#"
+            sol.on("layout", function()
+                local ok, err = pcall(error, "mine", 0)
+                local good, a, b = pcall(function() return 1, 2 end)
+                local xok, xerr = xpcall(function() error("theirs", 0) end, function(e) return "handled " .. e end)
+                sol.status(table.concat({ tostring(ok), err, tostring(good), a, b, tostring(xok), xerr }, " "))
+            end)
+            "#,
+        );
+        assert_eq!(
+            scripts.relayout(one_screen(&[])).status.as_deref(),
+            Some("false mine true 1 2 false handled theirs")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A coroutine can still yield inside `pcall` and `xpcall`**, as it
+    /// can in plain Lua 5.4.
+    #[test]
+    fn a_coroutine_can_still_yield_inside_pcall() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-pcall-yield",
+            r#"
+            sol.on("layout", function()
+                local co = coroutine.wrap(function()
+                    local _, first = pcall(function() return coroutine.yield("one") end)
+                    local _, second = xpcall(function() return coroutine.yield("two") end, function(e) return e end)
+                    return first .. " " .. second
+                end)
+                sol.status(table.concat({ co(), co("a"), co("b") }, " "))
+            end)
+            "#,
+        );
+        assert_eq!(
+            scripts.relayout(one_screen(&[])).status.as_deref(),
+            Some("one two a b")
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
