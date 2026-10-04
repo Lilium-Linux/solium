@@ -539,9 +539,12 @@ at it does not stop the next
 What a `done` asked for in the run that was stopped is dropped, the attempts it
 started with it, so a retry that acts again and then never returns is stopped
 once, not every round; and its stops are counted by function, as a listener's
-are, so one stopped three times is not called again until a reload
+are, so one stopped three times is not called again until a reload, while a
+`done` written inline is a new function at each `sol.act`, and is stopped each
+time rather than taken out
 (`script::tests::what_a_stopped_done_asked_for_is_dropped`,
 `script::tests::a_done_stopped_three_times_is_not_called_again`,
+`script::tests::an_inline_done_is_stopped_each_time_and_never_taken_out`,
 `state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_and_never_returns_does_not_stall_every_dispatch`).
 A `workspaces.*` action is the configuration's to answer, since the
 compositor does not know what a workspace is: a file answers one with

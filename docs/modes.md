@@ -246,7 +246,8 @@ finalizer, and the `__close` of a to-be-closed variable in the function a stop
 interrupts, run where no hook does, so the deadline cannot stop a loop in
 either: keep them short. A listener stopped three times stays off until
 `super+shift+r`, and so does a `done` of `sol.act`, whose stops are counted the
-same way
+same way, by function: a `done` written inline is a new function at each
+`sol.act`, so it is stopped each time rather than taken out
 (`script::tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 `script::tests::a_binding_that_never_returns_is_stopped`,
 `script::tests::a_handler_that_calls_sol_deadline_is_still_stopped`,
@@ -261,7 +262,8 @@ same way
 `script::tests::a_gc_finalizer_is_not_under_the_deadline`,
 `script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
 `script::tests::a_listener_stopped_three_times_is_taken_out`,
-`script::tests::a_done_stopped_three_times_is_not_called_again`).
+`script::tests::a_done_stopped_three_times_is_not_called_again`,
+`script::tests::an_inline_done_is_stopped_each_time_and_never_taken_out`).
 An `actions.override` is a listener `actions.lua` writes for you, so its stop
 names `actions.lua` as where it was written, and the override's own line as
 where it was stopped

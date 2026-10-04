@@ -8108,6 +8108,28 @@ actions.override("windows.close", function() heard = heard .. "second;" end)"#,
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **A `done` written inline is a new function at each `sol.act`**, so its
+    /// stops do not add up: it is stopped every time, and never taken out.
+    #[test]
+    fn an_inline_done_is_stopped_each_time_and_never_taken_out() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-done-inline",
+            r#"runs = 0
+               sol.on("surface", function()
+                   sol.act("windows.focus", { id = 1 }, function() runs = runs + 1; while true do end end)
+               end)"#,
+        );
+        for _ in 0..4 {
+            let outcome =
+                scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+            let settled = all_done(&outcome);
+            assert_eq!(settled.len(), 1, "one act: {:?}", outcome.commands);
+            let _ = scripts.attempts_settled(&settled, one_screen(&[]));
+        }
+        assert_eq!(scripts.evaluate("return tostring(runs)"), "4");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **What a `done` asked for before it was stopped is dropped**: its
     /// commands are not applied, and the attempt it started is forgotten,
     /// so a retry that acts again and then never returns is not told again.
