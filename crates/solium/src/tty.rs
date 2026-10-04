@@ -402,6 +402,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         drm: None,
         signal: event_loop.get_signal(),
         active: true,
+        chain: None,
     };
 
     // Whether the seat has been handed over yet.
@@ -473,6 +474,23 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                     }
                 }
 
+                // The kernel's flip, for `late`: counted whether or not
+                // anything asked for presentation feedback.
+                // `pacing::tests::a_frame_held_past_a_vblank_by_its_fence_is_late`.
+                let flip = match metadata.as_ref().map(|it| (it.time, it.sequence)) {
+                    Some((DrmEventTime::Monotonic(at), seq)) => {
+                        Some(crate::pacing::Flip { seq, at })
+                    }
+                    _ => None,
+                };
+                if let (Some(flip), Some(queued)) = (flip, screen.queued.take()) {
+                    crate::pacing::flipped(crate::pacing::vblanks_missed(
+                        queued,
+                        flip,
+                        frame_interval(&screen.output),
+                    ));
+                }
+
                 // The frame is on the screen, and *this* is the moment clients
                 // asked about. The kernel's own flip timestamp and sequence
                 // number, not ours: a number we invented here would be a guess
@@ -520,7 +538,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 // on its behalf.
                 let owed = state.screens.iter().any(|screen| screen.owed);
                 if state.solium.redraw || state.animating || owed {
+                    state.chain = flip.map(|flip| (crtc, flip));
                     state.render();
+                    state.chain = None;
                 } else {
                     state.idle();
                 }
@@ -788,6 +808,9 @@ struct Screen {
     /// What has been done to this display on its way off and back. See
     /// `power.rs`: the monitor stays in the session whatever this says.
     lit: Lit,
+    /// The frame queued on this screen and not yet flipped, for `late`.
+    /// `pacing::tests::a_frame_held_past_a_vblank_by_its_fence_is_late`.
+    queued: Option<crate::pacing::Queued>,
 }
 
 impl std::fmt::Debug for Screen {
@@ -834,6 +857,10 @@ pub(crate) struct State {
     node: Option<DrmNode>,
     signal: LoopSignal,
     active: bool,
+    /// The flip whose vblank handler is drawing right now, and its CRTC: a
+    /// frame queued in that render is chained to it.
+    /// `pacing::tests::a_chained_frame_that_skipped_a_vblank_is_one_late`.
+    chain: Option<(crtc::Handle, crate::pacing::Flip)>,
 }
 
 impl State {
@@ -995,6 +1022,7 @@ impl State {
             pending_feedback: None,
             owed: false,
             lit: Lit::On,
+            queued: None,
         });
         true
     }
@@ -1487,6 +1515,13 @@ impl State {
                     match screen.compositor.queue_frame(built_under) {
                         Ok(()) => {
                             screen.pending = true;
+                            screen.queued = Some(crate::pacing::Queued {
+                                at: crate::pacing::monotonic_now(),
+                                after: self
+                                    .chain
+                                    .filter(|(crtc, _)| *crtc == screen.crtc)
+                                    .map(|(_, flip)| flip),
+                            });
                             // Taken now, reported at *this* screen's flip. The
                             // callbacks belong to the frame just queued here, and
                             // neither a later frame's commits nor another

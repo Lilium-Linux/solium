@@ -66,7 +66,9 @@ use std::{
 /// Nothing is lost by the limit, which is the part worth getting right. A
 /// report is not "the frame that happened to be slow when the timer fired": it
 /// carries the **worst** frame since the last report, with its full breakdown,
-/// plus how many frames missed out of how many were drawn and over what span.
+/// plus how many frames missed out of how many were drawn and over what span,
+/// and how many vblanks a flip missed in it (`late`, which makes a report due
+/// on its own: `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`).
 /// So a single hiccup reads `missed=1 frames=3` and a sustained stall reads
 /// `missed=247 frames=259`, and the two are never confusable.
 ///
@@ -231,6 +233,9 @@ struct Counters {
     frames: Cell<u64>,
     /// Frames in it that did not fit in their deadline.
     missed: Cell<u64>,
+    /// Vblanks a flip missed in it.
+    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    late: Cell<u64>,
     /// The worst of those.
     worst: RefCell<Option<Slow>>,
     /// When the last report was made, if there has been one.
@@ -240,6 +245,9 @@ struct Counters {
     all_passes: Cell<u64>,
     /// How many of them overran the tightest monitor's interval.
     all_missed: Cell<u64>,
+    /// Vblanks a flip missed since the session began, measured or not.
+    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    all_late: Cell<u64>,
     /// A report that is due and waits for its pass's GPU time.
     /// `tests::a_report_waits_for_its_passes_gpu_time`.
     parked: RefCell<Option<Line>>,
@@ -273,10 +281,12 @@ thread_local! {
             since: Cell::new(None),
             frames: Cell::new(0),
             missed: Cell::new(0),
+            late: Cell::new(0),
             worst: RefCell::new(None),
             reported: Cell::new(None),
             all_passes: Cell::new(0),
             all_missed: Cell::new(0),
+            all_late: Cell::new(0),
             parked: RefCell::new(None),
             parked_at: Cell::new(0),
             captures: Cell::new(0),
@@ -349,7 +359,8 @@ impl Counters {
     /// No clock is read here, so the rules are driven with made-up times:
     /// `tests::a_sustained_stall_is_one_line_a_second`,
     /// `tests::the_first_miss_reports_immediately`,
-    /// `tests::an_occasional_miss_is_never_swallowed`. A deadline of zero is a
+    /// `tests::an_occasional_miss_is_never_swallowed`,
+    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`. A deadline of zero is a
     /// backend that did not name one: nothing can be missed against it, and
     /// inventing a number would turn a wiring mistake into a stream of
     /// confident nonsense.
@@ -373,43 +384,48 @@ impl Counters {
             return None;
         }
         self.frames.set(self.frames.get().saturating_add(1));
-        if !missed {
+        if missed {
+            self.missed.set(self.missed.get().saturating_add(1));
+        }
+
+        // The span's slowest pass, whether or not it missed, so a span with
+        // only late flips still has a pass to show; snapshot only when it is
+        // the slowest, so a pass that is not allocates nothing.
+        // `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+        if let Ok(mut worst) = self.worst.try_borrow_mut()
+            && worst.as_ref().is_none_or(|held| total > held.total)
+        {
+            let mut spent = [0_u64; Phase::COUNT];
+            for (slot, cell) in spent.iter_mut().zip(self.spent.iter()) {
+                *slot = cell.get();
+            }
+            *worst = Some(Slow {
+                pass,
+                total,
+                deadline,
+                monitor: self
+                    .monitor
+                    .try_borrow()
+                    .map(|held| held.clone())
+                    .unwrap_or_default(),
+                spent,
+                panes: u32::try_from(panes).unwrap_or(u32::MAX),
+                drew: self.drew.get(),
+                scenes: self.scenes.get(),
+                animating: self.animating.get(),
+                rendered: self.rendered.get(),
+                built: self.built.get(),
+                rebound: self.rebound.get(),
+                gpu: early,
+                captures: self.captures.get(),
+            });
+        }
+        if !missed && self.late.get() == 0 {
             return None;
         }
-        self.missed.set(self.missed.get().saturating_add(1));
 
-        let mut spent = [0_u64; Phase::COUNT];
-        for (slot, cell) in spent.iter_mut().zip(self.spent.iter()) {
-            *slot = cell.get();
-        }
-        let slow = Slow {
-            pass,
-            total,
-            deadline,
-            monitor: self
-                .monitor
-                .try_borrow()
-                .map(|held| held.clone())
-                .unwrap_or_default(),
-            spent,
-            panes: u32::try_from(panes).unwrap_or(u32::MAX),
-            drew: self.drew.get(),
-            scenes: self.scenes.get(),
-            animating: self.animating.get(),
-            rendered: self.rendered.get(),
-            built: self.built.get(),
-            rebound: self.rebound.get(),
-            gpu: early,
-            captures: self.captures.get(),
-        };
-        if let Ok(mut worst) = self.worst.try_borrow_mut()
-            && worst.as_ref().is_none_or(|held| slow.total > held.total)
-        {
-            *worst = Some(slow);
-        }
-
-        // The first miss after a quiet spell goes out at once; everything
-        // after it waits for the limit. See `REPORT_EVERY`.
+        // The first miss or late flip after a quiet spell goes out at once;
+        // everything after it waits for the limit. See `REPORT_EVERY`.
         let due = self
             .reported
             .get()
@@ -426,12 +442,13 @@ impl Counters {
             .try_borrow_mut()
             .ok()
             .and_then(|mut held| held.take());
-        let (frames, missed) = (self.frames.get(), self.missed.get());
+        let (frames, missed, late) = (self.frames.get(), self.missed.get(), self.late.get());
         self.reported.set(Some(now));
         self.since.set(Some(now));
         self.frames.set(0);
         self.missed.set(0);
-        worst.map(|worst| Line::of(&worst, frames, missed, span))
+        self.late.set(0);
+        worst.map(|worst| Line::of(&worst, frames, missed, late, span))
     }
 
     /// The session's totals. `tests::a_miss_is_counted_with_the_knob_off`.
@@ -439,6 +456,7 @@ impl Counters {
         Totals {
             passes: self.all_passes.get(),
             missed: self.all_missed.get(),
+            late: self.all_late.get(),
         }
     }
 
@@ -510,6 +528,17 @@ impl Counters {
         let mut line = self.flush()?;
         line.gpu = Some(gpu);
         Some(line)
+    }
+
+    /// A flip landed `late` vblanks late: into the session's totals always,
+    /// and into the span's report with the knob on.
+    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    fn flipped(&self, late: u32) {
+        let late = u64::from(late);
+        self.all_late.set(self.all_late.get().saturating_add(late));
+        if self.on.get() {
+            self.late.set(self.late.get().saturating_add(late));
+        }
     }
 }
 
@@ -691,9 +720,10 @@ impl Frame {
         COUNTERS.with(|counters| counters.drew.set(counters.drew.get().saturating_add(1)));
     }
 
-    /// Stop measuring, count the pass, and report if it missed and a report is
-    /// due: at once if its GPU time is in, and otherwise parked until it is
-    /// (`tests::a_report_waits_for_its_passes_gpu_time`).
+    /// Stop measuring, count the pass, and report if it missed or a flip was
+    /// late since the last report (`tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`)
+    /// and a report is due: at once if its GPU time is in, and otherwise
+    /// parked until it is (`tests::a_report_waits_for_its_passes_gpu_time`).
     ///
     /// `panes` is what was on screen — the count the reader needs to tell a
     /// slow frame with eight windows from a slow frame with one.
@@ -729,12 +759,71 @@ impl Frame {
     }
 }
 
+/// One page flip, as the kernel reported it: its vblank sequence and its
+/// CLOCK_MONOTONIC time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Flip {
+    pub(crate) seq: u32,
+    pub(crate) at: Duration,
+}
+
+/// A frame queued on one screen, waiting for its flip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Queued {
+    /// CLOCK_MONOTONIC when `queue_frame` returned.
+    pub(crate) at: Duration,
+    /// The vblank whose handler drew it, when one did: a frame chained to the
+    /// last flip should land on the next.
+    pub(crate) after: Option<Flip>,
+}
+
+/// Slack for the kernel's timestamp against ours: half a millisecond.
+const FLIP_SLACK: Duration = Duration::from_micros(500);
+
+/// **Vblanks this screen should have flipped at and did not.**
+///
+/// A frame drawn for a vblank should flip on the next one, so every vblank in
+/// between was lost: `tests::a_chained_frame_that_skipped_a_vblank_is_one_late`,
+/// `tests::a_sequence_that_wrapped_is_not_four_billion_late`. A frame started
+/// from idle or a client's commit has no vblank it was drawn for, so it is
+/// late only if a whole interval passed between queueing and flipping — the
+/// GPU or the fence held it: `tests::a_frame_from_idle_that_made_the_first_vblank_is_on_time`,
+/// `tests::a_frame_held_past_a_vblank_by_its_fence_is_late`.
+pub(crate) fn vblanks_missed(queued: Queued, flipped: Flip, interval: Duration) -> u32 {
+    if let Some(trigger) = queued.after {
+        return flipped.seq.wrapping_sub(trigger.seq).saturating_sub(1);
+    }
+    if interval.is_zero() {
+        return 0;
+    }
+    let waited = flipped
+        .at
+        .saturating_sub(queued.at)
+        .saturating_sub(FLIP_SLACK);
+    u32::try_from(waited.as_nanos() / interval.as_nanos()).unwrap_or(u32::MAX)
+}
+
+/// CLOCK_MONOTONIC now, which is the clock the kernel stamps flips with.
+pub(crate) fn monotonic_now() -> Duration {
+    smithay::utils::Clock::<smithay::utils::Monotonic>::new()
+        .now()
+        .into()
+}
+
+/// A flip landed `late` vblanks late. Counted always:
+/// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+pub(crate) fn flipped(late: u32) {
+    COUNTERS.with(|counters| counters.flipped(late));
+}
+
 /// What the session's passes came to, counted whether or not `SOLIUM_PACING`
 /// is set: `tests::a_miss_is_counted_with_the_knob_off`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Totals {
     pub(crate) passes: u64,
     pub(crate) missed: u64,
+    /// Vblanks a flip missed: `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    pub(crate) late: u64,
 }
 
 /// The session's totals so far, on this thread.
@@ -749,7 +838,8 @@ pub(crate) fn summary() {
     tracing::info!(
         passes = totals.passes,
         missed = totals.missed,
-        "pacing: render passes this session (one in which no monitor was ready to draw still counts), and passes that overran the tightest monitor's frame"
+        late = totals.late,
+        "pacing: render passes this session (one in which no monitor was ready to draw still counts), passes that overran the tightest monitor's frame, and vblanks a flip missed"
     );
 }
 
@@ -795,6 +885,9 @@ pub(crate) struct Line {
     pub(crate) deadline_us: u64,
     pub(crate) monitor: String,
     pub(crate) missed: u64,
+    /// Vblanks a flip missed in the span:
+    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    pub(crate) late: u64,
     pub(crate) frames: u64,
     pub(crate) span_ms: u64,
     pub(crate) spent_us: [u64; Phase::COUNT],
@@ -812,7 +905,7 @@ pub(crate) struct Line {
 }
 
 impl Line {
-    fn of(worst: &Slow, frames: u64, missed: u64, span: Duration) -> Self {
+    fn of(worst: &Slow, frames: u64, missed: u64, late: u64, span: Duration) -> Self {
         // Saturating rather than truncating: a pass that somehow lasted longer
         // than half a million years should read as enormous, not as small.
         let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
@@ -822,6 +915,7 @@ impl Line {
             deadline_us: micros(worst.deadline),
             monitor: worst.monitor.clone(),
             missed,
+            late,
             frames,
             span_ms: micros(span) / 1_000,
             spent_us: worst.spent.map(|nanos| nanos / 1_000),
@@ -878,6 +972,7 @@ fn emit(line: &Line) {
         deadline_us = line.deadline_us,
         monitor = line.monitor,
         missed = line.missed,
+        late = line.late,
         frames = line.frames,
         span_ms = line.span_ms,
         tick_us = phase(Phase::Tick),
@@ -913,7 +1008,7 @@ fn emit(line: &Line) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Frame, Line, Phase, Totals};
+    use super::{Counters, Flip, Frame, Line, Phase, Queued, Totals, vblanks_missed};
     use crate::gputime::{Gpu, GpuSample};
     use std::time::{Duration, Instant};
 
@@ -937,7 +1032,8 @@ mod tests {
             counters.totals(),
             Totals {
                 passes: 1,
-                missed: 1
+                missed: 1,
+                late: 0
             }
         );
     }
@@ -963,7 +1059,8 @@ mod tests {
             counters.totals(),
             Totals {
                 passes: 2,
-                missed: 0
+                missed: 0,
+                late: 0
             }
         );
     }
@@ -1003,7 +1100,8 @@ mod tests {
             super::totals(),
             Totals {
                 passes: 1,
-                missed: 1
+                missed: 1,
+                late: 0
             }
         );
 
@@ -1015,7 +1113,8 @@ mod tests {
             super::totals(),
             Totals {
                 passes: 2,
-                missed: 1
+                missed: 1,
+                late: 0
             },
             "a pass that named no deadline was judged against the last one's"
         );
@@ -1207,6 +1306,7 @@ mod tests {
             deadline_us: 0,
             monitor: String::new(),
             missed: 0,
+            late: 0,
             frames: 0,
             span_ms: 0,
             spent_us: [0; Phase::COUNT],
@@ -1266,6 +1366,89 @@ mod tests {
             .finish_at(start, start + ms(17), true, 1, 1)
             .expect("a first miss is due");
         assert_eq!((line.source.name(), line.clocks), ("none", None));
+    }
+
+    fn flip(seq: u32, at_us: u64) -> Flip {
+        Flip {
+            seq,
+            at: Duration::from_micros(at_us),
+        }
+    }
+
+    /// A frame drawn for the vblank before it that flipped one vblank further
+    /// on lost exactly that one.
+    #[test]
+    fn a_chained_frame_that_skipped_a_vblank_is_one_late() {
+        let queued = Queued {
+            at: Duration::from_micros(10_500),
+            after: Some(flip(100, 10_000)),
+        };
+        assert_eq!(vblanks_missed(queued, flip(102, 17_692), at_260()), 1);
+        assert_eq!(
+            vblanks_missed(queued, flip(101, 13_846), at_260()),
+            0,
+            "the next vblank is on time"
+        );
+    }
+
+    /// A frame started from idle or from a client's commit is late only if a
+    /// whole vblank passed between queueing it and its flip.
+    #[test]
+    fn a_frame_from_idle_that_made_the_first_vblank_is_on_time() {
+        let queued = Queued {
+            at: Duration::from_micros(50_000),
+            after: None,
+        };
+        assert_eq!(vblanks_missed(queued, flip(7, 51_000), at_260()), 0);
+    }
+
+    /// Held past a vblank by its fence: late, though the CPU was on time.
+    #[test]
+    fn a_frame_held_past_a_vblank_by_its_fence_is_late() {
+        let queued = Queued {
+            at: Duration::from_micros(50_000),
+            after: None,
+        };
+        assert_eq!(vblanks_missed(queued, flip(7, 54_615), at_260()), 1);
+    }
+
+    /// The kernel's sequence is a `u32` and wraps; a wrap is not four billion
+    /// vblanks.
+    #[test]
+    fn a_sequence_that_wrapped_is_not_four_billion_late() {
+        let queued = Queued {
+            at: Duration::ZERO,
+            after: Some(flip(u32::MAX, 0)),
+        };
+        assert_eq!(vblanks_missed(queued, flip(1, 7_692), at_260()), 1);
+    }
+
+    /// **A late flip makes a report due with no CPU miss at all** — the
+    /// GPU-bound stutter, which reads `late>0`, `missed=0` and a high `gpu_us`.
+    #[test]
+    fn a_late_flip_makes_a_report_due_without_a_cpu_miss() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        assert!(
+            counters
+                .finish_at(start, start + ms(2), true, 1, 1)
+                .is_none(),
+            "on time"
+        );
+        counters.flipped(1);
+        let due = counters
+            .finish_at(start + ms(4), start + ms(6), true, 1, 2)
+            .expect("a late flip is reported");
+        assert_eq!((due.missed, due.late), (0, 1));
+        assert_eq!(
+            counters.totals(),
+            Totals {
+                passes: 2,
+                missed: 0,
+                late: 1
+            }
+        );
     }
 
     /// A capture is counted only inside a measured pass: the GPU pre-flight
@@ -1383,6 +1566,8 @@ mod tests {
             reported: std::cell::Cell::new(None),
             all_passes: std::cell::Cell::new(0),
             all_missed: std::cell::Cell::new(0),
+            late: std::cell::Cell::new(0),
+            all_late: std::cell::Cell::new(0),
             parked: std::cell::RefCell::new(None),
             parked_at: std::cell::Cell::new(0),
             captures: std::cell::Cell::new(0),
