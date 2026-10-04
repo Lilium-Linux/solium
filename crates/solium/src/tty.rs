@@ -754,6 +754,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             state.qt.arm(coming);
             let _ = state.solium.display_handle.flush_clients();
         })
+        // The totals however the loop ended: a session that died is the one
+        // whose numbers are wanted. This needs a session, and no test
+        // reaches it.
+        .inspect_err(|_| crate::pacing::summary())
         .map_err(|err| anyhow!("running the event loop: {err}"))?;
     crate::pacing::summary();
     state.solium.session.end();
