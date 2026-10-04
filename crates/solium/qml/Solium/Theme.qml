@@ -49,15 +49,16 @@ QtObject {
     // pill's capsule, which stands out on a dark window and on a light one
     // (`tests/scenarios/keyboard-pane-drawn.lua`). `warning` and `danger` are
     // what the maximise and close buttons turn under the pointer, close the
-    // lighter, so the two are told apart by shade rather than by hue
-    // (`qml::hosting_tests::every_colour_the_theme_publishes_is_a_grey`).
+    // lighter, so the two are told apart by shade and by the glyph each then
+    // shows rather than by hue (`tests/scenarios/pane-buttons-drawn.lua`).
     readonly property color accent: "#d4d4d4"
     readonly property color warning: "#a6a6a6"
     readonly property color danger: "#ebebeb"
 
     // What is drawn on any of those three: the pill's glyph and label, a
-    // pressed tweak's label. Dark, so it contrasts with all three
-    // (`tests/scenarios/keyboard-pane-drawn.lua`).
+    // frame button's glyph, a pressed tweak's label. Dark, so it contrasts
+    // with all three (`tests/scenarios/keyboard-pane-drawn.lua`,
+    // `tests/scenarios/pane-buttons-drawn.lua`).
     readonly property color accentInk: "#1c1c1c"
 
     // --- metrics --------------------------------------------------------
