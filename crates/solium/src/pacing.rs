@@ -32,7 +32,10 @@
 //!   disk — deliberately, so a session that ends in the power button still has
 //!   its last seconds. A line per frame at 260 Hz is 260 synchronous writes a
 //!   second and would comfortably out-stall anything it was measuring. See
-//!   [`REPORT_EVERY`].
+//!   [`REPORT_EVERY`]. `SOLIUM_TRACE`, which wants every pass, formats one
+//!   record a pass into a buffer of its own and writes it once a second,
+//!   never `O_DSYNC`: [`Trace`],
+//!   `tests::the_trace_is_buffered_and_flushed_once_a_second`.
 //!
 //! # What a phase is
 //!
@@ -50,6 +53,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    io::Write as _,
     time::{Duration, Instant},
 };
 
@@ -302,6 +306,15 @@ struct Counters {
     /// This pass's Qt time for scenes past the slots.
     /// `tests::more_scenes_than_slots_land_in_other`.
     scene_other: Cell<u64>,
+    /// `SOLIUM_TRACE`'s file, when it is set and could be opened.
+    /// `tests::a_counted_pass_is_traced_with_its_gpu_time`.
+    trace: RefCell<Option<Trace>>,
+    /// CLOCK_MONOTONIC as this pass began, with a trace open.
+    /// `tests::a_traced_pass_and_its_flip_through_the_backends_calls`.
+    t_ns: Cell<u64>,
+    /// The windows on screen as this pass ended, for its record.
+    /// `tests::every_pass_record_carries_the_documented_fields`.
+    panes_seen: Cell<u32>,
 }
 
 thread_local! {
@@ -339,6 +352,9 @@ thread_local! {
             free_ids: RefCell::new(Vec::new()),
             scene_spent: [const { Cell::new((0, 0)) }; SCENE_SLOTS],
             scene_other: Cell::new(0),
+            trace: RefCell::new(None),
+            t_ns: Cell::new(0),
+            panes_seen: Cell::new(0),
         }
     };
 }
@@ -433,6 +449,8 @@ impl Counters {
         panes: usize,
         pass: u64,
     ) -> Option<Line> {
+        self.panes_seen
+            .set(u32::try_from(panes).unwrap_or(u32::MAX));
         let total = now.saturating_duration_since(started);
         let early = self.early.take();
         let deadline = self.deadline.get();
@@ -443,6 +461,17 @@ impl Counters {
         }
         if !on {
             return None;
+        }
+        // The pass's record waits for its GPU time, unless that came before
+        // the pass ended: `tests::a_counted_pass_is_traced_with_its_gpu_time`.
+        if let Ok(mut trace) = self.trace.try_borrow_mut()
+            && let Some(trace) = trace.as_mut()
+        {
+            trace.pass(pass, self.pass_record(pass, total, missed));
+            if early.is_some() {
+                trace.resolved(pass, early);
+            }
+            trace.tick(now);
         }
         self.frames.set(self.frames.get().saturating_add(1));
         if missed {
@@ -521,13 +550,20 @@ impl Counters {
         Some(Line::of(&worst, frames, missed, late, span))
     }
 
-    /// The loop went idle: whatever is parked
-    /// (`tests::idle_flushes_a_parked_report`), or else a report the span's
-    /// late flips made due, since a flip seen just before the loop went idle
-    /// has no pass after it to report it
+    /// The loop went idle: the trace's waiting records are written, as late
+    /// if their GPU time has not come
+    /// (`tests::a_counted_pass_is_traced_with_its_gpu_time`); then whatever
+    /// is parked (`tests::idle_flushes_a_parked_report`), or else a report
+    /// the span's late flips made due, since a flip seen just before the
+    /// loop went idle has no pass after it to report it
     /// (`tests::a_late_flip_before_idle_is_reported_at_idle`). `now` is
     /// asked for only then, so with the knob off this reads no clock.
     fn idle(&self, now: impl FnOnce() -> Instant) -> Option<Line> {
+        if let Ok(mut trace) = self.trace.try_borrow_mut()
+            && let Some(trace) = trace.as_mut()
+        {
+            trace.close();
+        }
         if let Some(line) = self.flush() {
             return Some(line);
         }
@@ -546,11 +582,19 @@ impl Counters {
         }
     }
 
-    /// Whether pacing is on, decided from the environment once.
+    /// Whether pacing is on, decided from the environment once: either
+    /// knob, `SOLIUM_TRACE` opening its file too
+    /// (`tests::the_trace_turns_pacing_on`).
     fn decide(&self) -> bool {
         if !self.asked.get() {
             self.asked.set(true);
-            self.on.set(crate::dev::pacing());
+            let path = crate::dev::trace_path();
+            self.on.set(knob(crate::dev::pacing(), path.is_some()));
+            if let Some(path) = path
+                && let Ok(mut trace) = self.trace.try_borrow_mut()
+            {
+                *trace = Trace::open(&path, Instant::now());
+            }
         }
         self.on.get()
     }
@@ -591,7 +635,14 @@ impl Counters {
     /// or with the pass being measured if it is that one, and send the parked
     /// report if it was waiting for it.
     /// `tests::a_gpu_time_that_came_before_its_report_goes_out_with_it`.
+    /// The trace's record of that pass goes with it:
+    /// `tests::a_counted_pass_is_traced_with_its_gpu_time`.
     fn gpu_resolved(&self, pass: u64, gpu: crate::gputime::Gpu) -> Option<Line> {
+        if let Ok(mut trace) = self.trace.try_borrow_mut()
+            && let Some(trace) = trace.as_mut()
+        {
+            trace.resolved(pass, Some(gpu));
+        }
         if let Ok(mut worst) = self.worst.try_borrow_mut()
             && let Some(held) = worst.as_mut()
             && held.pass == pass
@@ -726,6 +777,81 @@ impl Counters {
             .collect::<Vec<_>>()
             .join(",")
     }
+
+    /// This pass's record, without its GPU half.
+    /// `tests::every_pass_record_carries_the_documented_fields`.
+    fn pass_record(&self, pass: u64, total: Duration, missed: bool) -> String {
+        let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        let phase = |which: Phase| self.spent[which.slot()].get() / 1_000;
+        let monitor = self
+            .monitor
+            .try_borrow()
+            .map(|held| held.clone())
+            .unwrap_or_default();
+        let mut qml = String::from("{");
+        if let Ok(labels) = self.labels.try_borrow() {
+            for (key, nanos) in self
+                .scene_spent
+                .iter()
+                .map(Cell::get)
+                .filter(|(key, _)| *key != 0)
+            {
+                let label = usize::try_from(key.saturating_sub(1))
+                    .ok()
+                    .and_then(|id| labels.get(id))
+                    .and_then(Option::as_ref);
+                if let Some(label) = label {
+                    if qml.len() > 1 {
+                        qml.push(',');
+                    }
+                    qml.push_str(&format!(
+                        "{}:{}",
+                        crate::scripted::json_string(label),
+                        nanos / 1_000
+                    ));
+                }
+            }
+        }
+        qml.push('}');
+        let clocks = self.clocks.get().unwrap_or_default();
+        format!(
+            concat!(
+                r#"{{"pass":{},"t_ns":{},"total_us":{},"deadline_us":{},"monitor":{},"missed":{},"#,
+                r#""tick_us":{},"prep_us":{},"census_us":{},"qml_us":{},"elements_us":{},"gles_us":{},"#,
+                r#""commit_us":{},"settle_us":{},"loose_us":{},"captures":{},"panes":{},"drew":{},"#,
+                r#""scenes":{},"animating":{},"rendered":{},"built":{},"rebound":{},"qml":{},"#,
+                r#""clocks":"{}","gpu_mhz":{},"mem_mhz":{},"pstate":{}"#
+            ),
+            pass,
+            self.t_ns.get(),
+            micros(total),
+            micros(self.deadline.get()),
+            crate::scripted::json_string(&monitor),
+            missed,
+            phase(Phase::Tick),
+            phase(Phase::Prep),
+            phase(Phase::Census),
+            phase(Phase::Qml),
+            phase(Phase::Elements),
+            phase(Phase::Gles),
+            phase(Phase::Commit),
+            phase(Phase::Settle),
+            phase(Phase::Loose),
+            self.captures.get(),
+            self.panes_seen.get(),
+            self.drew.get(),
+            self.scenes.get(),
+            self.animating.get(),
+            self.rendered.get(),
+            self.built.get(),
+            self.rebound.get(),
+            qml,
+            crate::clocks::source().name(),
+            clocks.gpu_mhz,
+            clocks.mem_mhz,
+            clocks.pstate.map_or(-1, i32::from)
+        )
+    }
 }
 
 /// Passes a due report waits for its GPU time: read at least three passes
@@ -767,6 +893,16 @@ pub(crate) fn frame() -> Frame {
             slot.set((0, 0));
         }
         counters.scene_other.set(0);
+        // `tests::a_traced_pass_and_its_flip_through_the_backends_calls`.
+        if counters
+            .trace
+            .try_borrow()
+            .is_ok_and(|trace| trace.is_some())
+        {
+            counters
+                .t_ns
+                .set(u64::try_from(monotonic_now().as_nanos()).unwrap_or(u64::MAX));
+        }
         counters.mark.set(Some(now));
         counters.phase.set(Phase::Loose);
         if counters.since.get().is_none() {
@@ -1018,6 +1154,9 @@ pub(crate) struct Queued {
     /// The vblank whose handler drew it, when one did: a frame chained to the
     /// last flip should land on the next.
     pub(crate) after: Option<Flip>,
+    /// The pass that drew it, which its flip's record names.
+    /// `tests::a_flip_record_is_written_at_the_vblank`.
+    pub(crate) pass: u64,
 }
 
 /// Slack for the kernel's timestamp against ours, beyond the screen's
@@ -1079,9 +1218,18 @@ pub(crate) fn monotonic_now() -> Duration {
 
 /// A flip landed `late` vblanks late. Counted always:
 /// `tests::a_late_flip_is_counted_with_the_knob_off`,
-/// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
-pub(crate) fn flipped(late: u32) {
-    COUNTERS.with(|counters| counters.flipped(late));
+/// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`. With a trace
+/// open, its record is written, and only then is `monitor` asked for its
+/// name: `tests::a_traced_pass_and_its_flip_through_the_backends_calls`.
+pub(crate) fn flipped(late: u32, queued: Queued, flip: Flip, monitor: impl FnOnce() -> String) {
+    COUNTERS.with(|counters| {
+        counters.flipped(late);
+        if let Ok(mut trace) = counters.trace.try_borrow_mut()
+            && let Some(trace) = trace.as_mut()
+        {
+            trace.flip(&flip_record(&queued, flip, late, &monitor()));
+        }
+    });
 }
 
 /// What the session's passes came to, counted whether or not `SOLIUM_PACING`
@@ -1100,7 +1248,10 @@ pub(crate) fn totals() -> Totals {
 }
 
 /// One line of totals, at the end of a session: what a run with the knob off
-/// is compared by.
+/// is compared by. Then the session goes idle for the last time: the trace's
+/// waiting records are written and a parked report goes, as at any idle
+/// (`tests::a_counted_pass_is_traced_with_its_gpu_time`,
+/// `tests::idle_flushes_a_parked_report`).
 pub(crate) fn summary() {
     let totals = totals();
     tracing::info!(
@@ -1109,6 +1260,11 @@ pub(crate) fn summary() {
         late = totals.late,
         "pacing: render passes this session (one in which no monitor was ready to draw still counts), passes that overran the tightest monitor's frame, and vblanks a flip missed"
     );
+    COUNTERS.with(|counters| {
+        if let Some(line) = counters.idle(Instant::now) {
+            emit(&line);
+        }
+    });
 }
 
 /// Whether pacing is on. `SOLIUM_PACING`, read once.
@@ -1344,10 +1500,145 @@ fn emit(line: &Line) {
     );
 }
 
+/// Passes a record waits for its GPU time before it goes as late.
+/// `tests::a_pass_record_that_waits_too_long_goes_out_as_late`.
+const TRACE_WAIT: usize = 16;
+
+/// What the trace buffers before a write: 30 to 120 KB a second at 60 to 260
+/// passes, so a flush a second is the only write.
+/// `tests::the_trace_is_buffered_and_flushed_once_a_second`.
+const TRACE_BUFFER: usize = 256 * 1024;
+
+/// Whether pacing is on: either knob. `tests::the_trace_turns_pacing_on`.
+const fn knob(pacing: bool, trace: bool) -> bool {
+    pacing || trace
+}
+
+/// The per-pass trace: `SOLIUM_TRACE`'s file.
+///
+/// A pass's record is written once its GPU time is in
+/// (`tests::a_pass_record_is_written_when_its_gpu_time_resolves`), sixteen
+/// passes on as late, or at idle
+/// (`tests::a_pass_record_that_waits_too_long_goes_out_as_late`); a flip's
+/// when it lands (`tests::a_flip_record_is_written_at_the_vblank`).
+/// Buffered and flushed once a second, at idle and at exit, and never
+/// `O_DSYNC`, unlike the session log:
+/// `tests::the_trace_is_buffered_and_flushed_once_a_second`.
+struct Trace {
+    out: std::io::BufWriter<Box<dyn std::io::Write>>,
+    waiting: std::collections::VecDeque<(u64, String)>,
+    flushed: Instant,
+}
+
+impl std::fmt::Debug for Trace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Trace")
+            .field("waiting", &self.waiting.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Trace {
+    fn new(out: Box<dyn std::io::Write>, now: Instant) -> Self {
+        Self {
+            out: std::io::BufWriter::with_capacity(TRACE_BUFFER, out),
+            waiting: std::collections::VecDeque::with_capacity(TRACE_WAIT + 1),
+            flushed: now,
+        }
+    }
+
+    fn open(path: &std::path::Path, now: Instant) -> Option<Self> {
+        match std::fs::File::create(path) {
+            Ok(file) => Some(Self::new(Box::new(file), now)),
+            Err(err) => {
+                tracing::warn!(?err, path = %path.display(), "SOLIUM_TRACE could not be opened; no trace");
+                None
+            }
+        }
+    }
+
+    /// A pass's record, still missing its GPU time and its closing brace.
+    fn pass(&mut self, pass: u64, record: String) {
+        self.waiting.push_back((pass, record));
+        if self.waiting.len() > TRACE_WAIT
+            && let Some((_, record)) = self.waiting.pop_front()
+        {
+            self.write(&record, None);
+        }
+    }
+
+    /// A pass's GPU time is in: its record goes.
+    fn resolved(&mut self, pass: u64, gpu: Option<crate::gputime::Gpu>) {
+        if let Some(at) = self
+            .waiting
+            .iter()
+            .position(|(waiting, _)| *waiting == pass)
+            && let Some((_, record)) = self.waiting.remove(at)
+        {
+            self.write(&record, gpu);
+        }
+    }
+
+    fn flip(&mut self, record: &str) {
+        let _ = writeln!(self.out, "{record}");
+    }
+
+    /// Flush once a second.
+    fn tick(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.flushed) >= REPORT_EVERY {
+            let _ = std::io::Write::flush(&mut self.out);
+            self.flushed = now;
+        }
+    }
+
+    /// Everything still waiting goes as late, and the buffer is flushed.
+    fn close(&mut self) {
+        while let Some((_, record)) = self.waiting.pop_front() {
+            self.write(&record, None);
+        }
+        let _ = std::io::Write::flush(&mut self.out);
+    }
+
+    fn write(&mut self, record: &str, gpu: Option<crate::gputime::Gpu>) {
+        let _ = writeln!(self.out, "{record}{}", gpu_fields(gpu));
+    }
+}
+
+/// A record's GPU half, closing brace included.
+/// `tests::every_pass_record_carries_the_documented_fields`.
+fn gpu_fields(gpu: Option<crate::gputime::Gpu>) -> String {
+    use crate::gputime::{Gpu, GpuSample};
+    let (status, sample) = match gpu {
+        Some(Gpu::Ok(sample)) => ("ok", sample),
+        Some(Gpu::Unsupported) => ("unsupported", GpuSample::default()),
+        Some(Gpu::Disjoint) => ("disjoint", GpuSample::default()),
+        Some(Gpu::Late) | None => ("late", GpuSample::default()),
+    };
+    let [a, b, c, d] = sample.outputs_ns.map(|nanos| nanos / 1_000);
+    format!(
+        r#","gpu":"{status}","gpu_us":{},"gpu_prep_us":{},"gpu_out_us":[{a},{b},{c},{d}]}}"#,
+        sample.total_ns / 1_000,
+        sample.captures_ns / 1_000
+    )
+}
+
+/// A flip's record. `tests::a_flip_record_is_written_at_the_vblank`.
+fn flip_record(queued: &Queued, flip: Flip, late: u32, monitor: &str) -> String {
+    format!(
+        r#"{{"flip":{},"monitor":{},"seq":{},"at_ns":{},"queued_ns":{},"late":{late}}}"#,
+        queued.pass,
+        crate::scripted::json_string(monitor),
+        flip.seq,
+        flip.at.as_nanos(),
+        queued.at.as_nanos()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Counters, Flip, Frame, Line, Phase, Queued, SceneId, Totals, vblanks_missed, vertical_blank,
+        Counters, Flip, Frame, Line, Phase, Queued, SceneId, Totals, Trace, vblanks_missed,
+        vertical_blank,
     };
     use crate::gputime::{Gpu, GpuSample};
     use std::time::{Duration, Instant};
@@ -1840,6 +2131,7 @@ mod tests {
         let queued = Queued {
             at: Duration::from_micros(10_500),
             after: Some(flip(100, 10_000)),
+            pass: 1,
         };
         assert_eq!(
             vblanks_missed(queued, flip(102, 17_692), at_260(), blank_260()),
@@ -1859,6 +2151,7 @@ mod tests {
         let queued = Queued {
             at: Duration::from_micros(50_000),
             after: None,
+            pass: 1,
         };
         assert_eq!(
             vblanks_missed(queued, flip(7, 51_000), at_260(), blank_260()),
@@ -1872,6 +2165,7 @@ mod tests {
         let queued = Queued {
             at: Duration::from_micros(50_000),
             after: None,
+            pass: 1,
         };
         assert_eq!(
             vblanks_missed(queued, flip(7, 54_615), at_260(), blank_260()),
@@ -1889,6 +2183,7 @@ mod tests {
         let queued = Queued {
             at: Duration::from_micros(50_000),
             after: None,
+            pass: 1,
         };
         assert_eq!(
             vblanks_missed(queued, flip(7, 54_131), at_260(), blank_260()),
@@ -1917,6 +2212,7 @@ mod tests {
         let queued = Queued {
             at: Duration::from_micros(50_000),
             after: None,
+            pass: 1,
         };
         // A vblank began at 49.950 ms; the next begins at 66.617 ms, and its
         // blank ends at 67.283 ms.
@@ -1941,6 +2237,7 @@ mod tests {
         let queued = Queued {
             at: Duration::ZERO,
             after: Some(flip(u32::MAX, 0)),
+            pass: 1,
         };
         assert_eq!(
             vblanks_missed(queued, flip(1, 7_692), at_260(), blank_260()),
@@ -2232,6 +2529,282 @@ mod tests {
         assert_eq!(carried, 0, "the last pass's time was carried");
     }
 
+    /// A sink a test can read back.
+    #[derive(Clone, Debug, Default)]
+    struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Shared {
+        fn lines(&self) -> Vec<String> {
+            String::from_utf8_lossy(&self.0.borrow())
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    /// A record's value for `name` as written, up to the next comma or brace.
+    fn field<'a>(record: &'a str, name: &str) -> &'a str {
+        record
+            .split_once(&format!("\"{name}\":"))
+            .and_then(|(_, rest)| rest.split([',', '}']).next())
+            .unwrap_or("")
+    }
+
+    /// **A pass's record goes out once its GPU time is in**, and not before:
+    /// the record is the pass and its GPU time, together.
+    #[test]
+    fn a_pass_record_is_written_when_its_gpu_time_resolves() {
+        let sink = Shared::default();
+        let start = Instant::now();
+        let mut trace = Trace::new(Box::new(sink.clone()), start);
+        trace.pass(7, r#"{"pass":7,"total_us":3100"#.to_owned());
+        trace.tick(start + Duration::from_secs(2));
+        assert!(sink.lines().is_empty(), "written before its GPU time came");
+        trace.resolved(7, Some(timed()));
+        trace.tick(start + Duration::from_secs(4));
+        let lines = sink.lines();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].starts_with(r#"{"pass":7,"#)
+                && lines[0].contains(r#""gpu":"ok","gpu_us":912"#)
+                && lines[0].ends_with('}')
+        );
+    }
+
+    /// One whose GPU time never comes goes out as late, sixteen passes on.
+    #[test]
+    fn a_pass_record_that_waits_too_long_goes_out_as_late() {
+        let sink = Shared::default();
+        let start = Instant::now();
+        let mut trace = Trace::new(Box::new(sink.clone()), start);
+        for pass in 1..=17 {
+            trace.pass(pass, format!(r#"{{"pass":{pass}"#));
+        }
+        trace.close();
+        let lines = sink.lines();
+        assert!(lines[0].starts_with(r#"{"pass":1,"#) && lines[0].contains(r#""gpu":"late""#));
+        assert_eq!(lines.len(), 17, "closing writes the rest as late");
+    }
+
+    /// A flip's record is written when the flip lands.
+    #[test]
+    fn a_flip_record_is_written_at_the_vblank() {
+        let sink = Shared::default();
+        let start = Instant::now();
+        let mut trace = Trace::new(Box::new(sink.clone()), start);
+        let queued = Queued {
+            at: Duration::from_micros(50_000),
+            after: None,
+            pass: 9,
+        };
+        trace.flip(&super::flip_record(
+            &queued,
+            Flip {
+                seq: 3,
+                at: Duration::from_micros(54_615),
+            },
+            1,
+            "DP-1",
+        ));
+        trace.close();
+        assert_eq!(
+            sink.lines(),
+            vec![
+                r#"{"flip":9,"monitor":"DP-1","seq":3,"at_ns":54615000,"queued_ns":50000000,"late":1}"#
+                    .to_owned()
+            ]
+        );
+    }
+
+    /// The fields of a pass record, in order. `dev/pacing-summary.py` reads
+    /// them and `dev/README.md` lists them; this list is what the record is
+    /// held to.
+    const PASS_FIELDS: &[&str] = &[
+        "pass",
+        "t_ns",
+        "total_us",
+        "deadline_us",
+        "monitor",
+        "missed",
+        "tick_us",
+        "prep_us",
+        "census_us",
+        "qml_us",
+        "elements_us",
+        "gles_us",
+        "commit_us",
+        "settle_us",
+        "loose_us",
+        "captures",
+        "panes",
+        "drew",
+        "scenes",
+        "animating",
+        "rendered",
+        "built",
+        "rebound",
+        "qml",
+        "clocks",
+        "gpu_mhz",
+        "mem_mhz",
+        "pstate",
+        "gpu",
+        "gpu_us",
+        "gpu_prep_us",
+        "gpu_out_us",
+    ];
+
+    /// **A pass record carries every field `dev/pacing-summary.py` reads.**
+    #[test]
+    fn every_pass_record_carries_the_documented_fields() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let record = format!(
+            "{}{}",
+            counters.pass_record(1, ms(5), true),
+            super::gpu_fields(Some(timed()))
+        );
+        for field in PASS_FIELDS {
+            assert!(
+                record.contains(&format!("\"{field}\":")),
+                "{field} is missing from {record}"
+            );
+        }
+    }
+
+    /// Buffered, and flushed once a second: never a synchronous write per pass.
+    #[test]
+    fn the_trace_is_buffered_and_flushed_once_a_second() {
+        let sink = Shared::default();
+        let start = Instant::now();
+        let mut trace = Trace::new(Box::new(sink.clone()), start);
+        for pass in 1..=100 {
+            trace.pass(pass, format!(r#"{{"pass":{pass}"#));
+            trace.resolved(pass, Some(timed()));
+        }
+        trace.tick(start + Duration::from_millis(500));
+        assert!(
+            sink.lines().is_empty(),
+            "flushed before a second had passed"
+        );
+        trace.tick(start + Duration::from_millis(1_000));
+        assert_eq!(sink.lines().len(), 100);
+    }
+
+    /// Asking for a trace turns pacing on: a trace of nothing is no trace.
+    #[test]
+    fn the_trace_turns_pacing_on() {
+        assert!(super::knob(false, true));
+        assert!(super::knob(true, false));
+        assert!(!super::knob(false, false));
+    }
+
+    /// **A measured pass's record goes through the counters**: it waits from
+    /// `finish_at` for `gpu_resolved`; one whose GPU time came as it began,
+    /// as a GPU that cannot time itself answers, goes with it; and the loop
+    /// going idle writes what still waits as late.
+    #[test]
+    fn a_counted_pass_is_traced_with_its_gpu_time() {
+        let sink = Shared::default();
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        *counters.trace.borrow_mut() = Some(Trace::new(Box::new(sink.clone()), start));
+        assert!(
+            counters
+                .finish_at(start, start + ms(2), true, 1, 1)
+                .is_none()
+        );
+        assert!(counters.gpu_resolved(1, timed()).is_none());
+        // Pass 2, as `frame` numbers it, is being measured as its answer comes.
+        assert!(counters.gpu_resolved(2, Gpu::Unsupported).is_none());
+        assert!(
+            counters
+                .finish_at(start, start + ms(2), true, 1, 2)
+                .is_none()
+        );
+        assert!(
+            counters
+                .finish_at(start, start + ms(2), true, 1, 3)
+                .is_none()
+        );
+        assert!(counters.idle(|| start + ms(9)).is_none());
+        let written: Vec<(String, String)> = sink
+            .lines()
+            .iter()
+            .map(|line| {
+                (
+                    field(line, "pass").to_owned(),
+                    field(line, "gpu").to_owned(),
+                )
+            })
+            .collect();
+        let expected = [("1", "\"ok\""), ("2", "\"unsupported\""), ("3", "\"late\"")]
+            .map(|(pass, gpu)| (pass.to_owned(), gpu.to_owned()));
+        assert_eq!(written, expected);
+    }
+
+    /// **Through `frame`, `finish` and `flipped`, as the backends call
+    /// them**: a traced pass is stamped on CLOCK_MONOTONIC as it begins,
+    /// which is the clock a script cuts its window by, and a flip takes its
+    /// monitor's name only with a trace open (`Output::name` allocates).
+    #[test]
+    fn a_traced_pass_and_its_flip_through_the_backends_calls() {
+        super::COUNTERS.with(|counters| {
+            counters.asked.set(true);
+            counters.on.set(true);
+        });
+        let landed = Flip { seq: 3, at: ms(4) };
+        let queued = Queued {
+            at: Duration::ZERO,
+            after: None,
+            pass: 1,
+        };
+        super::flipped(0, queued, landed, || {
+            panic!("the name was taken with no trace open")
+        });
+        let sink = Shared::default();
+        super::COUNTERS.with(|counters| {
+            *counters.trace.borrow_mut() = Some(Trace::new(Box::new(sink.clone()), Instant::now()));
+        });
+        let before = super::monotonic_now().as_nanos();
+        let pass = super::frame();
+        let serial = pass.serial();
+        pass.finish(1);
+        let after = super::monotonic_now().as_nanos();
+        super::flipped(
+            0,
+            Queued {
+                pass: serial,
+                ..queued
+            },
+            landed,
+            || "DP-1".to_owned(),
+        );
+        super::idle();
+        super::COUNTERS.with(|counters| *counters.trace.borrow_mut() = None);
+        let lines = sink.lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(field(&lines[0], "flip"), serial.to_string());
+        assert_eq!(field(&lines[0], "monitor"), "\"DP-1\"");
+        assert_eq!(field(&lines[1], "pass"), serial.to_string());
+        let stamped: u128 = field(&lines[1], "t_ns").parse().unwrap_or(0);
+        assert!(
+            (before..=after).contains(&stamped),
+            "t_ns {stamped} is not between {before} and {after}"
+        );
+    }
+
     fn ms(count: u64) -> Duration {
         Duration::from_millis(count)
     }
@@ -2276,6 +2849,9 @@ mod tests {
             free_ids: std::cell::RefCell::new(Vec::new()),
             scene_spent: [const { std::cell::Cell::new((0, 0)) }; super::SCENE_SLOTS],
             scene_other: std::cell::Cell::new(0),
+            trace: std::cell::RefCell::new(None),
+            t_ns: std::cell::Cell::new(0),
+            panes_seen: std::cell::Cell::new(0),
         }
     }
 }

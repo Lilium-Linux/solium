@@ -485,12 +485,13 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                     _ => None,
                 };
                 if let (Some(flip), Some(queued)) = (flip, screen.queued.take()) {
-                    crate::pacing::flipped(crate::pacing::vblanks_missed(
+                    let late = crate::pacing::vblanks_missed(
                         queued,
                         flip,
                         frame_interval(&screen.output),
                         screen.blank,
-                    ));
+                    );
+                    crate::pacing::flipped(late, queued, flip, || screen.output.name());
                 }
 
                 // The frame is on the screen, and *this* is the moment clients
@@ -1538,6 +1539,7 @@ impl State {
                                     .chain
                                     .filter(|(crtc, _)| *crtc == screen.crtc)
                                     .map(|(_, flip)| flip),
+                                pass: pace.serial(),
                             });
                             // Taken now, reported at *this* screen's flip. The
                             // callbacks belong to the frame just queued here, and

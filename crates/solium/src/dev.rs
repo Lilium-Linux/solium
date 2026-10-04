@@ -285,6 +285,17 @@ pub(crate) fn pacing() -> bool {
     std::env::var_os("SOLIUM_PACING").is_some()
 }
 
+/// Where to write the per-pass trace, which also turns pacing on.
+///
+/// ```sh
+/// SOLIUM_TRACE=$XDG_RUNTIME_DIR/trace.jsonl ./target/debug/solium
+/// ```
+///
+/// One JSON line per pass and per flip: see `pacing::Trace`.
+pub(crate) fn trace_path() -> Option<PathBuf> {
+    std::env::var_os("SOLIUM_TRACE").map(PathBuf::from)
+}
+
 /// Whether a capture waits on the CPU for its GPU work.
 ///
 /// ```sh
