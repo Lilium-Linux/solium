@@ -253,6 +253,8 @@ function workspaces.apply(animation)
             end
         end
     end
+
+    workspaces.declare()
 end
 
 -- Switch the monitor in front of you, or every monitor when workspaces are
@@ -388,6 +390,81 @@ function workspaces.announce()
     end
 end
 
+-- What the workspaces are, said to the compositor, which has no idea
+-- (03 §3.2.17): one group per monitor when they are per monitor, one for
+-- every monitor when they are not, what each shows, and which workspace each
+-- window is on. This is how a hosted shell's `Workspaces` knows them. Rust
+-- diffs what it publishes, so saying it again unchanged costs no scene
+-- anything. See `the_shipped_workspaces_declare_what_each_monitor_shows`,
+-- `with_workspaces_together_one_group_has_every_monitor` and
+-- `a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+function workspaces.declare()
+    local count = workspaces.count()
+    local function group(id, names)
+        local list = {}
+        for index = 1, count do
+            local col, row = workspaces.cell(index)
+            list[#list + 1] = { id = tostring(index), name = tostring(index), col = col, row = row }
+        end
+        return { id = id, monitors = names, showing = { tostring(workspaces.on(names[1])) }, workspaces = list }
+    end
+    local groups = {}
+    if workspaces.settings.per_monitor then
+        for _, monitor in ipairs(sol.monitors()) do
+            groups[#groups + 1] = group(monitor.name, { monitor.name })
+        end
+    else
+        local names = {}
+        for _, monitor in ipairs(sol.monitors()) do
+            names[#names + 1] = monitor.name
+        end
+        if #names > 0 then
+            groups[1] = group(TOGETHER, names)
+        end
+    end
+    local windows = {}
+    for _, window in ipairs(sol.windows()) do
+        windows[window.id] = { tostring(workspaces.at(window.id, window.monitor)) }
+    end
+    sol.workspaces({
+        arrangement = {
+            kind = workspaces.settings.arrangement,
+            columns = workspaces.settings.columns,
+            rows = workspaces.settings.rows,
+        },
+        groups = groups,
+        windows = windows,
+    })
+end
+
+-- Send one window to a workspace on its own monitor: `windows.send` from a
+-- scene, which names the window rather than meaning the focused one. See
+-- `a_windows_send_from_a_scene_moves_the_window_it_names`.
+function workspaces.send_window(id, index)
+    index = math.max(1, math.min(index, workspaces.count()))
+    workspaces.of[id] = index
+    workspaces.apply()
+    workspaces.announce()
+end
+
+-- A scene asks for these by name (`Solium.send("workspaces.go", { id: "2",
+-- monitor: Solium.monitor.name })`), and only this file knows what they
+-- mean. See `a_workspaces_go_from_a_scene_switches_the_monitor_it_names` and
+-- `a_windows_send_from_a_scene_moves_the_window_it_names`.
+local actions = require("actions")
+actions.override("workspaces.go", function(data)
+    local index = type(data) == "table" and tonumber(data.id)
+    if index then
+        workspaces.go(index, data.monitor)
+    end
+end)
+actions.override("windows.send", function(data)
+    local index = type(data) == "table" and tonumber(data.workspace)
+    if index and data.id then
+        workspaces.send_window(data.id, index)
+    end
+end)
+
 -- A new window belongs to the workspace its own monitor is showing.
 sol.on("open", function(id)
     if workspaces.settings.follow_new_windows then
@@ -507,9 +584,11 @@ end)
 -- And membership follows the windows. Only the membership -- no `sol.animate`
 -- and no transform, so this cannot disturb whichever layout is also listening
 -- for this event. A selection whose members have not changed is not a change at
--- all and costs nothing on the other side.
+-- all and costs nothing on the other side. So does what the compositor is told
+-- of each window's workspace: `a_window_that_opens_is_declared_on_the_workspace_its_monitor_shows`.
 sol.on("layout", function()
     workspaces.regroup()
+    workspaces.declare()
 end)
 
 for index = 1, 9 do

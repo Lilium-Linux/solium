@@ -33,7 +33,8 @@ pub(crate) struct Workspace {
 
 /// Workspaces that switch together: one group per monitor, or one for every
 /// monitor; `showing` is the ids it shows now.
-/// `script::tests::sol_workspaces_declares_groups_and_windows`.
+/// `script::tests::the_shipped_workspaces_declare_what_each_monitor_shows`,
+/// `script::tests::with_workspaces_together_one_group_has_every_monitor`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Group {
     pub(crate) id: String,

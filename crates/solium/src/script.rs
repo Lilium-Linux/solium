@@ -7742,6 +7742,173 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **The shipped `workspaces.lua` declares its workspaces**: one group per
+    /// monitor when workspaces are per monitor, showing what each monitor shows.
+    #[test]
+    fn the_shipped_workspaces_declare_what_each_monitor_shows() {
+        let Some((scripts, commands)) = shell_after_monitors(
+            "solium-script-test-shipped-workspaces",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts;
+        let last = commands.iter().rev().find_map(|command| match command {
+            Command::Workspaces(declared) => Some(declared.clone()),
+            _ => None,
+        });
+        let declared = last.expect("workspaces.lua declared nothing");
+        assert_eq!(
+            declared
+                .groups
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test-1"]
+        );
+        assert_eq!(declared.groups[0].showing, vec!["1".to_owned()]);
+    }
+
+    /// **With workspaces not per monitor, one group has every monitor**, and
+    /// shows what every monitor shows.
+    #[test]
+    fn with_workspaces_together_one_group_has_every_monitor() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-workspaces-together",
+            "return { workspaces = { per_monitor = false } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let mut two = one_screen(&[]);
+        let mut right = two.monitors[0].clone();
+        right.name = "test-2".to_owned();
+        right.whole.x = 1600.0;
+        right.area.x = 1600.0;
+        right.focused = false;
+        two.monitors.push(right);
+        let outcome = scripts.monitors_changed(two);
+        let groups = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => Some(
+                    declared
+                        .groups
+                        .iter()
+                        .map(|group| (group.monitors.clone(), group.showing.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            });
+        assert_eq!(
+            groups,
+            Some(vec![(
+                vec!["test-1".to_owned(), "test-2".to_owned()],
+                vec!["1".to_owned()]
+            )]),
+            "(monitors, showing) of each group"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`workspaces.go` from a scene switches the monitor it names**, through
+    /// `actions.lua` to `workspaces.lua`, which then declares the new state.
+    #[test]
+    fn a_workspaces_go_from_a_scene_switches_the_monitor_it_names() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-workspaces-go",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[]));
+        let data =
+            crate::json::Json::parse(r#"{"id":"2","monitor":"test-1"}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "workspaces.go", &data, one_screen(&[]));
+        let showing = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => {
+                    declared.groups.first().map(|group| group.showing.clone())
+                }
+                _ => None,
+            });
+        assert_eq!(showing, Some(vec!["2".to_owned()]));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A window that opens is declared on the workspace its monitor
+    /// shows**, at the layout that places it, so a hosted shell counts it
+    /// at once.
+    #[test]
+    fn a_window_that_opens_is_declared_on_the_workspace_its_monitor_shows() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-workspaces-layout",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[]));
+        let _ = scripts.opened(9, one_screen(&[9]));
+        let outcome = scripts.relayout(one_screen(&[9]));
+        let windows = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            windows,
+            Some(std::collections::BTreeMap::from([(
+                9,
+                vec!["1".to_owned()]
+            )]))
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`windows.send` from a scene moves the window it names**, not the
+    /// focused one, through `actions.lua` to `workspaces.lua`, which then
+    /// declares where every window is.
+    #[test]
+    fn a_windows_send_from_a_scene_moves_the_window_it_names() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-windows-send",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[7, 8]));
+        let data = crate::json::Json::parse(r#"{"id":7,"workspace":"3"}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "windows.send", &data, one_screen(&[7, 8]));
+        let windows = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            windows,
+            Some(std::collections::BTreeMap::from([
+                (7, vec!["3".to_owned()]),
+                (8, vec!["1".to_owned()])
+            ])),
+            "window 7 sent to 3, window 8 left on the one its monitor shows"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **`actions.lua` routes the vocabulary and leaves the rest alone**: a
     /// `windows.*` action becomes a `sol.act`, one a file overrides is
     /// answered in Lua instead, and one outside the vocabulary, a tweak's
