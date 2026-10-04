@@ -141,17 +141,28 @@ Item {
     // reserved height rather than below it: a layer that stays within its own
     // insets only has those copied when it changes, and this one changes on
     // every frame.
+    //
+    // On an opaque base in the bar's own grey, so it fades towards the bar
+    // rather than towards whatever is behind the window: drawn straight over
+    // the gap, it showed the wallpaper's colour through it on every unfocused
+    // window and at every faint moment of a focused one
+    // (`tests/scenarios/pane-pulse-drawn.lua`).
     Rectangle {
         anchors { left: parent.left; right: parent.right; top: bar.bottom }
         height: frame.insetTop - bar.height
-        color: Theme.accent
-        opacity: frame.focused ? 0.9 : 0.2
+        color: bar.color
 
-        SequentialAnimation on opacity {
-            running: frame.focused
-            loops: Animation.Infinite
-            NumberAnimation { to: 0.25; duration: 1300; easing.type: Easing.InOutSine }
-            NumberAnimation { to: 0.9; duration: 1300; easing.type: Easing.InOutSine }
+        Rectangle {
+            anchors.fill: parent
+            color: Theme.accent
+            opacity: frame.focused ? 0.9 : 0.2
+
+            SequentialAnimation on opacity {
+                running: frame.focused
+                loops: Animation.Infinite
+                NumberAnimation { to: 0.25; duration: 1300; easing.type: Easing.InOutSine }
+                NumberAnimation { to: 0.9; duration: 1300; easing.type: Easing.InOutSine }
+            }
         }
     }
 }
