@@ -725,6 +725,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             let _ = state.solium.display_handle.flush_clients();
         })
         .map_err(|err| anyhow!("running the event loop: {err}"))?;
+    crate::pacing::summary();
     state.solium.session.end();
     Ok(())
 }
@@ -1307,22 +1308,23 @@ impl State {
             .iter()
             .any(|step| matches!(step, Some(Step::Draw | Step::Wake)));
 
-        // `SOLIUM_PACING`. Off, everything below is a thread-local load and a
-        // branch; see `pacing.rs`, which argues that trade at 260 Hz.
+        // `SOLIUM_PACING`. Off, a pass reads the clock twice and counts
+        // itself and its miss (`pacing::tests::a_miss_is_counted_with_the_knob_off`);
+        // see `pacing.rs`, which argues that trade at 260 Hz.
         let pace = crate::pacing::frame();
         // The tightest interval among the monitors being *driven*, not among
         // the ones this pass gets to draw. One event loop draws both screens,
         // so a pass that overruns has held every monitor off for the whole of
         // it, whichever one it was drawing at the time. `Frame::deadline` has
-        // the argument in full; the name is only taken when the knob is on,
-        // because `Output::name` allocates.
-        if pace.on()
-            && let Some(screen) = self
-                .screens
-                .iter()
-                .min_by_key(|screen| frame_interval(&screen.output))
+        // the argument in full. Taken on every pass, because every pass is
+        // counted; the name only with the knob on, because `Output::name`
+        // allocates: `pacing::tests::the_deadline_takes_no_name_with_the_knob_off`.
+        if let Some(screen) = self
+            .screens
+            .iter()
+            .min_by_key(|screen| frame_interval(&screen.output))
         {
-            pace.deadline(frame_interval(&screen.output), &screen.output.name());
+            pace.deadline(frame_interval(&screen.output), || screen.output.name());
         }
 
         // Once per frame and not once per screen: offscreen captures, the QML

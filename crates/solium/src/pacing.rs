@@ -9,15 +9,15 @@
 //!
 //! Three properties, in the order they constrain the design:
 //!
-//! * **It has to be free when off.** A hardware session runs at the monitor's
-//!   refresh — 260 Hz on the desk this was written for — so anything paid per
-//!   frame is paid 260 times a second, and anything paid per *scene* per output
-//!   per frame is paid thousands of times a second. Off, every call here is one
-//!   non-atomic thread-local load and a predictable branch; nothing samples a
-//!   clock, nothing allocates, nothing formats. It is deliberately not a
-//!   compile-time feature: a diagnostic that is not in the shipped binary is
-//!   not there on the day the shipped binary is slow, which is the only day it
-//!   is wanted.
+//! * **It has to be nearly free when off.** A hardware session runs at the
+//!   monitor's refresh — 260 Hz on the desk this was written for — so anything
+//!   paid per frame is paid 260 times a second. Off, a pass reads the clock
+//!   twice (a vDSO `clock_gettime`, tens of nanoseconds) and counts itself and
+//!   its miss, because a miss with the knob off is still a miss
+//!   (`tests::a_miss_is_counted_with_the_knob_off`); nothing allocates and
+//!   nothing formats. It is deliberately not a compile-time feature: a
+//!   diagnostic that is not in the shipped binary is not there on the day the
+//!   shipped binary is slow, which is the only day it is wanted.
 //!
 //! * **It has to be nearly free when on.** One `Instant::now` — a vDSO
 //!   `clock_gettime` on this platform, tens of nanoseconds — per phase
@@ -152,6 +152,7 @@ impl Phase {
 /// another second.
 #[derive(Clone, Debug)]
 struct Slow {
+    pass: u64,
     total: Duration,
     deadline: Duration,
     monitor: String,
@@ -193,8 +194,6 @@ struct Counters {
     /// rendered outside a frame too — the GPU pre-flight at startup, a scene
     /// built lazily — and time spent there belongs to nothing.
     live: Cell<bool>,
-    /// When the frame being measured began.
-    started: Cell<Option<Instant>>,
     /// When the phase currently running began.
     mark: Cell<Option<Instant>>,
     /// Which phase is running.
@@ -234,6 +233,11 @@ struct Counters {
     worst: RefCell<Option<Slow>>,
     /// When the last report was made, if there has been one.
     reported: Cell<Option<Instant>>,
+    /// Every pass since the session began, measured or not.
+    /// `tests::a_miss_is_counted_with_the_knob_off`.
+    all_passes: Cell<u64>,
+    /// How many of them overran the tightest monitor's interval.
+    all_missed: Cell<u64>,
 }
 
 thread_local! {
@@ -242,7 +246,6 @@ thread_local! {
             on: Cell::new(false),
             asked: Cell::new(false),
             live: Cell::new(false),
-            started: Cell::new(None),
             mark: Cell::new(None),
             phase: Cell::new(Phase::Loose),
             spent: [const { Cell::new(0) }; Phase::COUNT],
@@ -259,11 +262,13 @@ thread_local! {
             missed: Cell::new(0),
             worst: RefCell::new(None),
             reported: Cell::new(None),
+            all_passes: Cell::new(0),
+            all_missed: Cell::new(0),
         }
     };
 }
 
-/// A frame being measured. Ends with [`Frame::finish`].
+/// A pass being drawn. Ends with [`Frame::finish`].
 ///
 /// Deliberately without a `Drop` that reports. Finishing needs to be told what
 /// was on screen, and a guard that reported on the way out would either have to
@@ -272,7 +277,12 @@ thread_local! {
 /// half mean anything.
 #[derive(Debug)]
 pub(crate) struct Frame {
+    /// Whether the phases are measured: `SOLIUM_PACING`.
     on: bool,
+    /// When the pass began; `None` for a loop iteration that draws nothing.
+    started: Option<Instant>,
+    /// Which pass this is, counted from 1 for the life of the process.
+    pass: u64,
 }
 
 /// A phase, running for as long as this is held.
@@ -315,23 +325,126 @@ impl Counters {
         self.phase.set(next);
         previous
     }
+
+    /// Count one pass that began at `started` and ended at `now`, and say
+    /// whether a report is due.
+    ///
+    /// No clock is read here, so the rules are driven with made-up times:
+    /// `tests::a_sustained_stall_is_one_line_a_second`,
+    /// `tests::the_first_miss_reports_immediately`,
+    /// `tests::an_occasional_miss_is_never_swallowed`. A deadline of zero is a
+    /// backend that did not name one: nothing can be missed against it, and
+    /// inventing a number would turn a wiring mistake into a stream of
+    /// confident nonsense.
+    fn finish_at(
+        &self,
+        started: Instant,
+        now: Instant,
+        on: bool,
+        panes: usize,
+        pass: u64,
+    ) -> Option<Line> {
+        let total = now.saturating_duration_since(started);
+        let deadline = self.deadline.get();
+        let missed = !deadline.is_zero() && total > deadline;
+        self.all_passes.set(self.all_passes.get().saturating_add(1));
+        if missed {
+            self.all_missed.set(self.all_missed.get().saturating_add(1));
+        }
+        if !on {
+            return None;
+        }
+        self.frames.set(self.frames.get().saturating_add(1));
+        if !missed {
+            return None;
+        }
+        self.missed.set(self.missed.get().saturating_add(1));
+
+        let mut spent = [0_u64; Phase::COUNT];
+        for (slot, cell) in spent.iter_mut().zip(self.spent.iter()) {
+            *slot = cell.get();
+        }
+        let slow = Slow {
+            pass,
+            total,
+            deadline,
+            monitor: self
+                .monitor
+                .try_borrow()
+                .map(|held| held.clone())
+                .unwrap_or_default(),
+            spent,
+            panes: u32::try_from(panes).unwrap_or(u32::MAX),
+            drew: self.drew.get(),
+            scenes: self.scenes.get(),
+            animating: self.animating.get(),
+            rendered: self.rendered.get(),
+            built: self.built.get(),
+            rebound: self.rebound.get(),
+        };
+        if let Ok(mut worst) = self.worst.try_borrow_mut()
+            && worst.as_ref().is_none_or(|held| slow.total > held.total)
+        {
+            *worst = Some(slow);
+        }
+
+        // The first miss after a quiet spell goes out at once; everything
+        // after it waits for the limit. See `REPORT_EVERY`.
+        let due = self
+            .reported
+            .get()
+            .is_none_or(|last| now.saturating_duration_since(last) >= REPORT_EVERY);
+        if !due {
+            return None;
+        }
+        let span = self
+            .since
+            .get()
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        let worst = self
+            .worst
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut held| held.take());
+        let (frames, missed) = (self.frames.get(), self.missed.get());
+        self.reported.set(Some(now));
+        self.since.set(Some(now));
+        self.frames.set(0);
+        self.missed.set(0);
+        worst.map(|worst| Line::of(&worst, frames, missed, span))
+    }
+
+    /// The session's totals. `tests::a_miss_is_counted_with_the_knob_off`.
+    fn totals(&self) -> Totals {
+        Totals {
+            passes: self.all_passes.get(),
+            missed: self.all_missed.get(),
+        }
+    }
 }
 
-/// Begin measuring a frame.
+/// Begin a pass.
 ///
-/// Called by whichever backend is drawing. Returns a handle that is `on` only
-/// if the knob is; everything else in this module is a no-op until it is.
+/// Always reads the clock once, because every pass is counted: a miss with the
+/// knob off is still a miss (`tests::a_miss_is_counted_with_the_knob_off`).
+/// The phases, the snapshot and the line need the knob.
 pub(crate) fn frame() -> Frame {
     COUNTERS.with(|counters| {
         if !counters.asked.get() {
             counters.asked.set(true);
             counters.on.set(crate::dev::pacing());
         }
+        let now = Instant::now();
+        let pass = counters.all_passes.get().saturating_add(1);
+        counters.deadline.set(Duration::ZERO);
         if !counters.on.get() {
-            return Frame { on: false };
+            return Frame {
+                on: false,
+                started: Some(now),
+                pass,
+            };
         }
 
-        let now = Instant::now();
         for slot in &counters.spent {
             slot.set(0);
         }
@@ -341,15 +454,17 @@ pub(crate) fn frame() -> Frame {
         counters.built.set(0);
         counters.rebound.set(0);
         counters.drew.set(0);
-        counters.deadline.set(Duration::ZERO);
-        counters.started.set(Some(now));
         counters.mark.set(Some(now));
         counters.phase.set(Phase::Loose);
         if counters.since.get().is_none() {
             counters.since.set(Some(now));
         }
         counters.live.set(true);
-        Frame { on: true }
+        Frame {
+            on: true,
+            started: Some(now),
+            pass,
+        }
     })
 }
 
@@ -424,24 +539,21 @@ pub(crate) fn scene_rebound() {
 }
 
 impl Frame {
-    /// A frame that is not being measured.
+    /// A loop iteration that draws nothing, and is therefore not a pass.
     ///
     /// For a loop that decides whether to draw *after* it would have started
-    /// measuring. The nested backend is one: it can skip a whole iteration when
-    /// nothing has changed, and an iteration that drew nothing is not a slow
-    /// frame — it is the compositor correctly asleep, and counting it would put
-    /// the idle timeout inside the measurement.
+    /// measuring. The nested backend is one: an iteration that drew nothing is
+    /// the compositor correctly asleep, and counting it would put the idle
+    /// timeout inside the measurement.
     pub(crate) const fn off() -> Self {
-        Self { on: false }
+        Self {
+            on: false,
+            started: None,
+            pass: 0,
+        }
     }
 
-    /// Whether anything is being measured, so a caller can skip work that only
-    /// the report wants — the monitor's name is the whole of it.
-    pub(crate) const fn on(&self) -> bool {
-        self.on
-    }
-
-    /// This frame's deadline, and which monitor it belongs to.
+    /// This pass's deadline, and which monitor it belongs to.
     ///
     /// **The tightest interval among the monitors being driven, not the one
     /// being drawn.** Two monitors at 260 Hz and 75 Hz do not get two budgets,
@@ -455,15 +567,20 @@ impl Frame {
     /// from a real mode rather than assumed, and on a mixed-rate desk it is the
     /// fast monitor's — and `drew` in the report says how many screens the pass
     /// actually got to.
-    pub(crate) fn deadline(&self, interval: Duration, monitor: &str) {
-        if !self.on {
+    ///
+    /// The interval is taken on every pass, because every pass is judged; the
+    /// name only with the knob on, because `Output::name` allocates and only
+    /// the report reads it. `tests::the_deadline_takes_no_name_with_the_knob_off`.
+    pub(crate) fn deadline(&self, interval: Duration, monitor: impl FnOnce() -> String) {
+        if self.started.is_none() {
             return;
         }
         COUNTERS.with(|counters| {
             counters.deadline.set(interval);
-            if let Ok(mut held) = counters.monitor.try_borrow_mut() {
-                held.clear();
-                held.push_str(monitor);
+            if self.on
+                && let Ok(mut held) = counters.monitor.try_borrow_mut()
+            {
+                *held = monitor();
             }
         });
     }
@@ -476,110 +593,114 @@ impl Frame {
         COUNTERS.with(|counters| counters.drew.set(counters.drew.get().saturating_add(1)));
     }
 
-    /// Stop measuring, and report if this frame missed and a report is due.
+    /// Stop measuring, count the pass, and report if it missed and a report is
+    /// due.
     ///
     /// `panes` is what was on screen — the count the reader needs to tell a
     /// slow frame with eight windows from a slow frame with one.
     pub(crate) fn finish(self, panes: usize) {
-        if !self.on {
+        let Some(started) = self.started else {
             return;
-        }
+        };
         COUNTERS.with(|counters| {
             let now = Instant::now();
-            counters.switch(now, Phase::Loose);
-            counters.live.set(false);
-            counters.mark.set(None);
-
-            let Some(started) = counters.started.get() else {
-                return;
-            };
-            let total = now.saturating_duration_since(started);
-            counters.frames.set(counters.frames.get().saturating_add(1));
-
-            // A deadline of zero is a backend that did not name one. Nothing
-            // can be missed against it, and inventing a number would turn a
-            // wiring mistake into a stream of confident nonsense.
-            let deadline = counters.deadline.get();
-            if deadline.is_zero() || total <= deadline {
-                return;
+            if self.on {
+                counters.switch(now, Phase::Loose);
+                counters.live.set(false);
+                counters.mark.set(None);
             }
-            counters.missed.set(counters.missed.get().saturating_add(1));
-
-            let mut spent = [0_u64; Phase::COUNT];
-            for (slot, cell) in spent.iter_mut().zip(counters.spent.iter()) {
-                *slot = cell.get();
-            }
-            let slow = Slow {
-                total,
-                deadline,
-                monitor: counters
-                    .monitor
-                    .try_borrow()
-                    .map(|held| held.clone())
-                    .unwrap_or_default(),
-                spent,
-                panes: u32::try_from(panes).unwrap_or(u32::MAX),
-                drew: counters.drew.get(),
-                scenes: counters.scenes.get(),
-                animating: counters.animating.get(),
-                rendered: counters.rendered.get(),
-                built: counters.built.get(),
-                rebound: counters.rebound.get(),
-            };
-            if let Ok(mut worst) = counters.worst.try_borrow_mut()
-                && worst.as_ref().is_none_or(|held| slow.total > held.total)
-            {
-                *worst = Some(slow);
-            }
-
-            // The first miss after a quiet spell goes out at once; everything
-            // after it waits for the limit. See `REPORT_EVERY`.
-            let due = counters
-                .reported
-                .get()
-                .is_none_or(|last| now.saturating_duration_since(last) >= REPORT_EVERY);
-            if !due {
-                return;
-            }
-            let span = counters
-                .since
-                .get()
-                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
-            let worst = counters
-                .worst
-                .try_borrow_mut()
-                .ok()
-                .and_then(|mut held| held.take());
-            let (frames, missed) = (counters.frames.get(), counters.missed.get());
-            counters.reported.set(Some(now));
-            counters.since.set(Some(now));
-            counters.frames.set(0);
-            counters.missed.set(0);
-            if let Some(worst) = worst {
-                report(&worst, frames, missed, span);
+            if let Some(line) = counters.finish_at(started, now, self.on, panes, self.pass) {
+                emit(&line);
             }
         });
     }
 }
 
-/// Say what the worst frame of the span did.
+/// What the session's passes came to, counted whether or not `SOLIUM_PACING`
+/// is set: `tests::a_miss_is_counted_with_the_knob_off`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Totals {
+    pub(crate) passes: u64,
+    pub(crate) missed: u64,
+}
+
+/// The session's totals so far, on this thread.
+pub(crate) fn totals() -> Totals {
+    COUNTERS.with(Counters::totals)
+}
+
+/// One line of totals, at the end of a session: what a run with the knob off
+/// is compared by.
+pub(crate) fn summary() {
+    let totals = totals();
+    tracing::info!(
+        passes = totals.passes,
+        missed = totals.missed,
+        "pacing: passes drawn this session, and passes that overran the tightest monitor's frame"
+    );
+}
+
+/// One report: the worst pass of a span, and what the span came to.
 ///
-/// Microseconds throughout, as integers. Not a pre-formatted string: these are
-/// `tracing` fields so that one of them can be grepped, plotted or filtered
-/// without parsing a sentence, which is what a frame-timing number is for.
-fn report(worst: &Slow, frames: u64, missed: u64, span: Duration) {
-    let phase = |which: Phase| worst.spent[which.slot()] / 1_000;
-    // `tracing` records `u64`, not `u128`, and a `Duration` measures in the
-    // latter. Saturating rather than truncating: a frame that somehow lasted
-    // longer than half a million years should read as enormous, not as small.
-    let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+/// A value rather than a `tracing` call, so a test can read what would be
+/// said: `tests::the_first_miss_reports_immediately`. Microseconds throughout,
+/// as integers, so a field can be grepped, plotted or filtered without parsing
+/// a sentence.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Line {
+    pub(crate) pass: u64,
+    pub(crate) total_us: u64,
+    pub(crate) deadline_us: u64,
+    pub(crate) monitor: String,
+    pub(crate) missed: u64,
+    pub(crate) frames: u64,
+    pub(crate) span_ms: u64,
+    pub(crate) spent_us: [u64; Phase::COUNT],
+    pub(crate) panes: u32,
+    pub(crate) drew: u32,
+    pub(crate) scenes: u32,
+    pub(crate) animating: u32,
+    pub(crate) rendered: u32,
+    pub(crate) built: u32,
+    pub(crate) rebound: u32,
+}
+
+impl Line {
+    fn of(worst: &Slow, frames: u64, missed: u64, span: Duration) -> Self {
+        // Saturating rather than truncating: a pass that somehow lasted longer
+        // than half a million years should read as enormous, not as small.
+        let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        Self {
+            pass: worst.pass,
+            total_us: micros(worst.total),
+            deadline_us: micros(worst.deadline),
+            monitor: worst.monitor.clone(),
+            missed,
+            frames,
+            span_ms: micros(span) / 1_000,
+            spent_us: worst.spent.map(|nanos| nanos / 1_000),
+            panes: worst.panes,
+            drew: worst.drew,
+            scenes: worst.scenes,
+            animating: worst.animating,
+            rendered: worst.rendered,
+            built: worst.built,
+            rebound: worst.rebound,
+        }
+    }
+}
+
+/// Say a report. The one `tracing` call this module makes for one.
+fn emit(line: &Line) {
+    let phase = |which: Phase| line.spent_us[which.slot()];
     tracing::warn!(
-        total_us = micros(worst.total),
-        deadline_us = micros(worst.deadline),
-        monitor = worst.monitor,
-        missed,
-        frames,
-        span_ms = micros(span) / 1_000,
+        pass = line.pass,
+        total_us = line.total_us,
+        deadline_us = line.deadline_us,
+        monitor = line.monitor,
+        missed = line.missed,
+        frames = line.frames,
+        span_ms = line.span_ms,
         tick_us = phase(Phase::Tick),
         prep_us = phase(Phase::Prep),
         census_us = phase(Phase::Census),
@@ -589,92 +710,142 @@ fn report(worst: &Slow, frames: u64, missed: u64, span: Duration) {
         commit_us = phase(Phase::Commit),
         settle_us = phase(Phase::Settle),
         loose_us = phase(Phase::Loose),
-        panes = worst.panes,
-        drew = worst.drew,
-        scenes = worst.scenes,
-        animating = worst.animating,
-        rendered = worst.rendered,
-        built = worst.built,
-        rebound = worst.rebound,
+        panes = line.panes,
+        drew = line.drew,
+        scenes = line.scenes,
+        animating = line.animating,
+        rendered = line.rendered,
+        built = line.built,
+        rebound = line.rebound,
         "PACING"
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Phase, REPORT_EVERY};
+    use super::{Counters, Frame, Phase, Totals};
     use std::time::{Duration, Instant};
 
-    /// The rate limiter, as arithmetic, with no clock and no compositor.
-    ///
-    /// Written against the same rule `Frame::finish` applies rather than
-    /// against `Frame::finish` itself, because the thing worth pinning is the
-    /// *policy* — one line per second whatever happens, and the first miss
-    /// straight away — and the only way to drive the real one is to render
-    /// frames, which needs a GPU and a Qt.
-    struct Limiter {
-        reported: Option<Duration>,
-        lines: u32,
+    /// The deadline of a 260 Hz monitor, which every test here is written
+    /// against: 3.846 ms.
+    fn at_260() -> Duration {
+        Duration::from_nanos(3_846_153)
     }
 
-    impl Limiter {
-        const fn new() -> Self {
-            Self {
-                reported: None,
-                lines: 0,
+    /// **A miss is counted with the knob off**, and nothing is reported. The
+    /// totals are what two runs are compared by, so they cannot depend on the
+    /// knob whose cost they are there to measure.
+    #[test]
+    fn a_miss_is_counted_with_the_knob_off() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        let line = counters.finish_at(start, start + ms(5), false, 3, 1);
+        assert!(line.is_none(), "the knob is off, so nothing is said");
+        assert_eq!(
+            counters.totals(),
+            Totals {
+                passes: 1,
+                missed: 1
             }
-        }
-
-        /// One missed frame at `at`. Returns whether it produced a line.
-        fn missed(&mut self, at: Duration) -> bool {
-            let due = self
-                .reported
-                .is_none_or(|last| at.saturating_sub(last) >= REPORT_EVERY);
-            if due {
-                self.reported = Some(at);
-                self.lines += 1;
-            }
-            due
-        }
+        );
     }
 
-    /// **A sustained stall costs one line a second, not one a frame.**
-    ///
-    /// The requirement this whole limiter exists for. Sixty seconds of a
-    /// compositor missing every frame at 260 Hz is 15,600 slow frames; at a
-    /// line each, into a log opened `O_DSYNC`, the diagnostic is the outage.
+    /// The deadline is a ceiling, not a target: a pass that fits, and one that
+    /// lands exactly on it, are not misses. Pins the `<=`.
+    #[test]
+    fn a_pass_inside_its_deadline_is_not_a_miss() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        assert!(
+            counters
+                .finish_at(start, start + Duration::from_micros(3_800), true, 1, 1)
+                .is_none()
+        );
+        assert!(
+            counters
+                .finish_at(start, start + at_260(), true, 1, 2)
+                .is_none()
+        );
+        assert_eq!(
+            counters.totals(),
+            Totals {
+                passes: 2,
+                missed: 0
+            }
+        );
+    }
+
+    /// With the knob off the monitor's name is never asked for: `Output::name`
+    /// allocates, and this runs once a pass.
+    #[test]
+    fn the_deadline_takes_no_name_with_the_knob_off() {
+        let frame = Frame {
+            on: false,
+            started: Some(Instant::now()),
+            pass: 1,
+        };
+        frame.deadline(at_260(), || panic!("the name was taken with the knob off"));
+        super::COUNTERS.with(|counters| assert_eq!(counters.deadline.get(), at_260()));
+    }
+
+    /// **A sustained stall costs one line a second, not one a frame**, now
+    /// driven through the rule itself rather than through a copy of it. Sixty
+    /// seconds of a compositor missing every frame at 260 Hz is 15,600 slow
+    /// passes; at a line each, into a log opened `O_DSYNC`, the diagnostic is
+    /// the outage.
     #[test]
     fn a_sustained_stall_is_one_line_a_second() {
-        let mut limiter = Limiter::new();
-        // 260 Hz for sixty seconds, every frame over its deadline.
-        for frame in 0..15_600_u32 {
-            limiter.missed(Duration::from_nanos(u64::from(frame) * 3_846_153));
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        let mut lines = 0;
+        for pass in 0..15_600_u64 {
+            let begun = start + Duration::from_nanos(pass * 3_846_153);
+            if counters
+                .finish_at(begun, begun + ms(5), true, 1, pass)
+                .is_some()
+            {
+                lines += 1;
+            }
         }
         assert_eq!(
-            limiter.lines, 60,
+            lines, 60,
             "sixty seconds of solid stall should be sixty lines"
         );
     }
 
-    /// And the first one goes out at once, rather than a second late.
+    /// And the first one goes out at once, rather than a second late, carrying
+    /// the pass it describes.
     #[test]
     fn the_first_miss_reports_immediately() {
-        let mut limiter = Limiter::new();
-        assert!(limiter.missed(Duration::from_millis(17)));
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        let line = counters.finish_at(start, start + ms(17), true, 2, 41);
+        assert_eq!(
+            line.map(|line| (line.pass, line.total_us, line.panes)),
+            Some((41, 17_000, 2))
+        );
     }
 
     /// A hiccup every few seconds is reported every time: the limit is a
     /// ceiling on the rate, not a sampling interval.
     #[test]
     fn an_occasional_miss_is_never_swallowed() {
-        let mut limiter = Limiter::new();
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
         for second in 0..30_u64 {
+            let begun = start + Duration::from_secs(second * 5);
             assert!(
-                limiter.missed(Duration::from_secs(second * 5)),
+                counters
+                    .finish_at(begun, begun + ms(6), true, 1, second)
+                    .is_some(),
                 "a miss five seconds after the last report was dropped"
             );
         }
-        assert_eq!(limiter.lines, 30);
     }
 
     /// **Phases are exclusive: a nested one does not also count in its
@@ -761,7 +932,6 @@ mod tests {
             on: std::cell::Cell::new(true),
             asked: std::cell::Cell::new(true),
             live: std::cell::Cell::new(true),
-            started: std::cell::Cell::new(None),
             mark: std::cell::Cell::new(None),
             phase: std::cell::Cell::new(Phase::Loose),
             spent: [const { std::cell::Cell::new(0) }; Phase::COUNT],
@@ -778,6 +948,8 @@ mod tests {
             missed: std::cell::Cell::new(0),
             worst: std::cell::RefCell::new(None),
             reported: std::cell::Cell::new(None),
+            all_passes: std::cell::Cell::new(0),
+            all_missed: std::cell::Cell::new(0),
         }
     }
 }

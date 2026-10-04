@@ -209,7 +209,8 @@ SOLIUM_MEMDIAG
 
 SOLIUM_PACING
     Set to anything, say where a frame's time went on the frames that took
-    longer than the monitor's frame interval.
+    longer than the monitor's frame interval. Misses are counted whether or
+    not this is set, and every session ends with one `pacing` line of totals.
 
 SOLIUM_RESIZE_TRACE=<file>
     Append a per-frame trace of every resize drag to `<file>`.

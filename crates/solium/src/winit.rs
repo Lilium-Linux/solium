@@ -646,14 +646,12 @@ pub(crate) fn run() -> Result<()> {
         } else {
             crate::pacing::Frame::off()
         };
-        if pace.on()
-            && let Some((interval, name)) = state
-                .space
-                .outputs()
-                .map(|output| (frame_interval(output), output.name()))
-                .min_by_key(|(interval, _)| *interval)
+        if let Some(output) = state
+            .space
+            .outputs()
+            .min_by_key(|output| frame_interval(output))
         {
-            pace.deadline(interval, &name);
+            pace.deadline(frame_interval(output), || output.name());
         }
 
         // The renderer borrow must end before submit(), so rendering happens in
@@ -1033,6 +1031,7 @@ pub(crate) fn run() -> Result<()> {
         }
     }
 
+    crate::pacing::summary();
     state.session.end();
     Ok(())
 }
