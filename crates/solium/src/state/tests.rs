@@ -4827,7 +4827,7 @@ end)"#,
     mod fullscreen_glides {
         use super::*;
 
-        const SCRIPT: &str = r#"
+        pub(super) const SCRIPT: &str = r#"
             sol.on("fullscreen", function() sol.animate({ duration = 260, easing = "linear" }) end)
             sol.on("maximize", function() sol.animate({ duration = 220, easing = "linear" }) end)
             sol.bind("super+f", function() sol.toggle_fullscreen() end)
@@ -4835,12 +4835,12 @@ end)"#,
         "#;
 
         /// Where the window lives before anything is toggled.
-        fn before() -> Rectangle<f64, Logical> {
+        pub(super) fn before() -> Rectangle<f64, Logical> {
             Rectangle::new((300, 200).into(), (400, 300).into()).to_f64()
         }
 
         /// The monitor, which is also its work area: there is no bar.
-        fn screen() -> Rectangle<f64, Logical> {
+        pub(super) fn screen() -> Rectangle<f64, Logical> {
             Rectangle::new((0, 0).into(), (1920, 1080).into()).to_f64()
         }
 
@@ -4967,7 +4967,7 @@ end)"#,
 
         /// `script`, loaded from a file of its own, which is gone again by the
         /// time this returns.
-        fn script_at(name: &str, script: &str) -> Scripts {
+        pub(super) fn script_at(name: &str, script: &str) -> Scripts {
             let directory =
                 std::env::temp_dir().join(format!("solium-glides-{name}-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&directory);
@@ -4981,7 +4981,7 @@ end)"#,
         /// Whether `rect` is part of the way from `from` to `to`: strictly
         /// between them on every edge that moves, and on the others where
         /// both are.
-        fn between(
+        pub(super) fn between(
             rect: Rectangle<f64, Logical>,
             from: Rectangle<f64, Logical>,
             to: Rectangle<f64, Logical>,
@@ -10571,6 +10571,83 @@ end)"#,
 
             session.assert_sealed("a window opened while locked", selections);
             session.assert_unlocks(lock);
+        }
+
+        /// **#49: a lock part of the way through a glide leaves no window
+        /// transformed**: the glide lands behind the lock as anywhere
+        /// else, the window is a plain element at the monitor's rectangle
+        /// once it has, and it is still there at rest when the lock lifts.
+        #[test]
+        fn a_lock_mid_glide_leaves_the_window_at_rest() {
+            use super::fullscreen_glides::{SCRIPT, before, between, screen, script_at};
+
+            let mut session = Session::new();
+            session
+                .state
+                .start_scripts(Some(script_at("locked-mid-glide", SCRIPT)));
+            let (window, _toplevel, surface, _xdg) =
+                session.app.open(&mut session.display, &mut session.state);
+            commit_buffer(&session.app.client, &session.app.qh, &surface, 400, 300);
+            session.app.pump(&mut session.display, &mut session.state);
+            session
+                .state
+                .space
+                .map_element(window.clone(), (300, 200), false);
+            session.state.space.refresh();
+            session.state.sync_panes();
+            let pane = session.state.panes.id_of(&window).expect("a pane");
+            session
+                .state
+                .focus_window(&window, SERIAL_COUNTER.next_serial());
+            let land = |session: &mut Session, after: Duration| {
+                session.state.clock.advance(after);
+                let now = session.state.clock.now();
+                session.state.settle(now);
+                session.state.sync_panes();
+            };
+            let drawn = |session: &Session| {
+                let held = session.state.panes.get(pane).expect("the pane");
+                session
+                    .state
+                    .drawn_at(
+                        held,
+                        session.state.pane_outer(held),
+                        session.state.clock.now(),
+                    )
+                    .rect
+            };
+            let transformed = |session: &Session| {
+                session
+                    .state
+                    .panes
+                    .get(pane)
+                    .is_some_and(present::transformed)
+            };
+            land(&mut session, Duration::from_secs(1));
+
+            assert!(session.state.trigger("super+f"));
+            session.app.pump(&mut session.display, &mut session.state);
+            session.state.clock.advance(Duration::from_millis(100));
+            assert!(
+                between(drawn(&session), before(), screen()),
+                "the premise: part of the way into fullscreen"
+            );
+            let lock = session.lock();
+            commit_buffer(&session.app.client, &session.app.qh, &surface, 1920, 1080);
+            session.app.pump(&mut session.display, &mut session.state);
+            land(&mut session, Duration::from_secs(1));
+            assert!(!transformed(&session), "landed behind the lock, at rest");
+            assert_eq!(drawn(&session), screen(), "covering the monitor");
+
+            lock.unlock_and_destroy();
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert!(session.state.lock.is_none(), "the premise: unlocked");
+            land(&mut session, Duration::from_millis(16));
+            assert!(!transformed(&session), "and at rest once the lock lifts");
+            assert_eq!(drawn(&session), screen());
         }
 
         /// **What is pressed at the lock screen is not told to the
