@@ -1358,8 +1358,10 @@ impl State {
             .any(|step| matches!(step, Some(Step::Draw | Step::Wake)));
 
         // `SOLIUM_PACING`. Off, a pass reads the clock twice and counts
-        // itself and its miss (`pacing::tests::a_miss_is_counted_with_the_knob_off`);
-        // see `pacing.rs`, which argues that trade at 260 Hz.
+        // itself and its miss (`pacing::tests::a_miss_is_counted_with_the_knob_off`),
+        // and each frame it queues reads it once more, for `late`
+        // (`pacing::tests::a_late_flip_is_counted_with_the_knob_off`); see
+        // `pacing.rs`, which argues that trade at 260 Hz.
         let pace = crate::pacing::frame();
         // GPU time, read passes later: `gputime::tests::a_pass_is_read_three_passes_later_and_never_waited_for`.
         if let Some(timer) = self.solium.timer.as_mut() {

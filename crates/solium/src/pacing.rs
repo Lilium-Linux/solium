@@ -14,8 +14,10 @@
 //!   paid per frame is paid 260 times a second. Off, a pass reads the clock
 //!   twice (a vDSO `clock_gettime`, tens of nanoseconds) and counts itself and
 //!   its miss, because a miss with the knob off is still a miss
-//!   (`tests::a_miss_is_counted_with_the_knob_off`); nothing allocates and
-//!   nothing formats. It is deliberately not a compile-time feature: a
+//!   (`tests::a_miss_is_counted_with_the_knob_off`); on the hardware a frame
+//!   queued reads it once more, and its flip counts how late it landed
+//!   (`tests::a_late_flip_is_counted_with_the_knob_off`). Nothing allocates
+//!   and nothing formats. It is deliberately not a compile-time feature: a
 //!   diagnostic that is not in the shipped binary is not there on the day the
 //!   shipped binary is slow, which is the only day it is wanted.
 //!
@@ -72,9 +74,10 @@ use std::{
 /// So a single hiccup reads `missed=1 frames=3` and a sustained stall reads
 /// `missed=247 frames=259`, and the two are never confusable.
 ///
-/// The first miss after a quiet spell reports immediately rather than waiting
-/// out a window — a diagnostic whose first evidence arrives a second late is
-/// hard to trust, and it is the case somebody is watching the log live for.
+/// The first miss or late flip after a quiet spell reports immediately rather
+/// than waiting out a window — a diagnostic whose first evidence arrives a
+/// second late is hard to trust, and it is the case somebody is watching the
+/// log live for.
 const REPORT_EVERY: Duration = Duration::from_secs(1);
 
 /// The parts of a frame, each measured exclusively of the others.
@@ -246,7 +249,7 @@ struct Counters {
     /// How many of them overran the tightest monitor's interval.
     all_missed: Cell<u64>,
     /// Vblanks a flip missed since the session began, measured or not.
-    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    /// `tests::a_late_flip_is_counted_with_the_knob_off`.
     all_late: Cell<u64>,
     /// A report that is due and waits for its pass's GPU time.
     /// `tests::a_report_waits_for_its_passes_gpu_time`.
@@ -530,9 +533,10 @@ impl Counters {
         Some(line)
     }
 
-    /// A flip landed `late` vblanks late: into the session's totals always,
-    /// and into the span's report with the knob on.
-    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    /// A flip landed `late` vblanks late: into the session's totals always
+    /// (`tests::a_late_flip_is_counted_with_the_knob_off`), and into the
+    /// span's report with the knob on
+    /// (`tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`).
     fn flipped(&self, late: u32) {
         let late = u64::from(late);
         self.all_late.set(self.all_late.get().saturating_add(late));
@@ -777,7 +781,10 @@ pub(crate) struct Queued {
     pub(crate) after: Option<Flip>,
 }
 
-/// Slack for the kernel's timestamp against ours: half a millisecond.
+/// Slack for the kernel's timestamp against ours: half a millisecond. A flip
+/// is stamped a little after its vblank began, so a frame queued just after
+/// one vblank that flips on the next can read as a little more than an
+/// interval: `tests::a_flip_stamped_just_after_its_vblank_is_on_time`.
 const FLIP_SLACK: Duration = Duration::from_micros(500);
 
 /// **Vblanks this screen should have flipped at and did not.**
@@ -811,6 +818,7 @@ pub(crate) fn monotonic_now() -> Duration {
 }
 
 /// A flip landed `late` vblanks late. Counted always:
+/// `tests::a_late_flip_is_counted_with_the_knob_off`,
 /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
 pub(crate) fn flipped(late: u32) {
     COUNTERS.with(|counters| counters.flipped(late));
@@ -822,7 +830,7 @@ pub(crate) fn flipped(late: u32) {
 pub(crate) struct Totals {
     pub(crate) passes: u64,
     pub(crate) missed: u64,
-    /// Vblanks a flip missed: `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
+    /// Vblanks a flip missed: `tests::a_late_flip_is_counted_with_the_knob_off`.
     pub(crate) late: u64,
 }
 
@@ -1412,6 +1420,18 @@ mod tests {
         assert_eq!(vblanks_missed(queued, flip(7, 54_615), at_260()), 1);
     }
 
+    /// Queued 0.1 ms after one vblank and flipped on the next, stamped 0.4 ms
+    /// after that one began: a little more than an interval by the stamps,
+    /// and on time.
+    #[test]
+    fn a_flip_stamped_just_after_its_vblank_is_on_time() {
+        let queued = Queued {
+            at: Duration::from_micros(50_000),
+            after: None,
+        };
+        assert_eq!(vblanks_missed(queued, flip(7, 54_146), at_260()), 0);
+    }
+
     /// The kernel's sequence is a `u32` and wraps; a wrap is not four billion
     /// vblanks.
     #[test]
@@ -1421,6 +1441,33 @@ mod tests {
             after: Some(flip(u32::MAX, 0)),
         };
         assert_eq!(vblanks_missed(queued, flip(1, 7_692), at_260()), 1);
+    }
+
+    /// **A late flip is counted with the knob off**, into the totals and not
+    /// into a report: the totals are what a run with the knob off is
+    /// compared by.
+    #[test]
+    fn a_late_flip_is_counted_with_the_knob_off() {
+        let counters = counters();
+        counters.on.set(false);
+        counters.deadline.set(at_260());
+        counters.flipped(2);
+        let start = Instant::now();
+        assert!(
+            counters
+                .finish_at(start, start + ms(2), false, 1, 1)
+                .is_none(),
+            "the knob is off, so nothing is said"
+        );
+        assert_eq!(counters.late.get(), 0, "and nothing waits to be said");
+        assert_eq!(
+            counters.totals(),
+            Totals {
+                passes: 1,
+                missed: 0,
+                late: 2
+            }
+        );
     }
 
     /// **A late flip makes a report due with no CPU miss at all** — the
