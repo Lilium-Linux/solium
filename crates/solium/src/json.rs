@@ -244,11 +244,14 @@ impl Reader<'_> {
     }
 
     fn value(&mut self, depth: usize) -> Option<Json> {
-        if depth > Self::DEEPEST {
+        self.space();
+        let next = *self.bytes.get(self.at)?;
+        // A list or an object inside 64 others is one too deep, as a Lua
+        // table is. `tests::json_nested_too_deep_is_none`.
+        if depth >= Self::DEEPEST && matches!(next, b'[' | b'{') {
             return None;
         }
-        self.space();
-        match self.bytes.get(self.at)? {
+        match next {
             b'n' => self.word("null").map(|()| Json::Null),
             b't' => self.word("true").map(|()| Json::Bool(true)),
             b'f' => self.word("false").map(|()| Json::Bool(false)),
@@ -591,6 +594,11 @@ mod tests {
     fn json_nested_too_deep_is_none() {
         let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
         assert!(Json::parse(&nested(64)).is_some(), "64 deep is read");
+        assert!(
+            Json::parse(&format!("{}1{}", "[".repeat(64), "]".repeat(64))).is_some(),
+            "a value inside 64 lists is read"
+        );
+        assert_eq!(Json::parse(&nested(65)), None, "65 deep is refused");
         assert_eq!(Json::parse(&nested(10_000)), None, "10 000 deep is refused");
     }
 
