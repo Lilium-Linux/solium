@@ -268,6 +268,15 @@ impl Solium {
             crate::xwayland::activate(self, surface.as_ref());
         }
 
+        // Most recently focused first, for `Windows`' `focusOrder`, and a
+        // window that wanted attention has it (Ruling 18).
+        // `tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+        // `tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
+        let id = self.window_id(window);
+        self.focus_history.retain(|each| *each != id);
+        self.focus_history.insert(0, id);
+        self.urgent.remove(&id);
+
         // A layout may want to follow: a scroller brings the focused column
         // fully into view, which is the difference between clicking a window
         // half off the edge and being able to use it.

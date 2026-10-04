@@ -22,6 +22,19 @@ SoliumRow *make_monitor(QObject *parent)
     return new SoliumMonitor(parent);
 }
 
+SoliumRow *make_window(QObject *parent)
+{
+    return new SoliumWindow(parent);
+}
+
+SoliumWindow *window_at(const QAbstractItemModel *model, int row)
+{
+    const auto *rows = qobject_cast<const SoliumRows *>(model);
+    return rows != nullptr && row >= 0 && row < rows->rows().size()
+               ? qobject_cast<SoliumWindow *>(rows->rows().at(row))
+               : nullptr;
+}
+
 } // namespace
 
 SoliumRows::SoliumRows(const QMetaObject *row_type, Make make, Retire retire,
@@ -236,9 +249,104 @@ bool SoliumRows::apply(const QJsonArray &ops)
     return whole;
 }
 
+SoliumWindowRows::SoliumWindowRows()
+    : SoliumRows(&SoliumWindow::staticMetaObject, make_window, Retire::AfterGrace, "id")
+{
+    QQmlEngine::setObjectOwnership(&m_focused, QQmlEngine::CppOwnership);
+    QObject::connect(this, &SoliumRows::applied, this, [this]() { follow(); });
+}
+
+void SoliumWindowRows::follow()
+{
+    const SoliumRow *now = nullptr;
+    for (const SoliumRow *row : rows()) {
+        if (row->value("focused").toBool()) {
+            now = row;
+        }
+    }
+    const QList<QByteArray> changed = m_focused.assign(now != nullptr ? now->values : QVariantMap());
+    const bool present = now != nullptr;
+    if (!changed.isEmpty() || present != m_focused.present) {
+        m_focused.present = present;
+        m_focused.announce();
+    }
+}
+
+SoliumWindowList::SoliumWindowList(QObject *parent) : QSortFilterProxyModel(parent)
+{
+    setSourceModel(solium_rows(SOLIUM_QML_ROWS_WINDOWS));
+    setDynamicSortFilter(true);
+    QObject::connect(this, &QAbstractItemModel::rowsInserted, this, &SoliumWindowList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::rowsRemoved, this, &SoliumWindowList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::layoutChanged, this, &SoliumWindowList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::modelReset, this, &SoliumWindowList::countChanged);
+}
+
+template <typename Change>
+void SoliumWindowList::refilterWith(Change &&change)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    beginFilterChange();
+    change();
+    endFilterChange(QSortFilterProxyModel::Direction::Rows);
+#else
+    change();
+    invalidateFilter();
+#endif
+    emit changed();
+    emit countChanged();
+}
+
+void SoliumWindowList::refilter(QString &field, const QString &value)
+{
+    if (field != value) {
+        refilterWith([&field, &value]() { field = value; });
+    }
+}
+
+void SoliumWindowList::setOnStage(const QVariant &value)
+{
+    if (value != m_on_stage) {
+        refilterWith([this, &value]() { m_on_stage = value; });
+    }
+}
+
+void SoliumWindowList::setSortBy(const QString &value)
+{
+    if (value != m_sort) {
+        m_sort = value;
+        sort(value.isEmpty() ? -1 : 0);
+        invalidate();
+        emit changed();
+    }
+}
+
+bool SoliumWindowList::filterAcceptsRow(int source_row, const QModelIndex &) const
+{
+    const SoliumWindow *window = window_at(sourceModel(), source_row);
+    if (window == nullptr) {
+        return false;
+    }
+    return (m_monitor.isEmpty() || window->monitor() == m_monitor)
+           && (m_workspace.isEmpty() || window->workspace() == m_workspace)
+           && (m_app.isEmpty() || window->appId() == m_app)
+           && (!m_on_stage.isValid() || window->onStage() == m_on_stage.toBool());
+}
+
+bool SoliumWindowList::lessThan(const QModelIndex &left, const QModelIndex &right) const
+{
+    const SoliumWindow *a = window_at(sourceModel(), left.row());
+    const SoliumWindow *b = window_at(sourceModel(), right.row());
+    if (a == nullptr || b == nullptr || m_sort != QStringLiteral("mru")) {
+        return left.row() < right.row();
+    }
+    return a->focusOrder() < b->focusOrder();
+}
+
 SoliumRows *solium_rows(int model)
 {
     static SoliumRows *monitors = nullptr;
+    static SoliumRows *windows = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -249,6 +357,11 @@ SoliumRows *solium_rows(int model)
                                       SoliumRows::Retire::Never, "name");
         }
         return monitors;
+    case SOLIUM_QML_ROWS_WINDOWS:
+        if (windows == nullptr) {
+            windows = new SoliumWindowRows();
+        }
+        return windows;
     default:
         return nullptr;
     }

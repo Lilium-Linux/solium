@@ -7,6 +7,8 @@
 pub(crate) mod diff;
 pub(crate) mod keyboard;
 pub(crate) mod monitors;
+pub(crate) mod windows;
+pub(crate) mod workspaces;
 
 use crate::qml::hosted::Model;
 
@@ -14,6 +16,7 @@ use crate::qml::hosted::Model;
 #[derive(Debug, Default)]
 pub(crate) struct Published {
     monitors: Vec<diff::Row>,
+    windows: Vec<diff::Row>,
     /// `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
     keyboard: keyboard::Published,
 }
@@ -31,6 +34,13 @@ impl crate::state::Solium {
             Model::Monitors,
             &mut self.published.monitors,
             monitors,
+            crate::qml::hosted::apply_rows,
+        );
+        let windows = windows::rows(self);
+        publish(
+            Model::Windows,
+            &mut self.published.windows,
+            windows,
             crate::qml::hosted::apply_rows,
         );
         // The `Keyboard` singleton:

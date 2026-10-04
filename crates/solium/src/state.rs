@@ -265,6 +265,21 @@ pub(crate) struct Solium {
     /// only what changed since: `models::tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
     pub(crate) published: crate::models::Published,
 
+    /// The windows focused, by script id, the most recent first: what
+    /// `Windows`' `focusOrder` counts (Ruling 18).
+    /// `tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`.
+    pub(crate) focus_history: Vec<u64>,
+
+    /// Windows that asked for attention where nobody could see them, until
+    /// each is focused: `Windows`' `urgent` (Ruling 18).
+    /// `tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
+    pub(crate) urgent: std::collections::HashSet<u64>,
+
+    /// Which workspace each window is on, once Lua declares workspaces; until
+    /// then `None`, and every window's `workspace` in `Windows` reads `""`.
+    /// `tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`.
+    pub(crate) workspaces: Option<crate::models::workspaces::Declared>,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -1039,6 +1054,9 @@ impl Solium {
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),
             published: crate::models::Published::default(),
+            focus_history: Vec::new(),
+            urgent: std::collections::HashSet::new(),
+            workspaces: None,
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),

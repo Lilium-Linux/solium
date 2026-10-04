@@ -93,7 +93,6 @@ mod ffi {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Model {
     Monitors = 0,
-    #[expect(dead_code, reason = "host.h numbers it; nothing publishes windows yet")]
     Windows = 1,
     #[expect(
         dead_code,
@@ -2552,6 +2551,179 @@ pub(crate) mod tests {
                 1,
                 "Monitor is not the shell's own file"
             );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    fn window_row(
+        id: u64,
+        monitor: &str,
+        focused: bool,
+        focus_order: u32,
+    ) -> crate::models::diff::Row {
+        use crate::json::Json;
+        crate::models::diff::Row {
+            key: id.to_string(),
+            values: std::collections::BTreeMap::from([
+                (
+                    "id",
+                    Json::Number(f64::from(u32::try_from(id).unwrap_or(0))),
+                ),
+                ("title", Json::Text(format!("window {id}"))),
+                ("monitor", Json::Text(monitor.to_owned())),
+                ("focused", Json::Bool(focused)),
+                ("focusOrder", Json::Number(f64::from(focus_order))),
+                ("onStage", Json::Bool(true)),
+                ("state", Json::Text("shown".to_owned())),
+            ]),
+        }
+    }
+
+    /// **`WindowList` filters by monitor and by stage and sorts by recent
+    /// focus, again as focus moves, and is never reset; the facade follows
+    /// focus and is never null; a gone window's row reads invalid, not
+    /// null** (Ruling 17, Ruling 18).
+    #[test]
+    fn the_windows_model_filters_sorts_and_keeps_its_facades() {
+        use crate::json::Json;
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-windows",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    // Asked again as the count changes, so it is the row once
+                    // there is one, and whatever `get` answers once it goes.
+                    property var held: { Windows.count; return Windows.get(902) }
+                    readonly property string focusedTitle: Windows.focused.present ? Windows.focused.title : ""
+                    readonly property int heldValid: held.valid ? 1 : 0
+                    WindowList { id: here; monitor: "w-left"; sort: "mru" }
+                    WindowList { id: offStage; onStage: false }
+                    readonly property int here: here.count
+                    readonly property int offStageCount: offStage.count
+                    property string first: ""
+                    property int resets: 0
+                    function readFirst() { first = here.count > 0 ? here.data(here.index(0, 0), Qt.UserRole + 1 + 2) : "" }
+                    Connections {
+                        target: here
+                        function onLayoutChanged() { readFirst() }
+                        function onRowsInserted() { readFirst() }
+                        function onRowsRemoved() { readFirst() }
+                        function onRowsMoved() { readFirst() }
+                        function onModelReset() { resets += 1 }
+                    }
+                }
+                "#,
+                "w-left",
+            );
+            let mut parked = window_row(904, "w-right", false, 3);
+            parked.values.insert("onStage", Json::Bool(false));
+            let rows = vec![
+                window_row(901, "w-left", false, 1),
+                window_row(902, "w-left", true, 0),
+                window_row(903, "w-right", false, 2),
+                parked.clone(),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&[], &rows))
+            ));
+            assert_eq!(
+                scene.get_int("here"),
+                2,
+                "WindowList kept another monitor's window"
+            );
+            assert_eq!(
+                scene.get_int("offStageCount"),
+                1,
+                "WindowList {{ onStage: false }} is not only the window off stage"
+            );
+            assert_eq!(scene.get_string_for_test("focusedTitle"), "window 902");
+            assert_eq!(
+                scene.get_string_for_test("first"),
+                "902",
+                "sorted by recent focus, the focused window is first"
+            );
+            assert_eq!(
+                scene.get_int("heldValid"),
+                1,
+                "Windows.get(902) is not the window's live row"
+            );
+
+            let refocused = vec![
+                window_row(901, "w-left", true, 0),
+                window_row(902, "w-left", false, 1),
+                window_row(903, "w-right", false, 2),
+                parked.clone(),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&rows, &refocused))
+            ));
+            assert_eq!(
+                scene.get_string_for_test("focusedTitle"),
+                "window 901",
+                "the facade did not follow focus"
+            );
+            assert_eq!(
+                scene.get_string_for_test("first"),
+                "901",
+                "the list was not sorted again as focus moved"
+            );
+
+            let after = vec![
+                window_row(901, "w-left", true, 0),
+                window_row(903, "w-right", false, 1),
+                parked,
+            ];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&refocused, &after))
+            ));
+            assert_eq!(
+                (
+                    scene.get_int("heldValid"),
+                    scene.get_int("here"),
+                    scene.get_int("resets")
+                ),
+                (0, 1, 0),
+                "a gone window's row must read invalid, and still be an object, and the \
+                 list is never reset: (heldValid, how many on w-left, resets)"
+            );
+            let _ = super::apply_rows(super::Model::Windows, &render(&diff(&after, &[])));
+            assert_eq!(
+                scene.get_string_for_test("focusedTitle"),
+                "",
+                "with no window focused, the facade is absent"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **Qt Quick's `Window` is still Qt Quick's beside the windows model**
+    /// (Ruling 1a): `Windows`' row type has no name in `Solium`, so a scene
+    /// that imports both and writes `Window {}` builds a Qt Quick window.
+    #[test]
+    fn a_quick_window_is_still_qt_quicks_beside_the_windows_model() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-quick-window",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    Window { id: own; visible: false }
+                    readonly property int quick: own.contentItem ? 1 : 0
+                }
+                "#,
+                "quick-window-1",
+            );
+            assert_eq!(scene.get_int("quick"), 1, "Window is not Qt Quick's window");
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
         });

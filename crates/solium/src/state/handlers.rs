@@ -1126,6 +1126,12 @@ impl XdgActivationHandler for Solium {
                      where it was"
                 );
             } else if pane.is_some_and(|pane| self.carried_by_a_selection(pane)) {
+                // That refusal is this window wanting you: it is urgent until
+                // it is focused (03 §3.2.17).
+                // `state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
+                if let Some(pane) = pane {
+                    self.urgent.insert(pane.get());
+                }
                 tracing::debug!(
                     "a window on a workspace nobody is looking at asked to be brought forward, \
                      and the keyboard stayed where it was"

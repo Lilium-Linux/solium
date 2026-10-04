@@ -574,4 +574,14 @@ void solium_qml_register_types()
      * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`. */
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Monitors",
                                  solium_rows(SOLIUM_QML_ROWS_MONITORS));
+    /* A window's row is nameless like a monitor's: a named `Window` would
+     * hide Qt Quick's `Window` in every scene that imports both.
+     * `qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`. */
+    qmlRegisterAnonymousType<SoliumWindow>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Windows",
+                                 qobject_cast<SoliumWindowRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_WINDOWS)));
+    /* Named, since a scene writes one: `WindowList { ... }`.
+     * `qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`. */
+    qmlRegisterType<SoliumWindowList>(SOLIUM_NATIVE_URI, 1, 0, "WindowList");
 }
