@@ -45,7 +45,7 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::{
-            EventLoop, LoopSignal,
+            EventLoop, LoopHandle, LoopSignal,
             timer::{TimeoutAction, Timer},
         },
         drm::control::{Device as _, Mode as DrmMode, ModeTypeFlags, connector, crtc},
@@ -414,8 +414,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     // modes and CRTCs are chosen, XWayland starts.
     //
     // A warning and not a refusal: libseat can enable a session a moment after
-    // it is created, and most runs on this machine do get their devices about
-    // five seconds in.
+    // it is created.
     //
     // Note this says nothing about DRM master. Smithay warns "unable to become
     // drm master, assuming unprivileged mode" on every run here, and on a
@@ -652,13 +651,14 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     // not even the VT switch, which is itself a key. Better to give the screen
     // back and say why than to sit there looking like a crash.
     //
-    // The deadline is generous on purpose, and it is measured rather than
-    // guessed. libinput takes between three and four and a quarter seconds to
-    // report the first device on the machine this was written on; the first
-    // version of this waited five, lost the race, and shut down a session that
-    // was working — which reads exactly like an instant crash from the other
-    // side of the screen. A watchdog that fires early is worse than none,
-    // because it breaks the thing it is guarding.
+    // The deadline is generous on purpose. The first version of this waited
+    // five seconds and shut down a session that was working, which reads
+    // exactly like an instant crash from the other side of the screen. A
+    // watchdog that fires early is worse than none, because it breaks the
+    // thing it is guarding. (The three to four seconds libinput seemed to
+    // take to report the first device were the wait for somebody to touch
+    // one; `start_input` now hands the devices over on the loop's first pass,
+    // #48, so a working session has them before the first check.)
     //
     // Checked repeatedly rather than once, so the wait is visible in the log
     // instead of being a silent gap before a shutdown.
@@ -1853,24 +1853,182 @@ fn start_input(
     // Cloned rather than moved: the context is refcounted, and suspending and
     // resuming it across a VT switch is the caller's job, not the backend's.
     let handle = context.clone();
+    let mut queued = context.clone();
 
     event_loop
         .handle()
         .insert_source(LibinputInputBackend::new(context), |event, (), state| {
-            // The first monitor, as the region an absolute device's positions
-            // are measured against. Right for a single screen and a guess with
-            // several: libinput can say which output a touchscreen or tablet is
-            // glued to, and reading that is what makes touch land on the right
-            // monitor. Filed as #42 rather than guessed at here -- a mouse and
-            // a keyboard are unaffected, because relative motion is bounded by
-            // every screen instead.
-            let Some(output) = state.screens.first().map(|screen| screen.output.clone()) else {
-                return;
-            };
-            handle_input(state, &output, event);
+            route_input(state, event);
         })
         .map_err(|err| anyhow!("watching input devices: {err}"))?;
+
+    // The devices libinput found while taking the seat, handed over on the
+    // loop's first pass rather than at the first key press (#48).
+    //
+    // libinput reports them "during libinput_dispatch()", and smithay's
+    // backend dispatches only when libinput's fd turns readable -- which a
+    // keyboard nobody is pressing and a mouse nobody is moving never make
+    // it. So until somebody touched something there were no devices, and
+    // the watchdog in `run` counts them: a session left alone for twenty
+    // seconds was stopped with the seat active and every device present.
+    // The "three to four seconds" libinput seemed to take was how long the
+    // person at the machine took to reach for it.
+    let seat = seat.to_owned();
+    on_first_pass(
+        &event_loop.handle(),
+        move || queued_input(&mut queued),
+        route_input,
+        move |state: &mut State| {
+            // Once, so a session that still comes up with no devices says
+            // from its own log which way it failed: an inactive session gets
+            // none, an active one with none points at the seat or udev. This
+            // needs a seat, and no test reaches it.
+            let env = |name: &str| std::env::var(name).unwrap_or_else(|_| "unset".to_owned());
+            tracing::info!(
+                devices = state.input_devices,
+                session_active = state.session.is_active(),
+                seat,
+                xdg_session_id = env("XDG_SESSION_ID"),
+                xdg_vtnr = env("XDG_VTNR"),
+                "input devices at start-up"
+            );
+        },
+    );
     Ok(handle)
+}
+
+/// Every event libinput holds now, as smithay's backend would hand it over.
+///
+/// `dispatch` first, as the backend does and libinput asks: the devices found
+/// while taking the seat are reported during it. Then the whole queue, mapped
+/// arm for arm as `LibinputInputBackend::process_events` maps it in smithay
+/// 0.7 -- every kind of event and not only devices, because taking from the
+/// queue takes whatever is in it, and an event left out here would be lost
+/// rather than delivered later. What smithay drops, a tablet pad or a kind
+/// newer than it knows, is dropped here too.
+///
+/// No test: libinput's events come only from a seat's devices, and there is
+/// neither under `cargo test`. `on_first_pass`'s tests hold the delivery
+/// around it.
+fn queued_input(context: &mut Libinput) -> Vec<InputEvent<LibinputInputBackend>> {
+    use smithay::{
+        backend::libinput::PointerScrollAxis as Scroll,
+        reexports::input::event::{
+            DeviceEvent, Event, EventTrait as _, GestureEvent, KeyboardEvent, PointerEvent,
+            SwitchEvent, TabletToolEvent, TouchEvent,
+            gesture::{GestureHoldEvent, GesturePinchEvent, GestureSwipeEvent},
+        },
+    };
+
+    if let Err(err) = context.dispatch() {
+        tracing::warn!(?err, "libinput could not read its devices at start-up");
+    }
+    context
+        .by_ref()
+        .filter_map(|event| {
+            Some(match event {
+                Event::Device(DeviceEvent::Added(event)) => InputEvent::DeviceAdded {
+                    device: event.device(),
+                },
+                Event::Device(DeviceEvent::Removed(event)) => InputEvent::DeviceRemoved {
+                    device: event.device(),
+                },
+                Event::Touch(TouchEvent::Down(event)) => InputEvent::TouchDown { event },
+                Event::Touch(TouchEvent::Motion(event)) => InputEvent::TouchMotion { event },
+                Event::Touch(TouchEvent::Up(event)) => InputEvent::TouchUp { event },
+                Event::Touch(TouchEvent::Cancel(event)) => InputEvent::TouchCancel { event },
+                Event::Touch(TouchEvent::Frame(event)) => InputEvent::TouchFrame { event },
+                Event::Keyboard(KeyboardEvent::Key(event)) => InputEvent::Keyboard { event },
+                Event::Pointer(PointerEvent::Motion(event)) => InputEvent::PointerMotion { event },
+                Event::Pointer(PointerEvent::MotionAbsolute(event)) => {
+                    InputEvent::PointerMotionAbsolute { event }
+                }
+                Event::Pointer(PointerEvent::ScrollWheel(event)) => InputEvent::PointerAxis {
+                    event: Scroll::Wheel(event),
+                },
+                Event::Pointer(PointerEvent::ScrollFinger(event)) => InputEvent::PointerAxis {
+                    event: Scroll::Finger(event),
+                },
+                Event::Pointer(PointerEvent::ScrollContinuous(event)) => InputEvent::PointerAxis {
+                    event: Scroll::Continuous(event),
+                },
+                Event::Pointer(PointerEvent::Button(event)) => InputEvent::PointerButton { event },
+                Event::Gesture(GestureEvent::Swipe(GestureSwipeEvent::Begin(event))) => {
+                    InputEvent::GestureSwipeBegin { event }
+                }
+                Event::Gesture(GestureEvent::Swipe(GestureSwipeEvent::Update(event))) => {
+                    InputEvent::GestureSwipeUpdate { event }
+                }
+                Event::Gesture(GestureEvent::Swipe(GestureSwipeEvent::End(event))) => {
+                    InputEvent::GestureSwipeEnd { event }
+                }
+                Event::Gesture(GestureEvent::Pinch(GesturePinchEvent::Begin(event))) => {
+                    InputEvent::GesturePinchBegin { event }
+                }
+                Event::Gesture(GestureEvent::Pinch(GesturePinchEvent::Update(event))) => {
+                    InputEvent::GesturePinchUpdate { event }
+                }
+                Event::Gesture(GestureEvent::Pinch(GesturePinchEvent::End(event))) => {
+                    InputEvent::GesturePinchEnd { event }
+                }
+                Event::Gesture(GestureEvent::Hold(GestureHoldEvent::Begin(event))) => {
+                    InputEvent::GestureHoldBegin { event }
+                }
+                Event::Gesture(GestureEvent::Hold(GestureHoldEvent::End(event))) => {
+                    InputEvent::GestureHoldEnd { event }
+                }
+                Event::Tablet(TabletToolEvent::Axis(event)) => InputEvent::TabletToolAxis { event },
+                Event::Tablet(TabletToolEvent::Proximity(event)) => {
+                    InputEvent::TabletToolProximity { event }
+                }
+                Event::Tablet(TabletToolEvent::Tip(event)) => InputEvent::TabletToolTip { event },
+                Event::Tablet(TabletToolEvent::Button(event)) => {
+                    InputEvent::TabletToolButton { event }
+                }
+                Event::Switch(SwitchEvent::Toggle(event)) => InputEvent::SwitchToggle { event },
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
+/// Hand `take`'s events to `route` on the loop's first pass, whether or not
+/// any fd has woken by then, and then call `then` (#48).
+///
+/// An idle callback, so it runs at the end of the first `dispatch`: after any
+/// source that did wake in that pass. `take` and the backend read one queue,
+/// so whichever runs first hands an event over and the other finds it gone --
+/// nothing is handed over twice, and nothing is left behind for a key press.
+/// `the_first_pass_hands_over_what_was_queued_with_no_key_pressed` and
+/// `nothing_is_handed_over_twice`, against a fake backend that, like
+/// libinput's, runs only when its fd is readable;
+/// `without_it_the_devices_wait_for_the_first_key` is the bug itself.
+fn on_first_pass<S, E>(
+    handle: &LoopHandle<'_, S>,
+    take: impl FnOnce() -> Vec<E> + 'static,
+    route: impl Fn(&mut S, E) + 'static,
+    then: impl FnOnce(&mut S) + 'static,
+) {
+    handle.insert_idle(move |state| {
+        for event in take() {
+            route(state, event);
+        }
+        then(state);
+    });
+}
+
+/// One libinput event, from the backend or the first pass, to `handle_input`.
+fn route_input(state: &mut State, event: InputEvent<LibinputInputBackend>) {
+    // The first monitor, as the region an absolute device's positions are
+    // measured against. Right for a single screen and a guess with several:
+    // libinput can say which output a touchscreen or tablet is glued to, and
+    // reading that is what makes touch land on the right monitor. Filed as #42
+    // rather than guessed at here -- a mouse and a keyboard are unaffected,
+    // because relative motion is bounded by every screen instead.
+    let Some(output) = state.screens.first().map(|screen| screen.output.clone()) else {
+        return;
+    };
+    handle_input(state, &output, event);
 }
 
 /// Route a libinput event through the same profile the nested backend uses.
@@ -1959,7 +2117,163 @@ fn nothing_in_flight(pending: impl IntoIterator<Item = bool>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{gone, nothing_in_flight};
+    use super::{gone, nothing_in_flight, on_first_pass};
+
+    use std::{
+        cell::RefCell, collections::VecDeque, io::Read as _, io::Write as _,
+        os::unix::net::UnixStream, rc::Rc, time::Duration,
+    };
+
+    use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
+
+    /// What a test's loop has been handed, in order.
+    type Seen = Vec<&'static str>;
+    /// libinput's queue, shared by the fake backend and `on_first_pass`.
+    type Queue = Rc<RefCell<VecDeque<&'static str>>>;
+
+    /// libinput and smithay's backend for it, without a seat (#48).
+    ///
+    /// One queue, and a source that reads it only when its fd is readable --
+    /// `Interest::READ`, level-triggered, as `LibinputInputBackend::register`
+    /// asks -- and then hands over the whole of it, as its `process_events`
+    /// does. Writing to the returned socket is a key press: the kernel event
+    /// that makes libinput's fd readable.
+    fn fake_backend(event_loop: &EventLoop<'static, Seen>) -> (Queue, UnixStream) {
+        let queue = Queue::default();
+        let (fd, key) = UnixStream::pair().expect("a socket pair");
+        fd.set_nonblocking(true).expect("a non-blocking socket");
+        let drained = queue.clone();
+        event_loop
+            .handle()
+            .insert_source(
+                Generic::new(fd, Interest::READ, Mode::Level),
+                move |_, fd, seen: &mut Seen| {
+                    // Read what woke it, as `dispatch` reads the devices, so
+                    // it is not readable again until the next key.
+                    let mut buf = [0; 64];
+                    while matches!((&**fd).read(&mut buf), Ok(read) if read > 0) {}
+                    seen.extend(drained.borrow_mut().drain(..));
+                    Ok(PostAction::Continue)
+                },
+            )
+            .expect("the fake backend");
+        (queue, key)
+    }
+
+    /// Three devices, queued while the seat was taken and before the loop ran.
+    fn three_devices(queue: &Queue) {
+        queue
+            .borrow_mut()
+            .extend(["keyboard added", "mouse added", "power button added"]);
+    }
+
+    fn dispatch(event_loop: &mut EventLoop<'static, Seen>, seen: &mut Seen) {
+        event_loop
+            .dispatch(Some(Duration::ZERO), seen)
+            .expect("dispatching the loop");
+    }
+
+    /// The bug, in miniature: what was queued before the fd woke waits for
+    /// the first key, however many passes the loop makes. The pacing runs of
+    /// 2026-10-05 show it on the hardware: the devices arrive in the same
+    /// instant as the first Super press, or not within the watchdog's twenty
+    /// seconds when nobody touches anything.
+    #[test]
+    fn without_it_the_devices_wait_for_the_first_key() {
+        let mut event_loop: EventLoop<Seen> = EventLoop::try_new().expect("an event loop");
+        let (queue, mut key) = fake_backend(&event_loop);
+        three_devices(&queue);
+        let mut seen = Seen::new();
+        for _ in 0..5 {
+            dispatch(&mut event_loop, &mut seen);
+        }
+        assert!(seen.is_empty(), "handed over without a key: {seen:?}");
+
+        queue.borrow_mut().push_back("super pressed");
+        key.write_all(&[1]).expect("a key press");
+        dispatch(&mut event_loop, &mut seen);
+        assert_eq!(
+            seen,
+            [
+                "keyboard added",
+                "mouse added",
+                "power button added",
+                "super pressed"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_first_pass_hands_over_what_was_queued_with_no_key_pressed() {
+        let mut event_loop: EventLoop<Seen> = EventLoop::try_new().expect("an event loop");
+        let (queue, _key) = fake_backend(&event_loop);
+        three_devices(&queue);
+        let drained = queue.clone();
+        on_first_pass(
+            &event_loop.handle(),
+            move || drained.borrow_mut().drain(..).collect(),
+            |seen: &mut Seen, event| seen.push(event),
+            |seen: &mut Seen| seen.push("then"),
+        );
+        let mut seen = Seen::new();
+        dispatch(&mut event_loop, &mut seen);
+        assert_eq!(
+            seen,
+            [
+                "keyboard added",
+                "mouse added",
+                "power button added",
+                "then"
+            ]
+        );
+
+        // Once: a later pass hands over nothing more.
+        dispatch(&mut event_loop, &mut seen);
+        assert_eq!(seen.len(), 4, "handed over again: {seen:?}");
+    }
+
+    /// Neither path hands over what the other already did, whichever runs
+    /// first: the first pass before any key, then a key; or a key pressed
+    /// before the loop ever ran, so the backend wakes in that same pass.
+    #[test]
+    fn nothing_is_handed_over_twice() {
+        for key_first in [false, true] {
+            let mut event_loop: EventLoop<Seen> = EventLoop::try_new().expect("an event loop");
+            let (queue, mut key) = fake_backend(&event_loop);
+            three_devices(&queue);
+            let drained = queue.clone();
+            on_first_pass(
+                &event_loop.handle(),
+                move || drained.borrow_mut().drain(..).collect(),
+                |seen: &mut Seen, event| seen.push(event),
+                |_: &mut Seen| {},
+            );
+            let mut seen = Seen::new();
+            let mut press = || {
+                queue.borrow_mut().push_back("super pressed");
+                key.write_all(&[1]).expect("a key press");
+            };
+            if key_first {
+                press();
+                dispatch(&mut event_loop, &mut seen);
+            } else {
+                dispatch(&mut event_loop, &mut seen);
+                press();
+                dispatch(&mut event_loop, &mut seen);
+            }
+            dispatch(&mut event_loop, &mut seen);
+            assert_eq!(
+                seen,
+                [
+                    "keyboard added",
+                    "mouse added",
+                    "power button added",
+                    "super pressed"
+                ],
+                "key first: {key_first}"
+            );
+        }
+    }
 
     /// A parked report goes at idle only once every monitor has flipped: a
     /// flip of one can land while the pass just drawn on another is still
