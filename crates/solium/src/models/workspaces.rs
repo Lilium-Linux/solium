@@ -56,13 +56,24 @@ pub(crate) struct Declared {
 
 impl Declared {
     /// This declaration with every monitor and window the compositor does
-    /// not have taken out, and a group left with no monitor dropped.
-    /// `tests::a_declaration_naming_an_unknown_monitor_or_window_drops_them`.
+    /// not have taken out, a group left with no monitor dropped, and every
+    /// workspace whose row key an earlier one has already taken left out: a
+    /// model's rows have one key each, and `diff` cannot step between rows
+    /// that share one.
+    /// `tests::a_declaration_naming_an_unknown_monitor_or_window_drops_them`,
+    /// `tests::a_workspace_declared_twice_is_one_row`.
     pub(crate) fn validated(mut self, monitors: &[String], windows: &[u64]) -> Self {
         for group in &mut self.groups {
             group.monitors.retain(|monitor| monitors.contains(monitor));
         }
         self.groups.retain(|group| !group.monitors.is_empty());
+        let mut keys = HashSet::new();
+        for group in &mut self.groups {
+            let id = &group.id;
+            group
+                .workspaces
+                .retain(|workspace| keys.insert(row_key(id, &workspace.id)));
+        }
         self.windows.retain(|id, _| windows.contains(id));
         self
     }
@@ -84,10 +95,17 @@ impl Declared {
     }
 }
 
+/// A workspace's row key: `<group>/<id>`.
+fn row_key(group: &str, workspace: &str) -> String {
+    format!("{group}/{workspace}")
+}
+
 /// Log every monitor and window `declared` names that the compositor does not
-/// have, once per name for as long as `logged` lives: `workspaces.lua`
-/// declares on every layout, and one mistake is one line.
-/// `tests::an_unknown_monitor_or_window_is_logged_once_per_name`.
+/// have, and every row key it declares twice, once per name for as long as
+/// `logged` lives: `workspaces.lua` declares on every layout, and one mistake
+/// is one line.
+/// `tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+/// `tests::a_workspace_declared_twice_is_one_row`.
 pub(crate) fn log_unknown(
     declared: &Declared,
     monitors: &[String],
@@ -111,6 +129,18 @@ pub(crate) fn log_unknown(
                 window = id,
                 "sol.workspaces: no such window, so it was left out"
             );
+        }
+    }
+    let mut keys = HashSet::new();
+    for group in &declared.groups {
+        for workspace in &group.workspaces {
+            let key = row_key(&group.id, &workspace.id);
+            if !keys.insert(key.clone()) && logged.insert(format!("twice {key}")) {
+                tracing::warn!(
+                    workspace = key,
+                    "sol.workspaces: declared twice, so only the first was kept"
+                );
+            }
         }
     }
 }
@@ -154,7 +184,7 @@ pub(crate) fn joined(state: &Solium, windows: &[Row]) -> Vec<Row> {
                 })
                 .collect();
             let shown = group.showing.contains(&workspace.id);
-            let key = format!("{}/{}", group.id, workspace.id);
+            let key = row_key(&group.id, &workspace.id);
             let flag = |role: &str| {
                 mine.iter()
                     .any(|row| row.values.get(role) == Some(&Json::Bool(true)))
@@ -268,6 +298,66 @@ mod tests {
             ),
             (1, 1, 1, 1),
             "(monitor lines, naming it, window lines, naming it):\n{log}"
+        );
+    }
+
+    /// **A workspace declared twice is one row, the first**, whether a group
+    /// repeats an id or two groups' ids meet at the `/` of the key, and the
+    /// rows reach `diff`, which needs one row per key, and the log once.
+    #[test]
+    fn a_workspace_declared_twice_is_one_row() {
+        use smithay::reexports::wayland_server::Display;
+
+        let mut twice = group("twice-1", &["twice-1"], "1");
+        let mut again = twice.workspaces[0].clone();
+        again.name = "again".to_owned();
+        twice.workspaces.push(again);
+        let mut meets = group("twice-1", &["twice-1"], "1");
+        meets.id = "twice-1/1".to_owned();
+        meets.workspaces.truncate(1);
+        let mut through = group("twice-1", &["twice-1"], "1");
+        through.workspaces = vec![Workspace {
+            id: "1/1".to_owned(),
+            name: "through".to_owned(),
+            col: 1,
+            row: 1,
+            hidden: false,
+        }];
+        let declared = Declared {
+            groups: vec![twice, meets, through],
+            ..Declared::default()
+        };
+        let mut logged = HashSet::new();
+        let log = crate::script::logged_while(|| {
+            for _ in 0..2 {
+                super::log_unknown(&declared, &["twice-1".to_owned()], &[], &mut logged);
+            }
+        });
+        let display = Display::<crate::state::Solium>::new().expect("a test display");
+        let mut state = crate::state::Solium::new(display.handle());
+        state.workspaces = Some(declared.validated(&["twice-1".to_owned()], &[]));
+        let rows = super::joined(&state, &[]);
+        let named: Vec<(String, Option<crate::json::Json>)> = rows
+            .iter()
+            .map(|row| (row.key.clone(), row.values.get("name").cloned()))
+            .collect();
+        let text = |name: &str| Some(crate::json::Json::Text(name.to_owned()));
+        assert_eq!(
+            named,
+            vec![
+                ("twice-1/1".to_owned(), text("1")),
+                ("twice-1/2".to_owned(), text("2")),
+                ("twice-1/3".to_owned(), text("3")),
+                ("twice-1/1/1".to_owned(), text("1")),
+            ],
+            "(key, name) of each row"
+        );
+        let stepped = std::panic::catch_unwind(|| crate::models::diff::diff(&[], &rows).len());
+        assert_eq!(stepped.ok(), Some(4), "diff did not step to the rows");
+        assert_eq!(
+            log.matches("sol.workspaces: declared twice").count(),
+            2,
+            "one line for twice-1/1 and one for twice-1/1/1:\n{log}"
         );
     }
 }

@@ -517,9 +517,11 @@ answered by `workspaces.lua`
 (`script::tests::a_workspaces_go_from_a_scene_switches_the_monitor_it_names`,
 `script::tests::a_windows_send_from_a_scene_moves_the_window_it_names`).
 A declaration naming a monitor or a window the compositor does not have
-leaves it out, and the log names each once
+leaves it out, and so does one declaring a workspace twice, keeping the
+first; the log names each once
 (`models::workspaces::tests::a_declaration_naming_an_unknown_monitor_or_window_drops_them`,
-`models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`).
+`models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+`models::workspaces::tests::a_workspace_declared_twice_is_one_row`).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`

@@ -423,8 +423,10 @@ pub(crate) struct Solium {
     /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
     pub(crate) unknown_actions: std::collections::HashSet<String>,
     /// The monitors and windows `sol.workspaces` named that the compositor
-    /// does not have, each logged the first time only.
-    /// `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`.
+    /// does not have, and the workspaces it declared twice, each logged the
+    /// first time only.
+    /// `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+    /// `crate::models::workspaces::tests::a_workspace_declared_twice_is_one_row`.
     pub(crate) unknown_in_workspaces: std::collections::HashSet<String>,
     /// Whether the settled attempts are being told, so what a `done` asks
     /// for is told by that loop and not from inside it.
