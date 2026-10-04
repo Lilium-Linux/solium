@@ -516,6 +516,9 @@ model.id, monitor: Solium.monitor.name })`, and sends a window away with
 answered by `workspaces.lua`
 (`script::tests::a_workspaces_go_from_a_scene_switches_the_monitor_it_names`,
 `script::tests::a_windows_send_from_a_scene_moves_the_window_it_names`).
+`windows.send` takes that form only, for a window that is open; any other,
+`{ id, monitor }` among them, moves nothing and is logged
+(`script::tests::a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`).
 A declaration naming a monitor or a window the compositor does not have
 leaves it out, and so does one declaring a workspace twice, keeping the
 first; the log names each once

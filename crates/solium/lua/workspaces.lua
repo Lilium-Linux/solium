@@ -463,23 +463,49 @@ function workspaces.send_window(id, index)
     workspaces.announce()
 end
 
+-- Whether the compositor has window `id` now: `windows.send` for one it has
+-- not is logged, not kept. See
+-- `a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`.
+local function is_open(id)
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then
+            return true
+        end
+    end
+    return false
+end
+
 -- A scene asks for these by name (`Solium.send("workspaces.go", { id: "2",
 -- monitor: Solium.monitor.name })`), and only this file knows what they
 -- mean. See `a_workspaces_go_from_a_scene_switches_the_monitor_it_names` and
 -- `a_windows_send_from_a_scene_moves_the_window_it_names`.
-local actions = require("actions")
-actions.override("workspaces.go", function(data)
-    local index = type(data) == "table" and tonumber(data.id)
-    if index then
-        workspaces.go(index, data.monitor)
-    end
-end)
-actions.override("windows.send", function(data)
-    local index = type(data) == "table" and tonumber(data.workspace)
-    if index and data.id then
-        workspaces.send_window(data.id, index)
-    end
-end)
+--
+-- Answered only where `actions.lua` routes a scene's actions, which
+-- `init.lua` requires before this file: a configuration that took it out
+-- routes them its own way, and requiring it here would route each one a
+-- second time. See `workspaces_lua_does_not_route_a_scenes_actions_by_itself`.
+local actions = package.loaded["actions"]
+if actions then
+    actions.override("workspaces.go", function(data)
+        local index = type(data) == "table" and tonumber(data.id)
+        if index then
+            workspaces.go(index, data.monitor)
+        end
+    end)
+    -- `{ id, workspace }`, the id a number or its digits, for a window that
+    -- is open. Anything else, `{ id, monitor }` among it, is logged and does
+    -- nothing. See
+    -- `a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`.
+    actions.override("windows.send", function(data)
+        local id = type(data) == "table" and tonumber(data.id)
+        local index = id and tonumber(data.workspace)
+        if index and is_open(id) then
+            workspaces.send_window(id, index)
+        else
+            sol.log("windows.send: answered only as { id, workspace } for a window that is open")
+        end
+    end)
+end
 
 -- A new window belongs to the workspace its own monitor is showing.
 sol.on("open", function(id)

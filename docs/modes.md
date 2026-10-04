@@ -662,8 +662,11 @@ screen's.
 `workspaces.lua` declares the workspaces it keeps with `sol.workspaces{
 arrangement, groups, windows }` whenever they change, which is how a hosted
 shell's `Workspaces` and `WorkspaceList` know them, and it answers
-`workspaces.go` and `windows.send` from a scene through `actions.lua`. A
-configuration that keeps workspaces some other way, tags say, declares those.
+`workspaces.go` and `windows.send` from a scene through `actions.lua`, when
+the configuration keeps that file: without it, the configuration routes a
+scene's actions itself, and `workspaces.lua` does not route them a second
+time. A configuration that keeps workspaces some other way, tags say,
+declares those, each `<group>/<id>` once.
 See [shell-boundary.md](shell-boundary.md).
 
 `monitors.active()` is the monitor the pointer is on — where a new window goes,

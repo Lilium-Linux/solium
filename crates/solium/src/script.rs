@@ -7958,6 +7958,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **`windows.send` names its window by number or by digits, and logs
+    /// any other form**: `{ id: "8" }` sends window 8 as `{ id: 8 }` would,
+    /// while `{ id, monitor }`, a window that is not open and no id at all
+    /// each move nothing and say so.
+    #[test]
+    fn a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-windows-send-forms",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[7, 8]));
+        let send = |scripts: &mut Scripts, data: &str| {
+            let data = crate::json::Json::parse(data).expect("valid JSON");
+            scripts
+                .surface_action("shell", "windows.send", &data, one_screen(&[7, 8]))
+                .commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Workspaces(declared) => Some(declared.windows.clone()),
+                    _ => None,
+                })
+        };
+        let digits = send(&mut scripts, r#"{"id":"8","workspace":"2"}"#);
+        let mut others = Vec::new();
+        let log = logged_while(|| {
+            for data in [
+                r#"{"id":7,"monitor":"test-1"}"#,
+                r#"{"id":99,"workspace":"2"}"#,
+                r#"{"workspace":"2"}"#,
+            ] {
+                others.push(send(&mut scripts, data));
+            }
+        });
+        assert_eq!(
+            (
+                digits,
+                others,
+                log.matches("windows.send: answered only as").count()
+            ),
+            (
+                Some(std::collections::BTreeMap::from([
+                    (7, vec!["1".to_owned()]),
+                    (8, vec!["2".to_owned()])
+                ])),
+                vec![None, None, None],
+                3
+            ),
+            "(declared after an id in digits, declared after each other form, lines logged)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`workspaces.lua` does not route a scene's actions by itself**: a
+    /// configuration without `actions.lua` routes them its own way, and
+    /// keeping the workspaces does not route each one a second time.
+    #[test]
+    fn workspaces_lua_does_not_route_a_scenes_actions_by_itself() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-workspaces-no-actions",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+require("workspaces")
+sol.on("surface", function(_, action, data) sol.act(action, data) end)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "windows.close", &data, one_screen(&[4]));
+        let acts = outcome
+            .commands
+            .iter()
+            .filter(|command| matches!(command, Command::Act { .. }))
+            .count();
+        assert_eq!(acts, 1, "windows.close was routed more than once, or never");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **`actions.lua` routes the vocabulary and leaves the rest alone**: a
     /// `windows.*` action becomes a `sol.act`, one a file overrides is
     /// answered in Lua instead, and one outside the vocabulary, a tweak's
