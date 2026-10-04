@@ -733,7 +733,10 @@ function sol.unknown(key, meant) end
 ---reloaded. The stops are counted by function, so a function listening for
 ---two events counts the stops of both, and from its third on is taken out of
 ---each event it is stopped in. Bindings, and each `done` of `sol.act`, run
----under the same deadline. The compositor starts each one's clock itself, so
+---under the same deadline. A `done` is struck by function too, and one
+---stopped three times is not called again until the configuration is
+---reloaded; what a `done` asked for in the run that was stopped is dropped.
+---The compositor starts each one's clock itself, so
 ---nothing a handler calls puts it off. `pcall`, `xpcall` and `load` hand the
 ---stop on rather than catch it, and `xpcall`'s message handler is not called
 ---for it. A `__gc` finalizer, and the `__close` of a to-be-closed

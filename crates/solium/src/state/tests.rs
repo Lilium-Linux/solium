@@ -25265,6 +25265,39 @@ sol.on("surface", function(surface, action) if action == "go" then again() end e
                 );
             }
 
+            /// **A `done` that acts again and then never returns is stopped
+            /// once, not every round**: what it asked for before the stop is
+            /// dropped, so no round follows it and no attempt is left over
+            /// for the next dispatch to wait on.
+            #[test]
+            fn a_done_that_acts_again_and_never_returns_does_not_stall_every_dispatch() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"tries = 0
+local function again()
+    tries = tries + 1
+    sol.status(tostring(tries))
+    sol.act("windows.focus", { id = 4242 }, again)
+    while true do end
+end
+sol.on("surface", function(surface, action)
+    if action == "go" then sol.act("windows.focus", { id = 4242 }, again) end
+end)"#,
+                );
+                queue(&mut desk, shell, &[("go", "null")]);
+                desk.state.settle_scenes();
+                queue(&mut desk, shell, &[("other", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(
+                    (
+                        desk.state.status.as_str(),
+                        desk.state.settled_attempts.len()
+                    ),
+                    ("1", 0),
+                    "(how many times the done was told, the attempts left)"
+                );
+            }
+
             /// **A window still loading is not a window to focus, send
             /// fullscreen or maximise**: those three answer `unknown-window`
             /// for a pane with no client yet, though `sol.windows()` lists it,

@@ -525,6 +525,13 @@ told again in that dispatch, 16 rounds at most, the rest at the next one
 Each `done` has the whole 100 ms handler deadline of its own, and one stopped
 at it does not stop the next
 (`script::tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`).
+What a `done` asked for in the run that was stopped is dropped, the attempts it
+started with it, so a retry that acts again and then never returns is stopped
+once, not every round; and its stops are counted by function, as a listener's
+are, so one stopped three times is not called again until a reload
+(`script::tests::what_a_stopped_done_asked_for_is_dropped`,
+`script::tests::a_done_stopped_three_times_is_not_called_again`,
+`state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_and_never_returns_does_not_stall_every_dispatch`).
 A `workspaces.*` action is the configuration's to answer, since the
 compositor does not know what a workspace is: a file answers one with
 `actions.override(name, function(data, surface) ... end)`, and until one

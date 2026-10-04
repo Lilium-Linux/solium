@@ -1404,17 +1404,54 @@ impl Scripts {
     /// deadline.
     /// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
     /// `tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`.
+    ///
+    /// A `done` stopped at the deadline is struck as a listener is, by
+    /// function, and one stopped three times is not called again until the
+    /// next reload. What it asked for in the run that was stopped is
+    /// dropped, the attempts it started forgotten with it, so a retry that
+    /// acts again and then never returns is not told again, round after
+    /// round.
+    /// `tests::a_done_stopped_three_times_is_not_called_again`,
+    /// `tests::what_a_stopped_done_asked_for_is_dropped`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_and_never_returns_does_not_stall_every_dispatch`.
     pub(crate) fn attempts_settled(&mut self, settled: &[Settled], snapshot: Snapshot) -> Outcome {
         let settled = settled.to_vec();
         self.dispatch(snapshot, move |lua, sol| {
             let attempts: Table = sol.get("_attempts")?;
+            let strikes: Table = sol.get("_strikes")?;
             for each in &settled {
                 let done: Option<mlua::Function> = attempts.get(each.attempt)?;
                 attempts.set(each.attempt, Value::Nil)?;
                 let Some(done) = done else { continue };
+                if strikes.get::<Option<u32>>(&done)?.unwrap_or(0) >= STRIKES {
+                    continue;
+                }
+                let asked = lua
+                    .try_app_data_ref::<Pending>()
+                    .ok()
+                    .flatten()
+                    .map_or(0, |pending| pending.commands.len());
                 set_deadline(lua, Some(std::time::Instant::now()));
-                if let Err(err) = done.call::<()>((each.ok, each.reason)) {
-                    tracing::error!(%err, "an attempt's done failed");
+                match done.call::<()>((each.ok, each.reason)) {
+                    Ok(()) => {}
+                    Err(err) if err.to_string().contains(STOPPED) => {
+                        let dropped = lua
+                            .try_app_data_mut::<Pending>()
+                            .ok()
+                            .flatten()
+                            .map(|mut pending| {
+                                let at = asked.min(pending.commands.len());
+                                pending.commands.split_off(at)
+                            })
+                            .unwrap_or_default();
+                        for command in dropped {
+                            if let Command::Act { attempt, .. } = command {
+                                attempts.set(attempt, Value::Nil)?;
+                            }
+                        }
+                        let _ = strike(&strikes, &done, "done", &err)?;
+                    }
+                    Err(err) => tracing::error!(%err, "an attempt's done failed"),
                 }
             }
             Ok(true)
@@ -1914,6 +1951,53 @@ fn late(lua: &Lua) -> bool {
     deadline_started(lua).is_some_and(|started| started.elapsed() >= HANDLER_DEADLINE)
 }
 
+/// Count a stop at the deadline against `handler`, a listener of `event` or a
+/// `done` (`event` is then `"done"`), by function, and log it with the file
+/// and line the handler was written at. True from its third stop on, when it
+/// is taken out, which is logged too.
+/// `tests::a_listener_stopped_three_times_is_taken_out`,
+/// `tests::a_done_stopped_three_times_is_not_called_again`,
+/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
+fn strike(
+    strikes: &Table,
+    handler: &mlua::Function,
+    event: &str,
+    err: &mlua::Error,
+) -> mlua::Result<bool> {
+    let count = strikes.get::<Option<u32>>(handler)?.unwrap_or(0) + 1;
+    strikes.set(handler, count)?;
+    let info = handler.info();
+    // A file by its whole path, and a chunk of text by the short name Lua's
+    // own messages give it.
+    // `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+    // `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
+    let file = info
+        .source
+        .as_deref()
+        .and_then(|source| source.strip_prefix('@'))
+        .map(str::to_owned)
+        .or(info.short_src)
+        .unwrap_or_default();
+    let line = info.line_defined.unwrap_or_default();
+    tracing::error!(
+        %err,
+        event,
+        file = %file,
+        line,
+        count,
+        "a handler ran for longer than 100 ms and was stopped"
+    );
+    if count >= STRIKES {
+        tracing::error!(
+            event,
+            file = %file,
+            line,
+            "a handler stopped three times is taken out until the configuration is reloaded"
+        );
+    }
+    Ok(count >= STRIKES)
+}
+
 /// Run every listener registered for an event.
 ///
 /// One failing listener is logged and the rest still run: a broken script must
@@ -1954,36 +2038,7 @@ fn call_listeners(
         match listener.call::<()>(args.clone()) {
             Ok(()) => called = true,
             Err(err) if err.to_string().contains(STOPPED) => {
-                let count = strikes.get::<Option<u32>>(&listener)?.unwrap_or(0) + 1;
-                strikes.set(&listener, count)?;
-                let info = listener.info();
-                // A file by its whole path, and a chunk of text by the short
-                // name Lua's own messages give it.
-                // `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
-                // `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
-                let file = info
-                    .source
-                    .as_deref()
-                    .and_then(|source| source.strip_prefix('@'))
-                    .map(str::to_owned)
-                    .or(info.short_src)
-                    .unwrap_or_default();
-                let line = info.line_defined.unwrap_or_default();
-                tracing::error!(
-                    %err,
-                    event,
-                    file = %file,
-                    line,
-                    count,
-                    "a listener ran for longer than 100 ms and was stopped"
-                );
-                if count >= STRIKES {
-                    tracing::error!(
-                        event,
-                        file = %file,
-                        line,
-                        "a listener stopped three times is taken out until the configuration is reloaded"
-                    );
+                if strike(&strikes, &listener, event, &err)? {
                     out.push(listener);
                 }
             }
@@ -7822,6 +7877,74 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
             started.elapsed()
         );
         assert_eq!(status.as_deref(), Some("second true"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Every `sol.act` in `outcome`, settled as done.
+    fn all_done(outcome: &Outcome) -> Vec<Settled> {
+        outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Act { attempt, .. } => Some(Settled {
+                    attempt: *attempt,
+                    ok: true,
+                    reason: None,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A `done` stopped three times is not called again** until the next
+    /// reload: its stops are counted by function, as a listener's are.
+    #[test]
+    fn a_done_stopped_three_times_is_not_called_again() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-done-strikes",
+            r#"runs = 0
+               local function done() runs = runs + 1; while true do end end
+               sol.on("surface", function() sol.act("windows.focus", { id = 1 }, done) end)"#,
+        );
+        for _ in 0..4 {
+            let outcome =
+                scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+            let settled = all_done(&outcome);
+            assert_eq!(settled.len(), 1, "one act: {:?}", outcome.commands);
+            let _ = scripts.attempts_settled(&settled, one_screen(&[]));
+        }
+        assert_eq!(scripts.evaluate("return tostring(runs)"), "3");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **What a `done` asked for before it was stopped is dropped**: its
+    /// commands are not applied, and the attempt it started is forgotten,
+    /// so a retry that acts again and then never returns is not told again.
+    #[test]
+    fn what_a_stopped_done_asked_for_is_dropped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-done-drops",
+            r#"sol.on("surface", function()
+                   sol.act("windows.focus", { id = 1 }, function()
+                       sol.act("windows.focus", { id = 2 }, function() end)
+                       sol.close(2)
+                       while true do end
+                   end)
+               end)"#,
+        );
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        let told = scripts.attempts_settled(&all_done(&outcome), one_screen(&[]));
+        assert_eq!(
+            (
+                format!("{:?}", told.commands),
+                scripts.evaluate(
+                    "local n = 0 for _ in pairs(sol._attempts) do n = n + 1 end return tostring(n)"
+                )
+            ),
+            ("[]".to_owned(), "0".to_owned()),
+            "(the commands the stopped done left, the attempts still waiting)"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

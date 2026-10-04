@@ -244,7 +244,8 @@ listeners' time counts against the handler that called `sol.focus_direction` or
 finalizer, and the `__close` of a to-be-closed variable in the function a stop
 interrupts, run where no hook does, so the deadline cannot stop a loop in
 either: keep them short. A listener stopped three times stays off until
-`super+shift+r`
+`super+shift+r`, and so does a `done` of `sol.act`, whose stops are counted the
+same way
 (`script::tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 `script::tests::a_binding_that_never_returns_is_stopped`,
 `script::tests::a_handler_that_calls_sol_deadline_is_still_stopped`,
@@ -258,7 +259,8 @@ either: keep them short. A listener stopped three times stays off until
 `script::tests::a_close_run_after_a_stop_is_not_under_the_deadline`,
 `script::tests::a_gc_finalizer_is_not_under_the_deadline`,
 `script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
-`script::tests::a_listener_stopped_three_times_is_taken_out`).
+`script::tests::a_listener_stopped_three_times_is_taken_out`,
+`script::tests::a_done_stopped_three_times_is_not_called_again`).
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
 back: its scene calls `Solium.send(action, data)`, and you are told the
