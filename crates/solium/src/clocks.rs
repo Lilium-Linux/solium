@@ -45,6 +45,15 @@ impl Source {
             Self::None => "none",
         }
     }
+
+    /// As `SOURCE` holds it: `pacing::tests::a_pass_takes_its_clocks_from_the_sampler`.
+    const fn code(self) -> u32 {
+        match self {
+            Self::Nvml => 1,
+            Self::I915 => 2,
+            Self::None => 0,
+        }
+    }
 }
 
 const NVML: &CStr = c"libnvidia-ml.so.1";
@@ -102,6 +111,17 @@ pub(crate) fn latest() -> Option<Clocks> {
         mem_mhz: MEM_MHZ.load(Ordering::Relaxed),
         pstate: pstate(PSTATE.load(Ordering::Relaxed)),
     })
+}
+
+/// Leave `clocks` from `source` where the sampler leaves them, for
+/// `pacing::tests::a_pass_takes_its_clocks_from_the_sampler`, the one test
+/// that writes them.
+#[cfg(test)]
+pub(crate) fn sampled(source: Source, clocks: Clocks) {
+    GPU_MHZ.store(clocks.gpu_mhz, Ordering::Relaxed);
+    MEM_MHZ.store(clocks.mem_mhz, Ordering::Relaxed);
+    PSTATE.store(clocks.pstate.map_or(UNKNOWN, u32::from), Ordering::Relaxed);
+    SOURCE.store(source.code(), Ordering::Relaxed);
 }
 
 /// NVML's P-state, 0 to 15, or `None`. `tests::nvml_pstates_map_and_unknown_is_none`.
@@ -240,14 +260,7 @@ fn sample(probe: &Probe, tell: &std::sync::mpsc::Sender<Source>) {
         Probe::I915(_) => Source::I915,
         Probe::None => Source::None,
     };
-    SOURCE.store(
-        match source {
-            Source::Nvml => 1,
-            Source::I915 => 2,
-            Source::None => 0,
-        },
-        Ordering::Relaxed,
-    );
+    SOURCE.store(source.code(), Ordering::Relaxed);
     let _ = tell.send(source);
     loop {
         match probe {

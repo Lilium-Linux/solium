@@ -227,9 +227,10 @@ SOLIUM_PACING
     GPU that cannot time itself and `disjoint` when its clock jumped. Nested,
     only the captures and, with several monitors, each monitor are timed on
     the GPU, not the window's own draw. Each line also carries the GPU's
-    clocks when it was made: where they come from (`clocks`: `nvml`, `i915`
-    or `none`), `gpu_mhz`, `mem_mhz` (0 on i915) and NVIDIA's `pstate` (-1
-    where unknown), sampled four times a second by a thread of their own.
+    clocks as that pass ended: where they come from (`clocks`: `nvml`,
+    `i915` or `none`), `gpu_mhz`, `mem_mhz` (0 on i915) and NVIDIA's
+    `pstate` (-1 where unknown), sampled four times a second by a thread of
+    their own.
     Misses and late flips are counted whether or not this is set, and every
     session ends with one `pacing` line of totals.
 

@@ -171,6 +171,10 @@ struct Slow {
     rebound: u32,
     gpu: Option<crate::gputime::Gpu>,
     captures: u32,
+    /// The GPU's clocks as it ended, so a line made long after its pass
+    /// shows that pass's clocks:
+    /// `tests::a_line_made_long_after_its_pass_carries_that_passes_clocks`.
+    clocks: Option<crate::clocks::Clocks>,
 }
 
 /// Everything this module holds, for one thread.
@@ -262,6 +266,9 @@ struct Counters {
     /// with no extension answers.
     /// `tests::a_gpu_time_in_before_its_pass_ends_goes_out_with_it`.
     early: Cell<Option<crate::gputime::Gpu>>,
+    /// The GPU's clocks as this pass ended, from the sampler:
+    /// `tests::a_pass_takes_its_clocks_from_the_sampler`.
+    clocks: Cell<Option<crate::clocks::Clocks>>,
 }
 
 thread_local! {
@@ -294,6 +301,7 @@ thread_local! {
             parked_at: Cell::new(0),
             captures: Cell::new(0),
             early: Cell::new(None),
+            clocks: Cell::new(None),
         }
     };
 }
@@ -421,6 +429,7 @@ impl Counters {
                 rebound: self.rebound.get(),
                 gpu: early,
                 captures: self.captures.get(),
+                clocks: self.clocks.get(),
             });
         }
         if !missed && self.late.get() == 0 {
@@ -741,6 +750,7 @@ impl Frame {
                 counters.switch(now, Phase::Loose);
                 counters.live.set(false);
                 counters.mark.set(None);
+                counters.clocks.set(crate::clocks::latest());
             }
             if let Some(line) = counters.finish_at(started, now, self.on, panes, self.pass) {
                 // One report at a time: an older one still waiting goes as it is.
@@ -936,7 +946,7 @@ impl Line {
             rebound: worst.rebound,
             gpu: worst.gpu,
             captures: worst.captures,
-            clocks: crate::clocks::latest(),
+            clocks: worst.clocks,
             source: crate::clocks::source(),
         }
     }
@@ -1362,18 +1372,87 @@ mod tests {
         );
     }
 
-    /// **A line takes its clocks from the sampler when it is made**: with
-    /// nothing sampling (no test starts `clocks::start`), it says `none` and
-    /// carries no clocks.
+    /// **A pass takes its clocks from the sampler as it ends**, through
+    /// `frame` and `finish` as the backends call them: what the sampler last
+    /// left, and with nothing sampling, `none` and no clocks. The one test
+    /// that writes the sampler's atomics, and it clears them.
     #[test]
-    fn a_line_takes_its_clocks_from_the_sampler() {
+    fn a_pass_takes_its_clocks_from_the_sampler() {
+        use crate::clocks::{Clocks, Source};
+        super::COUNTERS.with(|counters| {
+            counters.asked.set(true);
+            counters.on.set(true);
+        });
+        // A pass that misses, whose line is parked for its GPU time.
+        let missed = || {
+            let pass = super::frame();
+            pass.deadline(Duration::from_nanos(1), String::new);
+            std::thread::sleep(ms(1));
+            pass.finish(1);
+            super::COUNTERS.with(|counters| {
+                counters.reported.set(None);
+                counters.flush()
+            })
+        };
+        let unsampled = missed().expect("a miss is reported");
+        assert_eq!((unsampled.source.name(), unsampled.clocks), ("none", None));
+        let clocks = Clocks {
+            gpu_mhz: 1080,
+            mem_mhz: 5001,
+            pstate: Some(3),
+        };
+        crate::clocks::sampled(Source::Nvml, clocks);
+        let sampled = missed();
+        crate::clocks::sampled(Source::None, Clocks::default());
+        let sampled = sampled.expect("a miss is reported");
+        assert_eq!(
+            (sampled.source.name(), sampled.clocks),
+            ("nvml", Some(clocks))
+        );
+    }
+
+    /// **A line carries the clocks of its pass, not of the moment it is
+    /// made.** A line reports the slowest pass of its span, which after an
+    /// idle spell can be minutes old, by when the GPU has dropped to its idle
+    /// clocks: those beside that pass's cost would read as a slow pass on a
+    /// slow GPU.
+    #[test]
+    fn a_line_made_long_after_its_pass_carries_that_passes_clocks() {
+        use crate::clocks::Clocks;
+        let busy = Clocks {
+            gpu_mhz: 1950,
+            mem_mhz: 10_501,
+            pstate: Some(0),
+        };
+        let idle = Clocks {
+            gpu_mhz: 210,
+            mem_mhz: 405,
+            pstate: Some(8),
+        };
         let counters = counters();
         counters.deadline.set(at_260());
         let start = Instant::now();
+        // The last frame of an animation: on time, and the span's slowest.
+        counters.clocks.set(Some(busy));
+        assert!(
+            counters
+                .finish_at(start, start + ms(3), true, 1, 500)
+                .is_none()
+        );
+        // Five minutes idle, then a keystroke's frame, whose flip is late,
+        // and the pass after it, which makes the line.
+        let later = start + Duration::from_secs(300);
+        counters.clocks.set(Some(idle));
+        assert!(
+            counters
+                .finish_at(later, later + ms(1), true, 1, 501)
+                .is_none()
+        );
+        counters.flipped(1);
         let line = counters
-            .finish_at(start, start + ms(17), true, 1, 1)
-            .expect("a first miss is due");
-        assert_eq!((line.source.name(), line.clocks), ("none", None));
+            .finish_at(later + ms(4), later + ms(5), true, 1, 502)
+            .expect("a late flip is reported");
+        assert_eq!((line.pass, line.clocks), (500, Some(busy)));
     }
 
     fn flip(seq: u32, at_us: u64) -> Flip {
@@ -1619,6 +1698,7 @@ mod tests {
             parked_at: std::cell::Cell::new(0),
             captures: std::cell::Cell::new(0),
             early: std::cell::Cell::new(None),
+            clocks: std::cell::Cell::new(None),
         }
     }
 }
