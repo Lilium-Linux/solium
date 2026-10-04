@@ -185,9 +185,10 @@ use crate::state::Solium;
 ///
 /// Not black: a black screen is indistinguishable from a monitor that has gone
 /// to sleep or a compositor that has died, and someone who cannot tell those
-/// apart will reach for the power button. A visible, deliberate colour says
-/// the machine is locked and working.
-pub(crate) const BLANK: [f32; 4] = [0.06, 0.05, 0.11, 1.0];
+/// apart will reach for the power button. A visible, deliberate dark grey says
+/// the machine is locked and working. A grey and not a hue, as every colour
+/// Solium ships is for now (the Theme's rule, `qml/Solium/Theme.qml`).
+pub(crate) const BLANK: [f32; 4] = [0.10, 0.10, 0.10, 1.0];
 
 /// Which lock a frame was built under.
 ///
