@@ -455,6 +455,7 @@ waiting for the application), `modal`,
 `state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
 `state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`,
 `state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`,
+`state::tests::real_client::reflow_on_close::keyboard_at_open::a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard`,
 `state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_at_once`).
 A window is listed from the moment it is launched, before its application
 draws, unless `loading.reserves_a_slot` is off; until then it has no `pid`,

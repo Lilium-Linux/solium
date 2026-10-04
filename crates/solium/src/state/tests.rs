@@ -19154,6 +19154,13 @@ end)
                     &working,
                     "a key typed after it went somewhere else",
                 );
+                // Turned down because nobody can see it, as a window on a
+                // hidden desk is, so it wants you just the same (Ruling 18).
+                assert!(
+                    desk.state.urgent.contains(&hidden.pane.get()),
+                    "a window nobody can see asked to be brought forward, gave the keyboard \
+                     back, and is not urgent"
+                );
             }
 
             /// **Any client can mint itself a token, and take the keyboard

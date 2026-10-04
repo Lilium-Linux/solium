@@ -1145,6 +1145,12 @@ impl XdgActivationHandler for Solium {
                          keyboard went back on screen"
                     );
                     self.hand_off_keyboard(&window);
+                    // Turned down as well, since nobody can see it, so it is
+                    // urgent as a window on a hidden desk is.
+                    // `state::tests::real_client::reflow_on_close::keyboard_at_open::a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard`.
+                    if let Some(pane) = pane {
+                        self.urgent.insert(pane.get());
+                    }
                 }
             }
             if let Some(pane) = pane {
