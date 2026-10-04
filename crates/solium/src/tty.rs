@@ -603,9 +603,14 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 }
                 // No vblank is coming while the session is away, so a frame
                 // left marked in-flight would block every render on return --
-                // on every screen, because every screen has its own.
+                // on every screen, because every screen has its own. Nor is
+                // its flip, and a frame left waiting for one would be judged
+                // late by the whole time away, by the rule that judges a frame
+                // queued from idle
+                // (`pacing::tests::a_frame_held_past_a_vblank_by_its_fence_is_late`).
                 for screen in &mut state.screens {
                     screen.pending = false;
+                    screen.queued = None;
                 }
             }
             SessionEvent::ActivateSession => {
