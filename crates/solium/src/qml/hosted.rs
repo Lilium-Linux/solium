@@ -135,7 +135,12 @@ impl Scene {
         // `tests::a_hosted_build_refused_before_the_host_leaves_the_next_scene_unhosted`.
         // SAFETY: null is the documented "none".
         unsafe { ffi::solium_qml_host_next_on(std::ptr::null()) };
-        built
+        // Named in the pacing report by its file and its monitor:
+        // `tests::a_hosted_scene_is_named_by_its_file_and_monitor_and_gives_it_back`.
+        built.map(|mut scene| {
+            scene.label(&format!("{}@{monitor}", crate::pacing::label_of(qml_path)));
+            scene
+        })
     }
 
     /// Write one property of the scene's root, by path.
@@ -1967,6 +1972,46 @@ pub(crate) mod tests {
                 "the failed build's monitor was inherited"
             );
             drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **The pacing report names a hosted scene by its file and its monitor**,
+    /// and every name a scene took is given back: the file's alone, which it
+    /// was built under, once the monitor's is taken; the monitor's when the
+    /// scene is freed; and a build's that failed, at once.
+    #[test]
+    fn a_hosted_scene_is_named_by_its_file_and_monitor_and_gives_it_back() {
+        on_the_qt_thread(|| {
+            let _measured = crate::pacing::measured();
+            let before = crate::pacing::interned();
+            let (directory, scene) = hosted(
+                "solium-hosted-pacing",
+                "import QtQuick\nItem {}\n",
+                "pacing-1",
+            );
+            assert_eq!(
+                crate::pacing::label(scene.pacing()).as_deref(),
+                Some("solium-hosted-pacing/Scene@pacing-1")
+            );
+            assert_eq!(
+                crate::pacing::interned(),
+                before + 1,
+                "the name it was built under was kept"
+            );
+            drop(scene);
+            assert_eq!(
+                crate::pacing::interned(),
+                before,
+                "a freed scene kept its name"
+            );
+            let missing = std::env::temp_dir().join("solium-hosted-missing/Nothing.qml");
+            assert!(Scene::for_monitor(&missing, 16, 16, None, "pacing-2").is_err());
+            assert_eq!(
+                crate::pacing::interned(),
+                before,
+                "a build that failed kept its name"
+            );
             let _ = std::fs::remove_dir_all(&directory);
         });
     }

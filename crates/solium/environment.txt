@@ -217,8 +217,11 @@ SOLIUM_PACING
     delays the next vblank instead of missing it and is rarely counted, while
     one started from idle is still judged against the monitor's fastest rate,
     so vrr's `late` does not compare with a fixed rate's. A line carries the
-    slowest pass since the last line: each phase on the CPU, how many
-    windows were captured (`captures`), and the GPU's time for the pass
+    slowest pass since the last line: each phase on the CPU, the three
+    scenes Qt spent the most of it on, costliest first (`qml_top`, as
+    `rounded/Frame=410`: each scene's folder and file, `@` the monitor it is
+    hosted on if it is, and its microseconds), how many windows were
+    captured (`captures`), and the GPU's time for the pass
     (`gpu`, `gpu_us`, and `gpu_prep_us` for the captures), which is read a
     few passes later, so a line waits up to eight passes for it and goes
     without it (`gpu="unread"`) after that, or sooner, still `gpu="unread"`,

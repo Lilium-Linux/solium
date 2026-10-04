@@ -151,6 +151,21 @@ impl Phase {
     }
 }
 
+/// A QML scene, as these counters name it: interned once when the scene is
+/// built, never per pass. `tests::qml_time_is_charged_to_the_scene_that_spent_it`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SceneId(u32);
+
+impl SceneId {
+    /// No scene, as every scene is with the knob off:
+    /// `tests::off_charges_nothing`.
+    pub(crate) const NONE: Self = Self(u32::MAX);
+}
+
+/// Scenes one pass charges separately; the rest share "other".
+/// `tests::more_scenes_than_slots_land_in_other`.
+const SCENE_SLOTS: usize = 8;
+
 /// One frame's measurements, kept for as long as it is the worst one seen.
 ///
 /// A snapshot rather than a borrow of the live state, because the live state is
@@ -176,6 +191,9 @@ struct Slow {
     /// shows that pass's clocks:
     /// `tests::a_line_made_long_after_its_pass_carries_that_passes_clocks`.
     clocks: Option<crate::clocks::Clocks>,
+    /// The pass's three costliest scenes, as `Counters::top` says them.
+    /// `tests::a_line_names_its_slowest_passes_costliest_scenes`.
+    qml_top: String,
 }
 
 /// Everything this module holds, for one thread.
@@ -271,6 +289,19 @@ struct Counters {
     /// The GPU's clocks as this pass ended, from the sampler:
     /// `tests::a_pass_takes_its_clocks_from_the_sampler`.
     clocks: Cell<Option<crate::clocks::Clocks>>,
+    /// Each scene's label, by id; `None` for an id given back.
+    /// `tests::a_forgotten_scene_gives_its_id_back`.
+    labels: RefCell<Vec<Option<String>>>,
+    /// Ids given back, to be given out again.
+    /// `tests::a_forgotten_scene_gives_its_id_back`.
+    free_ids: RefCell<Vec<u32>>,
+    /// This pass's Qt time per scene: `(id + 1, ns)`, 0 for an empty slot.
+    /// `tests::qml_time_is_charged_to_the_scene_that_spent_it`,
+    /// `tests::each_pass_charges_its_scenes_afresh`.
+    scene_spent: [Cell<(u32, u64)>; SCENE_SLOTS],
+    /// This pass's Qt time for scenes past the slots.
+    /// `tests::more_scenes_than_slots_land_in_other`.
+    scene_other: Cell<u64>,
 }
 
 thread_local! {
@@ -304,6 +335,10 @@ thread_local! {
             captures: Cell::new(0),
             early: Cell::new(None),
             clocks: Cell::new(None),
+            labels: RefCell::new(Vec::new()),
+            free_ids: RefCell::new(Vec::new()),
+            scene_spent: [const { Cell::new((0, 0)) }; SCENE_SLOTS],
+            scene_other: Cell::new(0),
         }
     };
 }
@@ -328,17 +363,30 @@ pub(crate) struct Frame {
 /// A phase, running for as long as this is held.
 ///
 /// Restores the phase that was running before it on the way out, so the phases
-/// stay exclusive however they nest.
+/// stay exclusive however they nest. One made by [`qml`] also charges the time
+/// it was held to its scene:
+/// `tests::a_scenes_span_charges_it_and_the_phase_alike`.
 #[derive(Debug)]
 #[must_use = "the phase lasts only as long as this is held"]
-pub(crate) struct Span(Option<Phase>);
+pub(crate) struct Span {
+    /// The phase to go back to; `None` when nothing is being measured.
+    previous: Option<Phase>,
+    /// The scene the time is charged to, and when it began.
+    scene: Option<(SceneId, Instant)>,
+}
 
 impl Drop for Span {
     fn drop(&mut self) {
-        if let Some(previous) = self.0 {
+        if let Some(previous) = self.previous {
             COUNTERS.with(|counters| {
                 if counters.live.get() {
-                    counters.switch(Instant::now(), previous);
+                    let now = Instant::now();
+                    counters.switch(now, previous);
+                    if let Some((id, since)) = self.scene {
+                        let nanos = u64::try_from(now.saturating_duration_since(since).as_nanos())
+                            .unwrap_or(u64::MAX);
+                        counters.charge(id, nanos);
+                    }
                 }
             });
         }
@@ -432,6 +480,7 @@ impl Counters {
                 gpu: early,
                 captures: self.captures.get(),
                 clocks: self.clocks.get(),
+                qml_top: self.top(),
             });
         }
         if !missed && self.late.get() == 0 {
@@ -578,6 +627,105 @@ impl Counters {
             self.late.set(self.late.get().saturating_add(late));
         }
     }
+
+    /// Name a scene, once, when it is built: an id given back before, or a
+    /// new one. `tests::a_forgotten_scene_gives_its_id_back`,
+    /// `tests::off_charges_nothing`.
+    fn intern(&self, label: &str) -> SceneId {
+        if !self.on.get() {
+            return SceneId::NONE;
+        }
+        let (Ok(mut labels), Ok(mut free)) =
+            (self.labels.try_borrow_mut(), self.free_ids.try_borrow_mut())
+        else {
+            return SceneId::NONE;
+        };
+        let id = match free.pop() {
+            Some(id) => id,
+            None => {
+                labels.push(None);
+                u32::try_from(labels.len().saturating_sub(1)).unwrap_or(u32::MAX)
+            }
+        };
+        if let Some(slot) = labels.get_mut(usize::try_from(id).unwrap_or(usize::MAX)) {
+            *slot = Some(label.to_owned());
+        }
+        SceneId(id)
+    }
+
+    /// A scene was freed: its id is given back.
+    /// `tests::a_forgotten_scene_gives_its_id_back`.
+    fn forget(&self, id: SceneId) {
+        if id == SceneId::NONE {
+            return;
+        }
+        if let (Ok(mut labels), Ok(mut free)) =
+            (self.labels.try_borrow_mut(), self.free_ids.try_borrow_mut())
+            && let Some(slot) = labels.get_mut(usize::try_from(id.0).unwrap_or(usize::MAX))
+            && slot.take().is_some()
+        {
+            free.push(id.0);
+        }
+    }
+
+    /// Charge `nanos` of Qt's time to `id`, in this pass. No allocation.
+    /// `tests::qml_time_is_charged_to_the_scene_that_spent_it`,
+    /// `tests::more_scenes_than_slots_land_in_other`.
+    fn charge(&self, id: SceneId, nanos: u64) {
+        if id == SceneId::NONE {
+            return;
+        }
+        let key = id.0.saturating_add(1);
+        let slot = self
+            .scene_spent
+            .iter()
+            .find(|slot| slot.get().0 == key)
+            .or_else(|| self.scene_spent.iter().find(|slot| slot.get().0 == 0));
+        match slot {
+            Some(slot) => slot.set((key, slot.get().1.saturating_add(nanos))),
+            None => self
+                .scene_other
+                .set(self.scene_other.get().saturating_add(nanos)),
+        }
+    }
+
+    /// This pass's time for one scene. For the tests.
+    #[cfg(test)]
+    fn spent_by(&self, id: SceneId) -> u64 {
+        let key = id.0.saturating_add(1);
+        self.scene_spent
+            .iter()
+            .find(|slot| slot.get().0 == key)
+            .map_or(0, |slot| slot.get().1)
+    }
+
+    /// The three costliest scenes of this pass, as `label=us`, costliest
+    /// first. Formatted only for a pass that is its span's slowest so far,
+    /// into its snapshot: `tests::the_report_names_the_three_costliest_scenes`,
+    /// `tests::a_line_names_its_slowest_passes_costliest_scenes`.
+    fn top(&self) -> String {
+        let mut spent: Vec<(u32, u64)> = self
+            .scene_spent
+            .iter()
+            .map(Cell::get)
+            .filter(|(key, _)| *key != 0)
+            .collect();
+        spent.sort_by_key(|&(_, nanos)| std::cmp::Reverse(nanos));
+        let Ok(labels) = self.labels.try_borrow() else {
+            return String::new();
+        };
+        spent
+            .iter()
+            .take(3)
+            .filter_map(|(key, nanos)| {
+                let label = labels
+                    .get(usize::try_from(key.checked_sub(1)?).ok()?)?
+                    .as_ref()?;
+                Some(format!("{label}={}", nanos / 1_000))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 /// Passes a due report waits for its GPU time: read at least three passes
@@ -615,6 +763,10 @@ pub(crate) fn frame() -> Frame {
         counters.rebound.set(0);
         counters.drew.set(0);
         counters.captures.set(0);
+        for slot in &counters.scene_spent {
+            slot.set((0, 0));
+        }
+        counters.scene_other.set(0);
         counters.mark.set(Some(now));
         counters.phase.set(Phase::Loose);
         if counters.since.get().is_none() {
@@ -639,9 +791,61 @@ pub(crate) fn frame() -> Frame {
 pub(crate) fn span(phase: Phase) -> Span {
     COUNTERS.with(|counters| {
         if !counters.live.get() {
-            return Span(None);
+            return Span {
+                previous: None,
+                scene: None,
+            };
         }
-        Span(Some(counters.switch(Instant::now(), phase)))
+        Span {
+            previous: Some(counters.switch(Instant::now(), phase)),
+            scene: None,
+        }
+    })
+}
+
+/// A scene's label: its file and the folder it is in, as `rounded/Ring`.
+/// `tests::a_scene_is_labelled_by_its_folder_and_file`.
+pub(crate) fn label_of(path: &std::path::Path) -> String {
+    let file = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match path.parent().and_then(std::path::Path::file_name) {
+        Some(folder) => format!("{}/{file}", folder.to_string_lossy()),
+        None => file,
+    }
+}
+
+/// Intern a scene's label, once, when it is built.
+/// `qml::hosting_tests::a_scenes_build_and_render_are_charged_to_it`.
+pub(crate) fn scene_id(label: &str) -> SceneId {
+    COUNTERS.with(|counters| {
+        counters.decide();
+        counters.intern(label)
+    })
+}
+
+/// A scene was freed: its id is given back.
+/// `qml::hosted::tests::a_hosted_scene_is_named_by_its_file_and_monitor_and_gives_it_back`.
+pub(crate) fn forget_scene(id: SceneId) {
+    COUNTERS.with(|counters| counters.forget(id));
+}
+
+/// Qt's phase, charged to `id` as well, for as long as the guard is held.
+/// `tests::a_scenes_span_charges_it_and_the_phase_alike`.
+pub(crate) fn qml(id: SceneId) -> Span {
+    COUNTERS.with(|counters| {
+        if !counters.live.get() {
+            return Span {
+                previous: None,
+                scene: None,
+            };
+        }
+        let now = Instant::now();
+        Span {
+            previous: Some(counters.switch(now, Phase::Qml)),
+            scene: Some((id, now)),
+        }
     })
 }
 
@@ -968,6 +1172,9 @@ pub(crate) struct Line {
     pub(crate) captures: u32,
     pub(crate) clocks: Option<crate::clocks::Clocks>,
     pub(crate) source: crate::clocks::Source,
+    /// The pass's three costliest scenes, as `bar@DP-1=2140,rounded/Frame=410`:
+    /// `tests::a_line_names_its_slowest_passes_costliest_scenes`.
+    pub(crate) qml_top: String,
 }
 
 impl Line {
@@ -996,6 +1203,7 @@ impl Line {
             captures: worst.captures,
             clocks: worst.clocks,
             source: crate::clocks::source(),
+            qml_top: worst.qml_top.clone(),
         }
     }
 
@@ -1031,6 +1239,67 @@ impl Line {
     }
 }
 
+/// Pacing on, on this thread, for a test elsewhere, until this is dropped:
+/// then as it was, with no pass left measured.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Measured {
+    asked: bool,
+    on: bool,
+}
+
+#[cfg(test)]
+impl Drop for Measured {
+    fn drop(&mut self) {
+        COUNTERS.with(|counters| {
+            counters.asked.set(self.asked);
+            counters.on.set(self.on);
+            counters.live.set(false);
+            counters.mark.set(None);
+        });
+    }
+}
+
+/// Turn pacing on for this thread, for as long as the guard is held.
+#[cfg(test)]
+pub(crate) fn measured() -> Measured {
+    COUNTERS.with(|counters| {
+        let was = Measured {
+            asked: counters.asked.get(),
+            on: counters.on.get(),
+        };
+        counters.asked.set(true);
+        counters.on.set(true);
+        was
+    })
+}
+
+/// How many scenes hold a label on this thread.
+#[cfg(test)]
+pub(crate) fn interned() -> usize {
+    COUNTERS.with(|counters| {
+        counters
+            .labels
+            .try_borrow()
+            .map_or(0, |labels| labels.iter().flatten().count())
+    })
+}
+
+/// A scene's label, while it holds one.
+#[cfg(test)]
+pub(crate) fn label(id: SceneId) -> Option<String> {
+    COUNTERS.with(|counters| {
+        let labels = counters.labels.try_borrow().ok()?;
+        labels.get(usize::try_from(id.0).ok()?)?.clone()
+    })
+}
+
+/// A scene's Qt time in the pass being measured.
+#[cfg(test)]
+pub(crate) fn spent(id: SceneId) -> u64 {
+    COUNTERS.with(|counters| counters.spent_by(id))
+}
+
 /// Say a report. The one `tracing` call this module makes for one.
 fn emit(line: &Line) {
     let phase = |which: Phase| line.spent_us[which.slot()];
@@ -1047,6 +1316,7 @@ fn emit(line: &Line) {
         prep_us = phase(Phase::Prep),
         census_us = phase(Phase::Census),
         qml_us = phase(Phase::Qml),
+        qml_top = line.qml_top.as_str(),
         elements_us = phase(Phase::Elements),
         gles_us = phase(Phase::Gles),
         commit_us = phase(Phase::Commit),
@@ -1077,7 +1347,7 @@ fn emit(line: &Line) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Counters, Flip, Frame, Line, Phase, Queued, Totals, vblanks_missed, vertical_blank,
+        Counters, Flip, Frame, Line, Phase, Queued, SceneId, Totals, vblanks_missed, vertical_blank,
     };
     use crate::gputime::{Gpu, GpuSample};
     use std::time::{Duration, Instant};
@@ -1437,6 +1707,7 @@ mod tests {
                 pstate: Some(3),
             }),
             source: crate::clocks::Source::Nvml,
+            qml_top: String::new(),
         };
         assert_eq!(line(Some(timed())).gpu_status(), "ok");
         assert_eq!(line(Some(Gpu::Unsupported)).gpu_status(), "unsupported");
@@ -1814,6 +2085,153 @@ mod tests {
         assert_eq!(slots.len(), Phase::COUNT, "two phases share a counter");
     }
 
+    /// **Qt's time in a pass is charged to the scene that spent it.**
+    #[test]
+    fn qml_time_is_charged_to_the_scene_that_spent_it() {
+        let counters = counters();
+        let bar = counters.intern("bar@DP-1");
+        let frame = counters.intern("rounded/Frame");
+        counters.charge(bar, 3_000);
+        counters.charge(frame, 5_000);
+        counters.charge(bar, 1_000);
+        assert_eq!(counters.spent_by(bar), 4_000);
+        assert_eq!(counters.spent_by(frame), 5_000);
+    }
+
+    /// A ninth scene in one pass is summed into "other", rather than allocated
+    /// a slot on the hot path.
+    #[test]
+    fn more_scenes_than_slots_land_in_other() {
+        let counters = counters();
+        let scenes: Vec<SceneId> = (0..=super::SCENE_SLOTS)
+            .map(|n| counters.intern(&format!("s{n}")))
+            .collect();
+        for scene in &scenes {
+            counters.charge(*scene, 10);
+        }
+        assert_eq!(counters.scene_other.get(), 10);
+    }
+
+    /// The report names the three costliest scenes, costliest first.
+    #[test]
+    fn the_report_names_the_three_costliest_scenes() {
+        let counters = counters();
+        for (label, nanos) in [
+            ("cursor", 35_000),
+            ("bar@DP-1", 2_140_000),
+            ("wallpaper", 9_000),
+            ("rounded/Frame", 410_000),
+        ] {
+            let id = counters.intern(label);
+            counters.charge(id, nanos);
+        }
+        assert_eq!(counters.top(), "bar@DP-1=2140,rounded/Frame=410,cursor=35");
+    }
+
+    /// A scene that is freed gives its id back, so a session that opens ten
+    /// thousand windows keeps ten thousand labels' worth of nothing.
+    #[test]
+    fn a_forgotten_scene_gives_its_id_back() {
+        let counters = counters();
+        let first = counters.intern("rounded/Frame");
+        counters.forget(first);
+        let second = counters.intern("top/Frame");
+        assert_eq!(first, second);
+        counters.charge(second, 1_000);
+        assert_eq!(counters.top(), "top/Frame=1");
+    }
+
+    /// With the knob off nothing is interned, so nothing is allocated, and a
+    /// charge to no scene is no charge.
+    #[test]
+    fn off_charges_nothing() {
+        let counters = counters();
+        counters.on.set(false);
+        let id = counters.intern("bar@DP-1");
+        assert_eq!(id, SceneId::NONE);
+        counters.charge(id, 1_000);
+        assert_eq!(counters.top(), "");
+    }
+
+    /// A scene's label is its file and the folder it is in.
+    #[test]
+    fn a_scene_is_labelled_by_its_folder_and_file() {
+        let label = |path: &str| super::label_of(std::path::Path::new(path));
+        assert_eq!(
+            label("/usr/share/solium/qml/panes/rounded/Ring.qml"),
+            "rounded/Ring"
+        );
+        assert_eq!(label("wallpaper.qml"), "wallpaper");
+    }
+
+    /// **A line names its slowest pass's costliest scenes**: the snapshot
+    /// keeps them, and the line carries them.
+    #[test]
+    fn a_line_names_its_slowest_passes_costliest_scenes() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let bar = counters.intern("bar@DP-1");
+        let frame = counters.intern("rounded/Frame");
+        counters.charge(frame, 410_000);
+        counters.charge(bar, 2_140_000);
+        let start = Instant::now();
+        let line = counters
+            .finish_at(start, start + ms(5), true, 1, 1)
+            .expect("a first miss is due");
+        assert_eq!(line.qml_top, "bar@DP-1=2140,rounded/Frame=410");
+    }
+
+    /// **A scene's span charges it and Qt's phase alike**, through `frame`,
+    /// `span` and `qml` as the render path calls them: a scene built inside
+    /// the compositor's `elements` is charged its whole time, all of which is
+    /// Qt's and none of which is the compositor's.
+    #[test]
+    fn a_scenes_span_charges_it_and_the_phase_alike() {
+        super::COUNTERS.with(|counters| {
+            counters.asked.set(true);
+            counters.on.set(true);
+        });
+        let pass = super::frame();
+        let id = super::scene_id("rounded/Frame");
+        {
+            let _elements = super::span(Phase::Elements);
+            let _qml = super::qml(id);
+            std::thread::sleep(ms(2));
+        }
+        let (scene, qml, elements) = super::COUNTERS.with(|counters| {
+            (
+                counters.spent_by(id),
+                counters.spent[Phase::Qml.slot()].get(),
+                counters.spent[Phase::Elements.slot()].get(),
+            )
+        });
+        pass.finish(0);
+        assert!(scene >= 2_000_000, "the scene was charged {scene} ns");
+        assert_eq!(scene, qml, "the scene and Qt's phase disagree");
+        assert!(
+            elements < scene,
+            "the scene's time was charged to the compositor: {elements} ns"
+        );
+    }
+
+    /// **Each pass charges its scenes afresh**: what a scene spent in one
+    /// pass is not carried into the next.
+    #[test]
+    fn each_pass_charges_its_scenes_afresh() {
+        super::COUNTERS.with(|counters| {
+            counters.asked.set(true);
+            counters.on.set(true);
+        });
+        let id = super::scene_id("bar@DP-1");
+        let first = super::frame();
+        super::COUNTERS.with(|counters| counters.charge(id, 1_000));
+        first.finish(0);
+        let second = super::frame();
+        let carried = super::COUNTERS.with(|counters| counters.spent_by(id));
+        second.finish(0);
+        assert_eq!(carried, 0, "the last pass's time was carried");
+    }
+
     fn ms(count: u64) -> Duration {
         Duration::from_millis(count)
     }
@@ -1854,6 +2272,10 @@ mod tests {
             captures: std::cell::Cell::new(0),
             early: std::cell::Cell::new(None),
             clocks: std::cell::Cell::new(None),
+            labels: std::cell::RefCell::new(Vec::new()),
+            free_ids: std::cell::RefCell::new(Vec::new()),
+            scene_spent: [const { std::cell::Cell::new((0, 0)) }; super::SCENE_SLOTS],
+            scene_other: std::cell::Cell::new(0),
         }
     }
 }
