@@ -38,8 +38,10 @@ conduct](CODE_OF_CONDUCT.md).
 
 The README's [Building](README.md#building) section lists the packages for
 each distribution. In short: Rust 1.88 or newer (edition 2024), a C++17
-compiler, Qt 6.5 or newer (Quick, Qml and Network), and the Wayland,
+compiler, Qt 6.5 or newer (Quick and Qml) with its `moc`, and the Wayland,
 libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm development files.
+`QT_MOC` names moc when the build cannot find it;
+[dev/README.md](dev/README.md#building) says where it looks.
 
 ```sh
 cargo build
@@ -198,8 +200,10 @@ And from Solium's first weeks:
   surfaces had never been sent an initial configure: every bar and dock had
   been invisible for as long as the compositor had claimed to support them,
   and no shipped check used the protocol. A protocol added gets a check from a
-  client's side, in `wl-probe` or as a real client in the test suite
-  (`mod real_client` in `crates/solium/src/state/tests.rs`).
+  client's side, in `wl-probe` or as a real client in the test suite:
+  `mod real_client` in `crates/solium/src/state/tests.rs`, and
+  `crates/solium/src/text_input/tests.rs`, which plays `zwp_text_input_v3`
+  against a real client on a socketpair.
 
 ### Naming
 
@@ -224,6 +228,15 @@ And from Solium's first weeks:
 - A check that can only be run by hand is written down in
   [dev/README.md](dev/README.md), with what it asserts and why no automated
   test reaches it.
+- **A feature written as configuration is tested by a scenario**, not by Rust
+  that names it. Lua policy and QML drawing from what the compositor publishes
+  have no Rust of their own, and their tests need none either. A scenario is a
+  Lua file in `crates/solium/tests/scenarios/` that returns
+  `{ qt, user, init, steps }`, and `cargo test` plays it
+  (`scenario::tests::every_scenario_with_a_client_passes`,
+  `every_scenario_on_the_qt_thread_passes`). The steps it can take, and what
+  `expect` sees, are listed at the top of `crates/solium/src/scenario.rs`; the
+  `keyboard-*.lua` scenarios are the examples.
 
 ### History worth knowing
 

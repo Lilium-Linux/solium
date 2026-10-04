@@ -81,6 +81,22 @@ application keeping one instance, answering the launch with a window it already
 had. The launch's pane dissolves instead, the window stays where it lives, and
 the scripts hear `activate` (#177, and `docs/modes.md`).
 
+What a program Solium starts inherits is decided in `launch.rs` (#175). Its
+environment is the one Solium was started with: noted at the top of `main`
+(`launch::remember`), before Qt, EGL or any library they load writes into it,
+and taken whole rather than scrubbed name by name. `Solium::spawn`
+(`state/open.rs`) then sets only the session's own variables:
+`WAYLAND_DISPLAY`; `DISPLAY`, naming Solium's Xwayland or removed when there
+is none; `XDG_CURRENT_DESKTOP`, which is `Lilium` unless the session named
+one; `XDG_SESSION_TYPE` when it is unset; and the activation token, as
+`XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`. In the child, every
+descriptor above stdio is marked close-on-exec by one `close_range`
+(`close_on_exec_above_stdio`), and the descriptors Xwayland and Qt's eglfs
+would otherwise pass on are marked the same way (`xwayland.rs`, `host.cpp`).
+The compositor's own Qt takes no input method from the session
+(`qml::keep_input_methods_out` removes `QT_IM_MODULE` and `QT_IM_MODULES`),
+while the programs it starts keep the user's.
+
 `Space` has not gone away and is not going to. It stays underneath as the
 authority on stacking and damage for a mapped client, because that bookkeeping
 is worth keeping and not worth rewriting. `Panes` is the view *over* it, and
@@ -244,6 +260,18 @@ installed on purpose. The renderer draws in that order and every hit test above
 or below the windows asks in it, so what is on top is what is clicked (#141,
 #142). `fullscreen.covers = "none"` keeps the bars over a fullscreen window.
 
+A script's scene is on top only where its own items take the point. When a hit
+test reaches a `sol.surface` band, the compositor asks that scene's live item
+tree, which answers `Hit::Nothing`, `Hit::Hover` or `Hit::Press`
+(`qml/hosted.rs`). `topmost_above` passes what the event asks for:
+`Asking::Hover` for motion, `Asking::Press` for a button or the wheel. So a
+strip that takes only hover leaves presses to the window under it (#173).
+While a scene holds a press it took, or holds a `Grab`, no client has the
+pointer (`surface_at` in `state/hit_test.rs`), and a press anywhere is the
+grab's to take or to be dismissed by (`claim_under`). A touch never lands on a
+scene (`touch_under`; see #181 under [Form factors](#form-factors)).
+`docs/shell-boundary.md`, "What a hosted shell is given", has the behaviour.
+
 Among the windows, one predicate says whether a window is under a point:
 `owns`, in `state/hit_test.rs` — on a screen that draws it, and inside what it
 paints there. `Solium::window_under` asks it from Rust and `sol.window_at` from
@@ -272,11 +300,45 @@ sync ([#59](https://github.com/Lilium-Linux/solium/issues/59)) is a protocol
 Smithay offers on GLES too, and Smithay's multi-GPU renderer
 ([#63](https://github.com/Lilium-Linux/solium/issues/63)) is built on GLES.
 
+### Hosted scenes
+
+`scripted.rs` keeps what scripts declare with `sol.surface`, and builds one
+live instance of a surface on each monitor it is on, as the monitor is
+placed; an instance goes with its monitor. A surface declared again writes its
+changed properties into the live scene instead of rebuilding it (#161).
+`surface.rs` is one hosted scene: a QML file, the area it was placed in, and
+its pointer events. `qml/hosted.rs` is the compositor's half of what a scene
+and the compositor say to each other: properties written in place, the
+monitor the instance is on, the models' rows, pointer events, what the
+scene's items claim at a point, its reserve, its grabs, and its keyboard wants
+and the keys it is told. `qml/keys.rs` puts the compositor's buttons,
+modifiers and keys in Qt's terms.
+
+`state/hosted.rs` reads what the scenes report, once a pass (`settle_scenes`),
+and applies it. A reserve goes into the work area (`reserved_on`, which
+`work_area_on` in `state/monitors.rs` adds to the layer-shell zones) and
+re-flows the layout once (#162). A `Grab` is held or dismissed
+(`settle_grabs`, `dismiss_hosted_grab`). The keyboard is held for a scene, its
+keys are delivered and repeated at the keymap's rate, and it is given back
+(`settle_keyboard`, `deliver_scene_key`, `repeat_scene_key`,
+`end_keyboard_hold`) (#163). `docs/shell-boundary.md`, "What a hosted shell is
+given", has the behaviour.
+
 ### Scripting
 
 Lua, and **modes really are scripts** — `lua/overview.lua` is overview, and the
 compositor contains no code that knows what overview is. The proof is that the
 Rust that used to implement it was deleted, not wrapped.
+
+The keyboard pill is the same claim for something drawn.
+`lua/keyboard_indicator.lua` is the policy and reads `keyboard.indicator`,
+which no Rust names. It draws with `qml/Solium/KeyboardPill.qml`, through each
+shipped pane style's `KeyboardPillLayer.qml` or on an overlay `sol.surface`
+(`qml/indicator/keyboard.qml`), and taking `require("keyboard_indicator")` out
+of `init.lua` takes the pill away. Its tests are scenarios: Lua files in
+`crates/solium/tests/scenarios/`, played by `scenario.rs` under `cargo test`.
+So a feature written as configuration is tested without Rust that knows about
+it.
 
 The boundary is one module, `script.rs`, and it is shaped so a mode never
 learns a window is a Wayland surface:
@@ -296,6 +358,29 @@ learns a window is a Wayland surface:
   shell has no way to read it yet.
 
 **No compositor config key per mode.** That is how a mode set becomes closed.
+
+### What the compositor publishes
+
+The models scenes read are built from the compositor's own state (`models/`),
+so nothing is mirrored. Each model is diffed by key (`models/diff.rs`) and
+sent to Qt as one batch, every row's values written before any row is
+announced (`qml/rows.cpp`), once a frame, in `render.rs` just before
+`qml::tick`. Two exist today: the monitors, read as `Solium.monitor`
+(`models/monitors.rs`), and the keyboard, read as the `Keyboard` singleton
+(`models/keyboard.rs`).
+
+`text_input.rs` answers `zwp_text_input_v3` itself, not through Smithay's
+module, which discards every request while no input method runs. It keeps only
+which field is live and its caret, and publishes that as `sol.text_input()` and
+`sol.on("text_input")` in the global space, and as `caret` in a pane's own
+space; it draws nothing. `keyboard_change.rs` tells the configuration
+(`sol.on("keyboard")`) and the scenes (`Keyboard.changed(what)`) when the
+layout, Caps Lock or Num Lock really changes. It never fires for ordinary
+typing, and does not tell the configuration while the session is locked. Every
+decoration layer is also handed `values` from `sol.pane_values`, a general
+channel from Lua that the compositor does not interpret, and a layer whose root
+says `dormant` is not drawn, and in software lets go of its image
+(`LayerScene::sleeps` in `decoration.rs`).
 
 ## Design rules
 
@@ -356,6 +441,19 @@ detail — QML animating off Qt's own timer would drift against every window
 transform beside it, which is the same mistake as having two animation clocks.
 A QML `Timer` rides that clock too whenever anything else animates, so between
 frames the event loop that serves Qt advances it, rather than going around it.
+That is `qml/wake.rs`: Qt's own poll set is one descriptor in the compositor's
+event loop, which turns readable when Qt's next timer is due or a descriptor Qt
+waits on is ready. Qt is then served on the compositor's clock (`qml::drain`),
+and a scene that changed asks for one frame and no more.
+
+Beside `host.cpp` are three files that register native types under the same
+`Solium` URI as the shipped QML module, so one `import Solium` reaches both:
+`attached.cpp`, the attached `Solium` object (`Solium.monitor`,
+`Solium.input`, `Solium.keyboard`, `Solium.surface.reserve`) and the `Grab`
+type; `rows.cpp`, the list model that applies the keyed row batches Rust
+sends; and `keyboard.cpp`, the `Keyboard` singleton. `attached.h`, `rows.h`
+and `keyboard.h` declare `Q_OBJECT` types, so `build.rs` runs Qt's moc on them
+(`MOC_HEADERS`; `QT_MOC` names moc when it is not found).
 
 No Qt QPA plugin available here will adopt the compositor's EGL context, so
 the GPU route runs the other way round: the compositor allocates a buffer
@@ -382,8 +480,12 @@ One compositor, one layout engine, different input profiles and default modes.
 Only the input profile is chosen today: `SOLIUM_FORM_FACTOR` sets click and
 touch focus, focus-follows-mouse, the drag modifier and natural scrolling
 (`input/profile.rs`). Every form factor starts floating, and there is no app
-switcher, no peek and no compositor gesture yet. The table is the intent, for
-E7:
+switcher, no peek and no compositor gesture yet. Touch reaches a client's
+window (checked with Firefox on a Surface Pro 7), but nothing the compositor
+draws reacts to it: frame buttons, a hosted shell's scenes, overview and the
+screen edges ([#181](https://github.com/Lilium-Linux/solium/issues/181)).
+Gestures are E7 ([#7](https://github.com/Lilium-Linux/solium/issues/7)), after
+v0.1.0. The table is the intent, for E7:
 
 | | Primary input | Default mode, intended |
 |---|---|---|

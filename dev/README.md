@@ -26,6 +26,17 @@ Natively, with the development packages the top-level README lists under
 cargo build
 ```
 
+The build runs Qt's `moc` on `qml/attached.h`, `qml/rows.h` and
+`qml/keyboard.h`, which declare the native `Solium` QML types. `build.rs`
+looks for it in this order: `QT_MOC` if it is set; the `libexecdir` Qt6Core's
+pkg-config file names; `qt6/libexec/moc` or `qt6/bin/moc` beside Qt's
+libraries; `/usr/lib64/qt6/libexec/moc`, `/usr/lib/qt6/libexec/moc` and
+`/usr/lib/x86_64-linux-gnu/qt6/libexec/moc`; and last, `moc` on `PATH`. If it
+cannot run moc, the build stops with `could not run moc at …` and
+`set QT_MOC to its path, or install Qt 6's development tools`. Setting or
+changing `QT_MOC` runs the build script again. On Fedora, moc comes with
+`qt6-qtbase-devel`, which the build image already has.
+
 Or, on a Fedora host without the development packages, in the build image,
 which needs only podman and a rustup install. The image has the C toolchain and
 the system libraries; Rust comes from your own `CARGO_HOME` and `RUSTUP_HOME`,
@@ -60,14 +71,15 @@ wrong otherwise, and both were hit:
   On a 260 Hz display, 55 fps puts a dragged window four frames behind the
   cursor, which is exactly what it looks like.
 
-**Never glob `target/debug/build/solium-*/out/`.** The Qt host is compiled into
-`libsolium_qml_host.a` under that path, and there is more than one such
-directory: cargo makes a separate one per unit metadata, so `cargo build -p
-solium` and `cargo build` (or `cargo test`) each own one. A test harness or a
-script that links "the" archive by glob picks whichever the shell sorts first,
-which is not the newest, and there is no error — the link succeeds and you
-measure a build from an hour ago. It cost a full round of debugging a fix that
-was already in the tree.
+**Never glob `target/debug/build/solium-*/out/`.** The Qt host — `host.cpp`,
+`attached.cpp`, `rows.cpp` and `keyboard.cpp`, and the moc output of their
+headers — is compiled into `libsolium_qml_host.a` under that path, and there is
+more than one such directory: cargo makes a separate one per unit metadata, so
+`cargo build -p solium` and `cargo build` (or `cargo test`) each own one. A
+test harness or a script that links "the" archive by glob picks whichever the
+shell sorts first, which is not the newest, and there is no error — the link
+succeeds and you measure a build from an hour ago. It cost a full round of
+debugging a fix that was already in the tree.
 
 This is not something one commit introduced and another can remove; it is how
 cargo lays the directory out. Either pin the newest,
@@ -76,9 +88,11 @@ cargo lays the directory out. Either pin the newest,
 ls -td target/debug/build/solium-*/out | head -1
 ```
 
-or compile `crates/solium/qml/host.cpp` from source in the harness's own
-`build.rs`, which is the only way to be certain that what runs is what is
-checked out.
+or compile the host from source in the harness's own `build.rs`: `host.cpp`
+together with `attached.cpp`, `rows.cpp` and `keyboard.cpp` from
+`crates/solium/qml/`, with moc run on `attached.h`, `rows.h` and `keyboard.h`,
+as `dev/wirecheck/build.rs` does. That is the only way to be certain that what
+runs is what is checked out.
 
 ### The gate
 
@@ -108,6 +122,17 @@ SOLIUM_GATE_PODMAN_ARGS="--memory=6g --memory-swap=6g" SOLIUM_GATE_JOBS=2 \
 The cargo steps run under `nice -n 19` and, where it exists, `ionice -c 3`, so
 a gate in the background leaves the machine usable. `solium --check` and
 `dev/wirecheck` are short and run at normal priority.
+
+The tests include the scenarios in `crates/solium/tests/scenarios/`, played by
+`scenario::tests::every_scenario_with_a_client_passes` and
+`every_scenario_on_the_qt_thread_passes`. Run natively on a machine whose
+`$XDG_CONFIG_HOME/solium` (`~/.config/solium`) holds any `.lua` file, the
+client scenarios and `script::tests::shipped_init_with_user` pass without
+running, and print
+`skipped: ~/.config/solium holds Lua of its own, which a scenario would load`,
+because that directory comes first on `package.path`. Pointing
+`XDG_CONFIG_HOME` at an empty directory runs them. With `SOLIUM_GATE_IMAGE` the
+container's `HOME` is `/tmp`, so they always run.
 
 CI runs the formatting check, clippy, the build, the tests and
 `solium --check`, and not `dev/wirecheck`, which needs a GPU. A source tarball
@@ -156,6 +181,15 @@ sol.bind("super+e", function() sol.spawn("foot", "-e", "htop") end)
 Programs start as clients of *this* compositor — `sol.spawn` overrides
 `WAYLAND_DISPLAY` in the child, or it would inherit the host's and open its
 window next to the nested compositor rather than inside it.
+
+Apart from the session's own variables (`WAYLAND_DISPLAY`; `DISPLAY` for
+Solium's Xwayland, or removed; `XDG_CURRENT_DESKTOP`; `XDG_SESSION_TYPE` when
+unset; `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`), a program gets the
+environment Solium itself was started with (#175). That environment is noted
+before Qt or EGL has changed it, so nothing they set inside the compositor
+leaks into a child, and the program holds no descriptor beyond stdio. The
+compositor's own Qt drops `QT_IM_MODULE` and `QT_IM_MODULES`, but a program
+Solium starts still gets yours.
 
 Solium runs on the host, so `sol.spawn` can start anything installed there —
 with one family of exceptions:
@@ -295,9 +329,12 @@ fine and the instrument was measuring something else.
 `SOLIUM_TRIGGER_AT` has the same limit on the keyboard side: it runs the
 handler a combination is bound to, and skips what a real key goes through
 first. A binding under a Cyrillic layout, which answers to its key cap as well
-as its keysym, can only be checked with a real keyboard with the second layout
-active; `wl-probe`'s `WL_PROBE_KEYBOARD` shows which layout the client was told
-is live.
+as its keysym, needs a real key, and `SOLIUM_KEY_AT` (*Keys by name*, below)
+presses one. With a second layout in the configuration's `keyboard` section,
+switch to it first (`shift+alt_l` under `grp:alt_shift_toggle`), then press
+the binding's keys, e.g. `SOLIUM_KEY_AT="3000:shift+alt_l,4000:super+q"`;
+`wl-probe`'s `WL_PROBE_KEYBOARD` shows which layout the client was told is
+live.
 
 ### Keys by name
 
@@ -312,10 +349,12 @@ SOLIUM_KEY_AT="3000:caps_lock,5000:caps_lock,6000:shift+alt_l" dev/run-nested.sh
 ```
 
 A key is keysym names joined by `+`, case aside, as xkb spells them:
-`caps_lock`, `num_lock`, `alt_l`, `return`, `a`. `shift`, `ctrl`, `alt` and
-`super` are the left-hand keys. Each name is looked up in the live keymap, in
-any of its layouts, so `a` is the same key with Russian live; a name no key of
-the keymap types presses nothing and says so in the log. The keyboard is the
+`caps_lock`, `num_lock`, `alt_l`, `return`, `a`. The keys go down in the order
+written and up in reverse. `shift`, `ctrl`, `alt` and `super` are the
+left-hand keys, and `control` and `logo` are taken for `ctrl` and `super`.
+Each name is looked up in the live keymap, in any of its layouts, so `a` is
+the same key with Russian live; a name no key of the keymap types means
+nothing of that combination is pressed, and the log says so. The keyboard is the
 nested session's own: the configuration's `keyboard` section, or the
 `XKB_DEFAULT_*` environment.
 
@@ -355,7 +394,8 @@ that should not be.
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
-| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. See *Installing it* |
+| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. `--no-check` skipping the installed binary's check. A system prefix (`--prefix /usr` and `/usr/local`): everything under the prefix and nothing in `XDG_CONFIG_HOME`, no `config.sha256` and no `sudo` line, `--session-dir` refused, and `--check` passing from the staged `/usr/share/solium` with a broken user configuration. The Fedora package: `dev/rpm/solium.spec`'s `%files` against that install both ways; its `License` naming every installed `.license`; each `Requires` and `Recommends` naming the package that has the file (the Qt QML modules the shipped QML imports with the Qt version clause, Xwayland, flock, xdg-desktop-portal and the backends `lilium-portals.conf` names, and foot); and the spec refusing to parse without `commit` and `commitdate`. See *Installing it* and *A Fedora package* |
+| `dev/rpm.sh [--jobs N] [--image IMAGE]` | the package built from the commit checked out, unpacked without installing, passes `solium --check` with an empty configuration and takes its QML and Lua from its own `usr/share/solium`. See *A Fedora package* |
 
 And the tools that measure rather than assert:
 
@@ -633,7 +673,12 @@ there are fewer CRTCs than connectors.
 
 Two monitors side by side in the nested window, each with its own layer map,
 work area and render pass, each drawn into a texture of its own — which is what
-having its own scanout buffer means. Every per-output path runs for each of
+having its own scanout buffer means — and each with its own instance of every
+`sol.surface` declared on it, the hosted shell's included (`shell.on` in
+`config.lua` says which monitors), each reading its own `Solium.monitor`.
+`SOLIUM_OUTPUTS_AT` and resizing the nested window build or drop instances as
+monitors arrive or go, so `SOLIUM_OUTPUTS=2 dev/run-shell.sh <shell-dir>`
+shows a shell on two monitors. Every per-output path runs for each of
 them; what it cannot simulate is a second *pipeline*, one refresh rate and one
 page flip per screen, which is `tty.rs`'s half of the problem.
 
@@ -685,8 +730,10 @@ Screens can be turned off without being taken away
 monitor's share of the window is drawn black once and then not drawn, its
 client is told `off`, and the log says it was blanked. All of it can be tried
 in a window that way. The DRM half — a black frame, then the CRTC cleared, and
-a modeset back on the next frame — has not yet been run on the hardware;
-[docs/beta.md](../docs/beta.md) tracks it.
+a modeset back on the next frame — has run on the hardware at `dfc95ce`: the
+screens going off after `idle.screens_off_after` works on an NVIDIA RTX 3070
+desktop and on a Microsoft Surface Pro 7 (Intel Ice Lake), both on Fedora 44.
+All three ways of asking end in `Solium::set_power` (`power.rs`).
 
 ## Tuning animations without running the compositor
 
@@ -1026,8 +1073,15 @@ and session services that are not running here and wait for them to time out.
 not the compositor failing to map it. konsole stays on the list as a fallback
 for a machine that has nothing else, never as a preference.
 
-**What the hardware has and has not been through.** Hotplug has (see
-*Hotplug* above). Turning a screen off has not; see *Turning screens off*.
+**What the hardware has and has not been through.** Hotplug has (see *Hotplug*
+above). So has `dfc95ce`, on an NVIDIA RTX 3070 desktop and on a Microsoft
+Surface Pro 7 (Intel Ice Lake), both on Fedora 44: QML on the GPU and its
+animations, the screens going off when idle (see *Turning screens off*), the
+screen going off when the lid was closed (seen, though Solium itself has no lid
+handling), `swaylock` locking the session, and the Caps and layout pill with no
+configuration. Touch reaches a client's window (Firefox), but nothing Solium
+draws reacts to it: frame buttons, a hosted shell, overview and the edges
+([#181](https://github.com/Lilium-Linux/solium/issues/181)).
 
 ### Soaking on a TTY, which is the only honest soak
 
@@ -1072,7 +1126,7 @@ dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for th
 | `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
 | `--uninstall` | remove `bin/solium`, `bin/solium-session`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
 | `DESTDIR=` | stage the prefix and `XDG_CONFIG_HOME` under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp`. It may contain a `~`, as rpmbuild's buildroot does |
-| `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`~/.cache/solium-build.lock`) and the container's memory cap (`6g`) |
+| `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`$XDG_CACHE_HOME/solium-build.lock`, or `~/.cache/solium-build.lock` when `XDG_CACHE_HOME` is unset) and the container's memory cap (`6g`). `dev/build-release.sh` reads both, so they apply to `dev/rpm.sh` too |
 
 `dev/install-check.sh` runs all of that into `/tmp` and checks every step.
 
@@ -1121,8 +1175,22 @@ compiled in as its `shipped assets root`, and `install.sh`'s check refuses it.
 Compiled at `/solium-src` in the container, the build tree it names is not on
 the host, so the installed copy falls through to `<prefix>/share/solium`. That
 build goes to its own `target/install`, apart from the builds made at the
-checkout's path, and `dev/build-release.sh` is that build on its own. Nothing is baked into `SOLIUM_DATADIR`, so the same binary
+checkout's path. Nothing is baked into `SOLIUM_DATADIR`, so the same binary
 works from any prefix, a `DESTDIR` staging area included.
+
+`dev/build-release.sh [--jobs N] [--image IMAGE]` is that build on its own
+(defaults `2` and `localhost/solium-build:fc44`), and it builds
+`target/install/release/solium`. It runs `cargo build --release -p solium` in
+the build image, with the checkout mounted at `/solium-src` and
+`CARGO_TARGET_DIR` at `/solium-src/target/install`, under
+`nice -n 19 ionice -c 3`. It holds the shared lock `SOLIUM_BUILD_LOCK`
+(default `$XDG_CACHE_HOME/solium-build.lock`, or
+`~/.cache/solium-build.lock` when that is unset) and caps the container at
+`SOLIUM_BUILD_MEMORY` (default `6g`, and swap the same). An exit status of 137
+means the container ran out of memory, and the script says to run it again
+with `--jobs 1`. `dev/install.sh` runs it (unless `--no-build`), and so does
+`dev/rpm.sh`, so a package holds the same binary as an install from the
+checkout.
 
 **Checked before it starts:** a Solium running from the binary it would
 replace (found through `/proc/<pid>/exe`, as `fuser` does; it refuses and
@@ -1215,6 +1283,14 @@ sudo dnf remove solium
 container build `dev/install.sh` runs, then makes the commit's source tarball
 and runs `rpmbuild -bb --with prebuilt` on the host (it needs `rpm-build`,
 which the build image does not have) into `target/rpm`, never `~/rpmbuild`.
+Its options are `--jobs N` and `--image IMAGE`, the same as
+`dev/build-release.sh` with the same defaults. It needs `rpmbuild` (from
+`rpm-build`), `rpm2cpio`, `cpio`, `git` and `podman` on the host, and refuses
+to run on a host that is not Fedora. It takes the Qt version for the
+`Requires` from the build image (`%_qt6_version`). It deletes and rebuilds
+`target/rpm` on every run, and refuses if `target/rpm` is a link. rpmbuild's
+whole log is `target/rpm/rpmbuild.log`, and the unpacked package's `--check`
+log is `target/rpm/check.log`.
 It refuses uncommitted changes, because the package is named after its commit
 (`0.0.0~git<commit date>.<short hash>`), and a build image of another Fedora
 release than the host's. Then it checks the package without installing it:
