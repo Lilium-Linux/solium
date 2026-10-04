@@ -395,6 +395,14 @@ pub(crate) struct Solium {
     /// button is up (Ruling 7).
     /// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
     pub(crate) scene_press: Option<ScenePress>,
+    /// What became of the `sol.act`s the dispatch being applied ran, told to
+    /// Lua once all of it is applied (Ruling 15).
+    /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+    pub(crate) settled_attempts: Vec<crate::script::Settled>,
+    /// The actions `sol.act` was asked for that the compositor does not know,
+    /// each logged the first time only.
+    /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+    pub(crate) unknown_actions: std::collections::HashSet<String>,
     /// Whether a grab ended while a scene held a press, so the pointer goes
     /// back to what is under it at that press's release.
     /// `tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
@@ -976,6 +984,8 @@ impl Solium {
             hovered_frame: None,
             pointer_buttons: 0,
             scene_press: None,
+            settled_attempts: Vec::new(),
+            unknown_actions: std::collections::HashSet::new(),
             repoint_at_release: false,
             scene_hovered: None,
             scene_hover_seen: None,
@@ -2131,30 +2141,6 @@ impl Solium {
             })
             .find(|(surface, area)| surface.hit(output, *area, location).claims(asking))
             .map(|(surface, area)| (surface.id(), area))
-    }
-
-    /// Act on whatever a scripted surface asked for.
-    ///
-    /// The scene sets `action`, this takes it and hands it to whoever is
-    /// listening, by surface name. A panel's buttons therefore live entirely
-    /// in the script that declared it -- which is what turned the Developer
-    /// Tweaks panel from a compositor feature into `lua/tweaks.lua`.
-    pub(crate) fn settle_surfaces(&mut self) {
-        let mut asked: Vec<(String, String)> = Vec::new();
-        for surface in self.surfaces.iter_mut() {
-            if let Some(action) = surface.taken_action() {
-                asked.push((surface.name().to_owned(), action));
-            }
-        }
-        for (name, action) in asked {
-            let snapshot = self.snapshot();
-            let Some(mut scripts) = self.scripts.take() else {
-                return;
-            };
-            let outcome = scripts.surface_action(&name, &action, snapshot);
-            self.scripts = Some(scripts);
-            self.apply(outcome);
-        }
     }
 
     /// Give every surface an instance on each monitor it is on, and no other:

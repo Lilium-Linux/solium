@@ -2,7 +2,7 @@
 //!
 //! The crate has no JSON dependency, and what crosses is small: a surface's
 //! properties, a scene's action data, a model's rows. This is the one type for
-//! all of it, written by hand and, from Task 10, read by hand.
+//! all of it, written and read by hand.
 
 use std::collections::BTreeMap;
 
@@ -10,14 +10,6 @@ use std::collections::BTreeMap;
 /// text: `tests::an_object_renders_its_keys_in_order`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Json {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "JSON's null; nothing outside the tests writes one until a \
-                      scene's action data is read"
-        )
-    )]
     Null,
     Bool(bool),
     Number(f64),
@@ -86,6 +78,81 @@ impl Json {
         })
     }
 
+    /// JSON text as a value, or `None` for anything that is not exactly one
+    /// value. Nesting deeper than 64 is refused, so nothing a scene sends can
+    /// run the stack out.
+    /// `tests::json_reads_what_qt_writes`, `tests::what_is_not_json_is_none`,
+    /// `tests::json_nested_too_deep_is_none`.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        let mut reader = Reader {
+            bytes: text.as_bytes(),
+            at: 0,
+        };
+        let value = reader.value(0)?;
+        reader.space();
+        (reader.at == reader.bytes.len()).then_some(value)
+    }
+
+    /// An object's field. `tests::json_reads_what_qt_writes`.
+    pub(crate) fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Self::Object(fields) => fields.get(key),
+            _ => None,
+        }
+    }
+
+    /// A whole, non-negative number below 2^53: a window's id.
+    /// `tests::only_a_whole_non_negative_number_is_an_id`.
+    pub(crate) fn as_u64(&self) -> Option<u64> {
+        const EXACT: f64 = 9_007_199_254_740_992.0;
+        match self {
+            Self::Number(number) if *number >= 0.0 && number.fract() == 0.0 && *number < EXACT => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "whole, non-negative and inside f64's exact range"
+                )]
+                let whole = *number as u64;
+                Some(whole)
+            }
+            _ => None,
+        }
+    }
+
+    /// This value in Lua: an object a table by key, a list a sequence, null
+    /// `nil`, and a whole number an integer. `tests::a_value_reaches_lua_as_a_table`.
+    pub(crate) fn to_lua(&self, lua: &mlua::Lua) -> mlua::Result<mlua::Value> {
+        const EXACT: f64 = 9_007_199_254_740_992.0;
+        Ok(match self {
+            Self::Null => mlua::Value::Nil,
+            Self::Bool(yes) => mlua::Value::Boolean(*yes),
+            Self::Number(number) if number.fract() == 0.0 && number.abs() < EXACT => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "whole, and inside f64's exact range"
+                )]
+                let whole = *number as i64;
+                mlua::Value::Integer(whole)
+            }
+            Self::Number(number) => mlua::Value::Number(*number),
+            Self::Text(text) => mlua::Value::String(lua.create_string(text)?),
+            Self::List(items) => {
+                let table = lua.create_table()?;
+                for (index, item) in items.iter().enumerate() {
+                    table.set(index + 1, item.to_lua(lua)?)?;
+                }
+                mlua::Value::Table(table)
+            }
+            Self::Object(fields) => {
+                let table = lua.create_table()?;
+                for (key, value) in fields {
+                    table.set(key.as_str(), value.to_lua(lua)?)?;
+                }
+                mlua::Value::Table(table)
+            }
+        })
+    }
+
     /// A Lua table's every key as an object's field, whether or not it also
     /// has a list part, which is how a surface's top-level `properties` is
     /// read: `crate::script::tests::a_surfaces_properties_keep_their_named_keys_beside_a_list_part`.
@@ -98,6 +165,165 @@ impl Json {
             }
         }
         Ok(fields)
+    }
+}
+
+/// A cursor over JSON text. `tests::json_reads_what_qt_writes`.
+#[derive(Debug)]
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Reader<'_> {
+    /// How deep a value may nest. `tests::json_nested_too_deep_is_none`.
+    const DEEPEST: usize = 64;
+
+    fn space(&mut self) {
+        while self.bytes.get(self.at).is_some_and(u8::is_ascii_whitespace) {
+            self.at += 1;
+        }
+    }
+
+    fn eat(&mut self, byte: u8) -> Option<()> {
+        self.space();
+        (self.bytes.get(self.at) == Some(&byte)).then(|| self.at += 1)
+    }
+
+    fn word(&mut self, word: &str) -> Option<()> {
+        let end = self.at + word.len();
+        (self.bytes.get(self.at..end) == Some(word.as_bytes())).then(|| self.at = end)
+    }
+
+    fn value(&mut self, depth: usize) -> Option<Json> {
+        if depth > Self::DEEPEST {
+            return None;
+        }
+        self.space();
+        match self.bytes.get(self.at)? {
+            b'n' => self.word("null").map(|()| Json::Null),
+            b't' => self.word("true").map(|()| Json::Bool(true)),
+            b'f' => self.word("false").map(|()| Json::Bool(false)),
+            b'"' => self.text().map(Json::Text),
+            b'[' => {
+                self.at += 1;
+                let mut items = Vec::new();
+                if self.eat(b']').is_some() {
+                    return Some(Json::List(items));
+                }
+                loop {
+                    items.push(self.value(depth + 1)?);
+                    if self.eat(b']').is_some() {
+                        return Some(Json::List(items));
+                    }
+                    self.eat(b',')?;
+                }
+            }
+            b'{' => {
+                self.at += 1;
+                let mut fields = BTreeMap::new();
+                if self.eat(b'}').is_some() {
+                    return Some(Json::Object(fields));
+                }
+                loop {
+                    self.space();
+                    let key = self.text()?;
+                    self.eat(b':')?;
+                    fields.insert(key, self.value(depth + 1)?);
+                    if self.eat(b'}').is_some() {
+                        return Some(Json::Object(fields));
+                    }
+                    self.eat(b',')?;
+                }
+            }
+            _ => self.number(),
+        }
+    }
+
+    fn number(&mut self) -> Option<Json> {
+        let start = self.at;
+        while self
+            .bytes
+            .get(self.at)
+            .is_some_and(|byte| matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'))
+        {
+            self.at += 1;
+        }
+        std::str::from_utf8(self.bytes.get(start..self.at)?)
+            .ok()?
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
+            .map(Json::Number)
+    }
+
+    /// A string, its escapes read, a surrogate pair as the one character it
+    /// is and half of one refused. `tests::json_reads_escapes_and_surrogate_pairs`.
+    fn text(&mut self) -> Option<String> {
+        if self.bytes.get(self.at) != Some(&b'"') {
+            return None;
+        }
+        self.at += 1;
+        let mut out = String::new();
+        loop {
+            let byte = *self.bytes.get(self.at)?;
+            match byte {
+                b'"' => {
+                    self.at += 1;
+                    return Some(out);
+                }
+                b'\\' => {
+                    self.at += 1;
+                    let escape = *self.bytes.get(self.at)?;
+                    self.at += 1;
+                    match escape {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let high = self.hex4()?;
+                            let code = if (0xd800..0xdc00).contains(&high) {
+                                self.word("\\u")?;
+                                let low = self.hex4()?;
+                                if !(0xdc00..0xe000).contains(&low) {
+                                    return None;
+                                }
+                                0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00)
+                            } else {
+                                high
+                            };
+                            out.push(char::from_u32(code)?);
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => {
+                    // Everything up to the next quote or escape, whole: the
+                    // text is a `str`, so a character is never cut.
+                    // `tests::json_reads_what_qt_writes`.
+                    let run = self.at;
+                    while self
+                        .bytes
+                        .get(self.at)
+                        .is_some_and(|byte| *byte != b'"' && *byte != b'\\')
+                    {
+                        self.at += 1;
+                    }
+                    out.push_str(std::str::from_utf8(self.bytes.get(run..self.at)?).ok()?);
+                }
+            }
+        }
+    }
+
+    fn hex4(&mut self) -> Option<u32> {
+        let digits = std::str::from_utf8(self.bytes.get(self.at..self.at + 4)?).ok()?;
+        self.at += 4;
+        u32::from_str_radix(digits, 16).ok()
     }
 }
 
@@ -192,5 +418,98 @@ mod tests {
             r#"{"name":"bar","nested":{"x":"s","y":1},"sizes":[1,2]}"#,
             "a function is left out, a sequence is a list, and keys are sorted"
         );
+    }
+
+    /// **What Qt writes, Rust reads**: the shape `Solium.send` sends.
+    #[test]
+    fn json_reads_what_qt_writes() {
+        let parsed = Json::parse(r#" {"data":{"id":7,"name":"q\"й","on":[true,null,-1.5e1]}} "#)
+            .expect("valid JSON");
+        let data = parsed.get("data").expect("a data field");
+        assert_eq!(data.get("id").and_then(Json::as_u64), Some(7));
+        assert_eq!(data.get("name"), Some(&Json::Text("q\"й".to_owned())));
+        assert_eq!(
+            data.get("on"),
+            Some(&Json::List(vec![
+                Json::Bool(true),
+                Json::Null,
+                Json::Number(-15.0)
+            ]))
+        );
+    }
+
+    #[test]
+    fn what_is_not_json_is_none() {
+        for text in [
+            "",
+            "{",
+            r#"{"a":}"#,
+            "[1,]",
+            "nul",
+            r#""unterminated"#,
+            "1 2",
+        ] {
+            assert_eq!(Json::parse(text), None, "{text:?}");
+        }
+    }
+
+    /// **Nothing a scene sends can run the stack out**: a value nested
+    /// deeper than 64 is refused, and one 64 deep is read.
+    #[test]
+    fn json_nested_too_deep_is_none() {
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        assert!(Json::parse(&nested(64)).is_some(), "64 deep is read");
+        assert_eq!(Json::parse(&nested(10_000)), None, "10 000 deep is refused");
+    }
+
+    /// **An escaped character and a surrogate pair are read**, and a lone
+    /// half of a pair is not.
+    #[test]
+    fn json_reads_escapes_and_surrogate_pairs() {
+        assert_eq!(
+            Json::parse(r#""a\n\té😀\/""#),
+            Some(Json::Text("a\n\té\u{1f600}/".to_owned()))
+        );
+        assert_eq!(Json::parse(r#""\ud83d""#), None);
+        assert_eq!(Json::parse(r#""\ude00""#), None);
+    }
+
+    #[test]
+    fn a_parsed_value_renders_back_as_it_was() {
+        let text = r#"{"a":[1,2.5,"x"],"b":{"c":false}}"#;
+        assert_eq!(
+            Json::parse(text).map(|value| value.render()),
+            Some(text.to_owned())
+        );
+    }
+
+    /// **Only a whole, non-negative number is a window's id.**
+    #[test]
+    fn only_a_whole_non_negative_number_is_an_id() {
+        assert_eq!(Json::Number(7.0).as_u64(), Some(7));
+        for not in [
+            Json::Number(-1.0),
+            Json::Number(1.5),
+            Json::Number(f64::NAN),
+            Json::Number(1e300),
+            Json::Text("7".to_owned()),
+        ] {
+            assert_eq!(not.as_u64(), None, "{not:?}");
+        }
+    }
+
+    #[test]
+    fn a_value_reaches_lua_as_a_table() {
+        let lua = mlua::Lua::new();
+        let value = Json::parse(r#"{"id":7,"tags":["a","b"]}"#)
+            .expect("valid JSON")
+            .to_lua(&lua)
+            .expect("converts");
+        lua.globals().set("value", value).expect("set");
+        let read: String = lua
+            .load(r#"return value.id .. " " .. value.tags[2] .. " " .. math.type(value.id)"#)
+            .eval()
+            .expect("reads");
+        assert_eq!(read, "7 b integer");
     }
 }

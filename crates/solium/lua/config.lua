@@ -110,6 +110,11 @@ local defaults = {
     -- See `the_shell_takes_its_outside_click_from_the_configuration` and
     -- `a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
     --
+    -- What it asks for, `Solium.send("windows.focus", { id: ... })` in its
+    -- QML, reaches `sol.on("surface", ...)`, and `lua/actions.lua` has the
+    -- compositor do the window actions. See
+    -- `windows_focus_from_a_scene_focuses_the_window`.
+    --
     -- `keyboard.bindings`: while the shell holds the keyboard (a search
     -- field, a password), which compositor bindings still work:
     -- "except_claimed" (the default; every binding but the keys the field

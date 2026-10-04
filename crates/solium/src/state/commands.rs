@@ -314,6 +314,32 @@ impl Solium {
                         self.close_pane(pane);
                     }
                 }
+                // One of the compositor's verbs, done as the command that does
+                // it, and its outcome kept for the attempt's `done` (Ruling 15).
+                // `real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
+                // `real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+                Command::Act {
+                    attempt,
+                    action,
+                    data,
+                } => match self.act(&action, &data) {
+                    Ok(command) => {
+                        self.apply(Outcome {
+                            commands: vec![command],
+                            ..Outcome::default()
+                        });
+                        self.settled_attempts.push(crate::script::Settled {
+                            attempt,
+                            ok: true,
+                            reason: None,
+                        });
+                    }
+                    Err(reason) => self.settled_attempts.push(crate::script::Settled {
+                        attempt,
+                        ok: false,
+                        reason: Some(reason),
+                    }),
+                },
                 Command::Loading(loading) => {
                     if self.loading != loading {
                         tracing::debug!(?loading, "loading behaviour set");
@@ -530,6 +556,20 @@ impl Solium {
         // `real_client::reflow_on_close::hosted::a_property_a_layout_handler_writes_reflows_the_windows_against_the_reserve_it_moved`.
         if self.dispatching == 0 && self.scenes_to_settle {
             self.settle_scenes();
+        }
+        // The attempts the dispatch settled, told to Lua in a dispatch of
+        // their own once all of it is applied, every command that settled
+        // them included (03 §3.3.2).
+        // `real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
+        // `real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+        if self.dispatching == 0 && !self.settled_attempts.is_empty() {
+            let settled = std::mem::take(&mut self.settled_attempts);
+            let snapshot = self.snapshot();
+            if let Some(mut scripts) = self.scripts.take() {
+                let outcome = scripts.attempts_settled(&settled, snapshot);
+                self.scripts = Some(scripts);
+                self.apply(outcome);
+            }
         }
     }
 

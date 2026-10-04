@@ -6,7 +6,8 @@
 //! (`tests::a_grab_is_held_while_active_and_dismissed_on_request`), and its
 //! keyboard wants and the keys it is told
 //! (`tests::a_field_that_wants_the_keyboard_reports_its_claims`,
-//! `tests::text_typed_on_russian_reaches_the_field`).
+//! `tests::text_typed_on_russian_reaches_the_field`), and the actions it sends
+//! (`tests::solium_send_queues_every_action_with_its_data_in_order`).
 
 use std::{
     ffi::{CString, c_char, c_int},
@@ -79,6 +80,11 @@ mod ffi {
             scan_code: u32,
         );
         pub(super) fn solium_qml_scene_let_go_keyboard(scene: *mut super::super::ffi::Scene);
+        pub(super) fn solium_qml_scene_take_action(
+            scene: *mut super::super::ffi::Scene,
+            action: *mut *const c_char,
+            data_json: *mut *const c_char,
+        ) -> c_int;
     }
 }
 
@@ -439,6 +445,40 @@ impl Scene {
         touched();
         // SAFETY: the scene is live for as long as `self`.
         unsafe { ffi::solium_qml_scene_let_go_keyboard(self.scene) }
+    }
+
+    /// The oldest action the scene queued with `Solium.send`, with its data,
+    /// `Json::Null` for none (Ruling 15).
+    /// `tests::solium_send_queues_every_action_with_its_data_in_order`,
+    /// `tests::an_unhosted_scene_may_send_and_queues_nothing`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn take_action(&mut self) -> Option<(String, Json)> {
+        let mut action: *const c_char = std::ptr::null();
+        let mut data: *const c_char = std::ptr::null();
+        // SAFETY: the scene is live for as long as `self`, and the host sets
+        // both only when it returns 1.
+        let taken = unsafe {
+            ffi::solium_qml_scene_take_action(self.scene, &raw mut action, &raw mut data)
+        };
+        if taken == 0 || action.is_null() || data.is_null() {
+            return None;
+        }
+        // SAFETY: NUL-terminated strings the host keeps valid until its next
+        // call, copied here before any.
+        let (action, data) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(action)
+                    .to_string_lossy()
+                    .into_owned(),
+                std::ffi::CStr::from_ptr(data)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        let data = Json::parse(&data)
+            .and_then(|wrapped| wrapped.get("data").cloned())
+            .unwrap_or(Json::Null);
+        Some((action, data))
     }
 
     /// A one-value string property, read as a list of one.
@@ -1003,6 +1043,43 @@ pub(crate) mod tests {
                 .expect("the panel builds");
             assert_eq!(scene.hit(60.0, 30.0), Hit::Press);
             drop(scene);
+        });
+    }
+
+    /// **A press on a tweak sends its id** with `Solium.send`, which the
+    /// compositor hands to `tweaks.lua` with no data (Ruling 15).
+    #[test]
+    fn a_press_on_a_tweak_sends_its_id() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/tweaks.qml"));
+            let mut scene = Scene::for_monitor(
+                path,
+                320,
+                400,
+                Some(r#"{"entries":[{"id":"pane:border","label":"Border","group":""}]}"#),
+                "tweaks-send-1",
+            )
+            .expect("the panel builds");
+            // Down the panel until the press lands on the entry, wherever the
+            // theme's sizes put it.
+            let mut sent = None;
+            for step in 0..80_u32 {
+                click(
+                    &mut scene,
+                    (60.0, f64::from(step * 5)),
+                    u64::from(step) * 1000,
+                );
+                sent = scene.take_action();
+                if sent.is_some() {
+                    break;
+                }
+            }
+            drop(scene);
+            assert_eq!(
+                sent,
+                Some(("pane:border".to_owned(), crate::json::Json::Null))
+            );
         });
     }
 
@@ -2328,6 +2405,70 @@ pub(crate) mod tests {
             ));
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **Every action a scene sends is queued with its data, in order**, so
+    /// two in one frame both arrive (Ruling 15): an object, a bare value
+    /// and nothing at all.
+    #[test]
+    fn solium_send_queues_every_action_with_its_data_in_order() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-send",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    Component.onCompleted: {
+                        Solium.send("windows.focus", { id: 7 })
+                        Solium.send("workspaces.go", { id: "2", monitor: "DP-1" })
+                        Solium.send("volume", 0.5)
+                        Solium.send("plain")
+                    }
+                }
+                "#,
+                "send-1",
+            );
+            let taken: Vec<(String, String)> = std::iter::from_fn(|| scene.take_action())
+                .map(|(action, data)| (action, data.render()))
+                .collect();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                taken,
+                vec![
+                    ("windows.focus".to_owned(), r#"{"id":7}"#.to_owned()),
+                    (
+                        "workspaces.go".to_owned(),
+                        r#"{"id":"2","monitor":"DP-1"}"#.to_owned()
+                    ),
+                    ("volume".to_owned(), "0.5".to_owned()),
+                    ("plain".to_owned(), "null".to_owned()),
+                ]
+            );
+        });
+    }
+
+    /// **A scene that is not hosted may call `Solium.send`, and queues
+    /// nothing**: there is no surface for its action to come from.
+    #[test]
+    fn an_unhosted_scene_may_send_and_queues_nothing() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-send-none");
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    Component.onCompleted: Solium.send(\"windows.focus\", { id: 7 })\n}\n",
+            )
+            .expect("writing the scene");
+            let mut scene = Scene::for_host(&path, 16, 16, None).expect("the scene builds");
+            let taken = scene.take_action();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(taken, None);
         });
     }
 

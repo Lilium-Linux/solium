@@ -44,6 +44,10 @@ sol.cursor_theme(config.cursor)
 -- file, and nothing in the compositor knows what a wallpaper is.
 require("wallpaper")
 require("shell")
+-- What a hosted scene sends with `Solium.send`: the vocabulary's actions go
+-- to `sol.act`, or to the file that answers them in Lua. See
+-- `windows_focus_from_a_scene_focuses_the_window`.
+require("actions")
 -- The keyboard pill near the text field: `keyboard.indicator` in config.lua.
 -- Configuration on the data the compositor publishes, like the two above.
 require("keyboard_indicator")

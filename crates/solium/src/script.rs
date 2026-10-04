@@ -449,6 +449,14 @@ pub(crate) enum Command {
     Close {
         id: u64,
     },
+    /// One of the compositor's verbs, from `sol.act`; its outcome reaches the
+    /// attempt's `done` (Ruling 15).
+    /// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
+    Act {
+        attempt: u64,
+        action: String,
+        data: crate::json::Json,
+    },
     /// Start a program, connected to this compositor.
     Spawn {
         program: String,
@@ -562,6 +570,17 @@ impl ClientSizes {
     pub(crate) fn believes(&self, app_id: &str) -> bool {
         self.floating && (app_id.is_empty() || !self.ignored.iter().any(|app| app == app_id))
     }
+}
+
+/// What became of one `sol.act`: whether the compositor did it, and if not,
+/// why: `"unknown-action"`, `"unknown-window"` or `"bad-data"` (Ruling 15).
+/// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
+/// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Settled {
+    pub(crate) attempt: u64,
+    pub(crate) ok: bool,
+    pub(crate) reason: Option<&'static str>,
 }
 
 /// The result of one dispatch.
@@ -1273,17 +1292,45 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "restore", ()))
     }
 
-    /// A scripted surface was pressed and asked for something.
+    /// A hosted scene sent an action, with data: the `surface` listeners
+    /// hear the surface's name, the action and the data, a table, a value or
+    /// `nil` (Ruling 15).
+    /// `tests::a_surface_action_reaches_lua_with_its_data`,
+    /// `tests::an_action_with_no_data_reaches_lua_as_nil`.
     pub(crate) fn surface_action(
         &mut self,
         name: &str,
         action: &str,
+        data: &crate::json::Json,
         snapshot: Snapshot,
     ) -> Outcome {
-        let name = name.to_owned();
-        let action = action.to_owned();
+        let data = data.to_lua(&self.lua).unwrap_or_else(|err| {
+            tracing::warn!(%err, action, "an action's data did not reach Lua");
+            Value::Nil
+        });
+        let (name, action) = (name.to_owned(), action.to_owned());
         self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "surface", (name.clone(), action.clone()))
+            call_listeners(sol, "surface", (name.clone(), action.clone(), data.clone()))
+        })
+    }
+
+    /// Attempts whose outcomes are known: each one's `done` is called once,
+    /// and forgotten, in a dispatch of its own.
+    /// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
+    pub(crate) fn attempts_settled(&mut self, settled: &[Settled], snapshot: Snapshot) -> Outcome {
+        let settled = settled.to_vec();
+        self.dispatch(snapshot, move |sol| {
+            let attempts: Table = sol.get("_attempts")?;
+            for each in &settled {
+                let done: Option<mlua::Function> = attempts.get(each.attempt)?;
+                attempts.set(each.attempt, Value::Nil)?;
+                if let Some(done) = done
+                    && let Err(err) = done.call::<()>((each.ok, each.reason))
+                {
+                    tracing::error!(%err, "an attempt's done failed");
+                }
+            }
+            Ok(true)
         })
     }
 
@@ -1769,6 +1816,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     let sol = lua.create_table()?;
     sol.set("_bindings", lua.create_table()?)?;
     sol.set("_handlers", lua.create_table()?)?;
+    // Each `sol.act`'s `done`, by attempt id, until its outcome is known.
+    // `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
+    sol.set("_attempts", lua.create_table()?)?;
     sol.set("_keeps", lua.create_table()?)?;
     // Where a binding came from, for the combinations a script chose to say.
     // Keyed the same way `_bindings` is -- the canonical spelling -- so the two
@@ -3295,6 +3345,36 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, id: u64| {
             with_pending(lua, |pending| pending.commands.push(Command::Close { id }))
         })?,
+    )?;
+
+    // `sol.act(action, data, done)`: one of the compositor's verbs, queued
+    // like every write here (03 §3.3.2). The id it answers is one no earlier
+    // `sol.act` answered, and `done(ok, reason)` runs once, after the command
+    // is applied, in a dispatch of its own.
+    // `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
+    // `tests::each_sol_act_answers_an_id_of_its_own_counting_up`,
+    // `state::tests::real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`.
+    static ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    sol.set(
+        "act",
+        lua.create_function(
+            |lua, (action, data, done): (String, Value, Option<mlua::Function>)| {
+                let data = crate::json::Json::from_lua(&data)?.unwrap_or(crate::json::Json::Null);
+                let attempt = ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                with_pending(lua, |pending| {
+                    pending.commands.push(Command::Act {
+                        attempt,
+                        action,
+                        data,
+                    });
+                })?;
+                if let Some(done) = done {
+                    let attempts: Table = lua.globals().get::<Table>("sol")?.get("_attempts")?;
+                    attempts.set(attempt, done)?;
+                }
+                Ok(attempt)
+            },
+        )?,
     )?;
 
     // `sol.spawn("foot", "-e", "htop")`. Variadic rather than a table because
@@ -7122,6 +7202,192 @@ mod tests {
                  list has is a typo `--check` waves through"
             );
         }
+    }
+
+    fn loaded(name: &str, script: &str) -> (std::path::PathBuf, Scripts) {
+        let directory = std::env::temp_dir().join(name);
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(&config, script).expect("writing the test script");
+        let scripts = Scripts::load(&config).expect("loading the test script");
+        (directory, scripts)
+    }
+
+    /// **A scene's action reaches Lua with its surface's name and its data.**
+    #[test]
+    fn a_surface_action_reaches_lua_with_its_data() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-action-data",
+            r#"sol.on("surface", function(surface, action, data) sol.status(surface .. " " .. action .. " " .. data.id) end)"#,
+        );
+        let data = crate::json::Json::parse(r#"{"id":7}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "windows.focus", &data, one_screen(&[]));
+        assert_eq!(outcome.status.as_deref(), Some("shell windows.focus 7"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_action_with_no_data_reaches_lua_as_nil() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-action-nil",
+            r#"sol.on("surface", function(surface, action, data) sol.status(tostring(data)) end)"#,
+        );
+        let outcome = scripts.surface_action(
+            "tweaks",
+            "pane:border",
+            &crate::json::Json::Null,
+            one_screen(&[]),
+        );
+        assert_eq!(outcome.status.as_deref(), Some("nil"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.act` queues the action as a command and answers an attempt id;
+    /// `done` hears the outcome once** (03 §3.3.2).
+    #[test]
+    fn sol_act_returns_an_attempt_and_done_hears_the_outcome_once() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-act",
+            r#"sol.on("surface", function()
+                   attempt = sol.act("windows.focus", { id = 9 }, function(ok, reason) sol.status(tostring(ok) .. " " .. tostring(reason)) end)
+               end)"#,
+        );
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        let acts: Vec<(u64, String, String)> = outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Act {
+                    attempt,
+                    action,
+                    data,
+                } => Some((*attempt, action.clone(), data.render())),
+                _ => None,
+            })
+            .collect();
+        let [(attempt, action, data)] = acts.as_slice() else {
+            panic!("one act: {acts:?}")
+        };
+        assert_eq!(
+            scripts.evaluate("return tostring(attempt)"),
+            attempt.to_string(),
+            "sol.act answered another id than its command carries"
+        );
+        assert_eq!(
+            (action.as_str(), data.as_str()),
+            ("windows.focus", r#"{"id":9}"#)
+        );
+        let settled = [Settled {
+            attempt: *attempt,
+            ok: false,
+            reason: Some("unknown-window"),
+        }];
+        assert_eq!(
+            scripts
+                .attempts_settled(&settled, one_screen(&[]))
+                .status
+                .as_deref(),
+            Some("false unknown-window")
+        );
+        assert_eq!(
+            scripts.attempts_settled(&settled, one_screen(&[])).status,
+            None,
+            "done was called twice"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`actions.lua` routes the vocabulary and leaves the rest alone**: a
+    /// `windows.*` action becomes a `sol.act`, one a file overrides is
+    /// answered in Lua instead, and one outside the vocabulary, a tweak's
+    /// id, is nobody's but its surface's listener's.
+    #[test]
+    fn actions_lua_routes_the_vocabulary_and_leaves_the_rest_alone() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-actions-lua",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+local actions = require("actions")
+actions.override("windows.focus", function(data, surface) sol.status("mine " .. data.id .. " " .. surface) end)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let acts = |outcome: &Outcome| -> Vec<(String, String)> {
+            outcome
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Act { action, data, .. } => Some((action.clone(), data.render())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let id =
+            |id: u64| crate::json::Json::parse(&format!(r#"{{"id":{id}}}"#)).expect("valid JSON");
+        let closed = scripts.surface_action("shell", "windows.close", &id(4), one_screen(&[]));
+        let focused = scripts.surface_action("shell", "windows.focus", &id(3), one_screen(&[]));
+        let tweaked = scripts.surface_action(
+            "tweaks",
+            "pane:border",
+            &crate::json::Json::Null,
+            one_screen(&[]),
+        );
+        assert_eq!(
+            (
+                acts(&closed),
+                (acts(&focused), focused.status.as_deref()),
+                acts(&tweaked)
+            ),
+            (
+                vec![("windows.close".to_owned(), r#"{"id":4}"#.to_owned())],
+                (Vec::new(), Some("mine 3 shell")),
+                Vec::new()
+            ),
+            "(the vocabulary's act, (an overridden one's acts, what its handler said), \
+             a tweak's acts)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **Each `sol.act` answers an id of its own, counting up**, with or
+    /// without a `done`, and data that is no table reaches the command as
+    /// it is.
+    #[test]
+    fn each_sol_act_answers_an_id_of_its_own_counting_up() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-act-ids",
+            r#"sol.on("surface", function()
+                   first = sol.act("windows.close", { id = 1 })
+                   second = sol.act("windows.close", 2)
+               end)"#,
+        );
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        let acts: Vec<(u64, String)> = outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Act { attempt, data, .. } => Some((*attempt, data.render())),
+                _ => None,
+            })
+            .collect();
+        let said = |name: &str| -> u64 {
+            scripts
+                .evaluate(&format!("return tostring({name})"))
+                .parse()
+                .unwrap_or(0)
+        };
+        let (first, second) = (said("first"), said("second"));
+        assert_eq!(
+            (second > first, acts),
+            (
+                true,
+                vec![(first, r#"{"id":1}"#.to_owned()), (second, "2".to_owned())]
+            ),
+            "(the second id after the first, the commands with their ids and data)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
 

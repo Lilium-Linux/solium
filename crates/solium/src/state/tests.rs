@@ -25003,6 +25003,131 @@ end)"#,
                     "the window was placed against the reserve the scene had before"
                 );
             }
+
+            /// Queue `actions`, each with its data as JSON, on the stand-in
+            /// for surface `id`.
+            fn queue(desk: &mut Desk, id: crate::scripted::SurfaceId, actions: &[(&str, &str)]) {
+                if let Some(stand) = desk
+                    .state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    for (action, data) in actions {
+                        stand.actions.push((
+                            (*action).to_owned(),
+                            crate::json::Json::parse(data).expect("valid JSON"),
+                        ));
+                    }
+                }
+            }
+
+            /// **Two actions from one frame both reach Lua, in order**, at
+            /// the next settle (Ruling 15).
+            #[test]
+            fn two_actions_from_one_frame_both_reach_lua_in_order() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"heard = ""
+sol.on("surface", function(surface, action) heard = heard .. action .. ";"; sol.status(heard) end)"#,
+                );
+                queue(&mut desk, shell, &[("first", "null"), ("second", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(desk.state.status, "first;second;");
+            }
+
+            /// **`windows.focus` from a scene focuses the window**, through
+            /// the shipped `actions.lua` and `sol.act`.
+            #[test]
+            fn windows_focus_from_a_scene_focuses_the_window() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(r#"require("actions")"#);
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                let id = desk
+                    .state
+                    .snapshot()
+                    .windows
+                    .first()
+                    .map(|window| window.id)
+                    .expect("a window");
+                queue(
+                    &mut desk,
+                    shell,
+                    &[("windows.focus", &format!(r#"{{"id":{id}}}"#))],
+                );
+                desk.state.settle_scenes();
+                assert_eq!(keyboard_on(&desk), Some(window_id(&opened)));
+            }
+
+            /// **An action naming a window that is not there is answered
+            /// `unknown-window`**, one the compositor does not know
+            /// `unknown-action`, and one with no window's id `bad-data`, each
+            /// once its batch is applied, in order.
+            #[test]
+            fn sol_act_answers_why_it_could_not() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(reason) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                queue(
+                    &mut desk,
+                    shell,
+                    &[
+                        ("windows.close", r#"{"id":4242}"#),
+                        ("windows.fly", r#"{"id":1}"#),
+                        ("windows.maximize", r#"{"id":"1"}"#),
+                    ],
+                );
+                desk.state.settle_scenes();
+                assert_eq!(desk.state.status, "unknown-window;unknown-action;bad-data;");
+            }
+
+            /// **`done` hears that an action was done, after it was**: a
+            /// window closed from a scene starts closing, `done(true)` is
+            /// told once after that, and the client is asked once the window
+            /// has faded.
+            #[test]
+            fn sol_act_tells_done_once_the_window_was_asked_to_close() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("closing", function(id) answers = answers .. "closing;"; sol.status(answers) end)
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(ok) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                let id = desk
+                    .state
+                    .snapshot()
+                    .windows
+                    .first()
+                    .map(|window| window.id)
+                    .expect("a window");
+                queue(
+                    &mut desk,
+                    shell,
+                    &[("windows.close", &format!(r#"{{"id":{id}}}"#))],
+                );
+                desk.state.settle_scenes();
+                let heard = desk.state.status.clone();
+                let faded =
+                    desk.state.clock.now() + crate::present::CLOSING + Duration::from_millis(10);
+                desk.state.settle_closing(faded);
+                desk.pump();
+                assert_eq!(
+                    (
+                        heard.as_str(),
+                        desk.client
+                            .closes
+                            .contains(&wayland_client::Proxy::id(&opened.toplevel))
+                    ),
+                    ("closing;true;", true),
+                    "(what the listeners heard, in order, whether the client was asked to close)"
+                );
+            }
         }
     }
 

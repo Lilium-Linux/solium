@@ -130,7 +130,7 @@
 ---@field layer? sol.Layer Which layer it is drawn in. `"background"` is the default.
 ---@field on? "primary"|"every-monitor"|string|sol.Rect `"every-monitor"` (the default) draws one instance per monitor, filling it; `"primary"` one on the primary monitor; a monitor's name one there; a rect one at that rect.
 ---@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those. A function, userdata or non-finite number is left out.
----@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing, and one it held when it is declared so is dismissed; nor does such a scene hold the keyboard. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sets its `action` property, and `sol.on("surface", ...)` hears it.
+---@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing, and one it held when it is declared so is dismissed; nor does such a scene hold the keyboard. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sends actions with `Solium.send(action, data)`, and `sol.on("surface", ...)` hears them.
 ---@field reserve? { top?: integer, right?: integer, bottom?: integer, left?: integer } Logical pixels taken out of the work area on those edges of every monitor the surface is on, whatever its size or placement; never negative. A scene's own `Solium.surface.reserve.<edge>` wins for an edge it sets. A change re-flows the windows once.
 ---@field outside_click? "swallow"|"pass"|table<string, "swallow"|"pass"> What a press outside an open `Grab` of the scene does once it has dismissed it: swallowed with its release (the default), or passed on to what is under it. A table names grabs, with `default` for the rest. Any other value fails the load.
 ---@field keyboard? { bindings?: "except_claimed"|"all"|"none" } While an item of the scene holds the keyboard (`Solium.keyboard.wants`): `"except_claimed"` (the default) keeps every binding but the keys the holding item claims (`Solium.keyboard.claims`), `"all"` keeps every binding, and `"none"` gives the scene every key but the Ctrl+Alt escapes. Any other value fails the load.
@@ -279,7 +279,7 @@
 ---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
 ---| "click" # A press while a script holds input: `(x, y)`.
----| "surface" # An interactive surface set its `action`: `(name, action)`.
+---| "surface" # A hosted scene sent an action: `(surface, action, data)`, `data` a table, a value or `nil`. Every action is heard, in the order sent, in a dispatch after the one that sent it; a scene that sets an `action` string property is heard the same way, with `data` `nil`.
 ---| "direction" # `sol.focus_direction` or `sol.move_direction` was called: `(verb, dir)`, `verb` being `"focus"` or `"move"`. The layout in charge answers.
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
@@ -618,6 +618,22 @@ function sol.unplace(id) end
 ---@return nil
 function sol.close(id) end
 
+---Perform an action of the vocabulary: the same names a scene sends with
+---`Solium.send`, `windows.focus`, `windows.close`, `windows.fullscreen` and
+---`windows.maximize`, each with `{ id = <window id> }`; the last two toggle.
+---Queued like every other request, and answered by `done(ok, reason)` once
+---the compositor has acted, in a handler of its own; `reason` is
+---`"unknown-action"`, `"unknown-window"` or `"bad-data"`. Answers the
+---attempt's id, one no earlier `sol.act` answered. A
+---`workspaces.*` action is not the compositor's: the file that keeps the
+---workspaces answers it, with `actions.override` in `lua/actions.lua`.
+---@overload fun(action: "windows.focus"|"windows.close"|"windows.fullscreen"|"windows.maximize", data: { id: integer }, done?: fun(ok: boolean, reason?: string)): integer
+---@param action string
+---@param data? any
+---@param done? fun(ok: boolean, reason?: string)
+---@return integer attempt
+function sol.act(action, data, done) end
+
 ---Start a program, with its arguments as separate strings:
 ---`sol.spawn("foot", "-e", "htop")`.
 ---
@@ -704,7 +720,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))
 ---@overload fun(event: "click", handler: fun(x: number, y: number))
----@overload fun(event: "surface", handler: fun(name: string, action: string))
+---@overload fun(event: "surface", handler: fun(surface: string, action: string, data: any))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore", handler: fun())
 ---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))
@@ -729,6 +745,11 @@ sol._bindings = {}
 ---@private
 ---@type table<string, function[]>
 sol._handlers = {}
+
+---Internal: each attempt's `done`, by attempt id. Use `sol.act`.
+---@private
+---@type table<integer, fun(ok: boolean, reason?: string)>
+sol._attempts = {}
 
 ---Internal: what `sol.keep` holds, by name.
 ---@private

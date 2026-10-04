@@ -485,6 +485,13 @@ void solium_qml_scene_key(SoliumQmlScene *scene, int pressed, int qt_key, unsign
  * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
 void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene);
 
+/* The oldest action the scene queued with `Solium.send`, popped: 1 with its
+ * name and its data as `{"data": ...}` JSON (both valid until the next
+ * call), 0 when none is queued. Ruling 15.
+ * `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
+                                 const char **data_json);
+
 /* The models hosted scenes read, by number.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0

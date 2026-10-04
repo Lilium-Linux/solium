@@ -12,7 +12,9 @@ use smithay::{
 };
 
 use crate::{
+    json::Json,
     qml::hosted::{GrabReport, KeyboardReport, PointerKind, SceneKey, ScenePointer},
+    script::Command,
     scripted::{Edges, KeyPolicy, Outside, SurfaceId},
     state::{ScenePress, Solium},
 };
@@ -83,7 +85,8 @@ impl Solium {
     /// (`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`),
     /// then keyboard wants
     /// (`state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`),
-    /// and then the actions they asked for.
+    /// and then the actions they asked for
+    /// (`state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`).
     /// Called after anything that can run QML code in a dispatch -- the end
     /// of an input dispatch and a frame's settle among them -- once a
     /// declaration has been applied, and once the surfaces are placed on
@@ -119,7 +122,7 @@ impl Solium {
             }
             self.settle_grabs();
             self.settle_keyboard();
-            self.settle_surfaces();
+            self.settle_actions();
             if !self.scenes_to_settle {
                 break;
             }
@@ -328,6 +331,54 @@ impl Solium {
             },
         );
         pointer.frame(self);
+    }
+
+    /// Hand every action the scenes queued to the `surface` listeners, scene
+    /// by scene and each scene's in order, with the surface's name and the
+    /// action's data, each in a dispatch of its own (Ruling 15).
+    /// `state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`,
+    /// `state::tests::real_client::a_click_on_a_hosted_button_is_acted_on_at_its_release`.
+    pub(crate) fn settle_actions(&mut self) {
+        let mut asked = Vec::new();
+        for surface in self.surfaces.iter_mut() {
+            for (action, data) in surface.take_actions() {
+                asked.push((surface.name().to_owned(), action, data));
+            }
+        }
+        for (name, action, data) in asked {
+            let snapshot = self.snapshot();
+            let Some(mut scripts) = self.scripts.take() else {
+                return;
+            };
+            let outcome = scripts.surface_action(&name, &action, &data, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
+    }
+
+    /// One of the compositor's verbs, as the command that does it, or why it
+    /// cannot be done: an action it does not know, logged once by name, data
+    /// with no window's id, or a window that is not there (Ruling 15).
+    /// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+    /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`.
+    pub(crate) fn act(&mut self, action: &str, data: &Json) -> Result<Command, &'static str> {
+        let make: fn(u64) -> Command = match action {
+            "windows.focus" => |id| Command::Focus { id },
+            "windows.close" => |id| Command::Close { id },
+            "windows.fullscreen" => |id| Command::ToggleFullscreen { id },
+            "windows.maximize" => |id| Command::ToggleMaximize { id },
+            _ => {
+                if self.unknown_actions.insert(action.to_owned()) {
+                    tracing::warn!(action, "sol.act: no such action");
+                }
+                return Err("unknown-action");
+            }
+        };
+        let id = data.get("id").and_then(Json::as_u64).ok_or("bad-data")?;
+        if self.panes.by_script_id(id).is_none() {
+            return Err("unknown-window");
+        }
+        Ok(make(id))
     }
 
     /// Dismiss the hosted grab: its scene hears every active grab of its

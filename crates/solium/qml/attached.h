@@ -20,6 +20,8 @@
 #include <QtCore/QStringList>
 #include <QtCore/QVariant>
 #include <QtCore/QVariantMap>
+#include <QtCore/QPair>
+#include <QtQml/QJSValue>
 #include <QtQml/QQmlParserStatus>
 #include <QtQml/qqml.h>
 #include <QtQuick/QQuickItem>
@@ -264,6 +266,10 @@ struct SoliumHosting
      * the start, so a scene says what it has at its first take.
      * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     bool keyboard_dirty = true;
+    /* The actions the scene sent and the compositor has not taken yet, in
+     * order, each with its data as `{"data": ...}` JSON. Ruling 15.
+     * `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+    QList<QPair<QString, QByteArray>> actions;
 };
 
 /* What every item reads as `Solium.<name>`.
@@ -292,6 +298,11 @@ public:
      * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
+    /* `Solium.send(action, data)`: a named action with data, an object, a
+     * value or nothing, queued for the compositor, which hands it to Lua at
+     * its next settle, after every one sent before it. Ruling 15.
+     * `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+    Q_INVOKABLE void send(const QString &action, const QJSValue &data = QJSValue());
 
 signals:
     void inputChanged();

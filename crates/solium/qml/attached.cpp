@@ -6,6 +6,9 @@
 
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonValue>
 #include <QtCore/QMetaObject>
 #include <QtQuick/QQuickItem>
 
@@ -323,6 +326,29 @@ SoliumKeyboard *SoliumAttached::keyboard()
         }
     }
     return m_keyboard;
+}
+
+void SoliumAttached::send(const QString &action, const QJSValue &data)
+{
+    /* A scene that is not hosted has no surface to send from: the log says
+     * so once, and nothing is queued.
+     * `qml::hosted::tests::an_unhosted_scene_may_send_and_queues_nothing`. */
+    SoliumHosting *hosting = solium_hosting_of(m_item);
+    if (hosting == nullptr) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            qWarning("Solium.send in a scene the compositor did not host for a sol.surface "
+                     "does nothing");
+        }
+        return;
+    }
+    /* In an object, so a bare value or nothing at all is still one JSON
+     * document. `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+    const QJsonObject wrapped{
+        {QStringLiteral("data"),
+         QJsonValue::fromVariant(data.toVariant(QJSValue::ConvertJSObjects))}};
+    hosting->actions.append({action, QJsonDocument(wrapped).toJson(QJsonDocument::Compact)});
 }
 
 SoliumMonitor *SoliumAttached::monitor() const

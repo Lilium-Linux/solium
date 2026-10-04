@@ -615,16 +615,23 @@ impl Surface {
         self.instances.contains_key(&output.name())
     }
 
-    /// Whatever the scene asked for since it was last looked at.
-    ///
-    /// The same one-way channel the window frames and the tweaks panel use:
-    /// QML sets `action`, the compositor takes it and clears it, so a press is
-    /// acted on once. Asked of every monitor's instance because the press
-    /// landed on exactly one of them and this does not know which.
-    pub(crate) fn taken_action(&mut self) -> Option<String> {
-        self.instances
-            .values_mut()
-            .find_map(crate::surface::ShellSurface::taken_action)
+    /// Every action its scenes asked for since they were last looked at,
+    /// each instance's in order, the instances by their monitors' names
+    /// (Ruling 15).
+    /// `state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`,
+    /// `tests::every_instances_actions_are_taken_by_monitor_name`.
+    pub(crate) fn take_actions(&mut self) -> Vec<(String, Json)> {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_mut() {
+            return std::mem::take(&mut stand.actions);
+        }
+        let mut instances: Vec<(&String, &mut crate::surface::ShellSurface)> =
+            self.instances.iter_mut().collect();
+        instances.sort_by_key(|(monitor, _)| *monitor);
+        instances
+            .into_iter()
+            .flat_map(|(_, instance)| instance.take_actions())
+            .collect()
     }
 
     /// Where this surface goes on one monitor, if it goes there at all.
@@ -779,6 +786,8 @@ pub(crate) struct Stand {
     pub(crate) keyboard: Option<KeyboardReport>,
     /// How many times the compositor took the keyboard back from it.
     pub(crate) let_go: u32,
+    /// Actions the scene queued, taken at the next settle.
+    pub(crate) actions: Vec<(String, Json)>,
 }
 
 #[cfg(test)]
@@ -797,6 +806,7 @@ impl Stand {
             hosts: true,
             keyboard: None,
             let_go: 0,
+            actions: Vec::new(),
         }
     }
 }
@@ -1654,6 +1664,44 @@ mod tests {
                 (on(surface, &left), on(surface, &right)),
                 (1, 0),
                 "each instance must read its own monitor"
+            );
+        });
+    }
+
+    /// **Every instance's actions are taken, by monitor name**: a surface on
+    /// two monitors whose scenes both send hears both, the instance on the
+    /// monitor whose name sorts first first, whatever the monitors' order.
+    #[test]
+    fn every_instances_actions_are_taken_by_monitor_name() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let path = scene_file(
+                "solium-scripted-take-actions",
+                "Scene.qml",
+                "import QtQuick\nimport Solium\nItem {\n    Component.onCompleted: Solium.send(\"hello\", Solium.monitor.name)\n}\n",
+            );
+            let (left, _, outputs) = side_by_side("take-actions-b", "take-actions-a");
+            let mut surfaces = Surfaces::default();
+            surfaces.declare(Declaration::for_test(
+                "bar",
+                path,
+                Layer::Top,
+                On::EveryMonitor,
+            ));
+            let id = surfaces.named("bar").expect("declared");
+            let surface = surfaces.get_mut(id).expect("live");
+            surface.sync(&outputs, Some(&left));
+            let taken: Vec<(String, String)> = surface
+                .take_actions()
+                .into_iter()
+                .map(|(action, data)| (action, data.render()))
+                .collect();
+            assert_eq!(
+                taken,
+                vec![
+                    ("hello".to_owned(), r#""take-actions-a""#.to_owned()),
+                    ("hello".to_owned(), r#""take-actions-b""#.to_owned()),
+                ]
             );
         });
     }

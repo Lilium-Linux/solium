@@ -2545,6 +2545,26 @@ extern "C" void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene)
     }
 }
 
+extern "C" int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
+                                            const char **data_json)
+{
+    if (scene == nullptr || scene->hosting == nullptr || scene->hosting->actions.isEmpty()) {
+        return 0;
+    }
+    static QByteArray name;
+    static QByteArray data;
+    const auto taken = scene->hosting->actions.takeFirst();
+    name = taken.first.toUtf8();
+    data = taken.second;
+    if (action != nullptr) {
+        *action = name.constData();
+    }
+    if (data_json != nullptr) {
+        *data_json = data.constData();
+    }
+    return 1;
+}
+
 extern "C" const char *solium_qml_scene_take_string(SoliumQmlScene *scene, const char *name)
 {
     if (scene == nullptr || scene->object == nullptr) {
