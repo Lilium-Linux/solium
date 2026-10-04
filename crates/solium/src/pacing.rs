@@ -550,19 +550,20 @@ impl Counters {
         Some(Line::of(&worst, frames, missed, late, span))
     }
 
-    /// The loop went idle: the trace's waiting records are written, as late
-    /// if their GPU time has not come
-    /// (`tests::a_counted_pass_is_traced_with_its_gpu_time`); then whatever
-    /// is parked (`tests::idle_flushes_a_parked_report`), or else a report
-    /// the span's late flips made due, since a flip seen just before the
-    /// loop went idle has no pass after it to report it
+    /// The loop went idle: the trace's buffer is written out, and a record
+    /// still waiting for its GPU time keeps waiting, because nested that time
+    /// is read only as the next pass begins
+    /// (`tests::a_record_waiting_as_the_loop_goes_idle_keeps_waiting_for_its_gpu_time`);
+    /// then whatever is parked (`tests::idle_flushes_a_parked_report`), or
+    /// else a report the span's late flips made due, since a flip seen just
+    /// before the loop went idle has no pass after it to report it
     /// (`tests::a_late_flip_before_idle_is_reported_at_idle`). `now` is
     /// asked for only then, so with the knob off this reads no clock.
     fn idle(&self, now: impl FnOnce() -> Instant) -> Option<Line> {
         if let Ok(mut trace) = self.trace.try_borrow_mut()
             && let Some(trace) = trace.as_mut()
         {
-            trace.close();
+            trace.flush();
         }
         if let Some(line) = self.flush() {
             return Some(line);
@@ -571,6 +572,18 @@ impl Counters {
             return None;
         }
         self.report(now())
+    }
+
+    /// The session ended: the trace's waiting records are written, as late,
+    /// and then it goes idle for the last time
+    /// (`tests::a_counted_pass_is_traced_with_its_gpu_time`).
+    fn end(&self, now: impl FnOnce() -> Instant) -> Option<Line> {
+        if let Ok(mut trace) = self.trace.try_borrow_mut()
+            && let Some(trace) = trace.as_mut()
+        {
+            trace.close();
+        }
+        self.idle(now)
     }
 
     /// The session's totals. `tests::a_miss_is_counted_with_the_knob_off`.
@@ -1248,8 +1261,8 @@ pub(crate) fn totals() -> Totals {
 }
 
 /// One line of totals, at the end of a session: what a run with the knob off
-/// is compared by. Then the session goes idle for the last time: the trace's
-/// waiting records are written and a parked report goes, as at any idle
+/// is compared by. Then the trace's waiting records are written, as late,
+/// and a parked report goes, as at any idle
 /// (`tests::a_counted_pass_is_traced_with_its_gpu_time`,
 /// `tests::idle_flushes_a_parked_report`).
 pub(crate) fn summary() {
@@ -1261,7 +1274,7 @@ pub(crate) fn summary() {
         "pacing: render passes this session (one in which no monitor was ready to draw still counts), passes that overran the tightest monitor's frame, and vblanks a flip missed"
     );
     COUNTERS.with(|counters| {
-        if let Some(line) = counters.idle(Instant::now) {
+        if let Some(line) = counters.end(Instant::now) {
             emit(&line);
         }
     });
@@ -1517,8 +1530,8 @@ const fn knob(pacing: bool, trace: bool) -> bool {
 /// The per-pass trace: `SOLIUM_TRACE`'s file.
 ///
 /// A pass's record is written once its GPU time is in
-/// (`tests::a_pass_record_is_written_when_its_gpu_time_resolves`), sixteen
-/// passes on as late, or at idle
+/// (`tests::a_pass_record_is_written_when_its_gpu_time_resolves`), or as
+/// late sixteen passes on or when the session ends
 /// (`tests::a_pass_record_that_waits_too_long_goes_out_as_late`); a flip's
 /// when it lands (`tests::a_flip_record_is_written_at_the_vblank`).
 /// Buffered and flushed once a second, at idle and at exit, and never
@@ -1591,12 +1604,19 @@ impl Trace {
         }
     }
 
+    /// What is written goes to the file; what waits for its GPU time keeps
+    /// waiting:
+    /// `tests::a_record_waiting_as_the_loop_goes_idle_keeps_waiting_for_its_gpu_time`.
+    fn flush(&mut self) {
+        let _ = std::io::Write::flush(&mut self.out);
+    }
+
     /// Everything still waiting goes as late, and the buffer is flushed.
     fn close(&mut self) {
         while let Some((_, record)) = self.waiting.pop_front() {
             self.write(&record, None);
         }
-        let _ = std::io::Write::flush(&mut self.out);
+        self.flush();
     }
 
     fn write(&mut self, record: &str, gpu: Option<crate::gputime::Gpu>) {
@@ -2711,8 +2731,8 @@ mod tests {
 
     /// **A measured pass's record goes through the counters**: it waits from
     /// `finish_at` for `gpu_resolved`; one whose GPU time came as it began,
-    /// as a GPU that cannot time itself answers, goes with it; and the loop
-    /// going idle writes what still waits as late.
+    /// as a GPU that cannot time itself answers, goes with it; and the
+    /// session's end writes what still waits as late.
     #[test]
     fn a_counted_pass_is_traced_with_its_gpu_time() {
         let sink = Shared::default();
@@ -2738,7 +2758,7 @@ mod tests {
                 .finish_at(start, start + ms(2), true, 1, 3)
                 .is_none()
         );
-        assert!(counters.idle(|| start + ms(9)).is_none());
+        assert!(counters.end(|| start + ms(9)).is_none());
         let written: Vec<(String, String)> = sink
             .lines()
             .iter()
@@ -2754,8 +2774,52 @@ mod tests {
         assert_eq!(written, expected);
     }
 
-    /// **Through `frame`, `finish` and `flipped`, as the backends call
-    /// them**: a traced pass is stamped on CLOCK_MONOTONIC as it begins,
+    /// **A record still waiting as the loop goes idle keeps waiting for its
+    /// GPU time.** Nested, `winit.rs` reads that time only as the next pass
+    /// begins, and its loop goes idle between a 60 Hz client's frames, so a
+    /// record written at idle would read `late` on every such pass. Only the
+    /// session's end writes what still waits as late.
+    #[test]
+    fn a_record_waiting_as_the_loop_goes_idle_keeps_waiting_for_its_gpu_time() {
+        let sink = Shared::default();
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        *counters.trace.borrow_mut() = Some(Trace::new(Box::new(sink.clone()), start));
+        assert!(
+            counters
+                .finish_at(start, start + ms(2), true, 1, 1)
+                .is_none()
+        );
+        // The loop's next turn draws nothing, and reads no GPU time.
+        assert!(counters.idle(|| start + ms(3)).is_none());
+        // The next pass begins, and pass 1's time is read.
+        assert!(counters.gpu_resolved(1, timed()).is_none());
+        assert!(
+            counters
+                .finish_at(start + ms(17), start + ms(19), true, 1, 2)
+                .is_none()
+        );
+        assert!(counters.idle(|| start + ms(20)).is_none());
+        assert_eq!(sink.lines().len(), 1, "pass 2 went before its time came");
+        assert!(counters.end(|| start + ms(21)).is_none());
+        let written: Vec<(String, String)> = sink
+            .lines()
+            .iter()
+            .map(|line| {
+                (
+                    field(line, "pass").to_owned(),
+                    field(line, "gpu").to_owned(),
+                )
+            })
+            .collect();
+        let expected = [("1", "\"ok\""), ("2", "\"late\"")]
+            .map(|(pass, gpu)| (pass.to_owned(), gpu.to_owned()));
+        assert_eq!(written, expected);
+    }
+
+    /// **Through `frame`, `finish`, `flipped` and `summary`, as the
+    /// backends call them**: a traced pass is stamped on CLOCK_MONOTONIC as it begins,
     /// which is the clock a script cuts its window by, and a flip takes its
     /// monitor's name only with a trace open (`Output::name` allocates).
     #[test]
@@ -2791,7 +2855,7 @@ mod tests {
             landed,
             || "DP-1".to_owned(),
         );
-        super::idle();
+        super::summary();
         super::COUNTERS.with(|counters| *counters.trace.borrow_mut() = None);
         let lines = sink.lines();
         assert_eq!(lines.len(), 2, "{lines:?}");
