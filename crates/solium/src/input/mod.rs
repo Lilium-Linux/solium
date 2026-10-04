@@ -413,9 +413,12 @@ fn press(
 ///
 /// Whether it repeats while held is the keymap's, as every Wayland client
 /// asks it: no modifier does, AltGr and Meta among them, nor a group toggle
-/// such as `grp:alt_shift_toggle`'s, whatever Qt calls it.
+/// such as `grp:alt_shift_toggle`'s, whatever Qt calls it; and a group
+/// toggle never does, even on a key that does, as `grp:alt_space_toggle`'s
+/// is.
 /// `tests::a_held_modifier_does_not_repeat_into_the_scene`,
-/// `tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
+/// `tests::a_held_group_toggle_does_not_repeat_into_the_scene`,
+/// `tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`.
 #[expect(
     unsafe_code,
     reason = "asking smithay's xkb keymap whether a key repeats"
@@ -432,11 +435,16 @@ fn scene_key(
         _ => sym,
     };
     let code = handle.raw_code();
-    let repeats = handle.xkb().lock().is_ok_and(|held| {
-        // SAFETY: the keymap is borrowed for this one call, under the lock,
-        // and nothing of it outlives the `Xkb` it belongs to.
-        unsafe { held.keymap() }.key_repeats(code)
-    });
+    // The ISO lock, latch and group keysyms never repeat, whatever key they
+    // are on: `grp:alt_space_toggle` puts `ISO_Next_Group` on space, which
+    // the keymap says repeats.
+    // `tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`.
+    let repeats = !(0xfe01..=0xfe0f).contains(&sym.raw())
+        && handle.xkb().lock().is_ok_and(|held| {
+            // SAFETY: the keymap is borrowed for this one call, under the
+            // lock, and nothing of it outlives the `Xkb` it belongs to.
+            unsafe { held.keymap() }.key_repeats(code)
+        });
     crate::qml::hosted::SceneKey {
         pressed,
         qt_key: crate::qml::keys::qt_key(named, &xkb::keysym_to_utf8(named)),
@@ -2799,6 +2807,46 @@ mod tests {
                     (toggle, repeats),
                     (Some((SHIFT, 0x01ff_ffff, String::new())), 0),
                     "((the toggle's keycode, Qt key and text), its repeats)"
+                );
+            },
+        );
+    }
+
+    /// **A group toggle on a key that repeats does not repeat into the
+    /// scene either** (#132): with `grp:alt_space_toggle` on `us,ru` and
+    /// Russian active, space pressed with alt held is `ISO_Next_Group`, and
+    /// the keymap says space repeats, but holding it repeats nothing.
+    #[test]
+    fn a_held_group_toggle_on_space_does_not_repeat_into_the_scene() {
+        const SPACE: u32 = 65;
+        with_keymap(
+            "held-alt-space-toggle",
+            "us,ru",
+            Some("grp:alt_space_toggle"),
+            1,
+            "",
+            |state| {
+                holding(state, &[], KeyPolicy::ExceptClaimed);
+                for code in [ALT_L, SPACE] {
+                    super::keyboard(
+                        state,
+                        Key {
+                            code,
+                            state: KeyState::Pressed,
+                        },
+                    );
+                }
+                let toggle = state
+                    .scene_keys
+                    .last()
+                    .map(|key| (key.code, key.text.clone()));
+                let late = state.clock.now() + std::time::Duration::from_secs(5);
+                state.repeat_scene_key(late);
+                let repeats = state.scene_keys.iter().filter(|key| key.autorepeat).count();
+                assert_eq!(
+                    (toggle, repeats),
+                    (Some((SPACE, String::new())), 0),
+                    "((the toggle's keycode and text), its repeats)"
                 );
             },
         );

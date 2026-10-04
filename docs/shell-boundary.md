@@ -327,7 +327,10 @@ and a key held repeats at the keyboard's own rate
 unless your keymap says it does not, as it says of a modifier, AltGr among
 them, and of a group toggle such as `grp:alt_shift_toggle`
 (`input::tests::a_held_modifier_does_not_repeat_into_the_scene`,
-`input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`).
+`input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`). A group
+toggle never repeats, even on a key that does, as `grp:alt_space_toggle`'s
+is
+(`input::tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`).
 The compositor's bindings keep working, `super+q` on Russian among them,
 except the keys the item claims, which are the field's
 (`input::tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,
