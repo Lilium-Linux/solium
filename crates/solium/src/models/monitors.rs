@@ -10,17 +10,29 @@ use crate::json::Json;
 use crate::state::Solium;
 
 /// One row per monitor, in the order the compositor holds them: its name, its
-/// whole and work areas in the global space, its scale, its transform, and
-/// whether it is the primary one.
-/// `tests::a_monitor_row_carries_its_whole_and_work_areas`.
+/// whole and work areas in the global space, its scale, its transform,
+/// whether it is the primary one, what is reserved on each edge, whether it
+/// is on, whether the pointer is on it and whether it is the active one.
+/// `tests::a_monitor_row_carries_its_whole_and_work_areas`,
+/// `tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`.
 pub(crate) fn rows(state: &Solium) -> Vec<Row> {
     let primary = state.primary_output();
+    let active = state.active_output();
+    let pointer = state
+        .seat
+        .get_pointer()
+        .map(|pointer| pointer.current_location());
     state
         .space
         .outputs()
         .filter_map(|output| {
             let whole = state.space.output_geometry(output)?;
             let area = state.work_area_on(output).unwrap_or(whole);
+            let power = if state.power.is_off(output) {
+                "off"
+            } else {
+                "on"
+            };
             Some(Row {
                 key: output.name(),
                 values: BTreeMap::from([
@@ -36,10 +48,36 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
                         Json::Text(format!("{:?}", output.current_transform()).to_lowercase()),
                     ),
                     ("primary", Json::Bool(primary.as_ref() == Some(output))),
+                    ("reserved", reserved(whole, area)),
+                    ("power", Json::Text(power.to_owned())),
+                    (
+                        "pointer",
+                        Json::Bool(pointer.is_some_and(|at| whole.to_f64().contains(at))),
+                    ),
+                    ("active", Json::Bool(active.as_ref() == Some(output))),
                 ]),
             })
         })
         .collect()
+}
+
+/// What the work area lost on each edge: layer-shell zones and hosted
+/// reserves together.
+/// `tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`.
+fn reserved(whole: Rectangle<i32, Logical>, area: Rectangle<i32, Logical>) -> Json {
+    let edge = |value: i32| Json::Number(f64::from(value));
+    Json::Object(BTreeMap::from([
+        ("top".to_owned(), edge(area.loc.y - whole.loc.y)),
+        ("left".to_owned(), edge(area.loc.x - whole.loc.x)),
+        (
+            "bottom".to_owned(),
+            edge((whole.loc.y + whole.size.h) - (area.loc.y + area.size.h)),
+        ),
+        (
+            "right".to_owned(),
+            edge((whole.loc.x + whole.size.w) - (area.loc.x + area.size.w)),
+        ),
+    ]))
 }
 
 /// A rectangle as QML's `rect` reads it: `x`, `y`, `width` and `height`.
@@ -112,6 +150,59 @@ mod tests {
             Some(&Json::Bool(true)),
             "the only monitor is the primary one"
         );
+    }
+
+    /// **A row says what is reserved on each edge, whether it is on, and
+    /// whether the pointer is on it.**
+    #[test]
+    fn a_monitor_row_says_what_is_reserved_and_where_the_pointer_is() {
+        let display = Display::<Solium>::new().expect("a test display");
+        let mut state = Solium::new(display.handle());
+        let output = Output::new(
+            "rows-reserved".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "solium".to_owned(),
+                model: "rows".to_owned(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(Scale::Fractional(1.0)),
+            None,
+        );
+        state.space.map_output(&output, (0, 0));
+        let mut declared = crate::scripted::Declaration::for_test(
+            "bar",
+            std::path::PathBuf::from("/nonexistent/rows.qml"),
+            crate::scripted::Layer::Top,
+            crate::scripted::On::EveryMonitor,
+        );
+        declared.reserve = crate::scripted::Edges {
+            bottom: 48,
+            ..Default::default()
+        };
+        state.declare_surface(declared);
+
+        let rows = super::rows(&state);
+        let [row] = rows.as_slice() else {
+            panic!("one monitor, one row: {rows:?}")
+        };
+        let reserved = row.values.get("reserved").expect("a reserved role");
+        assert_eq!(reserved.get("bottom"), Some(&Json::Number(48.0)));
+        assert_eq!(reserved.get("top"), Some(&Json::Number(0.0)));
+        assert_eq!(row.values.get("power"), Some(&Json::Text("on".to_owned())));
+        assert_eq!(
+            row.values.get("pointer"),
+            Some(&Json::Bool(true)),
+            "the pointer starts at 0,0, on this monitor"
+        );
+        assert_eq!(row.values.get("active"), Some(&Json::Bool(true)));
     }
 
     /// **A turned monitor's `transform` is Smithay's name in lower case**, as

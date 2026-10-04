@@ -12,7 +12,7 @@ the line, and it is not where a Wayland tutorial would put it.
   file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
   The shipped configuration names none.
 - A shell is QML written against Solium's own API: `import Solium` for
-  `Theme`, `Keyboard`, `Grab` and the attached `Solium` object
+  `Theme`, `Keyboard`, `Monitors`, `Grab` and the attached `Solium` object
   (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
   `Solium.keyboard`), and `Solium.send` for what it asks Lua to do
   ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
@@ -383,11 +383,11 @@ same clock, so one beside an animation nothing draws still fires.
 
 **The `Solium` QML module.** `Theme` above all: the colours, fonts and
 metrics the frames are drawn with. Everything `import Solium` brings is
-written unqualified, as `Theme` is: the singletons `Theme` and `Keyboard`
-("The keyboard, live", below); the type `Grab` ("Popups that hold the
-pointer", above); the pane-style types `PaneStyle` and `Layer`, and the
-keyboard pill's `KeyboardPill` and `KeyboardPillLayer` (the
-[panes README](../crates/solium/qml/panes/README.md)); and the attached
+written unqualified, as `Theme` is: the singletons `Theme`, `Keyboard`
+("The keyboard, live", below) and `Monitors` ("Its monitor, live", below); the
+type `Grab` ("Popups that hold the pointer", above); the pane-style types
+`PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
+`KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
 `Solium` object, which any item can read, with exactly four members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
@@ -428,6 +428,15 @@ A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
 `"_180"`, `"_270"`, `"flipped"`, `"flipped90"`, `"flipped180"` or
 `"flipped270"`, and not `"90"` or `"flipped-90"` as `sol.monitors{ ... }` takes
 it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smithay_does`).
+`Monitors` is every monitor, as a list model with the same roles and a
+`count`, and `Monitors.get(name)` one of them; a changed value is one
+`dataChanged` for that role alone
+(`qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`).
+Rows also say what is `reserved` on each edge (`top`, `right`, `bottom` and
+`left`: what the work area lost there, layer-shell zones and hosted reserves
+together), whether the monitor's `power` is `"on"` or `"off"`, whether the
+`pointer` is on it and whether it is the `active` one, the monitor in front of
+you (`models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
@@ -560,10 +569,10 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 - **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
   field copy and paste within the compositor's own Qt: what a window copied
   cannot be pasted into it, nor the other way round.
-- **No window list, no workspaces, no other monitors, and no icons.**
-  Nothing tells a hosted scene which windows or workspaces exist, and a scene
-  reads its own monitor as `Solium.monitor` and has no list of the others
-  ([#166](https://github.com/Lilium-Linux/solium/issues/166)). There is no
+- **No window list, no workspaces, and no icons.**
+  Nothing tells a hosted scene which windows or workspaces exist
+  ([#166](https://github.com/Lilium-Linux/solium/issues/166)); it has only
+  the monitors, as `Solium.monitor` and `Monitors`. There is no
   `image://` provider for the icon theme. Driving the compositor goes through
   `Solium.send` and Lua.
 - **No touch.** A scene takes no touch: a tap where it takes a press triggers

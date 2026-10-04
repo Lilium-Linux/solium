@@ -2321,6 +2321,59 @@ pub(crate) mod tests {
         });
     }
 
+    /// **`Monitors` lists every published monitor, `get` answers by name, and
+    /// a changed value is one `dataChanged` for that role only** (Ruling 17).
+    #[test]
+    fn the_monitors_model_lists_every_row_and_changes_one_role_at_a_time() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-monitors",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int count: Monitors.count
+                    readonly property int widthOfB: Monitors.get("model-b").area.width
+                    property int changedRoles: -1
+                    Connections {
+                        target: Monitors
+                        function onDataChanged(topLeft, bottomRight, roles) { changedRoles = roles.length }
+                    }
+                }
+                "#,
+                "model-a",
+            );
+            let before = vec![
+                monitor_row("model-a", 1920, 1.0),
+                monitor_row("model-b", 1600, 1.0),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &before))
+            ));
+            assert!(scene.get_int("count") >= 2);
+            assert_eq!(scene.get_int("widthOfB"), 1600);
+            let after = vec![
+                monitor_row("model-a", 1920, 1.0),
+                monitor_row("model-b", 1500, 1.0),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&before, &after))
+            ));
+            assert_eq!(
+                (scene.get_int("widthOfB"), scene.get_int("changedRoles")),
+                (1500, 1),
+                "one value changed, so one role"
+            );
+            let _ = super::apply_rows(super::Model::Monitors, &render(&diff(&after, &[])));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
     /// **A batch that does not match the rows held is refused**, and so is
     /// text that is not a batch, so a publish that was not taken is sent
     /// again rather than recorded as taken.

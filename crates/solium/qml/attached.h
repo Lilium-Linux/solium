@@ -56,10 +56,14 @@ public:
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 QRectF solium_rect(const QVariant &value);
 
-/* A monitor's row: what `Solium.monitor` is. Its name, its whole and work
- * areas in the global space, its scale, its transform and whether it is the
- * primary monitor, all announced by one `changed` per batch.
- * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
+/* A monitor's row: what `Solium.monitor` is, and one row of `Monitors`. Its
+ * name, its whole and work areas in the global space, its scale, its
+ * transform, whether it is the primary monitor, what is reserved on each
+ * edge, its power, whether the pointer is on it and whether it is the active
+ * one, all announced by one `changed` per batch.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`,
+ * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`,
+ * `models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`. */
 class SoliumMonitor : public SoliumRow
 {
     Q_OBJECT
@@ -71,6 +75,10 @@ class SoliumMonitor : public SoliumRow
     Q_PROPERTY(double scale READ scale NOTIFY changed)
     Q_PROPERTY(QString transform READ transform NOTIFY changed)
     Q_PROPERTY(bool primary READ primary NOTIFY changed)
+    Q_PROPERTY(QVariantMap reserved READ reserved NOTIFY changed)
+    Q_PROPERTY(QString power READ power NOTIFY changed)
+    Q_PROPERTY(bool pointer READ pointer NOTIFY changed)
+    Q_PROPERTY(bool active READ active NOTIFY changed)
 public:
     using SoliumRow::SoliumRow;
     bool isPresent() const { return present; }
@@ -80,6 +88,10 @@ public:
     double scale() const { return value("scale").toDouble(); }
     QString transform() const { return value("transform").toString(); }
     bool primary() const { return value("primary").toBool(); }
+    QVariantMap reserved() const { return value("reserved").toMap(); }
+    QString power() const { return value("power").toString(); }
+    bool pointer() const { return value("pointer").toBool(); }
+    bool active() const { return value("active").toBool(); }
     void announce() override { emit changed(); }
 signals:
     void changed();

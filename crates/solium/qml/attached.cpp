@@ -570,4 +570,8 @@ void solium_qml_register_types()
     /* `Keyboard`, unqualified like `Theme`, in every scene.
      * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`. */
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Keyboard", solium_keyboard());
+    /* The models, as singletons, each the one store Rust publishes into.
+     * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`. */
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Monitors",
+                                 solium_rows(SOLIUM_QML_ROWS_MONITORS));
 }
