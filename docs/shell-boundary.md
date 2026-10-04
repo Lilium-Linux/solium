@@ -12,7 +12,8 @@ the line, and it is not where a Wayland tutorial would put it.
   file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
   The shipped configuration names none.
 - A shell is QML written against Solium's own API: `import Solium` for
-  `Theme`, `Keyboard`, `Monitors`, `Grab` and the attached `Solium` object
+  `Theme`, `Keyboard`, `Monitors`, `Windows`, `WindowList`, `Grab` and the
+  attached `Solium` object
   (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
   `Solium.keyboard`), and `Solium.send` for what it asks Lua to do
   ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
@@ -384,8 +385,9 @@ same clock, so one beside an animation nothing draws still fires.
 **The `Solium` QML module.** `Theme` above all: the colours, fonts and
 metrics the frames are drawn with. Everything `import Solium` brings is
 written unqualified, as `Theme` is: the singletons `Theme`, `Keyboard`
-("The keyboard, live", below) and `Monitors` ("Its monitor, live", below); the
-type `Grab` ("Popups that hold the pointer", above); the pane-style types
+("The keyboard, live", below), `Monitors` ("Its monitor, live", below) and
+`Windows` ("Windows, live", below); the types `Grab` ("Popups that hold the
+pointer", above) and `WindowList` ("Windows, live"); the pane-style types
 `PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
 `KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
 `Solium` object, which any item can read, with exactly four members:
@@ -397,7 +399,9 @@ below); and `Solium.keyboard.wants` and `claims` (above)
 Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
 internal, and the row types have no name, so a shell's own `Monitor.qml` is
 not shadowed
-(`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`).
+(`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`),
+and `Window` is still Qt Quick's in a scene that imports both
+(`qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`).
 A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
 override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
@@ -437,6 +441,34 @@ Rows also say what is `reserved` on each edge (`top`, `right`, `bottom` and
 together), whether the monitor's `power` is `"on"` or `"off"`, whether the
 `pointer` is on it and whether it is the `active` one, the monitor in front of
 you (`models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`).
+
+**Windows, live.** `Windows` is every window, a list model built from the
+compositor's own panes and updated in place once per frame: `id`, `title`,
+`appId`, `pid`, `xwayland`, `monitor`, `workspace`, `focused`, `focusOrder`
+(0 is the most recently focused, and a window that closes leaves no gap),
+`urgent` (it asked for attention nobody could see, until it is focused),
+`fullscreen` and `maximized` (as its application last agreed to), `modal`,
+`parent`, `state` (`loading` from the click, `shown`, `closing`) and
+`onStage`
+(`state::tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
+`state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+`state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`,
+`state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`,
+`state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_once_its_client_commits_it`).
+A window is listed from the moment it is launched, before its application
+draws, unless `loading.reserves_a_slot` is off; until then it has no `pid`,
+which reads `-1`
+(`state::tests::real_client::reflow_on_close::hosted::a_window_still_loading_is_listed_as_loading`).
+`workspace` reads `""`: nothing declares workspaces yet
+([#166](https://github.com/Lilium-Linux/solium/issues/166)).
+`WindowList { monitor: Solium.monitor.name; sort: "mru" }` is a filtered,
+sorted view, never reset: `monitor`, `workspace`, `app` and `onStage` filter,
+an empty one (or `onStage` left unset) keeping every window, and `sort` is
+`""`, the order windows opened, or `"mru"`, the most recently focused first.
+`Windows.focused` is never null and follows focus; `Windows.get(id)` is one
+window's row, which reads `valid: false` once the window has gone. Rows say
+where a window lives, not where it is drawn this frame
+(`qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
@@ -575,12 +607,12 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 - **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
   field copy and paste within the compositor's own Qt: what a window copied
   cannot be pasted into it, nor the other way round.
-- **No window list, no workspaces, and no icons.**
-  Nothing tells a hosted scene which windows or workspaces exist
-  ([#166](https://github.com/Lilium-Linux/solium/issues/166)); it has only
-  the monitors, as `Solium.monitor` and `Monitors`. There is no
-  `image://` provider for the icon theme. Driving the compositor goes through
-  `Solium.send` and Lua.
+- **No workspaces, and no icons.**
+  Nothing tells a hosted scene which workspaces exist
+  ([#166](https://github.com/Lilium-Linux/solium/issues/166)); it has the
+  monitors and the windows, as `Solium.monitor`, `Monitors` and `Windows`.
+  There is no `image://` provider for the icon theme. Driving the compositor
+  goes through `Solium.send` and Lua.
 - **No touch.** A scene takes no touch: a tap where it takes a press triggers
   nothing there, and neither reaches nor focuses the window under it;
   elsewhere a touch reaches the window under the shell, as the pointer would

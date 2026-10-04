@@ -188,7 +188,7 @@ The Quickshell compatibility layer was removed
 programs that layer's `Process` started, was closed as superseded by it. What
 is left for a daily desktop is
 [#166](https://github.com/Lilium-Linux/solium/issues/166): a hosted shell
-has no window list and sees no workspaces. The epic also still holds
+sees its windows and monitors, and no workspaces yet. The epic also still holds
 [#167](https://github.com/Lilium-Linux/solium/issues/167), the services a
 shell shows (audio, notifications, media, battery, network, Bluetooth, the
 tray and the list of applications), which was written against the layer that

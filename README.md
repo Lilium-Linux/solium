@@ -28,8 +28,8 @@ It is being readied for daily use, and the daily-driving trial that decides
 whether it is ready has not happened yet. What stands in the way is the
 [`daily-drive` label][daily-drive], and the honest reasons are specific:
 
-- A hosted shell is not yet a whole desktop ([#169]): it sees no windows or
-  workspaces ([#166]).
+- A hosted shell is not yet a whole desktop ([#169]): it sees no workspaces
+  yet ([#166]).
 - Suspend and resume have never been tested ([#64]), and a session on the
   hardware sometimes starts with no input devices and stops itself ([#48]).
 - Nothing has run unattended for hours on the hardware ([#65]).
