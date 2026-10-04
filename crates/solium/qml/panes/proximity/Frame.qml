@@ -25,11 +25,13 @@ Item {
     property string action: ""
     property string hovered: ""
 
+    // Opaque at rest too, in the theme's edge greys: drawn see-through, the
+    // hairline took the colour of whatever was behind the window
+    // (`tests/scenarios/pane-proximity-drawn.lua`).
     Rectangle {
         anchors.fill: parent
         color: "transparent"
         radius: 0
-        opacity: frame.pointerInside ? 1.0 : 0.45
         border {
             width: frame.pointerInside ? frame.insetTop : 1
             color: frame.pointerInside
@@ -37,10 +39,9 @@ Item {
                    : (frame.focused ? Theme.edge : Theme.edgeInactive)
         }
 
-        // All three at once, and slowly enough to read as the window noticing
-        // you rather than as a flicker.
+        // Both at once, and slowly enough to read as the window noticing you
+        // rather than as a flicker.
         Behavior on border.width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
         Behavior on border.color { ColorAnimation { duration: 160 } }
-        Behavior on opacity { NumberAnimation { duration: 160 } }
     }
 }
