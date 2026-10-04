@@ -10,7 +10,9 @@
 //! of names known to leak. Two of the names a child was measured inheriting
 //! are written by sdl2-compat's constructor, which no Solium code calls, and
 //! the next library can add more:
-//! `tests::a_spawned_program_gets_the_environment_solium_started_with`. The
+//! `tests::a_spawned_program_gets_the_environment_solium_started_with`. One
+//! name is left out of it: `SOLIUM_TRACE`, so a Solium started inside a traced
+//! one does not write over its trace (the same test). The
 //! descriptors are all marked close-on-exec in the child, rather than chased
 //! one by one in the compositor:
 //! `tests::a_spawned_program_holds_no_descriptor_beyond_stdio`.
@@ -37,14 +39,22 @@ fn started_with() -> &'static [(OsString, OsString)] {
     STARTED_WITH.get_or_init(|| std::env::vars_os().collect())
 }
 
+/// What a child is not given: the trace's path, which a Solium started inside
+/// this one would write over.
+/// `tests::a_spawned_program_gets_the_environment_solium_started_with`.
+const NOT_PASSED_ON: &str = "SOLIUM_TRACE";
+
 /// A program to start as a child of this compositor: with the environment
-/// Solium was started with, and every descriptor above stdio closed when it
-/// executes.
+/// Solium was started with, [`NOT_PASSED_ON`] aside, and every descriptor
+/// above stdio closed when it executes.
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
-    command
-        .env_clear()
-        .envs(started_with().iter().map(|(name, value)| (name, value)));
+    command.env_clear().envs(
+        started_with()
+            .iter()
+            .filter(|(name, _)| name != NOT_PASSED_ON)
+            .map(|(name, value)| (name, value)),
+    );
     // SAFETY: the hook runs in the child, between fork and exec, where only
     // async-signal-safe calls may be made. It makes one system call, reads
     // errno and allocates nothing.
@@ -270,6 +280,9 @@ mod tests {
             .env("QT_IM_MODULE", INPUT_METHOD)
             .env("QT_IM_MODULES", INPUT_METHOD)
             .env(USERS, "kept")
+            // A trace of the user's, in a directory that does not exist, so
+            // the child itself can never write it.
+            .env(NOT_PASSED_ON, directory.join("trace/trace.jsonl"))
             .env_remove("RUST_LOG")
             .stdin(Stdio::null())
             .output()
@@ -312,7 +325,8 @@ mod tests {
     /// Inherited, `QT_QPA_PLATFORM=offscreen` or `eglfs` gives a Qt program no
     /// window at all, and on the GPU host that is every Qt program (#175). A
     /// user's own `QT_QPA_PLATFORM`, set before Solium started, is theirs and
-    /// is kept.
+    /// is kept. `SOLIUM_TRACE` is not: a Solium started from a terminal
+    /// inside a traced one would open the same file and write over it.
     #[test]
     fn a_spawned_program_gets_the_environment_solium_started_with() {
         let given = started_in("spawn", "environment");
@@ -332,6 +346,11 @@ mod tests {
             "the child gets the user's own QT_QPA_PLATFORM, not the host's"
         );
         assert_eq!(value(USERS), Some("kept"), "and the rest of theirs");
+        assert_eq!(
+            value("SOLIUM_TRACE"),
+            None,
+            "but not the trace's path, which a Solium it starts would write over"
+        );
         // Rules out a child given nothing but the snapshot.
         assert_eq!(
             value("WAYLAND_DISPLAY"),

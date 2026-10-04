@@ -254,8 +254,10 @@ SOLIUM_TRACE=<path>
     Write one JSON line per pass (`drew` 0 for one in which no monitor was
     ready to draw), and one per page flip, to `<path>`, and turn
     `SOLIUM_PACING` on. Buffered and written once a second; put it on
-    `$XDG_RUNTIME_DIR`. `dev/pacing-summary.py` reads it; the fields are in
-    `dev/README.md`, under *Measuring frame pacing on a TTY*.
+    `$XDG_RUNTIME_DIR`. Not passed on to the programs Solium starts, so a
+    Solium started inside a traced one does not write over its file.
+    `dev/pacing-summary.py` reads it; the fields are in `dev/README.md`,
+    under *Measuring frame pacing on a TTY*.
 
 SOLIUM_RESIZE_TRACE=<file>
     Append a per-frame trace of every resize drag to `<file>`.
