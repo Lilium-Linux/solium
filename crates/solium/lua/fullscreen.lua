@@ -12,12 +12,21 @@
 -- change instant, which is what `{ duration = 0 }` says out loud below.
 -- Played, with Russian live, by `tests/scenarios/fullscreen-glides.lua`,
 -- `fullscreen-instant.lua`, `fullscreen-animate-false.lua`,
--- `maximize-animate-false.lua`, `fullscreen-and-maximize-timed-apart.lua` and
--- `fullscreen-tiled.lua`.
+-- `maximize-animate-false.lua`, `fullscreen-animate-true.lua`,
+-- `fullscreen-and-maximize-timed-apart.lua` and `fullscreen-tiled.lua`.
 
 local config = require("config")
 
 local INSTANT = { duration = 0 }
+
+-- What config.lua ships as each `animate`, for `animate = true`: the merge
+-- puts `true` where the shipped motion was, and `true` is what turns the
+-- animation back on after `false`, not what turns it off.
+-- `tests/scenarios/fullscreen-animate-true.lua`.
+local SHIPPED = {
+    fullscreen = { duration = 260, easing = "outCubic" },
+    maximize = { duration = 220, easing = "outCubic" },
+}
 
 -- Whether `app_id` is one of `names`.
 local function listed(names, app_id)
@@ -33,10 +42,18 @@ local function listed(names, app_id)
 end
 
 -- The motion window `id` changes with under `settings`, which is
--- `config.fullscreen` or `config.maximize`: its `animate`, unless that is
--- `false` or the application is on its `instant` list.
-local function motion(settings, id)
-    if type(settings) ~= "table" or type(settings.animate) ~= "table" then
+-- `config.fullscreen` or `config.maximize`, shipped as `shipped`: its
+-- `animate`, unless that is `false` or the application is on its `instant`
+-- list.
+local function motion(settings, shipped, id)
+    if type(settings) ~= "table" then
+        return INSTANT
+    end
+    local animate = settings.animate
+    if animate == true then
+        animate = shipped
+    end
+    if type(animate) ~= "table" then
         return INSTANT
     end
     local instant = type(settings.instant) == "table" and settings.instant.app_id or nil
@@ -45,13 +62,13 @@ local function motion(settings, id)
             return INSTANT
         end
     end
-    return settings.animate
+    return animate
 end
 
 sol.on("fullscreen", function(id)
-    sol.animate(motion(config.fullscreen, id))
+    sol.animate(motion(config.fullscreen, SHIPPED.fullscreen, id))
 end)
 
 sol.on("maximize", function(id)
-    sol.animate(motion(config.maximize, id))
+    sol.animate(motion(config.maximize, SHIPPED.maximize, id))
 end)
