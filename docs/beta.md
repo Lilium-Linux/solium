@@ -2,9 +2,8 @@
 
 **Written 2026-09-07. Revised 2026-09-18**, after the first day of using it
 for real work rather than developing it, **and again 2026-09-30, and again
-2026-10-04.** Where the
-compositor stands, what has to be true before strangers run it, and the order
-to do it in.
+2026-10-04.** Where the compositor stands, what has to be true before
+strangers run it, and the order to do it in.
 
 The first version gated on *protocols* and *platforms* — multi-monitor, HiDPI,
 screencopy, session lock — and all of it is done. The 2026-09-18 revision found

@@ -24,11 +24,11 @@ Everything the shipped layers draw with -- colours, fonts, spacing -- comes
 from `Solium.Theme`, the same singleton the loading window reads, and a hosted
 shell that imports `Solium` can read it too. The fallback pointer and the
 default wallpaper do not: their colours are fixed. Nor, in part, does the
-keyboard pill: its capsule is `Theme.accent`, but its glyph and label are
-fixed white and its shadow fixed black. A `Solium/Theme.qml` of
-your own in `~/.config/solium/qml/` is meant to restyle all of them without
-touching anything that ships, and does not yet, because the shipped module is
-found first ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
+keyboard pill: its capsule is `Theme.accent`, but its glyph and label are fixed
+white and its shadow fixed black. A `Solium/Theme.qml` of your own in
+`~/.config/solium/qml/` is meant to restyle all of them without touching
+anything that ships, and does not yet, because the shipped module is found
+first ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
 
 ## The manifest
 

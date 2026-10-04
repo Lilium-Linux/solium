@@ -487,11 +487,11 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
   field copy and paste within the compositor's own Qt: what a window copied
   cannot be pasted into it, nor the other way round.
 - **No window list, no workspaces, no other monitors, and no icons.**
-  Nothing tells a hosted scene which windows or workspaces exist; a scene
-  reads its own monitor as `Solium.monitor` and has no list of the others; and
-  there is no `image://` provider for the icon theme
-  ([#166](https://github.com/Lilium-Linux/solium/issues/166)). Driving the
-  compositor goes through `action` and Lua.
+  Nothing tells a hosted scene which windows or workspaces exist, and a scene
+  reads its own monitor as `Solium.monitor` and has no list of the others
+  ([#166](https://github.com/Lilium-Linux/solium/issues/166)). There is no
+  `image://` provider for the icon theme. Driving the compositor goes through
+  `action` and Lua.
 - **No touch.** A scene takes no touch: a tap where it takes a press triggers
   nothing there, and neither reaches nor focuses the window under it;
   elsewhere a touch reaches the window under the shell, as the pointer would
