@@ -244,7 +244,8 @@ struct Counters {
     /// Vblanks a flip missed in it.
     /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
     late: Cell<u64>,
-    /// The worst of those.
+    /// The slowest pass in the span, missed or not:
+    /// `tests::a_late_flip_makes_a_report_due_without_a_cpu_miss`.
     worst: RefCell<Option<Slow>>,
     /// When the last report was made, if there has been one.
     reported: Cell<Option<Instant>>,
