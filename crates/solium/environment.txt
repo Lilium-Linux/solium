@@ -209,8 +209,14 @@ SOLIUM_MEMDIAG
 
 SOLIUM_PACING
     Set to anything, say where a frame's time went on the frames that took
-    longer than the monitor's frame interval. Misses are counted whether or
-    not this is set, and every session ends with one `pacing` line of totals.
+    longer than the monitor's frame interval: each phase on the CPU, how many
+    windows were captured (`captures`), and the GPU's time for the pass
+    (`gpu`, `gpu_us`, and `gpu_prep_us` for the captures), which is read a few
+    passes later, so a line waits up to eight passes for it and goes without
+    it (`gpu="late"`) after that. Nested, only the captures and, with several
+    monitors, each monitor are timed on the GPU, not the window's own draw.
+    Misses are counted whether or not this is set, and every session ends
+    with one `pacing` line of totals.
 
 SOLIUM_FENCE_WAIT=<on|off>
     `off` (or `0`, `no`, `skip`) drops a window capture's fence instead of

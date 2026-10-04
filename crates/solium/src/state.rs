@@ -589,6 +589,10 @@ pub(crate) struct Solium {
     /// not something a client binds.
     pub(crate) programs: crate::pass::Programs,
 
+    /// GPU time per pass, only while pacing is on: `gputime.rs`. On the state
+    /// rather than the backend so a capture can time itself (Ruling 5).
+    pub(crate) timer: Option<crate::gputime::Timer>,
+
     /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
     ///
     /// The global itself is created by whichever backend has a renderer, since
@@ -1047,6 +1051,7 @@ impl Solium {
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
             programs: crate::pass::Programs::default(),
+            timer: None,
             textures: None,
             focusing: false,
             closing: None,

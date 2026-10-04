@@ -521,6 +521,8 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 let owed = state.screens.iter().any(|screen| screen.owed);
                 if state.solium.redraw || state.animating || owed {
                     state.render();
+                } else {
+                    state.idle();
                 }
             }
             DrmEvent::Error(err) => tracing::error!(?err, "DRM error"),
@@ -1182,7 +1184,16 @@ impl State {
         let egl = unsafe { EGLDisplay::new(gbm.clone()) }.context("creating the EGL display")?;
         let context = EGLContext::new(&egl).context("creating the EGL context")?;
         #[expect(unsafe_code, reason = "GlesRenderer::new is unsafe by contract")]
-        let renderer = unsafe { GlesRenderer::new(context) }.context("creating the renderer")?;
+        let mut renderer =
+            unsafe { GlesRenderer::new(context) }.context("creating the renderer")?;
+        if crate::pacing::enabled() {
+            let timer = crate::gputime::Timer::new(&mut renderer);
+            tracing::info!(
+                supported = timer.supported(),
+                "pacing: GPU time per pass, from GL_EXT_disjoint_timer_query"
+            );
+            self.solium.timer = Some(timer);
+        }
         // Hardware buffer sharing, through `zwp_linux_dmabuf_v1` and not
         // through `wl_drm`.
         //
@@ -1316,6 +1327,13 @@ impl State {
         // itself and its miss (`pacing::tests::a_miss_is_counted_with_the_knob_off`);
         // see `pacing.rs`, which argues that trade at 260 Hz.
         let pace = crate::pacing::frame();
+        // GPU time, read passes later: `gputime::tests::a_pass_is_read_three_passes_later_and_never_waited_for`.
+        if let Some(timer) = self.solium.timer.as_mut() {
+            timer.begin_pass(renderer, pace.serial());
+            for (pass, gpu) in timer.take_resolved() {
+                crate::pacing::gpu_resolved(pass, gpu);
+            }
+        }
         // The tightest interval among the monitors being *driven*, not among
         // the ones this pass gets to draw. One event loop draws both screens,
         // so a pass that overruns has held every monitor off for the whole of
@@ -1437,6 +1455,12 @@ impl State {
             // so the mark brackets the call rather than a scope of ours, and is
             // dropped before the result is matched on. See
             // `qml::no_frame_in_flight`.
+            let region = crate::gputime::Region::Output(u8::try_from(index).unwrap_or(u8::MAX));
+            let stamp = self
+                .solium
+                .timer
+                .as_mut()
+                .map(|timer| timer.open(renderer, region));
             let frame = crate::qml::frame_in_flight();
             let gles = crate::pacing::span(crate::pacing::Phase::Gles);
             let rendered = screen.compositor.render_frame(
@@ -1447,6 +1471,9 @@ impl State {
             );
             drop(gles);
             drop(frame);
+            if let (Some(timer), Some(stamp)) = (self.solium.timer.as_mut(), stamp) {
+                timer.close(renderer, stamp);
+            }
             pace.drew();
             // The atomic commit, measured apart from the drawing it commits.
             // They fail and stall for completely unrelated reasons -- one is
@@ -1485,6 +1512,20 @@ impl State {
             self.animating = self.solium.settle(now);
         }
         pace.finish(self.solium.panes.len());
+    }
+
+    /// A flip landed and nothing is to be drawn: what was measured has
+    /// finished on the GPU, so its time is read and a report waiting for it
+    /// goes. `pacing::tests::idle_flushes_a_parked_report`.
+    fn idle(&mut self) {
+        if let (Some(timer), Some(renderer)) = (self.solium.timer.as_mut(), self.renderer.as_mut())
+        {
+            timer.idle(renderer);
+            for (pass, gpu) in timer.take_resolved() {
+                crate::pacing::gpu_resolved(pass, gpu);
+            }
+        }
+        crate::pacing::idle();
     }
 
     /// One frame of black on screen `index`, on its way off.

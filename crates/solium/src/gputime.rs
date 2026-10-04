@@ -3,10 +3,6 @@
     reason = "GL_EXT_disjoint_timer_query's two entry points are loaded through \
               egl::get_proc_address and called through function pointers"
 )]
-#![expect(
-    dead_code,
-    reason = "nothing reads the GPU timer until Task 4 wires it into the backends"
-)]
 
 //! How long the GPU spent on a pass, read passes later and never waited for.
 //!

@@ -388,6 +388,10 @@ fn into_scratch(
                 false
             }
             Ok(mut frame) => {
+                let stamp = state
+                    .timer
+                    .as_mut()
+                    .map(|timer| timer.open_in(&mut frame, crate::gputime::Region::Capture));
                 // Transparent, not black: the window's own corners are rounded and
                 // anything opaque here would draw a square behind them.
                 frame
@@ -409,6 +413,9 @@ fn into_scratch(
                     }
                 }
 
+                if let (Some(timer), Some(stamp)) = (state.timer.as_mut(), stamp) {
+                    timer.close_in(&mut frame, stamp);
+                }
                 // See `settle`: waited on by default, and the window full of
                 // garbage that sampling an unfinished texture can show is why.
                 settle(frame.finish(), crate::dev::fence_wait(), "a capture")
@@ -416,6 +423,9 @@ fn into_scratch(
         }
     };
 
+    if drawn {
+        crate::pacing::captured();
+    }
     crate::warp::release_framebuffer(renderer);
     drawn.then_some(texture)
 }
@@ -574,6 +584,12 @@ impl Screens {
                     false
                 }
                 Ok(mut frame) => {
+                    let stamp = state.timer.as_mut().map(|timer| {
+                        timer.open_in(
+                            &mut frame,
+                            crate::gputime::Region::Output(u8::try_from(index).unwrap_or(u8::MAX)),
+                        )
+                    });
                     // The same background the backends clear to, so an empty
                     // monitor looks like an empty monitor rather than a hole.
                     frame
@@ -596,6 +612,9 @@ impl Screens {
                         }
                     }
 
+                    if let (Some(timer), Some(stamp)) = (state.timer.as_mut(), stamp) {
+                        timer.close_in(&mut frame, stamp);
+                    }
                     settle(frame.finish(), crate::dev::fence_wait(), "a monitor")
                 }
             }

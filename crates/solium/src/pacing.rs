@@ -164,6 +164,8 @@ struct Slow {
     rendered: u32,
     built: u32,
     rebound: u32,
+    gpu: Option<crate::gputime::Gpu>,
+    captures: u32,
 }
 
 /// Everything this module holds, for one thread.
@@ -238,6 +240,13 @@ struct Counters {
     all_passes: Cell<u64>,
     /// How many of them overran the tightest monitor's interval.
     all_missed: Cell<u64>,
+    /// A report that is due and waits for its pass's GPU time.
+    /// `tests::a_report_waits_for_its_passes_gpu_time`.
+    parked: RefCell<Option<Line>>,
+    /// The pass at which it was parked.
+    parked_at: Cell<u64>,
+    /// Captures drawn in this pass. `tests::a_capture_is_counted_only_inside_a_measured_pass`.
+    captures: Cell<u32>,
 }
 
 thread_local! {
@@ -264,6 +273,9 @@ thread_local! {
             reported: Cell::new(None),
             all_passes: Cell::new(0),
             all_missed: Cell::new(0),
+            parked: RefCell::new(None),
+            parked_at: Cell::new(0),
+            captures: Cell::new(0),
         }
     };
 }
@@ -381,6 +393,8 @@ impl Counters {
             rendered: self.rendered.get(),
             built: self.built.get(),
             rebound: self.rebound.get(),
+            gpu: None,
+            captures: self.captures.get(),
         };
         if let Ok(mut worst) = self.worst.try_borrow_mut()
             && worst.as_ref().is_none_or(|held| slow.total > held.total)
@@ -421,7 +435,74 @@ impl Counters {
             missed: self.all_missed.get(),
         }
     }
+
+    /// Whether pacing is on, decided from the environment once.
+    fn decide(&self) -> bool {
+        if !self.asked.get() {
+            self.asked.set(true);
+            self.on.set(crate::dev::pacing());
+        }
+        self.on.get()
+    }
+
+    /// One capture was drawn. `tests::a_capture_is_counted_only_inside_a_measured_pass`.
+    fn capture(&self) {
+        if self.live.get() {
+            self.captures.set(self.captures.get().saturating_add(1));
+        }
+    }
+
+    /// Hold a due report until its pass's GPU time is in.
+    fn park(&self, line: Line, pass: u64) {
+        if let Ok(mut held) = self.parked.try_borrow_mut() {
+            *held = Some(line);
+            self.parked_at.set(pass);
+        }
+    }
+
+    /// Whatever is parked, now. `tests::idle_flushes_a_parked_report`.
+    fn flush(&self) -> Option<Line> {
+        self.parked
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut held| held.take())
+    }
+
+    /// The parked report, once [`PARK_PASSES`] passes have gone by without its
+    /// GPU time. `tests::a_report_goes_out_without_gpu_time_after_eight_passes`.
+    fn waited(&self, pass: u64) -> Option<Line> {
+        let parked = self.parked.try_borrow().is_ok_and(|held| held.is_some());
+        (parked && pass.saturating_sub(self.parked_at.get()) >= PARK_PASSES)
+            .then(|| self.flush())
+            .flatten()
+    }
+
+    /// A pass's GPU time is in: keep it with the worst pass if it is that one,
+    /// and send the parked report if it was waiting for it.
+    /// `tests::a_gpu_time_that_came_before_its_report_goes_out_with_it`.
+    fn gpu_resolved(&self, pass: u64, gpu: crate::gputime::Gpu) -> Option<Line> {
+        if let Ok(mut worst) = self.worst.try_borrow_mut()
+            && let Some(held) = worst.as_mut()
+            && held.pass == pass
+        {
+            held.gpu = Some(gpu);
+        }
+        let waiting = self
+            .parked
+            .try_borrow()
+            .is_ok_and(|held| held.as_ref().is_some_and(|line| line.pass == pass));
+        if !waiting {
+            return None;
+        }
+        let mut line = self.flush()?;
+        line.gpu = Some(gpu);
+        Some(line)
+    }
 }
+
+/// Passes a due report waits for its GPU time: read at least three passes
+/// late (`gputime`), and a little more for a busy queue.
+const PARK_PASSES: u64 = 8;
 
 /// Begin a pass.
 ///
@@ -432,14 +513,11 @@ impl Counters {
 /// The phases, the snapshot and the line need the knob.
 pub(crate) fn frame() -> Frame {
     COUNTERS.with(|counters| {
-        if !counters.asked.get() {
-            counters.asked.set(true);
-            counters.on.set(crate::dev::pacing());
-        }
+        let on = counters.decide();
         let now = Instant::now();
         let pass = counters.all_passes.get().saturating_add(1);
         counters.deadline.set(Duration::ZERO);
-        if !counters.on.get() {
+        if !on {
             return Frame {
                 on: false,
                 started: Some(now),
@@ -456,12 +534,17 @@ pub(crate) fn frame() -> Frame {
         counters.built.set(0);
         counters.rebound.set(0);
         counters.drew.set(0);
+        counters.captures.set(0);
         counters.mark.set(Some(now));
         counters.phase.set(Phase::Loose);
         if counters.since.get().is_none() {
             counters.since.set(Some(now));
         }
         counters.live.set(true);
+        // A report that has waited long enough for its GPU time goes without it.
+        if let Some(line) = counters.waited(pass) {
+            emit(&line);
+        }
         Frame {
             on: true,
             started: Some(now),
@@ -596,7 +679,8 @@ impl Frame {
     }
 
     /// Stop measuring, count the pass, and report if it missed and a report is
-    /// due.
+    /// due: at once if its GPU time is in, and otherwise parked until it is
+    /// (`tests::a_report_waits_for_its_passes_gpu_time`).
     ///
     /// `panes` is what was on screen — the count the reader needs to tell a
     /// slow frame with eight windows from a slow frame with one.
@@ -612,9 +696,21 @@ impl Frame {
                 counters.mark.set(None);
             }
             if let Some(line) = counters.finish_at(started, now, self.on, panes, self.pass) {
-                emit(&line);
+                // One report at a time: an older one still waiting goes as it is.
+                if let Some(older) = counters.flush() {
+                    emit(&older);
+                }
+                if line.gpu.is_some() {
+                    emit(&line);
+                } else {
+                    counters.park(line, self.pass);
+                }
             }
         });
+    }
+
+    pub(crate) const fn serial(&self) -> u64 {
+        self.pass
     }
 }
 
@@ -642,6 +738,35 @@ pub(crate) fn summary() {
     );
 }
 
+/// Whether pacing is on. `SOLIUM_PACING`, read once.
+pub(crate) fn enabled() -> bool {
+    COUNTERS.with(Counters::decide)
+}
+
+/// A window was drawn into a texture of its own in this pass.
+pub(crate) fn captured() {
+    COUNTERS.with(Counters::capture);
+}
+
+/// A pass's GPU time, from the backend's timer.
+pub(crate) fn gpu_resolved(pass: u64, gpu: crate::gputime::Gpu) {
+    COUNTERS.with(|counters| {
+        if let Some(line) = counters.gpu_resolved(pass, gpu) {
+            emit(&line);
+        }
+    });
+}
+
+/// The loop drew nothing: the GPU has finished what was measured, so a report
+/// waiting for it goes now. `tests::idle_flushes_a_parked_report`.
+pub(crate) fn idle() {
+    COUNTERS.with(|counters| {
+        if let Some(line) = counters.flush() {
+            emit(&line);
+        }
+    });
+}
+
 /// One report: the worst pass of a span, and what the span came to.
 ///
 /// A value rather than a `tracing` call, so a test can read what would be
@@ -665,6 +790,8 @@ pub(crate) struct Line {
     pub(crate) rendered: u32,
     pub(crate) built: u32,
     pub(crate) rebound: u32,
+    pub(crate) gpu: Option<crate::gputime::Gpu>,
+    pub(crate) captures: u32,
 }
 
 impl Line {
@@ -688,6 +815,33 @@ impl Line {
             rendered: worst.rendered,
             built: worst.built,
             rebound: worst.rebound,
+            gpu: worst.gpu,
+            captures: worst.captures,
+        }
+    }
+
+    /// `ok`, `unsupported`, `late` or `disjoint`. A line sent before its GPU
+    /// time came is `late`. `tests::every_pacing_line_carries_its_gpu_time_and_captures`.
+    pub(crate) fn gpu_status(&self) -> &'static str {
+        match self.gpu {
+            Some(crate::gputime::Gpu::Ok(_)) => "ok",
+            Some(crate::gputime::Gpu::Unsupported) => "unsupported",
+            Some(crate::gputime::Gpu::Disjoint) => "disjoint",
+            Some(crate::gputime::Gpu::Late) | None => "late",
+        }
+    }
+
+    pub(crate) fn gpu_us(&self) -> u64 {
+        match self.gpu {
+            Some(crate::gputime::Gpu::Ok(sample)) => sample.total_ns / 1_000,
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn gpu_prep_us(&self) -> u64 {
+        match self.gpu {
+            Some(crate::gputime::Gpu::Ok(sample)) => sample.captures_ns / 1_000,
+            _ => 0,
         }
     }
 }
@@ -712,6 +866,10 @@ fn emit(line: &Line) {
         commit_us = phase(Phase::Commit),
         settle_us = phase(Phase::Settle),
         loose_us = phase(Phase::Loose),
+        gpu = line.gpu_status(),
+        gpu_us = line.gpu_us(),
+        gpu_prep_us = line.gpu_prep_us(),
+        captures = line.captures,
         panes = line.panes,
         drew = line.drew,
         scenes = line.scenes,
@@ -725,7 +883,8 @@ fn emit(line: &Line) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Frame, Phase, Totals};
+    use super::{Counters, Frame, Line, Phase, Totals};
+    use crate::gputime::{Gpu, GpuSample};
     use std::time::{Duration, Instant};
 
     /// The deadline of a 260 Hz monitor, which every test here is written
@@ -890,6 +1049,141 @@ mod tests {
         }
     }
 
+    /// What a pass's GPU time came to in the tests below.
+    fn timed() -> Gpu {
+        let mut sample = GpuSample {
+            total_ns: 912_000,
+            captures_ns: 640_000,
+            ..GpuSample::default()
+        };
+        sample.outputs_ns[0] = 272_000;
+        Gpu::Ok(sample)
+    }
+
+    /// **A report waits for its pass's GPU time**, which is read passes later:
+    /// the line that goes out carries it.
+    #[test]
+    fn a_report_waits_for_its_passes_gpu_time() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        let due = counters
+            .finish_at(start, start + ms(5), true, 1, 7)
+            .expect("a first miss is due");
+        assert_eq!(due.gpu, None, "pass 7's GPU time cannot be in yet");
+        counters.park(due, 7);
+        assert!(counters.waited(8).is_none(), "a pass later it still waits");
+        let sent = counters
+            .gpu_resolved(7, timed())
+            .expect("sent once its GPU time is in");
+        assert_eq!(
+            (sent.gpu_status(), sent.gpu_us(), sent.gpu_prep_us()),
+            ("ok", 912, 640)
+        );
+        assert!(counters.flush().is_none(), "and sent once");
+    }
+
+    /// A GPU time that never comes does not hold the report for ever.
+    #[test]
+    fn a_report_goes_out_without_gpu_time_after_eight_passes() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        let due = counters
+            .finish_at(start, start + ms(5), true, 1, 7)
+            .expect("due");
+        counters.park(due, 7);
+        assert!(counters.waited(14).is_none());
+        let late = counters.waited(15).expect("eight passes on, it goes");
+        assert_eq!((late.pass, late.gpu_status()), (7, "late"));
+    }
+
+    /// The loop going idle sends what is parked: the last miss before a pause
+    /// is the one somebody is looking for.
+    #[test]
+    fn idle_flushes_a_parked_report() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        let due = counters
+            .finish_at(start, start + ms(5), true, 1, 7)
+            .expect("due");
+        counters.park(due, 7);
+        assert_eq!(counters.flush().map(|line| line.pass), Some(7));
+    }
+
+    /// The worst pass of a span can resolve before the span's report is due;
+    /// its GPU time is kept and goes out with it.
+    #[test]
+    fn a_gpu_time_that_came_before_its_report_goes_out_with_it() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        counters.reported.set(Some(start));
+        assert!(
+            counters
+                .finish_at(start, start + ms(5), true, 1, 3)
+                .is_none(),
+            "inside the limit"
+        );
+        assert!(
+            counters.gpu_resolved(3, timed()).is_none(),
+            "nothing is parked yet"
+        );
+        let later = start + Duration::from_secs(1);
+        let due = counters
+            .finish_at(later, later + ms(4), true, 1, 4)
+            .expect("due a second on");
+        assert_eq!((due.pass, due.gpu_status(), due.gpu_us()), (3, "ok", 912));
+    }
+
+    /// **Every PACING line carries its GPU time, its status and its captures**,
+    /// and a status that is not `ok` reads as zero microseconds.
+    #[test]
+    fn every_pacing_line_carries_its_gpu_time_and_captures() {
+        let line = |gpu: Option<Gpu>| Line {
+            pass: 1,
+            total_us: 0,
+            deadline_us: 0,
+            monitor: String::new(),
+            missed: 0,
+            frames: 0,
+            span_ms: 0,
+            spent_us: [0; Phase::COUNT],
+            panes: 5,
+            drew: 1,
+            scenes: 0,
+            animating: 0,
+            rendered: 0,
+            built: 0,
+            rebound: 0,
+            gpu,
+            captures: 5,
+        };
+        assert_eq!(line(Some(timed())).gpu_status(), "ok");
+        assert_eq!(line(Some(Gpu::Unsupported)).gpu_status(), "unsupported");
+        assert_eq!(line(Some(Gpu::Late)).gpu_status(), "late");
+        assert_eq!(line(None).gpu_status(), "late");
+        assert_eq!(line(Some(Gpu::Disjoint)).gpu_status(), "disjoint");
+        assert_eq!(
+            (line(Some(Gpu::Disjoint)).gpu_us(), line(None).captures),
+            (0, 5)
+        );
+    }
+
+    /// A capture is counted only inside a measured pass: the GPU pre-flight
+    /// and a scene built between passes belong to nothing.
+    #[test]
+    fn a_capture_is_counted_only_inside_a_measured_pass() {
+        let counters = counters();
+        counters.live.set(false);
+        counters.capture();
+        assert_eq!(counters.captures.get(), 0);
+        counters.live.set(true);
+        counters.capture();
+        assert_eq!(counters.captures.get(), 1);
+    }
+
     /// **Phases are exclusive: a nested one does not also count in its
     /// parent.**
     ///
@@ -992,6 +1286,9 @@ mod tests {
             reported: std::cell::Cell::new(None),
             all_passes: std::cell::Cell::new(0),
             all_missed: std::cell::Cell::new(0),
+            parked: std::cell::RefCell::new(None),
+            parked_at: std::cell::Cell::new(0),
+            captures: std::cell::Cell::new(0),
         }
     }
 }
