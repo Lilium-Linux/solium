@@ -206,8 +206,9 @@ struct Slow {
 /// runs tens of times a frame and `RefCell` can panic, which the workspace
 /// denies for good reason — a compositor crash takes the session with it, and a
 /// diagnostic that can end a session is strictly worse than no diagnostic. The
-/// two `RefCell`s left hold strings, are touched at most once a frame, and are
-/// only ever entered with `try_borrow_mut`.
+/// `RefCell`s hold strings, snapshots and the trace, are touched a few times a
+/// pass at most, and are only ever entered with `try_borrow` or
+/// `try_borrow_mut`.
 ///
 /// Thread-local rather than threaded through the render path as an argument.
 /// That is a real trade and it is made on purpose: the phases are entered from
