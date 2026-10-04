@@ -17,21 +17,26 @@
 
 ## Flags
 
-Only the **first** argument chooses what Solium does, and it is one of
-`--tty`, `--check`, `--check-qml` and `--probe`. Anything else in first
-place, an unknown flag or `--help` included, starts a compositor: nested, as a
-window, when `WAYLAND_DISPLAY` or `DISPLAY` is set, and on the hardware
-otherwise. So `solium --debug-mode --tty` never reaches `--tty`; write
-`solium --tty --debug-mode`.
+Every argument is checked before anything starts, and one Solium does not
+know is refused with exit status 2. One of `--tty`, `--check`, `--check-qml`,
+`--probe`, `--help` and `--version` chooses what Solium does, anywhere on the
+line; with none it starts a compositor: nested, as a window, when
+`WAYLAND_DISPLAY` or `DISPLAY` is set, and on the hardware otherwise.
+
+--help
+    Print how to run Solium, its flags and the variables that change a
+    session, and exit. Also `-h`. Starts nothing.
+
+--version
+    Print the version and exit. Also `-V`. Starts nothing.
 
 --tty
-    Run on the hardware from a free virtual terminal, taking the screen. The
-    session log, `$XDG_STATE_HOME/solium/session.log` (or
-    `~/.local/state/solium/session.log`), is written only when this is the
-    **first** argument.
+    Run on the hardware from a free virtual terminal, taking the screen, and
+    write the session log, `$XDG_STATE_HOME/solium/session.log` (or
+    `~/.local/state/solium/session.log`).
 
 --session
-    Read only after `--tty`, anywhere after it. `solium --tty --session` is
+    Only with `--tty`, anywhere on the line. `solium --tty --session` is
     the user's graphical session, and tells systemd and D-Bus so: it exports
     `WAYLAND_DISPLAY` and the rest, starts `solium-session.target`, and
     undoes both on exit. `solium-session`, which the session file starts,

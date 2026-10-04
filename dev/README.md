@@ -1003,11 +1003,9 @@ Five things worth knowing about the GPU path on a TTY:
 ## Running it on a TTY, as a real session
 
 The compositor picks its backend from the environment: nested when there is a
-compositor to nest in, on the hardware otherwise. Only the first argument
-chooses what Solium does, so write `solium --tty --debug-mode`, not the other
-way round, and don't pass a flag it does not know: anything else in first
-place, `--help` included, starts a compositor
-([#156](https://github.com/Lilium-Linux/solium/issues/156)).
+compositor to nest in, on the hardware otherwise. `--tty` asks for the
+hardware wherever it is on the line, and a flag Solium does not know starts
+nothing: it is refused with exit status 2. `solium --help` lists the flags.
 
 **First, from your desktop, check what the hardware offers.** This opens the
 card read-only and takes no DRM master, so it is safe to run inside a running

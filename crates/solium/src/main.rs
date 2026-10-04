@@ -10,6 +10,7 @@
 
 mod assets;
 mod capture;
+mod cli;
 mod clocks;
 mod cursor;
 mod decoration;
@@ -270,16 +271,33 @@ fn prepare_environment() {
     qml::keep_input_methods_out();
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<std::process::ExitCode> {
     // First, before Qt, EGL or a library they load has written anything into
     // the environment, and before any thread starts: it is what every program
     // Solium starts is given. See
     // `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`.
     prepare_environment();
-    let backend = std::env::args().nth(1);
-    // Before logging starts: the probe's child answers in one line.
-    if backend.as_deref() == Some(qml::renderer::PROBE) {
-        qml::renderer::probe_child();
+    // Every argument decided before anything starts: `cli::tests`, and the
+    // process tests in `tests/cli.rs`.
+    let command = match cli::parse(std::env::args().skip(1)) {
+        Ok(command) => command,
+        Err(refused) => {
+            eprintln!("solium: {refused}. See solium --help.");
+            return Ok(std::process::ExitCode::from(cli::USAGE_ERROR));
+        }
+    };
+    match command {
+        cli::Command::Help => {
+            print!("{}", cli::help());
+            return Ok(std::process::ExitCode::SUCCESS);
+        }
+        cli::Command::Version => {
+            println!("solium {}", env!("CARGO_PKG_VERSION"));
+            return Ok(std::process::ExitCode::SUCCESS);
+        }
+        // Before logging starts: the probe's child answers in one line.
+        cli::Command::ProbeQmlGpu => qml::renderer::probe_child(),
+        _ => {}
     }
     // On the hardware the screen belongs to the compositor, so anything printed
     // to the terminal is printed underneath itself and lost. Whatever went
@@ -287,9 +305,7 @@ fn main() -> Result<()> {
     // a file — under state rather than the runtime dir, because the first time
     // this went wrong the only way out was a reboot, and the runtime dir does
     // not survive one.
-    let log = matches!(backend.as_deref(), Some("--tty"))
-        .then(open_log)
-        .flatten();
+    let log = (command == cli::Command::Tty).then(open_log).flatten();
     start_logging(log);
 
     log_panics();
@@ -301,23 +317,24 @@ fn main() -> Result<()> {
     // Nested when there is a compositor to nest in, on the hardware otherwise.
     // `--probe` reports what the hardware offers without taking it, which is
     // the only one of the three that is safe to run inside another session.
-    match backend.as_deref() {
+    let ran = match command {
         // Loads one QML file and says what went wrong, without starting a
         // compositor. Writing a shell means walking a chain of "type X
         // unavailable" errors, and doing that through a real session costs ten
         // seconds a link.
-        Some("--check-qml") => check_qml(std::env::args().nth(2)),
+        cli::Command::CheckQml(path) => check_qml(Some(path.to_string_lossy().into_owned())),
         // Loads the configuration and says whether it would run, without
         // touching a session. A typo found here costs a line of output; the
         // same typo found by reloading costs whatever you were doing.
-        Some("--check") => check_config(),
-        Some("--probe") => tty::probe(),
-        Some("--tty") => tty::run(session::Place::tty(std::env::args().skip(2))),
+        cli::Command::Check(_) => check_config(),
+        cli::Command::Probe => tty::probe(),
+        cli::Command::Tty => tty::run(session::Place::tty(std::env::args().skip(1))),
         _ if std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var_os("DISPLAY").is_some() =>
         {
             winit::run()
         }
         _ => tty::run(session::Place::Console),
-    }
+    };
+    ran.map(|()| std::process::ExitCode::SUCCESS)
 }
