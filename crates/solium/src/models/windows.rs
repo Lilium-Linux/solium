@@ -2,7 +2,7 @@
 //! lives, never where it is drawn this frame (Section 2, primitive 12).
 //! `state::tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -13,9 +13,21 @@ use crate::state::Solium;
 
 /// One row per window a layout sees, in the order they opened.
 /// `state::tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
-/// `state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`.
+/// `state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+/// `state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`.
 pub(crate) fn rows(state: &Solium) -> Vec<Row> {
     let snapshot = state.snapshot();
+    // `focusOrder` counts only the windows listed, so a window that closed
+    // leaves no gap, and one never focused is last.
+    // `state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`.
+    let listed: HashSet<u64> = snapshot.windows.iter().map(|info| info.id).collect();
+    let ranks: HashMap<u64, usize> = state
+        .focus_history
+        .iter()
+        .filter(|id| listed.contains(id))
+        .enumerate()
+        .map(|(rank, id)| (*id, rank))
+        .collect();
     let mut rows: Vec<Row> = snapshot
         .windows
         .iter()
@@ -24,11 +36,7 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
             let pane_id = pane.id();
             let client = pane.client();
             let (fullscreen, maximized) = client.map_or((false, false), window_states);
-            let order = state
-                .focus_history
-                .iter()
-                .position(|each| *each == info.id)
-                .unwrap_or(state.focus_history.len());
+            let order = ranks.get(&info.id).copied().unwrap_or(ranks.len());
             let workspace = state
                 .workspaces
                 .as_ref()

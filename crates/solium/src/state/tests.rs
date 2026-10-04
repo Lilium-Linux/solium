@@ -25526,6 +25526,51 @@ end)"#,
                 );
             }
 
+            /// **A window that closes leaves no gap in `focusOrder`**
+            /// (Ruling 18): the windows left still count up from 0, so the
+            /// one focused before the one in front is still 1; and the next
+            /// focus forgets it, urgent as it was.
+            #[test]
+            fn a_closed_window_leaves_no_gap_in_focus_order() {
+                let (mut desk, first, _) = window_under_a_scene(button_over_the_window);
+                let second = desk.open_surface();
+                let third = desk.open_surface();
+                let (one, two, three) = (
+                    window(&desk, &first),
+                    window(&desk, &second),
+                    window(&desk, &third),
+                );
+                desk.state
+                    .focus_window(&three, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&two, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&one, SERIAL_COUNTER.next_serial());
+                desk.state.urgent.insert(second.pane.get());
+                second.toplevel.destroy();
+                desk.pump();
+                use crate::json::Json;
+                assert!(
+                    crate::models::windows::rows(&desk.state)
+                        .iter()
+                        .all(|row| row.key != second.pane.get().to_string()),
+                    "the premise: the closed window is not listed"
+                );
+                assert_eq!(
+                    [&first, &third].map(|opened| window_row(&desk, opened.pane.get())
+                        .get("focusOrder")
+                        .cloned()),
+                    [Some(Json::Number(0.0)), Some(Json::Number(1.0))],
+                    "[the window in front, the one focused before the closed one]"
+                );
+                desk.state
+                    .focus_window(&three, SERIAL_COUNTER.next_serial());
+                assert_eq!(
+                    (desk.state.focus_history.clone(), desk.state.urgent.len()),
+                    (vec![third.pane.get(), first.pane.get()], 0),
+                    "the next focus forgets the window that closed: (the focus history, how \
+                     many windows are urgent)"
+                );
+            }
+
             /// **A window reads `maximized` once its client has agreed to
             /// it**: as it last committed, not as it was only asked
             /// (Ruling 18).

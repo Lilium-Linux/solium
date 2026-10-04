@@ -266,8 +266,10 @@ pub(crate) struct Solium {
     pub(crate) published: crate::models::Published,
 
     /// The windows focused, by script id, the most recent first: what
-    /// `Windows`' `focusOrder` counts (Ruling 18).
-    /// `tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`.
+    /// `Windows`' `focusOrder` counts (Ruling 18). A window that has gone is
+    /// dropped at the next focus.
+    /// `tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+    /// `tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`.
     pub(crate) focus_history: Vec<u64>,
 
     /// Windows that asked for attention where nobody could see them, until
