@@ -453,7 +453,10 @@ Beside `host.cpp` are three files that register native types under the same
 type; `rows.cpp`, the list model that applies the keyed row batches Rust
 sends; and `keyboard.cpp`, the `Keyboard` singleton. `attached.h`, `rows.h`
 and `keyboard.h` declare `Q_OBJECT` types, so `build.rs` runs Qt's moc on them
-(`MOC_HEADERS`; `QT_MOC` names moc when it is not found).
+(`MOC_HEADERS`; `QT_MOC` names moc when it is not found). `dev/wirecheck`
+compiles the same files from its own `build.rs`, with its own copy of that
+list, so a new header that declares a `Q_OBJECT` type goes into both lists,
+and a new file beside `host.cpp` into both builds.
 
 No Qt QPA plugin available here will adopt the compositor's EGL context, so
 the GPU route runs the other way round: the compositor allocates a buffer

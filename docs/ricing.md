@@ -867,10 +867,10 @@ A string is a command line split on spaces; a list is one already split, for an
 argument with a space in it; a function is anything else, with the whole `sol`
 API in scope; `false` removes a shipped binding outright.
 
-A combination you bind belongs to the compositor from then on, and the
-application with the keyboard never receives it. So binding a plain key such
-as `escape`, `f1` or `return` takes that key from every window. This is why
-the overview binds Escape only while it is open
+A combination you bind belongs to the compositor from then on, and while the
+session is unlocked the application with the keyboard never receives it. So
+binding a plain key such as `escape`, `f1` or `return` takes that key from
+every window. This is why the overview binds Escape only while it is open
 ([#174](https://github.com/Lilium-Linux/solium/issues/174)).
 [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
 lists every shipped one, so you can see what a key does before you take it

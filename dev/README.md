@@ -35,7 +35,9 @@ libraries; `/usr/lib64/qt6/libexec/moc`, `/usr/lib/qt6/libexec/moc` and
 cannot run moc, the build stops with `could not run moc at …` and
 `set QT_MOC to its path, or install Qt 6's development tools`. Setting or
 changing `QT_MOC` runs the build script again. On Fedora, moc comes with
-`qt6-qtbase-devel`, which the build image already has.
+`qt6-qtbase-devel`, which the build image already has. `dev/wirecheck/build.rs`
+runs moc on the same headers from a list of its own, so a new header that
+declares a `Q_OBJECT` type goes into `MOC_HEADERS` in both build scripts.
 
 Or, on a Fedora host without the development packages, in the build image,
 which needs only podman and a rustup install. The image has the C toolchain and
@@ -127,12 +129,20 @@ The tests include the scenarios in `crates/solium/tests/scenarios/`, played by
 `scenario::tests::every_scenario_with_a_client_passes` and
 `every_scenario_on_the_qt_thread_passes`. Run natively on a machine whose
 `$XDG_CONFIG_HOME/solium` (`~/.config/solium`) holds any `.lua` file, the
-client scenarios and `script::tests::shipped_init_with_user` pass without
-running, and print
-`skipped: ~/.config/solium holds Lua of its own, which a scenario would load`,
-because that directory comes first on `package.path`. Pointing
-`XDG_CONFIG_HOME` at an empty directory runs them. With `SOLIUM_GATE_IMAGE` the
-container's `HOME` is `/tmp`, so they always run.
+client scenarios (`every_scenario_with_a_client_passes`) and the script tests
+built on `script::tests::shipped_init_with_user` pass without running, because
+that directory comes first on `package.path`; the scenario test prints
+`skipped: ~/.config/solium holds Lua of its own, which a scenario would load`.
+Pointing `XDG_CONFIG_HOME` at an empty directory runs them. With
+`SOLIUM_GATE_IMAGE` the container's `HOME` is `/tmp`, so they always run.
+
+One test is known to fail now and then under the gate's load
+([#176](https://github.com/Lilium-Linux/solium/issues/176)):
+`qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`
+counts exactly three frames in three and a half seconds, and a one-second
+`Timer` that drifts past the end of that window gives two. If it is the only
+failure, run it on its own (`cargo test -p solium a_clock_scene_repaints`)
+before suspecting the change.
 
 CI runs the formatting check, clippy, the build, the tests and
 `solium --check`, and not `dev/wirecheck`, which needs a GPU. A source tarball
@@ -675,12 +685,14 @@ Two monitors side by side in the nested window, each with its own layer map,
 work area and render pass, each drawn into a texture of its own — which is what
 having its own scanout buffer means — and each with its own instance of every
 `sol.surface` declared on it, the hosted shell's included (`shell.on` in
-`config.lua` says which monitors), each reading its own `Solium.monitor`.
-`SOLIUM_OUTPUTS_AT` and resizing the nested window build or drop instances as
-monitors arrive or go, so `SOLIUM_OUTPUTS=2 dev/run-shell.sh <shell-dir>`
-shows a shell on two monitors. Every per-output path runs for each of
-them; what it cannot simulate is a second *pipeline*, one refresh rate and one
-page flip per screen, which is `tty.rs`'s half of the problem.
+`config.lua` says which monitors), each reading its own `Solium.monitor`, so
+`SOLIUM_OUTPUTS=2 dev/run-shell.sh <shell-dir>` shows a shell on two monitors.
+`SOLIUM_OUTPUTS_AT` builds or drops instances as monitors arrive or go, and
+resizing the nested window, which changes the monitors' sizes without adding
+or removing one, gives each surface an instance on every monitor it now
+covers. Every per-output path runs for each of them; what it cannot simulate
+is a second *pipeline*, one refresh rate and one page flip per screen, which
+is `tty.rs`'s half of the problem.
 
 It exists for the same reason `cursor-check.sh` does, and it earned itself
 immediately. The window-resize handler only ever resized the first output, so

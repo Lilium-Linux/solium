@@ -131,6 +131,9 @@ function overview.toggle()
     end
 end
 
+-- Into the overview and out again; while it is up, Escape leaves it too.
+-- Escape is bound only then (`showing`, above), so `solium --check`, which
+-- lists what the configuration binds as it loads, does not show it.
 sol.bind("super+space", overview.toggle)
 
 -- Still up after a reload, so Escape is still the way out:

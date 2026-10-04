@@ -663,9 +663,10 @@ function sol.status(text) end
 ---
 ---The combination is normalised, so `super+shift+q` and `Shift+Super+Q` are
 ---one binding. A later call for the same combination replaces the earlier one.
----A bound combination never reaches the application with the keyboard. A key a
----mode needs only while it is up is bound when the mode starts and taken away
----with `sol.unbind` when it stops, as `overview.lua` does with `escape`.
+---While the session is unlocked, a bound combination never reaches the
+---application with the keyboard. A key a mode needs only while it is up is
+---bound when the mode starts and taken away with `sol.unbind` when it stops, as
+---`overview.lua` does with `escape`.
 ---`note` is a short phrase saying where the binding came from, which
 ---`solium --check` prints beside it.
 ---@param combo string

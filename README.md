@@ -143,7 +143,10 @@ are the touch epic ([#7]) and come after v0.1.0.
 Solium needs **Rust 1.88 or newer** (edition 2024), a C++17 compiler, **Qt 6.5
 or newer** (Qt Quick and Qml), and the development files for Wayland,
 libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm.
-Lua is compiled in and needs nothing installed.
+Lua is compiled in and needs nothing installed. The build also runs Qt's `moc`
+on the headers of Solium's own QML types; `QT_MOC` names it when the build
+cannot find it, and [dev/README.md](dev/README.md#building) says where it
+looks.
 
 Rust is easiest from [rustup](https://rustup.rs); a distribution's own Rust
 works too if it is new enough. The system packages:
@@ -309,10 +312,10 @@ The portal file sends screen capture to `xdg-desktop-portal-wlr`, which Fedora
 packages separately (`sudo dnf install xdg-desktop-portal-wlr`). The Fedora
 package puts the units in `/usr/lib/systemd/user` and the portal file in
 `/usr/share/xdg-desktop-portal` instead, and recommends
-`xdg-desktop-portal-wlr`, so dnf installs it; it also recommends `foot`, the
-terminal `super+return` opens, so dnf installs that too. A polkit agent, a
-keyring, applets and other separate programs start through XDG autostart or a
-user unit with `PartOf=graphical-session.target`.
+`xdg-desktop-portal-wlr`, so dnf installs it; it also recommends `foot`, so
+`super+return` always has a terminal to open. A polkit agent, a keyring,
+applets and other separate programs start through XDG autostart or a user unit
+with `PartOf=graphical-session.target`.
 [docs/shell-boundary.md](docs/shell-boundary.md#how-the-rest-of-the-desktop-starts)
 says how, with the one command that starts Fedora's KDE polkit agent under
 Solium. `session.systemd = false` in your configuration turns all of it off.

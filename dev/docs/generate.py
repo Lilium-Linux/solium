@@ -602,6 +602,11 @@ def bindings(solium, rev):
         "ends the session whatever the configuration says, except while the screen "
         "is locked, and `ctrl+alt+F1` to `ctrl+alt+F12` switch virtual terminal.",
         "",
+        "Nor is a key a mode binds only while it is up, because `solium --check` "
+        "lists what the configuration binds as it loads: `escape` leaves the "
+        "overview, and is bound only while the overview is open, so that the rest "
+        "of the time it reaches the application with the keyboard.",
+        "",
     ]
     by_file = {}
     for (path, line), (site, shown) in sorted(rows.items(), key=lambda item: (item[0][0] != f"{LUA}/init.lua", item[0])):
