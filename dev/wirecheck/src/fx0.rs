@@ -22,10 +22,13 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
 /// **Case 11b, second half: a region closed outside a frame resolves at the
 /// first idle after its work is done.** The TTY's shape: `open` before a
 /// frame and `close` after its `finish`, as `tty.rs` stamps an output around
-/// `render_frame`; the frame's fence not waited on (the kernel waits on it);
-/// 10 ms for the flip; then one `idle`, as the vblank handler calls it. Ten
-/// passes, and every one must be in at that first idle, or the report
-/// waiting for it goes as `late` (`Timer::close`).
+/// `render_frame`; then the frame's fence waited on, as the kernel waits on
+/// it before the flip, so the frame's work is done however slow the GPU
+/// (iris at cold clocks); 10 ms for the flip; then one `idle`, as the vblank
+/// handler calls it. The wait flushes nothing (`SyncPoint::wait`), so the
+/// closing stamp reaches the GPU only if `close` sent it. Ten passes, and
+/// every one must be in at that first idle, or the report waiting for it
+/// goes as `late` (`Timer::close`).
 fn closed_outside_a_frame(renderer: &mut GlesRenderer) -> Result<()> {
     println!("\n=== FX0: a region closed outside a frame resolves at the first idle ===");
     let mut timer = gputime::Timer::new(renderer);
@@ -40,7 +43,7 @@ fn closed_outside_a_frame(renderer: &mut GlesRenderer) -> Result<()> {
         timer.begin_pass(renderer, pass);
         for _ in timer.take_resolved() {}
         let stamp = timer.open(renderer, gputime::Region::Output(0));
-        {
+        let sync = {
             let mut framebuffer = renderer
                 .bind(&mut target)
                 .map_err(|err| anyhow!("binding: {err}"))?;
@@ -53,10 +56,12 @@ fn closed_outside_a_frame(renderer: &mut GlesRenderer) -> Result<()> {
                     .draw_solid(whole, &[whole], Color32F::new(shade, 0.2, 0.4, 1.0))
                     .map_err(|err| anyhow!("drawing: {err}"))?;
             }
-            // Not waited on: on the TTY the kernel waits on this fence.
-            let _sync = frame.finish().map_err(|err| anyhow!("finishing: {err}"))?;
-        }
+            frame.finish().map_err(|err| anyhow!("finishing: {err}"))?
+        };
         timer.close(renderer, stamp);
+        // The kernel's wait before the flip, after the close as on the TTY.
+        sync.wait()
+            .map_err(|err| anyhow!("waiting for the frame's fence: {err}"))?;
         std::thread::sleep(std::time::Duration::from_millis(10));
         timer.idle(renderer);
         let resolved = timer
