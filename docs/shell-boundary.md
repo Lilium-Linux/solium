@@ -465,9 +465,12 @@ which reads `-1`
 sorted view, never reset: `monitor`, `workspace`, `app` and `onStage` filter,
 an empty one (or `onStage` left unset) keeping every window, and `sort` is
 `""`, the order windows opened, or `"mru"`, the most recently focused first.
-`Windows.focused` is never null and follows focus; `Windows.get(id)` is one
-window's row, which reads `valid: false` once the window has gone. Rows say
-where a window lives, not where it is drawn this frame
+`Windows.focused` is never null and follows focus, and with no window focused
+it reads `present: false` and is empty, not the window focused last
+(`qml::hosted::tests::the_focused_facade_is_empty_with_nothing_focused`);
+`Windows.get(id)` is one window's row, which reads `valid: false` once the
+window has gone. Rows say where a window lives, not where it is drawn this
+frame
 (`qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the

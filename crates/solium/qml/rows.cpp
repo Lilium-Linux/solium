@@ -264,9 +264,13 @@ void SoliumWindowRows::follow()
             now = row;
         }
     }
-    const QList<QByteArray> changed = m_focused.assign(now != nullptr ? now->values : QVariantMap());
+    // Taken whole, not merged: with nothing focused the facade is as empty as
+    // the absent row, not the window focused last.
+    // `qml::hosted::tests::the_focused_facade_is_empty_with_nothing_focused`.
     const bool present = now != nullptr;
-    if (!changed.isEmpty() || present != m_focused.present) {
+    const QVariantMap next = present ? now->values : QVariantMap();
+    if (next != m_focused.values || present != m_focused.present) {
+        m_focused.values = next;
         m_focused.present = present;
         m_focused.announce();
     }

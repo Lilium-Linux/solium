@@ -2728,4 +2728,58 @@ pub(crate) mod tests {
             let _ = std::fs::remove_dir_all(&directory);
         });
     }
+
+    /// **With nothing focused, `Windows.focused` is empty**, as the absent
+    /// row is, and not the window focused last: a bar that shows the focused
+    /// title shows none on an empty desk (Ruling 17).
+    #[test]
+    fn the_focused_facade_is_empty_with_nothing_focused() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-focused-empty",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property string title: Windows.focused.title
+                    readonly property int focusedId: Windows.focused.id
+                    readonly property int present: Windows.focused.present ? 1 : 0
+                }
+                "#,
+                "focused-empty-1",
+            );
+            let focused = vec![window_row(911, "focused-empty-1", true, 0)];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&[], &focused))
+            ));
+            let before = scene.get_string_for_test("title");
+            let unfocused = vec![window_row(911, "focused-empty-1", false, 0)];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&focused, &unfocused))
+            ));
+            let after = (
+                scene.get_int("present"),
+                scene.get_string_for_test("title"),
+                scene.get_int("focusedId"),
+            );
+            // Taken out before asserting, so a failure leaves no row behind
+            // for the next test on the Qt thread.
+            let _ = super::apply_rows(super::Model::Windows, &render(&diff(&unfocused, &[])));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                before, "window 911",
+                "the premise: the facade is the focused window"
+            );
+            assert_eq!(
+                after,
+                (0, String::new(), 0),
+                "(present, title, id) with nothing focused"
+            );
+        });
+    }
 }
