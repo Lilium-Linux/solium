@@ -2077,9 +2077,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
     sol.set("_attempts", lua.create_table()?)?;
     sol.set("_keeps", lua.create_table()?)?;
-    // How many times each listener was stopped at the deadline, by function.
-    // `tests::a_listener_stopped_three_times_is_taken_out`,
-    // `tests::the_stops_are_counted_by_function_across_events`.
+    // How many times each listener or `done` was stopped at the deadline, by
+    // function. `tests::a_listener_stopped_three_times_is_taken_out`,
+    // `tests::the_stops_are_counted_by_function_across_events`,
+    // `tests::a_done_stopped_three_times_is_not_called_again`.
     sol.set("_strikes", lua.create_table()?)?;
     // Where a binding came from, for the combinations a script chose to say.
     // Keyed the same way `_bindings` is -- the canonical spelling -- so the two

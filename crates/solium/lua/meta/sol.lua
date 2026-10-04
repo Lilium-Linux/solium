@@ -739,12 +739,12 @@ function sol.unknown(key, meant) end
 ---under the same deadline. A `done` is struck by function too, and one
 ---stopped three times is not called again until the configuration is
 ---reloaded; what a `done` asked for in the run that was stopped is dropped.
----The compositor starts each one's clock itself, so
----nothing a handler calls puts it off. `pcall`, `xpcall` and `load` hand the
----stop on rather than catch it, and `xpcall`'s message handler is not called
----for it. A `__gc` finalizer, and the `__close` of a to-be-closed
----variable in the function a stop interrupts, run where no hook does, so the
----deadline cannot stop a loop in either.
+---The compositor starts each one's clock itself, so nothing a handler calls
+---puts it off. `pcall`, `xpcall` and `load` hand the stop on rather than
+---catch it, and `xpcall`'s message handler is not called for it. A `__gc`
+---finalizer, and the `__close` of a to-be-closed variable in the function a
+---stop interrupts, run where no hook does, so the deadline cannot stop a loop
+---in either.
 ---@overload fun(event: "open"|"focus"|"closing"|"refused"|"close", handler: fun(id: integer))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
@@ -787,7 +787,7 @@ sol._attempts = {}
 ---@type table<string, table>
 sol._keeps = {}
 
----Internal: how many times each listener was stopped, by function.
+---Internal: how many times each listener or `done` was stopped, by function.
 ---@private
 ---@type table<function, integer>
 sol._strikes = {}
