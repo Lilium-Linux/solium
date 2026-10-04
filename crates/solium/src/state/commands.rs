@@ -144,6 +144,10 @@ impl Solium {
         {
             tracing::debug!(status, "mode changed");
             self.status = status;
+            // `Solium.status` is published only from a frame, same as every
+            // other model; a binding that only calls `sol.status` must still
+            // ask for one, not rely on a command alongside it.
+            self.redraw = true;
         }
 
         let now = self.clock.now();
@@ -345,6 +349,28 @@ impl Solium {
                         reason: Some(reason),
                     }),
                 },
+                // What Lua says the workspaces are, less the monitors and
+                // windows the compositor does not have and any workspace
+                // declared twice, each logged once.
+                // `real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`,
+                // `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+                // `crate::models::workspaces::tests::a_workspace_declared_twice_is_one_row`.
+                Command::Workspaces(declared) => {
+                    let monitors: Vec<String> = self.space.outputs().map(Output::name).collect();
+                    let windows: Vec<u64> = self
+                        .snapshot()
+                        .windows
+                        .iter()
+                        .map(|window| window.id)
+                        .collect();
+                    crate::models::workspaces::log_unknown(
+                        &declared,
+                        &monitors,
+                        &windows,
+                        &mut self.unknown_in_workspaces,
+                    );
+                    self.workspaces = Some(declared.validated(&monitors, &windows));
+                }
                 Command::Loading(loading) => {
                     if self.loading != loading {
                         tracing::debug!(?loading, "loading behaviour set");
@@ -686,6 +712,12 @@ impl Solium {
                 // over is not left on screen
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
                 self.decorations.clear_values();
+                // Likewise: the old declaration is the previous session's,
+                // and a configuration that stops calling `sol.workspaces`
+                // must publish none, not what it last said. `workspaces.lua`
+                // declares again inside this same held dispatch, so nothing
+                // flickers for one that still does.
+                self.workspaces = None;
                 self.start_scripts(Some(scripts));
                 // The re-announcement, in the order the doc comment states.
                 // Three dispatches and not one, each with its own snapshot,

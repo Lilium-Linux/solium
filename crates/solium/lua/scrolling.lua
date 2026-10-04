@@ -612,9 +612,7 @@ function scrolling.move_direction(dir)
             each:remove(id)
         end
         view_for(next.name):insert(id, options(next.name))
-        if workspaces.of[id] ~= nil then
-            workspaces.of[id] = workspaces.on(next.name)
-        end
+        workspaces.carry(id, next.name)
     end
     scrolling.apply(config.scrolling.snap)
     return true

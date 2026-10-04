@@ -346,6 +346,11 @@ impl XwmHandler for Solium {
             self.take_unmanaged_pane(element);
             return;
         }
+        // Which process it is, for `Windows`' `pid`.
+        // `models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`.
+        if let Some(x11) = element.x11_surface() {
+            remember_client_pid(x11);
+        }
         self.map_stacked(element.clone(), (0, 0), true);
         self.take_pane(element.clone());
         // **X11's half of `refused_with_a_dialog`, and the place nearly every
@@ -726,6 +731,26 @@ pub(crate) fn activate(solium: &mut Solium, surface: Option<&WlSurface>) {
         }
         let _ = SERIAL_COUNTER.next_serial();
     }
+}
+
+/// The process an X11 window's own X connection belongs to, as Xwayland
+/// reports it, kept on the surface; `None` when Xwayland could not name one.
+#[derive(Clone, Copy, Debug)]
+struct ClientPid(Option<u32>);
+
+/// Ask Xwayland, the first time the window maps, which process it belongs
+/// to, so a row read every frame does not ask again.
+fn remember_client_pid(window: &X11Surface) {
+    window.user_data().insert_if_missing_threadsafe(|| {
+        ClientPid(window.get_client_pid().ok().filter(|pid| *pid != 0))
+    });
+}
+
+/// Which process an X11 window belongs to: [`remember_client_pid`]'s answer,
+/// and `None` before it maps.
+/// `models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`.
+pub(crate) fn client_pid(window: &X11Surface) -> Option<u32> {
+    window.user_data().get::<ClientPid>().and_then(|pid| pid.0)
 }
 
 /// The hardware backend's loop data, forwarding to the compositor inside it.

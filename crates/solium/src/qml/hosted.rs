@@ -32,6 +32,8 @@ mod ffi {
         ) -> c_int;
         pub(super) fn solium_qml_host_next_on(monitor: *const c_char);
         pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_status(text: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_arrangement(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_pointer_event(
             scene: *mut super::super::ffi::Scene,
             kind: c_int,
@@ -93,12 +95,7 @@ mod ffi {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Model {
     Monitors = 0,
-    #[expect(dead_code, reason = "host.h numbers it; nothing publishes windows yet")]
     Windows = 1,
-    #[expect(
-        dead_code,
-        reason = "host.h numbers it; nothing publishes workspaces yet"
-    )]
     Workspaces = 2,
 }
 
@@ -117,6 +114,31 @@ pub(crate) fn apply_rows(model: Model, ops: &str) -> bool {
     };
     // SAFETY: `ops` outlives the call; the host copies what it keeps.
     unsafe { ffi::solium_qml_rows_apply(model as c_int, ops.as_ptr()) != 0 }
+}
+
+/// What `Solium.status` reads: the text `sol.status` set. Whether Qt took
+/// it. `tests::the_workspaces_model_its_list_and_its_facades`,
+/// `crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_status(text: &str) -> bool {
+    touched();
+    let Ok(text) = CString::new(text) else {
+        return false;
+    };
+    // SAFETY: `text` outlives the call; the host copies it.
+    unsafe { ffi::solium_qml_set_status(text.as_ptr()) != 0 }
+}
+
+/// `Workspaces.arrangement`, from JSON. Whether Qt took it.
+/// `crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_arrangement(json: &str) -> bool {
+    touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_set_arrangement(json.as_ptr()) != 0 }
 }
 
 impl Scene {
@@ -2356,6 +2378,133 @@ pub(crate) mod tests {
         });
     }
 
+    /// **`Monitors` lists every published monitor, `get` answers by name, and
+    /// a changed value is one `dataChanged` for that role only** (Ruling 17).
+    #[test]
+    fn the_monitors_model_lists_every_row_and_changes_one_role_at_a_time() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-monitors",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int count: Monitors.count
+                    readonly property int widthOfB: Monitors.get("model-b").area.width
+                    readonly property int bIsPresent: Monitors.get("model-b").present ? 1 : 0
+                    readonly property int bIsNamed: Monitors.get("model-b").name === "model-b" ? 1 : 0
+                    property int changedRoles: -1
+                    Connections {
+                        target: Monitors
+                        function onDataChanged(topLeft, bottomRight, roles) { changedRoles = roles.length }
+                    }
+                }
+                "#,
+                "model-a",
+            );
+            let before = vec![
+                monitor_row("model-a", 1920, 1.0),
+                monitor_row("model-b", 1600, 1.0),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &before))
+            ));
+            assert!(scene.get_int("count") >= 2);
+            assert_eq!(scene.get_int("widthOfB"), 1600);
+            let after = vec![
+                monitor_row("model-a", 1920, 1.0),
+                monitor_row("model-b", 1500, 1.0),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&before, &after))
+            ));
+            assert_eq!(
+                (scene.get_int("widthOfB"), scene.get_int("changedRoles")),
+                (1500, 1),
+                "one value changed, so one role"
+            );
+            // A monitor that goes leaves the list, and its row reads absent
+            // and keeps its name (Ruling 4).
+            let listed = scene.get_int("count");
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&after, &[]))
+            ));
+            assert_eq!(
+                (
+                    listed - scene.get_int("count"),
+                    scene.get_int("bIsPresent"),
+                    scene.get_int("bIsNamed"),
+                    scene.get_int("widthOfB")
+                ),
+                (2, 0, 1, 1500),
+                "(the rows that left the list, whether model-b reads present, whether it keeps its name, its last width)"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A delegate of `Monitors` reads `scale` and `transform` through
+    /// `model`**: bare, those two names are the delegate item's own
+    /// properties, which hide the roles, while the other roles read bare.
+    #[test]
+    fn a_monitors_delegate_reads_scale_and_transform_through_model() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-monitors-delegate",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property int bareScale: -1
+                    property int modelScale: -1
+                    property int modelTransform: -1
+                    property int bareName: -1
+                    Repeater {
+                        model: Monitors
+                        delegate: Item {
+                            Component.onCompleted: {
+                                if (model.name !== "delegate-a") return
+                                root.bareScale = Math.round(scale * 100)
+                                root.modelScale = Math.round(model.scale * 100)
+                                root.modelTransform = model.transform === "normal" ? 1 : 0
+                                root.bareName = name === "delegate-a" ? 1 : 0
+                            }
+                        }
+                    }
+                }
+                "#,
+                "delegate-a",
+            );
+            let rows = vec![monitor_row("delegate-a", 1920, 1.5)];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &rows))
+            ));
+            assert_eq!(
+                (
+                    scene.get_int("bareScale"),
+                    scene.get_int("modelScale"),
+                    scene.get_int("modelTransform"),
+                    scene.get_int("bareName")
+                ),
+                (100, 150, 1, 1),
+                "(scale bare, scale through model, transform through model, name bare)"
+            );
+            let _ = super::apply_rows(super::Model::Monitors, &render(&diff(&rows, &[])));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
     /// **A batch that does not match the rows held is refused**, and so is
     /// text that is not a batch, so a publish that was not taken is sent
     /// again rather than recorded as taken.
@@ -2535,6 +2684,456 @@ pub(crate) mod tests {
                 "Monitor is not the shell's own file"
             );
             drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    fn window_row(
+        id: u64,
+        monitor: &str,
+        focused: bool,
+        focus_order: u32,
+    ) -> crate::models::diff::Row {
+        use crate::json::Json;
+        crate::models::diff::Row {
+            key: id.to_string(),
+            values: std::collections::BTreeMap::from([
+                (
+                    "id",
+                    Json::Number(f64::from(u32::try_from(id).unwrap_or(0))),
+                ),
+                ("title", Json::Text(format!("window {id}"))),
+                ("monitor", Json::Text(monitor.to_owned())),
+                ("focused", Json::Bool(focused)),
+                ("focusOrder", Json::Number(f64::from(focus_order))),
+                ("onStage", Json::Bool(true)),
+                ("state", Json::Text("shown".to_owned())),
+            ]),
+        }
+    }
+
+    /// **`WindowList` filters by monitor and by stage and sorts by recent
+    /// focus, again as focus moves, and is never reset; the facade follows
+    /// focus and is never null; a gone window's row reads invalid, not
+    /// null** (Ruling 17, Ruling 18).
+    #[test]
+    fn the_windows_model_filters_sorts_and_keeps_its_facades() {
+        use crate::json::Json;
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-windows",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    // Asked again as the count changes, so it is the row once
+                    // there is one, and whatever `get` answers once it goes.
+                    property var held: { Windows.count; return Windows.get(902) }
+                    readonly property string focusedTitle: Windows.focused.present ? Windows.focused.title : ""
+                    readonly property int heldValid: held.valid ? 1 : 0
+                    WindowList { id: here; monitor: "w-left"; sort: "mru" }
+                    WindowList { id: offStage; onStage: false }
+                    readonly property int here: here.count
+                    readonly property int offStageCount: offStage.count
+                    property string first: ""
+                    property int resets: 0
+                    function readFirst() { first = here.count > 0 ? here.data(here.index(0, 0), Qt.UserRole + 1 + 2) : "" }
+                    Connections {
+                        target: here
+                        function onLayoutChanged() { readFirst() }
+                        function onRowsInserted() { readFirst() }
+                        function onRowsRemoved() { readFirst() }
+                        function onRowsMoved() { readFirst() }
+                        function onModelReset() { resets += 1 }
+                    }
+                }
+                "#,
+                "w-left",
+            );
+            let mut parked = window_row(904, "w-right", false, 3);
+            parked.values.insert("onStage", Json::Bool(false));
+            let rows = vec![
+                window_row(901, "w-left", false, 1),
+                window_row(902, "w-left", true, 0),
+                window_row(903, "w-right", false, 2),
+                parked.clone(),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&[], &rows))
+            ));
+            assert_eq!(
+                scene.get_int("here"),
+                2,
+                "WindowList kept another monitor's window"
+            );
+            assert_eq!(
+                scene.get_int("offStageCount"),
+                1,
+                "WindowList {{ onStage: false }} is not only the window off stage"
+            );
+            assert_eq!(scene.get_string_for_test("focusedTitle"), "window 902");
+            assert_eq!(
+                scene.get_string_for_test("first"),
+                "902",
+                "sorted by recent focus, the focused window is first"
+            );
+            assert_eq!(
+                scene.get_int("heldValid"),
+                1,
+                "Windows.get(902) is not the window's live row"
+            );
+
+            let refocused = vec![
+                window_row(901, "w-left", true, 0),
+                window_row(902, "w-left", false, 1),
+                window_row(903, "w-right", false, 2),
+                parked.clone(),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&rows, &refocused))
+            ));
+            assert_eq!(
+                scene.get_string_for_test("focusedTitle"),
+                "window 901",
+                "the facade did not follow focus"
+            );
+            assert_eq!(
+                scene.get_string_for_test("first"),
+                "901",
+                "the list was not sorted again as focus moved"
+            );
+
+            let after = vec![
+                window_row(901, "w-left", true, 0),
+                window_row(903, "w-right", false, 1),
+                parked,
+            ];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&refocused, &after))
+            ));
+            assert_eq!(
+                (
+                    scene.get_int("heldValid"),
+                    scene.get_int("here"),
+                    scene.get_int("resets")
+                ),
+                (0, 1, 0),
+                "a gone window's row must read invalid, and still be an object, and the \
+                 list is never reset: (heldValid, how many on w-left, resets)"
+            );
+            let _ = super::apply_rows(super::Model::Windows, &render(&diff(&after, &[])));
+            assert_eq!(
+                scene.get_string_for_test("focusedTitle"),
+                "",
+                "with no window focused, the facade is absent"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **Qt Quick's `Window` is still Qt Quick's beside the windows model**
+    /// (Ruling 1a): `Windows`' row type has no name in `Solium`, so a scene
+    /// that imports both and writes `Window {}` builds a Qt Quick window.
+    #[test]
+    fn a_quick_window_is_still_qt_quicks_beside_the_windows_model() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-quick-window",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    Window { id: own; visible: false }
+                    readonly property int quick: own.contentItem ? 1 : 0
+                }
+                "#,
+                "quick-window-1",
+            );
+            assert_eq!(scene.get_int("quick"), 1, "Window is not Qt Quick's window");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **With nothing focused, `Windows.focused` is empty**, as the absent
+    /// row is, and not the window focused last: a bar that shows the focused
+    /// title shows none on an empty desk (Ruling 17).
+    #[test]
+    fn the_focused_facade_is_empty_with_nothing_focused() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-focused-empty",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property string title: Windows.focused.title
+                    readonly property int focusedId: Windows.focused.id
+                    readonly property int present: Windows.focused.present ? 1 : 0
+                }
+                "#,
+                "focused-empty-1",
+            );
+            let focused = vec![window_row(911, "focused-empty-1", true, 0)];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&[], &focused))
+            ));
+            let before = scene.get_string_for_test("title");
+            let unfocused = vec![window_row(911, "focused-empty-1", false, 0)];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&focused, &unfocused))
+            ));
+            let after = (
+                scene.get_int("present"),
+                scene.get_string_for_test("title"),
+                scene.get_int("focusedId"),
+            );
+            // Taken out before asserting, so a failure leaves no row behind
+            // for the next test on the Qt thread.
+            let _ = super::apply_rows(super::Model::Windows, &render(&diff(&unfocused, &[])));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                before, "window 911",
+                "the premise: the facade is the focused window"
+            );
+            assert_eq!(
+                after,
+                (0, String::new(), 0),
+                "(present, title, id) with nothing focused"
+            );
+        });
+    }
+
+    /// **A delegate reads `id`, `state` and `parent` through `model`**: in a
+    /// delegate, the item's own `state` and `parent` win over the roles of
+    /// those names, and `id` is QML's own word, so `model.` is how a delegate
+    /// spells all three.
+    #[test]
+    fn a_delegate_reads_id_state_and_parent_through_model() {
+        use crate::json::Json;
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, scene) = hosted(
+                "solium-hosted-window-delegate",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    Repeater {
+                        id: each
+                        model: Windows
+                        Item {
+                            readonly property string read: model.id + "/" + model.state + "/" + model.parent
+                            readonly property string own: state + "/" + (parent !== null)
+                        }
+                    }
+                    readonly property string read: each.count > 0 ? each.itemAt(0).read : ""
+                    readonly property string own: each.count > 0 ? each.itemAt(0).own : ""
+                }
+                "#,
+                "window-delegate-1",
+            );
+            let mut child = window_row(921, "window-delegate-1", false, 0);
+            child.values.insert("parent", Json::Number(77.0));
+            let rows = vec![child];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&[], &rows))
+            ));
+            let read = (
+                scene.get_string_for_test("read"),
+                scene.get_string_for_test("own"),
+            );
+            let _ = super::apply_rows(super::Model::Windows, &render(&diff(&rows, &[])));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                read,
+                ("921/shown/77".to_owned(), "/true".to_owned()),
+                "(the roles through `model`, the item's own `state` and `parent`)"
+            );
+        });
+    }
+
+    /// **A shell's own `Workspace.qml` is not shadowed by the workspaces
+    /// model** (Ruling 1a): `Workspaces`' row type has no name in `Solium`,
+    /// so a scene that imports it gets its own `Workspace`.
+    #[test]
+    fn a_shell_file_named_like_a_workspace_is_still_the_shells() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-shadow-workspace");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            std::fs::write(
+                directory.join("Workspace.qml"),
+                "import QtQuick\nItem { readonly property int mine: 1 }\n",
+            )
+            .expect("writing the shell's own file");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    Workspace { id: own }\n    readonly property int mine: own.mine\n}\n",
+            )
+            .expect("writing the scene");
+            let mut built = Scene::for_monitor(&path, 16, 16, None, "shadow-workspace-1");
+            let mine = built.as_mut().map(|scene| scene.get_int("mine")).ok();
+            drop(built);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(mine, Some(1), "Workspace is not the shell's own file");
+        });
+    }
+
+    /// **`WorkspaceList` is the group of its monitor, `showing(monitor)` is a
+    /// stable facade for what that monitor shows, `current` what the monitor
+    /// in front shows, and `Solium.status` is what `sol.status` set**
+    /// (Ruling 19); with no rows, the facades are empty.
+    #[test]
+    fn the_workspaces_model_its_list_and_its_facades() {
+        use crate::json::Json;
+        use crate::models::diff::{Row, diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-workspaces",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    WorkspaceList { id: own; monitor: "ws-left" }
+                    WorkspaceList { id: every }
+                    readonly property int mine: own.count
+                    readonly property int all: every.count
+                    property var held: { Workspaces.count; return Workspaces.get("ws-left/2") }
+                    readonly property int heldValid: held.valid ? 1 : 0
+                    readonly property string shown: Workspaces.showing("ws-left").name
+                    readonly property string current: Workspaces.current.name
+                    readonly property string status: Solium.status
+                }
+                "#,
+                "ws-left",
+            );
+            let row = |group: &str, id: &str, active: bool| Row {
+                key: format!("{group}/{id}"),
+                values: std::collections::BTreeMap::from([
+                    ("key", Json::Text(format!("{group}/{id}"))),
+                    ("id", Json::Text(id.to_owned())),
+                    ("name", Json::Text(format!("desk {id}"))),
+                    ("group", Json::Text(group.to_owned())),
+                    ("monitors", Json::List(vec![Json::Text(group.to_owned())])),
+                    ("active", Json::Bool(active)),
+                    ("focused", Json::Bool(active && group == "ws-left")),
+                ]),
+            };
+            let rows = vec![
+                row("ws-left", "1", false),
+                row("ws-left", "2", true),
+                row("ws-right", "1", true),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Workspaces,
+                &render(&diff(&[], &rows))
+            ));
+            assert!(super::set_status("workspace 2"));
+            let first = (
+                scene.get_int("mine"),
+                scene.get_int("all"),
+                scene.get_int("heldValid"),
+                scene.get_string_for_test("shown"),
+                scene.get_string_for_test("current"),
+                scene.get_string_for_test("status"),
+            );
+            let after = vec![
+                row("ws-left", "1", true),
+                row("ws-left", "2", false),
+                row("ws-right", "1", true),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Workspaces,
+                &render(&diff(&rows, &after))
+            ));
+            let switched = (
+                scene.get_string_for_test("shown"),
+                scene.get_string_for_test("current"),
+            );
+            let _ = super::apply_rows(super::Model::Workspaces, &render(&diff(&after, &[])));
+            let gone = (
+                scene.get_string_for_test("shown"),
+                scene.get_string_for_test("current"),
+                scene.get_int("heldValid"),
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                first,
+                (
+                    2,
+                    3,
+                    1,
+                    "desk 2".to_owned(),
+                    "desk 2".to_owned(),
+                    "workspace 2".to_owned()
+                ),
+                "(WorkspaceList's count on ws-left, with no monitor, get(\"ws-left/2\").valid, \
+                 showing(ws-left), current, Solium.status)"
+            );
+            assert_eq!(
+                switched,
+                ("desk 1".to_owned(), "desk 1".to_owned()),
+                "the facades did not follow the switch: (showing, current)"
+            );
+            assert_eq!(
+                gone,
+                (String::new(), String::new(), 0),
+                "with no workspaces, the facades must be empty, not the last shown, and a \
+                 gone workspace's row invalid: (showing, current, get(\"ws-left/2\").valid)"
+            );
+        });
+    }
+
+    /// **A shell's own file named like a singleton of the module is hidden
+    /// by it**: a `Monitors.qml` beside a scene that imports `Solium` is the
+    /// `Monitors` model there, which cannot be created, so the scene does not
+    /// build.
+    #[test]
+    fn a_shell_file_named_like_a_singleton_is_hidden_by_it() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-shadow-singleton");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            std::fs::write(
+                directory.join("Monitors.qml"),
+                "import QtQuick\nItem { readonly property int mine: 1 }\n",
+            )
+            .expect("writing the shell's own file");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    Monitors { id: own }\n    readonly property int mine: own.mine\n}\n",
+            )
+            .expect("writing the scene");
+            let built = Scene::for_monitor(&path, 16, 16, None, "shadow-singleton-1");
+            assert!(
+                built
+                    .as_ref()
+                    .is_err_and(|err| format!("{err:?}").contains("not creatable")),
+                "the shell's own Monitors.qml was not hidden by the model: {:?}",
+                built.as_ref().err()
+            );
+            drop(built);
             let _ = std::fs::remove_dir_all(&directory);
         });
     }

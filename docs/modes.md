@@ -237,9 +237,10 @@ sol.on("maximize", function(id, entering) end)     -- it was maximised, or resto
 
 Every handler, and every binding, has 100 ms, on a clock the compositor starts
 for each one, so nothing a handler calls puts it off: past that it is stopped
-with an error in the log, which names the file and line it was written at, so a
-loop in one cannot freeze the desktop, even inside a coroutine it makes, around
-a `pcall`, `xpcall` or `load`, which hand the stop on, or around
+with an error in the log, which names the file and line it was written at and
+the file and line it was stopped at, so a loop in one cannot freeze the
+desktop, even inside a coroutine it makes, around a `pcall`, `xpcall` or
+`load`, which hand the stop on, or around
 `sol.focus_direction`, and the other listeners still run. The `direction`
 listeners' time counts against the handler that called `sol.focus_direction` or
 `sol.move_direction`, so one stopped there stops that handler too. A `__gc`
@@ -247,7 +248,8 @@ finalizer, and the `__close` of a to-be-closed variable in the function a stop
 interrupts, run where no hook does, so the deadline cannot stop a loop in
 either: keep them short. A listener stopped three times stays off until
 `super+shift+r`, and so does a `done` of `sol.act`, whose stops are counted the
-same way
+same way, by function: a `done` written inline is a new function at each
+`sol.act`, so it is stopped each time rather than taken out
 (`script::tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 `script::tests::a_binding_that_never_returns_is_stopped`,
 `script::tests::a_handler_that_calls_sol_deadline_is_still_stopped`,
@@ -261,8 +263,15 @@ same way
 `script::tests::a_close_run_after_a_stop_is_not_under_the_deadline`,
 `script::tests::a_gc_finalizer_is_not_under_the_deadline`,
 `script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+`script::tests::a_stopped_binding_is_logged_where_it_was_written_and_stopped`,
+`script::tests::a_handler_stopped_at_its_focus_direction_is_logged_at_that_call`,
 `script::tests::a_listener_stopped_three_times_is_taken_out`,
-`script::tests::a_done_stopped_three_times_is_not_called_again`).
+`script::tests::a_done_stopped_three_times_is_not_called_again`,
+`script::tests::an_inline_done_is_stopped_each_time_and_never_taken_out`).
+An `actions.override` is a listener `actions.lua` writes for you, so its stop
+names `actions.lua` as where it was written, and the override's own line as
+where it was stopped
+(`script::tests::a_stopped_override_is_logged_where_it_was_stopped`).
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
 back: its scene calls `Solium.send(action, data)`, and you are told the
@@ -653,6 +662,17 @@ If you keep per-workspace state of your own, key it by monitor as well.
 that screen is showing is something `workspaces` knows, and threading it
 through every call site is how one of them ends up asking for the wrong
 screen's.
+
+`workspaces.lua` declares the workspaces it keeps with `sol.workspaces{
+arrangement, groups, windows }` whenever they change, which is how a hosted
+shell's `Workspaces` and `WorkspaceList` know them, and it answers
+`workspaces.go` and `windows.send` from a scene through `actions.lua`, when
+the configuration keeps that file and requires it before `workspaces`, as the
+shipped `init.lua` does: `workspaces.lua` looks for it once, as it loads.
+Without it, the configuration routes a scene's actions itself, and
+`workspaces.lua` does not route them a second time. A configuration that keeps workspaces some other way, tags say,
+declares those, each `<group>/<id>` once.
+See [shell-boundary.md](shell-boundary.md).
 
 `monitors.active()` is the monitor the pointer is on — where a new window goes,
 and what a binding pressed with no particular window in mind is about. It is

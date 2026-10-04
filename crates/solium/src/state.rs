@@ -265,6 +265,25 @@ pub(crate) struct Solium {
     /// only what changed since: `models::tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
     pub(crate) published: crate::models::Published,
 
+    /// The windows focused, by script id, the most recent first: what
+    /// `Windows`' `focusOrder` counts (Ruling 18). A window that has gone is
+    /// dropped at the next focus.
+    /// `tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+    /// `tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`.
+    pub(crate) focus_history: Vec<u64>,
+
+    /// Windows that asked for attention where nobody could see them, until
+    /// each is focused: `Windows`' `urgent` (Ruling 18).
+    /// `tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
+    pub(crate) urgent: std::collections::HashSet<u64>,
+
+    /// The workspaces Lua last declared with `sol.workspaces`, less what the
+    /// compositor does not have; until then `None`, with no `Workspaces`
+    /// rows, and every window's `workspace` in `Windows` reads `""`.
+    /// `tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
+    /// `tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`.
+    pub(crate) workspaces: Option<crate::models::workspaces::Declared>,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -353,7 +372,9 @@ pub(crate) struct Solium {
     /// The active mode's name, as a script last reported it with `sol.status`
     /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
     /// reads it back). The compositor does not know what modes exist; it keeps
-    /// the name and logs it when it changes, and nothing draws it.
+    /// the name and logs it when it changes, draws nothing with it, and hands
+    /// it to hosted scenes as `Solium.status`
+    /// (`crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`).
     pub(crate) status: String,
 
     /// Whether a mode owns input. While it does, keys and clicks belong to the
@@ -403,6 +424,12 @@ pub(crate) struct Solium {
     /// each logged the first time only.
     /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
     pub(crate) unknown_actions: std::collections::HashSet<String>,
+    /// The monitors and windows `sol.workspaces` named that the compositor
+    /// does not have, and the workspaces it declared twice, each logged the
+    /// first time only.
+    /// `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+    /// `crate::models::workspaces::tests::a_workspace_declared_twice_is_one_row`.
+    pub(crate) unknown_in_workspaces: std::collections::HashSet<String>,
     /// Whether the settled attempts are being told, so what a `done` asks
     /// for is told by that loop and not from inside it.
     /// `tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
@@ -1009,6 +1036,7 @@ impl Solium {
             scene_press: None,
             settled_attempts: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
+            unknown_in_workspaces: std::collections::HashSet::new(),
             telling_attempts: false,
             repoint_at_release: false,
             scene_hovered: None,
@@ -1058,6 +1086,9 @@ impl Solium {
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),
             published: crate::models::Published::default(),
+            focus_history: Vec::new(),
+            urgent: std::collections::HashSet::new(),
+            workspaces: None,
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),

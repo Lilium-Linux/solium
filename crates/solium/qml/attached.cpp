@@ -6,6 +6,7 @@
 
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
+#include <QtCore/QCoreApplication>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonValue>
@@ -296,7 +297,25 @@ SoliumKeyboard *solium_keyboard_holder(SoliumHosting *hosting)
     return holder;
 }
 
-SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item) {}
+SoliumStatus &SoliumStatus::instance()
+{
+    static SoliumStatus *status = nullptr;
+    if (status == nullptr) {
+        status = new SoliumStatus();
+    }
+    return *status;
+}
+
+SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item)
+{
+    QObject::connect(&SoliumStatus::instance(), &SoliumStatus::changed, this,
+                     &SoliumAttached::statusChanged);
+}
+
+QString SoliumAttached::status() const
+{
+    return SoliumStatus::instance().text;
+}
 
 SoliumKeyboard *SoliumAttached::keyboard()
 {
@@ -601,4 +620,44 @@ void solium_qml_register_types()
     /* `Keyboard`, unqualified like `Theme`, in every scene.
      * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`. */
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Keyboard", solium_keyboard());
+    /* The models, as singletons, each the one store Rust publishes into.
+     * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`. */
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Monitors",
+                                 solium_rows(SOLIUM_QML_ROWS_MONITORS));
+    /* A window's row is nameless like a monitor's: a named `Window` would
+     * hide Qt Quick's `Window` in every scene that imports both.
+     * `qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`. */
+    qmlRegisterAnonymousType<SoliumWindow>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Windows",
+                                 qobject_cast<SoliumWindowRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_WINDOWS)));
+    /* Named, since a scene writes one: `WindowList { ... }`.
+     * `qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`. */
+    qmlRegisterType<SoliumWindowList>(SOLIUM_NATIVE_URI, 1, 0, "WindowList");
+    /* A workspace's row is nameless like a monitor's, so a shell's own
+     * `Workspace.qml` is its own.
+     * `qml::hosted::tests::a_shell_file_named_like_a_workspace_is_still_the_shells`. */
+    qmlRegisterAnonymousType<SoliumWorkspace>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Workspaces",
+                                 qobject_cast<SoliumWorkspaceRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_WORKSPACES)));
+    /* Named, since a scene writes one: `WorkspaceList { ... }`.
+     * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+    qmlRegisterType<SoliumWorkspaceList>(SOLIUM_NATIVE_URI, 1, 0, "WorkspaceList");
+}
+
+/* What `Solium.status` reads: the text `sol.status` set.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+extern "C" int solium_qml_set_status(const char *text)
+{
+    if (QCoreApplication::instance() == nullptr) {
+        return 0;
+    }
+    SoliumStatus &status = SoliumStatus::instance();
+    const QString next = QString::fromUtf8(text != nullptr ? text : "");
+    if (next != status.text) {
+        status.text = next;
+        emit status.changed();
+    }
+    return 1;
 }

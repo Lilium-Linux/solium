@@ -36,6 +36,12 @@ end
 -- third stop, alone: every other action is still routed, and `name` goes to
 -- the compositor again. See `an_override_stopped_three_times_is_taken_out_alone`.
 function actions.override(name, handler)
+    -- An override of nil is none: `name` goes to the compositor again. See
+    -- `an_override_of_nil_gives_its_action_back_to_the_compositor`.
+    if handler == nil then
+        current[name] = nil
+        return
+    end
     local this = {}
     current[name] = this
     local heard = false

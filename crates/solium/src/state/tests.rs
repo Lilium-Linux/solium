@@ -7648,6 +7648,29 @@ end)"#,
         );
     }
 
+    /// **A changed `sol.status` with no commands still asks for a frame.**
+    ///
+    /// The shipped `modes.lua`, `overview.lua` and `workspaces.lua` always
+    /// send a command alongside a status change, which already sets
+    /// `redraw`, so this went unnoticed. But `sol.status` is now documented
+    /// as how a configuration tells a hosted shell its mode, and a binding
+    /// that only calls it would otherwise leave `Solium.status` stale until
+    /// some unrelated frame.
+    #[test]
+    fn a_status_change_with_no_commands_still_asks_for_a_frame() {
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state.redraw = false;
+        state.apply(Outcome {
+            status: Some("mode".to_owned()),
+            ..Outcome::default()
+        });
+        assert!(
+            state.redraw,
+            "a status change with no commands left redraw unset"
+        );
+    }
+
     /// **A window a layout lets go of is not held in the tile it had.**
     ///
     /// `sol.unplace` is what `modes.use` sends for every window when the
@@ -20149,6 +20172,13 @@ end)
                     &working,
                     "a key typed after it went somewhere else",
                 );
+                // Turned down because nobody can see it, as a window on a
+                // hidden desk is, so it wants you just the same (Ruling 18).
+                assert!(
+                    desk.state.urgent.contains(&hidden.pane.get()),
+                    "a window nobody can see asked to be brought forward, gave the keyboard \
+                     back, and is not urgent"
+                );
             }
 
             /// **Any client can mint itself a token, and take the keyboard
@@ -21194,6 +21224,87 @@ end)
                     !heard.split(',').any(|id| id == parked),
                     "the parked window was focused on the way, if only until the keyboard \
                      was handed back. Heard: [{heard}]"
+                );
+            }
+
+            /// **A refused activation is "this window wants you"** (03
+            /// §3.2.17, Ruling 18): the window asking to be brought forward
+            /// from a hidden workspace is urgent until it is focused.
+            #[test]
+            fn a_refused_activation_marks_the_window_urgent_until_it_is_focused() {
+                let (mut desk, _first) = working_in(
+                    &format!(
+                        "local config = require(\"config\")\n\
+                         config.tiling.minimum = {{ w = 900, h = 600 }}\n\
+                         config.tiling.follow_overflow = false\n\
+                         {SHIPPED_HEARING_FOCUS}"
+                    ),
+                    Some("super+t"),
+                );
+                let left = desk.focused();
+                let right = desk.open_surface();
+                desk.answer(&right);
+                let left_window = window_of(&desk, left);
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                assert!(
+                    headed_on_stage(&desk.state, left) && headed_on_stage(&desk.state, right.pane),
+                    "the premise: two tiles on screen"
+                );
+
+                // The pointer on the right tile, the keyboard on the left.
+                let over_right = desk.placed(right.pane);
+                point_at(
+                    &mut desk.state,
+                    (
+                        f64::from(over_right.loc.x + over_right.size.w / 2),
+                        f64::from(over_right.loc.y + over_right.size.h / 2),
+                    ),
+                );
+                desk.state
+                    .focus_window(&left_window, SERIAL_COUNTER.next_serial());
+                typed_into(
+                    &mut desk,
+                    &left_window,
+                    "the premise: typing reaches the left tile",
+                );
+
+                let parked = desk.open_surface();
+                assert_eq!(
+                    workspace_of(&desk, parked.pane),
+                    "2",
+                    "the premise: the third window had no room and went to workspace 2"
+                );
+                assert!(
+                    !headed_on_stage(&desk.state, parked.pane),
+                    "the premise: it is parked a screen away"
+                );
+                assert_eq!(
+                    desk.state.focused_window(),
+                    Some(left_window.clone()),
+                    "the premise: it opened without the keyboard"
+                );
+
+                let token = genuine_token(&mut desk);
+                desk.state.redraw = false;
+                activates(&mut desk, &parked.surface, &token);
+                let id = parked.pane.get();
+                assert!(
+                    desk.state.urgent.contains(&id),
+                    "a refused activation did not mark the window urgent"
+                );
+                assert!(
+                    desk.state.redraw,
+                    "a window going urgent asked for no frame, so the models would not show it \
+                     until something unrelated redrew"
+                );
+                let parked_window = window_of(&desk, parked.pane);
+                desk.state
+                    .focus_window(&parked_window, SERIAL_COUNTER.next_serial());
+                assert!(
+                    !desk.state.urgent.contains(&id),
+                    "focusing it did not clear urgent"
                 );
             }
 
@@ -26415,7 +26526,7 @@ end)"#,
                     shell,
                     &[("windows.fly", "null"), ("windows.fly", "null")],
                 );
-                let log = crate::script::tests::logged_while(|| desk.state.settle_scenes());
+                let log = crate::script::logged_while(|| desk.state.settle_scenes());
                 assert_eq!(
                     (
                         desk.state.status.as_str(),
@@ -26423,6 +26534,310 @@ end)"#,
                     ),
                     ("unknown-action;unknown-action;", 1),
                     "(what the dones heard, how many times the log warned of it):\n{log}"
+                );
+            }
+
+            fn window_row(
+                desk: &Desk,
+                id: u64,
+            ) -> std::collections::BTreeMap<&'static str, crate::json::Json> {
+                crate::models::windows::rows(&desk.state)
+                    .into_iter()
+                    .find(|row| row.key == id.to_string())
+                    .map(|row| row.values)
+                    .expect("a row for the window")
+            }
+
+            /// **A window's row is where it lives, its focus and its state**,
+            /// built from its pane.
+            #[test]
+            fn a_window_row_carries_where_it_lives_and_its_focus() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let id = opened.pane.get();
+                let row = window_row(&desk, id);
+                use crate::json::Json;
+                assert_eq!(row.get("state"), Some(&Json::Text("shown".to_owned())));
+                assert_eq!(row.get("focused"), Some(&Json::Bool(true)));
+                assert_eq!(row.get("focusOrder"), Some(&Json::Number(0.0)));
+                assert_eq!(row.get("onStage"), Some(&Json::Bool(true)));
+                assert_eq!(row.get("xwayland"), Some(&Json::Bool(false)));
+                assert!(matches!(row.get("monitor"), Some(Json::Text(name)) if !name.is_empty()));
+                assert_eq!(
+                    row.get("workspace"),
+                    Some(&Json::Text(String::new())),
+                    "no workspaces are declared, so the window is on none"
+                );
+            }
+
+            /// **Workspace rows count their windows and say which is shown**,
+            /// from what Lua declared, joined with the windows; and the
+            /// window's own row says which workspace it is on.
+            #[test]
+            fn workspace_rows_count_their_windows_and_say_which_is_shown() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let monitor = the_monitor(&desk).name();
+                let id = opened.pane.get();
+                desk.install(&format!(
+                    r#"sol.workspaces({{ arrangement = {{ kind = "horizontal", columns = 2, rows = 1 }},
+                        groups = {{ {{ id = "{monitor}", monitors = {{ "{monitor}" }}, showing = {{ "1" }},
+                                     workspaces = {{ {{ id = "1", name = "1", col = 1, row = 1 }}, {{ id = "2", name = "2", col = 2, row = 1 }} }} }} }},
+                        windows = {{ [{id}] = {{ "2" }} }} }})"#
+                ));
+                let outcome = desk
+                    .state
+                    .scripts
+                    .as_mut()
+                    .map(crate::script::Scripts::startup)
+                    .unwrap_or_default();
+                desk.state.apply(outcome);
+                let rows = crate::models::workspaces::rows(&desk.state);
+                let get = |key: &str, role: &str| {
+                    rows.iter()
+                        .find(|row| row.key == key)
+                        .and_then(|row| row.values.get(role).cloned())
+                };
+                use crate::json::Json;
+                assert_eq!(
+                    get(&format!("{monitor}/1"), "active"),
+                    Some(Json::Bool(true))
+                );
+                assert_eq!(
+                    (
+                        get(&format!("{monitor}/1"), "focused"),
+                        get(&format!("{monitor}/2"), "focused")
+                    ),
+                    (Some(Json::Bool(true)), Some(Json::Bool(false))),
+                    "the workspace the monitor in front shows is the focused one"
+                );
+                assert_eq!(
+                    get(&format!("{monitor}/2"), "occupied"),
+                    Some(Json::Number(1.0))
+                );
+                assert_eq!(
+                    get(&format!("{monitor}/1"), "occupied"),
+                    Some(Json::Number(0.0))
+                );
+                assert_eq!(
+                    window_row(&desk, id).get("workspace"),
+                    Some(&Json::Text("2".to_owned()))
+                );
+
+                // Fullscreen and urgent, the window makes its workspace so,
+                // and is in its `windows`; the other is neither.
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::ToggleFullscreen { id }],
+                    ..crate::script::Outcome::default()
+                });
+                desk.state.urgent.insert(id);
+                let rows = crate::models::workspaces::rows(&desk.state);
+                let roles = |key: String| {
+                    let row = rows.iter().find(|row| row.key == key);
+                    ["urgent", "hasFullscreen", "windows"]
+                        .map(|role| row.and_then(|row| row.values.get(role).cloned()))
+                };
+                #[expect(clippy::cast_precision_loss, reason = "a window id, far below 2^53")]
+                let number = id as f64;
+                assert_eq!(
+                    (roles(format!("{monitor}/2")), roles(format!("{monitor}/1"))),
+                    (
+                        [
+                            Some(Json::Bool(true)),
+                            Some(Json::Bool(true)),
+                            Some(Json::List(vec![Json::Number(number)]))
+                        ],
+                        [
+                            Some(Json::Bool(false)),
+                            Some(Json::Bool(false)),
+                            Some(Json::List(Vec::new()))
+                        ]
+                    ),
+                    "(urgent, hasFullscreen, windows) of workspace 2, with the window, and 1"
+                );
+            }
+
+            /// **A reload into a configuration that stops calling
+            /// `sol.workspaces` publishes none**, not what the previous
+            /// session last declared.
+            #[test]
+            fn a_reload_that_stops_declaring_workspaces_publishes_none() {
+                let (mut desk, _opened, _) = window_under_a_scene(button_over_the_window);
+                let monitor = the_monitor(&desk).name();
+                desk.install(&format!(
+                    r#"sol.workspaces({{ arrangement = {{ kind = "horizontal", columns = 1, rows = 1 }},
+                        groups = {{ {{ id = "{monitor}", monitors = {{ "{monitor}" }}, showing = {{ "1" }},
+                                     workspaces = {{ {{ id = "1", name = "1", col = 1, row = 1 }} }} }} }} }})"#
+                ));
+                let outcome = desk
+                    .state
+                    .scripts
+                    .as_mut()
+                    .map(crate::script::Scripts::startup)
+                    .unwrap_or_default();
+                desk.state.apply(outcome);
+                assert!(
+                    desk.state.workspaces.is_some(),
+                    "the premise: a declaration is held"
+                );
+                assert!(
+                    !crate::models::workspaces::rows(&desk.state).is_empty(),
+                    "the premise: it publishes rows"
+                );
+
+                let directory = std::env::temp_dir().join(format!(
+                    "solium-reload-drops-workspaces-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(
+                    &entry,
+                    "-- a configuration that never calls sol.workspaces\n",
+                )
+                .expect("writing the entry point");
+                desk.state.reload_from(&entry);
+                let _ = std::fs::remove_dir_all(&directory);
+
+                assert!(
+                    desk.state.workspaces.is_none(),
+                    "the old declaration stayed held after a reload that never declared one"
+                );
+                assert!(
+                    crate::models::workspaces::rows(&desk.state).is_empty(),
+                    "the old rows stayed published after a reload that never declared any"
+                );
+            }
+
+            /// **`focusOrder` is most recent first** (Ruling 18).
+            #[test]
+            fn focus_order_is_most_recent_first() {
+                let (mut desk, first, _) = window_under_a_scene(button_over_the_window);
+                let second = desk.open_surface();
+                let (one, two) = (window(&desk, &first), window(&desk, &second));
+                desk.state.focus_window(&one, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&two, SERIAL_COUNTER.next_serial());
+                use crate::json::Json;
+                assert_eq!(
+                    window_row(&desk, second.pane.get()).get("focusOrder"),
+                    Some(&Json::Number(0.0))
+                );
+                assert_eq!(
+                    window_row(&desk, first.pane.get()).get("focusOrder"),
+                    Some(&Json::Number(1.0))
+                );
+            }
+
+            /// **A window is listed from the moment it is launched**, before
+            /// its application draws: `loading`, titled with the program,
+            /// with no process to name yet, and, never focused, last in
+            /// `focusOrder` (Ruling 18).
+            #[test]
+            fn a_window_still_loading_is_listed_as_loading() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let focused = window(&desk, &opened);
+                desk.state
+                    .focus_window(&focused, SERIAL_COUNTER.next_serial());
+                let source = crate::pane::loading_source(None);
+                let loading = desk.state.open_loading("app", None, source, None);
+                let row = window_row(&desk, loading.get());
+                use crate::json::Json;
+                assert_eq!(
+                    (
+                        row.get("state"),
+                        row.get("title"),
+                        row.get("pid"),
+                        row.get("focusOrder")
+                    ),
+                    (
+                        Some(&Json::Text("loading".to_owned())),
+                        Some(&Json::Text("app".to_owned())),
+                        Some(&Json::Number(-1.0)),
+                        Some(&Json::Number(1.0))
+                    ),
+                    "(state, title, pid, focusOrder)"
+                );
+            }
+
+            /// **A window that closes leaves no gap in `focusOrder`**
+            /// (Ruling 18): the windows left still count up from 0, so the
+            /// one focused before the one in front is still 1; and the next
+            /// focus forgets it, urgent as it was.
+            #[test]
+            fn a_closed_window_leaves_no_gap_in_focus_order() {
+                let (mut desk, first, _) = window_under_a_scene(button_over_the_window);
+                let second = desk.open_surface();
+                let third = desk.open_surface();
+                let (one, two, three) = (
+                    window(&desk, &first),
+                    window(&desk, &second),
+                    window(&desk, &third),
+                );
+                desk.state
+                    .focus_window(&three, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&two, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&one, SERIAL_COUNTER.next_serial());
+                desk.state.urgent.insert(second.pane.get());
+                second.toplevel.destroy();
+                desk.pump();
+                use crate::json::Json;
+                assert!(
+                    crate::models::windows::rows(&desk.state)
+                        .iter()
+                        .all(|row| row.key != second.pane.get().to_string()),
+                    "the premise: the closed window is not listed"
+                );
+                assert_eq!(
+                    [&first, &third].map(|opened| window_row(&desk, opened.pane.get())
+                        .get("focusOrder")
+                        .cloned()),
+                    [Some(Json::Number(0.0)), Some(Json::Number(1.0))],
+                    "[the window in front, the one focused before the closed one]"
+                );
+                desk.state
+                    .focus_window(&three, SERIAL_COUNTER.next_serial());
+                assert_eq!(
+                    (desk.state.focus_history.clone(), desk.state.urgent.len()),
+                    (vec![third.pane.get(), first.pane.get()], 0),
+                    "the next focus forgets the window that closed: (the focus history, how \
+                     many windows are urgent)"
+                );
+            }
+
+            /// **A window reads `maximized` the moment the compositor
+            /// maximises it**, before its client has answered, and still
+            /// once it has: nothing waits for a client (Section 2, rule 3;
+            /// Ruling 18).
+            #[test]
+            fn a_maximised_window_reads_maximized_at_once() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state.toggle_maximize(&window);
+                desk.pump();
+                use crate::json::Json;
+                let asked = window_row(&desk, opened.pane.get())
+                    .get("maximized")
+                    .cloned();
+                let id = wayland_client::Proxy::id(&opened.xdg);
+                let serial = desk
+                    .client
+                    .surface_configures
+                    .iter()
+                    .rev()
+                    .find(|(to, _)| *to == id)
+                    .map(|&(_, serial)| serial)
+                    .expect("the window was configured");
+                opened.xdg.ack_configure(serial);
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 64, 64);
+                desk.pump();
+                let agreed = window_row(&desk, opened.pane.get())
+                    .get("maximized")
+                    .cloned();
+                assert_eq!(
+                    (asked, agreed),
+                    (Some(Json::Bool(true)), Some(Json::Bool(true))),
+                    "(maximized once the compositor maximised it, once the client committed it)"
                 );
             }
         }

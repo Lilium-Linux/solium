@@ -58,10 +58,14 @@ public:
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 QRectF solium_rect(const QVariant &value);
 
-/* A monitor's row: what `Solium.monitor` is. Its name, its whole and work
- * areas in the global space, its scale, its transform and whether it is the
- * primary monitor, all announced by one `changed` per batch.
- * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
+/* A monitor's row: what `Solium.monitor` is, and one row of `Monitors`. Its
+ * name, its whole and work areas in the global space, its scale, its
+ * transform, whether it is the primary monitor, what is reserved on each
+ * edge, its power, whether the pointer is on it and whether it is the active
+ * one, all announced by one `changed` per batch.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`,
+ * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`,
+ * `models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`. */
 class SoliumMonitor : public SoliumRow
 {
     Q_OBJECT
@@ -73,6 +77,10 @@ class SoliumMonitor : public SoliumRow
     Q_PROPERTY(double scale READ scale NOTIFY changed)
     Q_PROPERTY(QString transform READ transform NOTIFY changed)
     Q_PROPERTY(bool primary READ primary NOTIFY changed)
+    Q_PROPERTY(QVariantMap reserved READ reserved NOTIFY changed)
+    Q_PROPERTY(QString power READ power NOTIFY changed)
+    Q_PROPERTY(bool pointer READ pointer NOTIFY changed)
+    Q_PROPERTY(bool active READ active NOTIFY changed)
 public:
     using SoliumRow::SoliumRow;
     bool isPresent() const { return present; }
@@ -82,6 +90,10 @@ public:
     double scale() const { return value("scale").toDouble(); }
     QString transform() const { return value("transform").toString(); }
     bool primary() const { return value("primary").toBool(); }
+    QVariantMap reserved() const { return value("reserved").toMap(); }
+    QString power() const { return value("power").toString(); }
+    bool pointer() const { return value("pointer").toBool(); }
+    bool active() const { return value("active").toBool(); }
     void announce() override { emit changed(); }
 signals:
     void changed();
@@ -274,6 +286,19 @@ struct SoliumHosting
     QList<QPair<QString, QByteArray>> actions;
 };
 
+/* What `sol.status` last set, for `Solium.status`: one per process, made on
+ * first use.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+class SoliumStatus : public QObject
+{
+    Q_OBJECT
+public:
+    static SoliumStatus &instance();
+    QString text;
+signals:
+    void changed();
+};
+
 /* What every item reads as `Solium.<name>`.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 class SoliumAttached : public QObject
@@ -290,6 +315,9 @@ class SoliumAttached : public QObject
     /* `Solium.keyboard`: whether this item wants the keyboard, and the keys
      * it claims. `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     Q_PROPERTY(SoliumKeyboard *keyboard READ keyboard CONSTANT)
+    /* `Solium.status`: the text `sol.status` set.
+     * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+    Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     /* `Solium.cursor`: the pointer as the compositor publishes it, and the
      * hotspot the pointer's scene sets on its root.
      * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`,
@@ -312,6 +340,7 @@ public:
      * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
+    QString status() const;
     SoliumCursor *cursor();
     /* The object's `Solium.cursor` if anything has made it, else null.
      * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
@@ -329,6 +358,7 @@ public:
 
 signals:
     void inputChanged();
+    void statusChanged();
     void regionChanged();
     void materialChanged();
 

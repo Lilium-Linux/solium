@@ -358,8 +358,8 @@ learns a window is a Wayland surface:
   reused, so a script holding one across frames cannot address a different
   window with it.
 - **The compositor does not know what modes exist.** A script names itself with
-  `sol.status`. Today that name is only kept and logged: nothing draws it, and a
-  shell has no way to read it yet.
+  `sol.status`. The compositor keeps and logs that name and draws nothing
+  with it; a hosted shell reads it as `Solium.status`.
 
 **No compositor config key per mode.** That is how a mode set becomes closed.
 
@@ -369,9 +369,11 @@ The models scenes read are built from the compositor's own state (`models/`),
 so nothing is mirrored. Each model is diffed by key (`models/diff.rs`) and
 sent to Qt as one batch, every row's values written before any row is
 announced (`qml/rows.cpp`), once a frame, in `render.rs` just before
-`qml::tick`. Two exist today: the monitors, read as `Solium.monitor`
-(`models/monitors.rs`), and the keyboard, read as the `Keyboard` singleton
-(`models/keyboard.rs`).
+`qml::tick`. Four exist today: the monitors, read as `Solium.monitor` and
+`Monitors` (`models/monitors.rs`); the windows, read as `Windows`
+(`models/windows.rs`); the workspaces Lua declares with `sol.workspaces`,
+read as `Workspaces` (`models/workspaces.rs`); and the keyboard, read as the
+`Keyboard` singleton (`models/keyboard.rs`).
 
 `text_input.rs` answers `zwp_text_input_v3` itself, not through Smithay's
 module, which discards every request while no input method runs. It keeps only

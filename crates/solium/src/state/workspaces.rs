@@ -362,7 +362,7 @@ impl Solium {
     /// [`Self::on_stage`] for one pane, asked by id at [`Self::settling`]: for
     /// a caller with a single question rather than a walk to hoist the
     /// screens out of. A pane that is not there is not on stage.
-    pub(super) fn pane_on_stage(&self, pane: crate::pane::PaneId) -> bool {
+    pub(crate) fn pane_on_stage(&self, pane: crate::pane::PaneId) -> bool {
         let landed = self.settling();
         let screens = self.screens();
         self.panes

@@ -12,11 +12,12 @@ the line, and it is not where a Wayland tutorial would put it.
   file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
   The shipped configuration names none.
 - A shell is QML written against Solium's own API: `import Solium` for
-  `Theme`, `Keyboard`, `Grab` and the attached `Solium` object
+  `Theme`, `Keyboard`, `Monitors`, `Windows`, `WindowList`, `Workspaces`,
+  `WorkspaceList`, `Grab` and the attached `Solium` object
   (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
-  `Solium.keyboard`), and `Solium.send` for what it asks Lua to do
-  ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
-  (#172); Quickshell itself may add Solium support on its own side.
+  `Solium.keyboard`, `Solium.status`), and `Solium.send` for what it asks Lua
+  to do ([below](#what-a-hosted-shell-is-given)). Quickshell support was
+  removed (#172); Quickshell itself may add Solium support on its own side.
 - The pointer can be a scene of its own the same way, `cursor = { scene =
   "<its QML file>" }`, given what the pointer is doing as `Solium.cursor`
   ([below](#what-a-pointer-scene-is-given)).
@@ -386,17 +387,23 @@ same clock, so one beside an animation nothing draws still fires.
 
 **The `Solium` QML module.** `Theme` above all: the colours, fonts and
 metrics the frames are drawn with. Everything `import Solium` brings is
-written unqualified, as `Theme` is: the singletons `Theme` and `Keyboard`
-("The keyboard, live", below); the type `Grab` ("Popups that hold the
-pointer", above); the pane-style types `PaneStyle` and `Layer`, and the
-keyboard pill's `KeyboardPill` and `KeyboardPillLayer` (the
-[panes README](../crates/solium/qml/panes/README.md)); and the attached
-`Solium` object, which any item can read, with these members:
+written unqualified, as `Theme` is: the singletons `Theme`, `Keyboard`
+("The keyboard, live", below), `Monitors` ("Its monitor, live", below),
+`Windows` ("Windows, live", below) and `Workspaces` ("Workspaces, as the
+configuration has them", below); the types `Grab` ("Popups that hold the
+pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
+("Workspaces, as the configuration has them"); the pane-style types
+`PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
+`KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
+`Solium` object, which any item can read, with exactly ten members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
 `Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
-below); `Solium.keyboard.wants` and `claims` (above); `Solium.cursor`, the
-pointer, and the hotspot a pointer scene sets
+below); `Solium.keyboard.wants` and `claims` (above); `Solium.status`,
+the text `sol.status` set ("Workspaces, as the configuration has them",
+below); `Solium.send(action, data)`, what it asks Lua to do
+([below](#what-a-hosted-shell-is-given)); `Solium.cursor`, the pointer, and
+the hotspot a pointer scene sets
 ([What a pointer scene is given](#what-a-pointer-scene-is-given));
 and `Solium.region`, `Solium.material` and `Solium.materialState`, which
 every item accepts and nothing reads until materials exist
@@ -407,7 +414,16 @@ reading `"off"` till then
 Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
 internal, and the row types have no name, so a shell's own `Monitor.qml` is
 not shadowed
-(`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`).
+(`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`),
+and `Window` is still Qt Quick's in a scene that imports both
+(`qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`),
+and a shell's own `Workspace.qml` is its own
+(`qml::hosted::tests::a_shell_file_named_like_a_workspace_is_still_the_shells`).
+A shell's own file named like a type or singleton the compositor registers
+(`Grab`, `Keyboard`, `Monitors`) is hidden by it: a `Monitors.qml` beside a
+scene is the `Monitors` model there, and a scene that creates one does not
+build, so name such a file otherwise
+(`qml::hosted::tests::a_shell_file_named_like_a_singleton_is_hidden_by_it`).
 A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
 override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
@@ -439,6 +455,119 @@ A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
 `"_180"`, `"_270"`, `"flipped"`, `"flipped90"`, `"flipped180"` or
 `"flipped270"`, and not `"90"` or `"flipped-90"` as `sol.monitors{ ... }` takes
 it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smithay_does`).
+`Monitors` is every monitor, as a list model with the same roles and a
+`count`, and `Monitors.get(name)` one of them; a changed value is one
+`dataChanged` for that role alone
+(`qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`).
+Rows also say what is `reserved` on each edge (`top`, `right`, `bottom` and
+`left`: what the work area lost there, layer-shell zones and hosted reserves
+together), whether the monitor's `power` is `"on"` or `"off"`, whether the
+`pointer` is on it and whether it is the `active` one, the monitor in front of
+you (`models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`,
+`models::monitors::tests::on_two_monitors_only_the_pointers_is_active_and_each_says_its_own_edges`).
+`Monitors.get(name)` of a monitor that is not there answers a row carrying
+only that name, which becomes the monitor when it is plugged in; one that
+goes leaves the list and keeps its last values, so read `present` before them
+(`qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`).
+In a delegate of `Monitors`, `scale` and `transform` are the delegate item's
+own properties, so read those two as `model.scale` and `model.transform`
+(`qml::hosted::tests::a_monitors_delegate_reads_scale_and_transform_through_model`).
+The rows are published with a frame, so while every monitor is off none is
+published, and `power` reads `"off"` only while another monitor is drawn.
+
+**Windows, live.** `Windows` is every window, a list model built from the
+compositor's own panes and updated in place once per frame: `id`, `title`,
+`appId`, `pid`, `xwayland`, `monitor`, `workspace`, `focused`, `focusOrder`
+(0 is the most recently focused, and a window that closes leaves no gap),
+`urgent` (it asked for attention nobody could see, until it is focused),
+`fullscreen` and `maximized` (as the compositor last set them, without
+waiting for the application), `modal`,
+`parent`, `state` (`loading` from the click, `shown`, `closing`) and
+`onStage`
+(`state::tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
+`state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+`state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`,
+`state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`,
+`state::tests::real_client::reflow_on_close::keyboard_at_open::a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard`,
+`state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_at_once`).
+In a delegate they are `model.id`, `model.state` and `model.parent`: `id` is
+QML's own word, and the item's own `state` and `parent` win over the roles
+(`qml::hosted::tests::a_delegate_reads_id_state_and_parent_through_model`).
+A window is listed from the moment it is launched, before its application
+draws, unless `loading.reserves_a_slot` is off; until then it has no `pid`,
+which reads `-1`
+(`state::tests::real_client::reflow_on_close::hosted::a_window_still_loading_is_listed_as_loading`).
+An X11 window's `pid` is the process Xwayland names for the window's own X
+connection, `-1` when it names none, and never Xwayland's own
+(`models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`).
+`workspace` is the first workspace the configuration declared the window on
+(below), and reads `""` until a declaration names it
+(`state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`).
+It is the workspace's `id`, not its `<group>/<id>` key, and a group's ids are
+not unique across monitors ("2" exists in every group), so filtering on it
+without also filtering on `monitor` lists workspace 2 of every monitor.
+`WindowList { monitor: Solium.monitor.name; sort: "mru" }` is a filtered,
+sorted view, never reset: `monitor`, `workspace`, `app` and `onStage` filter,
+an empty one (or `onStage` left unset) keeping every window, and `sort` is
+`""`, the order windows opened, or `"mru"`, the most recently focused first.
+A delegate on a `WorkspaceList` binding `workspace: model.key` matches
+nothing, since `key` is the `<group>/<id>` row key and `workspace` wants the
+`id` alone: `WindowList { monitor: Solium.monitor.name; workspace: model.id }`,
+or read the workspace row's own `windows` list instead.
+`Windows.focused` is never null and follows focus, and with no window focused
+it reads `present: false` and is empty, not the window focused last
+(`qml::hosted::tests::the_focused_facade_is_empty_with_nothing_focused`);
+`Windows.get(id)` is one window's row, which reads `valid: false` once the
+window has gone. It is a lookup with no change signal of its own, so a
+binding reads `Windows.count` beside it, as `{ Windows.count; return
+Windows.get(id) }` does, to be asked again as windows come and go. Rows say
+where a window lives, not where it is drawn this frame
+(`qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`).
+A retired row (`valid: false`) is kept for 10 s after it leaves, then freed,
+and nothing marks `count` changed at that moment — only a window or
+workspace coming or going does. Read it again through `Windows.get(id)` (or
+the workspace equivalent) rather than holding the row itself past that grace
+period, or a reference kept in a `var` can outlive it.
+
+**Workspaces, as the configuration has them.** The compositor does not know
+what a workspace is: Lua declares them with `sol.workspaces`, and the shipped
+`workspaces.lua` does so whenever they change
+(`script::tests::the_shipped_workspaces_declare_what_each_monitor_shows`,
+`script::tests::a_window_that_opens_is_declared_on_the_workspace_its_monitor_shows`).
+`Workspaces` is every workspace declared, joined with the windows: `key`
+(`<group>/<id>`), `id`, `name`, `col`, `row`, `group`, `monitors`, `active`
+(its group shows it), `focused` (shown by the group of the monitor in front
+of you), `occupied` (how many windows are on it), `urgent` and
+`hasFullscreen` (of a window on it), `hidden` and `windows`
+(`state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`).
+`WorkspaceList { monitor: Solium.monitor.name }` is one monitor's group,
+`Workspaces.showing(name)` what that monitor shows, `Workspaces.current` what
+the monitor in front of you shows, each empty, never null, while nothing is
+shown, and `Workspaces.arrangement` the declared shape, `{ kind, columns,
+rows }`. A per-monitor bar binds `showing(Solium.monitor.name)`: a singleton
+cannot know which instance asks. `Solium.status` is the text `sol.status`
+set, the same in every scene
+(`qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`,
+`models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`).
+A workspaces widget switches with `Solium.send("workspaces.go", { id:
+model.id, monitor: Solium.monitor.name })`, and sends a window away with
+`Solium.send("windows.send", { id: window.id, workspace: "2" })`, both
+answered by `workspaces.lua`
+(`script::tests::a_workspaces_go_from_a_scene_switches_the_monitor_it_names`,
+`script::tests::a_windows_send_from_a_scene_moves_the_window_it_names`).
+Each takes that form only, a workspace being a whole number or its digits,
+and `windows.send` only for a window that is open; any other form,
+`{ id, monitor }` or a workspace `2.5` among them, moves nothing and is logged
+(`script::tests::a_workspaces_go_from_a_scene_switches_the_monitor_it_names`,
+`script::tests::a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`).
+A declaration naming a monitor or a window the compositor does not have
+leaves it out, with any group left with no monitor, and so does one
+declaring a workspace twice among the groups that stay, keeping the first;
+the log names each once
+(`models::workspaces::tests::a_declaration_naming_an_unknown_monitor_or_window_drops_them`,
+`models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+`models::workspaces::tests::a_workspace_declared_twice_is_one_row`,
+`models::workspaces::tests::a_workspace_of_a_group_left_out_is_not_logged_as_declared_twice`).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
@@ -510,9 +639,11 @@ compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
 `windows.fullscreen` and `windows.maximize`, each with `{ id = <window id> }`
 (`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
 `sol.act`'s data crosses as JSON, as a surface's `properties` do, nested at
-most 64 deep: a table nested deeper, or one that contains itself, is an error
-in the handler that sent it, not a crash of the compositor
-(`script::tests::data_that_contains_itself_is_an_error_in_the_handler`).
+most 64 deep and 65 536 values in all, a table counted once for each place it
+is in: a table nested deeper or holding more, or one that contains itself, is
+an error in the handler that sent it, not a crash or a stall of the compositor
+(`script::tests::data_that_contains_itself_is_an_error_in_the_handler`,
+`json::tests::a_table_of_more_than_65536_values_is_an_error_not_a_stall`).
 `sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
 hears once whether it was done, after it was; `reason` is `"unknown-action"`,
 `"unknown-window"`, `"bad-data"`, for a `windows.focus` behind the lock
@@ -539,9 +670,12 @@ at it does not stop the next
 What a `done` asked for in the run that was stopped is dropped, the attempts it
 started with it, so a retry that acts again and then never returns is stopped
 once, not every round; and its stops are counted by function, as a listener's
-are, so one stopped three times is not called again until a reload
+are, so one stopped three times is not called again until a reload, while a
+`done` written inline is a new function at each `sol.act`, and is stopped each
+time rather than taken out
 (`script::tests::what_a_stopped_done_asked_for_is_dropped`,
 `script::tests::a_done_stopped_three_times_is_not_called_again`,
+`script::tests::an_inline_done_is_stopped_each_time_and_never_taken_out`,
 `state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_and_never_returns_does_not_stall_every_dispatch`).
 A `workspaces.*` action is the configuration's to answer, since the
 compositor does not know what a workspace is: a file answers one with
@@ -553,9 +687,10 @@ vocabulary goes only to the listeners for its surface, as a tweak's does to
 An override is a `surface` listener of its own, under the same 100 ms deadline
 as every listener, so one stopped three times is taken out alone: every other
 action is still routed, and its own goes to `sol.act` again; a later override
-of the same name replaces it
+of the same name replaces it, and one of `nil` gives it back to `sol.act`
 (`script::tests::an_override_stopped_three_times_is_taken_out_alone`,
-`script::tests::a_later_override_of_the_same_name_replaces_the_earlier_one`).
+`script::tests::a_later_override_of_the_same_name_replaces_the_earlier_one`,
+`script::tests::an_override_of_nil_gives_its_action_back_to_the_compositor`).
 A scene that sets a string property named `action`, as scenes did before
 `Solium.send`, is heard the same way, after what it sent, with no data
 (`surface::tests::queued_actions_come_first_and_the_old_action_property_last`).
@@ -638,12 +773,8 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 - **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
   field copy and paste within the compositor's own Qt: what a window copied
   cannot be pasted into it, nor the other way round.
-- **No window list, no workspaces, no other monitors, and no icons.**
-  Nothing tells a hosted scene which windows or workspaces exist, and a scene
-  reads its own monitor as `Solium.monitor` and has no list of the others
-  ([#166](https://github.com/Lilium-Linux/solium/issues/166)). There is no
-  `image://` provider for the icon theme. Driving the compositor goes through
-  `Solium.send` and Lua.
+- **No icons.** There is no `image://` provider for the icon theme.
+  Driving the compositor goes through `Solium.send` and Lua.
 - **No touch.** A scene takes no touch: a tap where it takes a press triggers
   nothing there, and neither reaches nor focuses the window under it;
   elsewhere a touch reaches the window under the shell, as the pointer would

@@ -129,7 +129,7 @@
 ---@field scene string A file name looked up in `~/.config/solium/qml` and then in the shipped QML, or a path (absolute, or starting with `~/`).
 ---@field layer? sol.Layer Which layer it is drawn in. `"background"` is the default.
 ---@field on? "primary"|"every-monitor"|string|sol.Rect `"every-monitor"` (the default) draws one instance per monitor, filling it; `"primary"` one on the primary monitor; a monitor's name one there; a rect one at that rect.
----@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those, nested at most 64 deep. A function, userdata or non-finite number is left out; a table nested deeper, or one that contains itself, is an error.
+---@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those, nested at most 64 deep and 65 536 values in all, a table counted once for each place it is in. A function, userdata or non-finite number is left out; a table nested deeper or holding more, or one that contains itself, is an error.
 ---@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing, and one it held when it is declared so is dismissed; nor does such a scene hold the keyboard. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sends actions with `Solium.send(action, data)`, and `sol.on("surface", ...)` hears them.
 ---@field reserve? { top?: integer, right?: integer, bottom?: integer, left?: integer } Logical pixels taken out of the work area on those edges of every monitor the surface is on, whatever its size or placement; never negative. A scene's own `Solium.surface.reserve.<edge>` wins for an edge it sets. A change re-flows the windows once.
 ---@field outside_click? "swallow"|"pass"|table<string, "swallow"|"pass"> What a press outside an open `Grab` of the scene does once it has dismissed it: swallowed with its release (the default), or passed on to what is under it. A table names grabs, with `default` for the rest. Any other value fails the load.
@@ -370,6 +370,38 @@ function sol.text_input() end
 ---@param rows? sol.MonitorPlacement[]
 ---@return sol.Monitor[]|nil
 function sol.monitors(rows) end
+
+---What one workspace is, in a `sol.workspaces` declaration.
+---@class sol.DeclaredWorkspace
+---@field id string Unique within its group.
+---@field name? string What a shell shows; the id when left out.
+---@field col? integer Its column in the arrangement, from 1.
+---@field row? integer Its row in the arrangement, from 1.
+---@field hidden? boolean A workspace a shell should not list, such as a scratchpad.
+
+---A group of workspaces that switch together: one per monitor, or one for
+---every monitor.
+---@class sol.WorkspaceGroup
+---@field id string
+---@field monitors string[] The monitors it is on, by connector name.
+---@field showing string[] The ids it shows now.
+---@field workspaces sol.DeclaredWorkspace[]
+
+---@class sol.WorkspaceDeclaration
+---@field arrangement? { kind?: string, columns?: integer, rows?: integer } The shape the workspaces make, for a shell to draw.
+---@field groups sol.WorkspaceGroup[]
+---@field windows? table<integer, string[]> Which workspaces each window is on, by window id.
+
+---Say what the workspaces are. The compositor does not know what a workspace
+---is: `workspaces.lua` is the whole feature, and this is how a hosted shell's
+---`Workspaces` model learns it. Declare again whenever it changes; the same
+---declaration twice costs nothing. Monitors and windows the compositor does
+---not have are left out, with any group left with no monitor, and so is a
+---workspace whose `<group>/<id>` an earlier one in a group that stays already
+---has; each is logged once.
+---@param declared sol.WorkspaceDeclaration
+---@return nil
+function sol.workspaces(declared) end
 
 ---Turn a monitor's display off or on, or every monitor's with `"all"`.
 ---
@@ -632,7 +664,8 @@ function sol.close(id) end
 ---`Solium.send`, `windows.focus`, `windows.close`, `windows.fullscreen` and
 ---`windows.maximize`, each with `{ id = <window id> }`; the last two toggle.
 ---`data` is handed over as a surface's `properties` are, so a table nested
----deeper than 64, or one that contains itself, is an error in the handler.
+---deeper than 64 or holding more than 65 536 values, or one that contains
+---itself, is an error in the handler.
 ---Queued like every other request, and answered by `done(ok, reason)` once
 ---the compositor has acted, in a handler of its own; `reason` is
 ---`"unknown-action"`, `"unknown-window"`, `"bad-data"`, for a
@@ -691,7 +724,8 @@ function sol.quit() end
 function sol.grab_input(grabbed) end
 
 ---Say which mode is in charge. The compositor keeps the text and logs a change
----at debug level; nothing on screen shows it.
+---at debug level, and a hosted shell reads it as `Solium.status`; nothing the
+---compositor draws itself shows it.
 ---@param text string
 ---@return nil
 function sol.status(text) end
@@ -737,14 +771,19 @@ function sol.unknown(key, meant) end
 ---is logged while the others still run.
 ---
 ---A listener runs under a 100 ms deadline: one that takes longer is stopped
----with an error and logged with its file and line, the other listeners still
----run, and one stopped three times is taken out until the configuration is
----reloaded. The stops are counted by function, so a function listening for
----two events counts the stops of both, and from its third on is taken out of
----each event it is stopped in. Bindings, and each `done` of `sol.act`, run
----under the same deadline. A `done` is struck by function too, and one
+---with an error and logged with the file and line it was written at and the
+---file and line it was stopped at (for an `actions.override`, the listener
+---`actions.lua` writes for it, and the override's own line), the other
+---listeners still run, and one stopped three times is taken out until the
+---configuration is reloaded. The stops are counted by function, so a
+---function listening for two events counts the stops of both, and from its
+---third on is taken out of each event it is stopped in. Bindings, and each
+---`done` of `sol.act`, run under the same deadline, and a stopped binding is
+---logged the same way. A `done` is struck by function too, and one
 ---stopped three times is not called again until the configuration is
----reloaded; what a `done` asked for in the run that was stopped is dropped.
+---reloaded; a `done` written inline is a new function at each `sol.act`, so
+---it is stopped each time rather than taken out. What a `done` asked for in
+---the run that was stopped is dropped.
 ---The compositor starts each one's clock itself, so nothing a handler calls
 ---puts it off. `pcall`, `xpcall` and `load` hand the stop on rather than
 ---catch it, and `xpcall`'s message handler is not called for it. A `__gc`

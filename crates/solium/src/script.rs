@@ -481,6 +481,9 @@ pub(crate) enum Command {
         monitor: Option<String>,
         on: bool,
     },
+    /// What the workspaces are, as Lua declares them each time they change.
+    /// `tests::sol_workspaces_declares_groups_and_windows`.
+    Workspaces(crate::models::workspaces::Declared),
     /// Which XCursor theme the pointer is drawn from, and how big it is.
     ///
     /// Carries what the *configuration* said and nothing else — `None` in a
@@ -1012,8 +1015,13 @@ impl Scripts {
         lua.set_app_data(Deadline::default());
         lua.set_global_hook(
             mlua::HookTriggers::new().every_nth_instruction(10_000),
-            |lua, _debug| {
+            |lua, debug| {
                 if late(lua) {
+                    // Where the time ran out, for the log: inside a wrapper,
+                    // such as an `actions.override`, that is the wrapped
+                    // function, where the struck listener is the wrapper.
+                    // `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+                    stopped_here(lua, debug);
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(mlua::VmState::Continue)
@@ -1163,14 +1171,34 @@ impl Scripts {
 
     /// Run the handler bound to a key combination.
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, |_, sol| {
+        self.dispatch(snapshot, |lua, sol| {
             let bindings: Table = sol.get("_bindings")?;
             let handler: Value = bindings.get(normalise_combo(combo))?;
             match handler {
-                Value::Function(function) => {
-                    function.call::<()>(())?;
-                    Ok(true)
-                }
+                Value::Function(function) => match function.call::<()>(()) {
+                    Ok(()) => Ok(true),
+                    // Logged where it was written and where it was stopped,
+                    // as a stopped listener is, and unhandled, as a binding
+                    // that fails is.
+                    // `tests::a_stopped_binding_is_logged_where_it_was_written_and_stopped`.
+                    Err(err) if err.to_string().contains(STOPPED) => {
+                        let info = function.info();
+                        let file = file_of(info.source.as_deref(), info.short_src.as_deref());
+                        let line = info.line_defined.unwrap_or_default();
+                        let stopped_at = stopped_at(lua);
+                        tracing::error!(
+                            %err,
+                            event = "binding",
+                            combo,
+                            file = %file,
+                            line,
+                            stopped_at = stopped_at.as_deref().map(tracing::field::display),
+                            "a handler ran for longer than 100 ms and was stopped"
+                        );
+                        Ok(false)
+                    }
+                    Err(err) => Err(err),
+                },
                 _ => Ok(false),
             }
         })
@@ -1464,7 +1492,7 @@ impl Scripts {
                     .ok()
                     .flatten()
                     .map_or(0, |pending| pending.commands.len());
-                set_deadline(lua, Some(std::time::Instant::now()));
+                start_clock(lua);
                 match done.call::<()>((each.ok, each.reason)) {
                     Ok(()) => {}
                     Err(err) if err.to_string().contains(STOPPED) => {
@@ -1482,7 +1510,7 @@ impl Scripts {
                                 attempts.set(attempt, Value::Nil)?;
                             }
                         }
-                        let _ = strike(&strikes, &done, "done", &err)?;
+                        let _ = strike(lua, &strikes, &done, "done", &err)?;
                     }
                     Err(err) => tracing::error!(%err, "an attempt's done failed"),
                 }
@@ -1525,7 +1553,7 @@ impl Scripts {
     ) -> Outcome {
         self.lua.set_app_data(snapshot);
         self.lua.set_app_data(Pending::default());
-        set_deadline(&self.lua, Some(std::time::Instant::now()));
+        start_clock(&self.lua);
 
         let handled = match self.lua.globals().get::<Table>("sol") {
             Ok(sol) => match call(&self.lua, &sol) {
@@ -1960,14 +1988,61 @@ const STOPPED: &str = "this handler ran for longer than 100 ms and was stopped";
 #[derive(Debug, Default)]
 struct Deadline {
     started: Option<std::time::Instant>,
+    /// Where the handler running now was stopped, as `file:line`, once the
+    /// instruction hook has stopped it.
+    /// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+    stopped_at: Option<String>,
 }
 
-/// Start the handler clock, or stop it with `None`.
+/// Start a handler's clock now, with nowhere it was stopped yet.
+/// `tests::each_listener_has_the_whole_deadline`,
+/// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+fn start_clock(lua: &Lua) {
+    if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
+        deadline.started = Some(std::time::Instant::now());
+        deadline.stopped_at = None;
+    }
+}
+
+/// Set the handler clock back to when it started, or stop it with `None`.
 /// `tests::lua_run_between_dispatches_is_not_stopped`.
 fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
     if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
         deadline.started = started;
     }
+}
+
+/// Note `debug`'s function and line as where the handler running now was
+/// stopped. `tests::a_stopped_override_is_logged_where_it_was_stopped`,
+/// `tests::a_handler_stopped_at_its_focus_direction_is_logged_at_that_call`.
+fn stopped_here(lua: &Lua, debug: &mlua::debug::Debug) {
+    let source = debug.source();
+    let file = file_of(source.source.as_deref(), source.short_src.as_deref());
+    let line = debug.current_line().unwrap_or_default();
+    if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
+        deadline.stopped_at = Some(format!("{file}:{line}"));
+    }
+}
+
+/// Where the handler running now was stopped, once it has been.
+/// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+fn stopped_at(lua: &Lua) -> Option<String> {
+    lua.try_app_data_ref::<Deadline>()
+        .ok()
+        .flatten()
+        .and_then(|deadline| deadline.stopped_at.clone())
+}
+
+/// A file by its whole path, and a chunk of text by the short name Lua's own
+/// messages give it.
+/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+/// `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
+fn file_of(source: Option<&str>, short_src: Option<&str>) -> String {
+    source
+        .and_then(|source| source.strip_prefix('@'))
+        .or(short_src)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// When the handler running now started, if one is running.
@@ -1987,12 +2062,14 @@ fn late(lua: &Lua) -> bool {
 
 /// Count a stop at the deadline against `handler`, a listener of `event` or a
 /// `done` (`event` is then `"done"`), by function, and log it with the file
-/// and line the handler was written at. True from its third stop on, when it
-/// is taken out, which is logged too.
+/// and line the handler was written at, and the file and line it was stopped
+/// at. True from its third stop on, when it is taken out, which is logged too.
 /// `tests::a_listener_stopped_three_times_is_taken_out`,
 /// `tests::a_done_stopped_three_times_is_not_called_again`,
-/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
+/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+/// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
 fn strike(
+    lua: &Lua,
     strikes: &Table,
     handler: &mlua::Function,
     event: &str,
@@ -2001,23 +2078,15 @@ fn strike(
     let count = strikes.get::<Option<u32>>(handler)?.unwrap_or(0) + 1;
     strikes.set(handler, count)?;
     let info = handler.info();
-    // A file by its whole path, and a chunk of text by the short name Lua's
-    // own messages give it.
-    // `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
-    // `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
-    let file = info
-        .source
-        .as_deref()
-        .and_then(|source| source.strip_prefix('@'))
-        .map(str::to_owned)
-        .or(info.short_src)
-        .unwrap_or_default();
+    let file = file_of(info.source.as_deref(), info.short_src.as_deref());
     let line = info.line_defined.unwrap_or_default();
+    let stopped_at = stopped_at(lua);
     tracing::error!(
         %err,
         event,
         file = %file,
         line,
+        stopped_at = stopped_at.as_deref().map(tracing::field::display),
         count,
         "a handler ran for longer than 100 ms and was stopped"
     );
@@ -2068,11 +2137,11 @@ fn call_listeners(
         // `tests::each_listener_has_the_whole_deadline`,
         // `tests::a_handler_that_calls_sol_deadline_is_still_stopped`,
         // `tests::replacing_sol_deadline_leaves_each_listener_its_own_deadline`.
-        set_deadline(lua, Some(std::time::Instant::now()));
+        start_clock(lua);
         match listener.call::<()>(args.clone()) {
             Ok(()) => called = true,
             Err(err) if err.to_string().contains(STOPPED) => {
-                if strike(&strikes, &listener, event, &err)? {
+                if strike(lua, &strikes, &listener, event, &err)? {
                     out.push(listener);
                 }
             }
@@ -3595,6 +3664,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 with_pending(lua, |pending| pending.moving = outer)?;
                 heard?;
                 if late(lua) {
+                    // Stopped at this call, which is where the log says it
+                    // was stopped: a `direction` listener's clock cleared the
+                    // place, or left that listener's own.
+                    // `tests::a_handler_stopped_at_its_focus_direction_is_logged_at_that_call`.
+                    let _ = lua.inspect_stack(1, |caller| stopped_here(lua, caller));
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(())
@@ -3755,6 +3829,19 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         "status",
         lua.create_function(|lua, text: String| {
             with_pending(lua, |pending| pending.status = Some(text))
+        })?,
+    )?;
+
+    // `sol.workspaces{ arrangement, groups, windows }`: the compositor does
+    // not know what a workspace is, so Lua says, each time it changes
+    // (03 §3.2.17). `tests::sol_workspaces_declares_groups_and_windows`.
+    sol.set(
+        "workspaces",
+        lua.create_function(|lua, declared: Table| {
+            let declared = declared_workspaces(&declared)?;
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Workspaces(declared));
+            })
         })?,
     )?;
 
@@ -3940,6 +4027,67 @@ fn focused_id(lua: &Lua) -> Option<u64> {
             .iter()
             .find(|window| window.focused)
             .map(|window| window.id)
+    })
+}
+
+/// A `sol.workspaces` table, read: a workspace's `name` left out is its id,
+/// `col` and `row` are 1, and it is not `hidden`.
+/// `tests::sol_workspaces_declares_groups_and_windows`.
+fn declared_workspaces(declared: &Table) -> mlua::Result<crate::models::workspaces::Declared> {
+    use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
+    let strings = |table: Option<Table>| -> mlua::Result<Vec<String>> {
+        table.map_or_else(
+            || Ok(Vec::new()),
+            |table| table.sequence_values::<String>().collect(),
+        )
+    };
+    let arrangement = match declared.get::<Option<Table>>("arrangement")? {
+        Some(shape) => Arrangement {
+            kind: shape.get::<Option<String>>("kind")?.unwrap_or_default(),
+            columns: shape.get::<Option<u32>>("columns")?.unwrap_or(1),
+            rows: shape.get::<Option<u32>>("rows")?.unwrap_or(1),
+        },
+        None => Arrangement::default(),
+    };
+    let mut groups = Vec::new();
+    if let Some(list) = declared.get::<Option<Table>>("groups")? {
+        for group in list.sequence_values::<Table>() {
+            let group = group?;
+            let mut workspaces = Vec::new();
+            if let Some(list) = group.get::<Option<Table>>("workspaces")? {
+                for workspace in list.sequence_values::<Table>() {
+                    let workspace = workspace?;
+                    let id: String = workspace.get("id")?;
+                    workspaces.push(Workspace {
+                        name: workspace
+                            .get::<Option<String>>("name")?
+                            .unwrap_or_else(|| id.clone()),
+                        col: workspace.get::<Option<u32>>("col")?.unwrap_or(1),
+                        row: workspace.get::<Option<u32>>("row")?.unwrap_or(1),
+                        hidden: workspace.get::<Option<bool>>("hidden")?.unwrap_or(false),
+                        id,
+                    });
+                }
+            }
+            groups.push(Group {
+                id: group.get("id")?,
+                monitors: strings(group.get("monitors")?)?,
+                showing: strings(group.get("showing")?)?,
+                workspaces,
+            });
+        }
+    }
+    let mut windows = std::collections::BTreeMap::new();
+    if let Some(map) = declared.get::<Option<Table>>("windows")? {
+        for pair in map.pairs::<u64, Table>() {
+            let (id, list) = pair?;
+            windows.insert(id, strings(Some(list))?);
+        }
+    }
+    Ok(Declared {
+        arrangement,
+        groups,
+        windows,
     })
 }
 
@@ -4757,8 +4905,13 @@ pub(crate) fn normalise_combo(combo: &str) -> String {
 #[cfg(test)]
 mod reference;
 
+/// The one test helper other modules' tests share.
+/// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
 #[cfg(test)]
-pub(crate) mod tests {
+pub(crate) use tests::logged_while;
+
+#[cfg(test)]
+mod tests {
     use super::*;
 
     #[test]
@@ -7721,6 +7874,401 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **`sol.workspaces` declares groups and windows**, every field as Lua
+    /// wrote it.
+    #[test]
+    fn sol_workspaces_declares_groups_and_windows() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-workspaces",
+            r#"sol.workspaces({
+                arrangement = { kind = "grid", columns = 3, rows = 2 },
+                groups = { { id = "DP-1", monitors = { "DP-1" }, showing = { "2" },
+                             workspaces = { { id = "1", name = "1", col = 1, row = 1 }, { id = "2", name = "web", col = 2, row = 1 },
+                                            { id = "scratch", hidden = true } } } },
+                windows = { [42] = { "2" } },
+            })"#,
+        );
+        let declared: Vec<crate::models::workspaces::Declared> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared),
+                _ => None,
+            })
+            .collect();
+        let [declared] = declared.as_slice() else {
+            panic!("one declaration: {declared:?}")
+        };
+        assert_eq!(
+            (
+                declared.arrangement.kind.as_str(),
+                declared.arrangement.columns,
+                declared.arrangement.rows
+            ),
+            ("grid", 3, 2)
+        );
+        assert_eq!(declared.groups[0].showing, vec!["2".to_owned()]);
+        assert_eq!(declared.groups[0].workspaces[1].name, "web");
+        assert_eq!(
+            declared.groups[0].workspaces[2],
+            crate::models::workspaces::Workspace {
+                id: "scratch".to_owned(),
+                name: "scratch".to_owned(),
+                col: 1,
+                row: 1,
+                hidden: true,
+            },
+            "a workspace declared with only its id and hidden"
+        );
+        assert_eq!(declared.windows.get(&42), Some(&vec!["2".to_owned()]));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped `workspaces.lua` declares its workspaces**: one group per
+    /// monitor when workspaces are per monitor, showing what each monitor shows.
+    #[test]
+    fn the_shipped_workspaces_declare_what_each_monitor_shows() {
+        let Some((scripts, commands)) = shell_after_monitors(
+            "solium-script-test-shipped-workspaces",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts;
+        let last = commands.iter().rev().find_map(|command| match command {
+            Command::Workspaces(declared) => Some(declared.clone()),
+            _ => None,
+        });
+        let declared = last.expect("workspaces.lua declared nothing");
+        assert_eq!(
+            declared
+                .groups
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test-1"]
+        );
+        assert_eq!(declared.groups[0].showing, vec!["1".to_owned()]);
+    }
+
+    /// **With workspaces not per monitor, one group has every monitor**, and
+    /// shows what every monitor shows.
+    #[test]
+    fn with_workspaces_together_one_group_has_every_monitor() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-workspaces-together",
+            "return { workspaces = { per_monitor = false } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let mut two = one_screen(&[]);
+        let mut right = two.monitors[0].clone();
+        right.name = "test-2".to_owned();
+        right.whole.x = 1600.0;
+        right.area.x = 1600.0;
+        right.focused = false;
+        two.monitors.push(right);
+        let outcome = scripts.monitors_changed(two);
+        let groups = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => Some(
+                    declared
+                        .groups
+                        .iter()
+                        .map(|group| (group.monitors.clone(), group.showing.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            });
+        assert_eq!(
+            groups,
+            Some(vec![(
+                vec!["test-1".to_owned(), "test-2".to_owned()],
+                vec!["1".to_owned()]
+            )]),
+            "(monitors, showing) of each group"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`workspaces.go` from a scene switches the monitor it names**, through
+    /// `actions.lua` to `workspaces.lua`, which then declares the new state.
+    /// An id that is no workspace's number, `2.5` or none at all, switches
+    /// nothing and is logged.
+    #[test]
+    fn a_workspaces_go_from_a_scene_switches_the_monitor_it_names() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-workspaces-go",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        // Two monitors, the pointer on the left one: the right one is named,
+        // so it is the one that switches.
+        let two = || {
+            let mut snapshot = one_screen(&[]);
+            let mut right = snapshot.monitors[0].clone();
+            right.name = "test-2".to_owned();
+            right.whole.x = 1600.0;
+            right.area.x = 1600.0;
+            right.focused = false;
+            snapshot.monitors.push(right);
+            snapshot
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(two());
+        let go = |scripts: &mut Scripts, data: &str| {
+            let data = crate::json::Json::parse(data).expect("valid JSON");
+            scripts
+                .surface_action("shell", "workspaces.go", &data, two())
+                .commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Workspaces(declared) => Some(
+                        declared
+                            .groups
+                            .iter()
+                            .map(|group| (group.id.clone(), group.showing.clone()))
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+        };
+        let mut others = Vec::new();
+        let log = logged_while(|| {
+            for data in [
+                r#"{"id":2.5,"monitor":"test-2"}"#,
+                r#"{"monitor":"test-2"}"#,
+            ] {
+                others.push(go(&mut scripts, data));
+            }
+        });
+        let showing = go(&mut scripts, r#"{"id":"2","monitor":"test-2"}"#);
+        assert_eq!(
+            (
+                showing,
+                others,
+                log.matches("workspaces.go: answered only as").count()
+            ),
+            (
+                Some(vec![
+                    ("test-1".to_owned(), vec!["1".to_owned()]),
+                    ("test-2".to_owned(), vec!["2".to_owned()])
+                ]),
+                vec![None, None],
+                2
+            ),
+            "(group, showing) after the monitor named switches, not the one in front; \
+             declared after each other form; lines logged"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A window that opens is declared on the workspace its monitor
+    /// shows**, at the layout that places it, so a hosted shell counts it
+    /// at once.
+    #[test]
+    fn a_window_that_opens_is_declared_on_the_workspace_its_monitor_shows() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-workspaces-layout",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[]));
+        let _ = scripts.opened(9, one_screen(&[9]));
+        let outcome = scripts.relayout(one_screen(&[9]));
+        let windows = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            windows,
+            Some(std::collections::BTreeMap::from([(
+                9,
+                vec!["1".to_owned()]
+            )]))
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The declared arrangement is the shape the workspaces make**: the
+    /// shipped row of four is four by one, not the grid's `rows`; a column
+    /// is one wide; and a row of none is the one workspace there is.
+    #[test]
+    fn the_declared_arrangement_is_the_shape_of_its_workspaces() {
+        let mut shapes = Vec::new();
+        for (name, user) in [
+            ("row", "return {}"),
+            (
+                "column",
+                r#"return { workspaces = { arrangement = "vertical", rows = 3 } }"#,
+            ),
+            ("none", "return { workspaces = { columns = 0 } }"),
+        ] {
+            let Some((_scripts, commands)) =
+                shell_after_monitors(&format!("solium-script-test-workspaces-shape-{name}"), user)
+            else {
+                return;
+            };
+            let declared = commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Workspaces(declared) => Some(declared.clone()),
+                    _ => None,
+                })
+                .expect("workspaces.lua declared nothing");
+            let last = declared.groups[0]
+                .workspaces
+                .last()
+                .map(|workspace| (workspace.col, workspace.row));
+            shapes.push((
+                declared.arrangement.kind,
+                declared.arrangement.columns,
+                declared.arrangement.rows,
+                last,
+            ));
+        }
+        assert_eq!(
+            shapes,
+            vec![
+                ("horizontal".to_owned(), 4, 1, Some((4, 1))),
+                ("vertical".to_owned(), 1, 3, Some((1, 3))),
+                ("horizontal".to_owned(), 1, 1, Some((1, 1))),
+            ],
+            "(kind, columns, rows, the last workspace's cell)"
+        );
+    }
+
+    /// **`windows.send` from a scene moves the window it names**, not the
+    /// focused one, through `actions.lua` to `workspaces.lua`, which then
+    /// declares where every window is.
+    #[test]
+    fn a_windows_send_from_a_scene_moves_the_window_it_names() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-windows-send",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[7, 8]));
+        let data = crate::json::Json::parse(r#"{"id":7,"workspace":"3"}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "windows.send", &data, one_screen(&[7, 8]));
+        let windows = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            windows,
+            Some(std::collections::BTreeMap::from([
+                (7, vec!["3".to_owned()]),
+                (8, vec!["1".to_owned()])
+            ])),
+            "window 7 sent to 3, window 8 left on the one its monitor shows"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`windows.send` names its window by number or by digits, and logs
+    /// any other form**: `{ id: "8" }` sends window 8 as `{ id: 8 }` would,
+    /// while `{ id, monitor }`, a window that is not open, no id at all and
+    /// a workspace that is no workspace's number, `2.5`, each move nothing
+    /// and say so.
+    #[test]
+    fn a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-windows-send-forms",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[7, 8]));
+        let send = |scripts: &mut Scripts, data: &str| {
+            let data = crate::json::Json::parse(data).expect("valid JSON");
+            scripts
+                .surface_action("shell", "windows.send", &data, one_screen(&[7, 8]))
+                .commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Workspaces(declared) => Some(declared.windows.clone()),
+                    _ => None,
+                })
+        };
+        let digits = send(&mut scripts, r#"{"id":"8","workspace":"2"}"#);
+        let mut others = Vec::new();
+        let log = logged_while(|| {
+            for data in [
+                r#"{"id":7,"monitor":"test-1"}"#,
+                r#"{"id":99,"workspace":"2"}"#,
+                r#"{"workspace":"2"}"#,
+                r#"{"id":7,"workspace":2.5}"#,
+            ] {
+                others.push(send(&mut scripts, data));
+            }
+        });
+        assert_eq!(
+            (
+                digits,
+                others,
+                log.matches("windows.send: answered only as").count()
+            ),
+            (
+                Some(std::collections::BTreeMap::from([
+                    (7, vec!["1".to_owned()]),
+                    (8, vec!["2".to_owned()])
+                ])),
+                vec![None, None, None, None],
+                4
+            ),
+            "(declared after an id in digits, declared after each other form, lines logged)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`workspaces.lua` does not route a scene's actions by itself**: a
+    /// configuration without `actions.lua` routes them its own way, and
+    /// keeping the workspaces does not route each one a second time.
+    #[test]
+    fn workspaces_lua_does_not_route_a_scenes_actions_by_itself() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-workspaces-no-actions",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+require("workspaces")
+sol.on("surface", function(_, action, data) sol.act(action, data) end)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "windows.close", &data, one_screen(&[4]));
+        let acts = outcome
+            .commands
+            .iter()
+            .filter(|command| matches!(command, Command::Act { .. }))
+            .count();
+        assert_eq!(acts, 1, "windows.close was routed more than once, or never");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **`actions.lua` routes the vocabulary and leaves the rest alone**: a
     /// `windows.*` action becomes a `sol.act`, one a file overrides is
     /// answered in Lua instead, and one outside the vocabulary, a tweak's
@@ -7823,6 +8371,137 @@ actions.override("windows.close", function() runs = runs + 1; while true do end 
             ),
             "(the acts of the three stopped closes, another action's acts, \
              the same action's acts once the override is out, how many times it ran)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **An override of `nil` gives its action back to the compositor**, as
+    /// it did when the overrides were a table: no error, and `sol.act` hears
+    /// the action.
+    #[test]
+    fn an_override_of_nil_gives_its_action_back_to_the_compositor() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-actions-override-nil",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+local actions = require("actions")
+actions.override("windows.close", function() heard = true end)
+actions.override("windows.close", nil)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
+        let mut outcome = None;
+        let log = logged_while(|| {
+            outcome =
+                Some(scripts.surface_action("shell", "windows.close", &data, one_screen(&[])));
+        });
+        let acts: Vec<(String, String)> = outcome
+            .iter()
+            .flat_map(|outcome| outcome.commands.iter())
+            .filter_map(|command| match command {
+                Command::Act { action, data, .. } => Some((action.clone(), data.render())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (
+                scripts.evaluate("return tostring(heard)"),
+                acts,
+                log.contains("failed")
+            ),
+            (
+                "nil".to_owned(),
+                vec![("windows.close".to_owned(), r#"{"id":4}"#.to_owned())],
+                false
+            ),
+            "(whether the replaced override heard it, the acts queued, whether a listener failed):\n{log}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A stopped override is logged where it was stopped**: the listener
+    /// struck is `actions.lua`'s own, so the log also names the file and line
+    /// the handler's time ran out at, which is the override's.
+    #[test]
+    fn a_stopped_override_is_logged_where_it_was_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-actions-override-where",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+local actions = require("actions")
+actions.override("windows.close", function()
+    while true do end
+end)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
+        let log = logged_while(|| {
+            let _ = scripts.surface_action("shell", "windows.close", &data, one_screen(&[]));
+        });
+        let at = format!("stopped_at={}:4", directory.join("init.lua").display());
+        assert!(
+            log.lines()
+                .any(|line| line.contains("was stopped") && line.contains(&at)),
+            "the stop names {at}:\n{log}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A stopped binding is logged where it was written and where it was
+    /// stopped**, as a stopped listener is, and is left unhandled, as a
+    /// binding that fails is.
+    #[test]
+    fn a_stopped_binding_is_logged_where_it_was_written_and_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-binding-where",
+            "sol.bind(\"super+x\", function()\n    while true do end\nend)",
+        );
+        let mut handled = None;
+        let log = logged_while(|| {
+            handled = Some(scripts.key("super+x", one_screen(&[])).handled);
+        });
+        let init = directory.join("init.lua");
+        let (written, stopped) = (
+            format!("file={} line=1", init.display()),
+            format!("stopped_at={}:2", init.display()),
+        );
+        assert_eq!(
+            (
+                handled,
+                log.lines().any(|line| line.contains("was stopped")
+                    && line.contains("event=\"binding\"")
+                    && line.contains(&written)
+                    && line.contains(&stopped)),
+            ),
+            (Some(false), true),
+            "(whether the key was handled, whether the stop names {written} and {stopped}):\n{log}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A handler stopped when its `sol.focus_direction` returns is logged
+    /// at that call**, not with no place, nor at a `direction` listener's
+    /// line.
+    #[test]
+    fn a_handler_stopped_at_its_focus_direction_is_logged_at_that_call() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-direction-where",
+            "sol.on(\"direction\", function() end)\nsol.on(\"layout\", function()\n    while true do\n        sol.focus_direction(\"left\")\n    end\nend)",
+        );
+        let log = logged_while(|| {
+            let _ = scripts.relayout(one_screen(&[]));
+        });
+        // The error carries a traceback here, so the fields are on a line
+        // of their own.
+        let at = format!("stopped_at={}:4", directory.join("init.lua").display());
+        assert!(
+            log.contains("was stopped")
+                && log
+                    .lines()
+                    .any(|line| line.contains("event=\"layout\"") && line.contains(&at)),
+            "the stop names {at}:\n{log}"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -8143,6 +8822,28 @@ actions.override("windows.close", function() heard = heard .. "second;" end)"#,
             let _ = scripts.attempts_settled(&settled, one_screen(&[]));
         }
         assert_eq!(scripts.evaluate("return tostring(runs)"), "3");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A `done` written inline is a new function at each `sol.act`**, so its
+    /// stops do not add up: it is stopped every time, and never taken out.
+    #[test]
+    fn an_inline_done_is_stopped_each_time_and_never_taken_out() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-done-inline",
+            r#"runs = 0
+               sol.on("surface", function()
+                   sol.act("windows.focus", { id = 1 }, function() runs = runs + 1; while true do end end)
+               end)"#,
+        );
+        for _ in 0..4 {
+            let outcome =
+                scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+            let settled = all_done(&outcome);
+            assert_eq!(settled.len(), 1, "one act: {:?}", outcome.commands);
+            let _ = scripts.attempts_settled(&settled, one_screen(&[]));
+        }
+        assert_eq!(scripts.evaluate("return tostring(runs)"), "4");
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -14179,6 +14880,87 @@ mod directions {
         desk.press("super+shift+right");
         assert_eq!(desk.monitor(1), "DP-2", "floating: window 1 did not cross");
         assert_eq!(desk.workspace_of(1), "nil", "floating");
+    }
+
+    /// **A window moved by key onto the other monitor is declared on the
+    /// workspace that monitor shows**, by the press that moves it, in
+    /// tiling, in scrolling and with no layout: nothing runs `layout` after
+    /// a move, so without it a hosted shell would count the window on the
+    /// workspace it left.
+    #[test]
+    fn a_window_moved_onto_the_other_monitor_is_declared_on_the_workspace_it_shows() {
+        let declared = |commands: &[Command]| {
+            commands.iter().rev().find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.get(&2).cloned()),
+                _ => None,
+            })
+        };
+        let mut moved = Vec::new();
+        for layout in ["super+t", "super+s", ""] {
+            let mut desk = Desk::new("", two_screens());
+            assert_eq!(
+                desk.scripts
+                    .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 2 return \"\""),
+                ""
+            );
+            if !layout.is_empty() {
+                desk.press(layout);
+            }
+            desk.open(1, "DP-1", (1280.0, 720.0));
+            desk.open(2, "DP-1", (2000.0, 720.0));
+            desk.focus(2);
+            let commands = desk.press("super+shift+right");
+            moved.push((desk.monitor(2), declared(&commands)));
+        }
+        let there = ("DP-2".to_owned(), Some(Some(vec!["2".to_owned()])));
+        assert_eq!(
+            moved,
+            vec![there.clone(), there.clone(), there],
+            "(window 2's monitor, where the press declared it) in tiling, scrolling and floating"
+        );
+    }
+
+    /// **A window on no workspace moved by key onto the other monitor is
+    /// declared on the workspace that monitor shows**, by the press that moves
+    /// it: with `follow_new_windows` off it belongs to whatever its monitor
+    /// shows, and that monitor is now the other one.
+    #[test]
+    fn a_window_on_no_workspace_moved_across_is_declared_on_what_that_monitor_shows() {
+        let off = "require(\"config\").workspaces.follow_new_windows = false";
+        let declared = |commands: &[Command]| {
+            commands.iter().rev().find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.get(&2).cloned()),
+                _ => None,
+            })
+        };
+        let mut moved = Vec::new();
+        for layout in ["super+t", "super+s", ""] {
+            let mut desk = Desk::new(off, two_screens());
+            assert_eq!(
+                desk.scripts
+                    .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 2 return \"\""),
+                ""
+            );
+            if !layout.is_empty() {
+                desk.press(layout);
+            }
+            desk.open(1, "DP-1", (1280.0, 720.0));
+            desk.open(2, "DP-1", (2000.0, 720.0));
+            desk.focus(2);
+            assert_eq!(desk.workspace_of(2), "nil", "the premise");
+            let commands = desk.press("super+shift+right");
+            moved.push((desk.monitor(2), desk.workspace_of(2), declared(&commands)));
+        }
+        let there = (
+            "DP-2".to_owned(),
+            "nil".to_owned(),
+            Some(Some(vec!["2".to_owned()])),
+        );
+        assert_eq!(
+            moved,
+            vec![there.clone(), there.clone(), there],
+            "(window 2's monitor, its `of`, where the press declared it) in tiling, scrolling and floating"
+        );
     }
 
     /// **In scrolling, the directions are the strip's own keys.** #150.

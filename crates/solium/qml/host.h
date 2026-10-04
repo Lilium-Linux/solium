@@ -533,6 +533,14 @@ int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
  * `qml::hosted::tests::a_refused_batch_takes_none_of_its_steps`. */
 int solium_qml_rows_apply(int model, const char *ops_json);
 
+/* What `Solium.status` reads: the text `sol.status` set. 1 when Qt took it.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+int solium_qml_set_status(const char *text);
+
+/* `Workspaces.arrangement`, from JSON. 1 when Qt took it.
+ * `models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`. */
+int solium_qml_set_arrangement(const char *json);
+
 #ifdef __cplusplus
 }
 #endif
