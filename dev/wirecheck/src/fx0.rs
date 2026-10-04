@@ -18,10 +18,17 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     Ok(())
 }
 
+/// The least GPU time 200 fills of 1024² can take: 200 Mpix at 2 Tpix/s,
+/// several times the fill rate of any GPU there is. Two timestamps that do
+/// not bracket the fills read a microsecond or two, and this is how case 11b
+/// tells them apart (its control closes the region before the fills).
+const LEAST_PLAUSIBLE_NS: u64 = 100_000;
+
 /// **Case 11b: a pass's GPU time resolves, and is a plausible number.** 200
 /// full-target fills into a 1024² texture, inside a frame, between two
 /// timestamps: the timer must find the extension, load both entry points,
-/// and resolve the pass within 20 polls of `idle`, 10 ms apart, with `0 < ns < 1 s`.
+/// and resolve the pass within 20 polls of `idle`, 10 ms apart, with
+/// `100 us <= ns < 1 s` ([`LEAST_PLAUSIBLE_NS`]): the stamps time the fills.
 fn gpu_timestamps(renderer: &mut GlesRenderer) -> Result<()> {
     println!("\n=== FX0: GPU timestamps through GL_EXT_disjoint_timer_query ===");
     let mut timer = gputime::Timer::new(renderer);
@@ -72,7 +79,7 @@ fn gpu_timestamps(renderer: &mut GlesRenderer) -> Result<()> {
     }
     match got {
         Some(gputime::Gpu::Ok(sample))
-            if sample.captures_ns > 0 && sample.captures_ns < 1_000_000_000 =>
+            if (LEAST_PLAUSIBLE_NS..1_000_000_000).contains(&sample.captures_ns) =>
         {
             println!(
                 "  200 fills of 1024x1024 took {} us of GPU time",
@@ -81,7 +88,9 @@ fn gpu_timestamps(renderer: &mut GlesRenderer) -> Result<()> {
             Ok(())
         }
         other => Err(anyhow!(
-            "pass 1's GPU time did not resolve to a plausible number: {other:?}"
+            "pass 1's GPU time did not resolve to a plausible number: {other:?}. \
+             Under {LEAST_PLAUSIBLE_NS} ns means the two timestamps do not bracket \
+             the fills drawn between them"
         )),
     }
 }
