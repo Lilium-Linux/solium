@@ -54,6 +54,8 @@ judged at the very end.
 | 10 | the pointer's size | `cursor.qml` at 16, 24, 48 and 96 draws from the corner and fills the same fraction at each | `the pointer fills` … |
 | 11 | the rounded-corner shader | it compiles in all three variants, and draws the middle intact, all four corners cut, four radii in the right quadrants and a zero radius square | `the rounded-corner shader did not compile`, or a message naming the variant or corner |
 | 11b | GPU timestamps (FX0) | `GL_EXT_disjoint_timer_query` is found, both entry points load, and 200 fills of 1024² in one pass resolve within 20 polls of the timer's `idle`, 10 ms apart, to 100 µs ≤ ns < 1 s: the two timestamps bracket the fills, which a region closed before them (about 1 µs) does not. Second half: ten passes stamped as the TTY stamps an output (`open` before a frame, `close` after its `finish`, then the frame's fence waited on as the kernel waits on it before the flip, which flushes nothing) each resolve at the first `idle` 10 ms later, however slow the GPU | `GL_EXT_disjoint_timer_query is not usable here…`, `pass 1's GPU time did not resolve…`, or `passes […] were not resolved at the first idle…` |
+| 11c | a capture sampled with no CPU wait, through smithay (FX0) | 100 rounds of 500 fills into 1024², the fence dropped, sampled at once with `render_texture_from_to`: every pixel is the round's colour | `round N: a capture sampled with no CPU wait read pixels it had not finished` |
+| 11d | the same through raw GL, as the warp samples (FX0) | the same, sampled with the raw texture name in a program of its own, no `glWaitSync` | `round N: a capture sampled through raw GL …` |
 | 12 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
 | 13 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
 | 14 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
@@ -678,6 +680,17 @@ the compositor crate. The choice between rebinding and rebuilding is made in
 the scene is bound at against the size asked for, then `rebind_sized` on a new
 buffer. Changing it there changes nothing this runs.
 
+**The fence control.** `WIRECHECK_ONLY=fx0 WIRECHECK_FX0_CROSS=1` reads the
+same draw from an independent EGL display with no wait, and says in how many
+of 100 rounds it saw an unfinished picture: the race 11c and 11d would see if
+GL's one-context order did not hold. The readback prints as it goes, and its
+lines and the verdict can interleave in a pipe, so read the verdict with
+`grep -o 'a reader on another display saw.*rounds'`. Measured on NVIDIA: 0 of
+100. Each round's reader brings up a display of its own before it reads (about
+50 ms, against about 4 ms for the 500 fills), so the draw is done before the
+read starts, and 11c and 11d are regression guards rather than cases this
+control has shown can fail.
+
 ## Knobs
 
 | | |
@@ -691,6 +704,7 @@ buffer. Changing it there changes nothing this runs.
 | `WIRECHECK_STOP_THE_CLOCK` | stop ticking from the rebind onward — the animation control above |
 | `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |
 | `WIRECHECK_ONLY=fx0` | runs only the FX0 cases (11b onwards), with no Qt started; that is how the Surface Pro 7 runs them from a copied binary |
+| `WIRECHECK_FX0_CROSS` | with `WIRECHECK_ONLY=fx0`, also runs the fence control above |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
 | `WIRECHECK_NO_RESTORE` | skip both restores of the compositor's context around the first scene's build and first render, the early one included. Every restore after that still runs |
 | `WIRECHECK_LATE_RENDERER`, `WIRECHECK_SEPARATE_GBM` | build the renderer after Qt, or on its own device |

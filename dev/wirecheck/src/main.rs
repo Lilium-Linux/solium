@@ -1467,6 +1467,9 @@ fn main() -> Result<()> {
     if std::env::var("WIRECHECK_ONLY").as_deref() == Ok("fx0") {
         let mut renderer = make_renderer(&gbm)?;
         fx0::all(&mut renderer)?;
+        if std::env::var_os("WIRECHECK_FX0_CROSS").is_some() {
+            fx0::cross_control(&mut renderer, &gbm, &node)?;
+        }
         println!("\nFX0 cases passed");
         return Ok(());
     }
