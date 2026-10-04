@@ -230,7 +230,8 @@ SOLIUM_PACING
     clocks as that pass ended: where they come from (`clocks`: `nvml`,
     `i915` or `none`), `gpu_mhz`, `mem_mhz` (0 on i915) and NVIDIA's
     `pstate` (-1 where unknown), sampled four times a second by a thread of
-    their own.
+    their own, and `none` until that thread has found them, which NVML can
+    take a second or more to do; the log says what it found when it has.
     Misses and late flips are counted whether or not this is set, and every
     session ends with one `pacing` line of totals.
 

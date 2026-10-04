@@ -73,29 +73,36 @@ static PSTATE: AtomicU32 = AtomicU32::new(UNKNOWN);
 /// Once, from the backend, only when pacing is on; `SOLIUM_PACING_CLOCKS=off`
 /// keeps the thread from starting, for the run that checks the sampler does
 /// not itself keep the GPU out of its low states.
-pub(crate) fn start(major: u32, minor: u32) -> Source {
+pub(crate) fn start(major: u32, minor: u32) {
     if std::env::var("SOLIUM_PACING_CLOCKS").is_ok_and(|value| value.trim() == "off") {
         tracing::info!(
             clocks = "off",
             "SOLIUM_PACING_CLOCKS=off: the GPU's clocks are not sampled"
         );
-        return Source::None;
+        return;
     }
-    let (tell, told) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name("solium-clocks".to_owned())
-        .spawn(move || sample(&probe(NVML, Path::new("/sys"), major, minor), &tell));
-    if spawned.is_err() {
-        return Source::None;
+    if let Err(err) = spawn(move || probe(NVML, Path::new("/sys"), major, minor)) {
+        tracing::warn!(?err, "the GPU's clocks are not sampled: no thread for it");
     }
-    let source = told
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap_or(Source::None);
-    tracing::info!(clocks = source.name(), "GPU clocks for pacing");
-    source
 }
 
-/// Where the clocks come from, once `start` has answered.
+/// The sampler's thread: it probes, says what it found, and samples it for
+/// the life of the process. Nothing waits for it, since NVML can take a
+/// second or more to start; until it has found the clocks, a line says
+/// `none`. `tests::a_slow_probe_does_not_hold_the_backend`.
+fn spawn(
+    probe: impl FnOnce() -> Probe + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("solium-clocks".to_owned())
+        .spawn(move || {
+            let probe = probe();
+            tracing::info!(clocks = probe.source().name(), "GPU clocks for pacing");
+            sample(&probe);
+        })
+}
+
+/// Where the clocks come from, once the sampler has found them.
 pub(crate) fn source() -> Source {
     match SOURCE.load(Ordering::Relaxed) {
         1 => Source::Nvml,
@@ -211,6 +218,16 @@ enum Probe {
     None,
 }
 
+impl Probe {
+    const fn source(&self) -> Source {
+        match self {
+            Self::Nvml(_) => Source::Nvml,
+            Self::I915(_) => Source::I915,
+            Self::None => Source::None,
+        }
+    }
+}
+
 /// Find a way to read the clocks of the card behind `major:minor`.
 /// `tests::no_nvml_means_no_clocks`.
 fn probe(soname: &CStr, sysfs: &Path, major: u32, minor: u32) -> Probe {
@@ -280,16 +297,17 @@ unsafe fn device(entry: Entry, pci: &CStr) -> Option<Device> {
     }
 }
 
-/// The sampler: say what was found, then sample it for the life of the
-/// process. Runs on its own thread, so no NVML call lands in a pass.
-fn sample(probe: &Probe, tell: &std::sync::mpsc::Sender<Source>) {
-    let source = match probe {
-        Probe::Nvml(_) => Source::Nvml,
-        Probe::I915(_) => Source::I915,
-        Probe::None => Source::None,
-    };
-    SOURCE.store(source.code(), Ordering::Relaxed);
-    let _ = tell.send(source);
+/// Sample what the probe found, for the life of the process. On the
+/// sampler's own thread, so no NVML call lands in a pass.
+fn sample(probe: &Probe) {
+    // Nothing found writes nothing: `none` is where `SOURCE` starts, and
+    // `tests::a_slow_probe_does_not_hold_the_backend`'s probe, which finds
+    // nothing, must leave the atomics to the one test that writes them,
+    // `pacing::tests::a_pass_takes_its_clocks_from_the_sampler`.
+    if matches!(probe, Probe::None) {
+        return;
+    }
+    SOURCE.store(probe.source().code(), Ordering::Relaxed);
     loop {
         match probe {
             Probe::None => return,
@@ -330,7 +348,7 @@ mod tests {
         sync::atomic::{AtomicU32, Ordering},
     };
 
-    use super::{Device, Entry, Probe, device, i915_mhz, pci_address, probe, pstate};
+    use super::{Device, Entry, Probe, device, i915_mhz, pci_address, probe, pstate, spawn};
 
     /// A throwaway sysfs, under the test's own name.
     fn sysfs(name: &str) -> PathBuf {
@@ -359,6 +377,29 @@ mod tests {
             None,
             "another node is not this one"
         );
+    }
+
+    /// **A slow probe does not hold the backend.** NVML can take a second or
+    /// more to start, and the backend calls `start` on its way up, so the
+    /// sampler's thread probes and says what it found, and the backend goes
+    /// on at once.
+    #[test]
+    fn a_slow_probe_does_not_hold_the_backend() {
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let began = std::time::Instant::now();
+        let sampler = spawn(move || {
+            let _ = gate.recv();
+            Probe::None
+        })
+        .expect("the sampler's thread");
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(500),
+            "the backend waited for the probe"
+        );
+        let _ = open.send(());
+        sampler
+            .join()
+            .expect("the sampler found nothing, and stopped");
     }
 
     /// No NVML and no i915 file: no clocks, and no thread to sample nothing.
