@@ -21,10 +21,11 @@ Item {
     // The panel's own, empty parts too: a press between its entries does not
     // fall through to the window under it
     // (qml::hosted::tests::the_tweaks_panel_keeps_a_press_on_its_empty_part).
+    // Opaque, so what is behind the panel never tints its grey
+    // (qml::hosted::tests::the_tweaks_panel_is_opaque_and_grey).
     Rectangle {
         anchors.fill: parent
         color: Theme.surface
-        opacity: 0.94
         Solium.input: true
 
         Rectangle {

@@ -1046,6 +1046,41 @@ pub(crate) mod tests {
         });
     }
 
+    /// **The Tweaks panel is opaque and grey** where it has no entry, so what
+    /// is behind it -- the wallpaper's colour -- never shows through the
+    /// theme's grey. Drawn at 0.94, it did: alpha 239 here, and a violet
+    /// tint over the shipped wallpaper.
+    #[test]
+    fn the_tweaks_panel_is_opaque_and_grey() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            // The pixels, on the path that has them to read.
+            if crate::qml::on_gpu() {
+                return;
+            }
+            let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/tweaks.qml"));
+            let mut scene =
+                Scene::for_monitor(path, 320, 400, Some(r#"{"entries":[]}"#), "tweaks-opaque-1")
+                    .expect("the panel builds");
+            let rendered = scene.render().expect("the panel renders");
+            // Premultiplied ARGB32, little-endian: blue, green, red, alpha.
+            // Below its heading and clear of its left edge: panel and nothing
+            // else.
+            let wrong: Vec<String> = [(300_usize, 390_usize), (160, 300), (40, 200)]
+                .iter()
+                .filter_map(|&(x, y)| {
+                    let at = y * rendered.stride + x * 4;
+                    match rendered.pixels.get(at..at + 4) {
+                        Some(&[b, g, r, 255]) if b == g && g == r => None,
+                        pixel => Some(format!("({x}, {y}): bgra {pixel:?}")),
+                    }
+                })
+                .collect();
+            drop(scene);
+            assert!(wrong.is_empty(), "not opaque grey: {wrong:?}");
+        });
+    }
+
     /// **A press on a tweak sends its id** with `Solium.send`, which the
     /// compositor hands to `tweaks.lua` with no data (Ruling 15).
     #[test]
