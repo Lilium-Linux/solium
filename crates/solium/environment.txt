@@ -212,6 +212,12 @@ SOLIUM_PACING
     longer than the monitor's frame interval. Misses are counted whether or
     not this is set, and every session ends with one `pacing` line of totals.
 
+SOLIUM_FENCE_WAIT=<on|off>
+    `off` (or `0`, `no`, `skip`) drops a window capture's fence instead of
+    waiting for it on the CPU: the GPU orders the read after the draw on the
+    one context. `on`, or unset, waits, which is the default until #59 lands.
+    Each session's log says which it ran with.
+
 SOLIUM_RESIZE_TRACE=<file>
     Append a per-frame trace of every resize drag to `<file>`.
 

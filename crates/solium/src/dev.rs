@@ -285,6 +285,67 @@ pub(crate) fn pacing() -> bool {
     std::env::var_os("SOLIUM_PACING").is_some()
 }
 
+/// Whether a capture waits on the CPU for its GPU work.
+///
+/// ```sh
+/// SOLIUM_FENCE_WAIT=off ./target/debug/solium --tty
+/// ```
+///
+/// `off`, `0`, `no` or `skip` drop the fence unwaited; anything else, or
+/// nothing, keeps today's wait, and a word that is neither is named in the
+/// log. Read once and said once, so every session log records which it ran
+/// with. `tests::the_fence_wait_stays_on_unless_switched_off`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FenceWait {
+    /// Wait for the GPU before sampling: `SyncPoint::wait`.
+    Cpu,
+    /// Drop the fence: GL orders the sample after the draw on one context.
+    Skip,
+}
+
+impl FenceWait {
+    /// The mode a value names, and a warning when it names neither.
+    pub(crate) fn named(value: Option<&str>) -> (Self, Option<String>) {
+        match value.map(str::trim) {
+            None | Some("" | "on" | "1" | "yes" | "cpu") => (Self::Cpu, None),
+            Some("off" | "0" | "no" | "skip") => (Self::Skip, None),
+            Some(other) => (
+                Self::Cpu,
+                Some(format!(
+                    "SOLIUM_FENCE_WAIT={other} is neither on nor off; captures wait on the CPU"
+                )),
+            ),
+        }
+    }
+}
+
+/// The fence wait this process runs with, decided and logged on first use.
+pub(crate) fn fence_wait() -> FenceWait {
+    thread_local! {
+        static DECIDED: std::cell::OnceCell<FenceWait> = const { std::cell::OnceCell::new() };
+    }
+    DECIDED.with(|decided| {
+        *decided.get_or_init(|| {
+            let value = std::env::var("SOLIUM_FENCE_WAIT").ok();
+            let (wait, warning) = FenceWait::named(value.as_deref());
+            if let Some(warning) = warning {
+                tracing::warn!("{warning}");
+            }
+            match wait {
+                FenceWait::Cpu => tracing::info!(
+                    fence_wait = "cpu",
+                    "a capture waits on the CPU for its GPU work"
+                ),
+                FenceWait::Skip => tracing::info!(
+                    fence_wait = "skip",
+                    "captures are ordered on the GPU, not waited for on the CPU"
+                ),
+            }
+            wait
+        })
+    })
+}
+
 /// Whether to show the Developer Tweaks panel.
 ///
 /// `--debug-mode` anywhere in the arguments, so it composes with the backend
@@ -295,4 +356,33 @@ pub(crate) fn pacing() -> bool {
 pub(crate) fn debug_mode() -> bool {
     std::env::args().any(|argument| argument == "--debug-mode")
         || std::env::var_os("SOLIUM_DEBUG_MODE").is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FenceWait;
+
+    /// **The wait stays on unless it is switched off**, by a word that says
+    /// so; anything else keeps it and says why. Two-valued rather than a flag,
+    /// so the knob still means something after the default flips (§6.5, C2).
+    #[test]
+    fn the_fence_wait_stays_on_unless_switched_off() {
+        assert_eq!(FenceWait::named(None), (FenceWait::Cpu, None));
+        for off in ["off", "0", "no", "skip"] {
+            assert_eq!(
+                FenceWait::named(Some(off)),
+                (FenceWait::Skip, None),
+                "{off}"
+            );
+        }
+        for on in ["on", "1", "yes", "cpu", ""] {
+            assert_eq!(FenceWait::named(Some(on)), (FenceWait::Cpu, None), "{on}");
+        }
+        let (wait, warning) = FenceWait::named(Some("of"));
+        assert_eq!(wait, FenceWait::Cpu);
+        assert!(
+            warning.is_some_and(|said| said.contains("of")),
+            "a typo is named"
+        );
+    }
 }

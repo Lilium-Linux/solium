@@ -381,6 +381,10 @@ pub(crate) fn run() -> Result<()> {
     // as soon as it is knowable.
     let mut monitor_reported = false;
 
+    // Said once at startup, so every session log records which way captures
+    // ran: `dev::tests::the_fence_wait_stays_on_unless_switched_off`.
+    crate::dev::fence_wait();
+
     // Deliberately not exported into our own environment: clients need it in
     // *theirs*, and silently inheriting it is how a nested client ends up on the
     // developer's real session.

@@ -409,29 +409,62 @@ fn into_scratch(
                     }
                 }
 
-                // Waited on, not dropped. The fence says when the GPU has actually
-                // finished drawing into this texture; sampling it before then is a
-                // race that shows up as a window full of garbage, intermittently,
-                // which is the worst kind of rendering bug to be handed.
-                match frame.finish() {
-                    Ok(sync) => match sync.wait() {
-                        Ok(()) => true,
-                        Err(err) => {
-                            tracing::warn!(?err, "waiting for the offscreen draw failed");
-                            false
-                        }
-                    },
-                    Err(err) => {
-                        tracing::warn!(?err, "the offscreen draw did not finish");
-                        false
-                    }
-                }
+                // See `settle`: waited on by default, and the window full of
+                // garbage that sampling an unfinished texture can show is why.
+                settle(frame.finish(), crate::dev::fence_wait(), "a capture")
             }
         }
     };
 
     crate::warp::release_framebuffer(renderer);
     drawn.then_some(texture)
+}
+
+/// Whether a finished offscreen frame may be sampled: the compositor's
+/// `SyncPoint`, or a counting stand-in in the tests.
+pub(crate) trait Finished {
+    /// Wait for the GPU, and say whether that worked.
+    fn waited(&self) -> bool;
+}
+
+impl Finished for smithay::backend::renderer::sync::SyncPoint {
+    fn waited(&self) -> bool {
+        match self.wait() {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(?err, "waiting for an offscreen draw failed");
+                false
+            }
+        }
+    }
+}
+
+/// Whether an offscreen draw that `finish` answered may be sampled.
+///
+/// **Waited on, unless `SOLIUM_FENCE_WAIT=off`.** The fence says when the GPU
+/// has finished drawing into the texture. Every reader of a capture today is
+/// on the context that wrote it, where GL already orders the read after the
+/// write, so the wait buys nothing the GPU does not do anyway; it is kept as
+/// the default until #59 lands (§6.5, C2).
+/// `tests::a_capture_waits_on_the_cpu_only_when_asked`,
+/// `tests::a_wait_that_fails_is_a_failed_capture`,
+/// `tests::a_frame_that_did_not_finish_is_a_failed_capture_either_way`.
+/// Dropping an `EGLFence` is `eglDestroySync`, not a wait.
+pub(crate) fn settle<F: Finished, E: std::fmt::Debug>(
+    finished: Result<F, E>,
+    wait: crate::dev::FenceWait,
+    what: &str,
+) -> bool {
+    match finished {
+        Err(err) => {
+            tracing::warn!(?err, what, "an offscreen draw did not finish");
+            false
+        }
+        Ok(sync) => match wait {
+            crate::dev::FenceWait::Cpu => sync.waited(),
+            crate::dev::FenceWait::Skip => true,
+        },
+    }
 }
 
 /// One monitor's worth of picture, drawn into a texture of its own.
@@ -563,19 +596,7 @@ impl Screens {
                         }
                     }
 
-                    match frame.finish() {
-                        Ok(sync) => match sync.wait() {
-                            Ok(()) => true,
-                            Err(err) => {
-                                tracing::warn!(?err, "waiting for a monitor's draw failed");
-                                false
-                            }
-                        },
-                        Err(err) => {
-                            tracing::warn!(?err, "a monitor's draw did not finish");
-                            false
-                        }
-                    }
+                    settle(frame.finish(), crate::dev::fence_wait(), "a monitor")
                 }
             }
         };
@@ -591,6 +612,7 @@ mod tests {
 
     use smithay::utils::{Logical, Physical, Size};
 
+    use super::{Finished, settle};
     use super::{KEPT, Scratch, client_pixels, pixels};
 
     /// An ordinary window, the same one `qml::paint`'s tests measure and the
@@ -904,5 +926,69 @@ mod tests {
         for scale in [1.0, 2.0] {
             assert_eq!(pixels(width, scale), client_pixels(width, scale));
         }
+    }
+
+    /// A fence that counts how often it is waited on, and answers as told.
+    #[derive(Debug)]
+    struct Counted {
+        waits: Rc<Cell<u32>>,
+        answer: bool,
+    }
+
+    impl Finished for Counted {
+        fn waited(&self) -> bool {
+            self.waits.set(self.waits.get() + 1);
+            self.answer
+        }
+    }
+
+    /// **A capture waits on the CPU only when asked to.** Skipped, the fence is
+    /// dropped unwaited and the capture is still sampleable: GL orders the
+    /// reads after the writes on the one context (wirecheck's cases 11c and
+    /// 11d, Task 9).
+    #[test]
+    fn a_capture_waits_on_the_cpu_only_when_asked() {
+        use crate::dev::FenceWait;
+        let waits = Rc::new(Cell::new(0));
+        let fence = || Counted {
+            waits: Rc::clone(&waits),
+            answer: true,
+        };
+        assert!(settle::<_, ()>(Ok(fence()), FenceWait::Cpu, "a test"));
+        assert_eq!(waits.get(), 1, "the default waits");
+        assert!(settle::<_, ()>(Ok(fence()), FenceWait::Skip, "a test"));
+        assert_eq!(waits.get(), 1, "switched off, nothing waits");
+    }
+
+    /// A wait that fails is a failed capture, as it was before both waits went
+    /// through `settle`.
+    #[test]
+    fn a_wait_that_fails_is_a_failed_capture() {
+        let waits = Rc::new(Cell::new(0));
+        let failing = Counted {
+            waits: Rc::clone(&waits),
+            answer: false,
+        };
+        assert!(!settle::<_, ()>(
+            Ok(failing),
+            crate::dev::FenceWait::Cpu,
+            "a test"
+        ));
+    }
+
+    /// And a frame that did not finish is a failed capture either way.
+    #[test]
+    fn a_frame_that_did_not_finish_is_a_failed_capture_either_way() {
+        use crate::dev::FenceWait;
+        assert!(!settle::<Counted, &str>(
+            Err("no"),
+            FenceWait::Cpu,
+            "a test"
+        ));
+        assert!(!settle::<Counted, &str>(
+            Err("no"),
+            FenceWait::Skip,
+            "a test"
+        ));
     }
 }

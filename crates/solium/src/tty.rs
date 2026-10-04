@@ -662,6 +662,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         })
         .map_err(|err| anyhow!("arming the input watchdog: {err}"))?;
 
+    // Said once at startup, so every session log records which way captures
+    // ran: `dev::tests::the_fence_wait_stays_on_unless_switched_off`.
+    crate::dev::fence_wait();
+
     tracing::info!(
         socket = %state.solium.socket_name,
         "solium is up on the hardware -- run clients with WAYLAND_DISPLAY set to this"
