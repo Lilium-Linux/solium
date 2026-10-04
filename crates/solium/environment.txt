@@ -211,21 +211,25 @@ SOLIUM_PACING
     Set to anything, say where a frame's time went on the frames that took
     longer than the monitor's frame interval, and say it too when a monitor
     flipped late, which is counted apart as `late`: the vblanks a monitor
-    should have flipped at and did not, from the kernel's flips (always 0
-    nested, where there are none). A line carries the slowest pass since the
-    last line: each phase on the CPU, how many windows were captured
-    (`captures`), and the GPU's time for the pass (`gpu`, `gpu_us`, and
-    `gpu_prep_us` for the captures), which is read a few passes later, so a
-    line waits up to eight passes for it and goes without it (`gpu="late"`)
-    after that, or sooner, still `gpu="late"`, if nothing is being drawn and
-    it has still not come (always nested, where the time is read only when a
-    pass draws); `gpu` reads `unsupported` on a GPU that cannot time itself
-    and `disjoint` when its clock jumped. Nested, only the captures and, with
-    several monitors, each monitor are timed on the GPU, not the window's own
-    draw. Each line also carries the GPU's clocks when it was made: where
-    they come from (`clocks`: `nvml`, `i915` or `none`), `gpu_mhz`, `mem_mhz`
-    (0 on i915) and NVIDIA's `pstate` (-1 where unknown), sampled four times
-    a second by a thread of their own.
+    should have flipped at and did not, summed over the monitors, from the
+    kernel's flips (always 0 nested, where there are none). On a monitor with
+    vrr on, whose vblank waits for its frame, a slow frame drawn at a flip
+    delays the next vblank instead of missing it and is rarely counted, while
+    one started from idle is still judged against the monitor's fastest rate,
+    so its `late` does not compare with a fixed rate's. A line carries the
+    slowest pass since the last line: each phase on the CPU, how many
+    windows were captured (`captures`), and the GPU's time for the pass
+    (`gpu`, `gpu_us`, and `gpu_prep_us` for the captures), which is read a
+    few passes later, so a line waits up to eight passes for it and goes
+    without it (`gpu="late"`) after that, or sooner, still `gpu="late"`, if
+    nothing is being drawn and it has still not come (always nested, where
+    the time is read only when a pass draws); `gpu` reads `unsupported` on a
+    GPU that cannot time itself and `disjoint` when its clock jumped. Nested,
+    only the captures and, with several monitors, each monitor are timed on
+    the GPU, not the window's own draw. Each line also carries the GPU's
+    clocks when it was made: where they come from (`clocks`: `nvml`, `i915`
+    or `none`), `gpu_mhz`, `mem_mhz` (0 on i915) and NVIDIA's `pstate` (-1
+    where unknown), sampled four times a second by a thread of their own.
     Misses and late flips are counted whether or not this is set, and every
     session ends with one `pacing` line of totals.
 
