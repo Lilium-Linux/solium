@@ -186,8 +186,88 @@ impl Solium {
     /// Either path can be the reason. A pane is under exactly one of them —
     /// `settle_resize` hands a pane from one to the other rather than letting
     /// both claim it — so this is an "or" and not a precedence.
+    ///
+    /// **Or a fullscreen or maximise change waiting for its client's answer**
+    /// (#49), [`Self::answering`]. That one only keeps the slot: it is not
+    /// [`Self::held_hold`], so `resize.fill` -- a drag's setting -- is not
+    /// asked, and the client's last picture is stretched into the rectangle
+    /// whatever it says. `a_slow_client_is_drawn_stretched_until_it_answers`.
     pub(crate) fn holding_resize(&self, pane: crate::pane::PaneId) -> bool {
-        self.held_hold(pane).is_some()
+        self.held_hold(pane).is_some() || self.answering_for(pane).is_some()
+    }
+
+    /// This pane's entry in [`Self::answering`], if a fullscreen or maximise
+    /// change is holding it until its client answers.
+    fn answering_for(&self, pane: crate::pane::PaneId) -> Option<&crate::resizing::Held> {
+        self.answering.iter().find(|held| held.pane == pane)
+    }
+
+    /// Hold a window at the rectangle a fullscreen or maximise change has
+    /// just given it -- its slot, which its client has been told -- until the
+    /// client answers (#49). `lands` is when the change's glide lands:
+    /// `resizing::PATIENCE` runs from there, as a drag's runs from the
+    /// pointer letting go, so a client is never held for want of an answer
+    /// it had no time to give. A second change replaces the first's hold.
+    /// `a_slow_client_is_drawn_stretched_until_it_answers`,
+    /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+    pub(super) fn hold_for_answer(
+        &mut self,
+        pane: crate::pane::PaneId,
+        window: &Window,
+        now: Duration,
+        lands: Duration,
+    ) {
+        let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
+            return;
+        };
+        let hold = crate::resizing::Hold::new(
+            ResizeEdge::None,
+            window.geometry().size,
+            slot,
+            now,
+            Some(lands),
+        );
+        self.answering.retain(|held| held.pane != pane);
+        self.answering.push(crate::resizing::Held {
+            window: window.clone(),
+            pane,
+            hold,
+        });
+    }
+
+    /// Watch every window [`Self::answering`] holds, and end each hold when
+    /// its client answers -- or, answering nothing, `resizing::PATIENCE` after
+    /// its glide landed, when the client's own size wins, as it does at the
+    /// end of a drag. Returns whether any is still waiting, which keeps the
+    /// frames coming until the last has ended.
+    ///
+    /// A hold for a pane a drag has taken is dropped: the drag's rectangle is
+    /// the truth now, and landing this one would move it.
+    /// `a_slow_client_is_drawn_stretched_until_it_answers`,
+    /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+    pub(crate) fn settle_answering(&mut self, now: Duration) -> bool {
+        let mut waiting = false;
+        let mut kept = Vec::with_capacity(self.answering.len());
+        for mut held in std::mem::take(&mut self.answering) {
+            if self.panes.get(held.pane).and_then(Pane::client) != Some(&held.window)
+                || self.held_hold(held.pane).is_some()
+            {
+                continue;
+            }
+            match held.hold.settle(held.window.geometry().size, now) {
+                crate::resizing::Settle::Waiting => {
+                    waiting = true;
+                    kept.push(held);
+                }
+                crate::resizing::Settle::Done => {}
+                crate::resizing::Settle::Adopt(taken) => {
+                    self.land_on(&held.window, held.pane, &held.hold, taken);
+                }
+            }
+        }
+        kept.append(&mut self.answering);
+        self.answering = kept;
+        waiting
     }
 
     /// The hold governing this pane, whichever path put it there.
@@ -287,7 +367,7 @@ impl Solium {
     /// frame carrying a motion drew the layout's rectangle, and a frame without
     /// one drew the client's.
     pub(super) fn held_slot(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
-        let pane = self
+        let dragged = self
             .resize_hold
             .as_ref()
             .filter(|held| &held.window == window)
@@ -299,8 +379,24 @@ impl Solium {
                     .iter()
                     .find(|held| &held.window == window)
                     .map(|held| held.pane)
-            })?;
-        self.panes.get(pane).map(Pane::slot)
+            });
+        if let Some(pane) = dragged {
+            return self.panes.get(pane).map(Pane::slot);
+        }
+        // And a window a fullscreen or maximise change holds until its
+        // client answers, for the same reason: the slot's size is what the
+        // change told it, and the space has its old size.
+        // `a_slow_client_is_drawn_stretched_until_it_answers`.
+        //
+        // **Its size and not its place.** Position never needed a client's
+        // consent, and nothing here is dragging the window: one moved by its
+        // titlebar while it waits is where it was moved, and its patience
+        // running out lands it there rather than back where the change put
+        // it. `a_window_moved_while_its_change_holds_it_stays_where_it_was_moved`.
+        let held = self.answering.iter().find(|held| &held.window == window)?;
+        let slot = self.panes.get(held.pane).map(Pane::slot)?;
+        let at = self.space.element_location(window).unwrap_or(slot.loc);
+        Some(Rectangle::new(at, slot.size))
     }
 
     /// A fresh edge drag is starting on this window.

@@ -82,6 +82,7 @@ Three guides go deeper than the recipes below:
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
+| your pointer | any QML file, named by `cursor.scene` ([below](#your-own-pointer)) |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml`, once [#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed |
 | the shipped files, to copy from | `crates/solium/qml` and `crates/solium/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install: `/usr` for the Fedora package, `~/.local` for `dev/install.sh` |
 | the log | `~/.local/state/solium/session.log`, for a session started with `solium --tty` or from the login screen. A nested run logs to the terminal it was started from |
@@ -818,7 +819,9 @@ output gets the primary monitor.
 A fullscreen window in front of the workspace its monitor is showing covers
 the top layer -- a client's bar, and one declared with `sol.surface` -- and
 takes the clicks where the bar was, while the overlay layer (notifications, an
-OSD, a launcher) stays over it. To keep the bars over fullscreen windows:
+OSD, a launcher) stays over it. It goes over the bars as it starts to grow and
+back under them once it has finished shrinking. To keep the bars over
+fullscreen windows:
 
 ```lua
 return { fullscreen = { covers = "none" } }
@@ -826,6 +829,148 @@ return { fullscreen = { covers = "none" } }
 
 See **[shell-boundary.md](shell-boundary.md)** for why hosting is the design,
 and for both ways a shell attaches.
+
+### Your own pointer
+
+The pointer can be a QML scene of yours, named the way a shell is:
+
+```lua
+return { cursor = { scene = "~/.config/solium/cursor/Cursor.qml", size = 32 } }
+```
+
+A path, `~` expanded, or a bare name looked for in `~/.config/solium/qml/`
+and then in the shipped QML
+(`cursor::theme::tests::a_configured_scene_is_found_as_the_shells_is`).
+`SOLIUM_QML_CURSOR=<file>` is the scene for one run, over the setting
+(`cursor::theme::tests::the_environment_overrides_the_configured_scene`).
+It draws every shape a window or the compositor asks for, ahead of any
+XCursor theme, and is told which one
+(`models::pointer::tests::a_configured_scene_hears_every_named_shape`). A
+window that sets a cursor of its own, or hides the pointer as a game does,
+still does over its own surface
+(`cursor::tests::a_pointer_a_client_hides_stays_hidden_with_a_scene_configured`).
+`super+shift+r` applies a change and builds the scene again when its files
+changed. A scene that does not load leaves the theme, and then Solium's own
+arrow, to draw the pointer, says so in the log, and is tried again at the
+next reload (`cursor::tests::a_reload_swaps_the_scene`).
+
+It reads `Solium.cursor`. `shape` is the shape asked for, by its CSS cursor
+name: `default` over a titlebar, `text` over a text field, `ew-resize` on a
+window's left or right edge, and so on
+(`models::pointer::tests::a_named_shape_reaches_solium_cursor_shape`).
+`pressed` is whether a button is held, `velocity` how fast the pointer
+moved over the last frame in logical pixels a second along `x` and `y`,
+zero once it stops, `scale` the scale of the monitor it is on and `size` the
+configured `cursor.size`
+(`models::pointer::tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`).
+It says one thing back, `Solium.cursor.hotspot` on its root: the point of
+its picture that sits on the pointer, its top-left corner unless it says.
+Its size is its root's own `width` and `height`, up to 256 logical pixels
+a side, so a glow or a shadow can reach past `size` with the hotspot still
+on the point the pointer is at; a root that sets no size is `size` square
+(`cursor::scene::tests::the_scene_is_drawn_at_its_own_size_with_its_hotspot_on_the_pointer`).
+
+An arrow, an I-beam over text, and a glow that breathes:
+
+```qml
+// ~/.config/solium/cursor/Cursor.qml
+import QtQuick
+import QtQuick.Effects
+import QtQuick.Shapes
+import Solium
+
+Item {
+    id: root
+    readonly property int pad: 10        // room for the glow
+    readonly property int size: Solium.cursor.size
+    readonly property bool text: Solium.cursor.shape === "text"
+    width: size + 2 * pad
+    height: size + 2 * pad
+    // The arrow points with its tip, the I-beam with its middle.
+    Solium.cursor.hotspot: text ? Qt.point(pad + size / 2, pad + size / 2)
+                                : Qt.point(pad, pad)
+
+    // One breath, forever: the glow's strength and a tint in the arrow.
+    property real breath: 0.25
+    SequentialAnimation on breath {
+        loops: Animation.Infinite
+        NumberAnimation { to: 1; duration: 800; easing.type: Easing.InOutSine }
+        NumberAnimation { to: 0.25; duration: 800; easing.type: Easing.InOutSine }
+    }
+
+    MultiEffect {                        // the glow, behind the drawing
+        source: drawing
+        anchors.fill: drawing
+        shadowEnabled: true
+        shadowColor: "#7aa2ff"
+        shadowBlur: 1.0
+        shadowOpacity: root.breath
+    }
+
+    Item {
+        id: drawing
+        x: root.pad
+        y: root.pad
+        width: root.size
+        height: root.size
+        readonly property real u: width / 24
+
+        Shape {                          // the arrow
+            anchors.fill: parent
+            visible: !root.text
+            ShapePath {
+                fillColor: Qt.tint("white", Qt.rgba(0.48, 0.64, 1, 0.45 * root.breath))
+                strokeColor: "#1c1c1e"
+                strokeWidth: 1.6 * drawing.u
+                startX: 0.8 * drawing.u; startY: 0.8 * drawing.u
+                PathLine { x: 0.8 * drawing.u;  y: 16.3 * drawing.u }
+                PathLine { x: 5.0 * drawing.u;  y: 12.5 * drawing.u }
+                PathLine { x: 7.9 * drawing.u;  y: 19.1 * drawing.u }
+                PathLine { x: 11.0 * drawing.u; y: 17.7 * drawing.u }
+                PathLine { x: 8.2 * drawing.u;  y: 11.3 * drawing.u }
+                PathLine { x: 13.7 * drawing.u; y: 10.9 * drawing.u }
+                PathLine { x: 0.8 * drawing.u;  y: 0.8 * drawing.u }
+            }
+        }
+
+        Rectangle {                      // the I-beam
+            visible: root.text
+            anchors.centerIn: parent
+            width: 3 * drawing.u
+            height: 16 * drawing.u
+            color: "white"
+            border.color: "#1c1c1e"
+        }
+    }
+}
+```
+
+It animates on the compositor's clock: a running animation asks for the
+next frame, and a scene with nothing running asks for none
+(`cursor::scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`).
+This one breathes forever: while the pointer is shown it is drawn on every
+refresh, and while it is not (a window hiding it or drawing its own, or the
+screens off) the breath is still stepped a frame apart, every 16 ms
+(`qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`).
+To let it rest, bind the animation's `running:` to something the scene can
+see, such as `Solium.cursor.pressed`, the shape, or the velocity.
+
+`MultiEffect` and `ShaderEffect` draw on the GPU path, which a session on the
+hardware uses by default (`dev/wirecheck`'s case 11 draws a pointer scene's
+glow there). On the software path, which a nested session uses and
+`qml.renderer = "software"` chooses, they draw nothing, and the drawing
+under the glow is the whole pointer: that is why the breath is in the
+arrow's tint as well. The picture is offered to the hardware cursor plane,
+as a theme's is
+(`cursor::scene::tests::a_scene_with_no_material_is_a_cursor_plane_element`),
+and goes there when its size in device pixels fits the plane, commonly 64 or
+128 pixels a side; there moving the mouse redraws nothing else. A larger one,
+such as this one at `size = 32` on a 2x monitor (104 pixels a side), is
+drawn with everything else where the plane is smaller.
+`Solium.region` and `Solium.material` are accepted, and materials are off
+until [#199](https://github.com/Lilium-Linux/solium/issues/199):
+`Solium.materialState` reads `"off"`
+(`qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`).
 
 ### Your own colours
 
@@ -852,6 +997,32 @@ return {
 Those are the same four numbers CSS calls `cubic-bezier` and every easing
 generator on the internet hands out, so a feel you found elsewhere transfers
 directly. y may leave 0..1 — that is what overshoot is.
+
+Going fullscreen and maximising are timed the same way, each on its own, and
+both glide by default: the window grows from where it is to cover its monitor,
+or its work area, and shrinks back. `animate = false` makes one instant and
+`animate = true` is the shipped motion again, and `instant` names the
+applications that change at once whatever `animate` says — a game or a video
+player, say:
+
+```lua
+return {
+    fullscreen = {
+        animate = { duration = 200, easing = "inOutCubic" },
+        instant = { app_id = { "mpv", "gamescope" } },
+    },
+    maximize = { animate = false },
+}
+```
+
+The application is told its new size the moment you press the key, and its
+last picture is stretched until it has drawn one at that size — through the
+glide and after it, for a quarter of a second past the landing at most, and
+then the window is shown at whatever size the application has. Once it has
+answered the window is drawn as it is, with nothing in between, so a
+fullscreen game or video can be shown directly. An instant change is just that:
+nothing is stretched or moved, and the window is drawn as it is on the next
+frame. An app id is what `sol.windows()` calls `app_id`.
 
 ### Your own bindings
 
@@ -920,7 +1091,9 @@ require("bindings")
 it up -- `super+shift+k` is the keyboard layout. At the edge of a screen both go
 on to the next one. `super+f` is fullscreen, `super+shift+m` maximised and
 `super+shift+space` floats a window over the layout; each key again puts it
-back. Rebind any of them in `bindings`:
+back, and fullscreen and maximised glide there and back
+([Your own animation feel](#your-own-animation-feel) times them). Rebind any
+of them in `bindings`:
 
 ```lua
 return {

@@ -59,6 +59,9 @@ require("tweaks")
 
 require("modes")
 require("open")
+-- How a window goes fullscreen or maximised, and back: `fullscreen` and
+-- `maximize` in config.lua.
+require("fullscreen")
 require("overview")
 require("workspaces")
 require("tiling")

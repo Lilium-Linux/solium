@@ -319,6 +319,10 @@ struct SoliumQmlScene
      * `qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`. */
     QQmlContext *context = nullptr;
     SoliumHosting *hosting = nullptr;
+    /* Whether the root item says how big it is: the compositor never writes
+     * its width or height, and reads them instead. The pointer's scene is one.
+     * `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`. */
+    bool sized_by_root = false;
     /* A hosted scene's watch on its window's active focus, cut first when
      * the scene is freed, before any item of it goes.
      * `qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`. */
@@ -678,6 +682,50 @@ extern "C" void solium_qml_host_next_on(const char *monitor)
     g_next_monitor = monitor != nullptr ? QString::fromUtf8(monitor) : QString();
 }
 
+namespace {
+/* What solium_qml_host_next_sized_by_root handed over, for the next scene
+ * only: the size a root that sets none of its own takes, or 0 for a scene the
+ * host sizes. */
+int g_next_root_width = 0;
+int g_next_root_height = 0;
+} // namespace
+
+extern "C" void solium_qml_host_next_sized_by_root(int width, int height)
+{
+    g_next_root_width = width > 0 && height > 0 ? width : 0;
+    g_next_root_height = width > 0 && height > 0 ? height : 0;
+}
+
+extern "C" int solium_qml_scene_root_size(const SoliumQmlScene *scene, double *width,
+                                          double *height)
+{
+    if (scene == nullptr || scene->root == nullptr || width == nullptr || height == nullptr) {
+        return 0;
+    }
+    *width = scene->root->width();
+    *height = scene->root->height();
+    return 1;
+}
+
+extern "C" int solium_qml_scene_cursor_hotspot(const SoliumQmlScene *scene, double *x, double *y)
+{
+    if (scene == nullptr || scene->object == nullptr || x == nullptr || y == nullptr) {
+        return 0;
+    }
+    /* The root's own, and only if something made it: a scene that never
+     * names `Solium.cursor` on its root points with its top-left corner.
+     * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+    auto *attached = qobject_cast<SoliumAttached *>(
+        qmlAttachedPropertiesObject<SoliumAttachedType>(scene->object, false));
+    const SoliumCursor *cursor = attached != nullptr ? attached->cursorIfMade() : nullptr;
+    if (cursor == nullptr) {
+        return 0;
+    }
+    *x = cursor->hotspot().x();
+    *y = cursor->hotspot().y();
+    return 1;
+}
+
 extern "C" SoliumQmlScene *solium_qml_scene_new(const char *qml_path, int width, int height,
                                                 const char **error)
 {
@@ -718,6 +766,19 @@ static void size_window(SoliumQmlScene *scene, int width, int height)
     scene->window->contentItem()->setSize(QSizeF(width, height));
 }
 
+/* The root item laid out at the scene's logical size, unless it says how big
+ * it is itself: then a binding on its width or height has to survive every
+ * resize, and writing either would remove it.
+ * `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`. */
+static void size_root(SoliumQmlScene *scene, int width, int height)
+{
+    if (scene->root == nullptr || scene->sized_by_root) {
+        return;
+    }
+    scene->root->setWidth(width);
+    scene->root->setHeight(height);
+}
+
 static bool load_component(SoliumQmlScene *scene, const char *qml_path,
                            const char *initial_json, const char **error)
 {
@@ -737,6 +798,12 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
         solium_hosting_mark(scene->context, scene->hosting);
         g_next_hosted = false;
     }
+    /* The same for a root that says how big it is.
+     * `qml::pointer::tests::a_scene_built_after_one_sized_by_its_root_is_sized_by_the_host`. */
+    const int own_width = g_next_root_width;
+    const int own_height = g_next_root_height;
+    g_next_root_width = 0;
+    g_next_root_height = 0;
 
     scene->component =
         new QQmlComponent(g_engine, QUrl::fromLocalFile(QString::fromUtf8(qml_path)));
@@ -797,8 +864,20 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     }
 
     scene->root->setParentItem(scene->window->contentItem());
-    scene->root->setWidth(scene->width);
-    scene->root->setHeight(scene->height);
+    /* A root that says how big it is keeps what it says, and one that says
+     * nothing takes the size it was handed as its implicit size, which its
+     * own width and height would override.
+     * `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`. */
+    if (own_width > 0) {
+        scene->sized_by_root = true;
+        if (scene->root->implicitWidth() <= 0.0) {
+            scene->root->setImplicitWidth(own_width);
+        }
+        if (scene->root->implicitHeight() <= 0.0) {
+            scene->root->setImplicitHeight(own_height);
+        }
+    }
+    size_root(scene, scene->width, scene->height);
 
     /* A hosted scene's window is active from the start, so an item with
      * `focus: true` has active focus and `Solium.keyboard.wants: activeFocus`
@@ -1583,10 +1662,7 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
         const int logical_width = qMax(1, qRound(width / scale));
         const int logical_height = qMax(1, qRound(height / scale));
         size_window(scene, logical_width, logical_height);
-        if (scene->root != nullptr) {
-            scene->root->setWidth(logical_width);
-            scene->root->setHeight(logical_height);
-        }
+        size_root(scene, logical_width, logical_height);
         QQuickRenderTarget target =
             QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
         target.setDevicePixelRatio(scale);
@@ -1618,10 +1694,7 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
     const int logical_width = qMax(1, qRound(width / scale));
     const int logical_height = qMax(1, qRound(height / scale));
     size_window(scene, logical_width, logical_height);
-    if (scene->root != nullptr) {
-        scene->root->setWidth(logical_width);
-        scene->root->setHeight(logical_height);
-    }
+    size_root(scene, logical_width, logical_height);
 
     scene->image = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
     scene->image.setDevicePixelRatio(scale);
@@ -1755,10 +1828,7 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     const int logical_width = qMax(1, qRound(width / scale));
     const int logical_height = qMax(1, qRound(height / scale));
     size_window(scene, logical_width, logical_height);
-    if (scene->root != nullptr) {
-        scene->root->setWidth(logical_width);
-        scene->root->setHeight(logical_height);
-    }
+    size_root(scene, logical_width, logical_height);
 
     QQuickRenderTarget target =
         QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));

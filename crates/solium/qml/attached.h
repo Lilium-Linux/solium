@@ -28,6 +28,8 @@
 
 #include <utility>
 
+#include "pointer.h"
+
 class QQmlContext;
 
 /* The URI every native type is registered under: "Solium", the URI the
@@ -316,6 +318,18 @@ class SoliumAttached : public QObject
     /* `Solium.status`: the text `sol.status` set.
      * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    /* `Solium.cursor`: the pointer as the compositor publishes it, and the
+     * hotspot the pointer's scene sets on its root.
+     * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`,
+     * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+    Q_PROPERTY(SoliumCursor *cursor READ cursor CONSTANT)
+    /* `Solium.region` and `Solium.material`: accepted on every item and read
+     * by nothing yet; `Solium.materialState` is "off" until materials exist
+     * (#199), so a scene shows its plain drawing.
+     * `qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`. */
+    Q_PROPERTY(QString region READ region WRITE setRegion NOTIFY regionChanged)
+    Q_PROPERTY(QVariant material READ material WRITE setMaterial NOTIFY materialChanged)
+    Q_PROPERTY(QString materialState READ materialState CONSTANT)
 public:
     explicit SoliumAttached(QObject *item);
     SoliumMonitor *monitor() const;
@@ -327,6 +341,15 @@ public:
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
     QString status() const;
+    SoliumCursor *cursor();
+    /* The object's `Solium.cursor` if anything has made it, else null.
+     * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+    SoliumCursor *cursorIfMade() const { return m_cursor; }
+    QString region() const { return m_region; }
+    void setRegion(const QString &region);
+    QVariant material() const { return m_material; }
+    void setMaterial(const QVariant &material);
+    QString materialState() const { return QStringLiteral("off"); }
     /* `Solium.send(action, data)`: a named action with data, an object, a
      * value or nothing, queued for the compositor, which hands it to Lua at
      * its next settle, after every one sent before it. Ruling 15.
@@ -336,11 +359,16 @@ public:
 signals:
     void inputChanged();
     void statusChanged();
+    void regionChanged();
+    void materialChanged();
 
 private:
     QObject *m_item;
     int m_input = -1;
     SoliumKeyboard *m_keyboard = nullptr;
+    SoliumCursor *m_cursor = nullptr;
+    QString m_region;
+    QVariant m_material;
 };
 
 /* The name `Solium` in QML. It exists only to carry the attached object.

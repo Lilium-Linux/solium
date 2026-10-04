@@ -228,6 +228,7 @@
 ---@class sol.CursorOptions
 ---@field theme? string The name of an XCursor theme.
 ---@field size? integer Logical pixels, from 8 to 256.
+---@field scene? string A QML scene to draw the pointer with, for every shape and ahead of the theme: a path, `~` expanded, or a name looked for in `~/.config/solium/qml` and then the shipped QML. `SOLIUM_QML_CURSOR` overrides it for one run.
 
 ---How QML is rendered. Read once, before Qt starts.
 ---@class sol.QmlOptions
@@ -275,6 +276,8 @@
 ---| "closing" # A close was asked for and the window is fading: `(id)`.
 ---| "refused" # Its application declined, and the window is back: `(id)`.
 ---| "close" # The window is gone: `(id)`.
+---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture stretched into it, for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
+---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
 ---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
@@ -532,8 +535,9 @@ function sol.resize(options) end
 ---@return nil
 function sol.fullscreen(options) end
 
----Set the pointer's XCursor theme and size. Applied at once, so a reload is
----how a theme is tried. Not `sol.cursor`, which says where the pointer is.
+---Set the pointer's XCursor theme, size and scene. Applied at once, so a reload
+---is how a theme or a scene is tried, and a scene whose files changed is built
+---again. Not `sol.cursor`, which says where the pointer is.
 ---@param options? sol.CursorOptions
 ---@return nil
 function sol.cursor_theme(options) end
@@ -591,7 +595,9 @@ function sol.present_group(name, shift, motion) end
 function sol.present_group_clear(name, motion) end
 
 ---Set the timing for every animated command queued after this one in the same
----handler. Left unset, it is 220 ms and `"outCubic"`.
+---handler. Left unset, it is 220 ms and `"outCubic"`. In a `"fullscreen"` or
+---`"maximize"` listener it is also how the window's own move is timed; there,
+---left unset, the move is instant.
 ---@param options sol.Motion
 ---@return nil
 function sol.animate(options) end

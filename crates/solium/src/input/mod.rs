@@ -567,6 +567,9 @@ fn pointer_motion<B: InputBackend>(
         return;
     };
     let location = absolute_location(region, &event);
+    // What `Solium.cursor.velocity` is measured from:
+    // `models::pointer::tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`.
+    state.pointer.moved(event.time(), location);
 
     // Frames see the pointer before clients do, so buttons light up on hover.
     // Motion is *also* forwarded below, because the pointer leaving a window
@@ -651,6 +654,8 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
     // the shell all answer the question "where is the pointer now", and while
     // it is locked the answer has not changed.
     if !locked {
+        // As in `pointer_motion`, and only for a pointer that moved.
+        state.pointer.moved(event.time(), location);
         // As in `pointer_motion`: over nothing of a client's, the cursor is the
         // compositor's again. This is the path a real mouse takes, so leaving
         // it out is leaving it broken on the hardware and fixed nested -- and

@@ -597,6 +597,11 @@ pub(crate) struct Outcome {
     pub(crate) grab: Option<bool>,
     /// What the compositor should show as the active mode, if it changed.
     pub(crate) status: Option<String>,
+    /// The timing the last `sol.animate` in this dispatch set, or `None` when
+    /// nothing called it: what a `fullscreen` or `maximize` listener answers
+    /// the compositor's own move with.
+    /// `tests::a_change_is_answered_with_the_motion_sol_animate_set`.
+    pub(crate) motion: Option<AnimationSpec>,
 }
 
 /// The queue a script writes into. Lives in Lua's app data for the length of a
@@ -605,6 +610,9 @@ pub(crate) struct Outcome {
 struct Pending {
     commands: Vec<Command>,
     animation: AnimationSpec,
+    /// Whether `sol.animate` set `animation` in this dispatch. See
+    /// [`Outcome::motion`].
+    animated: bool,
     grab: Option<bool>,
     status: Option<String>,
     /// The window a `sol.move_direction` is moving, while its listeners run.
@@ -1205,6 +1213,30 @@ impl Scripts {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "open", id))
     }
 
+    /// A window went fullscreen, or left it: `(id, entering)`.
+    ///
+    /// Told after the change is made: the client has been sent its new size,
+    /// and the window lives at its new rectangle. What is left is moving the
+    /// picture there, which the compositor does once every listener has run,
+    /// from where the window is drawn, with the timing the listeners set with
+    /// `sol.animate` -- [`Outcome::motion`] -- and at once when none set one.
+    /// `tests::a_change_is_answered_with_the_motion_sol_animate_set`.
+    pub(crate) fn fullscreen(&mut self, id: u64, entering: bool, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "fullscreen", (id, entering))
+        })
+    }
+
+    /// A window was maximised, or restored: `(id, entering)`. Answered the
+    /// way [`Self::fullscreen`] is, and told on its own, so the two can be
+    /// given different motions.
+    /// `tests::a_change_is_answered_with_the_motion_sol_animate_set`.
+    pub(crate) fn maximize(&mut self, id: u64, entering: bool, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "maximize", (id, entering))
+        })
+    }
+
     /// Run the handler for a pointer press, while a mode owns input.
     pub(crate) fn click(&mut self, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "click", (x, y)))
@@ -1229,6 +1261,7 @@ impl Scripts {
             commands: pending.commands,
             grab: pending.grab,
             status: pending.status,
+            motion: pending.animated.then_some(pending.animation),
         }
     }
 
@@ -1547,6 +1580,7 @@ impl Scripts {
             commands: pending.commands,
             grab: pending.grab,
             status: pending.status,
+            motion: pending.animated.then_some(pending.animation),
         }
     }
 }
@@ -3336,6 +3370,24 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     ),
                 },
             }
+            // `scene` the same way: a path or a name, as `shell.scene` is, and
+            // anything else is no scene and a line in the log rather than a
+            // configuration that does not load.
+            // `tests::a_configured_cursor_scene_reaches_the_compositor`.
+            match options.get::<Value>("scene") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::String(scene)) => {
+                    if let Ok(scene) = scene.to_str()
+                        && !scene.is_empty()
+                    {
+                        configured.scene = Some(scene.to_string());
+                    }
+                }
+                Ok(value) => tracing::warn!(
+                    scene = ?value,
+                    "cursor scene is not a file name; ignoring it"
+                ),
+            }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Cursor(configured.clone()));
             })
@@ -3530,6 +3582,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 if let Some(easing) = easing {
                     pending.animation.easing = easing;
                 }
+                pending.animated = true;
             })
         })?,
     )?;
@@ -6094,6 +6147,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **`cursor.scene` reaches the compositor as written**, for the pointer to
+    /// look for as the shell's scene is looked for; a value that is not a
+    /// string is no scene, with a line in the log, rather than a configuration
+    /// that fails to load.
+    #[test]
+    fn a_configured_cursor_scene_reaches_the_compositor() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-scene");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+C", function()
+                sol.cursor_theme({ scene = "~/.config/solium/cursor/Cursor.qml", size = 32 })
+            end)
+            sol.bind("Super+V", function()
+                sol.cursor_theme({ scene = 5 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let scenes: Vec<_> = ["super+c", "super+v"]
+            .into_iter()
+            .map(
+                |key| match scripts.key(key, empty_snapshot()).commands.as_slice() {
+                    [Command::Cursor(configured)] => configured.scene.clone(),
+                    other => panic!("expected one cursor command, got {other:?}"),
+                },
+            )
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            scenes,
+            [Some("~/.config/solium/cursor/Cursor.qml".to_owned()), None],
+            "[a path, a number]"
+        );
+    }
+
     /// **The shipped configuration turns the screens off after ten minutes**,
     /// the same number the compositor holds for a configuration that says
     /// nothing, and a `user.lua` can say 0. See `crate::idle::Settings`.
@@ -7669,6 +7763,58 @@ mod tests {
             one_screen(&[]),
         );
         assert_eq!(outcome.status.as_deref(), Some("nil"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A window going fullscreen or maximised is told to the scripts, each
+    /// change by its own event, and answered with the timing `sol.animate`
+    /// set** (#49): the listener hears `(id, entering)`, and what it set is
+    /// the outcome's `motion`. A dispatch that called nothing answers `None`,
+    /// which the compositor reads as "at once", and is not the 220 ms a
+    /// command queued with no `sol.animate` is given.
+    #[test]
+    fn a_change_is_answered_with_the_motion_sol_animate_set() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-change-motion",
+            r#"
+            sol.on("fullscreen", function(id, entering)
+                sol.status("fullscreen " .. id .. " " .. tostring(entering))
+                sol.animate({ duration = 260, easing = "linear" })
+            end)
+            sol.on("maximize", function(id, entering)
+                sol.status("maximize " .. id .. " " .. tostring(entering))
+                if entering then sol.animate({ duration = 120 }) end
+            end)
+            "#,
+        );
+
+        let entering = scripts.fullscreen(7, true, one_screen(&[7]));
+        assert_eq!(entering.status.as_deref(), Some("fullscreen 7 true"));
+        let motion = entering.motion.expect("the listener set a motion");
+        assert_eq!(
+            (motion.duration, motion.easing),
+            (Duration::from_millis(260), Curve::Linear)
+        );
+
+        let leaving = scripts.fullscreen(7, false, one_screen(&[7]));
+        assert_eq!(leaving.status.as_deref(), Some("fullscreen 7 false"));
+
+        let maximised = scripts.maximize(7, true, one_screen(&[7]));
+        assert_eq!(maximised.status.as_deref(), Some("maximize 7 true"));
+        let motion = maximised.motion.expect("the listener set a motion");
+        assert_eq!(
+            (motion.duration, motion.easing),
+            (Duration::from_millis(120), Curve::OutCubic),
+            "the easing it did not name is the default's"
+        );
+
+        let restored = scripts.maximize(7, false, one_screen(&[7]));
+        assert_eq!(restored.status.as_deref(), Some("maximize 7 false"));
+        assert!(
+            restored.motion.is_none(),
+            "nothing called sol.animate, so there is no motion: {:?}",
+            restored.motion
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

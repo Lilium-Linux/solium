@@ -26,6 +26,7 @@
 pub(crate) mod hosted;
 pub(crate) mod keys;
 pub(crate) mod paint;
+pub(crate) mod pointer;
 pub(crate) mod renderer;
 mod target;
 pub(crate) mod wake;

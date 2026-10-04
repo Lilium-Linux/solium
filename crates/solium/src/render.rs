@@ -822,7 +822,14 @@ pub(crate) fn elements(
     // `overlay_cursor` in the screencopy protocol means: a screenshot of a
     // window should not have somebody's mouse in it.
     if with_cursor {
-        elements.extend(cursor(state, renderer, output_scale, scale, shift));
+        elements.extend(cursor(
+            state,
+            renderer,
+            output_scale,
+            scale,
+            shift,
+            screen.size,
+        ));
     }
 
     // Locked, so this is the whole frame. Everything below here belongs to the
@@ -1708,6 +1715,7 @@ fn cursor(
     output_scale: Scale<f64>,
     scale: f64,
     shift: smithay::utils::Point<f64, smithay::utils::Logical>,
+    screen: smithay::utils::Size<i32, smithay::utils::Logical>,
 ) -> Vec<Element> {
     let Some(pointer) = state.seat.get_pointer() else {
         return Vec::new();
@@ -1718,6 +1726,11 @@ fn cursor(
     // test for "is the pointer on this monitor" is needed or wanted: a cursor
     // straddling the boundary has to appear on both, and picking one would clip
     // it to a half-cursor at the exact moment it crosses.
+    //
+    // A configured scene asks a narrower question, which keeps the straddle:
+    // whether its picture reaches this output. It can animate, so drawing it
+    // off every other monitor's edge would cost a full draw per monitor per
+    // frame (`cursor::scene::tests::a_picture_is_drawn_only_on_the_outputs_it_touches`).
     let location = pointer.current_location() + shift;
 
     // `showing` rather than the field, which is now private. It is the one
@@ -1761,11 +1774,19 @@ fn cursor(
         // out of the configured XCursor theme, and the QML pointer that used to
         // be the only answer here is what is drawn when there is no theme or
         // the theme has nothing under that name. See `cursor::Pointer::element`.
-        CursorImageStatus::Named(icon) => state
-            .pointer
-            .element(renderer, icon, location, scale)
-            .into_iter()
-            .collect(),
+        //
+        // A configured scene is drawn ahead of both, and it can animate, so
+        // this asks for the next frame while it does, as `scripted` does for a
+        // hosted scene: `cursor::scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`.
+        CursorImageStatus::Named(icon) => {
+            let drawn = state
+                .pointer
+                .element(renderer, icon, location, scale, screen);
+            if drawn.animating {
+                state.redraw = true;
+            }
+            drawn.element.into_iter().collect()
+        }
     }
 }
 
