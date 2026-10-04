@@ -7626,6 +7626,88 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **An override stopped three times is taken out alone**: it is a
+    /// `surface` listener of its own, so the stops are its and not the
+    /// router's. Every other action is still routed, and its own action
+    /// goes to the compositor again.
+    #[test]
+    fn an_override_stopped_three_times_is_taken_out_alone() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-actions-override-stopped",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+local actions = require("actions")
+runs = 0
+actions.override("windows.close", function() runs = runs + 1; while true do end end)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let acts = |outcome: &Outcome| -> Vec<(String, String)> {
+            outcome
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Act { action, data, .. } => Some((action.clone(), data.render())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let id =
+            |id: u64| crate::json::Json::parse(&format!(r#"{{"id":{id}}}"#)).expect("valid JSON");
+        let stopped: Vec<Vec<(String, String)>> = (0..3)
+            .map(|_| {
+                acts(&scripts.surface_action("shell", "windows.close", &id(4), one_screen(&[])))
+            })
+            .collect();
+        let focused = scripts.surface_action("shell", "windows.focus", &id(3), one_screen(&[]));
+        let closed = scripts.surface_action("shell", "windows.close", &id(5), one_screen(&[]));
+        assert_eq!(
+            (
+                stopped,
+                acts(&focused),
+                acts(&closed),
+                scripts.evaluate("return tostring(runs)")
+            ),
+            (
+                vec![Vec::new(), Vec::new(), Vec::new()],
+                vec![("windows.focus".to_owned(), r#"{"id":3}"#.to_owned())],
+                vec![("windows.close".to_owned(), r#"{"id":5}"#.to_owned())],
+                "3".to_owned()
+            ),
+            "(the acts of the three stopped closes, another action's acts, \
+             the same action's acts once the override is out, how many times it ran)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A later override of the same name replaces the earlier one**: only
+    /// the last answers, and the action does not also go to the compositor.
+    #[test]
+    fn a_later_override_of_the_same_name_replaces_the_earlier_one() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-actions-override-replaced",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+local actions = require("actions")
+heard = ""
+actions.override("windows.close", function() heard = heard .. "first;" end)
+actions.override("windows.close", function() heard = heard .. "second;" end)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "windows.close", &data, one_screen(&[]));
+        assert_eq!(
+            (
+                scripts.evaluate("return heard"),
+                format!("{:?}", outcome.commands)
+            ),
+            ("second;".to_owned(), "[]".to_owned()),
+            "(which overrides answered, the commands queued)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **Each `sol.act` answers an id of its own, counting up**, with or
     /// without a `done`, and data that is no table reaches the command as
     /// it is.

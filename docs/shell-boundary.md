@@ -539,6 +539,12 @@ does, `sol.act` answers it `"unknown-action"`. An action outside the
 vocabulary goes only to the listeners for its surface, as a tweak's does to
 `tweaks.lua`
 (`script::tests::actions_lua_routes_the_vocabulary_and_leaves_the_rest_alone`).
+An override is a `surface` listener of its own, under the same 100 ms deadline
+as every listener, so one stopped three times is taken out alone: every other
+action is still routed, and its own goes to `sol.act` again; a later override
+of the same name replaces it
+(`script::tests::an_override_stopped_three_times_is_taken_out_alone`,
+`script::tests::a_later_override_of_the_same_name_replaces_the_earlier_one`).
 A scene that sets a string property named `action`, as scenes did before
 `Solium.send`, is heard the same way, after what it sent, with no data
 (`surface::tests::queued_actions_come_first_and_the_old_action_property_last`).

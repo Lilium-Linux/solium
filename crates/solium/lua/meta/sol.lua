@@ -638,7 +638,10 @@ function sol.close(id) end
 ---most, and the rest at the next one. Answers the attempt's id, one no
 ---earlier `sol.act` answered. A
 ---`workspaces.*` action is not the compositor's: the file that keeps the
----workspaces answers it, with `actions.override` in `lua/actions.lua`.
+---workspaces answers it, with `actions.override` in `lua/actions.lua`. An
+---override is a `surface` listener of its own, under the same deadline, so
+---one stopped three times is taken out alone, and its action goes to
+---`sol.act` again.
 ---@overload fun(action: "windows.focus"|"windows.close"|"windows.fullscreen"|"windows.maximize", data: { id: integer }, done?: fun(ok: boolean, reason?: string)): integer
 ---@param action string
 ---@param data? any
