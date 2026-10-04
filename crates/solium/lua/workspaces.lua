@@ -398,8 +398,13 @@ end
 -- anything. See `the_shipped_workspaces_declare_what_each_monitor_shows`,
 -- `with_workspaces_together_one_group_has_every_monitor` and
 -- `a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+--
+-- The arrangement is the shape the workspaces really make, which is where
+-- the last one sits: a row of four is four by one, whatever `rows` says.
+-- See `the_declared_arrangement_is_the_shape_of_its_workspaces`.
 function workspaces.declare()
     local count = workspaces.count()
+    local columns, rows = workspaces.cell(count)
     local function group(id, names)
         local list = {}
         for index = 1, count do
@@ -429,8 +434,8 @@ function workspaces.declare()
     sol.workspaces({
         arrangement = {
             kind = workspaces.settings.arrangement,
-            columns = workspaces.settings.columns,
-            rows = workspaces.settings.rows,
+            columns = columns,
+            rows = rows,
         },
         groups = groups,
         windows = windows,

@@ -7875,6 +7875,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **The declared arrangement is the shape the workspaces make**: the
+    /// shipped row of four is four by one, not the grid's `rows`; a column
+    /// is one wide; and a row of none is the one workspace there is.
+    #[test]
+    fn the_declared_arrangement_is_the_shape_of_its_workspaces() {
+        let mut shapes = Vec::new();
+        for (name, user) in [
+            ("row", "return {}"),
+            (
+                "column",
+                r#"return { workspaces = { arrangement = "vertical", rows = 3 } }"#,
+            ),
+            ("none", "return { workspaces = { columns = 0 } }"),
+        ] {
+            let Some((_scripts, commands)) =
+                shell_after_monitors(&format!("solium-script-test-workspaces-shape-{name}"), user)
+            else {
+                return;
+            };
+            let declared = commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Workspaces(declared) => Some(declared.clone()),
+                    _ => None,
+                })
+                .expect("workspaces.lua declared nothing");
+            let last = declared.groups[0]
+                .workspaces
+                .last()
+                .map(|workspace| (workspace.col, workspace.row));
+            shapes.push((
+                declared.arrangement.kind,
+                declared.arrangement.columns,
+                declared.arrangement.rows,
+                last,
+            ));
+        }
+        assert_eq!(
+            shapes,
+            vec![
+                ("horizontal".to_owned(), 4, 1, Some((4, 1))),
+                ("vertical".to_owned(), 1, 3, Some((1, 3))),
+                ("horizontal".to_owned(), 1, 1, Some((1, 1))),
+            ],
+            "(kind, columns, rows, the last workspace's cell)"
+        );
+    }
+
     /// **`windows.send` from a scene moves the window it names**, not the
     /// focused one, through `actions.lua` to `workspaces.lua`, which then
     /// declares where every window is.

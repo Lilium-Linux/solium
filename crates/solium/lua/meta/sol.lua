@@ -385,7 +385,7 @@ function sol.monitors(rows) end
 ---@field workspaces sol.DeclaredWorkspace[]
 
 ---@class sol.WorkspaceDeclaration
----@field arrangement? { kind?: string, columns?: integer, rows?: integer } The shape, for a shell to draw.
+---@field arrangement? { kind?: string, columns?: integer, rows?: integer } The shape the workspaces make, for a shell to draw.
 ---@field groups sol.WorkspaceGroup[]
 ---@field windows? table<integer, string[]> Which workspaces each window is on, by window id.
 
