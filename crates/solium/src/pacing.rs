@@ -791,11 +791,25 @@ pub(crate) struct Queued {
     pub(crate) after: Option<Flip>,
 }
 
-/// Slack for the kernel's timestamp against ours: half a millisecond. A flip
-/// is stamped a little after its vblank began, so a frame queued just after
-/// one vblank that flips on the next can read as a little more than an
-/// interval: `tests::a_flip_stamped_just_after_its_vblank_is_on_time`.
-const FLIP_SLACK: Duration = Duration::from_micros(500);
+/// Slack for the kernel's timestamp against ours, beyond the screen's
+/// vertical blank: a fifth of a millisecond. The price is that a frame held
+/// past a vblank it was queued less than this before reads as on time.
+/// `tests::a_flip_stamped_just_after_its_vblank_is_on_time`.
+const FLIP_MARGIN: Duration = Duration::from_micros(200);
+
+/// **How long a mode's vertical blank lasts**: the lines it scans and does
+/// not show, as a share of its interval. The kernel stamps a flip as its
+/// blank ends, when scanout starts, so a frame from idle that flips on time
+/// is stamped up to an interval and a blank after it was queued, and a blank
+/// can be longer than any fixed slack: 0.67 ms on CEA's 1080p60.
+/// `tests::a_flip_from_idle_on_a_cea_1080p60_mode_is_judged_by_its_blank`.
+pub(crate) fn vertical_blank(interval: Duration, shown: u16, total: u16) -> Duration {
+    let hidden = u32::from(total.saturating_sub(shown));
+    interval
+        .checked_mul(hidden)
+        .and_then(|lines| lines.checked_div(u32::from(total)))
+        .unwrap_or(Duration::ZERO)
+}
 
 /// **Vblanks this screen should have flipped at and did not.**
 ///
@@ -803,10 +817,17 @@ const FLIP_SLACK: Duration = Duration::from_micros(500);
 /// between was lost: `tests::a_chained_frame_that_skipped_a_vblank_is_one_late`,
 /// `tests::a_sequence_that_wrapped_is_not_four_billion_late`. A frame started
 /// from idle or a client's commit has no vblank it was drawn for, so it is
-/// late only if a whole interval passed between queueing and flipping — the
-/// GPU or the fence held it: `tests::a_frame_from_idle_that_made_the_first_vblank_is_on_time`,
-/// `tests::a_frame_held_past_a_vblank_by_its_fence_is_late`.
-pub(crate) fn vblanks_missed(queued: Queued, flipped: Flip, interval: Duration) -> u32 {
+/// late only if a whole interval passed between queueing and flipping, less
+/// the screen's `blank` the flip is stamped at the end of — the GPU or the
+/// fence held it: `tests::a_frame_from_idle_that_made_the_first_vblank_is_on_time`,
+/// `tests::a_frame_held_past_a_vblank_by_its_fence_is_late`,
+/// `tests::a_flip_from_idle_on_a_cea_1080p60_mode_is_judged_by_its_blank`.
+pub(crate) fn vblanks_missed(
+    queued: Queued,
+    flipped: Flip,
+    interval: Duration,
+    blank: Duration,
+) -> u32 {
     if let Some(trigger) = queued.after {
         return flipped.seq.wrapping_sub(trigger.seq).saturating_sub(1);
     }
@@ -816,7 +837,7 @@ pub(crate) fn vblanks_missed(queued: Queued, flipped: Flip, interval: Duration) 
     let waited = flipped
         .at
         .saturating_sub(queued.at)
-        .saturating_sub(FLIP_SLACK);
+        .saturating_sub(blank.saturating_add(FLIP_MARGIN));
     u32::try_from(waited.as_nanos() / interval.as_nanos()).unwrap_or(u32::MAX)
 }
 
@@ -1026,7 +1047,9 @@ fn emit(line: &Line) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Flip, Frame, Line, Phase, Queued, Totals, vblanks_missed};
+    use super::{
+        Counters, Flip, Frame, Line, Phase, Queued, Totals, vblanks_missed, vertical_blank,
+    };
     use crate::gputime::{Gpu, GpuSample};
     use std::time::{Duration, Instant};
 
@@ -1455,6 +1478,12 @@ mod tests {
         assert_eq!((line.pass, line.clocks), (500, Some(busy)));
     }
 
+    /// The vertical blank of the 260 Hz mode these tests are written
+    /// against: 160 of its 1,600 lines, 0.38 ms.
+    fn blank_260() -> Duration {
+        vertical_blank(at_260(), 1440, 1600)
+    }
+
     fn flip(seq: u32, at_us: u64) -> Flip {
         Flip {
             seq,
@@ -1470,9 +1499,12 @@ mod tests {
             at: Duration::from_micros(10_500),
             after: Some(flip(100, 10_000)),
         };
-        assert_eq!(vblanks_missed(queued, flip(102, 17_692), at_260()), 1);
         assert_eq!(
-            vblanks_missed(queued, flip(101, 13_846), at_260()),
+            vblanks_missed(queued, flip(102, 17_692), at_260(), blank_260()),
+            1
+        );
+        assert_eq!(
+            vblanks_missed(queued, flip(101, 13_846), at_260(), blank_260()),
             0,
             "the next vblank is on time"
         );
@@ -1486,7 +1518,10 @@ mod tests {
             at: Duration::from_micros(50_000),
             after: None,
         };
-        assert_eq!(vblanks_missed(queued, flip(7, 51_000), at_260()), 0);
+        assert_eq!(
+            vblanks_missed(queued, flip(7, 51_000), at_260(), blank_260()),
+            0
+        );
     }
 
     /// Held past a vblank by its fence: late, though the CPU was on time.
@@ -1496,19 +1531,56 @@ mod tests {
             at: Duration::from_micros(50_000),
             after: None,
         };
-        assert_eq!(vblanks_missed(queued, flip(7, 54_615), at_260()), 1);
+        assert_eq!(
+            vblanks_missed(queued, flip(7, 54_615), at_260(), blank_260()),
+            1
+        );
     }
 
-    /// Queued 0.1 ms after one vblank and flipped on the next, stamped 0.4 ms
-    /// after that one began: a little more than an interval by the stamps,
-    /// and on time.
+    /// Queued 0.1 ms after one vblank began and flipped on the next,
+    /// stamped as that one's blank ends, 0.38 ms in: a little more than an
+    /// interval by the stamps, and on time.
     #[test]
     fn a_flip_stamped_just_after_its_vblank_is_on_time() {
         let queued = Queued {
             at: Duration::from_micros(50_000),
             after: None,
         };
-        assert_eq!(vblanks_missed(queued, flip(7, 54_146), at_260()), 0);
+        assert_eq!(
+            vblanks_missed(queued, flip(7, 54_131), at_260(), blank_260()),
+            0
+        );
+    }
+
+    /// **However long a mode's blank, a flip from idle is judged by it.** A
+    /// flip is stamped as its vertical blank ends, and CEA's 1080p60 blanks
+    /// 45 of its 1,125 lines, 0.67 ms: a frame queued 0.05 ms after one
+    /// vblank began flips on time on the next, stamped an interval and 0.62 ms
+    /// later; one queued 0.25 ms before a vblank and held past it by its
+    /// fence is one late.
+    #[test]
+    fn a_flip_from_idle_on_a_cea_1080p60_mode_is_judged_by_its_blank() {
+        let interval = Duration::from_nanos(16_666_666);
+        let blank = vertical_blank(interval, 1080, 1125);
+        assert_eq!(blank, Duration::from_nanos(666_666));
+        let queued = Queued {
+            at: Duration::from_micros(50_000),
+            after: None,
+        };
+        // A vblank began at 49.950 ms; the next begins at 66.617 ms, and its
+        // blank ends at 67.283 ms.
+        assert_eq!(
+            vblanks_missed(queued, flip(8, 67_283), interval, blank),
+            0,
+            "queued just after a vblank began, and on time on the next"
+        );
+        // A vblank begins at 50.250 ms, and the frame misses it; the next
+        // begins at 66.917 ms, and its blank ends at 67.583 ms.
+        assert_eq!(
+            vblanks_missed(queued, flip(8, 67_583), interval, blank),
+            1,
+            "held past the vblank it was queued for"
+        );
     }
 
     /// The kernel's sequence is a `u32` and wraps; a wrap is not four billion
@@ -1519,7 +1591,10 @@ mod tests {
             at: Duration::ZERO,
             after: Some(flip(u32::MAX, 0)),
         };
-        assert_eq!(vblanks_missed(queued, flip(1, 7_692), at_260()), 1);
+        assert_eq!(
+            vblanks_missed(queued, flip(1, 7_692), at_260(), blank_260()),
+            1
+        );
     }
 
     /// **A late flip is counted with the knob off**, into the totals and not

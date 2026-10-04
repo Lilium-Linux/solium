@@ -489,6 +489,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                         queued,
                         flip,
                         frame_interval(&screen.output),
+                        screen.blank,
                     ));
                 }
 
@@ -814,6 +815,10 @@ struct Screen {
     /// The frame queued on this screen and not yet flipped, for `late`.
     /// `pacing::tests::a_frame_held_past_a_vblank_by_its_fence_is_late`.
     queued: Option<crate::pacing::Queued>,
+    /// How long its mode's vertical blank lasts, at whose end a flip is
+    /// stamped, for `late`.
+    /// `pacing::tests::a_flip_from_idle_on_a_cea_1080p60_mode_is_judged_by_its_blank`.
+    blank: Duration,
 }
 
 impl std::fmt::Debug for Screen {
@@ -897,6 +902,7 @@ impl State {
             connector.interface_id()
         );
         let (width, height) = mode.size();
+        let (_, _, scanned) = mode.vsync();
         tracing::info!(
             monitor = name,
             mode = format!("{width}x{height}@{:.0}", f64::from(mode.vrefresh())),
@@ -959,6 +965,7 @@ impl State {
         // not.
         output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
         output.set_preferred(wl_mode);
+        let blank = crate::pacing::vertical_blank(frame_interval(&output), height, scanned);
         // Mapped anywhere; `place_outputs` decides where, once, from the
         // configured arrangement — the same call the nested backend makes,
         // so both get the same layout from the same configuration.
@@ -1026,6 +1033,7 @@ impl State {
             owed: false,
             lit: Lit::On,
             queued: None,
+            blank,
         });
         true
     }
