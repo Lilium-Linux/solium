@@ -22,13 +22,22 @@ new style left it.
 
 Everything the shipped layers draw with -- colours, fonts, spacing -- comes
 from `Solium.Theme`, the same singleton the loading window reads, and a hosted
-shell that imports `Solium` can read it too. The fallback pointer and the
-default wallpaper do not: their colours are fixed. Nor, in part, does the
-keyboard pill: its capsule is `Theme.accent`, but its glyph and label are fixed
-white and its shadow fixed black. A `Solium/Theme.qml` of your own in
-`~/.config/solium/qml/` is meant to restyle all of them without touching
-anything that ships, and does not yet, because the shipped module is found
-first ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
+shell that imports `Solium` can read it too. The shipped theme is dark and has
+no hue in it: near-black bars, light grey titles, grey buttons, and an
+`accent` that is a light grey too. The fallback pointer and the default
+wallpaper do not read it: their colours are fixed. Nor, in part, does the
+keyboard pill: its capsule is `Theme.accent` and its glyph and label
+`Theme.accentInk`, but its shadow is fixed black. A `Solium/Theme.qml` of your
+own in `~/.config/solium/qml/` is meant to restyle all of them without
+touching anything that ships, and does not yet, because the shipped module is
+found first ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
+
+The styles with buttons -- `top`, `bottom`, `left`, `reveal`, `reactive` and
+`pulse` -- tell close from maximise without a colour: under the pointer each
+turns its own grey (`Theme.danger`, the lighter, and `Theme.warning`) and shows
+its glyph on it in `Theme.accentInk`, `×` to close and `+` to maximise.
+`crates/solium/tests/scenarios/pane-buttons-drawn.lua` points at each and
+reads the pixels.
 
 ## The manifest
 
@@ -311,8 +320,9 @@ again shows nothing. With `hold: true` it stays until the next cue. Otherwise
 it hides after `duration` milliseconds (1200 when not given), or, when `after`
 names one of the three, shows that one instead, held. While `accepts` is
 `false`, a new cue hides it rather than showing. It is the capsule, 28 high and
-at least 32 wide, in `Theme.accent`, with a `margin` of 14 on every side for
-its shadow, and it centres the capsule in itself. `KeyboardPillLayer` hands it
+at least 32 wide, in `Theme.accent` with its glyph or label in
+`Theme.accentInk`, with a `margin` of 14 on every side for its shadow, and it
+centres the capsule in itself. `KeyboardPillLayer` hands it
 `values.keyboard_indicator`, which the configuration sets as `{ show, cue }`,
 and draws only while `show` is `true` and the pane's `caret` is `valid`.
 

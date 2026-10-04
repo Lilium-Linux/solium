@@ -20,11 +20,14 @@ pieces are, how to write one, and what it costs.
 
 *Three terminals tiled, in the default `top` style over the default wallpaper:
 the focused window's titlebar is white, the other two light grey. Below, the
-same three in overview.* Both halves are the same QML. In overview each frame
-scales with the window it belongs to rather than being redrawn at a new size,
-because a frame is part of the window as far as the transform layer is
-concerned, which is why a mode can scale a window at all without knowing what
-a titlebar is.
+same three in overview. Taken under the light theme Solium shipped until
+2026-10-04 and not retaken yet: the shipped theme is now dark grey, the focused
+titlebar a shade lighter than the others ([Colours and
+fonts](#colours-and-fonts)).* Both halves are the same QML. In overview each
+frame scales with the window it belongs to rather than being redrawn at a new
+size, because a frame is part of the window as far as the transform layer is
+concerned, which is why a mode can scale a window at all without knowing what a
+titlebar is.
 
 ## What is QML, and where it comes from
 
@@ -192,23 +195,38 @@ more blur. Test it with `SOLIUM_OUTPUTS=2` and a scale on one of them; see
 
 ## Colours and fonts
 
-Nothing in a frame should contain a hex code. `Solium.Theme` has eighteen
+Nothing in a frame should contain a hex code. `Solium.Theme` has nineteen
 properties:
 
 - colours: `surface`, `surfaceInactive`, `edge`, `edgeInactive`, `text`,
-  `textDim`, `control`, `controlInactive`, `accent`, `warning`, `danger`;
+  `textDim`, `control`, `controlInactive`, `accent`, `warning`, `danger`,
+  `accentInk` (what is drawn on the last three);
 - metrics: `titlebarHeight`, `gap`, `margin`;
 - type: `fontFamily`, `fontSize`;
 - chrome durations, in milliseconds: `quick`, `normal`.
 
-The frames, the loading window and a hosted shell that imports `Solium` all
-read that one singleton, so a colour changed there changes all of them. The
-fallback pointer and the default wallpaper do not read it; their colours are
-fixed. A copy of `Solium/Theme.qml` in `~/.config/solium/qml/Solium/` is meant
-to be how you change it, and does not work yet: the shipped module is found
-first ([#88](https://github.com/Lilium-Linux/solium/issues/88)). A frame that
-hardcodes a colour is a frame that stops matching the moment anyone changes
-anything.
+The frames, the loading window, the keyboard pill and a hosted shell that
+imports `Solium` all read that one singleton, so a colour changed there changes
+all of them.
+
+**The shipped colours are greys, every one: red, green and blue the same.**
+That is the maintainer's decision for now: a dark theme in black, greys and
+white, with no accent hue and none of the logo's or the wallpaper's colours.
+The bars are near-black, the focused one a shade lighter, with light grey
+titles, dimmer on the windows without the keyboard; `accent` is a light grey,
+which the keyboard pill's capsule is drawn in; and `warning` and `danger`,
+which the maximise and close buttons turn under the pointer, are two greys
+told apart by shade and by the glyph each then shows. A light scheme, or
+colour accents, would be a change of the values only: the names stay.
+`qml::hosting_tests::every_colour_the_theme_publishes_is_a_grey` holds the
+shipped file to it.
+
+The fallback pointer and the default wallpaper do not read it; their colours
+are fixed. A copy of `Solium/Theme.qml` in `~/.config/solium/qml/Solium/` is
+meant to be how you change it, and does not work yet: the shipped module is
+found first ([#88](https://github.com/Lilium-Linux/solium/issues/88)). A frame
+that hardcodes a colour is a frame that stops matching the moment anyone
+changes anything.
 
 ## The pointer
 
@@ -232,12 +250,12 @@ on each edge.
 <img src="cursor.png" width="232" alt="Solium's own pointer, magnified eight times, over the dark wallpaper and over a white titlebar">
 
 *Solium's own pointer at 24 pixels, magnified eight times: over the dark part
-of the wallpaper, and over a focused `top` titlebar.* It is what you get with
-no scene and no theme set anywhere, or with a theme named that is not
-installed, and it is QML:
-`qml/cursor.qml`. Its colours are fixed rather than taken from `Theme`, a
-white body with a dark outline, because the pointer sits on whatever a client
-drew and has to stay legible on black and on white alike.
+of the wallpaper, and over a focused `top` titlebar as it was under the earlier
+light theme.* It is what you get with no scene and no theme set anywhere, or
+with a theme named that is not installed, and it is QML: `qml/cursor.qml`. Its
+colours are fixed rather than taken from `Theme`, a white body with a dark
+outline, because the pointer sits on whatever a client drew and has to stay
+legible on black and on white alike.
 
 It is one arrow for every shape. A pointer of your own is a scene, named the
 way a shell's is, `cursor = { scene = "~/.config/solium/cursor/Cursor.qml" }`,

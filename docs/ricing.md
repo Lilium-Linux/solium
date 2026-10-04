@@ -497,9 +497,12 @@ told once, where it ended up.
 
 ### The keyboard pill
 
-Switch layout, or press Caps Lock, and a small capsule in the accent colour
-appears just below where you are typing: `⇪` while Caps Lock is on, `EN` or
-`RU` for a moment after a switch, after the one macOS shows.
+Switch layout, or press Caps Lock, and a small capsule appears just below
+where you are typing: `⇪` while Caps Lock is on, `EN` or `RU` for a moment
+after a switch, after the one macOS shows. It is drawn in the theme's `accent`
+with its glyph in `accentInk`, which in the shipped theme is a light grey
+capsule with a dark glyph and a soft shadow: it stands out on a dark window
+and on a light one.
 
 It is not a compositor feature. It is the shipped configuration's example of
 doing something with what the compositor publishes, and it is two ways of
@@ -975,9 +978,14 @@ until [#199](https://github.com/Lilium-Linux/solium/issues/199):
 ### Your own colours
 
 `Solium.Theme` (`crates/solium/qml/Solium/Theme.qml`) is what every shipped
-frame and the loading window are drawn with, and a hosted shell that imports
-`Solium` can read it too. The fallback pointer and the default wallpaper do
-not: their colours are fixed. A copy of `Theme.qml` in
+frame, the loading window and the keyboard pill are drawn with, and a hosted
+shell that imports `Solium` can read it too. The shipped one is a dark theme
+of greys only, with no hue in it at all, the maintainer's choice for now:
+near-black bars, light grey text, grey buttons, and an `accent` that is a
+light grey too ([decorations.md](decorations.md#colours-and-fonts) lists every
+name). A shell that reads `Theme.accent` for its highlights gets that grey.
+The fallback pointer and the default wallpaper do not read it: their colours
+are fixed. A copy of `Theme.qml` in
 `~/.config/solium/qml/Solium/` is meant to restyle the frames, the loading
 window and such a shell at once, and does not work yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)). Until then, a
