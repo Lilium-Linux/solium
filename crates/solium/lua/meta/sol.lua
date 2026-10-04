@@ -129,7 +129,7 @@
 ---@field scene string A file name looked up in `~/.config/solium/qml` and then in the shipped QML, or a path (absolute, or starting with `~/`).
 ---@field layer? sol.Layer Which layer it is drawn in. `"background"` is the default.
 ---@field on? "primary"|"every-monitor"|string|sol.Rect `"every-monitor"` (the default) draws one instance per monitor, filling it; `"primary"` one on the primary monitor; a monitor's name one there; a rect one at that rect.
----@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those, nested at most 64 deep. A function, userdata or non-finite number is left out; a table nested deeper, or one that contains itself, is an error.
+---@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those, nested at most 64 deep and 65 536 values in all, a table counted once for each place it is in. A function, userdata or non-finite number is left out; a table nested deeper or holding more, or one that contains itself, is an error.
 ---@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing, and one it held when it is declared so is dismissed; nor does such a scene hold the keyboard. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sends actions with `Solium.send(action, data)`, and `sol.on("surface", ...)` hears them.
 ---@field reserve? { top?: integer, right?: integer, bottom?: integer, left?: integer } Logical pixels taken out of the work area on those edges of every monitor the surface is on, whatever its size or placement; never negative. A scene's own `Solium.surface.reserve.<edge>` wins for an edge it sets. A change re-flows the windows once.
 ---@field outside_click? "swallow"|"pass"|table<string, "swallow"|"pass"> What a press outside an open `Grab` of the scene does once it has dismissed it: swallowed with its release (the default), or passed on to what is under it. A table names grabs, with `default` for the rest. Any other value fails the load.
@@ -626,7 +626,8 @@ function sol.close(id) end
 ---`Solium.send`, `windows.focus`, `windows.close`, `windows.fullscreen` and
 ---`windows.maximize`, each with `{ id = <window id> }`; the last two toggle.
 ---`data` is handed over as a surface's `properties` are, so a table nested
----deeper than 64, or one that contains itself, is an error in the handler.
+---deeper than 64 or holding more than 65 536 values, or one that contains
+---itself, is an error in the handler.
 ---Queued like every other request, and answered by `done(ok, reason)` once
 ---the compositor has acted, in a handler of its own; `reason` is
 ---`"unknown-action"`, `"unknown-window"`, `"bad-data"`, for a

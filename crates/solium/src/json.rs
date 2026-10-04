@@ -50,7 +50,8 @@ impl Json {
     /// function, userdata, or a number that is not finite.
     /// `tests::a_lua_table_becomes_an_object_or_a_list`.
     pub(crate) fn from_lua(value: &mlua::Value) -> mlua::Result<Option<Self>> {
-        Self::from_lua_inside(value, 0)
+        let mut left = MOST_VALUES;
+        Self::from_lua_inside(value, 0, &mut left)
     }
 
     /// [`Self::from_lua`] for a value inside `depth` tables. A table nested
@@ -58,10 +59,19 @@ impl Json {
     /// contains itself, which is nested without end: the walk is Rust, which
     /// the handler deadline cannot stop, so it must not run the stack out.
     /// An error in an item fails the whole value, as one in a field does, so
-    /// a table that is its own item ends at the first error too.
+    /// a table that is its own item ends at the first error too. `left` is
+    /// how many more values may be read, [`MOST_VALUES`] at the start.
     /// `tests::a_table_that_contains_itself_is_an_error_not_a_crash`,
-    /// `tests::a_table_64_deep_is_read_and_65_deep_is_an_error`.
-    fn from_lua_inside(value: &mlua::Value, depth: usize) -> mlua::Result<Option<Self>> {
+    /// `tests::a_table_64_deep_is_read_and_65_deep_is_an_error`,
+    /// `tests::a_table_of_more_than_65536_values_is_an_error_not_a_stall`.
+    fn from_lua_inside(
+        value: &mlua::Value,
+        depth: usize,
+        left: &mut usize,
+    ) -> mlua::Result<Option<Self>> {
+        *left = left
+            .checked_sub(1)
+            .ok_or_else(|| mlua::Error::runtime("more than 65536 values"))?;
         Ok(match value {
             mlua::Value::String(text) => Some(Self::Text(text.to_str()?.to_owned())),
             #[expect(
@@ -81,12 +91,12 @@ impl Json {
                 let mut items = Vec::new();
                 for item in table.clone().sequence_values::<mlua::Value>() {
                     let Ok(item) = item else { continue };
-                    if let Some(item) = Self::from_lua_inside(&item, depth)? {
+                    if let Some(item) = Self::from_lua_inside(&item, depth, left)? {
                         items.push(item);
                     }
                 }
                 if items.is_empty() {
-                    Some(Self::Object(Self::fields_from_lua(table, depth)?))
+                    Some(Self::Object(Self::fields_from_lua(table, depth, left)?))
                 } else {
                     Some(Self::List(items))
                 }
@@ -176,22 +186,33 @@ impl Json {
     /// The table is the first of the 64 its values may be nested in:
     /// `crate::script::tests::data_that_contains_itself_is_an_error_in_the_handler`.
     pub(crate) fn object_from_lua(table: &mlua::Table) -> mlua::Result<BTreeMap<String, Self>> {
-        Self::fields_from_lua(table, 1)
+        let mut left = MOST_VALUES;
+        Self::fields_from_lua(table, 1, &mut left)
     }
 
     /// [`Self::object_from_lua`] for a table inside `depth - 1` others.
     /// `tests::a_table_64_deep_is_read_and_65_deep_is_an_error`.
-    fn fields_from_lua(table: &mlua::Table, depth: usize) -> mlua::Result<BTreeMap<String, Self>> {
+    fn fields_from_lua(
+        table: &mlua::Table,
+        depth: usize,
+        left: &mut usize,
+    ) -> mlua::Result<BTreeMap<String, Self>> {
         let mut fields = BTreeMap::new();
         for pair in table.pairs::<String, mlua::Value>() {
             let (key, value) = pair?;
-            if let Some(value) = Self::from_lua_inside(&value, depth)? {
+            if let Some(value) = Self::from_lua_inside(&value, depth, left)? {
                 fields.insert(key, value);
             }
         }
         Ok(fields)
     }
 }
+
+/// The most values one Lua value may hold, a table counted once for each
+/// place it is in: the walk is Rust, which the handler deadline cannot stop,
+/// and tables that share tables double the walk at every level.
+/// `tests::a_table_of_more_than_65536_values_is_an_error_not_a_stall`.
+const MOST_VALUES: usize = 65_536;
 
 /// A cursor over JSON text. `tests::json_reads_what_qt_writes`.
 #[derive(Debug)]
@@ -449,6 +470,33 @@ mod tests {
 
     /// What a table nested too deep is refused with.
     const TOO_DEEP: &str = "nested deeper than 64, or a table that contains itself";
+
+    /// What a table of too many values is refused with.
+    const TOO_MANY: &str = "more than 65536 values";
+
+    /// **A table of more than 65 536 values is an error, not a stall**: a
+    /// table is counted once for each place it is in, so tables that share
+    /// tables, doubling at every level, are refused at once rather than
+    /// walked for minutes where the handler deadline cannot stop the walk.
+    #[test]
+    fn a_table_of_more_than_65536_values_is_an_error_not_a_stall() {
+        let lua = mlua::Lua::new();
+        let read = |chunk: &str| {
+            let value: mlua::Value = lua.load(chunk).eval().expect("the table evaluates");
+            Json::from_lua(&value)
+                .map(|json| json.is_some())
+                .map_err(|err| err.to_string().contains(TOO_MANY))
+        };
+        assert_eq!(
+            (
+                read("local t = {} for _ = 1, 20 do t = { t, t } end return t"),
+                read("local t = {} for i = 1, 65535 do t[i] = i end return t"),
+                read("local t = {} for i = 1, 65536 do t[i] = i end return t"),
+            ),
+            (Err(true), Ok(true), Err(true)),
+            "(tables doubling 20 deep, a list and its 65 535 items, a list and its 65 536 items)"
+        );
+    }
 
     /// **A table that contains itself is an error, not a crash**, as its own
     /// field or as its own item: the walk stops at 64 deep, so it cannot run

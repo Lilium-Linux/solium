@@ -508,9 +508,11 @@ compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
 `windows.fullscreen` and `windows.maximize`, each with `{ id = <window id> }`
 (`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
 `sol.act`'s data crosses as JSON, as a surface's `properties` do, nested at
-most 64 deep: a table nested deeper, or one that contains itself, is an error
-in the handler that sent it, not a crash of the compositor
-(`script::tests::data_that_contains_itself_is_an_error_in_the_handler`).
+most 64 deep and 65 536 values in all, a table counted once for each place it
+is in: a table nested deeper or holding more, or one that contains itself, is
+an error in the handler that sent it, not a crash or a stall of the compositor
+(`script::tests::data_that_contains_itself_is_an_error_in_the_handler`,
+`json::tests::a_table_of_more_than_65536_values_is_an_error_not_a_stall`).
 `sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
 hears once whether it was done, after it was; `reason` is `"unknown-action"`,
 `"unknown-window"`, `"bad-data"`, for a `windows.focus` behind the lock
