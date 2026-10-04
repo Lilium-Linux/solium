@@ -7896,6 +7896,20 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
                 Ok(())
             }
         }
+        // A global subscriber that wants nothing, set once. With this
+        // thread's subscriber the only one registered, `tracing` asks only
+        // the thread that first reaches a call site whether it is wanted,
+        // and caches the answer for every thread: a test on another thread
+        // reaching "was stopped" first turned it off here, and `script::`
+        // failed every time on two threads. With two registered, each event
+        // asks the subscriber of its own thread.
+        // `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
+        static QUIET: std::sync::Once = std::sync::Once::new();
+        QUIET.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing::subscriber::NoSubscriber::default(),
+            );
+        });
         let lines = Lines::default();
         let writer = lines.clone();
         let subscriber = tracing_subscriber::fmt()
