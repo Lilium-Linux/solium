@@ -782,23 +782,30 @@ the compositor's, whatever the listener says:
 
 - **From what is on screen.** Pressing the key again half way turns the window
   round where it is drawn, not where it was headed or where it came from
-  (`real_client::fullscreen_glides::a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn`).
+  (`state::tests::real_client::fullscreen_glides::a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn`).
 - **Answered at once.** The application is configured on the key, not when the
   glide lands, and its last picture is stretched until it draws one at the new
-  size (`real_client::fullscreen_glides::the_client_is_told_its_new_size_on_the_toggle`).
+  size (`state::tests::real_client::fullscreen_glides::the_client_is_told_its_new_size_on_the_toggle`).
 - **Plain at rest.** The transform is released when the glide lands, so a
   fullscreen game or video is drawn with nothing in between
-  (`real_client::fullscreen_glides::a_window_glides_into_fullscreen_and_out_again`).
+  (`state::tests::real_client::fullscreen_glides::a_window_glides_into_fullscreen_and_out_again`).
+  A monitor unplugged or a reload part of the way through changes that for
+  nobody: the window comes to rest all the same
+  (`state::tests::real_client::fullscreen_glides::a_monitor_unplugged_mid_glide_leaves_the_window_at_rest`,
+  `state::tests::real_client::fullscreen_glides::a_reload_mid_glide_leaves_the_window_at_rest`).
+- **On its own monitor.** A window grows to cover the monitor it is on, and
+  shrinks back on it
+  (`state::tests::real_client::fullscreen_glides::a_window_on_the_second_monitor_glides_to_cover_that_one`).
 - **Over the bars while it is big.** A window going fullscreen goes over the
   bars as it starts to grow, and one leaving goes back under them once it has
   finished shrinking; a press goes to what is drawn there
-  (`stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`).
+  (`state::tests::real_client::reflow_on_close::stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`).
 - **Into its tile with its own motion.** A window going back into a tile is
   placed by the layout, and the change's glide replaces the layout's
   (`tests/scenarios/fullscreen-tiled.lua`).
 - **Not told twice.** A listener that toggles the window back has that done at
   once and is not told it
-  (`real_client::fullscreen_glides::a_listener_that_toggles_the_change_back_is_not_told_it_again`).
+  (`state::tests::real_client::fullscreen_glides::a_listener_that_toggles_the_change_back_is_not_told_it_again`).
 
 The compositor's move comes after the listeners' commands, so a `sol.present`
 of the window in one is replaced by it.
