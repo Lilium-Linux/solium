@@ -2782,4 +2782,56 @@ pub(crate) mod tests {
             );
         });
     }
+
+    /// **A delegate reads `id`, `state` and `parent` through `model`**: in a
+    /// delegate, the item's own `state` and `parent` win over the roles of
+    /// those names, and `id` is QML's own word, so `model.` is how a delegate
+    /// spells all three.
+    #[test]
+    fn a_delegate_reads_id_state_and_parent_through_model() {
+        use crate::json::Json;
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, scene) = hosted(
+                "solium-hosted-window-delegate",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    Repeater {
+                        id: each
+                        model: Windows
+                        Item {
+                            readonly property string read: model.id + "/" + model.state + "/" + model.parent
+                            readonly property string own: state + "/" + (parent !== null)
+                        }
+                    }
+                    readonly property string read: each.count > 0 ? each.itemAt(0).read : ""
+                    readonly property string own: each.count > 0 ? each.itemAt(0).own : ""
+                }
+                "#,
+                "window-delegate-1",
+            );
+            let mut child = window_row(921, "window-delegate-1", false, 0);
+            child.values.insert("parent", Json::Number(77.0));
+            let rows = vec![child];
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&[], &rows))
+            ));
+            let read = (
+                scene.get_string_for_test("read"),
+                scene.get_string_for_test("own"),
+            );
+            let _ = super::apply_rows(super::Model::Windows, &render(&diff(&rows, &[])));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                read,
+                ("921/shown/77".to_owned(), "/true".to_owned()),
+                "(the roles through `model`, the item's own `state` and `parent`)"
+            );
+        });
+    }
 }

@@ -457,6 +457,9 @@ waiting for the application), `modal`,
 `state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`,
 `state::tests::real_client::reflow_on_close::keyboard_at_open::a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard`,
 `state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_at_once`).
+In a delegate they are `model.id`, `model.state` and `model.parent`: `id` is
+QML's own word, and the item's own `state` and `parent` win over the roles
+(`qml::hosted::tests::a_delegate_reads_id_state_and_parent_through_model`).
 A window is listed from the moment it is launched, before its application
 draws, unless `loading.reserves_a_slot` is off; until then it has no `pid`,
 which reads `-1`
@@ -474,8 +477,10 @@ an empty one (or `onStage` left unset) keeping every window, and `sort` is
 it reads `present: false` and is empty, not the window focused last
 (`qml::hosted::tests::the_focused_facade_is_empty_with_nothing_focused`);
 `Windows.get(id)` is one window's row, which reads `valid: false` once the
-window has gone. Rows say where a window lives, not where it is drawn this
-frame
+window has gone. It is a lookup with no change signal of its own, so a
+binding reads `Windows.count` beside it, as `{ Windows.count; return
+Windows.get(id) }` does, to be asked again as windows come and go. Rows say
+where a window lives, not where it is drawn this frame
 (`qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
