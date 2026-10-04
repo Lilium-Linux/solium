@@ -77,7 +77,8 @@ use std::{
 /// The first miss or late flip after a quiet spell reports immediately rather
 /// than waiting out a window — a diagnostic whose first evidence arrives a
 /// second late is hard to trust, and it is the case somebody is watching the
-/// log live for.
+/// log live for. A late flip seen as the loop goes idle reports then, with no
+/// pass after it: `tests::a_late_flip_before_idle_is_reported_at_idle`.
 const REPORT_EVERY: Duration = Duration::from_secs(1);
 
 /// The parts of a frame, each measured exclusively of the others.
@@ -435,9 +436,16 @@ impl Counters {
         if !missed && self.late.get() == 0 {
             return None;
         }
+        self.report(now)
+    }
 
-        // The first miss or late flip after a quiet spell goes out at once;
-        // everything after it waits for the limit. See `REPORT_EVERY`.
+    /// The span's report, if one is due at `now`: its slowest pass, and what
+    /// the span came to. The first miss or late flip after a quiet spell goes
+    /// out at once; everything after it waits for the limit. See
+    /// `REPORT_EVERY`. A span with no pass in it has none to show, and keeps
+    /// what it counted for the next:
+    /// `tests::a_late_flip_before_idle_is_reported_at_idle`.
+    fn report(&self, now: Instant) -> Option<Line> {
         let due = self
             .reported
             .get()
@@ -445,22 +453,38 @@ impl Counters {
         if !due {
             return None;
         }
-        let span = self
-            .since
-            .get()
-            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
         let worst = self
             .worst
             .try_borrow_mut()
             .ok()
-            .and_then(|mut held| held.take());
+            .and_then(|mut held| held.take())?;
+        let span = self
+            .since
+            .get()
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
         let (frames, missed, late) = (self.frames.get(), self.missed.get(), self.late.get());
         self.reported.set(Some(now));
         self.since.set(Some(now));
         self.frames.set(0);
         self.missed.set(0);
         self.late.set(0);
-        worst.map(|worst| Line::of(&worst, frames, missed, late, span))
+        Some(Line::of(&worst, frames, missed, late, span))
+    }
+
+    /// The loop went idle: whatever is parked
+    /// (`tests::idle_flushes_a_parked_report`), or else a report the span's
+    /// late flips made due, since a flip seen just before the loop went idle
+    /// has no pass after it to report it
+    /// (`tests::a_late_flip_before_idle_is_reported_at_idle`). `now` is
+    /// asked for only then, so with the knob off this reads no clock.
+    fn idle(&self, now: impl FnOnce() -> Instant) -> Option<Line> {
+        if let Some(line) = self.flush() {
+            return Some(line);
+        }
+        if self.late.get() == 0 {
+            return None;
+        }
+        self.report(now())
     }
 
     /// The session's totals. `tests::a_miss_is_counted_with_the_knob_off`.
@@ -902,10 +926,12 @@ pub(crate) fn gpu_resolved(pass: u64, gpu: crate::gputime::Gpu) {
 }
 
 /// The loop drew nothing: the GPU has finished what was measured, so a report
-/// waiting for it goes now. `tests::idle_flushes_a_parked_report`.
+/// waiting for it goes now (`tests::idle_flushes_a_parked_report`), and so
+/// does one a flip made due since the last pass
+/// (`tests::a_late_flip_before_idle_is_reported_at_idle`).
 pub(crate) fn idle() {
     COUNTERS.with(|counters| {
-        if let Some(line) = counters.flush() {
+        if let Some(line) = counters.idle(Instant::now) {
             emit(&line);
         }
     });
@@ -1279,7 +1305,49 @@ mod tests {
             .finish_at(start, start + ms(5), true, 1, 7)
             .expect("due");
         counters.park(due, 7);
-        assert_eq!(counters.flush().map(|line| line.pass), Some(7));
+        assert_eq!(
+            counters.idle(|| start + ms(6)).map(|line| line.pass),
+            Some(7)
+        );
+    }
+
+    /// **A late flip seen as the loop goes idle is reported then**, not when
+    /// the next pass comes, which may be minutes later and would stretch the
+    /// line's span over the idle time. Once, and inside the limit like any
+    /// other report: a second late flip within the second waits, and with no
+    /// pass since the last line it has none to show, so it waits for the
+    /// next pass.
+    #[test]
+    fn a_late_flip_before_idle_is_reported_at_idle() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        assert!(
+            counters
+                .finish_at(start, start + ms(2), true, 1, 1)
+                .is_none(),
+            "on time"
+        );
+        counters.flipped(1);
+        let line = counters
+            .idle(|| start + ms(6))
+            .expect("the late flip goes at idle");
+        assert_eq!((line.pass, line.missed, line.late), (1, 0, 1));
+        assert!(counters.idle(|| start + ms(7)).is_none(), "and goes once");
+        counters.flipped(1);
+        assert!(
+            counters.idle(|| start + ms(9)).is_none(),
+            "inside the limit"
+        );
+        assert!(
+            counters.idle(|| start + Duration::from_secs(2)).is_none(),
+            "no pass since the line, so none to show"
+        );
+        let later = start + Duration::from_secs(3);
+        let next = counters
+            .finish_at(later, later + ms(1), true, 1, 2)
+            .expect("the late flip waited for it");
+        assert_eq!((next.pass, next.late), (2, 1));
     }
 
     /// The worst pass of a span can resolve before the span's report is due;

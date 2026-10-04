@@ -1565,8 +1565,9 @@ impl State {
 
     /// A flip landed and nothing is to be drawn: what has flipped has
     /// finished on the GPU, so its time is read, and once no monitor waits on
-    /// a flip a report still waiting for its time goes.
-    /// `pacing::tests::idle_flushes_a_parked_report`.
+    /// a flip a report still waiting for its time goes, or one a late flip
+    /// made due. `pacing::tests::idle_flushes_a_parked_report`,
+    /// `pacing::tests::a_late_flip_before_idle_is_reported_at_idle`.
     fn idle(&mut self) {
         if let (Some(timer), Some(renderer)) = (self.solium.timer.as_mut(), self.renderer.as_mut())
         {
