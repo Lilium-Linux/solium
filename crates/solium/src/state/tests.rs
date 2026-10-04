@@ -20269,11 +20269,17 @@ end)
                 );
 
                 let token = genuine_token(&mut desk);
+                desk.state.redraw = false;
                 activates(&mut desk, &parked.surface, &token);
                 let id = parked.pane.get();
                 assert!(
                     desk.state.urgent.contains(&id),
                     "a refused activation did not mark the window urgent"
+                );
+                assert!(
+                    desk.state.redraw,
+                    "a window going urgent asked for no frame, so the models would not show it \
+                     until something unrelated redrew"
                 );
                 let parked_window = window_of(&desk, parked.pane);
                 desk.state
