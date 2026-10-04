@@ -8021,7 +8021,8 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
     }
 
     /// **The stops are counted by function**: one function listening for two
-    /// events is taken out at its third stop, wherever the stops were.
+    /// events is taken out at its third stop, wherever the stops were, of the
+    /// event it was stopped in, and of the other at its next stop there.
     #[test]
     fn the_stops_are_counted_by_function_across_events() {
         let (directory, mut scripts) = loaded(
@@ -8035,9 +8036,16 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         let _ = scripts.relayout(one_screen(&[]));
         let _ = scripts.relayout(one_screen(&[]));
         let _ = scripts.monitors_changed(one_screen(&[]));
+        let count = "return #sol._handlers.layout .. ' ' .. #sol._handlers.monitors";
         assert_eq!(
-            scripts.evaluate("return #sol._handlers.layout .. ' ' .. #sol._handlers.monitors"),
+            scripts.evaluate(count),
             "1 0",
+            "(layout listeners, monitors listeners)"
+        );
+        let _ = scripts.relayout(one_screen(&[]));
+        assert_eq!(
+            scripts.evaluate(count),
+            "0 0",
             "(layout listeners, monitors listeners)"
         );
         let _ = std::fs::remove_dir_all(&directory);

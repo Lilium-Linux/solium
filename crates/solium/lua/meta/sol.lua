@@ -726,7 +726,8 @@ function sol.unknown(key, meant) end
 ---with an error and logged with its file and line, the other listeners still
 ---run, and one stopped three times is taken out until the configuration is
 ---reloaded. The stops are counted by function, so a function listening for
----two events counts the stops of both. Bindings, and each `done` of
+---two events counts the stops of both, and from its third on is taken out of
+---each event it is stopped in. Bindings, and each `done` of
 ---`sol.act`, run under the same deadline. `pcall`, `xpcall` and `load` hand
 ---the stop on rather than catch it, and `xpcall`'s message handler is not
 ---called for it.
