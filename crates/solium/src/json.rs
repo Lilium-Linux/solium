@@ -50,6 +50,18 @@ impl Json {
     /// function, userdata, or a number that is not finite.
     /// `tests::a_lua_table_becomes_an_object_or_a_list`.
     pub(crate) fn from_lua(value: &mlua::Value) -> mlua::Result<Option<Self>> {
+        Self::from_lua_inside(value, 0)
+    }
+
+    /// [`Self::from_lua`] for a value inside `depth` tables. A table nested
+    /// deeper than JSON text may be is an error, and so is a table that
+    /// contains itself, which is nested without end: the walk is Rust, which
+    /// the handler deadline cannot stop, so it must not run the stack out.
+    /// An error in an item fails the whole value, as one in a field does, so
+    /// a table that is its own item ends at the first error too.
+    /// `tests::a_table_that_contains_itself_is_an_error_not_a_crash`,
+    /// `tests::a_table_64_deep_is_read_and_65_deep_is_an_error`.
+    fn from_lua_inside(value: &mlua::Value, depth: usize) -> mlua::Result<Option<Self>> {
         Ok(match value {
             mlua::Value::String(text) => Some(Self::Text(text.to_str()?.to_owned())),
             #[expect(
@@ -60,16 +72,21 @@ impl Json {
             mlua::Value::Number(number) if number.is_finite() => Some(Self::Number(*number)),
             mlua::Value::Boolean(yes) => Some(Self::Bool(*yes)),
             mlua::Value::Table(table) => {
-                let items = table
-                    .clone()
-                    .sequence_values::<mlua::Value>()
-                    .filter_map(|item| {
-                        item.ok()
-                            .and_then(|item| Self::from_lua(&item).ok().flatten())
-                    })
-                    .collect::<Vec<_>>();
+                let depth = depth + 1;
+                if depth > Reader::DEEPEST {
+                    return Err(mlua::Error::runtime(
+                        "nested deeper than 64, or a table that contains itself",
+                    ));
+                }
+                let mut items = Vec::new();
+                for item in table.clone().sequence_values::<mlua::Value>() {
+                    let Ok(item) = item else { continue };
+                    if let Some(item) = Self::from_lua_inside(&item, depth)? {
+                        items.push(item);
+                    }
+                }
                 if items.is_empty() {
-                    Some(Self::Object(Self::object_from_lua(table)?))
+                    Some(Self::Object(Self::fields_from_lua(table, depth)?))
                 } else {
                     Some(Self::List(items))
                 }
@@ -156,11 +173,19 @@ impl Json {
     /// A Lua table's every key as an object's field, whether or not it also
     /// has a list part, which is how a surface's top-level `properties` is
     /// read: `crate::script::tests::a_surfaces_properties_keep_their_named_keys_beside_a_list_part`.
+    /// The table is the first of the 64 its values may be nested in:
+    /// `crate::script::tests::data_that_contains_itself_is_an_error_in_the_handler`.
     pub(crate) fn object_from_lua(table: &mlua::Table) -> mlua::Result<BTreeMap<String, Self>> {
+        Self::fields_from_lua(table, 1)
+    }
+
+    /// [`Self::object_from_lua`] for a table inside `depth - 1` others.
+    /// `tests::a_table_64_deep_is_read_and_65_deep_is_an_error`.
+    fn fields_from_lua(table: &mlua::Table, depth: usize) -> mlua::Result<BTreeMap<String, Self>> {
         let mut fields = BTreeMap::new();
         for pair in table.pairs::<String, mlua::Value>() {
             let (key, value) = pair?;
-            if let Some(value) = Self::from_lua(&value)? {
+            if let Some(value) = Self::from_lua_inside(&value, depth)? {
                 fields.insert(key, value);
             }
         }
@@ -176,7 +201,9 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    /// How deep a value may nest. `tests::json_nested_too_deep_is_none`.
+    /// How deep a value may nest, as JSON text or as a Lua table.
+    /// `tests::json_nested_too_deep_is_none`,
+    /// `tests::a_table_64_deep_is_read_and_65_deep_is_an_error`.
     const DEEPEST: usize = 64;
 
     fn space(&mut self) {
@@ -418,6 +445,63 @@ mod tests {
             r#"{"name":"bar","nested":{"x":"s","y":1},"sizes":[1,2]}"#,
             "a function is left out, a sequence is a list, and keys are sorted"
         );
+    }
+
+    /// What a table nested too deep is refused with.
+    const TOO_DEEP: &str = "nested deeper than 64, or a table that contains itself";
+
+    /// **A table that contains itself is an error, not a crash**, as its own
+    /// field or as its own item: the walk stops at 64 deep, so it cannot run
+    /// the stack out.
+    #[test]
+    fn a_table_that_contains_itself_is_an_error_not_a_crash() {
+        let lua = mlua::Lua::new();
+        for chunk in [
+            "local t = {} t.t = t return t",
+            "local t = {} t[1] = t return t",
+        ] {
+            let value: mlua::Value = lua.load(chunk).eval().expect("the table evaluates");
+            let said = Json::from_lua(&value)
+                .err()
+                .map(|err| err.to_string())
+                .unwrap_or_default();
+            assert!(said.contains(TOO_DEEP), "{chunk}: {said:?}");
+        }
+    }
+
+    /// **A table 64 deep is read, and one 65 deep is an error**, a list or
+    /// an object, as JSON text 64 deep is read.
+    #[test]
+    fn a_table_64_deep_is_read_and_65_deep_is_an_error() {
+        let lua = mlua::Lua::new();
+        let nested = |depth: usize, wrap: &str| -> mlua::Value {
+            lua.load(format!(
+                "local t = {{}} for _ = 2, {depth} do t = {wrap} end return t"
+            ))
+            .eval()
+            .expect("the table evaluates")
+        };
+        let read = |value: &mlua::Value| {
+            Json::from_lua(value)
+                .ok()
+                .flatten()
+                .map(|json| json.render())
+        };
+        assert_eq!(
+            (read(&nested(64, "{ t }")), read(&nested(64, "{ t = t }"))),
+            (
+                Some(format!("{}{{}}{}", "[".repeat(63), "]".repeat(63))),
+                Some(format!("{}{{}}{}", r#"{"t":"#.repeat(63), "}".repeat(63)))
+            ),
+            "(64 lists deep, 64 objects deep)"
+        );
+        for wrap in ["{ t }", "{ t = t }"] {
+            let said = Json::from_lua(&nested(65, wrap))
+                .err()
+                .map(|err| err.to_string())
+                .unwrap_or_default();
+            assert!(said.contains(TOO_DEEP), "65 deep, {wrap}: {said:?}");
+        }
     }
 
     /// **What Qt writes, Rust reads**: the shape `Solium.send` sends.

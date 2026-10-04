@@ -498,6 +498,10 @@ The shipped `lua/actions.lua` sends the vocabulary on to `sol.act`, the
 compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
 `windows.fullscreen` and `windows.maximize`, each with `{ id = <window id> }`
 (`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
+`sol.act`'s data crosses as JSON, as a surface's `properties` do, nested at
+most 64 deep: a table nested deeper, or one that contains itself, is an error
+in the handler that sent it, not a crash of the compositor
+(`script::tests::data_that_contains_itself_is_an_error_in_the_handler`).
 `sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
 hears once whether it was done, after it was; `reason` is `"unknown-action"`,
 `"unknown-window"`, `"bad-data"`, for a `windows.focus` behind the lock

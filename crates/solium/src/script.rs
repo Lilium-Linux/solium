@@ -7620,6 +7620,41 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **Data that contains itself is an error in the handler, not a crash
+    /// of the compositor**: `sol.act`, `sol.surface`'s properties and
+    /// `sol.pane_values` each raise an ordinary Lua error, which the handler
+    /// can catch, and nothing is queued.
+    #[test]
+    fn data_that_contains_itself_is_an_error_in_the_handler() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-data-contains-itself",
+            r#"sol.on("surface", function()
+                   local t = {} t.t = t
+                   local said = {}
+                   for _, call in ipairs({
+                       function() sol.act("windows.focus", t) end,
+                       function() sol.surface("bar", { scene = "/nonexistent/bar.qml", properties = t }) end,
+                       function() sol.pane_values(t) end,
+                   }) do
+                       local ok, err = pcall(call)
+                       said[#said + 1] = tostring(ok) .. " " .. tostring(tostring(err):find("contains itself", 1, true) ~= nil)
+                   end
+                   sol.status(table.concat(said, ";"))
+               end)"#,
+        );
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        assert_eq!(
+            (
+                outcome.status.as_deref(),
+                format!("{:?}", outcome.commands)
+            ),
+            (Some("false true;false true;false true"), "[]".to_owned()),
+            "(each call's pcall and whether it said why, the commands queued)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **A listener that never returns is stopped, and the others still run**
     /// (03 §3.3.3): the compositor answers within the deadline.
     #[test]
