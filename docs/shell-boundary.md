@@ -607,16 +607,19 @@ engine as every other scene and is given this
   (`dev/wirecheck`'s case 11); on the software path they draw nothing and the
   scene's plain drawing is what shows.
 - **The cursor plane.** Its picture is a `Kind::Cursor` element on both
-  paths, so it can go on the hardware cursor plane and moving the mouse
-  redraws nothing else. A picture that reads the backdrop would be composited
-  instead; nothing can until materials exist
+  paths, so it is offered to the hardware cursor plane, and goes there when
+  its size in device pixels fits the plane (commonly 64 or 128 pixels a
+  side); a larger one is composited like any other element. A picture that
+  reads the backdrop would be composited whatever its size; nothing can until
+  materials exist
   (`cursor::scene::tests::a_scene_with_no_material_is_a_cursor_plane_element`).
 - **Only the monitors it reaches.** It is drawn on each monitor its picture
   reaches onto, both of two while it crosses the edge between them, and not
   on the others
   (`cursor::scene::tests::a_picture_is_drawn_only_on_the_outputs_it_touches`).
 - **A reload that swaps it.** `super+shift+r` builds it again when the file,
-  its files' contents or `cursor.size` changed, or when it would not load
+  any QML in its directory or the directories under it, or `cursor.size`
+  changed, as an edit anywhere in a shell does, or when it would not load
   last time; one that would not load leaves the theme and the shipped arrow
   to draw the pointer (`cursor::tests::a_reload_swaps_the_scene`).
 

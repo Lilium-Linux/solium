@@ -22,9 +22,12 @@
 //!   one clock and a scene at rest asks for none
 //!   (`tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`).
 //! - **Its plane is a predicate, [`plane`].** Its picture is still a
-//!   `MemoryRenderBuffer` on both paths, so it can go on the hardware cursor
-//!   plane as the floor's does; a scene that reads the backdrop would be
-//!   composited instead, and nothing can until materials exist (#199)
+//!   `MemoryRenderBuffer` on both paths, so it is offered to the hardware
+//!   cursor plane as the floor's is, and goes there when its device size fits
+//!   the plane (`DrmDevice::cursor_size`, commonly 64 or 128 pixels a side); a
+//!   larger one is composited like any other element. A scene that reads the
+//!   backdrop would be composited whatever its size, and nothing can until
+//!   materials exist (#199)
 //!   (`tests::a_scene_with_no_material_is_a_cursor_plane_element`).
 //!
 //! What animating costs on the GPU path is the readback `super::Backing`

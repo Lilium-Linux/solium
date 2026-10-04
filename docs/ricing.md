@@ -946,17 +946,25 @@ Item {
 It animates on the compositor's clock: a running animation asks for the
 next frame, and a scene with nothing running asks for none
 (`cursor::scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`).
-This one breathes for as long as it is on screen, so it is drawn on every
-refresh; give the animation a `running:` condition to stop that.
+This one breathes forever: while the pointer is shown it is drawn on every
+refresh, and while it is not (a window hiding it or drawing its own, or the
+screens off) the breath is still stepped a frame apart, every 16 ms
+(`qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`).
+To let it rest, bind the animation's `running:` to something the scene can
+see, such as `Solium.cursor.pressed`, the shape, or the velocity.
 
 `MultiEffect` and `ShaderEffect` draw on the GPU path, which a session on the
 hardware uses by default (`dev/wirecheck`'s case 11 draws a pointer scene's
 glow there). On the software path, which a nested session uses and
 `qml.renderer = "software"` chooses, they draw nothing, and the drawing
 under the glow is the whole pointer: that is why the breath is in the
-arrow's tint as well. The picture still goes on the hardware cursor plane,
-as a theme's does, so moving the mouse redraws nothing else
-(`cursor::scene::tests::a_scene_with_no_material_is_a_cursor_plane_element`).
+arrow's tint as well. The picture is offered to the hardware cursor plane,
+as a theme's is
+(`cursor::scene::tests::a_scene_with_no_material_is_a_cursor_plane_element`),
+and goes there when its size in device pixels fits the plane, commonly 64 or
+128 pixels a side; there moving the mouse redraws nothing else. A larger one,
+such as this one at `size = 32` on a 2x monitor (104 pixels a side), is
+drawn with everything else where the plane is smaller.
 `Solium.region` and `Solium.material` are accepted, and materials are off
 until [#199](https://github.com/Lilium-Linux/solium/issues/199):
 `Solium.materialState` reads `"off"`

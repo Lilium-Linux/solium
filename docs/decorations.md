@@ -4,8 +4,8 @@ Most of what the compositor draws that is not a client's window is QML, hosted
 in-process: the window frames, the loading window, the wallpaper, a shell you
 name in the configuration, any other scene a script declares, and the pointer
 when a scene of your own is named for it or no cursor theme is set (see
-[shell-boundary.md](shell-boundary.md) for the shell). There is nothing to compile and no Rust to touch: write a file, name
-it, press `super+shift+r`.
+[shell-boundary.md](shell-boundary.md) for the shell). There is nothing to
+compile and no Rust to touch: write a file, name it, press `super+shift+r`.
 
 Two things on screen are not QML: a pointer from an XCursor theme, which is
 the theme's own picture, and the rounded corners cut into a client, which are
