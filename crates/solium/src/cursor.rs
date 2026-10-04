@@ -1042,14 +1042,14 @@ impl Pointer {
     /// was configured, and `None` with none configured or one that would not
     /// build. `tests::a_reload_swaps_the_scene`.
     fn scene(&mut self) -> Option<&mut Cursor> {
-        let source = self.settings.scene.clone()?;
         if matches!(self.hosted, Hosted::Unbuilt) {
-            self.hosted = match Cursor::configured(&source, self.settings.size) {
+            let source = self.settings.scene.as_deref()?;
+            self.hosted = match Cursor::configured(source, self.settings.size) {
                 Ok(cursor) => {
                     tracing::info!(scene = %source.display(), "the pointer's scene");
                     Hosted::Built {
                         cursor: Box::new(cursor),
-                        modified: modified(&source),
+                        modified: modified(source),
                     }
                 }
                 Err(err) => {
