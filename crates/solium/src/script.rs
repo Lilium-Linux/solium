@@ -1886,8 +1886,10 @@ fn restart_deadline(sol: &Table) {
 ///
 /// One failing listener is logged and the rest still run: a broken script must
 /// not silently disable the others, which is what returning early would do.
-/// One stopped at the deadline counts a strike, and is taken out at the third.
-/// `tests::a_listener_stopped_three_times_is_taken_out`.
+/// One stopped at the deadline counts a strike, and is taken out at the third;
+/// both are logged with the file and line the listener was written at.
+/// `tests::a_listener_stopped_three_times_is_taken_out`,
+/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
 fn call_listeners(
     sol: &Table,
     event: &str,
@@ -1915,15 +1917,23 @@ fn call_listeners(
             Err(err) if err.to_string().contains(STOPPED) => {
                 let count = strikes.get::<Option<u32>>(&listener)?.unwrap_or(0) + 1;
                 strikes.set(&listener, count)?;
+                let info = listener.info();
+                let file = info.source.unwrap_or_default();
+                let file = file.trim_start_matches('@');
+                let line = info.line_defined.unwrap_or_default();
                 tracing::error!(
                     %err,
                     event,
+                    file = %file,
+                    line,
                     count,
                     "a listener ran for longer than 100 ms and was stopped"
                 );
                 if count >= STRIKES {
                     tracing::error!(
                         event,
+                        file = %file,
+                        line,
                         "a listener stopped three times is taken out until the configuration is reloaded"
                     );
                     out.push(listener);
@@ -7840,6 +7850,59 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         assert_eq!(
             scripts.relayout(one_screen(&[])).status.as_deref(),
             Some("one two a b")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// What `tracing` logs on this thread while `run` runs.
+    fn logged_while(run: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|_| std::io::Error::other("the log lock was poisoned"))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = lines
+            .0
+            .lock()
+            .map(|bytes| bytes.clone())
+            .unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// **A stopped listener is logged with its file and line**, and so is
+    /// one taken out.
+    #[test]
+    fn a_stopped_listener_is_logged_with_its_file_and_line() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-where",
+            "\nsol.on(\"layout\", function() while true do end end)\n",
+        );
+        let log = logged_while(|| {
+            for _ in 0..3 {
+                let _ = scripts.relayout(one_screen(&[]));
+            }
+        });
+        let at = format!("file={} line=2", directory.join("init.lua").display());
+        let named: Vec<&str> = log.lines().filter(|line| line.contains(&at)).collect();
+        assert!(
+            named.len() == 4 && named.iter().any(|line| line.contains("taken out")),
+            "three stops and one take-out, each naming {at}:\n{log}"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
