@@ -623,8 +623,10 @@ function sol.close(id) end
 ---`windows.maximize`, each with `{ id = <window id> }`; the last two toggle.
 ---Queued like every other request, and answered by `done(ok, reason)` once
 ---the compositor has acted, in a handler of its own; `reason` is
----`"unknown-action"`, `"unknown-window"` or `"bad-data"`. Answers the
----attempt's id, one no earlier `sol.act` answered. A
+---`"unknown-action"`, `"unknown-window"` or `"bad-data"`. A `done` that
+---calls `sol.act` again is told again in the same dispatch, 16 rounds at
+---most, and the rest at the next one. Answers the attempt's id, one no
+---earlier `sol.act` answered. A
 ---`workspaces.*` action is not the compositor's: the file that keeps the
 ---workspaces answers it, with `actions.override` in `lua/actions.lua`.
 ---@overload fun(action: "windows.focus"|"windows.close"|"windows.fullscreen"|"windows.maximize", data: { id: integer }, done?: fun(ok: boolean, reason?: string)): integer

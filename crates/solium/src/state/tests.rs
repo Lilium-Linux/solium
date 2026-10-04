@@ -25128,6 +25128,103 @@ end)"#,
                     "(what the listeners heard, in order, whether the client was asked to close)"
                 );
             }
+
+            /// The first window's id, as `sol.windows()` gives it.
+            fn first_window(desk: &Desk) -> u64 {
+                desk.state
+                    .snapshot()
+                    .windows
+                    .first()
+                    .map(|window| window.id)
+                    .expect("a window")
+            }
+
+            /// **`done` is told once the whole batch that ran its `sol.act`
+            /// is applied** (03 §3.3.2), not part way through it, where a
+            /// later command of the batch runs listeners of its own: both
+            /// focus events come before it.
+            #[test]
+            fn done_is_told_after_every_command_of_the_batch_that_ran_its_act() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                let id = first_window(&desk);
+                desk.install(&format!(
+                    r#"heard = ""
+sol.on("focus", function() heard = heard .. "focus;"; sol.status(heard) end)
+sol.on("surface", function()
+    sol.act("windows.fly", nil, function() heard = heard .. "done;"; sol.status(heard) end)
+    sol.focus({id})
+    sol.focus({id})
+end)"#
+                ));
+                queue(&mut desk, shell, &[("go", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(desk.state.status, "focus;focus;done;");
+            }
+
+            /// **A `sol.act` a hotplug's `monitors` handler runs hears its
+            /// `done` in the hotplug's dispatch**, though the hotplug holds
+            /// its handlers as one dispatch.
+            #[test]
+            fn a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"sol.on("monitors", function()
+    sol.act("windows.fly", nil, function(ok, reason) sol.status("done " .. tostring(reason)) end)
+end)"#,
+                );
+                desk.state.settle_monitors();
+                assert_eq!(desk.state.status, "done unknown-action");
+            }
+
+            /// **A `sol.act` at the top of a reloaded configuration hears
+            /// its `done` in the reload's dispatch**, though the reload holds
+            /// its handlers as one dispatch.
+            #[test]
+            fn a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                let directory =
+                    std::env::temp_dir().join(format!("solium-reload-act-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(
+                    &entry,
+                    r#"sol.act("windows.fly", nil, function(ok, reason) sol.status("done " .. tostring(reason)) end)"#,
+                )
+                .expect("writing the entry point");
+                desk.state.reload_from(&entry);
+                let _ = std::fs::remove_dir_all(&directory);
+                assert_eq!(desk.state.status, "done unknown-action");
+            }
+
+            /// **A `done` that acts again each time it is told costs rounds,
+            /// not the session**: a retry that never succeeds is told
+            /// `ATTEMPT_ROUNDS` times in the dispatch that started it, the
+            /// attempt left over is told at the next dispatch, and nothing
+            /// runs the stack out.
+            #[test]
+            fn a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"tries = 0
+local function again()
+    tries = tries + 1
+    sol.status(tostring(tries))
+    sol.act("windows.focus", { id = 4242 }, again)
+end
+sol.on("surface", function(surface, action) if action == "go" then again() end end)"#,
+                );
+                let rounds = crate::state::commands::ATTEMPT_ROUNDS;
+                queue(&mut desk, shell, &[("go", "null")]);
+                desk.state.settle_scenes();
+                let first = (desk.state.status.clone(), desk.state.settled_attempts.len());
+                queue(&mut desk, shell, &[("other", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(
+                    (first, desk.state.status.clone()),
+                    (((1 + rounds).to_string(), 1), (1 + 2 * rounds).to_string()),
+                    "((the tries in the first dispatch, the attempts left), the tries after the next)"
+                );
+            }
         }
     }
 

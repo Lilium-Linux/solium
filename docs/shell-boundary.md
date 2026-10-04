@@ -504,6 +504,13 @@ hears once whether it was done, after it was; `reason` is `"unknown-action"`,
 (`script::tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
 `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
 `state::tests::real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`).
+It is told once the whole dispatch that ran `sol.act` is applied, a
+hotplug's or a reload's handlers included, and a `done` that acts again is
+told again in that dispatch, 16 rounds at most, the rest at the next one
+(`state::tests::real_client::reflow_on_close::hosted::done_is_told_after_every_command_of_the_batch_that_ran_its_act`,
+`state::tests::real_client::reflow_on_close::hosted::a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`,
+`state::tests::real_client::reflow_on_close::hosted::a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`,
+`state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`).
 A `workspaces.*` action is the configuration's to answer, since the
 compositor does not know what a workspace is: a file answers one with
 `actions.override(name, function(data, surface) ... end)`, and until one

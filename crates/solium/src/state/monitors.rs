@@ -532,6 +532,10 @@ impl Solium {
         // A monitor that arrived gets its scenes here rather than at its first
         // frame: `scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`.
         self.sync_instances();
+        // And what the held handlers' `sol.act`s came to, which no dispatch
+        // inside the hold could tell
+        // (`a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`).
+        self.tell_settled_attempts();
         self.redraw = true;
         // A lock waiting for its monitors may have been waiting for the one
         // that went. See `Solium::confirm_lock`, and

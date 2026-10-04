@@ -4,6 +4,11 @@
 
 use super::*;
 
+/// How many rounds of `done`s one dispatch tells, each round the attempts the
+/// round before it settled, before it leaves the rest to the next dispatch.
+/// `real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
+pub(super) const ATTEMPT_ROUNDS: usize = 16;
+
 impl Solium {
     /// Turn what a script aimed at into what the compositor holds.
     ///
@@ -557,20 +562,43 @@ impl Solium {
         if self.dispatching == 0 && self.scenes_to_settle {
             self.settle_scenes();
         }
-        // The attempts the dispatch settled, told to Lua in a dispatch of
-        // their own once all of it is applied, every command that settled
-        // them included (03 §3.3.2).
-        // `real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
-        // `real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
-        if self.dispatching == 0 && !self.settled_attempts.is_empty() {
-            let settled = std::mem::take(&mut self.settled_attempts);
-            let snapshot = self.snapshot();
-            if let Some(mut scripts) = self.scripts.take() {
-                let outcome = scripts.attempts_settled(&settled, snapshot);
-                self.scripts = Some(scripts);
-                self.apply(outcome);
-            }
+        self.tell_settled_attempts();
+    }
+
+    /// Tell each `done` what became of its `sol.act`, in a dispatch of their
+    /// own, once the outermost dispatch that settled it is applied whole,
+    /// every command after it in its batch included (03 §3.3.2), and after a
+    /// hotplug's or a reload's held handlers.
+    /// `real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
+    /// `real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+    /// `real_client::reflow_on_close::hosted::done_is_told_after_every_command_of_the_batch_that_ran_its_act`,
+    /// `real_client::reflow_on_close::hosted::a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`,
+    /// `real_client::reflow_on_close::hosted::a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`.
+    ///
+    /// Never from inside itself: what a `done` asks for is told by this
+    /// loop, a round at a time, so a `done` that acts again each time it is
+    /// told cannot run the stack out, and past `ATTEMPT_ROUNDS` rounds the
+    /// rest wait for the next dispatch.
+    /// `real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
+    pub(crate) fn tell_settled_attempts(&mut self) {
+        if self.dispatching > 0 || self.telling_attempts {
+            return;
         }
+        self.telling_attempts = true;
+        for _ in 0..ATTEMPT_ROUNDS {
+            if self.settled_attempts.is_empty() {
+                break;
+            }
+            let snapshot = self.snapshot();
+            let Some(mut scripts) = self.scripts.take() else {
+                break;
+            };
+            let settled = std::mem::take(&mut self.settled_attempts);
+            let outcome = scripts.attempts_settled(&settled, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
+        self.telling_attempts = false;
     }
 
     /// The window a script means by an id.
@@ -672,6 +700,10 @@ impl Solium {
                 // made another monitor primary may declare nothing differently
                 // (`a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
                 self.sync_instances();
+                // And what the held handlers' `sol.act`s came to, which no
+                // dispatch inside the hold could tell
+                // (`a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`).
+                self.tell_settled_attempts();
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
                 // And then look at what that produced -- at where it *lands*,

@@ -403,6 +403,10 @@ pub(crate) struct Solium {
     /// each logged the first time only.
     /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
     pub(crate) unknown_actions: std::collections::HashSet<String>,
+    /// Whether the settled attempts are being told, so what a `done` asks
+    /// for is told by that loop and not from inside it.
+    /// `tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
+    telling_attempts: bool,
     /// Whether a grab ended while a scene held a press, so the pointer goes
     /// back to what is under it at that press's release.
     /// `tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
@@ -986,6 +990,7 @@ impl Solium {
             scene_press: None,
             settled_attempts: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
+            telling_attempts: false,
             repoint_at_release: false,
             scene_hovered: None,
             scene_hover_seen: None,
