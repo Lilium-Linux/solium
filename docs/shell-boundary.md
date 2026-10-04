@@ -12,12 +12,12 @@ the line, and it is not where a Wayland tutorial would put it.
   file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
   The shipped configuration names none.
 - A shell is QML written against Solium's own API: `import Solium` for
-  `Theme`, `Keyboard`, `Monitors`, `Windows`, `WindowList`, `Grab` and the
-  attached `Solium` object
+  `Theme`, `Keyboard`, `Monitors`, `Windows`, `WindowList`, `Workspaces`,
+  `WorkspaceList`, `Grab` and the attached `Solium` object
   (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
-  `Solium.keyboard`), and `Solium.send` for what it asks Lua to do
-  ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
-  (#172); Quickshell itself may add Solium support on its own side.
+  `Solium.keyboard`, `Solium.status`), and `Solium.send` for what it asks Lua
+  to do ([below](#what-a-hosted-shell-is-given)). Quickshell support was
+  removed (#172); Quickshell itself may add Solium support on its own side.
 - A shell that runs as its own program — Waybar, a Quickshell instance run
   on its own, any `wlr-layer-shell` panel — is supported too, as an ordinary
   client. It needs nothing from the configuration and gets nothing from the
@@ -392,13 +392,14 @@ pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
 ("Workspaces, as the configuration has them"); the pane-style types
 `PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
 `KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
-`Solium` object, which any item can read, with exactly five members:
+`Solium` object, which any item can read, with exactly six members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
 `Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
-below); `Solium.keyboard.wants` and `claims` (above); and `Solium.status`,
+below); `Solium.keyboard.wants` and `claims` (above); `Solium.status`,
 the text `sol.status` set ("Workspaces, as the configuration has them",
-below)
+below); and `Solium.send(action, data)`, what it asks Lua to do
+([below](#what-a-hosted-shell-is-given))
 (`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
 Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
 internal, and the row types have no name, so a shell's own `Monitor.qml` is
@@ -476,10 +477,17 @@ connection, `-1` when it names none, and never Xwayland's own
 `workspace` is the first workspace the configuration declared the window on
 (below), and reads `""` until a declaration names it
 (`state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`).
+It is the workspace's `id`, not its `<group>/<id>` key, and a group's ids are
+not unique across monitors ("2" exists in every group), so filtering on it
+without also filtering on `monitor` lists workspace 2 of every monitor.
 `WindowList { monitor: Solium.monitor.name; sort: "mru" }` is a filtered,
 sorted view, never reset: `monitor`, `workspace`, `app` and `onStage` filter,
 an empty one (or `onStage` left unset) keeping every window, and `sort` is
 `""`, the order windows opened, or `"mru"`, the most recently focused first.
+A delegate on a `WorkspaceList` binding `workspace: model.key` matches
+nothing, since `key` is the `<group>/<id>` row key and `workspace` wants the
+`id` alone: `WindowList { monitor: Solium.monitor.name; workspace: model.id }`,
+or read the workspace row's own `windows` list instead.
 `Windows.focused` is never null and follows focus, and with no window focused
 it reads `present: false` and is empty, not the window focused last
 (`qml::hosted::tests::the_focused_facade_is_empty_with_nothing_focused`);
@@ -489,6 +497,11 @@ binding reads `Windows.count` beside it, as `{ Windows.count; return
 Windows.get(id) }` does, to be asked again as windows come and go. Rows say
 where a window lives, not where it is drawn this frame
 (`qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`).
+A retired row (`valid: false`) is kept for 10 s after it leaves, then freed,
+and nothing marks `count` changed at that moment — only a window or
+workspace coming or going does. Read it again through `Windows.get(id)` (or
+the workspace equivalent) rather than holding the row itself past that grace
+period, or a reference kept in a `var` can outlive it.
 
 **Workspaces, as the configuration has them.** The compositor does not know
 what a workspace is: Lua declares them with `sol.workspaces`, and the shipped
