@@ -4812,6 +4812,384 @@ end)"#,
         );
     }
 
+    /// **#49: going fullscreen or maximised, and coming back, is drawn
+    /// moving**, through the placement path and the transform a layout's
+    /// glide uses, on the one clock.
+    ///
+    /// Each window is 400x300 at 300,200 on a 1920x1080 monitor, with no
+    /// frames, and the scripts answer `fullscreen` with 260 ms and `maximize`
+    /// with 220 ms, both linear, so where a frame is drawn is arithmetic. The
+    /// keys are bound as `modes.lua` binds them. Frames are read through
+    /// `Solium::drawn_at`, which is what the renderer and the hit tests draw
+    /// and resolve a pane with, eight of them 45 ms apart as #49's own
+    /// measurement took them -- which found the window at its destination on
+    /// frame 0 and on every frame after.
+    mod fullscreen_glides {
+        use super::*;
+
+        const SCRIPT: &str = r#"
+            sol.on("fullscreen", function() sol.animate({ duration = 260, easing = "linear" }) end)
+            sol.on("maximize", function() sol.animate({ duration = 220, easing = "linear" }) end)
+            sol.bind("super+f", function() sol.toggle_fullscreen() end)
+            sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+        "#;
+
+        /// Where the window lives before anything is toggled.
+        fn before() -> Rectangle<f64, Logical> {
+            Rectangle::new((300, 200).into(), (400, 300).into()).to_f64()
+        }
+
+        /// The monitor, which is also its work area: there is no bar.
+        fn screen() -> Rectangle<f64, Logical> {
+            Rectangle::new((0, 0).into(), (1920, 1080).into()).to_f64()
+        }
+
+        /// One monitor, one client's window shown and at rest, focused, and
+        /// the scripts a test names.
+        struct Desk {
+            display: Display<Solium>,
+            state: Solium,
+            conn: Connection,
+            queue: wayland_client::EventQueue<Client>,
+            qh: QueueHandle<Client>,
+            client: Client,
+            window: Window,
+            toplevel: xdg_toplevel::XdgToplevel,
+            surface: wl_surface::WlSurface,
+            pane: crate::pane::PaneId,
+        }
+
+        impl Desk {
+            fn new(name: &str, script: &str) -> Self {
+                let mut display =
+                    Display::<Solium>::new().expect("creating a test wayland display");
+                let mut state = Solium::new(display.handle());
+                state
+                    .decorations
+                    .set_style(&mut state.panes, Some("none".to_string()));
+                one_screen(&mut state);
+                let directory = std::env::temp_dir()
+                    .join(format!("solium-glides-{name}-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(&entry, script).expect("writing the test script");
+                state.start_scripts(Some(
+                    Scripts::load(&entry).expect("loading the test script"),
+                ));
+                let _ = std::fs::remove_dir_all(&directory);
+
+                let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+                let qh = queue.handle();
+                let (window, toplevel, surface) =
+                    open_surface(&mut display, &mut state, &conn, &client, &qh);
+                commit_buffer(&client, &qh, &surface, 400, 300);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                state.space.map_element(window.clone(), (300, 200), false);
+                state.space.refresh();
+                let pane = state.panes.id_of(&window).expect("the window has a pane");
+                state.focus_window(&window, SERIAL_COUNTER.next_serial());
+                let mut desk = Self {
+                    display,
+                    state,
+                    conn,
+                    queue,
+                    qh,
+                    client,
+                    window,
+                    toplevel,
+                    surface,
+                    pane,
+                };
+                desk.land();
+                assert_eq!(
+                    desk.drawn(desk.state.clock.now()),
+                    before(),
+                    "the premise: at rest where it lives"
+                );
+                desk
+            }
+
+            fn pump(&mut self) {
+                pump(
+                    &mut self.display,
+                    &mut self.state,
+                    &self.conn,
+                    &self.qh,
+                    &mut self.queue,
+                    &mut self.client,
+                );
+            }
+
+            /// Where the window is drawn at `at`.
+            fn drawn(&self, at: Duration) -> Rectangle<f64, Logical> {
+                let held = self.state.panes.get(self.pane).expect("the pane is here");
+                self.state
+                    .drawn_at(held, self.state.pane_outer(held), at)
+                    .rect
+            }
+
+            /// Eight frames 45 ms apart, from `from`.
+            fn burst(&self, from: Duration) -> Vec<Rectangle<f64, Logical>> {
+                (0..8)
+                    .map(|frame| self.drawn(from + Duration::from_millis(45 * frame)))
+                    .collect()
+            }
+
+            /// The client answering the size it was told, as a client does.
+            fn answer(&mut self, width: i32, height: i32) {
+                commit_buffer(&self.client, &self.qh, &self.surface, width, height);
+                self.pump();
+            }
+
+            /// Past every animation, retired as a frame retires it.
+            fn land(&mut self) {
+                self.state.clock.advance(Duration::from_secs(1));
+                let now = self.state.clock.now();
+                self.state.settle(now);
+                self.state.sync_panes();
+            }
+
+            fn transformed(&self) -> bool {
+                self.state
+                    .panes
+                    .get(self.pane)
+                    .is_some_and(present::transformed)
+            }
+        }
+
+        /// Whether `rect` is part of the way from `from` to `to`: strictly
+        /// between them on every edge that moves, and on the others where
+        /// both are.
+        fn between(
+            rect: Rectangle<f64, Logical>,
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+        ) -> bool {
+            let part = |value: f64, from: f64, to: f64| {
+                if (from - to).abs() < 0.5 {
+                    (value - from).abs() < 0.5
+                } else {
+                    (value - from) * (to - from) > 0.0 && (value - to) * (from - to) > 0.0
+                }
+            };
+            part(rect.loc.x, from.loc.x, to.loc.x)
+                && part(rect.loc.y, from.loc.y, to.loc.y)
+                && part(rect.size.w, from.size.w, to.size.w)
+                && part(rect.size.h, from.size.h, to.size.h)
+        }
+
+        /// The same, with either end allowed.
+        fn from_to(
+            rect: Rectangle<f64, Logical>,
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+        ) -> bool {
+            rect == from || rect == to || between(rect, from, to)
+        }
+
+        /// That `frames` is a glide from `from` to `to`: frame 0 where it
+        /// was, frames 1 to `moving` part of the way and each further than
+        /// the last, and frame 7, at 315 ms, landed. 5 frames move in a
+        /// 260 ms glide and 4 in a 220 ms one; the frames between the last
+        /// of those and frame 7 are left out, because the glide starts when
+        /// the change is made, after the moment the burst counts from, by
+        /// however long the request took.
+        fn glides(
+            frames: &[Rectangle<f64, Logical>],
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+            moving: usize,
+        ) {
+            assert_eq!(
+                frames[0], from,
+                "frame 0 is where it was drawn: {frames:#?}"
+            );
+            for frame in 1..=moving {
+                assert!(
+                    between(frames[frame], from, to),
+                    "frame {frame} is part of the way from {from:?} to {to:?}: {frames:#?}"
+                );
+                assert!(
+                    between(frames[frame], frames[frame - 1], to),
+                    "frame {frame} is further on than the one before: {frames:#?}"
+                );
+            }
+            assert_eq!(frames[7], to, "and frame 7 has landed: {frames:#?}");
+        }
+
+        /// **A window sent fullscreen grows from where it was to cover the
+        /// monitor, and shrinks back when it leaves**, as its client asks
+        /// both through `xdg_toplevel`. Once each lands, and its client has
+        /// answered, it holds no transform: a plain element, which a
+        /// fullscreen game or video needs to be scanned out directly.
+        #[test]
+        fn a_window_glides_into_fullscreen_and_out_again() {
+            let mut desk = Desk::new("in-and-out", SCRIPT);
+
+            let at = desk.state.clock.now();
+            desk.toplevel.set_fullscreen(None);
+            desk.pump();
+            glides(&desk.burst(at), before(), screen(), 5);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(
+                !desk.transformed(),
+                "fullscreen and at rest, it holds no transform"
+            );
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+
+            let at = desk.state.clock.now();
+            desk.toplevel.unset_fullscreen();
+            desk.pump();
+            glides(&desk.burst(at), screen(), before(), 5);
+            desk.answer(400, 300);
+            desk.land();
+            assert!(
+                !desk.transformed(),
+                "back and at rest, it holds no transform"
+            );
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+        }
+
+        /// **And maximised, and restored, the same way**, by the key.
+        #[test]
+        fn a_window_glides_into_maximised_and_out_again() {
+            let mut desk = Desk::new("maximised", SCRIPT);
+
+            let at = desk.state.clock.now();
+            assert!(
+                desk.state.trigger("super+shift+m"),
+                "super+shift+m is bound"
+            );
+            desk.pump();
+            glides(&desk.burst(at), before(), screen(), 4);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(!desk.transformed(), "maximised and at rest, no transform");
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            glides(&desk.burst(at), screen(), before(), 4);
+            desk.answer(400, 300);
+            desk.land();
+            assert!(!desk.transformed(), "restored and at rest, no transform");
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+        }
+
+        /// **The window is told its new size on the toggle**, not when the
+        /// animation lands, and is drawn where it was while it is told: its
+        /// old picture is what is stretched until it answers. Both ways.
+        #[test]
+        fn the_client_is_told_its_new_size_on_the_toggle() {
+            let mut desk = Desk::new("told", SCRIPT);
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"), "super+f is bound");
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((1920, 1080)),
+                "told the monitor's size on the key"
+            );
+            assert_eq!(desk.drawn(at), before(), "while still drawn where it was");
+            desk.answer(1920, 1080);
+            desk.land();
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((400, 300)),
+                "told the size it had, on the key back"
+            );
+            assert_eq!(
+                desk.drawn(at),
+                screen(),
+                "while still drawn covering the monitor"
+            );
+        }
+
+        /// **A second toggle part of the way through the first starts from
+        /// where the window is drawn**, not from the monitor it was headed
+        /// for and not from the slot it left. The first glide, 60 ms on from
+        /// the moment it is read, bounds how far it can have got by the
+        /// time the second key is handled.
+        #[test]
+        fn a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn() {
+            let mut desk = Desk::new("mid-flight", SCRIPT);
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            let at = desk.state.clock.now();
+            let mid = desk.drawn(at);
+            let soon = desk.drawn(at + Duration::from_millis(60));
+            assert!(
+                between(mid, before(), screen()) && between(soon, mid, screen()),
+                "the premise: part of the way into fullscreen, and still going: {mid:?}, {soon:?}"
+            );
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let from = desk.drawn(at);
+            assert!(
+                from_to(from, mid, soon),
+                "the way back starts where the window was drawn, between {mid:?} and \
+                 {soon:?}, and not at the monitor or at the slot it left: {from:?}"
+            );
+            assert!(
+                between(desk.drawn(at + Duration::from_millis(130)), from, before()),
+                "and it shrinks from there"
+            );
+            assert_eq!(
+                desk.drawn(at + Duration::from_millis(400)),
+                before(),
+                "back where it lives"
+            );
+        }
+
+        /// **A listener that toggles the change straight back is not told
+        /// that too**: it would answer it again, and again. Told once, the
+        /// window ends where it started.
+        #[test]
+        fn a_listener_that_toggles_the_change_back_is_not_told_it_again() {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+            let mut desk = Desk::new(
+                "toggled-back",
+                r#"
+                local told = 0
+                sol.on("fullscreen", function(id)
+                    told = told + 1
+                    sol.status(tostring(told))
+                    if told < 5 then sol.toggle_fullscreen(id) end
+                end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            assert_eq!(desk.state.status, "1", "told once");
+            assert!(
+                !in_state(&desk.window, State::Fullscreen),
+                "and the listener's toggle back was made"
+            );
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+            assert!(!desk.transformed());
+        }
+    }
+
     /// **A modal cannot be buried under the window it is waiting on.**
     ///
     /// The regression floating them introduced. Tiled, a dialog took a slot

@@ -745,6 +745,15 @@ pub(crate) fn settle(pane: &Pane, now: Duration) -> bool {
     .unwrap_or(false)
 }
 
+/// Whether a pane holds a transform at all. A window at rest holds none, and
+/// is drawn as a plain element, which is what lets a fullscreen game or video
+/// be scanned out directly once its change has landed.
+/// `a_window_glides_into_fullscreen_and_out_again`.
+#[cfg(test)]
+pub(crate) fn transformed(pane: &Pane) -> bool {
+    with_slot(pane, |slot| slot.is_some()).unwrap_or(true)
+}
+
 /// Claim the first-show moment, returning whether this call won it.
 ///
 /// The moment is the first commit that carries a buffer, not the map request:

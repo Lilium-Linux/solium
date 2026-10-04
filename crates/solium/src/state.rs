@@ -125,7 +125,7 @@ use open::Claimed;
 #[cfg(test)]
 use open::{ClientKind, FirstFocus, first_focus};
 pub(crate) use placement::Standing;
-use placement::outer_of;
+use placement::{Change, outer_of};
 #[cfg(test)]
 use snapshot::to_rect;
 pub(crate) use snapshot::{Limits, limits_of};
@@ -646,6 +646,13 @@ pub(crate) struct Solium {
     /// run another. See `Solium::apply`.
     retelling_cramped: bool,
 
+    /// Whether a `fullscreen` or `maximize` event is being told now, so that
+    /// a change one of its listeners makes -- a `sol.toggle_fullscreen` in a
+    /// `fullscreen` listener -- is made at once and not told again, which
+    /// would be told again for ever. See `Solium::transition`.
+    /// `a_listener_that_toggles_the_change_back_is_not_told_it_again`.
+    telling_change: bool,
+
     /// Whether a `sol.monitors{}` was applied since the surfaces were last
     /// placed, so they are placed once the dispatch that applied it is done.
     /// `tests::real_client::a_runtime_primary_change_drops_the_old_primarys_scene`.
@@ -1073,6 +1080,7 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             retelling_cramped: false,
+            telling_change: false,
             monitors_rearranged: false,
             dispatching: 0,
             #[cfg(test)]

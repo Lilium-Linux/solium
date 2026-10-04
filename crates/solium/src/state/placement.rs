@@ -40,6 +40,16 @@ pub(crate) enum Standing {
     Within(Rectangle<i32, Logical>),
 }
 
+/// A change a window makes that its scripts are told, and answer with the
+/// motion it is drawn with (#49): which event they hear it as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// Fullscreen, entered or left: `sol.on("fullscreen", fn(id, entering))`.
+    Fullscreen,
+    /// Maximised, or restored: `sol.on("maximize", fn(id, entering))`.
+    Maximize,
+}
+
 /// Whether this window is fullscreen or maximised, as the compositor last
 /// decided it: in the pending state, which is what `Solium::toggle_maximize`
 /// and the fullscreen requests write.
@@ -865,6 +875,109 @@ impl Solium {
         }
     }
 
+    /// Where a pane is drawn now, as the start of a change it is about to
+    /// make: read before the change, because the change is what moves it.
+    ///
+    /// What [`present::frame`] answers, so for a pane at rest it is its old
+    /// rectangle, and for one part of the way through a change it is where
+    /// that change has got to: a second toggle mid-flight starts from what is
+    /// on screen, not from the slot it left.
+    /// `a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn`.
+    ///
+    /// `None` for a pane with nothing on screen to move from: one never shown,
+    /// or of no size -- a player started with `--fs` asks for fullscreen
+    /// before it has drawn, and its first picture is `open`'s to bring in --
+    /// and one that is leaving, whose picture is its close's.
+    pub(super) fn drawn_before(&self, pane: crate::pane::PaneId) -> Option<Frame> {
+        let held = self
+            .panes
+            .get(pane)
+            .filter(|held| present::was_shown(held) && !held.leaving())?;
+        let outer = self.pane_outer(held);
+        if outer.is_empty() {
+            return None;
+        }
+        Some(present::frame(held, outer, self.clock.now()))
+    }
+
+    /// Tell the scripts a window has gone fullscreen or maximised, or left
+    /// either, and draw it moving there with the motion they answer (#49).
+    ///
+    /// **Called once the change is made**: the client has been sent its new
+    /// size on the toggle, not at the end of the animation, the space and the
+    /// slot say where the window now lives, and a layout has placed it if it
+    /// went back into a tile. What is left is the picture, which is moved the
+    /// way a layout moves one: [`present::from`], from `start` -- where it was
+    /// drawn before the change, [`Self::drawn_before`] -- to the slot with the
+    /// frame it now has, and released when it lands, so at rest a window
+    /// holds no transform and a fullscreen game or video is a plain element
+    /// again. Until its client commits at the new size its last picture is
+    /// stretched into the rectangle drawn, as on every glide.
+    /// `a_window_glides_into_fullscreen_and_out_again`,
+    /// `the_client_is_told_its_new_size_on_the_toggle`.
+    ///
+    /// **The motion is the scripts'**: the listeners of `change`'s event set
+    /// it with `sol.animate`, and with no answer -- no listener, or no
+    /// scripts -- the window is where it lives on the next frame, as before
+    /// #49. A layout's own glide for a window going back into a tile is
+    /// replaced, so the change's motion is the one it is drawn with, there as
+    /// anywhere else. `tests::a_change_is_answered_with_the_motion_sol_animate_set`.
+    ///
+    /// **The compositor's move comes after the listeners' commands**, so a
+    /// `sol.present` of the window in one is replaced by it, and a change a
+    /// listener makes -- `sol.toggle_fullscreen` back again -- is made at once
+    /// and not told: telling it would ask the same listener again, for ever.
+    /// `a_listener_that_toggles_the_change_back_is_not_told_it_again`.
+    pub(super) fn transition(
+        &mut self,
+        pane: crate::pane::PaneId,
+        change: Change,
+        entering: bool,
+        start: Option<Frame>,
+    ) {
+        let motion = if self.telling_change {
+            None
+        } else {
+            self.tell_change(pane, change, entering)
+        };
+        let now = self.clock.now();
+        let Some(held) = self.panes.get(pane).filter(|held| !held.leaving()) else {
+            return;
+        };
+        let Some(start) = start else {
+            return;
+        };
+        let to = grown(held.slot(), self.insets_of(pane));
+        let motion = motion.unwrap_or(AnimationSpec {
+            duration: Duration::ZERO,
+            easing: present::Curve::OutCubic,
+        });
+        present::from(held, to, start, now, motion.duration, motion.easing);
+        self.redraw = true;
+    }
+
+    /// The `fullscreen` or `maximize` event, told, and the motion its
+    /// listeners answered with. See [`Self::transition`].
+    fn tell_change(
+        &mut self,
+        pane: crate::pane::PaneId,
+        change: Change,
+        entering: bool,
+    ) -> Option<AnimationSpec> {
+        let snapshot = self.snapshot();
+        let mut scripts = self.scripts.take()?;
+        let outcome = match change {
+            Change::Fullscreen => scripts.fullscreen(pane.get(), entering, snapshot),
+            Change::Maximize => scripts.maximize(pane.get(), entering, snapshot),
+        };
+        self.scripts = Some(scripts);
+        let motion = outcome.motion;
+        self.telling_change = true;
+        self.apply(outcome);
+        self.telling_change = false;
+        motion
+    }
+
     /// Fill the work area, or go back to where the window was.
     pub(super) fn toggle_maximize(&mut self, window: &Window) {
         let Some(id) = self.panes.id_of(window) else {
@@ -907,6 +1020,7 @@ impl Solium {
         let Some(filled) = self.maximised(window, current) else {
             return;
         };
+        let start = self.drawn_before(id);
 
         // On the pane and not on its frame, which is where it was until #92.
         // For this toggle a window with no frame to keep it on was latent, not
@@ -960,6 +1074,11 @@ impl Solium {
         });
         toplevel.send_pending_configure();
         if let Some(back) = back {
+            // The slot as well as the space, as `unfullscreen_request` writes
+            // both: it is what `transition` moves the picture to.
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_slot(back);
+            }
             self.map_stacked(window.clone(), back.loc, true);
         }
         // Back in a tile, and the layout says where that is now: a sweep while
@@ -970,6 +1089,16 @@ impl Solium {
         if tiled {
             self.trigger_relayout();
         }
+        // Moved there on screen, from where it was drawn. Not when it is
+        // restored with no size, which its client picks: there is no
+        // rectangle yet to move it to.
+        // `a_window_glides_into_maximised_and_out_again`.
+        self.transition(
+            id,
+            Change::Maximize,
+            maximized,
+            start.filter(|_| back.is_some() || tiled),
+        );
         tracing::debug!(maximized, "window maximise toggled");
     }
 

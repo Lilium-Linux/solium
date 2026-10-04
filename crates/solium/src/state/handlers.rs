@@ -561,6 +561,9 @@ impl XdgShellHandler for Solium {
         // leaving fullscreen lets the client pick its own size.
         let already = surface
             .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen));
+        // Where it is drawn now, which is where it grows from: read before
+        // anything below moves it or drops its frame.
+        let start = self.drawn_before(id);
         if !already
             && let Some(real) = self.real_geometry(&window)
             && !real.is_empty()
@@ -601,6 +604,13 @@ impl XdgShellHandler for Solium {
             pane.set_slot(screen);
         }
         self.map_stacked(window, screen.loc, true);
+        // And grown there on screen, with the motion the scripts answer
+        // `fullscreen` with. Not for a second request from a window that is
+        // fullscreen already: nothing has changed to tell.
+        // `a_window_glides_into_fullscreen_and_out_again`.
+        if !already {
+            self.transition(id, Change::Fullscreen, true, start);
+        }
         self.redraw = true;
         tracing::debug!(?screen, "a window went fullscreen");
     }
@@ -633,6 +643,9 @@ impl XdgShellHandler for Solium {
         if !fullscreen {
             return;
         }
+        // Where it is drawn now, which is where it shrinks from: read before
+        // its frame comes back and it is moved.
+        let start = self.drawn_before(id);
 
         // The frame comes back unless the client draws its own, which is what
         // `is_bare` cannot tell us on its own -- so the decoration mode is
@@ -696,13 +709,24 @@ impl XdgShellHandler for Solium {
         // centres a floated window at the size it has, which is still the
         // monitor's.
         // `a_floated_window_made_fullscreen_is_left_so_by_a_sweep_and_goes_back_where_it_floated`.
-        if self
+        let tiled = self
             .panes
             .get(id)
-            .is_some_and(|pane| pane.placed().is_some())
-        {
+            .is_some_and(|pane| pane.placed().is_some());
+        if tiled {
             self.trigger_relayout();
         }
+        // And shrunk there on screen, from the monitor it covered, with the
+        // motion the scripts answer `fullscreen` with -- into the tile the
+        // layout has just given it, too. Not with no rectangle to go to, which
+        // its client picks.
+        // `a_window_glides_into_fullscreen_and_out_again`.
+        self.transition(
+            id,
+            Change::Fullscreen,
+            false,
+            start.filter(|_| back.is_some() || tiled),
+        );
         self.redraw = true;
         tracing::debug!("a window left fullscreen");
     }
