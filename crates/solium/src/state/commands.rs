@@ -144,6 +144,10 @@ impl Solium {
         {
             tracing::debug!(status, "mode changed");
             self.status = status;
+            // `Solium.status` is published only from a frame, same as every
+            // other model; a binding that only calls `sol.status` must still
+            // ask for one, not rely on a command alongside it.
+            self.redraw = true;
         }
 
         let now = self.clock.now();

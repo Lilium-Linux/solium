@@ -6730,6 +6730,29 @@ end)"#,
         );
     }
 
+    /// **A changed `sol.status` with no commands still asks for a frame.**
+    ///
+    /// The shipped `modes.lua`, `overview.lua` and `workspaces.lua` always
+    /// send a command alongside a status change, which already sets
+    /// `redraw`, so this went unnoticed. But `sol.status` is now documented
+    /// as how a configuration tells a hosted shell its mode, and a binding
+    /// that only calls it would otherwise leave `Solium.status` stale until
+    /// some unrelated frame.
+    #[test]
+    fn a_status_change_with_no_commands_still_asks_for_a_frame() {
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state.redraw = false;
+        state.apply(Outcome {
+            status: Some("mode".to_owned()),
+            ..Outcome::default()
+        });
+        assert!(
+            state.redraw,
+            "a status change with no commands left redraw unset"
+        );
+    }
+
     /// **A window a layout lets go of is not held in the tile it had.**
     ///
     /// `sol.unplace` is what `modes.use` sends for every window when the
