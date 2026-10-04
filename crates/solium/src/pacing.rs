@@ -818,7 +818,7 @@ pub(crate) struct Queued {
 
 /// Slack for the kernel's timestamp against ours, beyond the screen's
 /// vertical blank: a fifth of a millisecond. The price is that a frame held
-/// past a vblank it was queued less than this before reads as on time.
+/// past a vblank it was queued less than this before reads as on time:
 /// `tests::a_flip_stamped_just_after_its_vblank_is_on_time`.
 const FLIP_MARGIN: Duration = Duration::from_micros(200);
 
@@ -1610,7 +1610,9 @@ mod tests {
 
     /// Queued 0.1 ms after one vblank began and flipped on the next,
     /// stamped as that one's blank ends, 0.38 ms in: a little more than an
-    /// interval by the stamps, and on time.
+    /// interval by the stamps, and on time. And the margin's price: queued
+    /// 0.1 ms before a vblank and held past it, a frame reads as on time
+    /// too.
     #[test]
     fn a_flip_stamped_just_after_its_vblank_is_on_time() {
         let queued = Queued {
@@ -1620,6 +1622,13 @@ mod tests {
         assert_eq!(
             vblanks_missed(queued, flip(7, 54_131), at_260(), blank_260()),
             0
+        );
+        // The vblank it missed began at 50.100 ms; the next begins at
+        // 53.946 ms, and its blank ends at 54.331 ms.
+        assert_eq!(
+            vblanks_missed(queued, flip(7, 54_331), at_260(), blank_260()),
+            0,
+            "inside the margin"
         );
     }
 
