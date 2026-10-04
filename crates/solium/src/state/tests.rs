@@ -10338,6 +10338,45 @@ end)"#,
             session.assert_unlocks(lock);
         }
 
+        /// **`sol.act("windows.focus")` behind the lock is answered
+        /// `locked`**: `focus_window` refuses it, so `done` is not told it
+        /// was done, and the keyboard stays the lock screen's. Tested with
+        /// the Cyrillic group active (#132).
+        #[test]
+        fn sol_act_focus_behind_the_lock_is_answered_locked() {
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let _ = session.app.open(&mut session.display, &mut session.state);
+            let id = session
+                .state
+                .snapshot()
+                .windows
+                .first()
+                .map(|window| window.id)
+                .expect("a window");
+            let lock = session.lock();
+            let selections = session.app.client.selections;
+            let directory =
+                std::env::temp_dir().join(format!("solium-locked-act-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.act("windows.focus", {{ id = {id} }}, function(ok, reason) sol.status(tostring(ok) .. " " .. tostring(reason)) end)"#
+                ),
+            )
+            .expect("writing the entry point");
+            session.state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            let _ = std::fs::remove_dir_all(&directory);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert_eq!(session.state.status, "false locked");
+            session.assert_sealed("sol.act windows.focus while locked", selections);
+            session.assert_unlocks(lock);
+        }
+
         /// **The last line: a key cannot reach a surface the gate would
         /// have refused, even when something has got the keyboard there.**
         ///

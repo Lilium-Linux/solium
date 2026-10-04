@@ -358,13 +358,14 @@ impl Solium {
 
     /// One of the compositor's verbs, as the command that does it, or why it
     /// cannot be done: an action it does not know, logged once by name, data
-    /// with no window's id, or a window that is not there (Ruling 15). Only
-    /// `windows.close` reaches a window still loading: the others act on its
-    /// client, which it does not have yet.
+    /// with no window's id, a window that is not there (Ruling 15), or a
+    /// focus the lock refuses. Only `windows.close` reaches a window still
+    /// loading: the others act on its client, which it does not have yet.
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
     /// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`,
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
-    /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`.
+    /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`,
+    /// `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
     pub(crate) fn act(&mut self, action: &str, data: &Json) -> Result<Command, &'static str> {
         let make: fn(u64) -> Command = match action {
             "windows.focus" => |id| Command::Focus { id },
@@ -379,13 +380,20 @@ impl Solium {
             }
         };
         let id = data.get("id").and_then(Json::as_u64).ok_or("bad-data")?;
+        let window = self.window_by_id(id);
         let there = if action == "windows.close" {
             self.panes.by_script_id(id).is_some()
         } else {
-            self.window_by_id(id).is_some()
+            window.is_some()
         };
         if !there {
             return Err("unknown-window");
+        }
+        // Behind the lock no window may take the keyboard, so `focus_window`
+        // refuses it, and `done` hears that and not that it was done.
+        // `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
+        if action == "windows.focus" && window.is_some_and(|window| !self.may_focus(&window)) {
+            return Err("locked");
         }
         Ok(make(id))
     }

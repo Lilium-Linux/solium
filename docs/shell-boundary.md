@@ -500,13 +500,15 @@ compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
 (`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
 `sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
 hears once whether it was done, after it was; `reason` is `"unknown-action"`,
-`"unknown-window"` or `"bad-data"`, and a window still loading, one
-`sol.windows()` lists before its application has arrived, is
-`"unknown-window"` to all but `windows.close`
+`"unknown-window"`, `"bad-data"` or, for a `windows.focus` behind the
+lock, `"locked"`, and a window still loading, one `sol.windows()` lists
+before its application has arrived, is `"unknown-window"` to all but
+`windows.close`
 (`script::tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
 `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
 `state::tests::real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
-`state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`).
+`state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
+`state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`).
 It is told once the whole dispatch that ran `sol.act` is applied, a
 hotplug's or a reload's handlers included, and a `done` that acts again is
 told again in that dispatch, 16 rounds at most, the rest at the next one
