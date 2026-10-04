@@ -385,23 +385,29 @@ same clock, so one beside an animation nothing draws still fires.
 **The `Solium` QML module.** `Theme` above all: the colours, fonts and
 metrics the frames are drawn with. Everything `import Solium` brings is
 written unqualified, as `Theme` is: the singletons `Theme`, `Keyboard`
-("The keyboard, live", below), `Monitors` ("Its monitor, live", below) and
-`Windows` ("Windows, live", below); the types `Grab` ("Popups that hold the
-pointer", above) and `WindowList` ("Windows, live"); the pane-style types
+("The keyboard, live", below), `Monitors` ("Its monitor, live", below),
+`Windows` ("Windows, live", below) and `Workspaces` ("Workspaces, as the
+configuration has them", below); the types `Grab` ("Popups that hold the
+pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
+("Workspaces, as the configuration has them"); the pane-style types
 `PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
 `KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
-`Solium` object, which any item can read, with exactly four members:
+`Solium` object, which any item can read, with exactly five members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
 `Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
-below); and `Solium.keyboard.wants` and `claims` (above)
+below); `Solium.keyboard.wants` and `claims` (above); and `Solium.status`,
+the text `sol.status` set ("Workspaces, as the configuration has them",
+below)
 (`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
 Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
 internal, and the row types have no name, so a shell's own `Monitor.qml` is
 not shadowed
 (`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`),
 and `Window` is still Qt Quick's in a scene that imports both
-(`qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`).
+(`qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`),
+and a shell's own `Workspace.qml` is its own
+(`qml::hosted::tests::a_shell_file_named_like_a_workspace_is_still_the_shells`).
 A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
 override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
@@ -467,8 +473,9 @@ which reads `-1`
 An X11 window's `pid` is the process Xwayland names for the window's own X
 connection, `-1` when it names none, and never Xwayland's own
 (`models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`).
-`workspace` reads `""`: nothing declares workspaces yet
-([#166](https://github.com/Lilium-Linux/solium/issues/166)).
+`workspace` is the first workspace the configuration declared the window on
+(below), and reads `""` until a declaration names it
+(`state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`).
 `WindowList { monitor: Solium.monitor.name; sort: "mru" }` is a filtered,
 sorted view, never reset: `monitor`, `workspace`, `app` and `onStage` filter,
 an empty one (or `onStage` left unset) keeping every window, and `sort` is
@@ -482,6 +489,37 @@ binding reads `Windows.count` beside it, as `{ Windows.count; return
 Windows.get(id) }` does, to be asked again as windows come and go. Rows say
 where a window lives, not where it is drawn this frame
 (`qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`).
+
+**Workspaces, as the configuration has them.** The compositor does not know
+what a workspace is: Lua declares them with `sol.workspaces`, and the shipped
+`workspaces.lua` does so whenever they change
+(`script::tests::the_shipped_workspaces_declare_what_each_monitor_shows`,
+`script::tests::a_window_that_opens_is_declared_on_the_workspace_its_monitor_shows`).
+`Workspaces` is every workspace declared, joined with the windows: `key`
+(`<group>/<id>`), `id`, `name`, `col`, `row`, `group`, `monitors`, `active`
+(its group shows it), `focused` (shown by the group of the monitor in front
+of you), `occupied` (how many windows are on it), `urgent` and
+`hasFullscreen` (of a window on it), `hidden` and `windows`
+(`state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`).
+`WorkspaceList { monitor: Solium.monitor.name }` is one monitor's group,
+`Workspaces.showing(name)` what that monitor shows, `Workspaces.current` what
+the monitor in front of you shows, each empty, never null, while nothing is
+shown, and `Workspaces.arrangement` the declared shape, `{ kind, columns,
+rows }`. A per-monitor bar binds `showing(Solium.monitor.name)`: a singleton
+cannot know which instance asks. `Solium.status` is the text `sol.status`
+set, the same in every scene
+(`qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`,
+`models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`).
+A workspaces widget switches with `Solium.send("workspaces.go", { id:
+model.id, monitor: Solium.monitor.name })`, and sends a window away with
+`Solium.send("windows.send", { id: window.id, workspace: "2" })`, both
+answered by `workspaces.lua`
+(`script::tests::a_workspaces_go_from_a_scene_switches_the_monitor_it_names`,
+`script::tests::a_windows_send_from_a_scene_moves_the_window_it_names`).
+A declaration naming a monitor or a window the compositor does not have
+leaves it out, and the log names each once
+(`models::workspaces::tests::a_declaration_naming_an_unknown_monitor_or_window_drops_them`,
+`models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
@@ -620,12 +658,8 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 - **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
   field copy and paste within the compositor's own Qt: what a window copied
   cannot be pasted into it, nor the other way round.
-- **No workspaces, and no icons.**
-  Nothing tells a hosted scene which workspaces exist
-  ([#166](https://github.com/Lilium-Linux/solium/issues/166)); it has the
-  monitors and the windows, as `Solium.monitor`, `Monitors` and `Windows`.
-  There is no `image://` provider for the icon theme. Driving the compositor
-  goes through `Solium.send` and Lua.
+- **No icons.** There is no `image://` provider for the icon theme.
+  Driving the compositor goes through `Solium.send` and Lua.
 - **No touch.** A scene takes no touch: a tap where it takes a press triggers
   nothing there, and neither reaches nor focuses the window under it;
   elsewhere a touch reaches the window under the shell, as the pointer would
