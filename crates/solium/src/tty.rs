@@ -475,8 +475,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 }
 
                 // The kernel's flip, for `late`: counted whether or not
-                // anything asked for presentation feedback.
-                // `pacing::tests::a_frame_held_past_a_vblank_by_its_fence_is_late`.
+                // anything asked for presentation feedback. The rules are
+                // `pacing::vblanks_missed`'s tests; this wiring needs a GPU,
+                // and no test reaches it.
                 let flip = match metadata.as_ref().map(|it| (it.time, it.sequence)) {
                     Some((DrmEventTime::Monotonic(at), seq)) => {
                         Some(crate::pacing::Flip { seq, at })
@@ -496,18 +497,15 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 // number, not ours: a number we invented here would be a guess
                 // at the thing the protocol exists to stop clients guessing.
                 if let Some(mut feedback) = screen.pending_feedback.take() {
-                    let (time, sequence) = match metadata.as_ref().map(|it| (it.time, it.sequence)) {
-                        Some((DrmEventTime::Monotonic(time), sequence)) => (time, sequence),
-                        // Realtime, or no metadata at all on a driver that does
-                        // not provide it. Discarded rather than answered with
-                        // our own clock, because the client was told these
-                        // timestamps are CLOCK_MONOTONIC and a realtime one
-                        // would be off by the epoch.
-                        _ => {
-                            feedback.discarded();
-                            screen.pending = false;
-                            return;
-                        }
+                    // No `flip`: a realtime timestamp, or no metadata at all
+                    // on a driver that does not provide it. Discarded rather
+                    // than answered with our own clock, because the client
+                    // was told these timestamps are CLOCK_MONOTONIC and a
+                    // realtime one would be off by the epoch.
+                    let Some(crate::pacing::Flip { seq: sequence, at: time }) = flip else {
+                        feedback.discarded();
+                        screen.pending = false;
+                        return;
                     };
                     // This monitor's refresh, not some other monitor's: a
                     // client on a 60 Hz panel told it has 3.8 ms to draw will
@@ -604,10 +602,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 // No vblank is coming while the session is away, so a frame
                 // left marked in-flight would block every render on return --
                 // on every screen, because every screen has its own. Nor is
-                // its flip, and a frame left waiting for one would be judged
-                // late by the whole time away, by the rule that judges a frame
-                // queued from idle
-                // (`pacing::tests::a_frame_held_past_a_vblank_by_its_fence_is_late`).
+                // its flip, and a frame left waiting for one would be paired
+                // with the next flip this screen reports and judged late by
+                // the whole time away (`pacing::vblanks_missed`); this handler
+                // needs a session, and no test reaches it.
                 for screen in &mut state.screens {
                     screen.pending = false;
                     screen.queued = None;
