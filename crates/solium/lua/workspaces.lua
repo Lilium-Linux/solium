@@ -402,7 +402,12 @@ end
 -- The arrangement is the shape the workspaces really make, which is where
 -- the last one sits: a row of four is four by one, whatever `rows` says.
 -- See `the_declared_arrangement_is_the_shape_of_its_workspaces`.
-function workspaces.declare()
+--
+-- `moved` is the monitor each window a handler has just moved is going to,
+-- by window id, for the windows `sol.windows()` cannot show there yet: it is
+-- the snapshot from before the handler ran. See `carry` and
+-- `a_window_on_no_workspace_moved_across_is_declared_on_what_that_monitor_shows`.
+function workspaces.declare(moved)
     local count = workspaces.count()
     local columns, rows = workspaces.cell(count)
     local function group(id, names)
@@ -429,7 +434,8 @@ function workspaces.declare()
     end
     local windows = {}
     for _, window in ipairs(sol.windows()) do
-        windows[window.id] = { tostring(workspaces.at(window.id, window.monitor)) }
+        local monitor = moved and moved[window.id] or window.monitor
+        windows[window.id] = { tostring(workspaces.at(window.id, monitor)) }
     end
     sol.workspaces({
         arrangement = {
@@ -444,13 +450,16 @@ end
 
 -- A window a layout moved onto another monitor goes to the workspace that
 -- monitor shows, if it belonged to one, and the compositor is told at once:
--- no `layout` follows a move by key. See
--- `a_window_moved_onto_the_other_monitor_is_declared_on_the_workspace_it_shows`.
+-- no `layout` follows a move by key. One that belongs to no workspace in
+-- particular is on whatever its new monitor shows, and is declared there
+-- too. See
+-- `a_window_moved_onto_the_other_monitor_is_declared_on_the_workspace_it_shows`
+-- and `a_window_on_no_workspace_moved_across_is_declared_on_what_that_monitor_shows`.
 function workspaces.carry(id, monitor)
     if workspaces.of[id] ~= nil then
         workspaces.of[id] = workspaces.on(monitor)
-        workspaces.declare()
     end
+    workspaces.declare({ [id] = monitor })
 end
 
 -- Send one window to a workspace on its own monitor: `windows.send` from a

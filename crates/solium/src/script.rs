@@ -14656,6 +14656,49 @@ mod directions {
         );
     }
 
+    /// **A window on no workspace moved by key onto the other monitor is
+    /// declared on the workspace that monitor shows**, by the press that moves
+    /// it: with `follow_new_windows` off it belongs to whatever its monitor
+    /// shows, and that monitor is now the other one.
+    #[test]
+    fn a_window_on_no_workspace_moved_across_is_declared_on_what_that_monitor_shows() {
+        let off = "require(\"config\").workspaces.follow_new_windows = false";
+        let declared = |commands: &[Command]| {
+            commands.iter().rev().find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.get(&2).cloned()),
+                _ => None,
+            })
+        };
+        let mut moved = Vec::new();
+        for layout in ["super+t", "super+s", ""] {
+            let mut desk = Desk::new(off, two_screens());
+            assert_eq!(
+                desk.scripts
+                    .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 2 return \"\""),
+                ""
+            );
+            if !layout.is_empty() {
+                desk.press(layout);
+            }
+            desk.open(1, "DP-1", (1280.0, 720.0));
+            desk.open(2, "DP-1", (2000.0, 720.0));
+            desk.focus(2);
+            assert_eq!(desk.workspace_of(2), "nil", "the premise");
+            let commands = desk.press("super+shift+right");
+            moved.push((desk.monitor(2), desk.workspace_of(2), declared(&commands)));
+        }
+        let there = (
+            "DP-2".to_owned(),
+            "nil".to_owned(),
+            Some(Some(vec!["2".to_owned()])),
+        );
+        assert_eq!(
+            moved,
+            vec![there.clone(), there.clone(), there],
+            "(window 2's monitor, its `of`, where the press declared it) in tiling, scrolling and floating"
+        );
+    }
+
     /// **In scrolling, the directions are the strip's own keys.** #150.
     ///
     /// Left and right are the columns and up and down the windows in one,
