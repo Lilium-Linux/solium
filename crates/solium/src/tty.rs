@@ -1527,7 +1527,10 @@ impl State {
             }
         }
         // A monitor still waiting has its own flip to come, which calls this
-        // again: `tests::a_parked_report_waits_for_every_monitors_flip`.
+        // again, or `render`, whose `begin_pass` reads the time and whose
+        // `frame` sends the line after eight passes. The rule is
+        // `tests::a_parked_report_waits_for_every_monitors_flip`; this call
+        // needs a GPU, and no test reaches it.
         if nothing_in_flight(self.screens.iter().map(|screen| screen.pending)) {
             crate::pacing::idle();
         }
