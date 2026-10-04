@@ -634,24 +634,11 @@ enum Hosted {
 }
 
 /// When the scene's files last changed: the newest of the file itself and the
-/// QML beside it, which a scene imports by relative path.
+/// QML in its directory and the directories under it, which a scene imports
+/// by relative path, looked for as the shell's are.
 /// `tests::a_reload_swaps_the_scene`.
 fn modified(source: &Path) -> Option<SystemTime> {
-    let changed = |path: &Path| {
-        std::fs::metadata(path)
-            .and_then(|data| data.modified())
-            .ok()
-    };
-    let beside = source
-        .parent()
-        .and_then(|directory| std::fs::read_dir(directory).ok())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|kind| kind == "qml"))
-        .filter_map(|path| changed(&path));
-    changed(source).into_iter().chain(beside).max()
+    crate::surface::newest_qml(source, source.parent())
 }
 
 /// Whether the configured theme has been looked for yet, and what came back.
@@ -1626,8 +1613,9 @@ mod tests {
 
     /// **A reload swaps the scene**: a different file is a new scene, the same
     /// file unchanged is the same live scene, an edited one is built again
-    /// from the edit, one that would not build is tried again, and a new size
-    /// builds it again at that size.
+    /// from the edit, one that would not build is tried again, a new size
+    /// builds it again at that size, and an edit to a file in a directory it
+    /// imports builds it again, as an edit anywhere in the shell's does.
     #[test]
     fn a_reload_swaps_the_scene() {
         crate::qml::qt_test::on_the_qt_thread(|| {
@@ -1641,6 +1629,16 @@ mod tests {
                 "import QtQuick\nItem { property string name: \"second\"; property int mark: 0 }\n",
             )
             .expect("writing the second scene");
+            // Written before anything is built, as `beside` says a file must
+            // be: Qt keeps a directory's listing once it has read it.
+            let parts = directory.join("parts");
+            let label = parts.join("Label.qml");
+            std::fs::create_dir_all(&parts).expect("a directory of parts");
+            std::fs::write(
+                &label,
+                "import QtQuick\nQtObject { property string text: \"part\" }\n",
+            )
+            .expect("writing a part");
             let mut pointer = Pointer::default();
             let configure = |pointer: &mut Pointer, scene: &std::path::Path, size: i32| {
                 pointer.configure(
@@ -1708,6 +1706,22 @@ mod tests {
             );
             let retried = configure(&mut pointer, &second, 32);
             seen.push((retried, read(&mut pointer)));
+            edit(
+                &second,
+                "import QtQuick\nimport \"parts\"\nItem {\n    Label { id: label }\n    property string name: label.text\n    property int mark: 0\n}\n",
+                20,
+            );
+            configure(&mut pointer, &second, 32);
+            if let Some(scene) = pointer.scene_for_test() {
+                scene.set_int("mark", 7);
+            }
+            edit(
+                &label,
+                "import QtQuick\nQtObject { property string text: \"edited part\" }\n",
+                25,
+            );
+            let split = configure(&mut pointer, &second, 32);
+            seen.push((split, read(&mut pointer)));
             drop(pointer);
             let _ = std::fs::remove_dir_all(&directory);
             let name = |name: &str, mark: i32| (name.to_owned(), mark);
@@ -1722,12 +1736,14 @@ mod tests {
                         (true, name("edited", 0)),
                         (true, name("edited", 0)),
                         (true, name("mended", 0)),
+                        (true, name("edited part", 0)),
                     ],
                     name("none", -1)
                 ),
                 "((whether the reload asked for a frame, (the scene, its mark)) for: the first \
                  scene, it again unchanged, another, the first again, the first edited, at a new \
-                 size, a broken scene mended; the broken scene)"
+                 size, a broken scene mended, a part in a directory it imports edited; the broken \
+                 scene)"
             );
         });
     }

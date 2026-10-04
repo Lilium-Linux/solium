@@ -552,6 +552,18 @@ fn build(
 
 /// The newest modification time anywhere the scene's QML lives.
 fn newest_change(source: &Path) -> Option<SystemTime> {
+    // The tree it came from, when one is named: editing a widget three
+    // directories away is still editing the shell.
+    let watched = std::env::var_os("SOLIUM_SHELL_WATCH").map(PathBuf::from);
+    newest_qml(source, watched.as_deref().or_else(|| source.parent()))
+}
+
+/// The newest modification time of `source` and of any QML file under
+/// `tree`, four directories deep: where a scene's QML lives, imported by
+/// relative path. Shared with the pointer's scene, which a reload builds
+/// again on an edit anywhere in it as the shell's does
+/// (`cursor::tests::a_reload_swaps_the_scene`).
+pub(crate) fn newest_qml(source: &Path, tree: Option<&Path>) -> Option<SystemTime> {
     fn newest_in(directory: &Path, best: &mut Option<SystemTime>, depth: usize) {
         if depth > 4 {
             return;
@@ -575,12 +587,8 @@ fn newest_change(source: &Path) -> Option<SystemTime> {
     let mut newest = std::fs::metadata(source)
         .and_then(|data| data.modified())
         .ok();
-    // The tree it came from, when one is named: editing a widget three
-    // directories away is still editing the shell.
-    if let Some(root) = std::env::var_os("SOLIUM_SHELL_WATCH") {
-        newest_in(Path::new(&root), &mut newest, 0);
-    } else if let Some(parent) = source.parent() {
-        newest_in(parent, &mut newest, 0);
+    if let Some(tree) = tree {
+        newest_in(tree, &mut newest, 0);
     }
     newest
 }
