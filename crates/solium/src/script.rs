@@ -1032,7 +1032,7 @@ impl Scripts {
             .create_function(|lua, results: mlua::MultiValue| {
                 // `pcall` and `xpcall` answer `false` for an error they
                 // caught, and `load` answers `nil`.
-                if late(lua) && matches!(results.front(), Some(Value::Boolean(false) | Value::Nil))
+                if matches!(results.front(), Some(Value::Boolean(false) | Value::Nil)) && late(lua)
                 {
                     return Err(mlua::Error::runtime(STOPPED));
                 }
