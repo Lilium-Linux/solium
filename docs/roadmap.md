@@ -174,12 +174,13 @@ instance per monitor, each reading `Solium.monitor`
 where its items take it
 ([#173](https://github.com/Lilium-Linux/solium/issues/173)); every
 button, the wheel, `Grab` popups and the keyboard on demand
-([#163](https://github.com/Lilium-Linux/solium/issues/163)); and edges
+([#163](https://github.com/Lilium-Linux/solium/issues/163)); edges
 reserved whatever the scene's size
-([#162](https://github.com/Lilium-Linux/solium/issues/162)). Separately, a
-hosted shell's timers fire on an idle desktop
+([#162](https://github.com/Lilium-Linux/solium/issues/162)); and named
+actions with data, sent with `Solium.send` and done by `sol.act`.
+Separately, a hosted shell's timers fire on an idle desktop
 ([#164](https://github.com/Lilium-Linux/solium/issues/164)), and a program
-it starts, through `action`, Lua and `sol.spawn`, gets the environment Solium
+it starts, through `Solium.send`, Lua and `sol.spawn`, gets the environment Solium
 started with ([#175](https://github.com/Lilium-Linux/solium/issues/175)).
 The Quickshell compatibility layer was removed
 ([#172](https://github.com/Lilium-Linux/solium/issues/172)), and

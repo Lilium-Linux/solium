@@ -355,19 +355,24 @@ Everywhere else the pointer goes to what is under it
 A surface without it holds neither a `Grab` nor the keyboard
 (`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`,
 `state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_keyboard`).
-The scene sets an `action` string, the compositor takes it, and whoever is
-listening is told:
+The scene sends an action, with data if it has any, `Solium.send("pressed",
+{ id: 3 })`, and whoever is listening is told:
 
 ```lua
 sol.surface("panel", { scene = "panel.qml", layer = "overlay",
                        on = area, interactive = true })
 
-sol.on("surface", function(name, action)
-    if name == "panel" then
+sol.on("surface", function(surface, action, data)
+    if surface == "panel" then
         sol.log("pressed " .. action)
     end
 end)
 ```
+
+An action of the compositor's own vocabulary, `windows.focus` with `{ id:
+model.id }` say, is done for you, by `lua/actions.lua` through `sol.act`
+([shell-boundary.md](shell-boundary.md#what-a-hosted-shell-is-given) has the
+list).
 
 That is the whole of how the Developer Tweaks panel works, and it is entirely
 in `lua/tweaks.lua` — the compositor has no idea what a tweak is.

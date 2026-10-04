@@ -310,9 +310,10 @@ changed properties into the live scene instead of rebuilding it (#161).
 its pointer events. `qml/hosted.rs` is the compositor's half of what a scene
 and the compositor say to each other: properties written in place, the
 monitor the instance is on, the models' rows, pointer events, what the
-scene's items claim at a point, its reserve, its grabs, and its keyboard wants
-and the keys it is told. `qml/keys.rs` puts the compositor's buttons,
-modifiers and keys in Qt's terms.
+scene's items claim at a point, its reserve, its grabs, its keyboard wants
+and the keys it is told, and the actions it sends with `Solium.send`, whose
+data `json.rs` reads. `qml/keys.rs` puts the compositor's buttons, modifiers
+and keys in Qt's terms.
 
 `state/hosted.rs` reads what the scenes report, once a pass (`settle_scenes`),
 and applies it. A reserve goes into the work area (`reserved_on`, which
@@ -321,8 +322,11 @@ re-flows the layout once (#162). A `Grab` is held or dismissed
 (`settle_grabs`, `dismiss_hosted_grab`). The keyboard is held for a scene, its
 keys are delivered and repeated at the keymap's rate, and it is given back
 (`settle_keyboard`, `deliver_scene_key`, `repeat_scene_key`,
-`end_keyboard_hold`) (#163). `docs/shell-boundary.md`, "What a hosted shell is
-given", has the behaviour.
+`end_keyboard_hold`) (#163). The actions the scenes sent go to the `surface`
+listeners, each in a dispatch of its own (`settle_actions`), and `sol.act`'s
+verbs become the commands that do them (`act`); `state/commands.rs` tells each
+attempt's `done` once the dispatch that ran it is applied.
+`docs/shell-boundary.md`, "What a hosted shell is given", has the behaviour.
 
 ### Scripting
 

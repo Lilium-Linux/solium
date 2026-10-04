@@ -215,7 +215,7 @@ simply does not contain it. There is nothing to clean up.
 
 ```lua
 sol.on("open",   function(id) end)                 -- a window's life began
-sol.on("surface", function(name, action) end)      -- a sol.surface asked for something
+sol.on("surface", function(surface, action, data) end) -- a hosted scene sent an action
 sol.on("closing", function(id) end)                -- a close was asked for
 sol.on("refused", function(id) end)                -- ...and declined: it is back
 sol.on("close",  function(id) end)                 -- it is gone
@@ -234,8 +234,15 @@ sol.on("text_input", function(field, why) end)     -- the focused text field: "f
 ```
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
-back: its scene sets an `action`, and you are told the surface's name and the
-action ([ricing.md](ricing.md#your-wallpaper) has an example). Declaring the
+back: its scene calls `Solium.send(action, data)`, and you are told the
+surface's name, the action and its data, a table, a value or `nil`, every
+action in the order it was sent
+(`script::tests::a_surface_action_reaches_lua_with_its_data`,
+`state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`);
+`sol.act(action, data, done)` performs the compositor's verbs, and
+`lua/actions.lua` hands it the ones a scene sends
+([shell-boundary.md](shell-boundary.md#what-a-hosted-shell-is-given) says
+which; [ricing.md](ricing.md#your-wallpaper) has an example). Declaring the
 same surface again with new `properties` writes them into the live scene rather
 than rebuilding it. `keyboard` and `text_input` are for something that
 reacts to typing rather than to windows:

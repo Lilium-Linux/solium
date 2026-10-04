@@ -14,7 +14,7 @@ the line, and it is not where a Wayland tutorial would put it.
 - A shell is QML written against Solium's own API: `import Solium` for
   `Theme`, `Keyboard`, `Grab` and the attached `Solium` object
   (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
-  `Solium.keyboard`), and an `action` property for what it asks Lua to do
+  `Solium.keyboard`), and `Solium.send` for what it asks Lua to do
   ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
   (#172); Quickshell itself may add Solium support on its own side.
 - A shell that runs as its own program — Waybar, a Quickshell instance run
@@ -484,10 +484,38 @@ the scene makes on its own, from a `Timer`, is read after the frame it was
 made in
 (`state::tests::real_client::reflow_on_close::hosted::a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame`).
 
-**A way back to the configuration.** A scene sets a string property named
-`action`, the compositor takes it, and `sol.on("surface", function(name,
-action) ... end)` in Lua is told. Anything Lua can do — `sol.spawn`, switching
-workspaces, any binding — a hosted shell can ask for this way.
+**A way back to the configuration.** `Solium.send("windows.focus", { id:
+model.id })` sends a named action with data, an object, a value or nothing
+(`qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`).
+Lua hears it as `sol.on("surface", function(surface, action, data) ... end)`,
+with the surface's name and the data as a table, a value or `nil`, in a
+dispatch after the one that sent it, every action in the order sent, and
+decides
+(`script::tests::a_surface_action_reaches_lua_with_its_data`,
+`script::tests::an_action_with_no_data_reaches_lua_as_nil`,
+`state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`).
+The shipped `lua/actions.lua` sends the vocabulary on to `sol.act`, the
+compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
+`windows.fullscreen` and `windows.maximize`, each with `{ id = <window id> }`
+(`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
+`sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
+hears once whether it was done, after it was; `reason` is `"unknown-action"`,
+`"unknown-window"` or `"bad-data"`
+(`script::tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
+`state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+`state::tests::real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`).
+A `workspaces.*` action is the configuration's to answer, since the
+compositor does not know what a workspace is: a file answers one with
+`actions.override(name, function(data, surface) ... end)`, and until one
+does, `sol.act` answers it `"unknown-action"`. An action outside the
+vocabulary goes only to the listeners for its surface, as a tweak's does to
+`tweaks.lua`
+(`script::tests::actions_lua_routes_the_vocabulary_and_leaves_the_rest_alone`).
+A scene that sets a string property named `action`, as scenes did before
+`Solium.send`, is heard the same way, after what it sent, with no data
+(`surface::tests::queued_actions_come_first_and_the_old_action_property_last`).
+Anything Lua can do — `sol.spawn`, switching workspaces, any binding — a
+hosted shell can ask for this way.
 
 ## What it is not given
 
@@ -503,7 +531,7 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
   reads its own monitor as `Solium.monitor` and has no list of the others
   ([#166](https://github.com/Lilium-Linux/solium/issues/166)). There is no
   `image://` provider for the icon theme. Driving the compositor goes through
-  `action` and Lua.
+  `Solium.send` and Lua.
 - **No touch.** A scene takes no touch: a tap where it takes a press triggers
   nothing there, and neither reaches nor focuses the window under it;
   elsewhere a touch reaches the window under the shell, as the pointer would
