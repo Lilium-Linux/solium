@@ -367,7 +367,7 @@ impl Solium {
     /// frame carrying a motion drew the layout's rectangle, and a frame without
     /// one drew the client's.
     pub(super) fn held_slot(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
-        let pane = self
+        let dragged = self
             .resize_hold
             .as_ref()
             .filter(|held| &held.window == window)
@@ -379,18 +379,24 @@ impl Solium {
                     .iter()
                     .find(|held| &held.window == window)
                     .map(|held| held.pane)
-            })
-            // And a window a fullscreen or maximise change holds until its
-            // client answers, for the same reason: the slot is what the
-            // change told it, and the space has its old size.
-            // `a_slow_client_is_drawn_stretched_until_it_answers`.
-            .or_else(|| {
-                self.answering
-                    .iter()
-                    .find(|held| &held.window == window)
-                    .map(|held| held.pane)
-            })?;
-        self.panes.get(pane).map(Pane::slot)
+            });
+        if let Some(pane) = dragged {
+            return self.panes.get(pane).map(Pane::slot);
+        }
+        // And a window a fullscreen or maximise change holds until its
+        // client answers, for the same reason: the slot's size is what the
+        // change told it, and the space has its old size.
+        // `a_slow_client_is_drawn_stretched_until_it_answers`.
+        //
+        // **Its size and not its place.** Position never needed a client's
+        // consent, and nothing here is dragging the window: one moved by its
+        // titlebar while it waits is where it was moved, and its patience
+        // running out lands it there rather than back where the change put
+        // it. `a_window_moved_while_its_change_holds_it_stays_where_it_was_moved`.
+        let held = self.answering.iter().find(|held| &held.window == window)?;
+        let slot = self.panes.get(held.pane).map(Pane::slot)?;
+        let at = self.space.element_location(window).unwrap_or(slot.loc);
+        Some(Rectangle::new(at, slot.size))
     }
 
     /// A fresh edge drag is starting on this window.

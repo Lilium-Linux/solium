@@ -949,6 +949,12 @@ impl Solium {
         entering: bool,
         start: Option<Frame>,
     ) {
+        // **A mode's picture is the mode's**, and asked before the listeners
+        // run: a `sol.present` one of them makes is the glide's to replace,
+        // as the move comes after their commands, and asked afterwards it
+        // kept the window at its old rectangle, transformed for good.
+        // `a_present_a_listener_makes_is_replaced_by_the_glide`.
+        let presented = self.panes.get(pane).is_some_and(present::presented);
         let motion = if self.telling_change {
             None
         } else {
@@ -977,7 +983,7 @@ impl Solium {
         // with the glide landed it over the overview's grid while the mode
         // still held the input.
         // `a_window_a_mode_presents_stays_where_the_mode_draws_it`.
-        if present::presented(held) {
+        if presented {
             return;
         }
         let Some(start) = start else {

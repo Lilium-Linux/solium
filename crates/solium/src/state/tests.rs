@@ -5369,6 +5369,42 @@ end)"#,
             }
         }
 
+        /// **A window moved by its titlebar while its change holds it is
+        /// where it was moved**: the hold keeps the size the change told its
+        /// client, not the place, so it is drawn under the pointer, and a
+        /// client that never answers lands there rather than back where the
+        /// change put it.
+        #[test]
+        fn a_window_moved_while_its_change_holds_it_stays_where_it_was_moved() {
+            let mut desk = Desk::new("moved-while-held", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert!(desk.state.holding_resize(desk.pane), "the premise: held");
+            // What `MoveGrab::motion` does on every motion.
+            desk.state
+                .space
+                .map_element(desk.window.clone(), (600, 400), false);
+            desk.frame_after(Duration::from_millis(16));
+            let moved = Rectangle::new((600, 400).into(), (400, 300).into()).to_f64();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                moved,
+                "drawn where it was moved, at the size it was told"
+            );
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert!(!desk.state.holding_resize(desk.pane), "no longer held");
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()).loc,
+                moved.loc,
+                "and left there once its patience runs out"
+            );
+        }
+
         /// **And one that never answers is held only so long**:
         /// `resizing::PATIENCE` past the landing, as a drag's hold is, and
         /// then drawn at the size it has, where it lives.
@@ -5479,6 +5515,37 @@ end)"#,
             desk.land();
             assert_eq!(desk.drawn(desk.state.clock.now()), screen());
             assert!(!desk.transformed());
+        }
+
+        /// **A `sol.present` a listener makes is replaced by the glide**, as
+        /// the compositor's move comes after the listeners' commands: only a
+        /// picture a mode was presenting *before* the change is the mode's.
+        /// A listener presenting the window it is told about does not keep
+        /// it at its old size, transformed for good.
+        #[test]
+        fn a_present_a_listener_makes_is_replaced_by_the_glide() {
+            let mut desk = Desk::new(
+                "listener-presents",
+                r#"
+                sol.on("fullscreen", function(id)
+                    sol.animate({ duration = 260, easing = "linear" })
+                    sol.present(id, { opacity = 0.5 })
+                end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let midway = desk.state.clock.now() + Duration::from_millis(100);
+            assert!(
+                between(desk.drawn(midway), before(), screen()),
+                "it glides to the monitor: {:?}",
+                desk.drawn(midway)
+            );
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+            assert!(!desk.transformed(), "and at rest it holds no transform");
         }
 
         /// **Turning round part of the way out keeps the way back**, for

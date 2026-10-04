@@ -787,6 +787,9 @@ local defaults = {
         -- and `true` is the motion below again:
         --
         --     fullscreen = { animate = false },
+        --
+        -- Change this default and `SHIPPED` in `lua/fullscreen.lua` with it:
+        -- that is the motion `animate = true` turns back on.
         animate = { duration = 260, easing = "outCubic" },
 
         -- Applications that go fullscreen and back at once whatever `animate`
@@ -812,6 +815,8 @@ local defaults = {
         -- easing, `false` for instant, or `true` for the motion below.
         --
         --     maximize = { animate = false },
+        --
+        -- Change this default and `SHIPPED` in `lua/fullscreen.lua` with it.
         animate = { duration = 220, easing = "outCubic" },
 
         -- Applications that are maximised and restored at once whatever

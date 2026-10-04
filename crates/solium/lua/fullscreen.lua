@@ -22,7 +22,8 @@ local INSTANT = { duration = 0 }
 -- What config.lua ships as each `animate`, for `animate = true`: the merge
 -- puts `true` where the shipped motion was, and `true` is what turns the
 -- animation back on after `false`, not what turns it off.
--- `tests/scenarios/fullscreen-animate-true.lua`.
+-- `tests/scenarios/fullscreen-animate-true.lua`. Kept equal to config.lua's
+-- two `animate` defaults by hand; each of those says so beside it.
 local SHIPPED = {
     fullscreen = { duration = 260, easing = "outCubic" },
     maximize = { duration = 220, easing = "outCubic" },
