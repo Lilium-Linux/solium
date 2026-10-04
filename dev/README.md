@@ -802,8 +802,8 @@ anything in the checkout reloads the scene within half a second.
 
 `solium --check-qml <file>` loads one file without starting a compositor and
 prints `ok` or the errors Qt reported — the quick way through a chain of "type
-X unavailable" errors while writing a shell. It exits 0 either way, so read
-what it prints.
+X unavailable" errors while writing a shell. It exits with 1 when the file
+does not load.
 
 ## QML on the GPU
 

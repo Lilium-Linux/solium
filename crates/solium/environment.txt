@@ -47,12 +47,16 @@ line; with none it starts a compositor: nested, as a window, when
 
 --check
     Load the configuration, print every binding it registered and every one
-    it removed, and exit. Exits with 1 when the configuration fails to load or
-    sets a key nothing reads. Starts no compositor and needs no display.
+    it removed, and exit. Exits with 1 when anything fails: the configuration
+    fails to load or sets a key nothing reads. `--check <file.qml>` checks one
+    QML file instead, as `--check-qml` does. Starts no compositor and needs no
+    display.
 
 --check-qml <file.qml>
-    Load one QML file in software, print `ok` or what went wrong, and exit.
-    Starts no compositor.
+    The old spelling of `--check <file.qml>`: load one QML file in software
+    and, for a style's `Pane.qml`, every layer it names; print what went
+    wrong; exit with 1 when anything did. A style that requires the GPU is
+    said to, and its layers are not loaded. Starts no compositor.
 
 --probe
     Print every connector and every mode it offers, without taking the

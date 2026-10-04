@@ -1,5 +1,6 @@
 //! The binary itself, run as a process: what `--help`, `--version` and an
-//! unknown flag do before anything starts (#156).
+//! unknown flag do before anything starts (#156), and the exit status of a
+//! check.
 //!
 //! **Safety.** These run only against a binary whose parser is in, and never
 //! against an unfixed one. Even so, every run has `WAYLAND_DISPLAY` naming a
@@ -22,14 +23,21 @@ use std::{
 };
 
 fn run(argument: &str) -> (i32, String, String) {
+    run_with(&[argument])
+}
+
+fn run_with(arguments: &[&str]) -> (i32, String, String) {
+    let argument = arguments.join(" ");
     let dir = std::env::temp_dir().join(format!(
         "solium-cli-test-{}-{}",
         std::process::id(),
-        argument.trim_start_matches('-')
+        arguments
+            .first()
+            .map_or("", |first| first.trim_start_matches('-'))
     ));
     let _ = std::fs::create_dir_all(&dir);
     let mut child = Command::new(env!("CARGO_BIN_EXE_solium"))
-        .arg(argument)
+        .args(arguments)
         .env("WAYLAND_DISPLAY", "solium-cli-test-no-such-socket")
         .env_remove("DISPLAY")
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
@@ -88,4 +96,17 @@ fn an_unknown_flag_exits_two_and_starts_nothing() {
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("--help"));
     assert!(!err.contains("starting solium"));
+}
+
+/// A QML file that does not load exits **1**: `--check-qml` used to print
+/// the error and exit 0, so nothing but a person reading could tell.
+#[test]
+fn check_qml_on_a_broken_file_exits_one() {
+    let broken = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/check/broken.qml"
+    );
+    let (code, out, err) = run_with(&["--check-qml", broken]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("broken.qml"), "{out}");
 }

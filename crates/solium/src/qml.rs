@@ -1062,8 +1062,8 @@ impl Scene {
     /// construction, each refusal logged as its own unrelated failure. A
     /// fourth caller answering this question for itself is the same bug again.
     ///
-    /// `main.rs`'s `--check-qml` is the one deliberate exception and says so
-    /// where it sits: its host is software in every mode, so its scene is
+    /// `check.rs`, behind `--check-qml`, is the one deliberate exception and
+    /// says so where it sits: its host is software in every mode, so its scene is
     /// software by construction and not by preference. See
     /// `renderer::check_qml_is_software_in_every_mode`.
     pub(crate) fn for_host(
@@ -1114,8 +1114,8 @@ impl Scene {
     ///
     /// Named for what it is rather than `new`, because `new` reads as the
     /// normal constructor and this one is an exception with exactly one
-    /// legitimate caller: `main.rs`'s `--check-qml`, which validates a file and
-    /// exits. Anything that will be *drawn* wants [`Scene::for_host`], and on a
+    /// legitimate caller: `check.rs`, behind `--check-qml`, which validates a
+    /// file and exits. Anything that will be *drawn* wants [`Scene::for_host`], and on a
     /// GPU host this scene would be refused at construction — see `host.cpp`'s
     /// software constructor.
     ///
