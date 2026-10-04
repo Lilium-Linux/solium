@@ -712,6 +712,12 @@ impl Solium {
                 // over is not left on screen
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
                 self.decorations.clear_values();
+                // Likewise: the old declaration is the previous session's,
+                // and a configuration that stops calling `sol.workspaces`
+                // must publish none, not what it last said. `workspaces.lua`
+                // declares again inside this same held dispatch, so nothing
+                // flickers for one that still does.
+                self.workspaces = None;
                 self.start_scripts(Some(scripts));
                 // The re-announcement, in the order the doc comment states.
                 // Three dispatches and not one, each with its own snapshot,

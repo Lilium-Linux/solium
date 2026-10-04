@@ -25598,6 +25598,55 @@ end)"#,
                 );
             }
 
+            /// **A reload into a configuration that stops calling
+            /// `sol.workspaces` publishes none**, not what the previous
+            /// session last declared.
+            #[test]
+            fn a_reload_that_stops_declaring_workspaces_publishes_none() {
+                let (mut desk, _opened, _) = window_under_a_scene(button_over_the_window);
+                let monitor = the_monitor(&desk).name();
+                desk.install(&format!(
+                    r#"sol.workspaces({{ arrangement = {{ kind = "horizontal", columns = 1, rows = 1 }},
+                        groups = {{ {{ id = "{monitor}", monitors = {{ "{monitor}" }}, showing = {{ "1" }},
+                                     workspaces = {{ {{ id = "1", name = "1", col = 1, row = 1 }} }} }} }} }})"#
+                ));
+                let outcome = desk
+                    .state
+                    .scripts
+                    .as_mut()
+                    .map(crate::script::Scripts::startup)
+                    .unwrap_or_default();
+                desk.state.apply(outcome);
+                assert!(
+                    desk.state.workspaces.is_some(),
+                    "the premise: a declaration is held"
+                );
+                assert!(
+                    !crate::models::workspaces::rows(&desk.state).is_empty(),
+                    "the premise: it publishes rows"
+                );
+
+                let directory = std::env::temp_dir().join(format!(
+                    "solium-reload-drops-workspaces-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(&entry, "-- a configuration that never calls sol.workspaces\n")
+                    .expect("writing the entry point");
+                desk.state.reload_from(&entry);
+                let _ = std::fs::remove_dir_all(&directory);
+
+                assert!(
+                    desk.state.workspaces.is_none(),
+                    "the old declaration stayed held after a reload that never declared one"
+                );
+                assert!(
+                    crate::models::workspaces::rows(&desk.state).is_empty(),
+                    "the old rows stayed published after a reload that never declared any"
+                );
+            }
+
             /// **`focusOrder` is most recent first** (Ruling 18).
             #[test]
             fn focus_order_is_most_recent_first() {
