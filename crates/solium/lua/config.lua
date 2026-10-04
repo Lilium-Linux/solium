@@ -31,7 +31,6 @@
 --     200 ms out.
 --   * How long a closing window takes to fade, fixed in the compositor at
 --     190 ms.
---   * Your own fallback pointer: SOLIUM_QML_CURSOR; see `cursor` below.
 
 local defaults = {
     -- Space between windows and around the work area, in logical pixels.
@@ -334,7 +333,20 @@ local defaults = {
     -- different pointer from everything else.
     --
     --     cursor = { theme = "Adwaita", size = 24 },
+    --     cursor = { scene = "~/.config/solium/cursor/Cursor.qml", size = 32 },
     --
+    --   scene   a QML scene to draw the pointer with, configured the way
+    --           `shell.scene` is: a path (`~` is expanded), or a name looked
+    --           for in ~/.config/solium/qml/ and then the shipped QML. It is
+    --           drawn for every shape, ahead of any theme, and reads
+    --           `Solium.cursor`: the shape asked for (`default`, `text`,
+    --           `pointer`, `ew-resize`...), `pressed`, `velocity`, `scale`
+    --           and `size`. It sets `Solium.cursor.hotspot` on its root, and
+    --           is as big as its root says, so a glow can reach past `size`.
+    --           It may animate. A window that draws its own cursor, or hides
+    --           it as a game does, still does over its own surface.
+    --           `SOLIUM_QML_CURSOR=<file>` is the scene for one run, over this.
+    --           docs/ricing.md has an example.
     --   theme   the name of an XCursor theme -- a directory under ~/.icons,
     --           ~/.local/share/icons or /usr/share/icons. `ls /usr/share/icons`
     --           lists the ones this machine has. Naming one here takes
@@ -353,13 +365,13 @@ local defaults = {
     -- logical pixels and no theme at all.
     --
     -- **No theme is not a missing pointer.** Solium draws its own from
-    -- `qml/cursor.qml`, and that is what you get with nothing set here, with
-    -- nothing in the environment, or with a theme named that turns out not to
-    -- be installed -- the log says which. It is a white arrow with a dark
-    -- outline, in fixed colours rather than the theme's, because a pointer
-    -- has to read over whatever a client drew. A copy of `cursor.qml` in
-    -- ~/.config/solium/qml/ is not read: `SOLIUM_QML_CURSOR=<file>` draws
-    -- the pointer from your own file, and a setting for it waits on #159.
+    -- `qml/cursor.qml`, and that is what you get with no scene and no theme
+    -- set here, nothing in the environment, or a theme named that turns out
+    -- not to be installed -- the log says which. It is a white arrow with a
+    -- dark outline, in fixed colours rather than the theme's, because a
+    -- pointer has to read over whatever a client drew, and it is one arrow
+    -- for every shape. A scene that would not load is drawn as no scene is,
+    -- with a line in the log, and a reload tries it again.
     --
     -- A shape your theme does *not* have is the one case that does not reach
     -- it. Applications name the cursor they want -- an I-beam over text, a
@@ -367,9 +379,10 @@ local defaults = {
     -- of them; the missing ones fall back to that theme's own arrow, so a
     -- themed session stays wholly themed rather than mixing two designs.
     --
-    -- Applied on reload, so trying a theme out is `super+shift+r`. The
-    -- compositor call is `sol.cursor_theme(...)`; `sol.cursor()` is a
-    -- different function that answers with where the pointer is.
+    -- Applied on reload, so trying a theme or a scene out is `super+shift+r`;
+    -- a scene whose files changed is built again then. The compositor call is
+    -- `sol.cursor_theme(...)`; `sol.cursor()` is a different function that
+    -- answers with where the pointer is.
     cursor = {},
 
     -- How QML -- the frames, the pointer, the wallpaper -- is rendered.
@@ -1117,7 +1130,7 @@ local open_sections = {
         caps = true,
         num = true,
     },
-    cursor = { theme = true, size = true },
+    cursor = { theme = true, size = true, scene = true },
     -- `true` rather than a set of names: everything is accepted.
     bindings = true,
 }

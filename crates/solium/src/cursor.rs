@@ -62,14 +62,17 @@
 //! [`Pointer::showing`], the only reader, which is also where a surface that
 //! has since died turns back into the compositor's arrow.
 //!
-//! # And underneath two of the three, two ways to draw a name
+//! # And underneath two of the three, three ways to draw a name
 //!
-//! Sources two and three both end in a *name*, and a name is drawn from the
-//! configured XCursor theme where there is one, so that the pointer matches
-//! what every other application on the machine draws; see [`theme`], which is
-//! where that arrived and why. When there is no theme — none configured, none
-//! in the environment, or a name nothing on disk answers to — a name is drawn
-//! from *ours*, from QML, `qml/cursor.qml`.
+//! Sources two and three both end in a *name*. A scene the configuration
+//! names, `cursor.scene`, draws every name, ahead of everything else: it is
+//! told the name and draws what it likes, and it can animate; see [`scene`].
+//! With none, a name is drawn from the configured XCursor theme where there is
+//! one, so that the pointer matches what every other application on the
+//! machine draws; see [`theme`], which is where that arrived and why. When
+//! there is no theme either — none configured, none in the environment, or a
+//! name nothing on disk answers to — a name is drawn from *ours*, from QML,
+//! `qml/cursor.qml`, one arrow for every name.
 //!
 //! **The QML pointer is not a fallback that was left lying around; it is the
 //! floor.** It is deliberate, it is what a session with no theme configured
@@ -83,10 +86,14 @@
 //! *shape* the theme has never heard of must end up at the theme's own arrow
 //! before it ever gets that far, which is [`shape::resolve`].
 
+pub(crate) mod scene;
 pub(crate) mod shape;
 pub(crate) mod theme;
 
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use anyhow::Result;
 use smithay::{
@@ -110,7 +117,7 @@ use crate::{
         self,
         paint::{Gpu, Kept, Said},
     },
-    render::Element,
+    render::{Drawn, Element},
 };
 
 /// Where the point of the arrow is within the QML image.
@@ -222,7 +229,8 @@ enum Backing {
     Gpu(Gpu),
 }
 
-/// Our own pointer, rasterised once per size and reused.
+/// Our own pointer, rasterised once per size and reused: the shipped floor,
+/// or the scene `cursor.scene` names (`scene.rs`).
 #[derive(Debug)]
 pub(crate) struct Cursor {
     scene: qml::Scene,
@@ -237,10 +245,10 @@ pub(crate) struct Cursor {
     size: i32,
     /// One uploadable buffer per device size the pointer has been asked for.
     ///
-    /// Keyed on one edge because a pointer is square. The window frames use the
-    /// same container keyed on a size *pair*, which is why [`Kept`] is generic
-    /// over its key — see `qml/paint.rs`.
-    buffers: Kept<i32, MemoryRenderBuffer>,
+    /// Keyed on a size *pair*, as the window frames' are: the floor is square
+    /// and asks for `(edge, edge)`, and a configured scene is whatever size its
+    /// root says. See `qml/paint.rs` for [`Kept`].
+    buffers: Kept<(i32, i32), MemoryRenderBuffer>,
     /// Whether producing a pointer image has already failed and said so.
     ///
     /// One latch for the whole of [`Cursor::fill`] rather than one per `warn!`,
@@ -371,12 +379,12 @@ impl Cursor {
         // The size actually in hand, which is `edge` unless a GPU rebind failed
         // and the scene is frozen on a smaller buffer.
         let fresh = self.scene.needs_render();
-        let held = if self.buffers.current(edge, fresh) {
+        let held = if self.buffers.current((edge, edge), fresh) {
             edge
         } else {
-            self.fill(renderer, edge, scale)?
+            self.fill(Some(renderer), (edge, edge), scale)?.0
         };
-        let buffer = self.buffers.get_mut(held)?;
+        let buffer = self.buffers.get_mut((held, held))?;
 
         // Physical, and the hotspot is logical, so both go through the scale.
         let position = (
@@ -418,8 +426,13 @@ impl Cursor {
         }
     }
 
-    /// Draw the pointer at `edge` pixels and keep the result. Returns the size
+    /// Draw the pointer at `pixels` and keep the result. Returns the size
     /// that was actually produced.
+    ///
+    /// `renderer` is needed on the GPU path only, which samples and reads back
+    /// through it; the software path copies out of Qt's image, so a test can
+    /// draw a pointer with none
+    /// (`scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`).
     ///
     /// **Every way out of here that is not `Some` runs again next frame**, for
     /// this output and every other one: nothing was pushed, so `buffers.current`
@@ -427,7 +440,12 @@ impl Cursor {
     /// the GPU was momentarily full heals itself with nobody having to notice —
     /// and it is why each complaint on the way out goes through `self.drawing`
     /// rather than straight to `warn!`. See [`Said`].
-    fn fill(&mut self, renderer: &mut GlesRenderer, edge: i32, scale: f64) -> Option<i32> {
+    fn fill(
+        &mut self,
+        renderer: Option<&mut GlesRenderer>,
+        pixels: (i32, i32),
+        scale: f64,
+    ) -> Option<(i32, i32)> {
         // Several fields of one struct, borrowed at once.
         let Self {
             scene,
@@ -436,11 +454,12 @@ impl Cursor {
             drawing,
             ..
         } = self;
+        let wanted = pixels;
         let (pixels, stride, held) = match backing {
             Backing::Memory => {
-                scene.resize(edge, edge, scale);
+                scene.resize(wanted.0, wanted.1, scale);
                 match scene.render() {
-                    Ok(rendered) => (Pixels::Borrowed(rendered.pixels), rendered.stride, edge),
+                    Ok(rendered) => (Pixels::Borrowed(rendered.pixels), rendered.stride, wanted),
                     Err(err) => {
                         drawing.once(|| {
                             tracing::warn!(
@@ -453,22 +472,25 @@ impl Cursor {
                 }
             }
             Backing::Gpu(gpu) => {
+                // Sampled and read back through the renderer, so with none
+                // there is no picture.
+                let renderer = renderer?;
                 // No complaint of ours on this `?`: `Gpu::sample` has its own
                 // latches — the same `Said` this module uses — and has already
                 // said whatever there was to say.
                 let (texture, size) = {
-                    let shown = gpu.sample(scene, renderer, (edge, edge), scale)?;
+                    let shown = gpu.sample(scene, renderer, wanted, scale)?;
                     (shown.texture.clone(), shown.size)
                 };
                 let read = read_back(renderer, texture, size, drawing)?;
                 let stride = usize::try_from(size.0.max(0)).unwrap_or_default() * 4;
-                (Pixels::Owned(read), stride, size.0)
+                (Pixels::Owned(read), stride, size)
             }
         };
 
-        let row_bytes = usize::try_from(held.max(0)).unwrap_or_default() * 4;
+        let row_bytes = usize::try_from(held.0.max(0)).unwrap_or_default() * 4;
         let mut buffer =
-            MemoryRenderBuffer::new(Fourcc::Argb8888, (held, held), 1, Transform::Normal, None);
+            MemoryRenderBuffer::new(Fourcc::Argb8888, held, 1, Transform::Normal, None);
         let mut context = buffer.render();
         let copy = context.draw(|target| {
             for (row, destination) in target.chunks_exact_mut(row_bytes).enumerate() {
@@ -478,7 +500,7 @@ impl Cursor {
                 };
                 destination.copy_from_slice(source);
             }
-            Ok(vec![Rectangle::from_size((held, held).into())])
+            Ok(vec![Rectangle::from_size(held.into())])
         });
         if copy.is_err() {
             drawing.once(|| {
@@ -587,11 +609,49 @@ fn read_back(
     Some(pixels)
 }
 
+/// The floor's file: the shipped `cursor.qml`, always. `SOLIUM_QML_CURSOR`
+/// names the pointer's scene, over `cursor.scene`
+/// (`theme::tests::the_environment_overrides_the_configured_scene`).
 fn qml_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("SOLIUM_QML_CURSOR") {
-        return PathBuf::from(path);
-    }
     crate::assets::qml().join("cursor.qml")
+}
+
+/// The configured scene, once looked for.
+/// `tests::a_reload_swaps_the_scene`.
+#[derive(Debug, Default)]
+enum Hosted {
+    /// None built: none is configured, or one is and has not been drawn since
+    /// it was, or since a reload asked for it again.
+    #[default]
+    Unbuilt,
+    /// Built from `settings.scene`, as its files were when it was.
+    Built {
+        cursor: Box<Cursor>,
+        modified: Option<SystemTime>,
+    },
+    /// It would not build, and said so once; a reload tries again.
+    Failed,
+}
+
+/// When the scene's files last changed: the newest of the file itself and the
+/// QML beside it, which a scene imports by relative path.
+/// `tests::a_reload_swaps_the_scene`.
+fn modified(source: &Path) -> Option<SystemTime> {
+    let changed = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|data| data.modified())
+            .ok()
+    };
+    let beside = source
+        .parent()
+        .and_then(|directory| std::fs::read_dir(directory).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|kind| kind == "qml"))
+        .filter_map(|path| changed(&path));
+    changed(source).into_iter().chain(beside).max()
 }
 
 /// Whether the configured theme has been looked for yet, and what came back.
@@ -657,6 +717,9 @@ pub(crate) struct Pointer {
     /// Set once QML has failed, so a broken scene costs one error and not one
     /// per frame for the life of the session.
     unavailable: bool,
+    /// The scene `cursor.scene` names, drawn for every named shape ahead of
+    /// any theme. See `scene.rs`.
+    hosted: Hosted,
     /// Whether uploading a *themed* cursor has failed and said so.
     ///
     /// Separate from `Cursor::uploading` next door for the reason that one is
@@ -684,6 +747,7 @@ impl Default for Pointer {
             loaded: Loaded::Unasked,
             art: None,
             unavailable: false,
+            hosted: Hosted::Unbuilt,
             theming: Said::default(),
         }
     }
@@ -802,6 +866,16 @@ impl Pointer {
         environment: &theme::Environment,
     ) -> bool {
         let settings = theme::Settings::resolve(configured, environment);
+        // And to build a scene that would not, or to build again one whose
+        // files were edited since: `tests::a_reload_swaps_the_scene`.
+        let rescene = settings
+            .scene
+            .as_deref()
+            .is_some_and(|source| match &self.hosted {
+                Hosted::Failed => true,
+                Hosted::Built { modified: when, .. } => modified(source) != *when,
+                Hosted::Unbuilt => false,
+            });
         // **A reload is also a second chance to find a theme that was not
         // installed last time**, and that is why an unchanged setting is not
         // by itself a reason to stop. `Loaded::Missing` is a settled answer
@@ -814,7 +888,7 @@ impl Pointer {
         // Only when a theme is actually named: with none, `load` reaches
         // `Missing` without touching the disk and there is nothing to retry.
         let retry = settings.theme.is_some() && matches!(self.loaded, Loaded::Missing);
-        if settings == self.settings && !retry {
+        if settings == self.settings && !retry && !rescene {
             return false;
         }
         tracing::debug!(
@@ -835,6 +909,23 @@ impl Pointer {
         }
         if let Some(art) = self.art.as_mut() {
             art.set_size(settings.size);
+        }
+        // A different scene, an edited one, one that failed, or a new size,
+        // which is what a scene that sets no size of its own is drawn at: the
+        // scene is built again, from the files as they are now, at the next
+        // draw. `tests::a_reload_swaps_the_scene`.
+        //
+        // The engine forgets what it compiled, or an edited file builds as it
+        // was; only when a scene was built or tried, which is on the thread Qt
+        // runs on, and never in a process where nothing has started Qt.
+        if rescene
+            || settings.scene != self.settings.scene
+            || (settings.scene.is_some() && settings.size != self.settings.size)
+        {
+            if !matches!(self.hosted, Hosted::Unbuilt) {
+                qml::clear_cache();
+            }
+            self.hosted = Hosted::Unbuilt;
         }
         self.settings = settings;
         true
@@ -862,21 +953,82 @@ impl Pointer {
     /// inside the first arm, not beside it. A shape the theme has not got
     /// becomes the theme's own arrow in [`shape::resolve`] and never reaches
     /// the second arm at all, so a themed session stays wholly themed.
+    ///
+    /// **A configured scene comes before both**, for every shape. It is the
+    /// one of the three that can animate, so what comes back says whether it
+    /// still is, as [`Drawn`] does for every other scene
+    /// (`scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`). A scene that would not
+    /// build (`tests::a_reload_swaps_the_scene`), or drew nothing this frame,
+    /// leaves the two arms below to draw the pointer as they do with none
+    /// configured.
     pub(crate) fn element(
         &mut self,
         renderer: &mut GlesRenderer,
         icon: CursorIcon,
         location: Point<f64, Logical>,
         scale: f64,
-    ) -> Option<Element> {
+    ) -> Drawn {
+        if let Some(cursor) = self.scene() {
+            let drawn = cursor.drawn(renderer, location, scale);
+            if drawn.element.is_some() {
+                return drawn;
+            }
+        }
         // Logical size times this output's scale, at the point of use. See
         // `theme::pixels`.
         let pixels = theme::pixels(self.settings.size, scale);
         if let Some(element) = self.themed(renderer, icon, pixels, location, scale) {
-            return Some(element);
+            return Drawn {
+                element: Some(element),
+                animating: false,
+            };
         }
-        self.art()
-            .and_then(|cursor| cursor.element(renderer, location, scale))
+        Drawn {
+            element: self
+                .art()
+                .and_then(|cursor| cursor.element(renderer, location, scale)),
+            animating: false,
+        }
+    }
+
+    /// The configured scene's own QML scene, built if it is not yet.
+    #[cfg(test)]
+    pub(crate) fn scene_for_test(&mut self) -> Option<&mut qml::Scene> {
+        self.scene().map(|cursor| &mut cursor.scene)
+    }
+
+    /// The configured scene, built the first time it is asked for after it
+    /// was configured, and `None` with none configured or one that would not
+    /// build. `tests::a_reload_swaps_the_scene`.
+    fn scene(&mut self) -> Option<&mut Cursor> {
+        let source = self.settings.scene.clone()?;
+        if matches!(self.hosted, Hosted::Unbuilt) {
+            self.hosted = match Cursor::configured(&source, self.settings.size) {
+                Ok(cursor) => {
+                    tracing::info!(scene = %source.display(), "the pointer's scene");
+                    Hosted::Built {
+                        cursor: Box::new(cursor),
+                        modified: modified(&source),
+                    }
+                }
+                Err(err) => {
+                    // Loud, once, and not fatal: what is drawn instead is the
+                    // theme or Solium's own pointer, and a reload tries again
+                    // (`tests::a_reload_swaps_the_scene`).
+                    tracing::warn!(
+                        ?err,
+                        scene = %source.display(),
+                        "the pointer's scene would not load; drawing the theme or Solium's own \
+                         pointer until a reload"
+                    );
+                    Hosted::Failed
+                }
+            };
+        }
+        match &mut self.hosted {
+            Hosted::Built { cursor, .. } => Some(cursor),
+            Hosted::Unbuilt | Hosted::Failed => None,
+        }
     }
 
     /// The themed cursor for `icon` at `pixels` device pixels, if there is
@@ -1226,6 +1378,7 @@ mod tests {
             &theme::Configured {
                 theme: Some(theme::NOT_INSTALLED.to_owned()),
                 size: Some(24),
+                scene: None,
             },
             &theme::Environment::default(),
         );
@@ -1267,6 +1420,7 @@ mod tests {
             &theme::Configured {
                 theme: Some(theme::NOT_INSTALLED.to_owned()),
                 size: Some(32),
+                scene: None,
             },
             &theme::Environment::default(),
         );
@@ -1319,6 +1473,7 @@ mod tests {
             &theme::Configured {
                 theme: None,
                 size: Some(32),
+                scene: None,
             },
             &theme::Environment::default(),
         );
@@ -1347,6 +1502,7 @@ mod tests {
         let configured = theme::Configured {
             theme: None,
             size: Some(32),
+            scene: None,
         };
         pointer.configure(&configured, &environment);
         assert!(
@@ -1358,6 +1514,7 @@ mod tests {
                 &theme::Configured {
                     theme: None,
                     size: Some(48),
+                    scene: None,
                 },
                 &environment
             ),
@@ -1382,6 +1539,7 @@ mod tests {
         let configured = theme::Configured {
             theme: Some(theme::NOT_INSTALLED.to_owned()),
             size: Some(24),
+            scene: None,
         };
         pointer.configure(&configured, &environment);
         assert!(pointer.ready(CursorIcon::Default, 24).is_none());
@@ -1419,6 +1577,125 @@ mod tests {
             "a reload with no cursor theme configured asked for a frame"
         );
         assert!(matches!(pointer.loaded, Loaded::Missing));
+    }
+
+    /// **A reload swaps the scene**: a different file is a new scene, the same
+    /// file unchanged is the same live scene, an edited one is built again
+    /// from the edit, one that would not build is tried again, and a new size
+    /// builds it again at that size.
+    #[test]
+    fn a_reload_swaps_the_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let (directory, first) = crate::qml::pointer::tests::written(
+                "solium-cursor-reload-swaps",
+                "import QtQuick\nItem { property string name: \"first\"; property int mark: 0 }\n",
+            );
+            let second = directory.join("Second.qml");
+            std::fs::write(
+                &second,
+                "import QtQuick\nItem { property string name: \"second\"; property int mark: 0 }\n",
+            )
+            .expect("writing the second scene");
+            let mut pointer = Pointer::default();
+            let configure = |pointer: &mut Pointer, scene: &std::path::Path, size: i32| {
+                pointer.configure(
+                    &theme::Configured {
+                        scene: Some(scene.display().to_string()),
+                        size: Some(size),
+                        ..theme::Configured::default()
+                    },
+                    &theme::Environment::default(),
+                )
+            };
+            let read = |pointer: &mut Pointer| {
+                pointer.scene_for_test().map_or_else(
+                    || ("none".to_owned(), -1),
+                    |scene| (scene.get_string_for_test("name"), scene.get_int("mark")),
+                )
+            };
+            let mut seen = Vec::new();
+            configure(&mut pointer, &first, 24);
+            seen.push((true, read(&mut pointer)));
+            if let Some(scene) = pointer.scene_for_test() {
+                scene.set_int("mark", 7);
+            }
+            let same = configure(&mut pointer, &first, 24);
+            seen.push((same, read(&mut pointer)));
+            let other = configure(&mut pointer, &second, 24);
+            seen.push((other, read(&mut pointer)));
+            let back = configure(&mut pointer, &first, 24);
+            seen.push((back, read(&mut pointer)));
+            if let Some(scene) = pointer.scene_for_test() {
+                scene.set_int("mark", 7);
+            }
+            std::fs::write(
+                &first,
+                "import QtQuick\nItem { property string name: \"edited\"; property int mark: 0 }\n",
+            )
+            .expect("editing the scene");
+            let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+            std::fs::File::options()
+                .write(true)
+                .open(&first)
+                .and_then(|file| file.set_modified(later))
+                .expect("dating the edit");
+            let edited = configure(&mut pointer, &first, 24);
+            seen.push((edited, read(&mut pointer)));
+            if let Some(scene) = pointer.scene_for_test() {
+                scene.set_int("mark", 7);
+            }
+            let resized = configure(&mut pointer, &first, 32);
+            seen.push((resized, read(&mut pointer)));
+            std::fs::write(&second, "import QtQuick\nItem { this is not QML }\n")
+                .expect("breaking the scene");
+            configure(&mut pointer, &second, 32);
+            let broken = read(&mut pointer);
+            std::fs::write(
+                &second,
+                "import QtQuick\nItem { property string name: \"mended\"; property int mark: 0 }\n",
+            )
+            .expect("mending the scene");
+            let retried = configure(&mut pointer, &second, 32);
+            seen.push((retried, read(&mut pointer)));
+            drop(pointer);
+            let _ = std::fs::remove_dir_all(&directory);
+            let name = |name: &str, mark: i32| (name.to_owned(), mark);
+            assert_eq!(
+                (seen, broken),
+                (
+                    vec![
+                        (true, name("first", 0)),
+                        (false, name("first", 7)),
+                        (true, name("second", 0)),
+                        (true, name("first", 0)),
+                        (true, name("edited", 0)),
+                        (true, name("edited", 0)),
+                        (true, name("mended", 0)),
+                    ],
+                    name("none", -1)
+                ),
+                "((whether the reload asked for a frame, (the scene, its mark)) for: the first \
+                 scene, it again unchanged, another, the first again, the first edited, at a new \
+                 size, a broken scene mended; the broken scene)"
+            );
+        });
+    }
+
+    /// **With no scene configured the pointer is drawn as it was**: nothing is
+    /// looked for, nothing is built, and a reload that changed nothing still
+    /// asks for no frame.
+    #[test]
+    fn with_no_scene_configured_the_pointer_is_drawn_as_before() {
+        let mut pointer = Pointer::default();
+        let nothing = theme::Configured::default();
+        let environment = theme::Environment::default();
+        pointer.configure(&nothing, &environment);
+        assert!(pointer.scene().is_none());
+        assert!(matches!(pointer.hosted, super::Hosted::Unbuilt));
+        assert!(
+            !pointer.configure(&nothing, &environment),
+            "a reload that changed nothing asked for a frame"
+        );
     }
 
     /// The pointer's own use of the shared cache, at the pointer's own cap.

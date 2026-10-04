@@ -3267,6 +3267,24 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     ),
                 },
             }
+            // `scene` the same way: a path or a name, as `shell.scene` is, and
+            // anything else is no scene and a line in the log rather than a
+            // configuration that does not load.
+            // `tests::a_configured_cursor_scene_reaches_the_compositor`.
+            match options.get::<Value>("scene") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::String(scene)) => {
+                    if let Ok(scene) = scene.to_str()
+                        && !scene.is_empty()
+                    {
+                        configured.scene = Some(scene.to_string());
+                    }
+                }
+                Ok(value) => tracing::warn!(
+                    scene = ?value,
+                    "cursor scene is not a file name; ignoring it"
+                ),
+            }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Cursor(configured.clone()));
             })
@@ -5939,6 +5957,47 @@ pub(crate) mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`cursor.scene` reaches the compositor as written**, for the pointer to
+    /// look for as the shell's scene is looked for; a value that is not a
+    /// string is no scene, with a line in the log, rather than a configuration
+    /// that fails to load.
+    #[test]
+    fn a_configured_cursor_scene_reaches_the_compositor() {
+        let directory = std::env::temp_dir().join("solium-script-test-cursor-scene");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+C", function()
+                sol.cursor_theme({ scene = "~/.config/solium/cursor/Cursor.qml", size = 32 })
+            end)
+            sol.bind("Super+V", function()
+                sol.cursor_theme({ scene = 5 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let scenes: Vec<_> = ["super+c", "super+v"]
+            .into_iter()
+            .map(
+                |key| match scripts.key(key, empty_snapshot()).commands.as_slice() {
+                    [Command::Cursor(configured)] => configured.scene.clone(),
+                    other => panic!("expected one cursor command, got {other:?}"),
+                },
+            )
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            scenes,
+            [Some("~/.config/solium/cursor/Cursor.qml".to_owned()), None],
+            "[a path, a number]"
+        );
     }
 
     /// **The shipped configuration turns the screens off after ten minutes**,

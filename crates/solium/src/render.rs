@@ -1761,11 +1761,17 @@ fn cursor(
         // out of the configured XCursor theme, and the QML pointer that used to
         // be the only answer here is what is drawn when there is no theme or
         // the theme has nothing under that name. See `cursor::Pointer::element`.
-        CursorImageStatus::Named(icon) => state
-            .pointer
-            .element(renderer, icon, location, scale)
-            .into_iter()
-            .collect(),
+        //
+        // A configured scene is drawn ahead of both, and it can animate, so
+        // this asks for the next frame while it does, as `scripted` does for a
+        // hosted scene: `cursor::scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`.
+        CursorImageStatus::Named(icon) => {
+            let drawn = state.pointer.element(renderer, icon, location, scale);
+            if drawn.animating {
+                state.redraw = true;
+            }
+            drawn.element.into_iter().collect()
+        }
     }
 }
 
