@@ -807,6 +807,8 @@ pub(crate) struct Line {
     pub(crate) rebound: u32,
     pub(crate) gpu: Option<crate::gputime::Gpu>,
     pub(crate) captures: u32,
+    pub(crate) clocks: Option<crate::clocks::Clocks>,
+    pub(crate) source: crate::clocks::Source,
 }
 
 impl Line {
@@ -832,6 +834,8 @@ impl Line {
             rebound: worst.rebound,
             gpu: worst.gpu,
             captures: worst.captures,
+            clocks: crate::clocks::latest(),
+            source: crate::clocks::source(),
         }
     }
 
@@ -889,6 +893,13 @@ fn emit(line: &Line) {
         gpu_us = line.gpu_us(),
         gpu_prep_us = line.gpu_prep_us(),
         captures = line.captures,
+        clocks = line.source.name(),
+        gpu_mhz = line.clocks.map_or(0, |clocks| clocks.gpu_mhz),
+        mem_mhz = line.clocks.map_or(0, |clocks| clocks.mem_mhz),
+        pstate = line
+            .clocks
+            .and_then(|clocks| clocks.pstate)
+            .map_or(-1, i32::from),
         panes = line.panes,
         drew = line.drew,
         scenes = line.scenes,
@@ -1208,6 +1219,12 @@ mod tests {
             rebound: 0,
             gpu,
             captures: 5,
+            clocks: Some(crate::clocks::Clocks {
+                gpu_mhz: 1080,
+                mem_mhz: 5001,
+                pstate: Some(3),
+            }),
+            source: crate::clocks::Source::Nvml,
         };
         assert_eq!(line(Some(timed())).gpu_status(), "ok");
         assert_eq!(line(Some(Gpu::Unsupported)).gpu_status(), "unsupported");
@@ -1229,6 +1246,11 @@ mod tests {
                 line(None).captures
             ),
             (0, 0, 5)
+        );
+        let held = line(None);
+        assert_eq!(
+            (held.source.name(), held.clocks.map(|c| c.gpu_mhz)),
+            ("nvml", Some(1080))
         );
     }
 

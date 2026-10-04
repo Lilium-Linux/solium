@@ -218,7 +218,10 @@ SOLIUM_PACING
     only when a pass draws); `gpu` reads `unsupported` on a GPU that cannot time itself and
     `disjoint` when its clock jumped. Nested, only the captures and, with
     several monitors, each monitor are timed on the GPU, not the window's own
-    draw.
+    draw. Each line also carries the GPU's clocks when it was made: where
+    they come from (`clocks`: `nvml`, `i915` or `none`), `gpu_mhz`, `mem_mhz`
+    (0 on i915) and NVIDIA's `pstate` (-1 where unknown), sampled four times
+    a second by a thread of their own.
     Misses are counted whether or not this is set, and every session ends
     with one `pacing` line of totals.
 
@@ -227,6 +230,11 @@ SOLIUM_FENCE_WAIT=<on|off>
     waiting for it on the CPU: the GPU orders the read after the draw on the
     one context. `on`, or unset, waits, which is the default until #59 lands.
     Each session's log says which it ran with.
+
+SOLIUM_PACING_CLOCKS=off
+    With `SOLIUM_PACING`, do not start the thread that samples the GPU's
+    clocks (NVML, or i915's sysfs). For checking that sampling them does not
+    itself keep the GPU out of its low-power states.
 
 SOLIUM_RESIZE_TRACE=<file>
     Append a per-frame trace of every resize drag to `<file>`.

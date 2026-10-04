@@ -10,6 +10,7 @@
 
 mod assets;
 mod capture;
+mod clocks;
 mod cursor;
 mod decoration;
 mod dev;

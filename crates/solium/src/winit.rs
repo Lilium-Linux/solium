@@ -188,6 +188,14 @@ pub(crate) fn run() -> Result<()> {
         );
         state.timer = Some(timer);
     }
+    if crate::pacing::enabled()
+        && let Ok(device) = smithay::backend::egl::EGLDevice::device_for_display(
+            backend.renderer().egl_context().display(),
+        )
+        && let Ok(Some(node)) = device.try_get_render_node()
+    {
+        crate::clocks::start(node.major(), node.minor());
+    }
 
     // The same hardware buffer sharing the hardware backend offers, so that a
     // client taking the fast path is exercised here rather than first
