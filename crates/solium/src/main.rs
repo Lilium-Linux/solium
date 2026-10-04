@@ -14,6 +14,7 @@ mod cursor;
 mod decoration;
 mod dev;
 mod focus;
+mod gputime;
 mod group;
 mod idle;
 mod input;

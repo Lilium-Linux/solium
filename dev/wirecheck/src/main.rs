@@ -45,6 +45,8 @@ use std::os::fd::{FromRawFd as _, OwnedFd};
 #[allow(dead_code, reason = "target.rs carries fields only the compositor reads")]
 mod target;
 
+mod fx0;
+
 unsafe extern "C" {
     fn solium_qml_start_gpu(import_path: *const c_char) -> c_int;
     fn solium_qml_scene_new_gpu(
@@ -1460,6 +1462,14 @@ fn main() -> Result<()> {
         if late { "after" } else { "before" },
         if separate { "its own" } else { "the buffers'" }
     );
+    // `WIRECHECK_ONLY=fx0`: the FX0 cases alone, with no Qt, so they can be
+    // run on a machine that has only this binary (the Surface Pro 7).
+    if std::env::var("WIRECHECK_ONLY").as_deref() == Ok("fx0") {
+        let mut renderer = make_renderer(&gbm)?;
+        fx0::all(&mut renderer)?;
+        println!("\nFX0 cases passed");
+        return Ok(());
+    }
     let mut renderer = if late {
         // Qt first, exactly as the compositor orders it.
         let import_path = CString::new(repo().join("crates/solium/qml").as_os_str().as_encoded_bytes())?;
@@ -2564,6 +2574,9 @@ fn main() -> Result<()> {
             ));
         }
     }
+
+    // Case 11b onwards: Phase 0 of the shader work, in `fx0.rs`.
+    fx0::all(&mut renderer)?;
 
     // ------------------------------------------------------------------
     // The first rebind, on a scene that has never rendered.

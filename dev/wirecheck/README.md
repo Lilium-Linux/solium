@@ -53,6 +53,7 @@ judged at the very end.
 | 9 | the compositor's own scenes | `cursor.qml`, `panes/top/Frame.qml` and `delegate.qml` build and draw on a GPU host; the first two read as not animating, and `delegate.qml`, whose one animation is in a `Repeater` delegate, reads as animating | `a GPU host could not build the` …, or `` `solium_qml_scene_animating` says `` … |
 | 10 | the pointer's size | `cursor.qml` at 16, 24, 48 and 96 draws from the corner and fills the same fraction at each | `the pointer fills` … |
 | 11 | the rounded-corner shader | it compiles in all three variants, and draws the middle intact, all four corners cut, four radii in the right quadrants and a zero radius square | `the rounded-corner shader did not compile`, or a message naming the variant or corner |
+| 11b | GPU timestamps (FX0) | `GL_EXT_disjoint_timer_query` is found, both entry points load, and 200 fills of 1024² in one pass resolve within 20 polls of the timer's `idle`, 10 ms apart, to 0 < ns < 1 s | `GL_EXT_disjoint_timer_query is not usable here…`, or `pass 1's GPU time did not resolve…` |
 | 12 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
 | 13 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
 | 14 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
@@ -689,6 +690,7 @@ buffer. Changing it there changes nothing this runs.
 | `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
 | `WIRECHECK_STOP_THE_CLOCK` | stop ticking from the rebind onward — the animation control above |
 | `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |
+| `WIRECHECK_ONLY=fx0` | runs only the FX0 cases (11b onwards), with no Qt started; that is how the Surface Pro 7 runs them from a copied binary |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
 | `WIRECHECK_NO_RESTORE` | skip both restores of the compositor's context around the first scene's build and first render, the early one included. Every restore after that still runs |
 | `WIRECHECK_LATE_RENDERER`, `WIRECHECK_SEPARATE_GBM` | build the renderer after Qt, or on its own device |
