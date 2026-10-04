@@ -717,6 +717,11 @@ function sol.unknown(key, meant) end
 
 ---Listen for an event. Listeners are added, never replaced, and one that fails
 ---is logged while the others still run.
+---
+---A listener runs under a 100 ms deadline: one that takes longer is stopped
+---with an error and logged, the other listeners still run, and one stopped
+---three times is taken out until the configuration is reloaded. Bindings, and
+---each `done` of `sol.act`, run under the same deadline.
 ---@overload fun(event: "open"|"focus"|"closing"|"refused"|"close", handler: fun(id: integer))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))

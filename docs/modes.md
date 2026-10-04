@@ -233,6 +233,15 @@ sol.on("keyboard", function(state, changed) end)   -- the layout, Caps Lock or N
 sol.on("text_input", function(field, why) end)     -- the focused text field: "field", "caret" or "framed"
 ```
 
+Every handler, and every binding, has 100 ms: past that it is stopped with an
+error in the log, so a loop in one cannot freeze the desktop, even inside a
+coroutine it makes, and the other listeners still run. A listener stopped three
+times stays off until `super+shift+r`
+(`script::tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
+`script::tests::a_binding_that_never_returns_is_stopped`,
+`script::tests::a_listener_that_never_returns_inside_a_coroutine_is_stopped`,
+`script::tests::a_listener_stopped_three_times_is_taken_out`).
+
 `surface` is how a `sol.surface` declared with `interactive = true` talks
 back: its scene calls `Solium.send(action, data)`, and you are told the
 surface's name, the action and its data, a table, a value or `nil`, every
