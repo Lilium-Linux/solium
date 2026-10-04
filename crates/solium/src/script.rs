@@ -998,8 +998,11 @@ impl Scripts {
 
         // Every 10 000 instructions, a handler past its deadline is unwound
         // with an error. `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`.
+        // The global hook rather than a thread's own: a coroutine a handler
+        // makes finds no callback for a thread's hook, drops it, and would
+        // loop unchecked. `tests::a_listener_that_never_returns_inside_a_coroutine_is_stopped`.
         lua.set_app_data(Deadline::default());
-        lua.set_hook(
+        lua.set_global_hook(
             mlua::HookTriggers::new().every_nth_instruction(10_000),
             |lua, _debug| {
                 let late = lua
@@ -7585,6 +7588,28 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         );
         let outcome = scripts.relayout(one_screen(&[]));
         assert_eq!(outcome.status.as_deref(), Some("whole"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A loop inside a coroutine is stopped too**: a coroutine the handler
+    /// makes is under the same deadline as the handler.
+    #[test]
+    fn a_listener_that_never_returns_inside_a_coroutine_is_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-coroutine",
+            r#"
+            sol.on("layout", function() coroutine.wrap(function() while true do end end)() end)
+            sol.on("layout", function() sol.status("ran") end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome.status.as_deref(), Some("ran"));
         let _ = std::fs::remove_dir_all(&directory);
     }
 
