@@ -7823,22 +7823,45 @@ mod tests {
         ) else {
             return;
         };
+        // Two monitors, the pointer on the left one: the right one is named,
+        // so it is the one that switches.
+        let two = || {
+            let mut snapshot = one_screen(&[]);
+            let mut right = snapshot.monitors[0].clone();
+            right.name = "test-2".to_owned();
+            right.whole.x = 1600.0;
+            right.area.x = 1600.0;
+            right.focused = false;
+            snapshot.monitors.push(right);
+            snapshot
+        };
         let _ = scripts.startup();
-        let _ = scripts.monitors_changed(one_screen(&[]));
+        let _ = scripts.monitors_changed(two());
         let data =
-            crate::json::Json::parse(r#"{"id":"2","monitor":"test-1"}"#).expect("valid JSON");
-        let outcome = scripts.surface_action("shell", "workspaces.go", &data, one_screen(&[]));
+            crate::json::Json::parse(r#"{"id":"2","monitor":"test-2"}"#).expect("valid JSON");
+        let outcome = scripts.surface_action("shell", "workspaces.go", &data, two());
         let showing = outcome
             .commands
             .iter()
             .rev()
             .find_map(|command| match command {
-                Command::Workspaces(declared) => {
-                    declared.groups.first().map(|group| group.showing.clone())
-                }
+                Command::Workspaces(declared) => Some(
+                    declared
+                        .groups
+                        .iter()
+                        .map(|group| (group.id.clone(), group.showing.clone()))
+                        .collect::<Vec<_>>(),
+                ),
                 _ => None,
             });
-        assert_eq!(showing, Some(vec!["2".to_owned()]));
+        assert_eq!(
+            showing,
+            Some(vec![
+                ("test-1".to_owned(), vec!["1".to_owned()]),
+                ("test-2".to_owned(), vec!["2".to_owned()])
+            ]),
+            "(group, showing): the monitor named switches, not the one in front"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

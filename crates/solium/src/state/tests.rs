@@ -25535,6 +25535,38 @@ end)"#,
                     window_row(&desk, id).get("workspace"),
                     Some(&Json::Text("2".to_owned()))
                 );
+
+                // Fullscreen and urgent, the window makes its workspace so,
+                // and is in its `windows`; the other is neither.
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::ToggleFullscreen { id }],
+                    ..crate::script::Outcome::default()
+                });
+                desk.state.urgent.insert(id);
+                let rows = crate::models::workspaces::rows(&desk.state);
+                let roles = |key: String| {
+                    let row = rows.iter().find(|row| row.key == key);
+                    ["urgent", "hasFullscreen", "windows"]
+                        .map(|role| row.and_then(|row| row.values.get(role).cloned()))
+                };
+                #[expect(clippy::cast_precision_loss, reason = "a window id, far below 2^53")]
+                let number = id as f64;
+                assert_eq!(
+                    (roles(format!("{monitor}/2")), roles(format!("{monitor}/1"))),
+                    (
+                        [
+                            Some(Json::Bool(true)),
+                            Some(Json::Bool(true)),
+                            Some(Json::List(vec![Json::Number(number)]))
+                        ],
+                        [
+                            Some(Json::Bool(false)),
+                            Some(Json::Bool(false)),
+                            Some(Json::List(Vec::new()))
+                        ]
+                    ),
+                    "(urgent, hasFullscreen, windows) of workspace 2, with the window, and 1"
+                );
             }
 
             /// **`focusOrder` is most recent first** (Ruling 18).
