@@ -261,6 +261,8 @@ same way, by function: a `done` written inline is a new function at each
 `script::tests::a_close_run_after_a_stop_is_not_under_the_deadline`,
 `script::tests::a_gc_finalizer_is_not_under_the_deadline`,
 `script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+`script::tests::a_stopped_binding_is_logged_where_it_was_written_and_stopped`,
+`script::tests::a_handler_stopped_at_its_focus_direction_is_logged_at_that_call`,
 `script::tests::a_listener_stopped_three_times_is_taken_out`,
 `script::tests::a_done_stopped_three_times_is_not_called_again`,
 `script::tests::an_inline_done_is_stopped_each_time_and_never_taken_out`).

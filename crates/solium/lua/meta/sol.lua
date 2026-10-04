@@ -769,10 +769,11 @@ function sol.unknown(key, meant) end
 ---file and line it was stopped at (for an `actions.override`, the listener
 ---`actions.lua` writes for it, and the override's own line), the other
 ---listeners still run, and one stopped three times is taken out until the
----configuration is reloaded. The stops are counted by function, so a function listening for
----two events counts the stops of both, and from its third on is taken out of
----each event it is stopped in. Bindings, and each `done` of `sol.act`, run
----under the same deadline. A `done` is struck by function too, and one
+---configuration is reloaded. The stops are counted by function, so a
+---function listening for two events counts the stops of both, and from its
+---third on is taken out of each event it is stopped in. Bindings, and each
+---`done` of `sol.act`, run under the same deadline, and a stopped binding is
+---logged the same way. A `done` is struck by function too, and one
 ---stopped three times is not called again until the configuration is
 ---reloaded; a `done` written inline is a new function at each `sol.act`, so
 ---it is stopped each time rather than taken out. What a `done` asked for in

@@ -1013,12 +1013,7 @@ impl Scripts {
                     // such as an `actions.override`, that is the wrapped
                     // function, where the struck listener is the wrapper.
                     // `tests::a_stopped_override_is_logged_where_it_was_stopped`.
-                    let source = debug.source();
-                    let file = file_of(source.source.as_deref(), source.short_src.as_deref());
-                    let line = debug.current_line().unwrap_or_default();
-                    if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
-                        deadline.stopped_at = Some(format!("{file}:{line}"));
-                    }
+                    stopped_here(lua, debug);
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(mlua::VmState::Continue)
@@ -1168,14 +1163,34 @@ impl Scripts {
 
     /// Run the handler bound to a key combination.
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, |_, sol| {
+        self.dispatch(snapshot, |lua, sol| {
             let bindings: Table = sol.get("_bindings")?;
             let handler: Value = bindings.get(normalise_combo(combo))?;
             match handler {
-                Value::Function(function) => {
-                    function.call::<()>(())?;
-                    Ok(true)
-                }
+                Value::Function(function) => match function.call::<()>(()) {
+                    Ok(()) => Ok(true),
+                    // Logged where it was written and where it was stopped,
+                    // as a stopped listener is, and unhandled, as a binding
+                    // that fails is.
+                    // `tests::a_stopped_binding_is_logged_where_it_was_written_and_stopped`.
+                    Err(err) if err.to_string().contains(STOPPED) => {
+                        let info = function.info();
+                        let file = file_of(info.source.as_deref(), info.short_src.as_deref());
+                        let line = info.line_defined.unwrap_or_default();
+                        let stopped_at = stopped_at(lua);
+                        tracing::error!(
+                            %err,
+                            event = "binding",
+                            combo,
+                            file = %file,
+                            line,
+                            stopped_at = stopped_at.as_deref().map(tracing::field::display),
+                            "a handler ran for longer than 100 ms and was stopped"
+                        );
+                        Ok(false)
+                    }
+                    Err(err) => Err(err),
+                },
                 _ => Ok(false),
             }
         })
@@ -1963,6 +1978,27 @@ fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
     }
 }
 
+/// Note `debug`'s function and line as where the handler running now was
+/// stopped. `tests::a_stopped_override_is_logged_where_it_was_stopped`,
+/// `tests::a_handler_stopped_at_its_focus_direction_is_logged_at_that_call`.
+fn stopped_here(lua: &Lua, debug: &mlua::debug::Debug) {
+    let source = debug.source();
+    let file = file_of(source.source.as_deref(), source.short_src.as_deref());
+    let line = debug.current_line().unwrap_or_default();
+    if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
+        deadline.stopped_at = Some(format!("{file}:{line}"));
+    }
+}
+
+/// Where the handler running now was stopped, once it has been.
+/// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+fn stopped_at(lua: &Lua) -> Option<String> {
+    lua.try_app_data_ref::<Deadline>()
+        .ok()
+        .flatten()
+        .and_then(|deadline| deadline.stopped_at.clone())
+}
+
 /// A file by its whole path, and a chunk of text by the short name Lua's own
 /// messages give it.
 /// `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
@@ -2010,11 +2046,7 @@ fn strike(
     let info = handler.info();
     let file = file_of(info.source.as_deref(), info.short_src.as_deref());
     let line = info.line_defined.unwrap_or_default();
-    let stopped_at = lua
-        .try_app_data_ref::<Deadline>()
-        .ok()
-        .flatten()
-        .and_then(|deadline| deadline.stopped_at.clone());
+    let stopped_at = stopped_at(lua);
     tracing::error!(
         %err,
         event,
@@ -3579,6 +3611,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 with_pending(lua, |pending| pending.moving = outer)?;
                 heard?;
                 if late(lua) {
+                    // Stopped at this call, which is where the log says it
+                    // was stopped: a `direction` listener's clock cleared the
+                    // place, or left that listener's own.
+                    // `tests::a_handler_stopped_at_its_focus_direction_is_logged_at_that_call`.
+                    let _ = lua.inspect_stack(1, |caller| stopped_here(lua, caller));
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(())
@@ -8261,6 +8298,63 @@ end)"#,
         assert!(
             log.lines()
                 .any(|line| line.contains("was stopped") && line.contains(&at)),
+            "the stop names {at}:\n{log}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A stopped binding is logged where it was written and where it was
+    /// stopped**, as a stopped listener is, and is left unhandled, as a
+    /// binding that fails is.
+    #[test]
+    fn a_stopped_binding_is_logged_where_it_was_written_and_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-binding-where",
+            "sol.bind(\"super+x\", function()\n    while true do end\nend)",
+        );
+        let mut handled = None;
+        let log = logged_while(|| {
+            handled = Some(scripts.key("super+x", one_screen(&[])).handled);
+        });
+        let init = directory.join("init.lua");
+        let (written, stopped) = (
+            format!("file={} line=1", init.display()),
+            format!("stopped_at={}:2", init.display()),
+        );
+        assert_eq!(
+            (
+                handled,
+                log.lines().any(|line| line.contains("was stopped")
+                    && line.contains("event=\"binding\"")
+                    && line.contains(&written)
+                    && line.contains(&stopped)),
+            ),
+            (Some(false), true),
+            "(whether the key was handled, whether the stop names {written} and {stopped}):\n{log}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A handler stopped when its `sol.focus_direction` returns is logged
+    /// at that call**, not with no place, nor at a `direction` listener's
+    /// line.
+    #[test]
+    fn a_handler_stopped_at_its_focus_direction_is_logged_at_that_call() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-direction-where",
+            "sol.on(\"direction\", function() end)\nsol.on(\"layout\", function()\n    while true do\n        sol.focus_direction(\"left\")\n    end\nend)",
+        );
+        let log = logged_while(|| {
+            let _ = scripts.relayout(one_screen(&[]));
+        });
+        // The error carries a traceback here, so the fields are on a line
+        // of their own.
+        let at = format!("stopped_at={}:4", directory.join("init.lua").display());
+        assert!(
+            log.contains("was stopped")
+                && log
+                    .lines()
+                    .any(|line| line.contains("event=\"layout\"") && line.contains(&at)),
             "the stop names {at}:\n{log}"
         );
         let _ = std::fs::remove_dir_all(&directory);
