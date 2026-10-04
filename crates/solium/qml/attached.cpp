@@ -328,6 +328,34 @@ SoliumKeyboard *SoliumAttached::keyboard()
     return m_keyboard;
 }
 
+SoliumCursor *SoliumAttached::cursor()
+{
+    /* One per object, made when first read or written: the published values
+     * are the same in every one, and the hotspot is the object's own, read
+     * from the scene's root.
+     * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+    if (m_cursor == nullptr) {
+        m_cursor = new SoliumCursor(this);
+    }
+    return m_cursor;
+}
+
+void SoliumAttached::setRegion(const QString &region)
+{
+    if (region != m_region) {
+        m_region = region;
+        emit regionChanged();
+    }
+}
+
+void SoliumAttached::setMaterial(const QVariant &material)
+{
+    if (material != m_material) {
+        m_material = material;
+        emit materialChanged();
+    }
+}
+
 void SoliumAttached::send(const QString &action, const QJSValue &data)
 {
     /* A scene that is not hosted has no surface to send from, so nothing is
@@ -564,6 +592,9 @@ void solium_qml_register_types()
     /* `Solium.keyboard`'s group, nameless for the same reason.
      * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     qmlRegisterAnonymousType<SoliumKeyboard>(SOLIUM_NATIVE_URI, 1);
+    /* `Solium.cursor`'s group, nameless for the same reason.
+     * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`. */
+    qmlRegisterAnonymousType<SoliumCursor>(SOLIUM_NATIVE_URI, 1);
     /* Named, since a scene writes one: `Grab { ... }`.
      * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
     qmlRegisterType<SoliumGrab>(SOLIUM_NATIVE_URI, 1, 0, "Grab");

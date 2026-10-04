@@ -100,6 +100,30 @@ int solium_qml_start_gpu(const char *import_path);
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 void solium_qml_host_next_on(const char *monitor);
 
+/* Whether the next scene built says how big it is through its root item: the
+ * host then never writes the root's width or height, and a root that sets
+ * neither takes `width` by `height` logical pixels as its implicit size. 0 for
+ * a scene the host sizes, as every other is. Consumed by the next build,
+ * whether it succeeds or not.
+ * `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`,
+ * `qml::pointer::tests::a_scene_built_after_one_sized_by_its_root_is_sized_by_the_host`. */
+void solium_qml_host_next_sized_by_root(int width, int height);
+
+/* The scene's root item's width and height, in logical pixels. 0 for a scene
+ * with no root. `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`. */
+int solium_qml_scene_root_size(const SoliumQmlScene *scene, double *width, double *height);
+
+/* `Solium.cursor.hotspot` as the scene's root set it, in logical pixels.
+ * Returns 0, writing nothing, when the root set none.
+ * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+int solium_qml_scene_cursor_hotspot(const SoliumQmlScene *scene, double *x, double *y);
+
+/* The pointer as `Solium.cursor` reads it, as one JSON object: `shape`,
+ * `pressed`, `velocity` (`{ x, y }`), `scale` and `size`. Returns 0 when Qt
+ * has not started, so the compositor sends it again.
+ * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`. */
+int solium_qml_pointer_publish(const char *json);
+
 /* A scene that renders into a buffer we allocated.
  *
  * `dmabuf_fd` is borrowed for the call — EGL takes its own reference on the
