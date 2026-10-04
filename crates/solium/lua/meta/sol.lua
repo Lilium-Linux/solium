@@ -228,6 +228,7 @@
 ---@class sol.CursorOptions
 ---@field theme? string The name of an XCursor theme.
 ---@field size? integer Logical pixels, from 8 to 256.
+---@field scene? string A QML scene to draw the pointer with, for every shape and ahead of the theme: a path, `~` expanded, or a name looked for in `~/.config/solium/qml` and then the shipped QML. `SOLIUM_QML_CURSOR` overrides it for one run.
 
 ---How QML is rendered. Read once, before Qt starts.
 ---@class sol.QmlOptions
@@ -500,8 +501,9 @@ function sol.resize(options) end
 ---@return nil
 function sol.fullscreen(options) end
 
----Set the pointer's XCursor theme and size. Applied at once, so a reload is
----how a theme is tried. Not `sol.cursor`, which says where the pointer is.
+---Set the pointer's XCursor theme, size and scene. Applied at once, so a reload
+---is how a theme or a scene is tried, and a scene whose files changed is built
+---again. Not `sol.cursor`, which says where the pointer is.
 ---@param options? sol.CursorOptions
 ---@return nil
 function sol.cursor_theme(options) end

@@ -3,8 +3,8 @@
 Most of what the compositor draws that is not a client's window is QML, hosted
 in-process: the window frames, the loading window, the wallpaper, a shell you
 name in the configuration, any other scene a script declares, and the pointer
-when no cursor theme is set (see [shell-boundary.md](shell-boundary.md) for the
-shell). There is nothing to compile and no Rust to touch: write a file, name
+when a scene of your own is named for it or no cursor theme is set (see
+[shell-boundary.md](shell-boundary.md) for the shell). There is nothing to compile and no Rust to touch: write a file, name
 it, press `super+shift+r`.
 
 Two things on screen are not QML: a pointer from an XCursor theme, which is
@@ -36,7 +36,8 @@ a titlebar is.
 | a shell (bar, dock, launcher) | nothing ships | `shell = { scene = ... }` |
 | the keyboard pill, on a surface of its own | `qml/indicator/keyboard.qml` | `keyboard.indicator` in `config.lua` (`lua/keyboard_indicator.lua` declares it through `sol.surface`) |
 | any other scene | `qml/tweaks.qml`, the Developer Tweaks panel (`--debug-mode` only) | `sol.surface(name, { scene = ... })` |
-| the pointer, with no cursor theme | `qml/cursor.qml` | `SOLIUM_QML_CURSOR`, for one run |
+| the pointer, with no scene and no cursor theme | `qml/cursor.qml` | not replaced; name a scene instead |
+| the pointer's scene | nothing ships | `cursor = { scene = ... }`, or `SOLIUM_QML_CURSOR` for one run |
 
 Your own directory is `~/.config/solium/qml/`, and for everything in that
 table but the pointer it is searched first. A file you write shadows the
@@ -46,8 +47,9 @@ from the shipped set, including its later improvements. A folder under
 replace the shipped style of that name. There is no registry: nothing has to
 be listed anywhere for a style to be found.
 
-The pointer is the exception: `~/.config/solium/qml/cursor.qml` is not looked
-for. [The pointer](#the-pointer) below says what is.
+The shipped pointer is the exception: `~/.config/solium/qml/cursor.qml` does
+not replace it. A pointer of your own is a scene you name, which a bare name
+finds in that directory first. [The pointer](#the-pointer) below says how.
 
 ## Writing a pane style
 
@@ -210,7 +212,8 @@ anything.
 
 ## The pointer
 
-The pointer is the machine's XCursor theme whenever there is one:
+With no scene of your own named for it, the pointer is the machine's XCursor
+theme whenever there is one:
 
 ```lua
 cursor = { theme = "Adwaita", size = 24 },
@@ -230,14 +233,20 @@ on each edge.
 
 *Solium's own pointer at 24 pixels, magnified eight times: over the dark part
 of the wallpaper, and over a focused `top` titlebar.* It is what you get with
-no theme set anywhere, or with one named that is not installed, and it is QML:
+no scene and no theme set anywhere, or with a theme named that is not
+installed, and it is QML:
 `qml/cursor.qml`. Its colours are fixed rather than taken from `Theme`, a
 white body with a dark outline, because the pointer sits on whatever a client
 drew and has to stay legible on black and on white alike.
 
-To change it, point `SOLIUM_QML_CURSOR` at a file of your own for a run. A copy
-in `~/.config/solium/qml/` is not looked for, and the scene is built once, so
-an edit to it needs a restart rather than a reload.
+It is one arrow for every shape. A pointer of your own is a scene, named the
+way a shell's is, `cursor = { scene = "~/.config/solium/cursor/Cursor.qml" }`,
+or `SOLIUM_QML_CURSOR=<file>` for one run. It draws every shape ahead of any
+theme, is told which one through `Solium.cursor.shape`, can be larger than
+`size` and can animate; a reload builds it again after an edit.
+[ricing.md](ricing.md#your-own-pointer) has an example, and
+[shell-boundary.md](shell-boundary.md#what-a-pointer-scene-is-given) what it
+is given.
 
 ## Which windows get a frame, and what a failure looks like
 

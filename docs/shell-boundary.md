@@ -17,6 +17,9 @@ the line, and it is not where a Wayland tutorial would put it.
   `Solium.keyboard`), and `Solium.send` for what it asks Lua to do
   ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
   (#172); Quickshell itself may add Solium support on its own side.
+- The pointer can be a scene of its own the same way, `cursor = { scene =
+  "<its QML file>" }`, given what the pointer is doing as `Solium.cursor`
+  ([below](#what-a-pointer-scene-is-given)).
 - A shell that runs as its own program — Waybar, a Quickshell instance run
   on its own, any `wlr-layer-shell` panel — is supported too, as an ordinary
   client. It needs nothing from the configuration and gets nothing from the
@@ -388,12 +391,19 @@ written unqualified, as `Theme` is: the singletons `Theme` and `Keyboard`
 pointer", above); the pane-style types `PaneStyle` and `Layer`, and the
 keyboard pill's `KeyboardPill` and `KeyboardPillLayer` (the
 [panes README](../crates/solium/qml/panes/README.md)); and the attached
-`Solium` object, which any item can read, with exactly four members:
+`Solium` object, which any item can read, with these members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
 `Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
-below); and `Solium.keyboard.wants` and `claims` (above)
-(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
+below); `Solium.keyboard.wants` and `claims` (above); `Solium.cursor`, the
+pointer, and the hotspot a pointer scene sets
+([What a pointer scene is given](#what-a-pointer-scene-is-given));
+and `Solium.region`, `Solium.material` and `Solium.materialState`, which
+every item accepts and nothing reads until materials exist
+([#199](https://github.com/Lilium-Linux/solium/issues/199)), `materialState`
+reading `"off"` till then
+(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
+`qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`).
 Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
 internal, and the row types have no name, so a shell's own `Monitor.qml` is
 not shadowed
@@ -403,7 +413,8 @@ override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
 The attached `Solium` object and `Grab` belong to a hosted scene, which
 `sol.surface` builds on a monitor. Elsewhere (a pane's layers, the loading
-window, the fallback pointer) they build and do nothing: `Solium.monitor` is an
+window, the pointer's scene, the fallback pointer) they build and do nothing:
+`Solium.monitor` is an
 absent row with an empty `name` and `present: false`, `Solium.surface.reserve`
 reserves nothing, and `Solium.keyboard` and a `Grab` hold nothing
 (`qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`,
@@ -550,6 +561,66 @@ A scene that sets a string property named `action`, as scenes did before
 (`surface::tests::queued_actions_come_first_and_the_old_action_property_last`).
 Anything Lua can do — `sol.spawn`, switching workspaces, any binding — a
 hosted shell can ask for this way.
+
+## What a pointer scene is given
+
+The pointer is a scene too, when the configuration names one:
+`cursor = { scene = "~/.config/solium/cursor/Cursor.qml" }`, found as
+`shell.scene` is, or `SOLIUM_QML_CURSOR` for one run. It is built in the same
+engine as every other scene and is given this
+([ricing.md](ricing.md#your-own-pointer) has an example):
+
+- **Every named shape.** It is drawn for every shape a window names over its
+  surface, through `cursor-shape`, and for every one the compositor asserts
+  over its own chrome: the arrow over a titlebar, the resize arrows on the
+  edges. No theme is asked
+  (`models::pointer::tests::a_configured_scene_hears_every_named_shape`). A
+  window that attaches a cursor surface of its own, or hides the pointer, is
+  still drawn as it asked, over its own surface
+  (`cursor::tests::a_pointer_a_client_hides_stays_hidden_with_a_scene_configured`).
+- **`Solium.cursor`**, published once a frame for as long as a pointer scene
+  is configured, and read the same in every scene: `shape`, the shape by its
+  CSS cursor name (`default`, `text`, `pointer`, `ew-resize`, and so on);
+  `pressed`; `velocity`, a `point` in logical pixels a second over the last
+  frame, zero once the pointer stops; `scale`, the scale of the monitor under
+  the pointer; and `size`, the configured `cursor.size`
+  (`models::pointer::tests::a_named_shape_reaches_solium_cursor_shape`,
+  `models::pointer::tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`).
+  A pointer that moved asks for the frame after, which publishes it standing
+  still, and with no pointer scene nothing is published at all
+  (`models::pointer::tests::a_moving_pointer_asks_for_the_frame_that_says_it_stopped`,
+  `models::pointer::tests::nothing_is_published_with_no_scene`).
+- **A size of its own.** The root's `width` and `height`, up to 256 logical
+  pixels a side, which the compositor reads and never writes, so a binding on
+  them holds; a root that sets neither is `cursor.size` square
+  (`qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`).
+- **A hotspot.** `Solium.cursor.hotspot` on its root is the point of its
+  picture that sits on the pointer, the top-left corner by default. The
+  picture is placed so that point is where every hit test asks, at every
+  scale (`qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`,
+  `cursor::scene::tests::the_scene_is_drawn_at_its_own_size_with_its_hotspot_on_the_pointer`).
+- **The compositor's clock.** An animation in it runs on the clock every
+  other scene's does and asks for the next frame while it runs; at rest it
+  asks for none
+  (`cursor::scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`).
+  `ShaderEffect` and `MultiEffect` draw on the GPU path
+  (`dev/wirecheck`'s case 11); on the software path they draw nothing and the
+  scene's plain drawing is what shows.
+- **The cursor plane.** Its picture is a `Kind::Cursor` element on both
+  paths, so it can go on the hardware cursor plane and moving the mouse
+  redraws nothing else. A picture that reads the backdrop would be composited
+  instead; nothing can until materials exist
+  (`cursor::scene::tests::a_scene_with_no_material_is_a_cursor_plane_element`).
+- **A reload that swaps it.** `super+shift+r` builds it again when the file,
+  its files' contents or `cursor.size` changed, or when it would not load
+  last time; one that would not load leaves the theme and the shipped arrow
+  to draw the pointer (`cursor::tests::a_reload_swaps_the_scene`).
+
+It is not hosted on a monitor and takes no input: `Solium.monitor` is the
+absent row, and `Solium.send`, `Grab` and `Solium.keyboard` do nothing in it.
+With no scene configured, nothing of this runs: the pointer is the theme, and
+then `qml/cursor.qml`, as before
+(`cursor::tests::with_no_scene_configured_the_pointer_is_drawn_as_before`).
 
 ## What it is not given
 
@@ -750,7 +821,8 @@ time it opens.
 |---|---|---|
 | Applications | Clients | `xdg-shell` |
 | Window frames | Compositor's QML engine | directly |
-| Loading windows, the pointer | The same QML engine | directly |
+| Loading windows, the shipped pointer | The same QML engine | directly |
+| A pointer scene | The same QML engine | `cursor.scene`, through `sol.cursor_theme` |
 | The wallpaper, other scripted scenes | The same QML engine | `sol.surface` from Lua |
 | A hosted shell: bar, dock, launcher | The same QML engine | `shell.scene`, through `sol.surface` |
 | A client shell (Waybar and the like), wallpaper programs | Clients | `wlr-layer-shell` |
