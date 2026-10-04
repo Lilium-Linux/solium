@@ -101,11 +101,12 @@ fn row_key(group: &str, workspace: &str) -> String {
 }
 
 /// Log every monitor and window `declared` names that the compositor does not
-/// have, and every row key it declares twice, once per name for as long as
-/// `logged` lives: `workspaces.lua` declares on every layout, and one mistake
-/// is one line.
+/// have, and every row key a group it keeps declares twice, once per name
+/// for as long as `logged` lives: `workspaces.lua` declares on every layout,
+/// and one mistake is one line.
 /// `tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
-/// `tests::a_workspace_declared_twice_is_one_row`.
+/// `tests::a_workspace_declared_twice_is_one_row`,
+/// `tests::a_workspace_of_a_group_left_out_is_not_logged_as_declared_twice`.
 pub(crate) fn log_unknown(
     declared: &Declared,
     monitors: &[String],
@@ -131,8 +132,15 @@ pub(crate) fn log_unknown(
             );
         }
     }
+    // Only the groups `validated` keeps take a key, as there.
     let mut keys = HashSet::new();
-    for group in &declared.groups {
+    let kept = declared.groups.iter().filter(|group| {
+        group
+            .monitors
+            .iter()
+            .any(|monitor| monitors.contains(monitor))
+    });
+    for group in kept {
         for workspace in &group.workspaces {
             let key = row_key(&group.id, &workspace.id);
             if !keys.insert(key.clone()) && logged.insert(format!("twice {key}")) {
@@ -358,6 +366,34 @@ mod tests {
             log.matches("sol.workspaces: declared twice").count(),
             2,
             "one line for twice-1/1 and one for twice-1/1/1:\n{log}"
+        );
+    }
+
+    /// **A group that is left out takes no key**, so the workspace of a kept
+    /// group that shares one is not logged as declared twice: it is the one
+    /// kept.
+    #[test]
+    fn a_workspace_of_a_group_left_out_is_not_logged_as_declared_twice() {
+        let declared = Declared {
+            groups: vec![
+                group("left-out-1", &["left-out-gone"], "1"),
+                group("left-out-1", &["left-out-1"], "1"),
+            ],
+            ..Declared::default()
+        };
+        let mut logged = HashSet::new();
+        let log = crate::script::logged_while(|| {
+            super::log_unknown(&declared, &["left-out-1".to_owned()], &[], &mut logged);
+        });
+        let kept = declared.validated(&["left-out-1".to_owned()], &[]);
+        assert_eq!(
+            (
+                kept.groups.len(),
+                kept.groups.first().map(|group| group.workspaces.len()),
+                log.matches("sol.workspaces: declared twice").count()
+            ),
+            (1, Some(3), 0),
+            "(groups kept, their workspaces, lines saying one was declared twice):\n{log}"
         );
     }
 }

@@ -393,8 +393,9 @@ function sol.monitors(rows) end
 ---is: `workspaces.lua` is the whole feature, and this is how a hosted shell's
 ---`Workspaces` model learns it. Declare again whenever it changes; the same
 ---declaration twice costs nothing. Monitors and windows the compositor does
----not have are left out, and so is a workspace whose `<group>/<id>` an
----earlier one already has; each is logged once.
+---not have are left out, with any group left with no monitor, and so is a
+---workspace whose `<group>/<id>` an earlier one in a group that stays already
+---has; each is logged once.
 ---@param declared sol.WorkspaceDeclaration
 ---@return nil
 function sol.workspaces(declared) end
