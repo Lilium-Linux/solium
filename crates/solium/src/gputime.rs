@@ -482,12 +482,23 @@ impl Timer {
             .unwrap_or(Stamp(None))
     }
 
+    /// Close a region outside a frame, and flush it to the GPU. A frame's
+    /// `finish` flushes what was stamped inside it; nothing flushes a stamp
+    /// made after it until the next pass draws, so without this the TTY's
+    /// output region is still unresolved at the idle after its flip, and the
+    /// report waiting for it goes as `late`: wirecheck case 11b's second half.
     pub(crate) fn close(&mut self, renderer: &mut GlesRenderer, stamp: Stamp) {
         let Self { ring, ext } = self;
         let Some(ext) = *ext else {
             return;
         };
-        let _ = renderer.with_context(|gl| ring.close(&mut Gl { gl, ext }, stamp));
+        let _ = renderer.with_context(|gl| {
+            ring.close(&mut Gl { gl, ext }, stamp);
+            if stamp.0.is_some() {
+                // SAFETY: the context is current inside `with_context`.
+                unsafe { gl.Flush() };
+            }
+        });
     }
 
     pub(crate) fn close_in(&mut self, frame: &mut GlesFrame<'_, '_>, stamp: Stamp) {
