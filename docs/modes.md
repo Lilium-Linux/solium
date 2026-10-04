@@ -243,6 +243,8 @@ listeners still run. A listener stopped three times stays off until
 `script::tests::a_binding_that_never_returns_is_stopped`,
 `script::tests::a_listener_that_never_returns_inside_a_coroutine_is_stopped`,
 `script::tests::a_listener_that_retries_with_pcall_is_stopped`,
+`script::tests::an_xpcall_handler_that_never_returns_is_not_called_for_the_stop`,
+`script::tests::a_listener_that_retries_load_is_stopped`,
 `script::tests::a_binding_that_loops_on_focus_direction_is_stopped`,
 `script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
 `script::tests::a_listener_stopped_three_times_is_taken_out`).

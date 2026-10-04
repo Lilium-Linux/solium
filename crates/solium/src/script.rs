@@ -1012,39 +1012,68 @@ impl Scripts {
             },
         )
         .map_err(failed("installing the handler deadline"))?;
-        // `pcall` and `xpcall` hand the stop on rather than catch it: a
-        // handler that calls one in a loop would otherwise catch it every
-        // time, and run for ever. They catch every other error as they did.
-        // Each is wrapped in Lua, and only the look at its results is Rust,
-        // so a coroutine can still yield inside one.
+        // `pcall`, `xpcall` and `load` hand the stop on rather than catch
+        // it: a handler that calls one in a loop would otherwise catch it
+        // every time, and run for ever. They catch every other error as they
+        // did. Each is wrapped in Lua, and only the look at its results is
+        // Rust, so a coroutine can still yield inside one. `xpcall`'s message
+        // handler is not called for the stop: Lua calls it from inside the
+        // instruction hook that raised the stop, where no hook runs, so a
+        // handler that never returned there would never be stopped.
         // `tests::a_listener_that_retries_with_pcall_is_stopped`,
         // `tests::a_listener_that_retries_with_xpcall_is_stopped`,
+        // `tests::a_listener_that_retries_load_is_stopped`,
+        // `tests::an_xpcall_handler_that_never_returns_is_not_called_for_the_stop`,
+        // `tests::an_xpcall_handler_that_never_returns_is_stopped`,
         // `tests::pcall_still_catches_an_ordinary_error_in_a_handler`,
+        // `tests::load_still_answers_a_chunk_or_nil_and_why`,
         // `tests::a_coroutine_can_still_yield_inside_pcall`.
         let hand_on = lua
             .create_function(|lua, results: mlua::MultiValue| {
-                if late(lua) && matches!(results.front(), Some(Value::Boolean(false))) {
+                // `pcall` and `xpcall` answer `false` for an error they
+                // caught, and `load` answers `nil`.
+                if late(lua) && matches!(results.front(), Some(Value::Boolean(false) | Value::Nil))
+                {
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(results)
             })
-            .map_err(failed("wrapping `pcall` and `xpcall`"))?;
-        for name in ["pcall", "xpcall"] {
-            let catcher: mlua::Function = lua
+            .map_err(failed("wrapping `pcall`, `xpcall` and `load`"))?;
+        let in_time = lua
+            .create_function(|lua, (): ()| Ok(!late(lua)))
+            .map_err(failed("wrapping `pcall`, `xpcall` and `load`"))?;
+        for (name, wrapper) in [
+            (
+                "pcall",
+                "return function(...) return hand_on(pcall(...)) end",
+            ),
+            ("load", "return function(...) return hand_on(load(...)) end"),
+            (
+                "xpcall",
+                "return function(f, handler, ...)\n\
+                     if type(handler) == 'function' then\n\
+                         local theirs = handler\n\
+                         handler = function(err)\n\
+                             if in_time() then return theirs(err) end\n\
+                             return err\n\
+                         end\n\
+                     end\n\
+                     return hand_on(xpcall(f, handler, ...))\n\
+                 end",
+            ),
+        ] {
+            let original: mlua::Function = lua
                 .globals()
                 .get(name)
-                .map_err(failed("reading `pcall` and `xpcall`"))?;
-            let handing_on: mlua::Function = lua
-                .load(format!(
-                    "local {name}, hand_on = ...\n\
-                     return function(...) return hand_on({name}(...)) end"
-                ))
+                .map_err(failed("reading `pcall`, `xpcall` and `load`"))?;
+            let wrapped: mlua::Function = lua
+                .load(format!("local {name}, hand_on, in_time = ...\n{wrapper}"))
                 .set_name(format!("={name}"))
-                .call((catcher, hand_on.clone()))
-                .map_err(failed("wrapping `pcall` and `xpcall`"))?;
+                .call((original, hand_on.clone(), in_time.clone()))
+                .map_err(failed("wrapping `pcall`, `xpcall` and `load`"))?;
             lua.globals()
-                .set(name, handing_on)
-                .map_err(failed("wrapping `pcall` and `xpcall`"))?;
+                .set(name, wrapped)
+                .map_err(failed("wrapping `pcall`, `xpcall` and `load`"))?;
         }
 
         // So a script can `require` its neighbours.
@@ -7853,6 +7882,99 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         assert_eq!(
             scripts.relayout(one_screen(&[])).status.as_deref(),
             Some("one two a b")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`xpcall`'s message handler is not called for the stop**: Lua calls
+    /// it from inside the instruction hook that raised the stop, where no hook
+    /// runs, so one that never returned there would never be stopped.
+    #[test]
+    fn an_xpcall_handler_that_never_returns_is_not_called_for_the_stop() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-xpcall-handler",
+            r#"
+            sol.on("layout", function()
+                xpcall(function() while true do end end, function() while true do end end)
+            end)
+            sol.on("layout", function() sol.status("ran") end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome.status.as_deref(), Some("ran"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **An `xpcall` message handler that never returns is stopped**, when
+    /// the error it handles is an ordinary one.
+    #[test]
+    fn an_xpcall_handler_that_never_returns_is_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-xpcall-handler-ordinary",
+            r#"
+            sol.on("layout", function()
+                xpcall(function() error("mine") end, function() while true do end end)
+            end)
+            sol.on("layout", function() sol.status("ran") end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome.status.as_deref(), Some("ran"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A loop that catches the stop in `load`'s reader is still stopped.**
+    #[test]
+    fn a_listener_that_retries_load_is_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-load",
+            r#"
+            sol.on("layout", function() repeat until load(function() while true do end end) end)
+            sol.on("layout", function() sol.status("ran") end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome.status.as_deref(), Some("ran"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`load` still answers a chunk, or `nil` and why**, and still takes a
+    /// reader, a name, a mode and an environment.
+    #[test]
+    fn load_still_answers_a_chunk_or_nil_and_why() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-load-ordinary",
+            r#"
+            sol.on("layout", function()
+                local bad, why = load("return (")
+                local good = load("return x", "=mine", "t", { x = 5 })
+                local pieces, at = { "return ", "7" }, 0
+                local read = load(function() at = at + 1 return pieces[at] end)
+                sol.status(table.concat({ tostring(bad), type(why), good(), read() }, " "))
+            end)
+            "#,
+        );
+        assert_eq!(
+            scripts.relayout(one_screen(&[])).status.as_deref(),
+            Some("nil string 5 7")
         );
         let _ = std::fs::remove_dir_all(&directory);
     }

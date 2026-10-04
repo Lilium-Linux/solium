@@ -723,8 +723,9 @@ function sol.unknown(key, meant) end
 ---run, and one stopped three times is taken out until the configuration is
 ---reloaded. The stops are counted by function, so a function listening for
 ---two events counts the stops of both. Bindings, and each `done` of
----`sol.act`, run under the same deadline. `pcall` and `xpcall` hand the stop
----on rather than catch it.
+---`sol.act`, run under the same deadline. `pcall`, `xpcall` and `load` hand
+---the stop on rather than catch it, and `xpcall`'s message handler is not
+---called for it.
 ---@overload fun(event: "open"|"focus"|"closing"|"refused"|"close", handler: fun(id: integer))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
