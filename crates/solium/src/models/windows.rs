@@ -107,15 +107,19 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
     rows
 }
 
-/// Whether a window is fullscreen and maximised, as its client last committed.
-/// `state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_once_its_client_commits_it`.
+/// Whether a window is fullscreen and maximised, as the compositor last set
+/// it: the state its next configure carries, which is how the compositor
+/// itself asks (`state::workspaces`' `fullscreen`), so nothing waits for the
+/// client (Section 2, rule 3).
+/// `state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_at_once`.
 fn window_states(window: &Window) -> (bool, bool) {
     if let Some(toplevel) = window.toplevel() {
-        let current = toplevel.current_state();
-        return (
-            current.states.contains(xdg_toplevel::State::Fullscreen),
-            current.states.contains(xdg_toplevel::State::Maximized),
-        );
+        return toplevel.with_pending_state(|state| {
+            (
+                state.states.contains(xdg_toplevel::State::Fullscreen),
+                state.states.contains(xdg_toplevel::State::Maximized),
+            )
+        });
     }
     window.x11_surface().map_or((false, false), |x11| {
         (x11.is_fullscreen(), x11.is_maximized())

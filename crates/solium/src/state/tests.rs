@@ -25571,11 +25571,12 @@ end)"#,
                 );
             }
 
-            /// **A window reads `maximized` once its client has agreed to
-            /// it**: as it last committed, not as it was only asked
-            /// (Ruling 18).
+            /// **A window reads `maximized` the moment the compositor
+            /// maximises it**, before its client has answered, and still
+            /// once it has: nothing waits for a client (Section 2, rule 3;
+            /// Ruling 18).
             #[test]
-            fn a_maximised_window_reads_maximized_once_its_client_commits_it() {
+            fn a_maximised_window_reads_maximized_at_once() {
                 let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
                 let window = window(&desk, &opened);
                 desk.state.toggle_maximize(&window);
@@ -25601,8 +25602,8 @@ end)"#,
                     .cloned();
                 assert_eq!(
                     (asked, agreed),
-                    (Some(Json::Bool(false)), Some(Json::Bool(true))),
-                    "(maximized once asked, once the client committed it)"
+                    (Some(Json::Bool(true)), Some(Json::Bool(true))),
+                    "(maximized once the compositor maximised it, once the client committed it)"
                 );
             }
         }

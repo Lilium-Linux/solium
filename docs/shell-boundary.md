@@ -447,14 +447,15 @@ compositor's own panes and updated in place once per frame: `id`, `title`,
 `appId`, `pid`, `xwayland`, `monitor`, `workspace`, `focused`, `focusOrder`
 (0 is the most recently focused, and a window that closes leaves no gap),
 `urgent` (it asked for attention nobody could see, until it is focused),
-`fullscreen` and `maximized` (as its application last agreed to), `modal`,
+`fullscreen` and `maximized` (as the compositor last set them, without
+waiting for the application), `modal`,
 `parent`, `state` (`loading` from the click, `shown`, `closing`) and
 `onStage`
 (`state::tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
 `state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
 `state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`,
 `state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`,
-`state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_once_its_client_commits_it`).
+`state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_at_once`).
 A window is listed from the moment it is launched, before its application
 draws, unless `loading.reserves_a_slot` is off; until then it has no `pid`,
 which reads `-1`
