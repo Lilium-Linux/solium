@@ -1841,6 +1841,7 @@ const HANDLER_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1
 /// `tests::a_listener_stopped_three_times_is_taken_out`.
 const STRIKES: u32 = 3;
 /// What the error a stopped handler is unwound with says.
+/// `tests::a_listener_stopped_three_times_is_taken_out`.
 const STOPPED: &str = "this handler ran for longer than 100 ms and was stopped";
 
 /// When the handler running now started, for the instruction hook; `None`
@@ -1853,6 +1854,7 @@ struct Deadline {
 }
 
 /// Start the handler clock, or stop it with `None`.
+/// `tests::lua_run_between_dispatches_is_not_stopped`.
 fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
     if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
         deadline.started = started;
@@ -1975,7 +1977,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set("_attempts", lua.create_table()?)?;
     sol.set("_keeps", lua.create_table()?)?;
     // How many times each listener was stopped at the deadline, by function.
-    // `tests::a_listener_stopped_three_times_is_taken_out`.
+    // `tests::a_listener_stopped_three_times_is_taken_out`,
+    // `tests::the_stops_are_counted_by_function_across_events`.
     sol.set("_strikes", lua.create_table()?)?;
     // Restart the handler clock: called before each listener, and before
     // each `done` in `Scripts::attempts_settled`, so each has the whole
@@ -7850,6 +7853,29 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         assert_eq!(
             scripts.relayout(one_screen(&[])).status.as_deref(),
             Some("one two a b")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The stops are counted by function**: one function listening for two
+    /// events is taken out at its third stop, wherever the stops were.
+    #[test]
+    fn the_stops_are_counted_by_function_across_events() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-strikes-by-function",
+            r#"
+            local function loop() while true do end end
+            sol.on("layout", loop)
+            sol.on("monitors", loop)
+            "#,
+        );
+        let _ = scripts.relayout(one_screen(&[]));
+        let _ = scripts.relayout(one_screen(&[]));
+        let _ = scripts.monitors_changed(one_screen(&[]));
+        assert_eq!(
+            scripts.evaluate("return #sol._handlers.layout .. ' ' .. #sol._handlers.monitors"),
+            "1 0",
+            "(layout listeners, monitors listeners)"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
