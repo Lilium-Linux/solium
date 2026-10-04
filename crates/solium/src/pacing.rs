@@ -1197,8 +1197,8 @@ mod tests {
         assert_eq!(next.gpu, None);
     }
 
-    /// **Every PACING line carries its GPU time, its status and its captures**,
-    /// and a status that is not `ok` reads as zero microseconds.
+    /// **Every PACING line carries its GPU time, its status, its captures and
+    /// its clocks**, and a status that is not `ok` reads as zero microseconds.
     #[test]
     fn every_pacing_line_carries_its_gpu_time_and_captures() {
         let line = |gpu: Option<Gpu>| Line {
@@ -1252,6 +1252,20 @@ mod tests {
             (held.source.name(), held.clocks.map(|c| c.gpu_mhz)),
             ("nvml", Some(1080))
         );
+    }
+
+    /// **A line takes its clocks from the sampler when it is made**: with
+    /// nothing sampling (no test starts `clocks::start`), it says `none` and
+    /// carries no clocks.
+    #[test]
+    fn a_line_takes_its_clocks_from_the_sampler() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        let line = counters
+            .finish_at(start, start + ms(17), true, 1, 1)
+            .expect("a first miss is due");
+        assert_eq!((line.source.name(), line.clocks), ("none", None));
     }
 
     /// A capture is counted only inside a measured pass: the GPU pre-flight
