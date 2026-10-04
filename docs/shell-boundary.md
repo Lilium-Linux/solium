@@ -514,6 +514,9 @@ told again in that dispatch, 16 rounds at most, the rest at the next one
 `state::tests::real_client::reflow_on_close::hosted::a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`,
 `state::tests::real_client::reflow_on_close::hosted::a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`,
 `state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`).
+Each `done` has the whole 100 ms handler deadline of its own, and one stopped
+at it does not stop the next
+(`script::tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`).
 A `workspaces.*` action is the configuration's to answer, since the
 compositor does not know what a workspace is: a file answers one with
 `actions.override(name, function(data, surface) ... end)`, and until one

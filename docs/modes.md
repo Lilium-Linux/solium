@@ -234,12 +234,17 @@ sol.on("text_input", function(field, why) end)     -- the focused text field: "f
 ```
 
 Every handler, and every binding, has 100 ms: past that it is stopped with an
-error in the log, so a loop in one cannot freeze the desktop, even inside a
-coroutine it makes, and the other listeners still run. A listener stopped three
-times stays off until `super+shift+r`
+error in the log, which names the file and line it was written at, so a loop in
+one cannot freeze the desktop, even inside a coroutine it makes, around a
+`pcall`, which hands the stop on, or around `sol.focus_direction`, and the other
+listeners still run. A listener stopped three times stays off until
+`super+shift+r`
 (`script::tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 `script::tests::a_binding_that_never_returns_is_stopped`,
 `script::tests::a_listener_that_never_returns_inside_a_coroutine_is_stopped`,
+`script::tests::a_listener_that_retries_with_pcall_is_stopped`,
+`script::tests::a_binding_that_loops_on_focus_direction_is_stopped`,
+`script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
 `script::tests::a_listener_stopped_three_times_is_taken_out`).
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
