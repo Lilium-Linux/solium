@@ -67,7 +67,12 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
                     (
                         "pid",
                         client
-                            .and_then(|window| state.client_pid(window))
+                            .and_then(|window| {
+                                pid_of(
+                                    window.x11_surface().map(crate::xwayland::client_pid),
+                                    || state.client_pid(window),
+                                )
+                            })
                             .map_or(Json::Number(-1.0), |pid| Json::Number(f64::from(pid))),
                     ),
                     (
@@ -124,4 +129,38 @@ fn window_states(window: &Window) -> (bool, bool) {
     window.x11_surface().map_or((false, false), |x11| {
         (x11.is_fullscreen(), x11.is_maximized())
     })
+}
+
+/// Which process a window belongs to. An X11 window's is the one Xwayland
+/// named for its own X connection (`crate::xwayland::client_pid`), and never
+/// its Wayland connection's, which is Xwayland itself for every X11 window;
+/// any other window's is its connection's.
+/// `tests::an_x11_window_is_never_given_the_pid_of_its_connection`.
+fn pid_of(x11: Option<Option<u32>>, connection: impl FnOnce() -> Option<u32>) -> Option<u32> {
+    match x11 {
+        Some(named) => named,
+        None => connection(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pid_of;
+
+    /// **An X11 window is never given the pid of its Wayland connection**,
+    /// which is Xwayland's: a widget that ended `model.pid` would end every
+    /// X11 application. It reads the one Xwayland named, or none.
+    #[test]
+    fn an_x11_window_is_never_given_the_pid_of_its_connection() {
+        let xwayland = || Some(4242);
+        assert_eq!(
+            (
+                pid_of(Some(Some(7)), xwayland),
+                pid_of(Some(None), xwayland),
+                pid_of(None, xwayland),
+            ),
+            (Some(7), None, Some(4242)),
+            "(an X11 window Xwayland named, one it could not name, a Wayland window)"
+        );
+    }
 }

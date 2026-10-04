@@ -460,6 +460,9 @@ A window is listed from the moment it is launched, before its application
 draws, unless `loading.reserves_a_slot` is off; until then it has no `pid`,
 which reads `-1`
 (`state::tests::real_client::reflow_on_close::hosted::a_window_still_loading_is_listed_as_loading`).
+An X11 window's `pid` is the process Xwayland names for the window's own X
+connection, `-1` when it names none, and never Xwayland's own
+(`models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`).
 `workspace` reads `""`: nothing declares workspaces yet
 ([#166](https://github.com/Lilium-Linux/solium/issues/166)).
 `WindowList { monitor: Solium.monitor.name; sort: "mru" }` is a filtered,
