@@ -277,18 +277,7 @@ impl Solium {
                 }
             });
         }
-        let location = pointer.current_location();
-        let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
-        pointer.motion(
-            self,
-            None,
-            &MotionEvent {
-                location,
-                serial: SERIAL_COUNTER.next_serial(),
-                time,
-            },
-        );
-        pointer.frame(self);
+        self.motion_in_place(None);
     }
 
     /// Give the pointer back once a grab is over, as a motion that does not
@@ -301,15 +290,29 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`.
     fn repoint_clients(&mut self) {
+        let Some(location) = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+        else {
+            return;
+        };
+        let under = self.surface_under(location);
+        self.motion_in_place(under);
+    }
+
+    /// A motion that does not move the pointer, giving it to `focus`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it`.
+    fn motion_in_place(&mut self, focus: Option<(WlSurface, Point<f64, Logical>)>) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
         let location = pointer.current_location();
-        let under = self.surface_under(location);
         let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
         pointer.motion(
             self,
-            under,
+            focus,
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
