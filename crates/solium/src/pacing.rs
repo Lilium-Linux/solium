@@ -247,6 +247,10 @@ struct Counters {
     parked_at: Cell<u64>,
     /// Captures drawn in this pass. `tests::a_capture_is_counted_only_inside_a_measured_pass`.
     captures: Cell<u32>,
+    /// This pass's GPU time, when it came before the pass ended, as a timer
+    /// with no extension answers.
+    /// `tests::a_gpu_time_in_before_its_pass_ends_goes_out_with_it`.
+    early: Cell<Option<crate::gputime::Gpu>>,
 }
 
 thread_local! {
@@ -276,6 +280,7 @@ thread_local! {
             parked: RefCell::new(None),
             parked_at: Cell::new(0),
             captures: Cell::new(0),
+            early: Cell::new(None),
         }
     };
 }
@@ -357,6 +362,7 @@ impl Counters {
         pass: u64,
     ) -> Option<Line> {
         let total = now.saturating_duration_since(started);
+        let early = self.early.take();
         let deadline = self.deadline.get();
         let missed = !deadline.is_zero() && total > deadline;
         self.all_passes.set(self.all_passes.get().saturating_add(1));
@@ -393,7 +399,7 @@ impl Counters {
             rendered: self.rendered.get(),
             built: self.built.get(),
             rebound: self.rebound.get(),
-            gpu: None,
+            gpu: early,
             captures: self.captures.get(),
         };
         if let Ok(mut worst) = self.worst.try_borrow_mut()
@@ -478,7 +484,8 @@ impl Counters {
     }
 
     /// A pass's GPU time is in: keep it with the worst pass if it is that one,
-    /// and send the parked report if it was waiting for it.
+    /// or with the pass being measured if it is that one, and send the parked
+    /// report if it was waiting for it.
     /// `tests::a_gpu_time_that_came_before_its_report_goes_out_with_it`.
     fn gpu_resolved(&self, pass: u64, gpu: crate::gputime::Gpu) -> Option<Line> {
         if let Ok(mut worst) = self.worst.try_borrow_mut()
@@ -486,6 +493,12 @@ impl Counters {
             && held.pass == pass
         {
             held.gpu = Some(gpu);
+        }
+        // `frame` numbers the pass being measured after those counted:
+        // `tests::a_gpu_time_in_before_its_pass_ends_goes_out_with_it`.
+        if self.live.get() && pass == self.all_passes.get().saturating_add(1) {
+            self.early.set(Some(gpu));
+            return None;
         }
         let waiting = self
             .parked
@@ -1137,6 +1150,36 @@ mod tests {
         assert_eq!((due.pass, due.gpu_status(), due.gpu_us()), (3, "ok", 912));
     }
 
+    /// **A GPU that cannot time itself says so at once.** Without the
+    /// extension the timer answers `unsupported` as a pass begins, before
+    /// that pass has a report to carry it; the report goes out with it
+    /// rather than being held eight passes and called `late`.
+    #[test]
+    fn a_gpu_time_in_before_its_pass_ends_goes_out_with_it() {
+        let counters = counters();
+        counters.deadline.set(at_260());
+        let start = Instant::now();
+        // Pass 1, as `frame` numbers it, is being measured, and fits.
+        assert!(counters.gpu_resolved(1, Gpu::Unsupported).is_none());
+        assert!(
+            counters
+                .finish_at(start, start + ms(1), true, 1, 1)
+                .is_none()
+        );
+        // Pass 2 misses, and its answer came as it began.
+        assert!(counters.gpu_resolved(2, Gpu::Unsupported).is_none());
+        let due = counters
+            .finish_at(start, start + ms(5), true, 1, 2)
+            .expect("a first miss is due");
+        assert_eq!((due.pass, due.gpu_status()), (2, "unsupported"));
+        // An answer is its own pass's only.
+        let later = start + Duration::from_secs(1);
+        let next = counters
+            .finish_at(later, later + ms(5), true, 1, 3)
+            .expect("due a second on");
+        assert_eq!(next.gpu, None);
+    }
+
     /// **Every PACING line carries its GPU time, its status and its captures**,
     /// and a status that is not `ok` reads as zero microseconds.
     #[test]
@@ -1289,6 +1332,7 @@ mod tests {
             parked: std::cell::RefCell::new(None),
             parked_at: std::cell::Cell::new(0),
             captures: std::cell::Cell::new(0),
+            early: std::cell::Cell::new(None),
         }
     }
 }
