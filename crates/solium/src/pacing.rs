@@ -999,14 +999,16 @@ impl Line {
         }
     }
 
-    /// `ok`, `unsupported`, `late` or `disjoint`. A line sent before its GPU
-    /// time came is `late`. `tests::every_pacing_line_carries_its_gpu_time_and_captures`.
+    /// `ok`, `unsupported`, `unread` or `disjoint`. A line sent before its
+    /// GPU time was read is `unread`, a word of its own because `late` on the
+    /// same line counts late flips.
+    /// `tests::every_pacing_line_carries_its_gpu_time_and_captures`.
     pub(crate) fn gpu_status(&self) -> &'static str {
         match self.gpu {
             Some(crate::gputime::Gpu::Ok(_)) => "ok",
             Some(crate::gputime::Gpu::Unsupported) => "unsupported",
             Some(crate::gputime::Gpu::Disjoint) => "disjoint",
-            Some(crate::gputime::Gpu::Late) | None => "late",
+            Some(crate::gputime::Gpu::Late) | None => "unread",
         }
     }
 
@@ -1291,8 +1293,8 @@ mod tests {
             .expect("due");
         counters.park(due, 7);
         assert!(counters.waited(14).is_none());
-        let late = counters.waited(15).expect("eight passes on, it goes");
-        assert_eq!((late.pass, late.gpu_status()), (7, "late"));
+        let sent = counters.waited(15).expect("eight passes on, it goes");
+        assert_eq!((sent.pass, sent.gpu_status()), (7, "unread"));
     }
 
     /// The loop going idle sends what is parked: the last miss before a pause
@@ -1379,7 +1381,7 @@ mod tests {
     /// **A GPU that cannot time itself says so at once.** Without the
     /// extension the timer answers `unsupported` as a pass begins, before
     /// that pass has a report to carry it; the report goes out with it
-    /// rather than being held eight passes and called `late`.
+    /// rather than being held eight passes and called `unread`.
     #[test]
     fn a_gpu_time_in_before_its_pass_ends_goes_out_with_it() {
         let counters = counters();
@@ -1438,8 +1440,8 @@ mod tests {
         };
         assert_eq!(line(Some(timed())).gpu_status(), "ok");
         assert_eq!(line(Some(Gpu::Unsupported)).gpu_status(), "unsupported");
-        assert_eq!(line(Some(Gpu::Late)).gpu_status(), "late");
-        assert_eq!(line(None).gpu_status(), "late");
+        assert_eq!(line(Some(Gpu::Late)).gpu_status(), "unread");
+        assert_eq!(line(None).gpu_status(), "unread");
         assert_eq!(line(Some(Gpu::Disjoint)).gpu_status(), "disjoint");
         assert_eq!(
             (

@@ -28,7 +28,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
 /// handler calls it. The wait flushes nothing (`SyncPoint::wait`), so the
 /// closing stamp reaches the GPU only if `close` sent it. Ten passes, and
 /// every one must be in at that first idle, or the report waiting for it
-/// goes as `late` (`Timer::close`).
+/// goes as `unread` (`Timer::close`).
 fn closed_outside_a_frame(renderer: &mut GlesRenderer) -> Result<()> {
     println!("\n=== FX0: a region closed outside a frame resolves at the first idle ===");
     let mut timer = gputime::Timer::new(renderer);

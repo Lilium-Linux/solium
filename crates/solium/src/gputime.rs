@@ -486,7 +486,7 @@ impl Timer {
     /// `finish` flushes what was stamped inside it; nothing flushes a stamp
     /// made after it until the next pass draws, so without this the TTY's
     /// output region is still unresolved at the idle after its flip, and the
-    /// report waiting for it goes as `late`: wirecheck case 11b's second half.
+    /// report waiting for it goes as `unread`: wirecheck case 11b's second half.
     pub(crate) fn close(&mut self, renderer: &mut GlesRenderer, stamp: Stamp) {
         let Self { ring, ext } = self;
         let Some(ext) = *ext else {
