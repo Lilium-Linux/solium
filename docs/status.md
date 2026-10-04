@@ -24,7 +24,8 @@ The first release, v0.1.0, will be a preview release, cut only once the
 desktop is daily-drivable (the `daily-drive` label), the native preview shell
 is written (a bar at the bottom, a dock at the top, quick search, desktop
 icons, widgets with real data and a native lock screen), and there are
-packages, then an open beta: [The road to a public preview](beta.md).
+packages: the point where it is ready for an open beta. [The road to a public
+preview](beta.md) is that road.
 
 The pages in this section are the longer view:
 

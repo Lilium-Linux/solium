@@ -62,7 +62,8 @@ desktop is daily-drivable (the issues labelled
 [`daily-drive`](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20state%3Aopen%20label%3Adaily-drive)),
 the native preview shell exists (a bar at the bottom, a dock at the top, quick
 search, desktop icons, widgets with real data and a native lock screen), and
-there are packages, then an open beta. It is not cut until that is done. The
+there are packages: the point where it is ready for an open beta. It is not cut
+until that is done. The
 native preview shell is not built yet: the shipped configuration hosts no
 shell.
 

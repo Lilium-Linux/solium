@@ -22,10 +22,10 @@ asked to draw its own and was let. The wallpaper is a QML file too.
 will be a preview release, and it is not cut until the desktop is
 daily-drivable (the `daily-drive` label), the native preview shell is written
 (a bar at the bottom, a dock at the top, quick search, desktop icons, widgets
-with real data and a native lock screen), and there are packages, then an open
-beta: [docs/beta.md](docs/beta.md) is that road. It is being readied for daily
-use, and the trial on real hardware that decides whether it is ready has not
-happened yet. What stands in the way is the
+with real data and a native lock screen), and there are packages: the point
+where it is ready for an open beta. [docs/beta.md](docs/beta.md) is that road.
+It is being readied for daily use, and the daily-driving trial that decides
+whether it is ready has not happened yet. What stands in the way is the
 [`daily-drive` label][daily-drive], and the honest reasons are specific:
 
 - A hosted shell is not yet a whole desktop ([#169]): it sees no windows or
