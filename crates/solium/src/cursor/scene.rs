@@ -512,6 +512,30 @@ mod tests {
         });
     }
 
+    /// **The shipped pointer, named as the scene, is `cursor.size`**: a copy
+    /// of `cursor.qml` is where a pointer of one's own starts, and as a scene
+    /// its root is the size it says, so a root that wrote 24 would be drawn at
+    /// 24 whatever size was asked for.
+    #[test]
+    fn the_shipped_pointer_named_as_a_scene_is_cursor_size() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            // As `models::pointer::publish` does, in the frame that builds it.
+            assert!(crate::qml::pointer::publish(
+                r#"{"shape":"default","pressed":false,"velocity":{"x":0,"y":0},"scale":1,"size":48}"#
+            ));
+            let shipped = crate::assets::qml().join("cursor.qml");
+            let size = Cursor::configured(&shipped, 48)
+                .expect("the shipped pointer builds as a scene")
+                .own_size();
+            assert_eq!(
+                size,
+                (48, 48),
+                "the shipped pointer as a scene at cursor.size 48"
+            );
+        });
+    }
+
     /// **A side is whole pixels, rounded up and bounded**: a root 40.4 wide is
     /// 41, one that says nothing sensible is 1, and one wider than
     /// [`super::LARGEST`] is that; at 1.5x a 40 by 32 scene is 60 by 48

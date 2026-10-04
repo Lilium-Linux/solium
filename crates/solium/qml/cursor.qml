@@ -1,6 +1,7 @@
-// The pointer Solium draws itself: what a name is drawn from when no XCursor
-// theme is configured, none is in the environment, or the one named is not
-// installed (`cursor.rs`; `no_theme_configured_is_our_own_pointer` and
+// The pointer Solium draws itself: what a name is drawn from when no pointer
+// scene is named (`cursor.scene`, #213), no XCursor theme is configured, none
+// is in the environment, or the one named is not installed (`cursor.rs`;
+// `no_theme_configured_is_our_own_pointer` and
 // `a_theme_that_will_not_load_falls_back_to_our_own_pointer` there). With a
 // theme, the pointer is that theme's.
 //
@@ -30,8 +31,16 @@ Item {
     // or `XCURSOR_SIZE`, whatever `cursor::theme::Settings` resolved — so
     // whatever is written here is overwritten before the first frame. It is
     // the size the file draws at when opened on its own.
-    width: 24
-    height: 24
+    //
+    // Bound to `Solium.cursor.size`, 24 until the compositor publishes one,
+    // rather than written as 24, for the one place nothing overwrites it: this
+    // file or a copy of it named as the pointer's scene (`cursor.scene`,
+    // `SOLIUM_QML_CURSOR`), whose root is the size it says (#213). There it
+    // follows `cursor.size` as it does here, instead of staying 24 whatever
+    // size was asked for
+    // (`cursor::scene::tests::the_shipped_pointer_named_as_a_scene_is_cursor_size`).
+    width: Solium.cursor.size
+    height: Solium.cursor.size
 
     // **The arrow is laid out in a 24-unit square and scaled to fit, rather
     // than drawn in absolute units.** `cursor.rs` sizes the scene to the
