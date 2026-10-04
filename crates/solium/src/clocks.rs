@@ -224,31 +224,59 @@ fn probe(soname: &CStr, sysfs: &Path, major: u32, minor: u32) -> Probe {
     Probe::None
 }
 
-/// NVML for the card at `pci`, or `None` with no driver library.
+/// NVML for the card at `pci`, or `None` with no driver library, or with
+/// one that does not drive the card.
 fn nvml(soname: &CStr, pci: &str) -> Option<Nvml> {
+    let address = std::ffi::CString::new(pci).ok()?;
     let library = Library::open(soname)?;
     // SAFETY: the signatures are NVML's (`nvml.h`), versions `_v2` where NVML
     // has one.
     unsafe {
-        let init: unsafe extern "C" fn() -> c_int = library.get(c"nvmlInit_v2")?;
-        let by_pci: unsafe extern "C" fn(*const c_char, *mut Device) -> c_int =
-            library.get(c"nvmlDeviceGetHandleByPciBusId_v2")?;
+        let entry = Entry {
+            init: library.get(c"nvmlInit_v2")?,
+            shutdown: library.get(c"nvmlShutdown")?,
+            by_pci: library.get(c"nvmlDeviceGetHandleByPciBusId_v2")?,
+        };
         let clock = library.get(c"nvmlDeviceGetClockInfo")?;
         let pstate = library.get(c"nvmlDeviceGetPerformanceState")?;
-        if init() != NVML_SUCCESS {
-            return None;
-        }
-        let address = std::ffi::CString::new(pci).ok()?;
-        let mut device: Device = std::ptr::null_mut();
-        if by_pci(address.as_ptr(), &raw mut device) != NVML_SUCCESS {
-            return None;
-        }
+        let device = device(entry, &address)?;
         Some(Nvml {
             _library: library,
             device,
             clock,
             pstate,
         })
+    }
+}
+
+/// NVML's calls that start it, stop it and find a card.
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    init: unsafe extern "C" fn() -> c_int,
+    shutdown: unsafe extern "C" fn() -> c_int,
+    by_pci: unsafe extern "C" fn(*const c_char, *mut Device) -> c_int,
+}
+
+/// Start NVML and find the card at `pci`. NVML started for a card it does
+/// not drive is shut down again before its library can be closed under it
+/// (a hybrid laptop's screens on the other GPU):
+/// `tests::nvml_is_shut_down_when_the_card_is_not_its`.
+///
+/// # Safety
+/// `entry` must be NVML's, or keep its contracts.
+unsafe fn device(entry: Entry, pci: &CStr) -> Option<Device> {
+    // SAFETY: the caller vouches for `entry`; the address is NUL-terminated
+    // and the device is an out-pointer to a local.
+    unsafe {
+        if (entry.init)() != NVML_SUCCESS {
+            return None;
+        }
+        let mut device: Device = std::ptr::null_mut();
+        if (entry.by_pci)(pci.as_ptr(), &raw mut device) != NVML_SUCCESS {
+            let _ = (entry.shutdown)();
+            return None;
+        }
+        Some(device)
     }
 }
 
@@ -297,7 +325,12 @@ fn sample(probe: &Probe, tell: &std::sync::mpsc::Sender<Source>) {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Probe, i915_mhz, pci_address, probe, pstate};
+    use std::{
+        ffi::{c_char, c_int},
+        sync::atomic::{AtomicU32, Ordering},
+    };
+
+    use super::{Device, Entry, Probe, device, i915_mhz, pci_address, probe, pstate};
 
     /// A throwaway sysfs, under the test's own name.
     fn sysfs(name: &str) -> PathBuf {
@@ -340,6 +373,79 @@ mod tests {
         std::os::unix::fs::symlink(&card, node.join("device")).expect("the device link");
         let probed = probe(c"libsolium-test-no-such-library.so.1", &root, 226, 128);
         assert!(matches!(probed, Probe::None));
+    }
+
+    /// How many times the fake NVML below was shut down.
+    static SHUT_DOWN: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn starts() -> c_int {
+        0
+    }
+
+    /// `NVML_ERROR_UNKNOWN`.
+    extern "C" fn does_not_start() -> c_int {
+        999
+    }
+
+    extern "C" fn shut_down() -> c_int {
+        SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+
+    /// `NVML_ERROR_NOT_FOUND`: the card is not one NVML drives.
+    extern "C" fn not_its_card(_: *const c_char, _: *mut Device) -> c_int {
+        6
+    }
+
+    /// # Safety
+    /// `found` must be writable, as `device` passes it.
+    unsafe extern "C" fn its_card(_: *const c_char, found: *mut Device) -> c_int {
+        // SAFETY: the caller's out-pointer.
+        unsafe { found.write(std::ptr::dangling_mut()) };
+        0
+    }
+
+    /// **NVML started for a card it does not drive is shut down again**,
+    /// before its library is closed under it: a hybrid laptop with NVIDIA's
+    /// driver installed and its screens on the other GPU. NVML that did not
+    /// start is not shut down, and NVML that found the card is kept.
+    #[test]
+    fn nvml_is_shut_down_when_the_card_is_not_its() {
+        let pci = c"0000:00:02.0";
+        // SAFETY: the fakes keep NVML's signatures and contracts.
+        unsafe {
+            let refused = Entry {
+                init: starts,
+                shutdown: shut_down,
+                by_pci: not_its_card,
+            };
+            assert_eq!(device(refused, pci), None);
+            assert_eq!(
+                SHUT_DOWN.load(Ordering::Relaxed),
+                1,
+                "started, and shut down again"
+            );
+            let unstarted = Entry {
+                init: does_not_start,
+                ..refused
+            };
+            assert_eq!(device(unstarted, pci), None);
+            assert_eq!(
+                SHUT_DOWN.load(Ordering::Relaxed),
+                1,
+                "never started, so not shut down"
+            );
+            let found = Entry {
+                by_pci: its_card,
+                ..refused
+            };
+            assert!(device(found, pci).is_some());
+            assert_eq!(
+                SHUT_DOWN.load(Ordering::Relaxed),
+                1,
+                "found its card, so kept"
+            );
+        }
     }
 
     /// NVML's P-states are 0 to 15; 32 is "unknown", and so is anything else.
