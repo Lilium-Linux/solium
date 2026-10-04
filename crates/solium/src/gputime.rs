@@ -533,6 +533,10 @@ mod tests {
         calls: u32,
         early_reads: u32,
         disjoint: bool,
+        /// Passes more before an end's result is in than its start's, as on
+        /// a GPU, where a region's end lands after its start. `ids()` gives
+        /// starts odd names and ends even ones.
+        end_lag: u64,
     }
 
     impl Fake {
@@ -541,6 +545,17 @@ mod tests {
                 lag,
                 ..Self::default()
             }
+        }
+
+        fn ready(&self, id: u32) -> bool {
+            let end_lag = if id.is_multiple_of(2) {
+                self.end_lag
+            } else {
+                0
+            };
+            self.stamped
+                .get(&id)
+                .is_some_and(|(at, _)| at + self.lag + end_lag <= self.now)
         }
     }
 
@@ -556,17 +571,11 @@ mod tests {
         }
         fn available(&mut self, id: u32) -> bool {
             self.calls += 1;
-            self.stamped
-                .get(&id)
-                .is_some_and(|(at, _)| at + self.lag <= self.now)
+            self.ready(id)
         }
         fn read(&mut self, id: u32) -> u64 {
             self.calls += 1;
-            if !self
-                .stamped
-                .get(&id)
-                .is_some_and(|(at, _)| at + self.lag <= self.now)
-            {
+            if !self.ready(id) {
                 self.early_reads += 1;
             }
             self.stamped.get(&id).map_or(0, |(_, value)| *value)
@@ -716,6 +725,23 @@ mod tests {
         assert!(
             matches!(ring.done.first(), Some((1, Gpu::Ok(sample))) if sample.regions == 16 && sample.refused == 1)
         );
+    }
+
+    /// A region is read once its end is in, not only its start: on a GPU the
+    /// end lands later, and reading it early is the stall.
+    #[test]
+    fn a_region_waits_for_its_end_not_only_its_start() {
+        let (mut ring, mut fake) = (Ring::new(ids()), Fake::lagging(1));
+        fake.end_lag = 2;
+        for each in 1..=5 {
+            pass(&mut ring, &mut fake, each);
+        }
+        assert_eq!(
+            fake.early_reads, 0,
+            "an end was read before it was available"
+        );
+        let resolved: Vec<u64> = ring.done.iter().map(|(pass, _)| *pass).collect();
+        assert_eq!(resolved, vec![1, 2], "an end is in three passes later");
     }
 
     /// An end that reads before its start is a wrapped or broken counter, and
