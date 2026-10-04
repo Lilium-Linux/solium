@@ -11,9 +11,11 @@ that you change without rebuilding anything.
 ![Two windows on the Solium wallpaper: one in the compositor's own QML titlebar, focused, and one that draws its own](docs/desktop.png)
 
 Captured by the compositor reading back its own framebuffer, in a nested
-session with the shipped configuration and nothing else. The window on the left
-wears the default frame, a QML scene rendered in-process; the one on the right
-asked to draw its own and was let. The wallpaper is a QML file too.
+session with the shipped configuration and nothing else, under the light theme
+Solium shipped until 2026-10-04 and not retaken yet: the shipped theme is now
+dark grey. The window on the left wears the default frame, a QML scene
+rendered in-process; the one on the right asked to draw its own and was let.
+The wallpaper is a QML file too.
 [docs/modes.md](docs/modes.md) has every mode, frame by frame.
 
 ## Status

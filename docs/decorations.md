@@ -219,7 +219,12 @@ which the maximise and close buttons turn under the pointer, are two greys
 told apart by shade and by the glyph each then shows. A light scheme, or
 colour accents, would be a change of the values only: the names stay.
 `qml::hosting_tests::every_colour_the_theme_publishes_is_a_grey` holds the
-shipped file to it.
+shipped file to it. And a grey drawn see-through over the wallpaper takes the
+wallpaper's colour, so the bars of `top`, `reactive` and `reveal`, `pulse`'s
+breathing line and the Developer Tweaks panel are opaque
+(`tests/scenarios/pane-top-drawn.lua`, `tests/scenarios/pane-bars-opaque.lua`,
+`tests/scenarios/pane-pulse-drawn.lua`,
+`qml::hosted::tests::the_tweaks_panel_is_opaque_and_grey`).
 
 The fallback pointer and the default wallpaper do not read it; their colours
 are fixed. A copy of `Solium/Theme.qml` in `~/.config/solium/qml/Solium/` is
