@@ -101,9 +101,10 @@ runs is what is checked out.
 `dev/gate.sh` checks the formatting with `cargo fmt --check`, then runs clippy
 with warnings denied, the tests and a build, then two checks on the built
 binaries that nothing else reaches: `solium --check`, which loads the Lua
-configuration, and `dev/wirecheck`, which drives the QML GPU path against the
-machine's own render node. Run `cargo fmt --all` first if the formatting step
-fails. It runs cargo natively unless told otherwise:
+configuration and builds the scenes it declares, and `dev/wirecheck`, which
+drives the QML GPU path against the machine's own render node. Run
+`cargo fmt --all` first if the formatting step fails. It runs cargo natively
+unless told otherwise:
 
 | Variable | Effect |
 |---|---|

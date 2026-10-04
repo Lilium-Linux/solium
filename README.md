@@ -231,7 +231,7 @@ Three flags worth knowing:
 
 | | |
 |---|---|
-| `--check` | would the configuration load? which bindings survived? |
+| `--check` | would the configuration load? which bindings survived? do its scenes and your styles build? |
 | `--probe` | every connector and every mode it offers, without taking the screen |
 | `--debug-mode` | adds the Developer Tweaks panel, on `super+shift+d` |
 
@@ -345,8 +345,10 @@ return {
 
 Press `super+shift+r` and every open window is framed again, with its
 titlebar down the left side. `solium --check` says, without starting anything,
-whether the configuration would load, which bindings it made, and which
-settings it sets that nothing reads, with what you probably meant. A reload whose
+whether the configuration would load, which bindings it made, which
+settings it sets that nothing reads, with what you probably meant, and whether
+every scene it declares at load and every pane style of your own builds
+without an error or a QML warning. A reload whose
 configuration fails to load keeps the session as it was, and says why in the
 log:
 `~/.local/state/solium/session.log` for a session from the login screen or

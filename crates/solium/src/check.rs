@@ -1,8 +1,12 @@
 //! `solium --check`: will this configuration do what I wrote. Each check
 //! writes to a [`Report`] and fails it rather than exiting, so every one is
 //! tested; [`run`] turns the report into the exit status (spec §6.5, C7).
+//! `--check` checks the configuration, then the scenes it declares at load,
+//! your own pane styles and the scenes this run's environment names.
 //! `tests::a_config_that_does_not_load_still_fails`,
-//! `tests::a_file_that_does_not_load_fails`.
+//! `tests::a_file_that_does_not_load_fails`,
+//! `tests::a_surface_whose_scene_does_not_load_fails`,
+//! `tests::a_broken_style_of_your_own_fails`.
 
 use std::{io::Write, path::Path};
 
@@ -202,6 +206,149 @@ fn one(path: &Path, report: &mut Report) -> Option<crate::qml::Scene> {
     }
 }
 
+/// The one monitor every declared scene is built on, as
+/// `models::monitors::rows` publishes one, so `Solium.monitor` is present in
+/// what is built. `tests::a_scene_that_reads_its_monitor_passes`.
+fn the_monitor() -> crate::models::diff::Row {
+    let whole = crate::models::monitors::rect(smithay::utils::Rectangle::new(
+        (0, 0).into(),
+        (1920, 1080).into(),
+    ));
+    crate::models::diff::Row {
+        key: MONITOR.to_owned(),
+        values: std::collections::BTreeMap::from([
+            ("name", crate::json::Json::Text(MONITOR.to_owned())),
+            ("whole", whole.clone()),
+            ("area", whole),
+            ("scale", crate::json::Json::Number(1.0)),
+            ("transform", crate::json::Json::Text("normal".to_owned())),
+            ("primary", crate::json::Json::Bool(true)),
+        ]),
+    }
+}
+
+/// What the check's one monitor is called.
+const MONITOR: &str = "check";
+
+/// Every surface the configuration declares at load, built on one monitor and
+/// drawn once, since some errors come only from the first polish and sync; a
+/// scene fails on an error, or on a QML warning while it is built and drawn.
+/// Only surfaces declared at load are seen: one declared later, by a handler,
+/// is not, and the output says how many were.
+/// `tests::a_surface_whose_scene_builds_is_listed_and_passes`,
+/// `tests::a_scene_that_warns_while_it_is_built_fails`,
+/// `tests::a_surface_whose_scene_does_not_load_fails`,
+/// `tests::a_surface_whose_scene_file_is_missing_fails`,
+/// `tests::a_surface_missing_a_required_property_fails`,
+/// `tests::the_shipped_configuration_passes`.
+pub(crate) fn scenes(scripts: &mut crate::script::Scripts, report: &mut Report) {
+    use crate::models::diff::{diff, render};
+    use crate::qml::hosted::{Model, apply_rows};
+
+    let monitor = [the_monitor()];
+    let published = apply_rows(Model::Monitors, &render(&diff(&[], &monitor)));
+    let declared: Vec<crate::scripted::Declaration> = scripts
+        .startup()
+        .commands
+        .into_iter()
+        .filter_map(|command| match command {
+            crate::script::Command::Surface(declared) => Some(*declared),
+            _ => None,
+        })
+        .collect();
+    report.line(&format!("  {} scene(s) declared at load:", declared.len()));
+    for declaration in declared {
+        let mark = crate::qml::warning_mark();
+        let properties = declaration.properties.render();
+        let rendered = crate::qml::Scene::for_monitor(
+            &declaration.scene,
+            400,
+            200,
+            Some(&properties),
+            MONITOR,
+        )
+        .and_then(|mut scene| scene.render().map(|_| ()));
+        let warned = crate::qml::warnings_since(mark);
+        match rendered {
+            Err(err) => report.fail(&format!("    {}: {err:#}", declaration.name)),
+            // A warning fails, as a key nothing reads does: the scene built,
+            // and is not doing what its file says (Ruling 19). The shipped
+            // scenes declared at load build without one.
+            // `tests::a_scene_that_warns_while_it_is_built_fails`,
+            // `tests::the_shipped_configuration_passes`.
+            Ok(()) if warned > 0 => report.fail(&format!(
+                "    {}: {warned} QML warning(s) while it was built and drawn, logged above",
+                declaration.name
+            )),
+            Ok(()) => report.line(&format!("    ok {}", declaration.name)),
+        }
+    }
+    // Taken away again, so the process is left with the rows it had.
+    if published {
+        let _ = apply_rows(Model::Monitors, &render(&diff(&monitor, &[])));
+    }
+}
+
+/// Your own pane-style bundles, every layer included. The shipped ones are
+/// `cargo test`'s, which builds them
+/// (`decoration::tests::a_narrow_tile_hides_the_titlebars_pieces_in_every_shipped_style`).
+/// `tests::a_broken_style_of_your_own_fails`.
+pub(crate) fn styles(report: &mut Report) {
+    styles_in(
+        &crate::style::directories(),
+        &crate::style::shipped(),
+        report,
+    );
+}
+
+/// [`styles`], over directories handed in, so a test can hand in its own.
+/// `tests::a_broken_style_of_your_own_fails`,
+/// `tests::the_shipped_styles_are_left_to_cargo_test`.
+fn styles_in(directories: &[std::path::PathBuf], shipped: &Path, report: &mut Report) {
+    for directory in directories.iter().filter(|directory| *directory != shipped) {
+        let Ok(bundles) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        let mut manifests: Vec<std::path::PathBuf> = bundles
+            .flatten()
+            .map(|bundle| bundle.path().join("Pane.qml"))
+            .filter(|manifest| manifest.is_file())
+            .collect();
+        manifests.sort();
+        if manifests.is_empty() {
+            continue;
+        }
+        report.line(&format!(
+            "  {} pane style(s) of your own in {}:",
+            manifests.len(),
+            directory.display()
+        ));
+        for manifest in manifests {
+            qml_file(&manifest, report);
+        }
+    }
+}
+
+/// The pane style and the loading scene this run's environment names, each
+/// found as the compositor finds it. `SOLIUM_SHELL_SCENE` is not among them:
+/// `shell.lua` declares it at load (`script::tests::the_environment_overrides_the_configured_shell_scene`),
+/// so [`scenes`] builds it, on its monitor.
+/// `tests::a_pane_knob_naming_a_broken_style_fails`,
+/// `tests::a_loading_knob_naming_a_missing_file_fails`.
+fn knobs(pane: Option<&str>, loading: Option<&str>, report: &mut Report) {
+    if let Some(pane) = pane {
+        report.line(&format!("  the pane style this run names, {pane}:"));
+        match crate::decoration::style_file(Some(pane)) {
+            Some(file) => qml_file(&file, report),
+            None => report.fail(&format!("{pane}: no pane style of that name")),
+        }
+    }
+    if let Some(loading) = loading {
+        report.line(&format!("  the loading scene this run names, {loading}:"));
+        qml_file(&crate::pane::loading_source(Some(loading)), report);
+    }
+}
+
 /// `solium --check [<file>]`: the configuration, or one QML file; the exit
 /// status is the report's. `tests/cli.rs`'s `check_qml_on_a_broken_file_exits_one`.
 pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
@@ -223,7 +370,26 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
             }
         }
         None => {
-            let _ = config(&crate::script::Scripts::config_path(), &mut report);
+            if let Some(mut scripts) = config(&crate::script::Scripts::config_path(), &mut report) {
+                // Software, as for one file: what is checked is whether each
+                // scene builds, not what it looks like on this machine.
+                crate::qml::renderer::decide(
+                    crate::qml::renderer::Entry::CheckQml,
+                    &crate::qml::renderer::Configured::default(),
+                );
+                match crate::qml::start() {
+                    Ok(()) => {
+                        scenes(&mut scripts, &mut report);
+                        styles(&mut report);
+                        let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
+                            .into_iter()
+                            .find_map(|name| std::env::var(name).ok());
+                        let loading = std::env::var("SOLIUM_LOADING").ok();
+                        knobs(pane.as_deref(), loading.as_deref(), &mut report);
+                    }
+                    Err(err) => report.fail(&format!("  Qt would not start: {err:#}")),
+                }
+            }
         }
     }
     if report.passed() {
@@ -237,7 +403,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Report, config, qml_file};
+    use super::{Report, config, knobs, qml_file, styles_in};
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -400,6 +566,189 @@ mod tests {
             let (passed, text) = reported(|report| qml_file(&fixture("gpu/Pane.qml"), report));
             assert!(passed, "{text}");
             assert!(text.contains("needs the GPU"), "{text}");
+        });
+    }
+
+    /// A configuration in a temporary directory of its own, declaring one
+    /// surface whose scene is `scene`.
+    fn declaring(name: &str, scene: &Path) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("solium-check-test-{name}"));
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("init.lua");
+        std::fs::write(
+            &path,
+            format!(
+                "sol.surface(\"bar\", {{ scene = {:?}, layer = \"top\" }})\n",
+                scene.display().to_string()
+            ),
+        )
+        .expect("the file");
+        path
+    }
+
+    /// `config`, then `scenes` over what it loaded, as `run` does.
+    fn check_scenes(config_path: &Path) -> (bool, String) {
+        reported(|report| {
+            if let Some(mut scripts) = config(config_path, report) {
+                super::scenes(&mut scripts, report);
+            }
+        })
+    }
+
+    /// Whether the user's own files would be read in place of the shipped
+    /// ones: their Lua, found first on `package.path`, or their QML, found
+    /// first by `scripted::find_scene`. Then a test about the shipped
+    /// configuration has nothing to say.
+    fn the_users_own_files_are_in_the_way() -> bool {
+        let lua = crate::script::Scripts::user_config_dir()
+            .and_then(|own| std::fs::read_dir(own).ok())
+            .is_some_and(|mut entries| {
+                entries.any(|entry| {
+                    entry.ok().is_some_and(|entry| {
+                        entry.path().extension().is_some_and(|kind| kind == "lua")
+                    })
+                })
+            });
+        lua || crate::qml::user_qml_dir().is_some()
+    }
+
+    /// A surface whose scene builds and draws is listed, and passes.
+    #[test]
+    fn a_surface_whose_scene_builds_is_listed_and_passes() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let (passed, text) = check_scenes(&declaring("bar", &fixture("surface/Bar.qml")));
+            assert!(passed, "{text}");
+            assert!(text.contains("  1 scene(s) declared at load:"), "{text}");
+            assert!(text.contains("    ok bar"), "{text}");
+        });
+    }
+
+    /// **A surface whose scene does not load fails `--check`**: it used to
+    /// pass, because the check never built a scene.
+    #[test]
+    fn a_surface_whose_scene_does_not_load_fails() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let (passed, text) = check_scenes(&declaring("broken-surface", &fixture("broken.qml")));
+            assert!(!passed, "{text}");
+        });
+    }
+
+    #[test]
+    fn a_surface_whose_scene_file_is_missing_fails() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let (passed, text) = check_scenes(&declaring(
+                "missing-surface",
+                Path::new("/nonexistent/solium-check.qml"),
+            ));
+            assert!(!passed, "{text}");
+        });
+    }
+
+    #[test]
+    fn a_surface_missing_a_required_property_fails() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let (passed, text) = check_scenes(&declaring("needs", &fixture("needs/Needs.qml")));
+            assert!(!passed, "{text}");
+        });
+    }
+
+    /// A scene that reads its monitor passes: the check publishes one row.
+    #[test]
+    fn a_scene_that_reads_its_monitor_passes() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let (passed, text) = check_scenes(&declaring("monitor", &fixture("monitor/Reads.qml")));
+            assert!(passed, "{text}");
+        });
+    }
+
+    /// **A scene that warns while it is built fails**, as an unrecognised
+    /// setting does: it built, and it is not doing what the file says
+    /// (Ruling 19).
+    #[test]
+    fn a_scene_that_warns_while_it_is_built_fails() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let (passed, text) = check_scenes(&declaring("warns", &fixture("warns/Warns.qml")));
+            assert!(!passed, "{text}");
+            assert!(text.contains("warning"), "{text}");
+        });
+    }
+
+    /// The shipped configuration passes, as `generate.py` and the gate run it.
+    #[test]
+    fn the_shipped_configuration_passes() {
+        if the_users_own_files_are_in_the_way() {
+            return;
+        }
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let shipped = crate::assets::lua().join("init.lua");
+            let (passed, text) = check_scenes(&shipped);
+            assert!(passed, "{text}");
+        });
+    }
+
+    /// A style of your own fails on its broken layer, under `--check` alone.
+    #[test]
+    fn a_broken_style_of_your_own_fails() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let own = fixture("");
+            let (passed, text) = reported(|report| {
+                styles_in(std::slice::from_ref(&own), &crate::style::shipped(), report);
+            });
+            assert!(!passed, "{text}");
+            assert!(text.contains("Ring.qml"), "{text}");
+        });
+    }
+
+    /// The shipped styles are not built again: `cargo test` checks them
+    /// (`decoration::tests::a_narrow_tile_hides_the_titlebars_pieces_in_every_shipped_style`).
+    #[test]
+    fn the_shipped_styles_are_left_to_cargo_test() {
+        let shipped = crate::style::shipped();
+        let (passed, text) = reported(|report| {
+            styles_in(std::slice::from_ref(&shipped), &shipped, report);
+        });
+        assert!(passed, "{text}");
+        assert!(!text.contains("Pane.qml"), "{text}");
+    }
+
+    /// `SOLIUM_PANE` naming a style is that style checked, layers and all.
+    #[test]
+    fn a_pane_knob_naming_a_broken_style_fails() {
+        if std::env::var_os("SOLIUM_PANE").is_some()
+            || std::env::var_os("SOLIUM_DECORATION").is_some()
+            || std::env::var_os("SOLIUM_QML_TITLEBAR").is_some()
+        {
+            return;
+        }
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let style = fixture("style").display().to_string();
+            let (passed, text) = reported(|report| knobs(Some(&style), None, report));
+            assert!(!passed, "{text}");
+            assert!(text.contains("Ring.qml"), "{text}");
+        });
+    }
+
+    /// `SOLIUM_LOADING` naming a file that is not there fails, and says so.
+    #[test]
+    fn a_loading_knob_naming_a_missing_file_fails() {
+        if std::env::var_os("SOLIUM_LOADING").is_some() {
+            return;
+        }
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let (passed, text) =
+                reported(|report| knobs(None, Some("/nonexistent/solium-loading.qml"), report));
+            assert!(!passed, "{text}");
+            assert!(text.contains("solium-loading.qml"), "{text}");
         });
     }
 }

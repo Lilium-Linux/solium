@@ -273,6 +273,11 @@ extern "C" fn solium_qml_log_from_qt(
         };
     }
 
+    // Counted for `--check`, which fails a scene that warns while it is
+    // built: `tests::qt_warnings_and_errors_are_counted`.
+    if level >= LOG_WARN {
+        WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     match level {
         LOG_DEBUG => forward!(debug),
         LOG_INFO => forward!(info),
@@ -283,6 +288,22 @@ extern "C" fn solium_qml_log_from_qt(
         // warning, and the drift is worth seeing.
         _ => forward!(warn),
     }
+}
+
+/// How many warnings and errors Qt has said in this process. One count for
+/// every thread, because the handler above may be called from any of them.
+/// `tests::qt_warnings_and_errors_are_counted`.
+static WARNINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where the count of Qt's warnings stands now, for [`warnings_since`].
+pub(crate) fn warning_mark() -> u64 {
+    WARNINGS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many warnings and errors Qt has said since `mark`.
+/// `tests::qt_warnings_and_errors_are_counted`.
+pub(crate) fn warnings_since(mark: u64) -> u64 {
+    warning_mark().saturating_sub(mark)
 }
 
 /// Start Qt. Idempotent, and must happen on the thread that renders.
@@ -1868,6 +1889,32 @@ pub(crate) mod qt_test {
 
 #[cfg(test)]
 mod tests {
+    /// **Qt's warnings and errors are counted**, for `--check` to fail on;
+    /// its debug and info lines are not.
+    #[test]
+    fn qt_warnings_and_errors_are_counted() {
+        super::qt_test::on_the_qt_thread(|| {
+            let message = c"counted";
+            let mark = super::warning_mark();
+            for level in [
+                super::LOG_DEBUG,
+                super::LOG_INFO,
+                super::LOG_WARN,
+                super::LOG_ERROR,
+            ] {
+                super::solium_qml_log_from_qt(
+                    level,
+                    std::ptr::null(),
+                    message.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            }
+            assert_eq!(super::warnings_since(mark), 2);
+        });
+    }
+
     /// The guard has to actually catch the thing it exists for, and a guard
     /// that is never exercised is a comment with a runtime cost.
     #[test]

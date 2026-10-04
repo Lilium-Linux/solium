@@ -47,10 +47,14 @@ line; with none it starts a compositor: nested, as a window, when
 
 --check
     Load the configuration, print every binding it registered and every one
-    it removed, and exit. Exits with 1 when anything fails: the configuration
-    fails to load or sets a key nothing reads. `--check <file.qml>` checks one
-    QML file instead, as `--check-qml` does. Starts no compositor and needs no
-    display.
+    it removed, build every scene it declares at load and every pane style of
+    your own, and exit; also the pane style and the loading scene this run's
+    environment names. Exits with 1 when anything fails: the configuration
+    fails to load or sets a key nothing reads, or a scene fails to build,
+    misses a required property, or warns while it is built and first drawn.
+    Scenes are built in software, on one monitor. `--check <file.qml>` checks
+    one QML file instead, as `--check-qml` does. Starts no compositor and
+    needs no display.
 
 --check-qml <file.qml>
     The old spelling of `--check <file.qml>`: load one QML file in software
