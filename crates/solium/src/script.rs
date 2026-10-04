@@ -4738,8 +4738,13 @@ pub(crate) fn normalise_combo(combo: &str) -> String {
 #[cfg(test)]
 mod reference;
 
+/// The one test helper other modules' tests share.
+/// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
 #[cfg(test)]
-pub(crate) mod tests {
+pub(crate) use tests::logged_while;
+
+#[cfg(test)]
+mod tests {
     use super::*;
 
     #[test]

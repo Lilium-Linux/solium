@@ -25355,7 +25355,7 @@ end)"#,
                     shell,
                     &[("windows.fly", "null"), ("windows.fly", "null")],
                 );
-                let log = crate::script::tests::logged_while(|| desk.state.settle_scenes());
+                let log = crate::script::logged_while(|| desk.state.settle_scenes());
                 assert_eq!(
                     (
                         desk.state.status.as_str(),
