@@ -49,7 +49,10 @@ require("shell")
 require("keyboard_indicator")
 -- What a hosted scene sends with `Solium.send`: the vocabulary's actions go
 -- to `sol.act`, or to the file that answers them in Lua. See
--- `windows_focus_from_a_scene_focuses_the_window`.
+-- `windows_focus_from_a_scene_focuses_the_window`. Keep it before
+-- `workspaces`, which answers `workspaces.go` and `windows.send` only when
+-- this file is already loaded. See
+-- `a_workspaces_go_from_a_scene_switches_the_monitor_it_names`.
 require("actions")
 
 require("tweaks")

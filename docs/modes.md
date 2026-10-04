@@ -663,9 +663,10 @@ screen's.
 arrangement, groups, windows }` whenever they change, which is how a hosted
 shell's `Workspaces` and `WorkspaceList` know them, and it answers
 `workspaces.go` and `windows.send` from a scene through `actions.lua`, when
-the configuration keeps that file: without it, the configuration routes a
-scene's actions itself, and `workspaces.lua` does not route them a second
-time. A configuration that keeps workspaces some other way, tags say,
+the configuration keeps that file and requires it before `workspaces`, as the
+shipped `init.lua` does: `workspaces.lua` looks for it once, as it loads.
+Without it, the configuration routes a scene's actions itself, and
+`workspaces.lua` does not route them a second time. A configuration that keeps workspaces some other way, tags say,
 declares those, each `<group>/<id>` once.
 See [shell-boundary.md](shell-boundary.md).
 
