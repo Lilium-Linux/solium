@@ -8020,6 +8020,57 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **The deadline cannot reach a `__close` run by a stop**: the
+    /// to-be-closed variables of the function a stop interrupts are closed
+    /// inside the instruction hook, where no hook runs, so one runs to its end
+    /// however late it is. Bounded here, so the test ends.
+    #[test]
+    fn a_close_run_after_a_stop_is_not_under_the_deadline() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-close",
+            r#"
+            sol.on("layout", function()
+                local guard <close> = setmetatable({}, { __close = function()
+                    for _ = 1, 1e6 do end
+                    closed = true
+                end })
+                while true do end
+            end)
+            "#,
+        );
+        let _ = scripts.relayout(one_screen(&[]));
+        assert_eq!(scripts.evaluate("return tostring(closed)"), "true");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The deadline cannot reach a `__gc` finalizer**: Lua runs one with no
+    /// hook, so it runs to its end however long it takes. Bounded here, so
+    /// the test ends.
+    #[test]
+    fn a_gc_finalizer_is_not_under_the_deadline() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-gc",
+            r#"
+            sol.on("layout", function()
+                setmetatable({}, { __gc = function()
+                    for _ = 1, 1e8 do end
+                    finalized = true
+                end })
+                collectgarbage()
+            end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let _ = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() >= HANDLER_DEADLINE,
+            "the finalizer ended within the deadline, so it shows nothing: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(scripts.evaluate("return tostring(finalized)"), "true");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **The stops are counted by function**: one function listening for two
     /// events is taken out at its third stop, wherever the stops were, of the
     /// event it was stopped in, and of the other at its next stop there.

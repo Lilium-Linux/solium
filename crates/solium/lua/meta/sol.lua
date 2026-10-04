@@ -730,7 +730,9 @@ function sol.unknown(key, meant) end
 ---each event it is stopped in. Bindings, and each `done` of
 ---`sol.act`, run under the same deadline. `pcall`, `xpcall` and `load` hand
 ---the stop on rather than catch it, and `xpcall`'s message handler is not
----called for it.
+---called for it. A `__gc` finalizer, and the `__close` of a to-be-closed
+---variable in the function a stop interrupts, run where no hook does, so the
+---deadline cannot stop a loop in either.
 ---@overload fun(event: "open"|"focus"|"closing"|"refused"|"close", handler: fun(id: integer))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))

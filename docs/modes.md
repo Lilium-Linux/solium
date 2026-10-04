@@ -236,10 +236,13 @@ sol.on("text_input", function(field, why) end)     -- the focused text field: "f
 Every handler, and every binding, has 100 ms: past that it is stopped with an
 error in the log, which names the file and line it was written at, so a loop in
 one cannot freeze the desktop, even inside a coroutine it makes, around a
-`pcall`, which hands the stop on, or around `sol.focus_direction`, and the other
-listeners still run. The `direction` listeners' time counts against the handler
-that called `sol.focus_direction` or `sol.move_direction`, so one stopped there
-stops that handler too. A listener stopped three times stays off until
+`pcall`, `xpcall` or `load`, which hand the stop on, or around
+`sol.focus_direction`, and the other listeners still run. The `direction`
+listeners' time counts against the handler that called `sol.focus_direction` or
+`sol.move_direction`, so one stopped there stops that handler too. A `__gc`
+finalizer, and the `__close` of a to-be-closed variable in the function a stop
+interrupts, run where no hook does, so the deadline cannot stop a loop in
+either: keep them short. A listener stopped three times stays off until
 `super+shift+r`
 (`script::tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 `script::tests::a_binding_that_never_returns_is_stopped`,
@@ -249,6 +252,8 @@ stops that handler too. A listener stopped three times stays off until
 `script::tests::a_listener_that_retries_load_is_stopped`,
 `script::tests::a_binding_that_loops_on_focus_direction_is_stopped`,
 `script::tests::a_direction_listener_stopped_at_the_deadline_stops_its_caller_too`,
+`script::tests::a_close_run_after_a_stop_is_not_under_the_deadline`,
+`script::tests::a_gc_finalizer_is_not_under_the_deadline`,
 `script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
 `script::tests::a_listener_stopped_three_times_is_taken_out`).
 
