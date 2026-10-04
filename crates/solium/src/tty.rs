@@ -1514,9 +1514,10 @@ impl State {
         pace.finish(self.solium.panes.len());
     }
 
-    /// A flip landed and nothing is to be drawn: what was measured has
-    /// finished on the GPU, so its time is read and a report waiting for it
-    /// goes. `pacing::tests::idle_flushes_a_parked_report`.
+    /// A flip landed and nothing is to be drawn: what has flipped has
+    /// finished on the GPU, so its time is read, and once no monitor waits on
+    /// a flip a report still waiting for its time goes.
+    /// `pacing::tests::idle_flushes_a_parked_report`.
     fn idle(&mut self) {
         if let (Some(timer), Some(renderer)) = (self.solium.timer.as_mut(), self.renderer.as_mut())
         {
@@ -1525,7 +1526,11 @@ impl State {
                 crate::pacing::gpu_resolved(pass, gpu);
             }
         }
-        crate::pacing::idle();
+        // A monitor still waiting has its own flip to come, which calls this
+        // again: `tests::a_parked_report_waits_for_every_monitors_flip`.
+        if nothing_in_flight(self.screens.iter().map(|screen| screen.pending)) {
+            crate::pacing::idle();
+        }
     }
 
     /// One frame of black on screen `index`, on its way off.
@@ -1887,9 +1892,28 @@ fn start_socket(event_loop: &mut EventLoop<State>, display: Display<Solium>) -> 
     Ok(name)
 }
 
+/// No monitor waits on a flip, so every frame queued has been drawn.
+/// `tests::a_parked_report_waits_for_every_monitors_flip`.
+fn nothing_in_flight(pending: impl IntoIterator<Item = bool>) -> bool {
+    !pending.into_iter().any(|pending| pending)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::gone;
+    use super::{gone, nothing_in_flight};
+
+    /// A parked report goes at idle only once every monitor has flipped: a
+    /// flip of one can land while the pass just drawn on another is still
+    /// on the GPU, whose time the report is waiting for.
+    #[test]
+    fn a_parked_report_waits_for_every_monitors_flip() {
+        assert!(
+            !nothing_in_flight([false, true]),
+            "one monitor still waits on its flip"
+        );
+        assert!(nothing_in_flight([false, false]));
+        assert!(nothing_in_flight([]));
+    }
 
     #[test]
     fn nothing_changed_means_nothing_to_drop() {
