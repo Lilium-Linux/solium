@@ -500,10 +500,12 @@ compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
 (`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
 `sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
 hears once whether it was done, after it was; `reason` is `"unknown-action"`,
-`"unknown-window"`, `"bad-data"` or, for a `windows.focus` behind the
-lock, `"locked"`, and a window still loading, one `sol.windows()` lists
-before its application has arrived, is `"unknown-window"` to all but
-`windows.close`
+`"unknown-window"`, `"bad-data"`, for a `windows.focus` behind the lock
+`"locked"`, or, for a `windows.fullscreen` or `windows.maximize` of an X11
+window, which the compositor cannot send there, `"unsupported"` (no test can
+make an X11 window, so that one is read in `Solium::act`), and a window still
+loading, one `sol.windows()` lists before its application has arrived, is
+`"unknown-window"` to all but `windows.close`
 (`script::tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
 `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
 `state::tests::real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,

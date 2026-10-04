@@ -358,9 +358,11 @@ impl Solium {
 
     /// One of the compositor's verbs, as the command that does it, or why it
     /// cannot be done: an action it does not know, logged once by name, data
-    /// with no window's id, a window that is not there (Ruling 15), or a
-    /// focus the lock refuses. Only `windows.close` reaches a window still
-    /// loading: the others act on its client, which it does not have yet.
+    /// with no window's id, a window that is not there (Ruling 15), a focus
+    /// the lock refuses, or a fullscreen or maximise of an X11 window, which
+    /// has no xdg toplevel to take it. Only `windows.close` reaches a window
+    /// still loading: the others act on its client, which it does not have
+    /// yet.
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
     /// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`,
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
@@ -389,13 +391,25 @@ impl Solium {
         if !there {
             return Err("unknown-window");
         }
-        // Behind the lock no window may take the keyboard, so `focus_window`
-        // refuses it, and `done` hears that and not that it was done.
-        // `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
-        if action == "windows.focus" && window.is_some_and(|window| !self.may_focus(&window)) {
-            return Err("locked");
+        match (action, window) {
+            // Behind the lock no window may take the keyboard, so
+            // `focus_window` refuses it, and `done` hears that and not that
+            // it was done.
+            // `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
+            ("windows.focus", Some(window)) if !self.may_focus(&window) => Err("locked"),
+            // An X11 window has no xdg toplevel, and `ToggleFullscreen` and
+            // `toggle_maximize` leave a window without one as it is, so
+            // `done` hears `unsupported` and not that it was done. No test
+            // can make an X11 window (an `X11Surface` needs a live XWayland,
+            // as the comment on `first_focus` in `state/open.rs` says), so
+            // this is checked by reading those two.
+            ("windows.fullscreen" | "windows.maximize", Some(window))
+                if window.toplevel().is_none() =>
+            {
+                Err("unsupported")
+            }
+            _ => Ok(make(id)),
         }
-        Ok(make(id))
     }
 
     /// Dismiss the hosted grab: its scene hears every active grab of its
