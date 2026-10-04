@@ -162,8 +162,8 @@ public:
     QObject *target() const { return m_target; }
     void setTarget(QObject *target);
     /* The item a point is asked of: the target itself, or, for a Qt Quick
-     * Controls `Popup`, which is no item, the item Qt draws it as, its
-     * content item's parent.
+     * Controls `Popup`, which is no item, the item Qt draws it as, as
+     * `Solium.input` and `Solium.keyboard` find it.
      * `qml::hosted::tests::a_controls_popup_is_a_grabs_target`. */
     QQuickItem *target_item() const;
     bool active() const { return m_active; }
@@ -189,11 +189,13 @@ private:
     SoliumHosting *m_hosting = nullptr;
 };
 
-/* `Solium.keyboard`, on one item: whether it wants the keyboard, and the
- * keys it claims while it holds it, as `sol.bind` spells them. The scene
- * holds the keyboard while any visible item wants it. Ruling 14.
+/* `Solium.keyboard`, on one item, or a Qt Quick Controls `Popup` as its
+ * item: whether it wants the keyboard, and the keys it claims while it holds
+ * it, as `sol.bind` spells them. The scene holds the keyboard while any
+ * visible item wants it. Ruling 14.
  * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
- * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+ * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`,
+ * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
 class SoliumKeyboard : public QObject
 {
     Q_OBJECT

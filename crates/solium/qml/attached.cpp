@@ -17,6 +17,25 @@ namespace {
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 constexpr const char kHosting[] = "_soliumHosting";
 
+/* The item Qt draws a Qt Quick Controls `Popup` as: its child of type
+ * QQuickPopupItem, which the popup makes with itself, so it is there from
+ * the popup's first binding, before any content item is; null for any
+ * other object.
+ * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`,
+ * `qml::hosted::tests::a_controls_popup_is_a_grabs_target`. */
+QQuickItem *popup_item_of(QObject *object)
+{
+    if (object == nullptr || !object->inherits("QQuickPopup")) {
+        return nullptr;
+    }
+    for (QObject *child : object->children()) {
+        if (child->inherits("QQuickPopupItem")) {
+            return qobject_cast<QQuickItem *>(child);
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 QRectF solium_rect(const QVariant &value)
@@ -151,11 +170,7 @@ QQuickItem *SoliumGrab::target_item() const
     if (auto *item = qobject_cast<QQuickItem *>(m_target.data())) {
         return item;
     }
-    if (m_target != nullptr && m_target->inherits("QQuickPopup")) {
-        auto *content = m_target->property("contentItem").value<QQuickItem *>();
-        return content != nullptr ? content->parentItem() : nullptr;
-    }
-    return nullptr;
+    return popup_item_of(m_target.data());
 }
 
 void SoliumGrab::setActive(bool active)
@@ -176,24 +191,6 @@ namespace {
  * last is known.
  * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`. */
 quint64 g_wants = 0;
-
-/* The item Qt draws a Qt Quick Controls `Popup` as: its child of type
- * QQuickPopupItem, which the popup makes with itself, so it is there from
- * the popup's first binding, before any content item is; null for any
- * other object.
- * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
-QQuickItem *popup_item_of(QObject *object)
-{
-    if (object == nullptr || !object->inherits("QQuickPopup")) {
-        return nullptr;
-    }
-    for (QObject *child : object->children()) {
-        if (child->inherits("QQuickPopupItem")) {
-            return qobject_cast<QQuickItem *>(child);
-        }
-    }
-    return nullptr;
-}
 
 } // namespace
 
