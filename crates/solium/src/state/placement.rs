@@ -921,7 +921,8 @@ impl Solium {
     /// scripts -- the window is where it lives on the next frame, as before
     /// #49. A layout's own glide for a window going back into a tile is
     /// replaced, so the change's motion is the one it is drawn with, there as
-    /// anywhere else. `tests::a_change_is_answered_with_the_motion_sol_animate_set`.
+    /// anywhere else. `tests::a_change_is_answered_with_the_motion_sol_animate_set`,
+    /// and `tests/scenarios/fullscreen-tiled.lua` for the tile.
     ///
     /// **The compositor's move comes after the listeners' commands**, so a
     /// `sol.present` of the window in one is replaced by it, and a change a

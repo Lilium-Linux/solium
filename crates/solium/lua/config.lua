@@ -750,19 +750,60 @@ local defaults = {
         fill = "stretch",
     },
 
-    -- What a fullscreen window covers, when it is the one in front on the
-    -- workspace its monitor is showing.
+    -- A fullscreen window: what it covers, and how a window goes fullscreen
+    -- and comes back (super+f, or the application asking).
     fullscreen = {
+        -- What a fullscreen window covers, when it is the one in front on the
+        -- workspace its monitor is showing.
+        --
         -- "top", the default: the top layer, so a bar -- a client's, like
         -- Waybar, or one declared with `sol.surface` -- goes under a
         -- fullscreen video or game, and the video takes the clicks where the
         -- bar was. The overlay layer stays over it: notifications, an OSD, a
-        -- launcher.
+        -- launcher. A window going fullscreen goes over the bars as it starts
+        -- to grow, and one leaving goes back under them once it has finished
+        -- shrinking.
         --
         -- "none": nothing, and the bars stay over fullscreen windows.
         --
         -- Anything else is named in the log, and the default kept.
         covers = "top",
+
+        -- How a window grows to cover its monitor, and shrinks back to where
+        -- it was: from wherever it is drawn, as a window a layout moves
+        -- glides, so pressing the key again half way turns it round where it
+        -- is. The application is told its new size the moment the key is
+        -- pressed, and its last picture is stretched until it has drawn one
+        -- at that size. Once it lands the window is drawn as it is, with
+        -- nothing in between, so a game or a video can be shown directly.
+        --
+        -- `duration` is in milliseconds and `easing` is a curve, by name or
+        -- as four numbers, as for every `motion` here (docs/animation.md).
+        -- `false` makes every change instant:
+        --
+        --     fullscreen = { animate = false },
+        animate = { duration = 260, easing = "outCubic" },
+
+        -- Applications that go fullscreen and back at once whatever `animate`
+        -- says, by their app id: the name `app_id` gives each window in
+        -- `sol.windows()`. A game, or a video player started fullscreen, may
+        -- want to be there at once:
+        --
+        --     fullscreen = { instant = { app_id = { "mpv", "gamescope" } } },
+        --
+        -- Empty as shipped, so every application animates. A list is
+        -- replaced whole, so the list you write is the whole list.
+        instant = { app_id = {} },
+    },
+
+    -- How a window is maximised to fill the work area of its monitor, and
+    -- restored (super+shift+m, or the button on its frame). The same two
+    -- settings as `fullscreen`'s and read the same way, but on their own: a
+    -- maximise can move differently from a fullscreen, or not at all, and
+    -- changing one changes nothing about the other.
+    maximize = {
+        animate = { duration = 220, easing = "outCubic" },
+        instant = { app_id = {} },
     },
 
     floating = {

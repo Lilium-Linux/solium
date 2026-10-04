@@ -720,7 +720,8 @@ impl XdgShellHandler for Solium {
         // motion the scripts answer `fullscreen` with -- into the tile the
         // layout has just given it, too. Not with no rectangle to go to, which
         // its client picks.
-        // `a_window_glides_into_fullscreen_and_out_again`.
+        // `a_window_glides_into_fullscreen_and_out_again`, and
+        // `tests/scenarios/fullscreen-tiled.lua` for the tile.
         self.transition(
             id,
             Change::Fullscreen,
