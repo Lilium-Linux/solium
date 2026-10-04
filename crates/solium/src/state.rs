@@ -395,6 +395,10 @@ pub(crate) struct Solium {
     /// button is up (Ruling 7).
     /// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
     pub(crate) scene_press: Option<ScenePress>,
+    /// Whether a grab ended while a scene held a press, so the pointer goes
+    /// back to what is under it at that press's release.
+    /// `tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
+    repoint_at_release: bool,
     /// The scene the pointer was last over, and the one this motion found.
     /// `tests::real_client::reflow_on_close::hosted::the_scene_hears_the_pointer_leave_when_it_moves_off_its_items`.
     pub(crate) scene_hovered: Option<(crate::scripted::SurfaceId, Output)>,
@@ -972,6 +976,7 @@ impl Solium {
             hovered_frame: None,
             pointer_buttons: 0,
             scene_press: None,
+            repoint_at_release: false,
             scene_hovered: None,
             scene_hover_seen: None,
             settling_scenes: false,
@@ -1930,6 +1935,13 @@ impl Solium {
                 }
                 if matches!(event.kind, PointerKind::Release(_)) && event.buttons == 0 {
                     self.scene_press = None;
+                    // A grab let go of during the press gave the pointer to
+                    // no client; with no grab held now, the window under it
+                    // has it back.
+                    // `tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
+                    if std::mem::take(&mut self.repoint_at_release) && self.hosted_grab.is_none() {
+                        self.repoint_clients();
+                    }
                 }
             }
             self.redraw = true;

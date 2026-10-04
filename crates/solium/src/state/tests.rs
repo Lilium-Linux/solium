@@ -23599,6 +23599,67 @@ end)
                 );
             }
 
+            /// A grab's target over the window at 600,500.
+            fn inside_over_the_window(at: Point<f64, Logical>) -> bool {
+                (600.0..664.0).contains(&at.x) && (500.0..564.0).contains(&at.y)
+            }
+
+            /// **A popup closed during a press inside it gives the pointer
+            /// back at the release** (Ruling 12): with the pointer resting
+            /// over the window, a grab the scene lets go of while it holds a
+            /// press, as a popup closed from its own `onPressed` is, leaves
+            /// the pointer with the scene until the button is up, and then
+            /// gives it to the window, so the next click there, with no motion
+            /// before it, reaches it.
+            #[test]
+            fn a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release() {
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                if let Some(stand) = desk
+                    .state
+                    .surfaces
+                    .get_mut(menu)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    stand.inside = inside_over_the_window;
+                }
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                report(&mut desk, menu, crate::qml::hosted::GrabReport::Released);
+                let pressed = pointer_focus(&desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    12,
+                );
+                let released = pointer_focus(&desk);
+                click_here(&mut desk, 13);
+                desk.pump();
+                assert_eq!(
+                    (
+                        presses(&desk, menu),
+                        pressed,
+                        released,
+                        desk.state.hosted_grab.is_none(),
+                        desk.client.buttons.clone()
+                    ),
+                    (
+                        1,
+                        None,
+                        Some(window_id(&opened)),
+                        true,
+                        vec![(0x110, true), (0x110, false)]
+                    ),
+                    "(the presses the scene took, the pointer's surface while its press was \
+                     held, its surface after the release, the grab let go, the buttons the \
+                     window was told)"
+                );
+            }
+
             /// **A surface taken away gives the pointer back to the window
             /// under it at once**, with the grab it held, before the pointer
             /// moves.

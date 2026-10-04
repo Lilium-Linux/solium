@@ -289,7 +289,12 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`.
-    fn repoint_clients(&mut self) {
+    ///
+    /// A grab that ends while its scene holds a press leaves the pointer
+    /// with the scene until that press's release, which gives it back
+    /// then.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
+    pub(crate) fn repoint_clients(&mut self) {
         let Some(location) = self
             .seat
             .get_pointer()
@@ -297,6 +302,9 @@ impl Solium {
         else {
             return;
         };
+        if self.scene_press.is_some() {
+            self.repoint_at_release = true;
+        }
         let under = self.surface_under(location);
         self.motion_in_place(under);
     }
