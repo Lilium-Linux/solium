@@ -42,9 +42,11 @@ Item {
         radius: 0
 
         // Tucked just above the window when hidden, so it comes out from under
-        // its own edge instead of materialising.
+        // its own edge instead of materialising. Opaque once out, so what is
+        // behind the window never tints its grey
+        // (`tests/scenarios/pane-bars-opaque.lua`).
         y: frame.pointerInside ? 0 : -height
-        opacity: frame.pointerInside ? 0.96 : 0.0
+        opacity: frame.pointerInside ? 1.0 : 0.0
 
         Behavior on y {
             NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 0.9 }

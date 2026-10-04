@@ -24,8 +24,7 @@ local styles = {
 
 -- The darkest and the lightest of the 7 by 7 square around `at`, as a grey,
 -- and whether every pixel of it is one: red, green and blue within 2 of one
--- another. Premultiplied, as the layer holds them; `reveal` draws its bar at
--- 0.96, which takes a few levels off both ends and changes neither verdict.
+-- another. Premultiplied, as the layer holds them.
 local function square(world, at)
     local darkest, lightest, grey = 255, 0, true
     for y = at[2] - 3, at[2] + 3 do

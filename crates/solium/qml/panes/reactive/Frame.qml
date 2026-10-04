@@ -106,8 +106,9 @@ Item {
 
         anchors { left: parent.left; right: parent.right; top: parent.top }
         height: frame.insetTop
+        // Opaque, so what is behind the window never tints its grey
+        // (`tests/scenarios/pane-bars-opaque.lua`).
         color: frame.focused ? Theme.surface : Theme.surfaceInactive
-        opacity: 0.92
 
         Text {
             anchors.centerIn: parent
