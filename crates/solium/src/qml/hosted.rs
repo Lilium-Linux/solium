@@ -2358,6 +2358,8 @@ pub(crate) mod tests {
                 Item {
                     readonly property int count: Monitors.count
                     readonly property int widthOfB: Monitors.get("model-b").area.width
+                    readonly property int bIsPresent: Monitors.get("model-b").present ? 1 : 0
+                    readonly property int bIsNamed: Monitors.get("model-b").name === "model-b" ? 1 : 0
                     property int changedRoles: -1
                     Connections {
                         target: Monitors
@@ -2390,7 +2392,79 @@ pub(crate) mod tests {
                 (1500, 1),
                 "one value changed, so one role"
             );
-            let _ = super::apply_rows(super::Model::Monitors, &render(&diff(&after, &[])));
+            // A monitor that goes leaves the list, and its row reads absent
+            // and keeps its name (Ruling 4).
+            let listed = scene.get_int("count");
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&after, &[]))
+            ));
+            assert_eq!(
+                (
+                    listed - scene.get_int("count"),
+                    scene.get_int("bIsPresent"),
+                    scene.get_int("bIsNamed"),
+                    scene.get_int("widthOfB")
+                ),
+                (2, 0, 1, 1500),
+                "(the rows that left the list, whether model-b reads present, whether it keeps its name, its last width)"
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A delegate of `Monitors` reads `scale` and `transform` through
+    /// `model`**: bare, those two names are the delegate item's own
+    /// properties, which hide the roles, while the other roles read bare.
+    #[test]
+    fn a_monitors_delegate_reads_scale_and_transform_through_model() {
+        use crate::models::diff::{diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-monitors-delegate",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property int bareScale: -1
+                    property int modelScale: -1
+                    property int modelTransform: -1
+                    property int bareName: -1
+                    Repeater {
+                        model: Monitors
+                        delegate: Item {
+                            Component.onCompleted: {
+                                if (model.name !== "delegate-a") return
+                                root.bareScale = Math.round(scale * 100)
+                                root.modelScale = Math.round(model.scale * 100)
+                                root.modelTransform = model.transform === "normal" ? 1 : 0
+                                root.bareName = name === "delegate-a" ? 1 : 0
+                            }
+                        }
+                    }
+                }
+                "#,
+                "delegate-a",
+            );
+            let rows = vec![monitor_row("delegate-a", 1920, 1.5)];
+            assert!(super::apply_rows(
+                super::Model::Monitors,
+                &render(&diff(&[], &rows))
+            ));
+            assert_eq!(
+                (
+                    scene.get_int("bareScale"),
+                    scene.get_int("modelScale"),
+                    scene.get_int("modelTransform"),
+                    scene.get_int("bareName")
+                ),
+                (100, 150, 1, 1),
+                "(scale bare, scale through model, transform through model, name bare)"
+            );
+            let _ = super::apply_rows(super::Model::Monitors, &render(&diff(&rows, &[])));
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
         });
@@ -2991,6 +3065,41 @@ pub(crate) mod tests {
                 "with no workspaces, the facades must be empty, not the last shown, and a \
                  gone workspace's row invalid: (showing, current, get(\"ws-left/2\").valid)"
             );
+        });
+    }
+
+    /// **A shell's own file named like a singleton of the module is hidden
+    /// by it**: a `Monitors.qml` beside a scene that imports `Solium` is the
+    /// `Monitors` model there, which cannot be created, so the scene does not
+    /// build.
+    #[test]
+    fn a_shell_file_named_like_a_singleton_is_hidden_by_it() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-shadow-singleton");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            std::fs::write(
+                directory.join("Monitors.qml"),
+                "import QtQuick\nItem { readonly property int mine: 1 }\n",
+            )
+            .expect("writing the shell's own file");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    Monitors { id: own }\n    readonly property int mine: own.mine\n}\n",
+            )
+            .expect("writing the scene");
+            let built = Scene::for_monitor(&path, 16, 16, None, "shadow-singleton-1");
+            assert!(
+                built
+                    .as_ref()
+                    .is_err_and(|err| format!("{err:?}").contains("not creatable")),
+                "the shell's own Monitors.qml was not hidden by the model: {:?}",
+                built.as_ref().err()
+            );
+            drop(built);
+            let _ = std::fs::remove_dir_all(&directory);
         });
     }
 }

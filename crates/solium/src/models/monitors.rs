@@ -205,6 +205,110 @@ mod tests {
         assert_eq!(row.values.get("active"), Some(&Json::Bool(true)));
     }
 
+    /// **On two monitors, only the one the pointer is on says so and is the
+    /// active one, each edge says what was reserved on it, and a monitor
+    /// turned off says `"off"` while the other stays `"on"`.**
+    #[test]
+    fn on_two_monitors_only_the_pointers_is_active_and_each_says_its_own_edges() {
+        let display = Display::<Solium>::new().expect("a test display");
+        let mut state = Solium::new(display.handle());
+        let monitor = |name: &str| {
+            let output = Output::new(
+                name.to_owned(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_owned(),
+                    model: "rows".to_owned(),
+                },
+            );
+            output.change_current_state(
+                Some(Mode {
+                    size: (1920, 1080).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Fractional(1.0)),
+                None,
+            );
+            output
+        };
+        let (left, right) = (monitor("rows-two-left"), monitor("rows-two-right"));
+        state.space.map_output(&left, (0, 0));
+        state.space.map_output(&right, (1920, 0));
+        let mut declared = crate::scripted::Declaration::for_test(
+            "dock",
+            std::path::PathBuf::from("/nonexistent/rows-two.qml"),
+            crate::scripted::Layer::Top,
+            crate::scripted::On::Monitor("rows-two-right".to_owned()),
+        );
+        declared.reserve = crate::scripted::Edges {
+            left: 30,
+            right: 20,
+            ..Default::default()
+        };
+        state.declare_surface(declared);
+        state
+            .seat
+            .get_pointer()
+            .expect("a pointer")
+            .set_location((2000.0, 500.0).into());
+        assert!(state.set_power(&left, false), "the left monitor turns off");
+
+        let rows = super::rows(&state);
+        let values = |name: &str| {
+            rows.iter()
+                .find(|row| row.key == name)
+                .map(|row| row.values.clone())
+                .expect("a row for each monitor")
+        };
+        let (on_left, on_right) = (values("rows-two-left"), values("rows-two-right"));
+        let role = |values: &std::collections::BTreeMap<&'static str, Json>, name: &str| {
+            values.get(name).cloned().unwrap_or(Json::Null)
+        };
+        assert_eq!(
+            (
+                role(&on_left, "pointer"),
+                role(&on_left, "active"),
+                role(&on_left, "power"),
+                role(&on_right, "pointer"),
+                role(&on_right, "active"),
+                role(&on_right, "power"),
+            ),
+            (
+                Json::Bool(false),
+                Json::Bool(false),
+                Json::Text("off".to_owned()),
+                Json::Bool(true),
+                Json::Bool(true),
+                Json::Text("on".to_owned()),
+            ),
+            "(left: pointer, active, power; right: pointer, active, power)"
+        );
+        let edges = |values: &std::collections::BTreeMap<&'static str, Json>| {
+            let reserved = role(values, "reserved");
+            ["top", "right", "bottom", "left"].map(|edge| reserved.get(edge).cloned())
+        };
+        assert_eq!(
+            (edges(&on_left), edges(&on_right)),
+            (
+                [
+                    Some(Json::Number(0.0)),
+                    Some(Json::Number(0.0)),
+                    Some(Json::Number(0.0)),
+                    Some(Json::Number(0.0)),
+                ],
+                [
+                    Some(Json::Number(0.0)),
+                    Some(Json::Number(20.0)),
+                    Some(Json::Number(0.0)),
+                    Some(Json::Number(30.0)),
+                ],
+            ),
+            "(the left monitor's top, right, bottom and left, then the right one's)"
+        );
+    }
+
     /// **A turned monitor's `transform` is Smithay's name in lower case**, as
     /// `sol.monitors()` spells it, not as `sol.monitors{ ... }` takes it.
     #[test]

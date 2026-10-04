@@ -409,6 +409,11 @@ and `Window` is still Qt Quick's in a scene that imports both
 (`qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`),
 and a shell's own `Workspace.qml` is its own
 (`qml::hosted::tests::a_shell_file_named_like_a_workspace_is_still_the_shells`).
+A shell's own file named like a type or singleton the compositor registers
+(`Grab`, `Keyboard`, `Monitors`) is hidden by it: a `Monitors.qml` beside a
+scene is the `Monitors` model there, and a scene that creates one does not
+build, so name such a file otherwise
+(`qml::hosted::tests::a_shell_file_named_like_a_singleton_is_hidden_by_it`).
 A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
 override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
@@ -447,7 +452,17 @@ Rows also say what is `reserved` on each edge (`top`, `right`, `bottom` and
 `left`: what the work area lost there, layer-shell zones and hosted reserves
 together), whether the monitor's `power` is `"on"` or `"off"`, whether the
 `pointer` is on it and whether it is the `active` one, the monitor in front of
-you (`models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`).
+you (`models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`,
+`models::monitors::tests::on_two_monitors_only_the_pointers_is_active_and_each_says_its_own_edges`).
+`Monitors.get(name)` of a monitor that is not there answers a row carrying
+only that name, which becomes the monitor when it is plugged in; one that
+goes leaves the list and keeps its last values, so read `present` before them
+(`qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`).
+In a delegate of `Monitors`, `scale` and `transform` are the delegate item's
+own properties, so read those two as `model.scale` and `model.transform`
+(`qml::hosted::tests::a_monitors_delegate_reads_scale_and_transform_through_model`).
+The rows are published with a frame, so while every monitor is off none is
+published, and `power` reads `"off"` only while another monitor is drawn.
 
 **Windows, live.** `Windows` is every window, a list model built from the
 compositor's own panes and updated in place once per frame: `id`, `title`,
