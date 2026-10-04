@@ -4658,7 +4658,7 @@ pub(crate) fn normalise_combo(combo: &str) -> String {
 mod reference;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -8103,7 +8103,7 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
     }
 
     /// What `tracing` logs on this thread while `run` runs.
-    fn logged_while(run: impl FnOnce()) -> String {
+    pub(crate) fn logged_while(run: impl FnOnce()) -> String {
         #[derive(Clone, Default)]
         struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
         impl std::io::Write for Lines {

@@ -25305,9 +25305,9 @@ end)"#,
                 );
             }
 
-            /// **An action the compositor does not know is kept, and so
-            /// warned of, the first time only**: asked for twice, it is one
-            /// name, and both `done`s still hear `unknown-action`.
+            /// **An action the compositor does not know is warned of the
+            /// first time only**: asked for twice, the log says so once, and
+            /// both `done`s still hear `unknown-action`.
             #[test]
             fn an_unknown_action_is_warned_of_the_first_time_only() {
                 let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
@@ -25322,11 +25322,14 @@ end)"#,
                     shell,
                     &[("windows.fly", "null"), ("windows.fly", "null")],
                 );
-                desk.state.settle_scenes();
+                let log = crate::script::tests::logged_while(|| desk.state.settle_scenes());
                 assert_eq!(
-                    (desk.state.status.as_str(), desk.state.unknown_actions.len()),
+                    (
+                        desk.state.status.as_str(),
+                        log.matches("sol.act: no such action").count()
+                    ),
                     ("unknown-action;unknown-action;", 1),
-                    "(what the dones heard, the names kept to warn of)"
+                    "(what the dones heard, how many times the log warned of it):\n{log}"
                 );
             }
         }
