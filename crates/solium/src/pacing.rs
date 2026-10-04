@@ -426,7 +426,9 @@ impl Counters {
 /// Begin a pass.
 ///
 /// Always reads the clock once, because every pass is counted: a miss with the
-/// knob off is still a miss (`tests::a_miss_is_counted_with_the_knob_off`).
+/// knob off is still a miss (`tests::a_miss_is_counted_with_the_knob_off`,
+/// and through `frame`, `deadline` and `finish` as the backends call them,
+/// `tests::a_pass_with_the_knob_off_is_counted_from_frame_to_finish`).
 /// The phases, the snapshot and the line need the knob.
 pub(crate) fn frame() -> Frame {
     COUNTERS.with(|counters| {
@@ -636,7 +638,7 @@ pub(crate) fn summary() {
     tracing::info!(
         passes = totals.passes,
         missed = totals.missed,
-        "pacing: passes drawn this session, and passes that overran the tightest monitor's frame"
+        "pacing: render passes this session (one in which no monitor was ready to draw still counts), and passes that overran the tightest monitor's frame"
     );
 }
 
@@ -788,6 +790,46 @@ mod tests {
         };
         frame.deadline(at_260(), || panic!("the name was taken with the knob off"));
         super::COUNTERS.with(|counters| assert_eq!(counters.deadline.get(), at_260()));
+    }
+
+    /// **A pass with the knob off is counted from `frame` to `finish`**, the
+    /// way the backends call them, not through `finish_at` alone: the pass is
+    /// counted, its miss with it, its serial runs from 1, and a pass whose
+    /// backend named no deadline is not judged against the last one's.
+    #[test]
+    fn a_pass_with_the_knob_off_is_counted_from_frame_to_finish() {
+        super::COUNTERS.with(|counters| {
+            counters.asked.set(true);
+            counters.on.set(false);
+        });
+        let first = super::frame();
+        assert_eq!(first.pass, 1, "the serial counts from 1");
+        // A deadline no pass can meet, so this one is a miss however fast.
+        first.deadline(Duration::from_nanos(1), || {
+            panic!("the name was taken with the knob off")
+        });
+        std::thread::sleep(ms(1));
+        first.finish(3);
+        assert_eq!(
+            super::totals(),
+            Totals {
+                passes: 1,
+                missed: 1
+            }
+        );
+
+        let second = super::frame();
+        assert_eq!(second.pass, 2);
+        std::thread::sleep(ms(1));
+        second.finish(3);
+        assert_eq!(
+            super::totals(),
+            Totals {
+                passes: 2,
+                missed: 1
+            },
+            "a pass that named no deadline was judged against the last one's"
+        );
     }
 
     /// **A sustained stall costs one line a second, not one a frame**, now
