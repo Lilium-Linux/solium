@@ -52,12 +52,13 @@ judged at the very end.
 | 8 | the resize | a rebind keeps the object tree and its running animation, the scene reads as animating, the new size draws right, and freeing the scene takes none of the compositor's GL objects | `the QML tree was rebuilt by a resize`, or `freeing the resized scene destroyed` … |
 | 9 | the compositor's own scenes | `cursor.qml`, `panes/top/Frame.qml` and `delegate.qml` build and draw on a GPU host; the first two read as not animating, and `delegate.qml`, whose one animation is in a `Repeater` delegate, reads as animating | `a GPU host could not build the` …, or `` `solium_qml_scene_animating` says `` … |
 | 10 | the pointer's size | `cursor.qml` at 16, 24, 48 and 96 draws from the corner and fills the same fraction at each | `the pointer fills` … |
-| 11 | the rounded-corner shader | it compiles in all three variants, and draws the middle intact, all four corners cut, four radii in the right quadrants and a zero radius square | `the rounded-corner shader did not compile`, or a message naming the variant or corner |
-| 12 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
-| 13 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
-| 14 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
+| 11 | a pointer scene's glow (`glow.qml`) | a scene sized by its own root, as `cursor.scene` is (#213), keeps its root's 48x48 on the 24-pixel buffer it is built on and is rebound onto 48, and its `MultiEffect` draws a glow beside its square | `a scene sized by its root read` …, or `MultiEffect drew no glow beside the square on the GPU path` |
+| 12 | the rounded-corner shader | it compiles in all three variants, and draws the middle intact, all four corners cut, four radii in the right quadrants and a zero radius square | `the rounded-corner shader did not compile`, or a message naming the variant or corner |
+| 13 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
+| 14 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
+| 15 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
 
-**C-1** is the name the harness prints for case 14 (`=== C-1: free a scene
+**C-1** is the name the harness prints for case 15 (`=== C-1: free a scene
 with the compositor's context current ===`), and it is the name the controls
 below use.
 
@@ -174,6 +175,18 @@ At 24 alone it passes, which is exactly how this shipped. The bounding box also 
 at every size: `cursor.rs` places the buffer by subtracting `HOTSPOT`, which is
 (0, 0), so the arrow's tip has to be in the corner or the pointer points a few
 pixels away from what it is over.
+
+**And that a pointer scene's glow is drawn.** `cursor.scene` (#213) is a scene
+sized by its own root, and `MultiEffect` is a shader, so it draws on this path
+and nothing on the software one; `cargo test` has no GPU and a nested run has
+no GBM device, so this is the only place it can be seen. `glow.qml` is a 48x48
+root with a white 16-pixel square in the middle and a `MultiEffect` shadow of
+it. It is built on a 24-pixel buffer, as `Cursor::configured` builds a scene at
+`cursor.size`, where its root has to still read 48x48, and then rebound onto a
+48-pixel one, as the first `Gpu::sample` rebinds it. What is read back is the
+alpha inside the square, 255, and four pixels beside it, which only the glow
+can reach: 27 on this machine. Measured with `size_root` in `host.cpp` writing
+every root, as it did before, the root reads 24x24 and the case fails.
 
 **And whether the host can say that a scene is animating — both ways.**
 `solium_qml_scene_animating`, which is what `render::Drawn` gates the next frame

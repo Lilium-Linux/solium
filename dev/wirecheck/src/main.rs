@@ -58,6 +58,8 @@ unsafe extern "C" {
         initial_json: *const c_char,
     ) -> *mut c_void;
     fn solium_qml_scene_render_gpu(scene: *mut c_void, fence_fd: *mut c_int) -> c_int;
+    fn solium_qml_host_next_sized_by_root(width: c_int, height: c_int);
+    fn solium_qml_scene_root_size(scene: *const c_void, width: *mut f64, height: *mut f64) -> c_int;
     fn solium_qml_scene_resize(scene: *mut c_void, width: c_int, height: c_int, scale: f64);
     fn solium_qml_scene_rebind(
         scene: *mut c_void,
@@ -2520,6 +2522,110 @@ fn main() -> Result<()> {
                  item, so the fraction is the same at every size: too small means it is still \
                  drawing in absolute units and the configured size only pads the buffer, and \
                  1.00 means the drawing runs off the edge and the pointer is clipped"
+            ));
+        }
+        kept_scenes.push(built);
+        kept_buffers.push(buffer);
+    }
+
+    // ------------------------------------------------------------------
+    // A pointer scene's glow, on a GPU host.
+    //
+    // `cursor.scene` (#213) is a scene sized by its own root, built the way
+    // `qml::Scene::sized_by_root` builds it, and it can do what any scene can:
+    // Qt's `MultiEffect` is a shader, so it draws on this path, and on the
+    // software one it draws nothing. `cargo test` has no GPU and a nested run
+    // has no GBM device, so this is the one place a pointer's glow can be seen
+    // at all. `glow.qml` draws a white square in the middle of a 48-pixel
+    // scene; anything beside the square is the glow.
+    println!("\n=== a pointer scene's MultiEffect glow, on a GPU host ===");
+    {
+        // Built at `cursor.size`, 24, as `cursor::Cursor::configured` builds
+        // it, and moved onto a buffer of the root's own size, as the first
+        // `Gpu::sample` moves it: the rebind is where a host that wrote the
+        // root's size would shrink the scene to the buffer it was built on.
+        const BUILT: c_int = 24;
+        const SIDE: c_int = 48;
+        let glow_qml = repo().join("dev/wirecheck/glow.qml");
+        let glow_path = CString::new(glow_qml.as_os_str().as_encoded_bytes())?;
+        let first = target::allocate(&gbm, BUILT, BUILT).context("the pointer's first buffer")?;
+        let (fd, stride, modifier, fourcc) = first.as_ffi().context("as_ffi")?;
+        unsafe { solium_qml_host_next_sized_by_root(BUILT, BUILT) };
+        let built = unsafe {
+            solium_qml_scene_new_gpu(
+                glow_path.as_ptr(),
+                BUILT,
+                BUILT,
+                fd,
+                stride,
+                modifier,
+                fourcc,
+                std::ptr::null(),
+            )
+        };
+        unsafe { solium_qml_host_next_sized_by_root(0, 0) };
+        restore(&renderer)?;
+        if built.is_null() {
+            return Err(anyhow!(
+                "a GPU host could not build a pointer scene with a MultiEffect in it"
+            ));
+        }
+        // Read on the buffer it was built on, which is where a host that wrote
+        // the root's size would have made it 24.
+        let (mut width, mut height) = (0.0, 0.0);
+        unsafe { solium_qml_scene_root_size(built, &raw mut width, &raw mut height) };
+        let buffer = target::allocate(&gbm, SIDE, SIDE).context("the glowing pointer's buffer")?;
+        wipe(&mut renderer, &buffer.dmabuf, SIDE, SIDE)?;
+        let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
+        let rebound =
+            unsafe { solium_qml_scene_rebind(built, fd, stride, modifier, fourcc, SIDE, SIDE, 1.0) };
+        restore(&renderer)?;
+        if !rebound {
+            return Err(anyhow!("the pointer scene would not move onto its own size's buffer"));
+        }
+        drop(first);
+        // A few frames, so the effect's own layer of the square is rendered
+        // before the effect samples it.
+        for _ in 0..3 {
+            tick(&mut clock, FRAME_MS);
+            let mut fence: c_int = -1;
+            let rendered = unsafe { solium_qml_scene_render_gpu(built, &raw mut fence) };
+            restore(&renderer)?;
+            if rendered == 0 {
+                return Err(anyhow!("the glowing pointer scene did not render on the GPU"));
+            }
+            if fence >= 0 {
+                wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fence) })?;
+            }
+        }
+        let raw = read_dmabuf(&mut renderer, &buffer.dmabuf, SIDE, SIDE)?;
+        // ARGB8888 read back little-endian: blue, green, red, alpha.
+        let alpha = |x: c_int, y: c_int| {
+            usize::try_from((y * SIDE + x) * 4 + 3)
+                .ok()
+                .and_then(|at| raw.get(at).copied())
+                .unwrap_or_default()
+        };
+        let (square, beside, corner) = (alpha(24, 24), alpha(12, 24), alpha(0, 0));
+        println!(
+            "  root {width}x{height} on the buffer it was built on; alpha in the square \
+             {square}, 4 px beside it {beside}, in the corner {corner}"
+        );
+        if (width, height) != (48.0, 48.0) {
+            return Err(anyhow!(
+                "a scene sized by its root read {width}x{height} on the 24-pixel buffer it was \
+                 built on, not the 48x48 its root says: the host wrote the root's size"
+            ));
+        }
+        if square != 255 {
+            return Err(anyhow!(
+                "the glowing pointer scene did not draw its square ({square} alpha inside it)"
+            ));
+        }
+        if beside == 0 {
+            return Err(anyhow!(
+                "MultiEffect drew no glow beside the square on the GPU path: a pointer scene's \
+                 effects would be invisible on the one path that is meant to draw them"
             ));
         }
         kept_scenes.push(built);
