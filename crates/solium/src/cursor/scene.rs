@@ -58,6 +58,7 @@ use crate::{
 pub(crate) const LARGEST: i32 = 256;
 
 /// The highest scale a side is multiplied by, as `theme::pixels` bounds it.
+/// `tests::a_side_is_whole_pixels_rounded_up_and_bounded`.
 const MAX_SCALE: f64 = 8.0;
 
 /// A scene that animates asks for frames; one at rest costs nothing. See
@@ -143,6 +144,7 @@ impl Cursor {
     }
 
     /// The picture, uploaded and placed with its hotspot on the pointer.
+    /// `tests::the_scene_is_drawn_at_its_own_size_with_its_hotspot_on_the_pointer`.
     fn placed(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -231,6 +233,7 @@ pub(crate) fn origin(
 
 /// One side of the scene, in whole logical pixels: what its root says,
 /// rounded up, from one to [`LARGEST`].
+/// `tests::a_side_is_whole_pixels_rounded_up_and_bounded`.
 fn side(logical: f64) -> i32 {
     if !logical.is_finite() {
         return 1;
@@ -243,7 +246,9 @@ fn side(logical: f64) -> i32 {
     whole
 }
 
-/// A size in logical pixels as device pixels at `scale`, at least one each.
+/// A size in logical pixels as device pixels at `scale`, at least one each;
+/// a scale that is not a number, or not above zero, is 1.
+/// `tests::a_side_is_whole_pixels_rounded_up_and_bounded`.
 fn device(size: (i32, i32), scale: f64) -> (i32, i32) {
     let scale = if scale.is_finite() && scale > 0.0 {
         scale.min(MAX_SCALE)
@@ -259,7 +264,7 @@ fn device(size: (i32, i32), scale: f64) -> (i32, i32) {
 }
 
 /// One place the pointer was reported, and when, in microseconds on the
-/// input device's own clock.
+/// input device's own clock. `tests::velocity_is_the_motion_since_it_was_last_read`.
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     at: u64,
@@ -285,7 +290,7 @@ pub(crate) struct Motion {
 
 impl Motion {
     /// The pointer was reported at `location`, `at` microseconds into the
-    /// device's clock.
+    /// device's clock. `tests::velocity_is_the_motion_since_it_was_last_read`.
     pub(crate) fn moved(&mut self, at: u64, location: Point<f64, Logical>) {
         let now = Sample { at, location };
         let from = match self.span {
@@ -505,6 +510,33 @@ mod tests {
                  read]"
             );
         });
+    }
+
+    /// **A side is whole pixels, rounded up and bounded**: a root 40.4 wide is
+    /// 41, one that says nothing sensible is 1, and one wider than
+    /// [`super::LARGEST`] is that; at 1.5x a 40 by 32 scene is 60 by 48
+    /// pixels, a scale that is not a number draws it at 1x, and one past
+    /// [`super::MAX_SCALE`] at that.
+    #[test]
+    fn a_side_is_whole_pixels_rounded_up_and_bounded() {
+        assert_eq!(
+            [
+                super::side(40.4),
+                super::side(0.0),
+                super::side(f64::NAN),
+                super::side(1000.0)
+            ],
+            [41, 1, 1, super::LARGEST]
+        );
+        assert_eq!(
+            [
+                super::device((40, 32), 1.5),
+                super::device((40, 32), f64::NAN),
+                super::device((40, 32), 0.0),
+                super::device((40, 32), 100.0)
+            ],
+            [(60, 48), (40, 32), (40, 32), (320, 256)]
+        );
     }
 
     /// **Velocity is the motion since it was last read**, in logical pixels a

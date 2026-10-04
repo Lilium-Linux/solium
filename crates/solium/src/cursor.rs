@@ -873,6 +873,7 @@ impl Pointer {
     }
 
     /// The configured size, in logical pixels.
+    /// `crate::models::pointer::tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`.
     pub(crate) const fn size(&self) -> i32 {
         self.settings.size
     }
