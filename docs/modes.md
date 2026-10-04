@@ -231,6 +231,8 @@ sol.on("restore",  function() end)                 -- you have replaced a runnin
 sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" or "move", and which way
 sol.on("keyboard", function(state, changed) end)   -- the layout, Caps Lock or Num Lock changed: "layout", "caps" or "num"
 sol.on("text_input", function(field, why) end)     -- the focused text field: "field", "caret" or "framed"
+sol.on("fullscreen", function(id, entering) end)   -- it went fullscreen, or left: answer with sol.animate
+sol.on("maximize", function(id, entering) end)     -- it was maximised, or restored: the same
 ```
 
 Every handler, and every binding, has 100 ms, on a clock the compositor starts
@@ -755,6 +757,51 @@ its tile there, or with no layout at the same place on the new screen as it
 had on the old one. A window floated with `super+shift+space` and then made
 fullscreen stays fullscreen through every layout pass, and leaving goes back to
 where it floated.
+
+### Going fullscreen or maximised, and back
+
+The compositor makes the change and the scripts choose how it looks. On the
+key, or when an application asks, the window is told its new size at once and
+lives at its new rectangle -- the whole monitor it is on, its work area, or
+the place or tile it came from. Then `fullscreen` or `maximize` is told,
+`(id, entering)`, and once every listener has run the window's picture glides
+there from wherever it is drawn, through the same transform a layout's glide
+uses, with the timing a listener set with `sol.animate`. With none set, the
+change is instant:
+
+```lua
+sol.on("fullscreen", function(id, entering)
+    sol.animate({ duration = 260, easing = "outCubic" })
+end)
+```
+
+`lua/fullscreen.lua` is the listener that ships, reading `fullscreen` and
+`maximize` in `config.lua` -- `animate`, or `false`, and `instant.app_id`, each
+section on its own ([ricing.md](ricing.md#your-own-animation-feel)). The rest is
+the compositor's, whatever the listener says:
+
+- **From what is on screen.** Pressing the key again half way turns the window
+  round where it is drawn, not where it was headed or where it came from
+  (`real_client::fullscreen_glides::a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn`).
+- **Answered at once.** The application is configured on the key, not when the
+  glide lands, and its last picture is stretched until it draws one at the new
+  size (`real_client::fullscreen_glides::the_client_is_told_its_new_size_on_the_toggle`).
+- **Plain at rest.** The transform is released when the glide lands, so a
+  fullscreen game or video is drawn with nothing in between
+  (`real_client::fullscreen_glides::a_window_glides_into_fullscreen_and_out_again`).
+- **Over the bars while it is big.** A window going fullscreen goes over the
+  bars as it starts to grow, and one leaving goes back under them once it has
+  finished shrinking; a press goes to what is drawn there
+  (`stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`).
+- **Into its tile with its own motion.** A window going back into a tile is
+  placed by the layout, and the change's glide replaces the layout's
+  (`tests/scenarios/fullscreen-tiled.lua`).
+- **Not told twice.** A listener that toggles the window back has that done at
+  once and is not told it
+  (`real_client::fullscreen_glides::a_listener_that_toggles_the_change_back_is_not_told_it_again`).
+
+The compositor's move comes after the listeners' commands, so a `sol.present`
+of the window in one is replaced by it.
 
 ## The arrangements that ship
 

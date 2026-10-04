@@ -107,6 +107,8 @@ scrolling = {
 workspaces = { motion = { duration = 300, easing = "outCubic" } },
 open      = { motion = { duration = 220, easing = "outBack" }, scale = 0.88 },
 loading   = { fade = 180 },
+fullscreen = { animate = { duration = 260, easing = "outCubic" }, instant = { app_id = {} } },
+maximize   = { animate = { duration = 220, easing = "outCubic" }, instant = { app_id = {} } },
 ```
 
 These are the numbers `config.lua` really has. The block used to print `open` as

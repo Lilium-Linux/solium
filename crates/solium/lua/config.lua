@@ -802,7 +802,15 @@ local defaults = {
     -- maximise can move differently from a fullscreen, or not at all, and
     -- changing one changes nothing about the other.
     maximize = {
+        -- How a window grows to fill the work area and shrinks back, as
+        -- `fullscreen.animate` says for going fullscreen: a duration and an
+        -- easing, or `false` for instant.
+        --
+        --     maximize = { animate = false },
         animate = { duration = 220, easing = "outCubic" },
+
+        -- Applications that are maximised and restored at once whatever
+        -- `animate` says, by app id, as `fullscreen.instant` lists them.
         instant = { app_id = {} },
     },
 
