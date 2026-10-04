@@ -1030,6 +1030,19 @@ impl Solium {
         self.redraw = true;
     }
 
+    /// Where a window stands, as the way back a fullscreen or a maximise
+    /// keeps: the slot a hold is keeping -- the rectangle its client was told
+    /// and has not drawn at yet, part of the way out of either -- and where
+    /// the space has it otherwise. The space has the size the client last
+    /// drew, and turned round part of the way out, that is still the
+    /// monitor's: kept, the next way out configured it, and the window lost
+    /// its size for good.
+    /// `turning_round_part_of_the_way_out_keeps_the_way_back`.
+    pub(super) fn standing(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        self.held_slot(window)
+            .or_else(|| self.real_geometry(window))
+    }
+
     /// The `fullscreen` or `maximize` event, told, and the motion its
     /// listeners answered with. See [`Self::transition`].
     fn tell_change(
@@ -1088,7 +1101,10 @@ impl Solium {
             return;
         }
 
-        let Some(current) = self.real_geometry(window) else {
+        // Where it stands, which is the way back it keeps below, as
+        // `fullscreen_request` keeps one.
+        // `turning_round_part_of_the_way_out_keeps_the_way_back`.
+        let Some(current) = self.standing(window) else {
             return;
         };
         let Some(filled) = self.maximised(window, current) else {

@@ -5481,6 +5481,42 @@ end)"#,
             assert!(!desk.transformed());
         }
 
+        /// **Turning round part of the way out keeps the way back**, for
+        /// fullscreen and maximised alike: pressed again before the client
+        /// has drawn at the size it went back to, what is kept is the
+        /// rectangle it was told, and not the monitor's size it has not
+        /// yet left -- which the next way out configured it with, so the
+        /// window lost its size for good.
+        #[test]
+        fn turning_round_part_of_the_way_out_keeps_the_way_back() {
+            for key in ["super+f", "super+shift+m"] {
+                let mut desk = Desk::new("turned-round", SCRIPT);
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.answer(1920, 1080);
+                desk.land();
+
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.state.clock.advance(Duration::from_millis(100));
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.answer(1920, 1080);
+                desk.land();
+
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                assert_eq!(
+                    last_configured(&desk.client, &desk.toplevel),
+                    Some((400, 300)),
+                    "{key}: the way out is to the size it had"
+                );
+                desk.answer(400, 300);
+                desk.land();
+                assert_eq!(desk.drawn(desk.state.clock.now()), before(), "{key}");
+            }
+        }
+
         /// **A reload part of the way through leaves no window transformed**:
         /// the glide goes on under the new scripts and is released when it
         /// lands, entering and leaving alike.

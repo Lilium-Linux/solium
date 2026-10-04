@@ -564,8 +564,12 @@ impl XdgShellHandler for Solium {
         // Where it is drawn now, which is where it grows from: read before
         // anything below moves it or drops its frame.
         let start = self.drawn_before(id);
+        // The way back is where it stands, and not where the space has it:
+        // turned round part of the way out of fullscreen, the space has the
+        // monitor's size, which its client has not left yet.
+        // `turning_round_part_of_the_way_out_keeps_the_way_back`.
         if !already
-            && let Some(real) = self.real_geometry(&window)
+            && let Some(real) = self.standing(&window)
             && !real.is_empty()
             && let Some(pane) = self.panes.get_mut(id)
             && pane.restore().is_none()
