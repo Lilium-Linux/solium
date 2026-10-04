@@ -253,6 +253,8 @@ reads one that file does not list.
 | `SOLIUM_TERMINAL=<command line>` | The terminal `super+return` opens, split on spaces. | |
 | `SOLIUM_PANE=<name or path>` | The frame style for this run. | |
 | `SOLIUM_FENCE_WAIT=off` | A window capture drops its fence instead of waiting for it on the CPU. The default waits, and each session's log says which it ran with. | |
+| `SOLIUM_PACING` | Say where a pass's time went, on passes that overran the tightest monitor's frame; with it, GPU time, clocks and late flips. Misses are counted without it. | |
+| `SOLIUM_TRACE=<path>` | One JSON line per pass and per flip, and `SOLIUM_PACING` on. See *Measuring frame pacing on a TTY*. | |
 | `SOLIUM_QML=<mode>` | `auto`, `gpu` or `software`; see *QML on the GPU*. | |
 | `SOLIUM_SESSION_BUS=<address>` | The D-Bus bus to tell about the session and to own `org.freedesktop.ScreenSaver` on, instead of the session bus. A nested run, or `solium --tty` without `--session`, tells nobody anything without it. To check the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. | |
 | `RUST_LOG=<filter>` | Log levels, `info` by default. `solium::qml` carries Qt's own messages. | |
@@ -1131,6 +1133,60 @@ made with `dev/soak.sh --triggers`. What churns is the client side: terminals
 opened and closed, and an X11 client now and then. Nested, the whole cycle
 runs. Until the hardware backend reads the triggers, a soak of the window
 lifecycle on a TTY needs the windows opened and closed from outside it.
+
+### Measuring frame pacing on a TTY
+
+`dev/pacing-tty.sh` runs pinned scenes on the hardware and measures every
+pass of them, with `SOLIUM_TRACE` writing a line per pass and per flip. S1 is
+the `rounded` pane style, four idle terminals and one player at fixed
+rectangles on the monitor you name, over the shipped wallpaper; S1 tilted is
+the same with the player held at 6 degrees, so its picture is captured again
+whenever it draws; and the tilt scene is two tilted terminals, one idle and
+one ticking. It is what Phase 0 of the shader work is judged by (FX-S1), and
+the 260 Hz numbers come only from here: nested, there is no page flip and
+QML is software. The tilts are made by the scenes' Lua, because the hardware
+backend reads none of the scripted knobs.
+
+    dev/pacing-tty.sh before DP-1     # fourteen runs, about 21 minutes
+    dev/pacing-tty.sh after DP-1      # nine runs, about 14 minutes
+    dev/pacing-tty.sh fence DP-1      # one fence pair, about 3 minutes
+    dev/pacing-tty.sh one DP-1        # one run, to try it
+
+Run it on a free VT, logged in, from the worktree the measured binary was
+built in, and keep your hands off the keyboard and mouse until it says
+`done`. Nothing else should be building or running on the GPU meanwhile;
+each run's `meta.txt` records the load and any `cargo` or `rustc` it saw.
+Each run is capped by a timeout; Ctrl+Alt+Backspace stops the compositor at
+any moment and the script with it. It writes under
+`~/.local/state/solium/pacing/<date>-<protocol>/`: per run, `meta.txt` (the
+build, the player, the kernel, the load, the driver and its clocks before
+the run), `stderr.log`, the trace and `summary.txt`; and `results.txt` with
+every summary. The compositor's own state and configuration directories are
+the run's, so your `session.log` and `user.lua` are untouched. Without mpv
+and `PACING_CLIP`, ffplay plays a test pattern; every run that is compared
+must use the same player.
+
+`PACING_BINARY` runs a binary frozen for a measurement. Freeze a release
+build (`cargo build --release`) in a worktree of its own and run the script
+from that worktree: the binary finds its QML and Lua in the tree it was
+built from, so a worktree that keeps changing would change what is
+measured, and the dev profile's `missed` is not the shipped one's.
+`after` also runs `PACING_ANCHOR`, the build an earlier run measured, once,
+so two sittings can be compared through it. `dev/pacing-nested.sh <label>`
+runs the same scenes nested (`PACING_SCENE=tilt`, `PACING_TILT=6`) and
+prints the same summary; its numbers are not the TTY's. Nested, only the
+captures are GPU-timed: timing the window's own draw needs a GL call after
+its swap, which leaves the window's surface uncurrent, so the next pass
+could not read its buffer age and would redraw everything.
+
+A pass record carries `pass`, `t_ns` (CLOCK_MONOTONIC at its start),
+`total_us`, `deadline_us`, `monitor`, `missed`, each phase as `<phase>_us`,
+`captures`, `panes`, `drew`, `scenes`, `animating`, `rendered`, `built`,
+`rebound`, `qml` (Qt's microseconds per scene), `clocks`, `gpu_mhz`,
+`mem_mhz`, `pstate`, `gpu` (`ok`, `unsupported`, `late` or `disjoint`),
+`gpu_us`, `gpu_prep_us` and `gpu_out_us`. A flip record carries `flip` (the
+pass), `monitor`, `seq`, `at_ns`, `queued_ns` and `late`, the vblanks it
+missed. `dev/pacing-summary.py` reads them.
 
 ## Installing it
 
