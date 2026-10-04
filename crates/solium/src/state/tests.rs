@@ -25483,6 +25483,60 @@ end)"#,
                 );
             }
 
+            /// **Workspace rows count their windows and say which is shown**,
+            /// from what Lua declared, joined with the windows; and the
+            /// window's own row says which workspace it is on.
+            #[test]
+            fn workspace_rows_count_their_windows_and_say_which_is_shown() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let monitor = the_monitor(&desk).name();
+                let id = opened.pane.get();
+                desk.install(&format!(
+                    r#"sol.workspaces({{ arrangement = {{ kind = "horizontal", columns = 2, rows = 1 }},
+                        groups = {{ {{ id = "{monitor}", monitors = {{ "{monitor}" }}, showing = {{ "1" }},
+                                     workspaces = {{ {{ id = "1", name = "1", col = 1, row = 1 }}, {{ id = "2", name = "2", col = 2, row = 1 }} }} }} }},
+                        windows = {{ [{id}] = {{ "2" }} }} }})"#
+                ));
+                let outcome = desk
+                    .state
+                    .scripts
+                    .as_mut()
+                    .map(crate::script::Scripts::startup)
+                    .unwrap_or_default();
+                desk.state.apply(outcome);
+                let rows = crate::models::workspaces::rows(&desk.state);
+                let get = |key: &str, role: &str| {
+                    rows.iter()
+                        .find(|row| row.key == key)
+                        .and_then(|row| row.values.get(role).cloned())
+                };
+                use crate::json::Json;
+                assert_eq!(
+                    get(&format!("{monitor}/1"), "active"),
+                    Some(Json::Bool(true))
+                );
+                assert_eq!(
+                    (
+                        get(&format!("{monitor}/1"), "focused"),
+                        get(&format!("{monitor}/2"), "focused")
+                    ),
+                    (Some(Json::Bool(true)), Some(Json::Bool(false))),
+                    "the workspace the monitor in front shows is the focused one"
+                );
+                assert_eq!(
+                    get(&format!("{monitor}/2"), "occupied"),
+                    Some(Json::Number(1.0))
+                );
+                assert_eq!(
+                    get(&format!("{monitor}/1"), "occupied"),
+                    Some(Json::Number(0.0))
+                );
+                assert_eq!(
+                    window_row(&desk, id).get("workspace"),
+                    Some(&Json::Text("2".to_owned()))
+                );
+            }
+
             /// **`focusOrder` is most recent first** (Ruling 18).
             #[test]
             fn focus_order_is_most_recent_first() {

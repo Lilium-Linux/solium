@@ -481,6 +481,9 @@ pub(crate) enum Command {
         monitor: Option<String>,
         on: bool,
     },
+    /// What the workspaces are, as Lua declares them each time they change.
+    /// `tests::sol_workspaces_declares_groups_and_windows`.
+    Workspaces(crate::models::workspaces::Declared),
     /// Which XCursor theme the pointer is drawn from, and how big it is.
     ///
     /// Carries what the *configuration* said and nothing else — `None` in a
@@ -3739,6 +3742,19 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // `sol.workspaces{ arrangement, groups, windows }`: the compositor does
+    // not know what a workspace is, so Lua says, each time it changes
+    // (03 §3.2.17). `tests::sol_workspaces_declares_groups_and_windows`.
+    sol.set(
+        "workspaces",
+        lua.create_function(|lua, declared: Table| {
+            let declared = declared_workspaces(&declared)?;
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Workspaces(declared));
+            })
+        })?,
+    )?;
+
     // The later call wins, and always has: two scripts binding one combination
     // is how `init.lua` and `scrolling.lua` coexist, and the alternative --
     // refusing the second -- would make the order files happen to be required
@@ -3921,6 +3937,67 @@ fn focused_id(lua: &Lua) -> Option<u64> {
             .iter()
             .find(|window| window.focused)
             .map(|window| window.id)
+    })
+}
+
+/// A `sol.workspaces` table, read: a workspace's `name` left out is its id,
+/// `col` and `row` are 1, and it is not `hidden`.
+/// `tests::sol_workspaces_declares_groups_and_windows`.
+fn declared_workspaces(declared: &Table) -> mlua::Result<crate::models::workspaces::Declared> {
+    use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
+    let strings = |table: Option<Table>| -> mlua::Result<Vec<String>> {
+        table.map_or_else(
+            || Ok(Vec::new()),
+            |table| table.sequence_values::<String>().collect(),
+        )
+    };
+    let arrangement = match declared.get::<Option<Table>>("arrangement")? {
+        Some(shape) => Arrangement {
+            kind: shape.get::<Option<String>>("kind")?.unwrap_or_default(),
+            columns: shape.get::<Option<u32>>("columns")?.unwrap_or(1),
+            rows: shape.get::<Option<u32>>("rows")?.unwrap_or(1),
+        },
+        None => Arrangement::default(),
+    };
+    let mut groups = Vec::new();
+    if let Some(list) = declared.get::<Option<Table>>("groups")? {
+        for group in list.sequence_values::<Table>() {
+            let group = group?;
+            let mut workspaces = Vec::new();
+            if let Some(list) = group.get::<Option<Table>>("workspaces")? {
+                for workspace in list.sequence_values::<Table>() {
+                    let workspace = workspace?;
+                    let id: String = workspace.get("id")?;
+                    workspaces.push(Workspace {
+                        name: workspace
+                            .get::<Option<String>>("name")?
+                            .unwrap_or_else(|| id.clone()),
+                        col: workspace.get::<Option<u32>>("col")?.unwrap_or(1),
+                        row: workspace.get::<Option<u32>>("row")?.unwrap_or(1),
+                        hidden: workspace.get::<Option<bool>>("hidden")?.unwrap_or(false),
+                        id,
+                    });
+                }
+            }
+            groups.push(Group {
+                id: group.get("id")?,
+                monitors: strings(group.get("monitors")?)?,
+                showing: strings(group.get("showing")?)?,
+                workspaces,
+            });
+        }
+    }
+    let mut windows = std::collections::BTreeMap::new();
+    if let Some(map) = declared.get::<Option<Table>>("windows")? {
+        for pair in map.pairs::<u64, Table>() {
+            let (id, list) = pair?;
+            windows.insert(id, strings(Some(list))?);
+        }
+    }
+    Ok(Declared {
+        arrangement,
+        groups,
+        windows,
     })
 }
 
@@ -7611,6 +7688,57 @@ mod tests {
             None,
             "done was called twice"
         );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.workspaces` declares groups and windows**, every field as Lua
+    /// wrote it.
+    #[test]
+    fn sol_workspaces_declares_groups_and_windows() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-workspaces",
+            r#"sol.workspaces({
+                arrangement = { kind = "grid", columns = 3, rows = 2 },
+                groups = { { id = "DP-1", monitors = { "DP-1" }, showing = { "2" },
+                             workspaces = { { id = "1", name = "1", col = 1, row = 1 }, { id = "2", name = "web", col = 2, row = 1 },
+                                            { id = "scratch", hidden = true } } } },
+                windows = { [42] = { "2" } },
+            })"#,
+        );
+        let declared: Vec<crate::models::workspaces::Declared> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared),
+                _ => None,
+            })
+            .collect();
+        let [declared] = declared.as_slice() else {
+            panic!("one declaration: {declared:?}")
+        };
+        assert_eq!(
+            (
+                declared.arrangement.kind.as_str(),
+                declared.arrangement.columns,
+                declared.arrangement.rows
+            ),
+            ("grid", 3, 2)
+        );
+        assert_eq!(declared.groups[0].showing, vec!["2".to_owned()]);
+        assert_eq!(declared.groups[0].workspaces[1].name, "web");
+        assert_eq!(
+            declared.groups[0].workspaces[2],
+            crate::models::workspaces::Workspace {
+                id: "scratch".to_owned(),
+                name: "scratch".to_owned(),
+                col: 1,
+                row: 1,
+                hidden: true,
+            },
+            "a workspace declared with only its id and hidden"
+        );
+        assert_eq!(declared.windows.get(&42), Some(&vec!["2".to_owned()]));
         let _ = std::fs::remove_dir_all(&directory);
     }
 

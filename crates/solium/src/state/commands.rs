@@ -345,6 +345,26 @@ impl Solium {
                         reason: Some(reason),
                     }),
                 },
+                // What Lua says the workspaces are, less the monitors and
+                // windows the compositor does not have, each logged once.
+                // `real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`,
+                // `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`.
+                Command::Workspaces(declared) => {
+                    let monitors: Vec<String> = self.space.outputs().map(Output::name).collect();
+                    let windows: Vec<u64> = self
+                        .snapshot()
+                        .windows
+                        .iter()
+                        .map(|window| window.id)
+                        .collect();
+                    crate::models::workspaces::log_unknown(
+                        &declared,
+                        &monitors,
+                        &windows,
+                        &mut self.unknown_in_workspaces,
+                    );
+                    self.workspaces = Some(declared.validated(&monitors, &windows));
+                }
                 Command::Loading(loading) => {
                     if self.loading != loading {
                         tracing::debug!(?loading, "loading behaviour set");

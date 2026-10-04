@@ -277,9 +277,11 @@ pub(crate) struct Solium {
     /// `tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
     pub(crate) urgent: std::collections::HashSet<u64>,
 
-    /// Which workspace each window is on, once Lua declares workspaces; until
-    /// then `None`, and every window's `workspace` in `Windows` reads `""`.
-    /// `tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`.
+    /// The workspaces Lua last declared with `sol.workspaces`, less what the
+    /// compositor does not have; until then `None`, with no `Workspaces`
+    /// rows, and every window's `workspace` in `Windows` reads `""`.
+    /// `tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
+    /// `tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`.
     pub(crate) workspaces: Option<crate::models::workspaces::Declared>,
 
     /// Every selection a script has named, and where each is being carried.
@@ -420,6 +422,10 @@ pub(crate) struct Solium {
     /// each logged the first time only.
     /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
     pub(crate) unknown_actions: std::collections::HashSet<String>,
+    /// The monitors and windows `sol.workspaces` named that the compositor
+    /// does not have, each logged the first time only.
+    /// `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`.
+    pub(crate) unknown_in_workspaces: std::collections::HashSet<String>,
     /// Whether the settled attempts are being told, so what a `done` asks
     /// for is told by that loop and not from inside it.
     /// `tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
@@ -1007,6 +1013,7 @@ impl Solium {
             scene_press: None,
             settled_attempts: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
+            unknown_in_workspaces: std::collections::HashSet::new(),
             telling_attempts: false,
             repoint_at_release: false,
             scene_hovered: None,

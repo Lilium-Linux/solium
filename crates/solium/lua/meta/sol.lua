@@ -368,6 +368,36 @@ function sol.text_input() end
 ---@return sol.Monitor[]|nil
 function sol.monitors(rows) end
 
+---What one workspace is, in a `sol.workspaces` declaration.
+---@class sol.DeclaredWorkspace
+---@field id string Unique within its group.
+---@field name? string What a shell shows; the id when left out.
+---@field col? integer Its column in the arrangement, from 1.
+---@field row? integer Its row in the arrangement, from 1.
+---@field hidden? boolean A workspace a shell should not list, such as a scratchpad.
+
+---A group of workspaces that switch together: one per monitor, or one for
+---every monitor.
+---@class sol.WorkspaceGroup
+---@field id string
+---@field monitors string[] The monitors it is on, by connector name.
+---@field showing string[] The ids it shows now.
+---@field workspaces sol.DeclaredWorkspace[]
+
+---@class sol.WorkspaceDeclaration
+---@field arrangement? { kind?: string, columns?: integer, rows?: integer } The shape, for a shell to draw.
+---@field groups sol.WorkspaceGroup[]
+---@field windows? table<integer, string[]> Which workspaces each window is on, by window id.
+
+---Say what the workspaces are. The compositor does not know what a workspace
+---is: `workspaces.lua` is the whole feature, and this is how a hosted shell's
+---`Workspaces` model learns it. Declare again whenever it changes; the same
+---declaration twice costs nothing. Monitors and windows the compositor does
+---not have are left out, and each is logged once.
+---@param declared sol.WorkspaceDeclaration
+---@return nil
+function sol.workspaces(declared) end
+
 ---Turn a monitor's display off or on, or every monitor's with `"all"`.
 ---
 ---The monitor keeps its place, its work area and its windows. Any key, click,
@@ -686,7 +716,8 @@ function sol.quit() end
 function sol.grab_input(grabbed) end
 
 ---Say which mode is in charge. The compositor keeps the text and logs a change
----at debug level; nothing on screen shows it.
+---at debug level, and a hosted shell reads it as `Solium.status`; nothing the
+---compositor draws itself shows it.
 ---@param text string
 ---@return nil
 function sol.status(text) end

@@ -183,6 +183,104 @@ private:
     QVariant m_on_stage;
 };
 
+/* A workspace's row: one row of `Workspaces`, and what its facades answer.
+ * Its key is `<group>/<id>`. A workspace no longer declared reads `present`
+ * and `valid` false (Ruling 17).
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`,
+ * `state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`. */
+class SoliumWorkspace : public SoliumRow
+{
+    Q_OBJECT
+    Q_PROPERTY(bool present READ isPresent NOTIFY changed)
+    Q_PROPERTY(bool valid READ isPresent NOTIFY changed)
+    Q_PROPERTY(QString key READ key NOTIFY changed)
+    Q_PROPERTY(QString id READ id NOTIFY changed)
+    Q_PROPERTY(QString name READ name NOTIFY changed)
+    Q_PROPERTY(int col READ col NOTIFY changed)
+    Q_PROPERTY(int row READ row NOTIFY changed)
+    Q_PROPERTY(QString group READ group NOTIFY changed)
+    Q_PROPERTY(QStringList monitors READ monitors NOTIFY changed)
+    Q_PROPERTY(bool active READ active NOTIFY changed)
+    Q_PROPERTY(bool focused READ focused NOTIFY changed)
+    Q_PROPERTY(int occupied READ occupied NOTIFY changed)
+    Q_PROPERTY(bool urgent READ urgent NOTIFY changed)
+    Q_PROPERTY(bool hidden READ hidden NOTIFY changed)
+    Q_PROPERTY(bool hasFullscreen READ hasFullscreen NOTIFY changed)
+    Q_PROPERTY(QVariantList windows READ windows NOTIFY changed)
+public:
+    using SoliumRow::SoliumRow;
+    bool isPresent() const { return present; }
+    QString key() const { return value("key").toString(); }
+    QString id() const { return value("id").toString(); }
+    QString name() const { return value("name").toString(); }
+    int col() const { return value("col").toInt(); }
+    int row() const { return value("row").toInt(); }
+    QString group() const { return value("group").toString(); }
+    QStringList monitors() const { return value("monitors").toStringList(); }
+    bool active() const { return value("active").toBool(); }
+    bool focused() const { return value("focused").toBool(); }
+    int occupied() const { return value("occupied").toInt(); }
+    bool urgent() const { return value("urgent").toBool(); }
+    bool hidden() const { return value("hidden").toBool(); }
+    bool hasFullscreen() const { return value("hasFullscreen").toBool(); }
+    QVariantList windows() const { return value("windows").toList(); }
+    void announce() override { emit changed(); }
+signals:
+    void changed();
+};
+
+/* `Workspaces`: every workspace; `current`, what the active monitor shows;
+ * `showing(monitor)`, a stable facade for what one monitor shows, which is
+ * what a per-monitor bar binds, since a singleton cannot know which instance
+ * asks; and the declared `arrangement`. Ruling 19.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`,
+ * `models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`. */
+class SoliumWorkspaceRows : public SoliumRows
+{
+    Q_OBJECT
+    Q_PROPERTY(SoliumWorkspace *current READ current CONSTANT)
+    Q_PROPERTY(QVariantMap arrangement READ arrangement NOTIFY arrangementChanged)
+public:
+    SoliumWorkspaceRows();
+    SoliumWorkspace *current() { return &m_current; }
+    Q_INVOKABLE SoliumWorkspace *showing(const QString &monitor);
+    QVariantMap arrangement() const { return m_arrangement; }
+    void setArrangement(const QVariantMap &arrangement);
+signals:
+    void arrangementChanged();
+
+private:
+    void follow();
+    static void copy(SoliumWorkspace &facade, const SoliumRow *row);
+    SoliumWorkspace m_current;
+    QHash<QString, SoliumWorkspace *> m_showing;
+    QVariantMap m_arrangement;
+};
+
+/* `WorkspaceList { monitor }`: the workspaces of the group a monitor is in;
+ * an empty `monitor` keeps every workspace.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+class SoliumWorkspaceList : public QSortFilterProxyModel
+{
+    Q_OBJECT
+    Q_PROPERTY(QString monitor READ monitor WRITE setMonitor NOTIFY changed)
+    Q_PROPERTY(int count READ count NOTIFY countChanged)
+public:
+    explicit SoliumWorkspaceList(QObject *parent = nullptr);
+    QString monitor() const { return m_monitor; }
+    void setMonitor(const QString &monitor);
+    int count() const { return rowCount(); }
+signals:
+    void changed();
+    void countChanged();
+
+protected:
+    bool filterAcceptsRow(int source_row, const QModelIndex &source_parent) const override;
+
+private:
+    QString m_monitor;
+};
+
 /* The store for a SOLIUM_QML_ROWS_* number, built on first use.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 SoliumRows *solium_rows(int model);

@@ -32,6 +32,8 @@ mod ffi {
         ) -> c_int;
         pub(super) fn solium_qml_host_next_on(monitor: *const c_char);
         pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_status(text: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_arrangement(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_pointer_event(
             scene: *mut super::super::ffi::Scene,
             kind: c_int,
@@ -94,10 +96,6 @@ mod ffi {
 pub(crate) enum Model {
     Monitors = 0,
     Windows = 1,
-    #[expect(
-        dead_code,
-        reason = "host.h numbers it; nothing publishes workspaces yet"
-    )]
     Workspaces = 2,
 }
 
@@ -116,6 +114,31 @@ pub(crate) fn apply_rows(model: Model, ops: &str) -> bool {
     };
     // SAFETY: `ops` outlives the call; the host copies what it keeps.
     unsafe { ffi::solium_qml_rows_apply(model as c_int, ops.as_ptr()) != 0 }
+}
+
+/// What `Solium.status` reads: the text `sol.status` set. Whether Qt took
+/// it. `tests::the_workspaces_model_its_list_and_its_facades`,
+/// `crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_status(text: &str) -> bool {
+    touched();
+    let Ok(text) = CString::new(text) else {
+        return false;
+    };
+    // SAFETY: `text` outlives the call; the host copies it.
+    unsafe { ffi::solium_qml_set_status(text.as_ptr()) != 0 }
+}
+
+/// `Workspaces.arrangement`, from JSON. Whether Qt took it.
+/// `crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_arrangement(json: &str) -> bool {
+    touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_set_arrangement(json.as_ptr()) != 0 }
 }
 
 impl Scene {
@@ -2831,6 +2854,142 @@ pub(crate) mod tests {
                 read,
                 ("921/shown/77".to_owned(), "/true".to_owned()),
                 "(the roles through `model`, the item's own `state` and `parent`)"
+            );
+        });
+    }
+
+    /// **A shell's own `Workspace.qml` is not shadowed by the workspaces
+    /// model** (Ruling 1a): `Workspaces`' row type has no name in `Solium`,
+    /// so a scene that imports it gets its own `Workspace`.
+    #[test]
+    fn a_shell_file_named_like_a_workspace_is_still_the_shells() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-hosted-shadow-workspace");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            std::fs::write(
+                directory.join("Workspace.qml"),
+                "import QtQuick\nItem { readonly property int mine: 1 }\n",
+            )
+            .expect("writing the shell's own file");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                "import QtQuick\nimport Solium\nItem {\n    Workspace { id: own }\n    readonly property int mine: own.mine\n}\n",
+            )
+            .expect("writing the scene");
+            let mut built = Scene::for_monitor(&path, 16, 16, None, "shadow-workspace-1");
+            let mine = built.as_mut().map(|scene| scene.get_int("mine")).ok();
+            drop(built);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(mine, Some(1), "Workspace is not the shell's own file");
+        });
+    }
+
+    /// **`WorkspaceList` is the group of its monitor, `showing(monitor)` is a
+    /// stable facade for what that monitor shows, `current` what the monitor
+    /// in front shows, and `Solium.status` is what `sol.status` set**
+    /// (Ruling 19); with no rows, the facades are empty.
+    #[test]
+    fn the_workspaces_model_its_list_and_its_facades() {
+        use crate::json::Json;
+        use crate::models::diff::{Row, diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-workspaces",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    WorkspaceList { id: own; monitor: "ws-left" }
+                    WorkspaceList { id: every }
+                    readonly property int mine: own.count
+                    readonly property int all: every.count
+                    property var held: { Workspaces.count; return Workspaces.get("ws-left/2") }
+                    readonly property int heldValid: held.valid ? 1 : 0
+                    readonly property string shown: Workspaces.showing("ws-left").name
+                    readonly property string current: Workspaces.current.name
+                    readonly property string status: Solium.status
+                }
+                "#,
+                "ws-left",
+            );
+            let row = |group: &str, id: &str, active: bool| Row {
+                key: format!("{group}/{id}"),
+                values: std::collections::BTreeMap::from([
+                    ("key", Json::Text(format!("{group}/{id}"))),
+                    ("id", Json::Text(id.to_owned())),
+                    ("name", Json::Text(format!("desk {id}"))),
+                    ("group", Json::Text(group.to_owned())),
+                    ("monitors", Json::List(vec![Json::Text(group.to_owned())])),
+                    ("active", Json::Bool(active)),
+                    ("focused", Json::Bool(active && group == "ws-left")),
+                ]),
+            };
+            let rows = vec![
+                row("ws-left", "1", false),
+                row("ws-left", "2", true),
+                row("ws-right", "1", true),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Workspaces,
+                &render(&diff(&[], &rows))
+            ));
+            assert!(super::set_status("workspace 2"));
+            let first = (
+                scene.get_int("mine"),
+                scene.get_int("all"),
+                scene.get_int("heldValid"),
+                scene.get_string_for_test("shown"),
+                scene.get_string_for_test("current"),
+                scene.get_string_for_test("status"),
+            );
+            let after = vec![
+                row("ws-left", "1", true),
+                row("ws-left", "2", false),
+                row("ws-right", "1", true),
+            ];
+            assert!(super::apply_rows(
+                super::Model::Workspaces,
+                &render(&diff(&rows, &after))
+            ));
+            let switched = (
+                scene.get_string_for_test("shown"),
+                scene.get_string_for_test("current"),
+            );
+            let _ = super::apply_rows(super::Model::Workspaces, &render(&diff(&after, &[])));
+            let gone = (
+                scene.get_string_for_test("shown"),
+                scene.get_string_for_test("current"),
+                scene.get_int("heldValid"),
+            );
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                first,
+                (
+                    2,
+                    3,
+                    1,
+                    "desk 2".to_owned(),
+                    "desk 2".to_owned(),
+                    "workspace 2".to_owned()
+                ),
+                "(WorkspaceList's count on ws-left, with no monitor, get(\"ws-left/2\").valid, \
+                 showing(ws-left), current, Solium.status)"
+            );
+            assert_eq!(
+                switched,
+                ("desk 1".to_owned(), "desk 1".to_owned()),
+                "the facades did not follow the switch: (showing, current)"
+            );
+            assert_eq!(
+                gone,
+                (String::new(), String::new(), 0),
+                "with no workspaces, the facades must be empty, not the last shown, and a \
+                 gone workspace's row invalid: (showing, current, get(\"ws-left/2\").valid)"
             );
         });
     }

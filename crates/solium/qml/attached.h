@@ -284,6 +284,19 @@ struct SoliumHosting
     QList<QPair<QString, QByteArray>> actions;
 };
 
+/* What `sol.status` last set, for `Solium.status`: one per process, made on
+ * first use.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+class SoliumStatus : public QObject
+{
+    Q_OBJECT
+public:
+    static SoliumStatus &instance();
+    QString text;
+signals:
+    void changed();
+};
+
 /* What every item reads as `Solium.<name>`.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 class SoliumAttached : public QObject
@@ -300,6 +313,9 @@ class SoliumAttached : public QObject
     /* `Solium.keyboard`: whether this item wants the keyboard, and the keys
      * it claims. `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     Q_PROPERTY(SoliumKeyboard *keyboard READ keyboard CONSTANT)
+    /* `Solium.status`: the text `sol.status` set.
+     * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+    Q_PROPERTY(QString status READ status NOTIFY statusChanged)
 public:
     explicit SoliumAttached(QObject *item);
     SoliumMonitor *monitor() const;
@@ -310,6 +326,7 @@ public:
      * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
+    QString status() const;
     /* `Solium.send(action, data)`: a named action with data, an object, a
      * value or nothing, queued for the compositor, which hands it to Lua at
      * its next settle, after every one sent before it. Ruling 15.
@@ -318,6 +335,7 @@ public:
 
 signals:
     void inputChanged();
+    void statusChanged();
 
 private:
     QObject *m_item;

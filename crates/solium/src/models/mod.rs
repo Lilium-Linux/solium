@@ -17,6 +17,12 @@ use crate::qml::hosted::Model;
 pub(crate) struct Published {
     monitors: Vec<diff::Row>,
     windows: Vec<diff::Row>,
+    /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
+    workspaces: Vec<diff::Row>,
+    /// What `Solium.status` and `Workspaces.arrangement` last took.
+    /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
+    status: Option<String>,
+    arrangement: Option<String>,
     /// `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
     keyboard: keyboard::Published,
 }
@@ -37,12 +43,36 @@ impl crate::state::Solium {
             crate::qml::hosted::apply_rows,
         );
         let windows = windows::rows(self);
+        let workspaces = workspaces::joined(self, &windows);
         publish(
             Model::Windows,
             &mut self.published.windows,
             windows,
             crate::qml::hosted::apply_rows,
         );
+        // The workspaces Lua declared, `Solium.status` and
+        // `Workspaces.arrangement`, each when it changed:
+        // `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
+        publish(
+            Model::Workspaces,
+            &mut self.published.workspaces,
+            workspaces,
+            crate::qml::hosted::apply_rows,
+        );
+        if self.published.status.as_deref() != Some(self.status.as_str())
+            && crate::qml::hosted::set_status(&self.status)
+        {
+            self.published.status = Some(self.status.clone());
+        }
+        if let Some(arrangement) = self
+            .workspaces
+            .as_ref()
+            .map(|declared| declared.arrangement_json().render())
+            && self.published.arrangement.as_deref() != Some(arrangement.as_str())
+            && crate::qml::hosted::set_arrangement(&arrangement)
+        {
+            self.published.arrangement = Some(arrangement);
+        }
         // The `Keyboard` singleton:
         // `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
         let mut keyboard = std::mem::take(&mut self.published.keyboard);
@@ -207,6 +237,108 @@ mod tests {
             );
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **`publish_models` carries Lua's workspaces, `sol.status` and the
+    /// declared arrangement to every scene**: `WorkspaceList`,
+    /// `Workspaces.showing(monitor)`, `Workspaces.arrangement` and
+    /// `Solium.status`, from the compositor's own state.
+    #[test]
+    fn publish_models_carries_the_workspaces_the_status_and_the_arrangement() {
+        use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+        use smithay::reexports::wayland_server::Display;
+
+        use super::workspaces::{Arrangement, Declared, Group, Workspace};
+
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let (directory, mut scene) = crate::qml::hosted::tests::hosted(
+                "solium-models-publish-workspaces",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    WorkspaceList { id: own; monitor: "publish-ws-1" }
+                    readonly property int count: own.count
+                    readonly property string shown: Workspaces.showing("publish-ws-1").name
+                    readonly property string kind: Workspaces.arrangement.kind || ""
+                    readonly property int columns: Workspaces.arrangement.columns || 0
+                    readonly property string status: Solium.status
+                }
+                "#,
+                "publish-ws-1",
+            );
+            let display = Display::<crate::state::Solium>::new().expect("a test display");
+            let mut state = crate::state::Solium::new(display.handle());
+            let output = Output::new(
+                "publish-ws-1".to_owned(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "solium".to_owned(),
+                    model: "publish".to_owned(),
+                },
+            );
+            output.change_current_state(
+                Some(Mode {
+                    size: (1280, 720).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Fractional(1.0)),
+                None,
+            );
+            state.space.map_output(&output, (0, 0));
+            state.status = "workspace 3".to_owned();
+            state.workspaces = Some(Declared {
+                arrangement: Arrangement {
+                    kind: "grid".to_owned(),
+                    columns: 2,
+                    rows: 2,
+                },
+                groups: vec![Group {
+                    id: "publish-ws-1".to_owned(),
+                    monitors: vec!["publish-ws-1".to_owned()],
+                    showing: vec!["3".to_owned()],
+                    workspaces: (1..=4)
+                        .map(|index| Workspace {
+                            id: index.to_string(),
+                            name: format!("desk {index}"),
+                            col: (index - 1) % 2 + 1,
+                            row: (index - 1) / 2 + 1,
+                            hidden: false,
+                        })
+                        .collect(),
+                }],
+                windows: std::collections::BTreeMap::new(),
+            });
+
+            state.publish_models();
+            let published = (
+                scene.get_int("count"),
+                scene.get_string_for_test("shown"),
+                scene.get_string_for_test("kind"),
+                scene.get_int("columns"),
+                scene.get_string_for_test("status"),
+            );
+            state.workspaces = None;
+            state.publish_models();
+            let gone = scene.get_int("count");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                published,
+                (
+                    4,
+                    "desk 3".to_owned(),
+                    "grid".to_owned(),
+                    2,
+                    "workspace 3".to_owned()
+                ),
+                "(WorkspaceList's count, showing, the arrangement's kind and columns, \
+                 Solium.status)"
+            );
+            assert_eq!(gone, 0, "workspaces no longer declared are still listed");
         });
     }
 }
