@@ -527,6 +527,13 @@ pub(crate) struct Pane {
     /// Whether the layout that last placed this pane said its tile is smaller
     /// than the window's own minimum. See `WindowInfo::cramped`.
     cramped: bool,
+    /// Until when a window that has left fullscreen stays lifted over the
+    /// bars: the moment its shrink lands, so the bars come back over it once
+    /// it has finished shrinking rather than while it is still the size of
+    /// the monitor. `None` for every other pane. Written by
+    /// `Solium::transition`, read by `Solium::lifted_on`.
+    /// `a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`.
+    lifted_until: Option<Duration>,
 }
 
 impl Pane {
@@ -564,6 +571,7 @@ impl Pane {
             scratch: crate::offscreen::Scratch::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            lifted_until: None,
         }
     }
 
@@ -594,6 +602,7 @@ impl Pane {
             scratch: crate::offscreen::Scratch::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            lifted_until: None,
         }
     }
 
@@ -616,6 +625,17 @@ impl Pane {
     /// What the layout placing this pane says about its tile.
     pub(crate) const fn set_cramped(&mut self, cramped: bool) {
         self.cramped = cramped;
+    }
+
+    /// Until when this pane stays lifted over the bars, having left
+    /// fullscreen. See the field.
+    pub(crate) const fn lifted_until(&self) -> Option<Duration> {
+        self.lifted_until
+    }
+
+    /// Keep this pane lifted until `until`, or no longer: see the field.
+    pub(crate) const fn set_lifted_until(&mut self, until: Option<Duration>) {
+        self.lifted_until = until;
     }
 
     /// Whether a layout may place this pane and count it as a window.

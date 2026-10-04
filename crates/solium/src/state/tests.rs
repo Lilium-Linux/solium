@@ -22436,6 +22436,71 @@ end)
                 assert_eq!(delivered(&desk, 20.0, 15.0), Some(id(&bar)));
             }
 
+            /// **#49: a window going fullscreen is lifted over the bar as it
+            /// starts to grow, and one leaving goes back under the bar only
+            /// once it has finished shrinking** -- drawn and pressed alike.
+            /// Lifted, it covers the bar only where it is drawn: at the
+            /// start of growing that is the corner it was in.
+            #[test]
+            fn a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk() {
+                let mut desk = Desk::new();
+                desk.install(
+                    r#"sol.on("fullscreen", function() sol.animate({ duration = 260 }) end)"#,
+                );
+                let (strip, _strip) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state.space.map_element(window.clone(), (10, 5), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let pane = Seen::Pane(opened.pane);
+                let bar = Seen::Layer(id(&strip));
+                assert!(
+                    drawn_over(&desk, bar, pane),
+                    "the premise: the bar over the window: {:?}",
+                    drawn(&desk)
+                );
+
+                opened.toplevel.set_fullscreen(None);
+                desk.pump();
+                assert!(
+                    drawn_over(&desk, pane, bar),
+                    "lifted over the bar as it starts to grow: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    (delivered(&desk, 20.0, 15.0), delivered(&desk, 1500.0, 15.0)),
+                    (Some(surface_id(&window)), Some(id(&strip))),
+                    "(a press on the window over the bar, one on the bar where the \
+                     window is not drawn yet)"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 1920, 1080);
+                desk.pump();
+                landed(&mut desk);
+
+                opened.toplevel.unset_fullscreen();
+                desk.pump();
+                assert!(
+                    drawn_over(&desk, pane, bar),
+                    "still over the bar while it shrinks: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    delivered(&desk, 1500.0, 15.0),
+                    Some(surface_id(&window)),
+                    "and the press where it still covers the bar is the window's"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 64, 64);
+                desk.pump();
+                landed(&mut desk);
+                assert!(
+                    drawn_over(&desk, bar, pane),
+                    "back under the bar once it has shrunk: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(delivered(&desk, 20.0, 15.0), Some(id(&strip)));
+            }
+
             /// **A fullscreen window on a workspace that is not shown does
             /// not hide the bar.**
             #[test]

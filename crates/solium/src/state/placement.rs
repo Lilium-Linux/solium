@@ -941,6 +941,22 @@ impl Solium {
             self.tell_change(pane, change, entering)
         };
         let now = self.clock.now();
+        let motion = motion.unwrap_or(AnimationSpec {
+            duration: Duration::ZERO,
+            easing: present::Curve::OutCubic,
+        });
+        // **Over the bars until it has shrunk.** A window going fullscreen is
+        // lifted by being fullscreen, from the moment it starts to grow; one
+        // leaving stops being fullscreen on the toggle, and dropped under the
+        // bars then, it would be shrinking from the size of the monitor with
+        // the bars drawn over it. So it stays lifted for as long as it moves.
+        // `stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`.
+        if change == Change::Fullscreen
+            && let Some(held) = self.panes.get_mut(pane)
+        {
+            let shrinking = !entering && start.is_some();
+            held.set_lifted_until(shrinking.then_some(now + motion.duration));
+        }
         let Some(held) = self.panes.get(pane).filter(|held| !held.leaving()) else {
             return;
         };
@@ -948,10 +964,6 @@ impl Solium {
             return;
         };
         let to = grown(held.slot(), self.insets_of(pane));
-        let motion = motion.unwrap_or(AnimationSpec {
-            duration: Duration::ZERO,
-            easing: present::Curve::OutCubic,
-        });
         present::from(held, to, start, now, motion.duration, motion.easing);
         self.redraw = true;
     }
