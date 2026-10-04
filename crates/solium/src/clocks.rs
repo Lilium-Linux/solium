@@ -145,7 +145,14 @@ impl Library {
     fn open(name: &CStr) -> Option<Self> {
         // SAFETY: a NUL-terminated name; the flags are dlopen's own.
         let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        (!handle.is_null()).then_some(Self(handle))
+        // Not `then_some(Self(handle))`: that builds the `Library` before the
+        // check, and dropping it closes a null handle, which crashes.
+        // `tests::no_nvml_means_no_clocks`.
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self(handle))
+        }
     }
 
     /// One symbol, as a function pointer of type `F`.
@@ -305,9 +312,15 @@ mod tests {
     }
 
     /// No NVML and no i915 file: no clocks, and no thread to sample nothing.
+    /// The node names a card, so the missing library is what is asked.
     #[test]
     fn no_nvml_means_no_clocks() {
         let root = sysfs("none");
+        let card = root.join("devices/pci0000:00/0000:08:00.0");
+        std::fs::create_dir_all(card.join("drm/card1")).expect("the card, with no frequency");
+        let node = root.join("dev/char/226:128");
+        std::fs::create_dir_all(&node).expect("the node's directory");
+        std::os::unix::fs::symlink(&card, node.join("device")).expect("the device link");
         let probed = probe(c"libsolium-test-no-such-library.so.1", &root, 226, 128);
         assert!(matches!(probed, Probe::None));
     }
