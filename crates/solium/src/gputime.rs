@@ -56,6 +56,7 @@ pub(crate) struct GpuSample {
     pub(crate) total_ns: u64,
     pub(crate) captures_ns: u64,
     /// The first four outputs; a fifth is in the total only.
+    /// `tests::a_fifth_output_is_in_the_total_only`.
     pub(crate) outputs_ns: [u64; 4],
     pub(crate) regions: u16,
     pub(crate) refused: u16,
@@ -742,6 +743,29 @@ mod tests {
         );
         let resolved: Vec<u64> = ring.done.iter().map(|(pass, _)| *pass).collect();
         assert_eq!(resolved, vec![1, 2], "an end is in three passes later");
+    }
+
+    /// A fifth output has no column of its own: it is in the total only.
+    #[test]
+    fn a_fifth_output_is_in_the_total_only() {
+        let mut fake = Fake::lagging(0);
+        fake.values = vec![100, 150, 200, 270];
+        let mut ring = Ring::new(ids());
+        fake.now = 1;
+        ring.begin(&mut fake, 1);
+        for region in [Region::Output(0), Region::Output(4)] {
+            let stamp = ring.open(&mut fake, region);
+            ring.close(&mut fake, stamp);
+        }
+        fake.now = 2;
+        ring.begin(&mut fake, 2);
+        let mut expected = GpuSample {
+            total_ns: 120,
+            regions: 2,
+            ..GpuSample::default()
+        };
+        expected.outputs_ns[0] = 50;
+        assert_eq!(ring.done, vec![(1, Gpu::Ok(expected))]);
     }
 
     /// An end that reads before its start is a wrapped or broken counter, and
