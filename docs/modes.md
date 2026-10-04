@@ -229,13 +229,19 @@ sol.on("layout", function() end)                   -- the room windows get chang
 sol.on("monitors", function() end)                 -- the screens are not the screens you knew
 sol.on("restore",  function() end)                 -- you have replaced a running session
 sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" or "move", and which way
+sol.on("keyboard", function(state, changed) end)   -- the layout, Caps Lock or Num Lock changed: "layout", "caps" or "num"
+sol.on("text_input", function(field, why) end)     -- the focused text field: "field", "caret" or "framed"
 ```
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
 back: its scene sets an `action`, and you are told the surface's name and the
 action ([ricing.md](ricing.md#your-wallpaper) has an example). Declaring the
 same surface again with new `properties` writes them into the live scene rather
-than rebuilding it. Eight of the rest are worth reading twice.
+than rebuilding it. `keyboard` and `text_input` are for something that
+reacts to typing rather than to windows:
+[ricing.md](ricing.md#your-keyboard) says when each fires and with what, and
+`lua/keyboard_indicator.lua` uses both. Eight of the rest are worth reading
+twice.
 
 **`open` fires when the window opens, and for a launched window that is before
 its application exists.** A window started with `sol.spawn` begins its life
@@ -617,8 +623,10 @@ click the empty desktop, press the key for a terminal, and a focus-based rule
 would open it on the screen you just looked away from.
 
 The `primary` flag is a different question and answers a different one: it is
-where things belonging to *one* screen go — a dock, a bar, a layer surface that
-named no output. It does not move, which is the whole point of it. See
+where things belonging to *one* screen go — a layer surface that named no
+output, or a hosted shell or `sol.surface` declared with `on = "primary"`. The
+hosted shell is on every monitor unless `shell.on` names one. It does not
+move, which is the whole point of it. See
 [shell-boundary.md](shell-boundary.md).
 
 `x`, `y`, `w`, `h` are the **work area** — the monitor less whatever bars have
@@ -1009,11 +1017,12 @@ desktop back exactly is a mode nobody will use twice. All of it is
 This is real and it works. Save it as `~/.config/solium/mymode.lua`. A mode is
 loaded by `init.lua`, and the shipped one does not know about yours, so copy the
 shipped `init.lua` to `~/.config/solium/init.lua` — it is
-`share/solium/lua/init.lua` under the prefix Solium was installed to (`~/.local`
-for `dev/install.sh`), and `crates/solium/lua/init.lua` in a checkout — and add
-`require("mymode")` after its `require("scrolling")`. Your copy then replaces
-the shipped file entirely: it keeps what it had when you copied it and does not
-pick up what a later version adds, so compare the two after an update.
+`share/solium/lua/init.lua` under the prefix Solium was installed to (`/usr`
+for the Fedora package, `~/.local` for `dev/install.sh`), and
+`crates/solium/lua/init.lua` in a checkout — and add `require("mymode")` after
+its `require("scrolling")`. Your copy then replaces the shipped file entirely:
+it keeps what it had when you copied it and does not pick up what a later
+version adds, so compare the two after an update.
 
 ```lua
 -- Two columns on every monitor: the most recently raised window on the right,
@@ -1137,6 +1146,14 @@ raises it, and it becomes `windows[1]`.
 transforms every window onto a grid with `present`, and clears them on the way
 out. It never calls `place`, so the layout underneath is untouched and leaving
 is exact.
+
+It binds `escape` on the way in and takes it away with `sol.unbind` on the way
+out, because a bound key never reaches the application with the keyboard:
+bound for good, Escape was taken from every window (#174). Whether it is up is
+kept with `sol.keep`, because the grab and the thumbnails outlive
+`super+shift+r`, so a reload with the overview open binds Escape again, and
+Escape still leaves it. A mode that needs a key only while it is up should do
+the same.
 
 That file is also the architecture's proof, and its comment says so — the app
 switcher is that with a row instead of a grid, peek is it with one window at the

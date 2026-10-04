@@ -43,7 +43,7 @@
 ---@class sol.Window: sol.Rect
 ---@field id integer The window's id, which every other call takes.
 ---@field title string The window's title; the program's name until its application arrives.
----@field focused boolean Whether it has the keyboard.
+---@field focused boolean Whether it has the keyboard. While an item of a hosted scene holds the keyboard (`Solium.keyboard.wants`), the window it was taken from still reads `true`, is drawn focused, and gets the keyboard back when the scene lets go.
 ---@field monitor string The name of the monitor it is on.
 ---@field modal boolean Whether it says it is a modal dialog.
 ---@field parent? integer|false The window it belongs to; `false` when the client named a parent that is not on screen, absent when it named none.
@@ -284,7 +284,7 @@
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
 ---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
----| "text_input" # The focused text field changed: `(field, why)`, `field` being what `sol.text_input()` answers at that moment and `why` what changed -- `"field"`, one was enabled, or focused again by its window getting the keyboard back; `"caret"`, its client moved its caret; `"framed"`, its window started or stopped being drawn in a frame, as one going fullscreen does. Told at most once a pass of the event loop, before the frame is drawn, as the most that changed: a caret moved twice since the last frame is told once, where it is now, and a field enabled and then given its caret, as kitty gives it with its first key, is told once as `"field"`. A window moving with its field in it is not told.
+---| "text_input" # The focused text field changed: `(field, why)`, `field` being what `sol.text_input()` answers at that moment and `why` what changed -- `"field"`, one was enabled, or focused again by its window getting the keyboard back; `"caret"`, its client moved its caret; `"framed"`, its window started or stopped being drawn in a frame, as one going fullscreen does. Told at most once a pass of the event loop, before the frame is drawn, as the most that changed: a caret moved twice since the last frame is told once, where it is now, and a field enabled and then given its caret, as kitty gives it with its first key, is told once as `"field"`. A window moving with its field in it is not told. A field disabled, or its window losing the keyboard, is not told: `sol.text_input()` answers `nil` from then on, and `field` is never `nil` here.
 ---| "keyboard" # The live layout, Caps Lock or Num Lock changed, by a key or by `sol.keyboard{ ... }`: `(state, changed)`, `state` being what `sol.keyboard()` answers now and `changed` `"layout"`, `"caps"` or `"num"`. Never for ordinary typing, a new keymap or a configuration starting, nor while the session is locked: what is pressed at the lock screen is the lock screen's, and a lock screen that wants a Caps Lock warning draws its own. A change a `keyboard` listener makes is not told back to it.
 
 -- sol ------------------------------------------------------------------------
@@ -620,6 +620,15 @@ function sol.close(id) end
 
 ---Start a program, with its arguments as separate strings:
 ---`sol.spawn("foot", "-e", "htop")`.
+---
+---The program gets the environment Solium was started with, not what Qt and
+---the libraries it loads have written into Solium's own since. On top of that:
+---`WAYLAND_DISPLAY` naming this compositor; `DISPLAY` naming its own Xwayland,
+---or removed when there is none; `XDG_CURRENT_DESKTOP`, which is `Lilium`
+---unless the session named one; `XDG_SESSION_TYPE=wayland` when it is unset;
+---and `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, naming the window opened
+---for it. It holds no file descriptor beyond stdin, stdout and stderr. stdin
+---and stdout are `/dev/null`, and stderr is Solium's.
 ---@param program string
 ---@param ... string
 ---@return nil
@@ -654,6 +663,9 @@ function sol.status(text) end
 ---
 ---The combination is normalised, so `super+shift+q` and `Shift+Super+Q` are
 ---one binding. A later call for the same combination replaces the earlier one.
+---A bound combination never reaches the application with the keyboard. A key a
+---mode needs only while it is up is bound when the mode starts and taken away
+---with `sol.unbind` when it stops, as `overview.lua` does with `escape`.
 ---`note` is a short phrase saying where the binding came from, which
 ---`solium --check` prints beside it.
 ---@param combo string
@@ -667,7 +679,8 @@ function sol.bind(combo, handler, note) end
 ---@return boolean
 function sol.bound(combo) end
 
----Take a binding away. With a `note`, `solium --check` lists the combination as
+---Take a binding away. The combination then reaches the application with the
+---keyboard again. With a `note`, `solium --check` lists the combination as
 ---removed by the configuration.
 ---@param combo string
 ---@param note? string

@@ -248,3 +248,10 @@ XCURSOR_THEME
 
 XCURSOR_SIZE
     The pointer size when the configuration's `cursor.size` is not set.
+
+XKB_CONFIG_ROOT
+    Where xkb's data is; `/usr/share/X11/xkb` when unset. Solium reads
+    `rules/evdev.xml` there for each layout's short name,
+    `sol.keyboard().layout_short`. A layout the rules do not name, or every
+    layout when the file is not there, gets the first two letters of its
+    name, in capitals.

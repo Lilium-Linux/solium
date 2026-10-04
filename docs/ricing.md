@@ -83,7 +83,7 @@ Three guides go deeper than the recipes below:
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml`, once [#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed |
-| the shipped files, to copy from | `crates/solium/qml` and `crates/solium/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install, which for `dev/install.sh` is `~/.local` |
+| the shipped files, to copy from | `crates/solium/qml` and `crates/solium/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install: `/usr` for the Fedora package, `~/.local` for `dev/install.sh` |
 | the log | `~/.local/state/solium/session.log`, for a session started with `solium --tty` or from the login screen. A nested run logs to the terminal it was started from |
 
 `~/.config` is `$XDG_CONFIG_HOME` when that is set, and `~/.local/state` is
@@ -137,6 +137,15 @@ frame, or above it. A layer can also `bleed` past the window's edge, which is
 how a border waves or a shadow reaches. A single QML file still works too and
 is still called a decoration; it lives in
 `~/.config/solium/qml/decorations/` and is one layer in the frame.
+
+A layer is also told where the focused text field's caret is, as `caret`, in
+the pane's own space; whatever the configuration hands every pane with
+`sol.pane_values{ key = value }`, as `values`, which a delegated layer
+declares as `property var values: ({})`; and it can read the keyboard's layout
+and locks as the `Keyboard` singleton. That is how `KeyboardPillLayer {}` draws
+the keyboard pill: the panes README's
+[What the compositor sets on every layer](../crates/solium/qml/panes/README.md#what-the-compositor-sets-on-every-layer)
+has each of them.
 
 ### Rounded corners
 
@@ -329,8 +338,18 @@ scene of its own, built when the surface is declared or the monitor arrives and
 dropped when the monitor goes, and inside it `Solium.monitor` is that monitor.
 `sol.surface(name, false)` removes one.
 
+Declaring the same name again with the same `scene` writes the changed
+`properties` into the live scene rather than building it again, so an open
+popup or a running animation in it survives. A key left out of `properties`
+keeps the value the scene last had, and a dotted key such as
+`["panel.open"] = true` reaches a grouped property. Only a different `scene`
+file builds it again.
+
 `interactive = true` lets the pointer reach it, where its items take input:
-a `MouseArea`, a pointer handler, or an item marked `Solium.input: true`.
+a `MouseArea`, a control such as a `Button`, a pointer handler other than
+`HoverHandler`, or an item marked `Solium.input: true`
+([shell-boundary.md](shell-boundary.md#what-a-hosted-shell-is-given) has the
+whole list).
 Everywhere else the pointer goes to what is under it
 (`state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`).
 A surface without it holds neither a `Grab` nor the keyboard
@@ -361,11 +380,16 @@ edge it sets; [shell-boundary.md](shell-boundary.md), "Room of its own", has
 how the windows re-flow when it changes
 (`state::tests::real_client::reflow_on_close::hosted::a_declared_reserve_takes_its_edge_out_of_the_work_area`).
 
-**Place things on the `monitors` event, not at the top of your script.** Scripts
-load before the screens are known — on the hardware backend, before the GPU is
-even opened — so a rect computed at load time is computed against zeros. The
-event fires once when the monitors are first known, again on every hotplug and
-again on every reload, which is when a placement needs redoing anyway:
+**Place a rect on the `monitors` event, not at the top of your script.**
+Scripts load before the screens are known — on the hardware backend, before
+the GPU is even opened — so a rect computed at load time is computed against
+zeros. The event fires once when the monitors are first known, again on every
+hotplug and again on every reload, which is when a placement needs redoing
+anyway. A surface whose `on` is `"every-monitor"`, `"primary"` or a connector
+name needs no event: declare it at the top of the script, and the compositor
+builds its scene on each monitor it names as that monitor arrives, as
+`wallpaper.lua` and `shell.lua` do. Only a rect computed from the monitors
+waits for them:
 
 ```lua
 sol.on("monitors", function()
@@ -441,6 +465,17 @@ keyboard = {
 },
 ```
 
+The locks can be set too, and Num Lock on at login is the usual one:
+
+```lua
+keyboard = { num = true },
+```
+
+That turns Num Lock on when the session starts, and again at every
+`super+shift+r`. `caps` works the same way for Caps Lock. Each is set by
+pressing the keymap's own key inside the compositor, so the application with
+the keyboard is told and the layout stays where it was.
+
 `sol.keyboard()` reads all of it back to Lua — the layout names, which is
 active and its names (`layout_name`, `Russian`; `layout_short`, `RU`), whether
 Caps Lock and Num Lock are on, and the repeat settings — and
@@ -469,9 +504,10 @@ doing the same thing, so you can see both:
   that draws the pill at the pane's `caret` — where the focused text field's
   caret is, in the pane's own space. Because it is part of the pane, it moves,
   scales and fades with its window. Your own style gets it by adding the same
-  line. A window drawn with no frame — fullscreen, or one that draws its own
-  decorations — has no pane style around it, so it gets the surface below at
-  its caret instead: `sol.text_input()` says which, as `framed`.
+  line. A window drawn with no frame — fullscreen, one that draws its own
+  decorations, or every window when `pane = "none"` — has no pane style
+  around it, so it gets the surface below at its caret instead:
+  `sol.text_input()` says which, as `framed`.
 - **On a surface of its own** (`show = "surface"`): an overlay `sol.surface`
   that `lua/keyboard_indicator.lua` places at the caret in the global space,
   from `sol.text_input()`, and moves again each time `sol.on("text_input")`
@@ -486,13 +522,14 @@ it, so a pill that stays while you type, Caps Lock's, can sit a cell behind
 the cursor until the next key. The look is QML,
 `KeyboardPill` in `import Solium`, on `Theme`. The compositor provides the
 data underneath — `text-input-v3` for the caret, the keyboard's state and its
-events — and knows nothing about pills. It is configured in `config.lua`:
+events — and knows nothing about pills. These are its defaults, from
+`config.lua`; any of them goes under `keyboard` in `user.lua`:
 
 ```lua
 keyboard = { indicator = {
     show = "pane",            -- "pane", "surface", or false
     on = { layout = true, caps = true, num = false },
-    caps_on_focus = true,     -- Caps' pill again when a field is focused with Caps on
+    caps_on_focus = true,     -- Caps' pill again when a field is focused with Caps on (needs on.caps)
     fallback = "surface",     -- with no caret: on the screen, or false
     position = "bottom",      -- where on the screen: "bottom", "center" or "top"
     duration = 1200,          -- ms a layout's pill stays
@@ -502,15 +539,16 @@ keyboard = { indicator = {
 The caret comes only from applications that say where it is through
 `text-input-v3`; for the others, `fallback = "surface"` shows the pill on the
 focused window's monitor instead. To try it nested, `SOLIUM_KEY_AT` presses
-Caps Lock and a layout switch for you ([`dev/README.md`](../dev/README.md)).
+Caps Lock and a layout switch for you ([`dev/README.md`](../dev/README.md#keys-by-name)).
 To change the policy, copy `lua/keyboard_indicator.lua` next to your
 configuration, where it is found first. To change the on-screen pill's look,
 copy `qml/indicator/keyboard.qml` to `~/.config/solium/qml/indicator/`; a
 pane style of your own can draw a pill of its own at `caret` in place of
 `KeyboardPillLayer {}`. `KeyboardPill` itself is in the shipped `Solium`
 module, which a copy cannot replace yet
-([#88](https://github.com/Lilium-Linux/solium/issues/88)). To have none, take
-`require("keyboard_indicator")` out of your `init.lua`.
+([#88](https://github.com/Lilium-Linux/solium/issues/88)). To have none,
+write `keyboard = { indicator = false }` in `user.lua`; a whole `init.lua` of
+your own can instead leave out `require("keyboard_indicator")`.
 
 ### Your monitors
 
@@ -547,7 +585,7 @@ does not exist here.
 | `vrr` | variable refresh rate, where the monitor and driver offer it |
 | `transform` | `"90"`, `"180"`, `"270"`, `"normal"`, or the same with `flipped-` |
 | `enabled = false` | do not drive it |
-| `primary = true` | where a dock, a bar, or any layer surface that named no output goes |
+| `primary = true` | where a layer surface that named no output goes, and a hosted shell or `sol.surface` declared with `on = "primary"` |
 | `scale` | device pixels per logical one. Left out, worked out from the panel |
 
 `super+shift+r` applies the placement keys (`right_of`, `left_of`, `above`,
@@ -754,6 +792,18 @@ Solium's own QML API;
 [shell-boundary.md](shell-boundary.md) has how to install one and what it is
 and is not given.
 
+Two more settings are the shell's. `shell.outside_click` is what a press
+outside one of its open popups does after closing it: `"swallow"`, the
+default, or `"pass"`, which also clicks what is under it. A table names popups
+by their `Grab`'s `name`: `{ default = "swallow", ["tray-menu"] = "pass" }`.
+`shell.keyboard.bindings` is which compositor bindings still work while one of
+its fields holds the keyboard: `"except_claimed"` (the default: all but the
+keys the field claims), `"all"`, or `"none"`. The Ctrl+Alt escapes always
+work. A scene of your own drawn with `sol.surface` takes the same two, as
+`outside_click` and `keyboard = { bindings = ... }`.
+[shell-boundary.md](shell-boundary.md#what-a-hosted-shell-is-given) has `Grab`
+and `Solium.keyboard`.
+
 A bar can also be an ordinary client over `wlr-layer-shell`, which means any
 panel already written for that protocol works. A surface names the output it
 wants and the compositor honours it, so a bar on every screen is one surface
@@ -816,6 +866,12 @@ return {
 A string is a command line split on spaces; a list is one already split, for an
 argument with a space in it; a function is anything else, with the whole `sol`
 API in scope; `false` removes a shipped binding outright.
+
+A combination you bind belongs to the compositor from then on, and the
+application with the keyboard never receives it. So binding a plain key such
+as `escape`, `f1` or `return` takes that key from every window. This is why
+the overview binds Escape only while it is open
+([#174](https://github.com/Lilium-Linux/solium/issues/174)).
 [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
 lists every shipped one, so you can see what a key does before you take it
 over — `super+g` above is a demonstration that tilts a window.

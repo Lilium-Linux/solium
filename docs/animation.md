@@ -63,8 +63,9 @@ is only moving between two slots.
 parameters (stiffness, damping, mass, initial velocity) are not settable from
 Lua yet — you get the default, which settles in a little under half a second
 (445 ms) with a small overshoot. A gesture's throw speed belongs in its initial
-velocity and that is why the parameter exists; wiring it to a real gesture is
-E7's work.
+velocity and that is why the parameter exists; wiring it to a real gesture
+belongs to the touch and gestures epic,
+[#7](https://github.com/Lilium-Linux/solium/issues/7), after v0.1.0.
 
 ## Any curve at all
 
@@ -196,6 +197,15 @@ cached clock froze whenever the screen was still, so a binding pressed after a
 quiet minute started its animation a minute in the past and was already finished
 by the time anything drew it. Animations that work only if you have been doing
 something are worse than none.
+
+QML runs on the same clock. An animation in a pane style, a `sol.surface`
+scene or a hosted shell advances on the compositor's clock, which each frame
+brings up to date before Qt's events are delivered, so it cannot drift against
+the window transforms beside it. Between frames, the compositor's own event
+loop serves Qt's timers and the descriptors Qt waits on, on that same clock.
+So a QML `Timer` fires on time on an idle desktop, and costs a frame only when
+it changes what the scene draws (#164). The keyboard pill's timed hide is such
+a `Timer`.
 
 See also: **[modes.md](modes.md)** for what to animate,
 **[ricing.md](ricing.md)** for the settings file.

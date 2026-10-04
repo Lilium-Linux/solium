@@ -126,7 +126,9 @@ local defaults = {
         keyboard = { bindings = "except_claimed" },
     },
 
-    -- The keyboard.
+    -- The keyboard: its xkb layouts (`layout`, `variant`, `options`, `model`,
+    -- `rules`, `active`), the locks (`caps`, `num`), the repeat rate, and the
+    -- keyboard pill.
     --
     -- No xkb name is set here, and that means "whatever the session already
     -- said". Every name below is an xkb name, and leaving one out makes
@@ -157,9 +159,9 @@ local defaults = {
     --   active    which of the layouts is live, counting from 1. A number past
     --            the last layout is warned about and changes nothing.
     --   caps      Caps Lock on or off, and `num` the same for Num Lock: `num =
-    --            true` here starts every session with Num Lock on. Set by
-    --            pressing the keymap's own key inside the compositor, so the
-    --            layout stays where it was.
+    --            true` here turns Num Lock on when the session starts and
+    --            again at every reload. Set by pressing the keymap's own key
+    --            inside the compositor, so the layout stays where it was.
     --
     -- The repeat rate is the compositor's own, not xkb's, so no environment
     -- variable reaches it and this is the only place it can be set:
@@ -199,8 +201,9 @@ local defaults = {
             --              `KeyboardPillLayer {}`, and moves, scales and fades
             --              it with the window. A style of your own without
             --              that line draws none. A window drawn with no frame
-            --              -- fullscreen, or one drawing its own decorations --
-            --              gets the "surface" pill at its caret instead.
+            --              -- fullscreen, one drawing its own decorations, or
+            --              any window under `pane = "none"` -- gets the
+            --              "surface" pill at its caret instead.
             --   "surface"  on a surface of its own over everything, at the
             --              caret on screen, moved after it as the
             --              application says its caret has moved.
@@ -215,7 +218,7 @@ local defaults = {
             -- lock's if one is on.
             on = { layout = true, caps = true, num = false },
             -- Show Caps Lock's pill again when a text field is focused while
-            -- Caps Lock is on, as macOS does.
+            -- Caps Lock is on, as macOS does. Only while `on.caps` is true.
             caps_on_focus = true,
             -- With no caret to go to -- an application that says nothing about
             -- one, or no text field focused -- "surface" draws it on the
@@ -488,12 +491,14 @@ local defaults = {
     --                                     matters on a card with more
     --                                     connectors than CRTCs.
     --
-    --   primary = true                    the monitor things belonging to one
-    --                                     screen go on: a dock, a bar, any
-    --                                     layer surface that did not name an
-    --                                     output. Without this it is the first
-    --                                     monitor -- stable, but not a choice
-    --                                     anybody made.
+    --   primary = true                    the monitor a layer-shell surface
+    --                                     that names no output goes on, and
+    --                                     the one a hosted shell
+    --                                     (`shell.on = "primary"`) or a
+    --                                     `sol.surface` (`on = "primary"`) is
+    --                                     drawn on when told to. Without this
+    --                                     it is the first monitor -- stable,
+    --                                     but not a choice anybody made.
     --
     --   scale = 2                         how many device pixels to a logical
     --                                     one. Everything doubles in size: a
