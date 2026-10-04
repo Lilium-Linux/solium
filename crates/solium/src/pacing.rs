@@ -722,6 +722,8 @@ impl Frame {
         });
     }
 
+    /// This pass's number, counted from 1, the one its GPU time comes back
+    /// under: `tests::a_pass_with_the_knob_off_is_counted_from_frame_to_finish`.
     pub(crate) const fn serial(&self) -> u64 {
         self.pass
     }
@@ -844,6 +846,8 @@ impl Line {
         }
     }
 
+    /// Microseconds of GPU time for the pass, 0 unless the status is `ok`.
+    /// `tests::every_pacing_line_carries_its_gpu_time_and_captures`.
     pub(crate) fn gpu_us(&self) -> u64 {
         match self.gpu {
             Some(crate::gputime::Gpu::Ok(sample)) => sample.total_ns / 1_000,
@@ -851,6 +855,8 @@ impl Line {
         }
     }
 
+    /// Microseconds of it spent on captures, 0 unless the status is `ok`.
+    /// `tests::every_pacing_line_carries_its_gpu_time_and_captures`.
     pub(crate) fn gpu_prep_us(&self) -> u64 {
         match self.gpu {
             Some(crate::gputime::Gpu::Ok(sample)) => sample.captures_ns / 1_000,
@@ -975,7 +981,7 @@ mod tests {
             counters.on.set(false);
         });
         let first = super::frame();
-        assert_eq!(first.pass, 1, "the serial counts from 1");
+        assert_eq!(first.serial(), 1, "the serial counts from 1");
         // A deadline no pass can meet, so this one is a miss however fast.
         first.deadline(Duration::from_nanos(1), || {
             panic!("the name was taken with the knob off")
@@ -1209,8 +1215,20 @@ mod tests {
         assert_eq!(line(None).gpu_status(), "late");
         assert_eq!(line(Some(Gpu::Disjoint)).gpu_status(), "disjoint");
         assert_eq!(
-            (line(Some(Gpu::Disjoint)).gpu_us(), line(None).captures),
-            (0, 5)
+            (
+                line(Some(timed())).gpu_us(),
+                line(Some(timed())).gpu_prep_us()
+            ),
+            (912, 640)
+        );
+        let disjoint = line(Some(Gpu::Disjoint));
+        assert_eq!(
+            (
+                disjoint.gpu_us(),
+                disjoint.gpu_prep_us(),
+                line(None).captures
+            ),
+            (0, 0, 5)
         );
     }
 
