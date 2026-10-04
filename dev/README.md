@@ -405,6 +405,8 @@ that should not be.
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
+| `dev/fence-check.sh` | skipping a capture's CPU fence wait (`SOLIUM_FENCE_WAIT=off`) changes no pixel |
+| `dev/pulse-control.sh [env…]` | the renderer is not frozen: a focused window in the `pulse` style moves in 150 ms |
 | `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. `--no-check` skipping the installed binary's check. A system prefix (`--prefix /usr` and `/usr/local`): everything under the prefix and nothing in `XDG_CONFIG_HOME`, no `config.sha256` and no `sudo` line, `--session-dir` refused, and `--check` passing from the staged `/usr/share/solium` with a broken user configuration. The Fedora package: `dev/rpm/solium.spec`'s `%files` against that install both ways; its `License` naming every installed `.license`; each `Requires` and `Recommends` naming the package that has the file (the Qt QML modules the shipped QML imports with the Qt version clause, Xwayland, flock, xdg-desktop-portal and the backends `lilium-portals.conf` names, and foot); and the spec refusing to parse without `commit` and `commitdate`. See *Installing it* and *A Fedora package* |
 | `dev/rpm.sh [--jobs N] [--image IMAGE]` | the package built from the commit checked out, unpacked without installing, passes `solium --check` with an empty configuration and takes its QML and Lua from its own `usr/share/solium`. See *A Fedora package* |
 
@@ -464,6 +466,19 @@ stacking order and asks whether each one, as it is drawn at that moment
 
 Kept out of `gate.sh` deliberately: it needs a host compositor to nest in and a
 client to open, and a gate that cannot run headless is a gate that gets skipped.
+
+`dev/fence-check.sh` captures the same two windows with the capture's fence
+wait on twice, off once, and tilted a degree more once, and fails unless the
+first three are byte-identical and the fourth is not. Both windows are rounded
+and the first is tilted, so a capture runs for each on every frame. A race that
+shows once in several hundred frames is wirecheck's to catch (cases 11c and
+11d), not this.
+
+`dev/pulse-control.sh` runs one focused window in the `pulse` style nested and
+fails unless two captures 150 ms apart differ: the known-animating control a
+nested capture is judged beside. Its arguments are extra environment for the
+compositor; `dev/pulse-control.sh SOLIUM_PANE=none` is its own fail-first, since
+nothing on screen moves then.
 
 `clipboard-check.sh` runs its X11 half in a container, so the host needs no
 `xclip`. **Run it more than once.** The bug it was
