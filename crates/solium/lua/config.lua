@@ -774,12 +774,17 @@ local defaults = {
         -- glides, so pressing the key again half way turns it round where it
         -- is. The application is told its new size the moment the key is
         -- pressed, and its last picture is stretched until it has drawn one
-        -- at that size. Once it lands the window is drawn as it is, with
-        -- nothing in between, so a game or a video can be shown directly.
+        -- at that size: through the glide and after it, for a quarter of a
+        -- second past the landing at most, and then the window is shown at
+        -- the size the application has. Once it has answered the window is
+        -- drawn as it is, with nothing in between, so a game or a video can
+        -- be shown directly.
         --
         -- `duration` is in milliseconds and `easing` is a curve, by name or
         -- as four numbers, as for every `motion` here (docs/animation.md).
-        -- `false` makes every change instant:
+        -- `false` makes every change instant -- nothing is moved or
+        -- stretched, and the window is drawn as it is on the next frame --
+        -- and `true` is the motion below again:
         --
         --     fullscreen = { animate = false },
         animate = { duration = 260, easing = "outCubic" },
@@ -804,7 +809,7 @@ local defaults = {
     maximize = {
         -- How a window grows to fill the work area and shrinks back, as
         -- `fullscreen.animate` says for going fullscreen: a duration and an
-        -- easing, or `false` for instant.
+        -- easing, `false` for instant, or `true` for the motion below.
         --
         --     maximize = { animate = false },
         animate = { duration = 220, easing = "outCubic" },

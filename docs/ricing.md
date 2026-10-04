@@ -857,9 +857,10 @@ directly. y may leave 0..1 — that is what overshoot is.
 
 Going fullscreen and maximising are timed the same way, each on its own, and
 both glide by default: the window grows from where it is to cover its monitor,
-or its work area, and shrinks back. `animate = false` makes one instant, and
-`instant` names the applications that change at once whatever `animate` says —
-a game or a video player, say:
+or its work area, and shrinks back. `animate = false` makes one instant and
+`animate = true` is the shipped motion again, and `instant` names the
+applications that change at once whatever `animate` says — a game or a video
+player, say:
 
 ```lua
 return {
@@ -872,9 +873,13 @@ return {
 ```
 
 The application is told its new size the moment you press the key, and its
-last picture is stretched until it has drawn one at that size. Once the window
-lands it is drawn as it is, with nothing in between, so a fullscreen game or
-video can be shown directly. An app id is what `sol.windows()` calls `app_id`.
+last picture is stretched until it has drawn one at that size — through the
+glide and after it, for a quarter of a second past the landing at most, and
+then the window is shown at whatever size the application has. Once it has
+answered the window is drawn as it is, with nothing in between, so a
+fullscreen game or video can be shown directly. An instant change is just that:
+nothing is stretched or moved, and the window is drawn as it is on the next
+frame. An app id is what `sol.windows()` calls `app_id`.
 
 ### Your own bindings
 
