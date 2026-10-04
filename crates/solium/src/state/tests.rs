@@ -4861,22 +4861,27 @@ end)"#,
 
         impl Desk {
             fn new(name: &str, script: &str) -> Self {
+                Self::on(name, script, (300, 200), |state| {
+                    one_screen(state);
+                })
+            }
+
+            /// [`Self::new`], with the monitors `screens` maps and the
+            /// window at `at`.
+            fn on(
+                name: &str,
+                script: &str,
+                at: (i32, i32),
+                screens: impl FnOnce(&mut Solium),
+            ) -> Self {
                 let mut display =
                     Display::<Solium>::new().expect("creating a test wayland display");
                 let mut state = Solium::new(display.handle());
                 state
                     .decorations
                     .set_style(&mut state.panes, Some("none".to_string()));
-                one_screen(&mut state);
-                let directory = std::env::temp_dir()
-                    .join(format!("solium-glides-{name}-{}", std::process::id()));
-                let _ = std::fs::create_dir_all(&directory);
-                let entry = directory.join("init.lua");
-                std::fs::write(&entry, script).expect("writing the test script");
-                state.start_scripts(Some(
-                    Scripts::load(&entry).expect("loading the test script"),
-                ));
-                let _ = std::fs::remove_dir_all(&directory);
+                screens(&mut state);
+                state.start_scripts(Some(script_at(name, script)));
 
                 let (conn, mut queue, mut client) = connect(&mut display, &mut state);
                 let qh = queue.handle();
@@ -4891,7 +4896,7 @@ end)"#,
                     &mut queue,
                     &mut client,
                 );
-                state.space.map_element(window.clone(), (300, 200), false);
+                state.space.map_element(window.clone(), at, false);
                 state.space.refresh();
                 let pane = state.panes.id_of(&window).expect("the window has a pane");
                 state.focus_window(&window, SERIAL_COUNTER.next_serial());
@@ -4908,11 +4913,7 @@ end)"#,
                     pane,
                 };
                 desk.land();
-                assert_eq!(
-                    desk.drawn(desk.state.clock.now()),
-                    before(),
-                    "the premise: at rest where it lives"
-                );
+                assert!(!desk.transformed(), "the premise: at rest where it lives");
                 desk
             }
 
@@ -4962,6 +4963,19 @@ end)"#,
                     .get(self.pane)
                     .is_some_and(present::transformed)
             }
+        }
+
+        /// `script`, loaded from a file of its own, which is gone again by the
+        /// time this returns.
+        fn script_at(name: &str, script: &str) -> Scripts {
+            let directory =
+                std::env::temp_dir().join(format!("solium-glides-{name}-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(&entry, script).expect("writing the test script");
+            let scripts = Scripts::load(&entry).expect("loading the test script");
+            let _ = std::fs::remove_dir_all(&directory);
+            scripts
         }
 
         /// Whether `rect` is part of the way from `from` to `to`: strictly
@@ -5187,6 +5201,98 @@ end)"#,
             desk.land();
             assert_eq!(desk.drawn(desk.state.clock.now()), before());
             assert!(!desk.transformed());
+        }
+
+        /// The right of two monitors, side by side.
+        fn right() -> Rectangle<f64, Logical> {
+            Rectangle::new((1920, 0).into(), (1920, 1080).into()).to_f64()
+        }
+
+        /// **A window on the second monitor grows to cover that one**, the
+        /// monitor it is on and not the first, and shrinks back to where it
+        /// was on it.
+        #[test]
+        fn a_window_on_the_second_monitor_glides_to_cover_that_one() {
+            let mut desk = Desk::on("second-monitor", SCRIPT, (2220, 200), |state| {
+                side_by_side(state, "left-test");
+            });
+            let was = Rectangle::new((2220, 200).into(), (400, 300).into()).to_f64();
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            glides(&desk.burst(at), was, right(), 5);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(!desk.transformed());
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            glides(&desk.burst(at), right(), was, 5);
+        }
+
+        /// **A monitor unplugged part of the way through leaves no window
+        /// transformed**: the window growing on it is brought onto the one
+        /// left, and is at rest there once that lands.
+        #[test]
+        fn a_monitor_unplugged_mid_glide_leaves_the_window_at_rest() {
+            let mut gone = None;
+            let mut desk = Desk::on("unplugged", SCRIPT, (2220, 200), |state| {
+                gone = Some(side_by_side(state, "left-test").1);
+            });
+            let gone = gone.expect("the right monitor");
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            let was = Rectangle::new((2220, 200).into(), (400, 300).into()).to_f64();
+            assert!(
+                between(desk.drawn(desk.state.clock.now()), was, right()),
+                "the premise: part of the way"
+            );
+            crate::layer::close_all(&gone);
+            desk.state.space.unmap_output(&gone);
+            desk.state.settle_monitors();
+            desk.land();
+            assert!(!desk.transformed(), "at rest once it lands");
+            let drawn = desk.drawn(desk.state.clock.now());
+            assert!(
+                drawn.loc.x < 1920.0,
+                "and drawn on the monitor that is left: {drawn:?}"
+            );
+        }
+
+        /// **A reload part of the way through leaves no window transformed**:
+        /// the glide goes on under the new scripts and is released when it
+        /// lands, entering and leaving alike.
+        #[test]
+        fn a_reload_mid_glide_leaves_the_window_at_rest() {
+            let mut desk = Desk::new("reloaded", SCRIPT);
+            let directory =
+                std::env::temp_dir().join(format!("solium-glides-reload-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(&entry, SCRIPT).expect("writing the test script");
+
+            for (size, from, to) in [
+                ((1920, 1080), before(), screen()),
+                ((400, 300), screen(), before()),
+            ] {
+                assert!(desk.state.trigger("super+f"));
+                desk.pump();
+                desk.state.clock.advance(Duration::from_millis(100));
+                assert!(
+                    between(desk.drawn(desk.state.clock.now()), from, to),
+                    "the premise: part of the way"
+                );
+                desk.state.reload_from(&entry);
+                desk.answer(size.0, size.1);
+                desk.land();
+                assert!(!desk.transformed(), "at rest once it lands");
+                assert_eq!(desk.drawn(desk.state.clock.now()), to);
+            }
+            let _ = std::fs::remove_dir_all(&directory);
         }
     }
 
