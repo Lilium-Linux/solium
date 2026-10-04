@@ -268,8 +268,9 @@ time the layer changes, so a bar throwing spikes upward should ask for
 `bleed: { "top": 48 }` rather than `48`.
 
 A layer that is usually empty, as the keyboard pill's is, can bind `dormant`
-to "nothing to show". While it is true the layer is not drawn, keeps no image
-and is not blended over the client. The
+to "nothing to show". While it is true the layer is not drawn and nothing of
+it is blended over the client; in software it also lets go of its image, and
+on the GPU it keeps the buffer it was last drawn into. The
 [panes README](../crates/solium/qml/panes/README.md#what-it-costs), "What it
 costs", has the details.
 

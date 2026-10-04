@@ -48,8 +48,9 @@ Item {
     // parent to read them off, and a bar that has to know how tall its own
     // band is would otherwise need a second copy of the number — which is the
     // disagreement this property being on `PaneStyle` exists to prevent. An
-    // inline layer is already inside this object and can read `insets.top`
-    // directly; it is handed the flat four as well and is free to ignore them.
+    // inline layer is already inside this object and reads `insets.top`
+    // directly. This object declares none of the flat four, so they reach only
+    // a delegated layer that declares them on its own root.
     //
     // The same four names a single QML file under `decorations/` declares, and
     // deliberately: there the compositor *reads* them, because that file is
@@ -210,8 +211,9 @@ Item {
     property string action: ""
 
     // The `dormant` of the inline layer this scene draws, at the root where
-    // the compositor reads it: while it is true the layer is not drawn and
-    // keeps no image (`Layer.qml`). False in a manifest, which draws nothing.
+    // the compositor reads it: while it is true the layer is not drawn, and in
+    // software keeps no image (`Layer.qml`). False in a manifest, which draws
+    // nothing.
     // `decoration::tests::a_dormant_layer_draws_nothing_and_holds_no_buffer`.
     readonly property bool dormant: style.layerIndex >= 0
         && style.layerIndex < style.layers.length

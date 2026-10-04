@@ -14,9 +14,10 @@
 --   "pane"     inside the window, at the caret: every shipped pane style has
 --              a `KeyboardPillLayer`, which reads the pane's `caret` and the
 --              `values` this file hands every pane with `sol.pane_values`.
---              A window drawn with no frame -- fullscreen, or one drawing its
---              own decorations -- has no pane style around it to draw one,
---              so it gets the surface below at its caret instead.
+--              A window drawn with no frame -- fullscreen, one drawing its
+--              own decorations, or every window under `pane = "none"` -- has
+--              no pane style around it to draw one, so it gets the surface
+--              below at its caret instead.
 --   "surface"  on an overlay `sol.surface` of its own, at the caret in the
 --              global space (`qml/indicator/keyboard.qml`), moved there
 --              again whenever the client says its caret has moved.

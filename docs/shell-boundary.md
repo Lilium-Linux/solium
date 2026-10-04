@@ -400,8 +400,9 @@ reserves nothing, and `Solium.keyboard` and a `Grab` hold nothing
 (`qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`,
 `qml::hosted::tests::an_unhosted_scene_may_bind_a_reserve_and_reserves_nothing`,
 `qml::hosted::tests::an_unhosted_scene_may_bind_the_keyboard_and_holds_nothing`).
-`Solium.input` changes nothing there either, since a pane's layers are given
-every pointer event. `Theme` and `Keyboard` are the same in every scene.
+`Solium.input` changes nothing there either, since what reaches a pane's
+layers is decided by the pane, not by the scene's item tree. `Theme` and
+`Keyboard` are the same in every scene.
 
 **Its monitor, live.** `Solium.monitor` is the row of the monitor this
 instance is on: `name`, `whole` and `area` (rectangles in the global space,

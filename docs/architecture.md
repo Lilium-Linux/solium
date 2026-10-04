@@ -332,13 +332,13 @@ Rust that used to implement it was deleted, not wrapped.
 
 The keyboard pill is the same claim for something drawn.
 `lua/keyboard_indicator.lua` is the policy and reads `keyboard.indicator`,
-which no Rust names. It draws with `qml/Solium/KeyboardPill.qml`, through each
-shipped pane style's `KeyboardPillLayer.qml` or on an overlay `sol.surface`
-(`qml/indicator/keyboard.qml`), and taking `require("keyboard_indicator")` out
-of `init.lua` takes the pill away. Its tests are scenarios: Lua files in
-`crates/solium/tests/scenarios/`, played by `scenario.rs` under `cargo test`.
-So a feature written as configuration is tested without Rust that knows about
-it.
+which no Rust names. It draws with `qml/Solium/KeyboardPill.qml`, through
+`KeyboardPillLayer` (`qml/Solium/KeyboardPillLayer.qml`), which every shipped
+pane style adds, or on an overlay `sol.surface` (`qml/indicator/keyboard.qml`),
+and taking `require("keyboard_indicator")` out of `init.lua` takes the pill
+away. Its tests are scenarios: Lua files in `crates/solium/tests/scenarios/`,
+played by `scenario.rs` under `cargo test`. So a feature written as
+configuration is tested without Rust that knows about it.
 
 The boundary is one module, `script.rs`, and it is shaped so a mode never
 learns a window is a Wayland surface:

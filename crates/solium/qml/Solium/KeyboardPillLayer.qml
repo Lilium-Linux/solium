@@ -28,9 +28,9 @@
 // style draws over the client (`panes/README.md`, "Layers"): the `frame`
 // layer of most styles copies only its own band in software. It costs a
 // scene per window, and while no pill is on show it is `dormant`: the
-// compositor draws nothing of it and keeps no image for it, so it costs no
-// buffer and no blending over the client. A style that leaves the line out
-// pays nothing at all.
+// compositor draws nothing of it and blends nothing over the client, and in
+// software keeps no image for it either (`Layer.qml`). A style that leaves the
+// line out pays nothing at all.
 
 import QtQuick
 

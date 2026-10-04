@@ -157,7 +157,7 @@ Read back by the compositor:
 |---|---|
 | `action` | set to `"close"` or `"maximize"` to ask for it; cleared once taken |
 | `onButton` | `true` while the pointer is over a button. A press on the frame starts a window drag unless some layer says this |
-| `dormant` | `true` while the layer has nothing to draw, so it is not drawn and keeps no image. An inline layer binds it on its `Layer` and `PaneStyle` hands it on; a delegated layer declares `property bool dormant` on its own root |
+| `dormant` | `true` while the layer has nothing to draw, so it is not drawn, and in software keeps no image. An inline layer binds it on its `Layer` and `PaneStyle` hands it on; a delegated layer declares `property bool dormant` on its own root |
 
 A layer declares only the ones it uses; one that positions nothing against the
 window declares no `bleedTop` and is handed a property it ignores.
@@ -181,9 +181,10 @@ layer with bleed is given the pointer in **its own canvas**, so a click lands on
 whatever that layer drew there. **Presses are narrower than hover**: they reach
 the layers only inside the band the insets reserve, so a button drawn over the
 client, out in the bleed, or in a style that reserves nothing cannot be
-pressed. Touch reaches no layer: a finger on a frame's close or maximize
-button, or on its edge, does nothing
-([#181](https://github.com/Lilium-Linux/solium/issues/181)).
+pressed. Touch reaches no layer: a finger on a frame's close or maximise
+button, or on its edge, presses nothing and resizes nothing
+([#181](https://github.com/Lilium-Linux/solium/issues/181)), though outside
+the `tablet` and `phone` form factors the tap still focuses the window.
 
 ## What it costs
 
@@ -298,8 +299,9 @@ when the pane has no room below. It shows what the configuration hands it,
 `lua/keyboard_indicator.lua`, set by `keyboard.indicator` in `config.lua`,
 and `docs/ricing.md` has the whole of it. A style of your own gets the pill by
 adding the same line, and a style without it has none. A window drawn bare --
-fullscreen, or one drawing its own decorations -- has no style around it at
-all, and the configuration draws its pill on a surface instead.
+fullscreen, one drawing its own decorations, or every window under
+`pane = "none"` -- has no style around it at all, and the configuration draws
+its pill on a surface instead.
 
 `KeyboardPill` shows what its `cue` says and decides nothing. `cue` is
 `{ what, serial, hold, duration, after }`. `what` is `"caps"` (an outlined
@@ -317,9 +319,9 @@ and draws only while `show` is `true` and the pane's `caret` is `valid`.
 It is a layer of its own because it draws over the client, and in software a
 `frame` layer that reserves a band copies only that band. So it costs one more
 scene per window. While no pill is on show it is `dormant`, which is nearly
-always: not drawn, no image kept, nothing blended over the client. It is
-drawn only from the cue that shows a pill until that pill has faded. A style
-that leaves the line out pays nothing for it at all.
+always: not drawn, nothing blended over the client, and in software no image
+kept. It is drawn only from the cue that shows a pill until that pill has
+faded. A style that leaves the line out pays nothing for it at all.
 `crates/solium/tests/scenarios/keyboard-pane-drawn.lua` draws it in `top`,
 reads its pixels, and reads when it is dormant.
 
