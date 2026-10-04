@@ -163,7 +163,8 @@ case "$protocol" in
     after | fence) s1_want=0; tilted_want=1; tilt_want=1 ;;
     *) s1_want=5; tilted_want=5; tilt_want=2 ;;
 esac
-for label in "${runs[@]}"; do
+one_run() {
+    local label="$1"
     case "$label" in
         anchor) run "$label" s1 5 "$anchor" ;;
         s1-untraced) run "$label" s1 - "$binary" ;;
@@ -174,7 +175,28 @@ for label in "${runs[@]}"; do
         tfence-off-*) run "$label" s1 "$tilted_want" "$binary" PACING_TILT=6 SOLIUM_FENCE_WAIT=off ;;
         tilt-*) run "$label" tilt "$tilt_want" "$binary" ;;
         *) run "$label" s1 "$s1_want" "$binary" ;;
-    esac || { echo "stopped at $label; logs: $out" >&2; exit 1; }
+    esac
+}
+
+# A run whose compositor got no input devices from the seat in its first
+# twenty seconds, and stopped itself for it (#48, intermittent), is started
+# again, up to three times: that stop is about the seat, not the scene, and
+# the run it cut short measured nothing. Its logs are kept beside the run as
+# <label>.noinput-<n>. Any other stop still stops the protocol.
+for label in "${runs[@]}"; do
+    attempt=1
+    until one_run "$label"; do
+        if [[ "$attempt" -lt 3 ]] && grep -q 'no input devices -- stopping' "$out/$label/stderr.log" 2>/dev/null; then
+            tty_stop
+            mv "$out/$label" "$out/$label.noinput-$attempt"
+            echo "$label: no input devices from the seat (#48); starting it again ($((attempt + 1)) of 3)" >&2
+            attempt=$((attempt + 1))
+            sleep 3
+            continue
+        fi
+        echo "stopped at $label; logs: $out" >&2
+        exit 1
+    done
     sleep 3
 done
 echo "done: $out/results.txt"
