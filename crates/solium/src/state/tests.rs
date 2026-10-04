@@ -26692,8 +26692,11 @@ end)"#,
                 ));
                 let _ = std::fs::create_dir_all(&directory);
                 let entry = directory.join("init.lua");
-                std::fs::write(&entry, "-- a configuration that never calls sol.workspaces\n")
-                    .expect("writing the entry point");
+                std::fs::write(
+                    &entry,
+                    "-- a configuration that never calls sol.workspaces\n",
+                )
+                .expect("writing the entry point");
                 desk.state.reload_from(&entry);
                 let _ = std::fs::remove_dir_all(&directory);
 
