@@ -732,10 +732,11 @@ function sol.unknown(key, meant) end
 ---run, and one stopped three times is taken out until the configuration is
 ---reloaded. The stops are counted by function, so a function listening for
 ---two events counts the stops of both, and from its third on is taken out of
----each event it is stopped in. Bindings, and each `done` of
----`sol.act`, run under the same deadline. `pcall`, `xpcall` and `load` hand
----the stop on rather than catch it, and `xpcall`'s message handler is not
----called for it. A `__gc` finalizer, and the `__close` of a to-be-closed
+---each event it is stopped in. Bindings, and each `done` of `sol.act`, run
+---under the same deadline. The compositor starts each one's clock itself, so
+---nothing a handler calls puts it off. `pcall`, `xpcall` and `load` hand the
+---stop on rather than catch it, and `xpcall`'s message handler is not called
+---for it. A `__gc` finalizer, and the `__close` of a to-be-closed
 ---variable in the function a stop interrupts, run where no hook does, so the
 ---deadline cannot stop a loop in either.
 ---@overload fun(event: "open"|"focus"|"closing"|"refused"|"close", handler: fun(id: integer))
@@ -779,12 +780,6 @@ sol._attempts = {}
 ---@private
 ---@type table<string, table>
 sol._keeps = {}
-
----Internal: restarts the handler deadline. Called before each listener and
----each `done`.
----@private
----@type fun()
-sol._deadline = function() end
 
 ---Internal: how many times each listener was stopped, by function.
 ---@private

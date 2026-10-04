@@ -1155,7 +1155,7 @@ impl Scripts {
 
     /// Run the handler bound to a key combination.
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, |sol| {
+        self.dispatch(snapshot, |_, sol| {
             let bindings: Table = sol.get("_bindings")?;
             let handler: Value = bindings.get(normalise_combo(combo))?;
             match handler {
@@ -1174,12 +1174,12 @@ impl Scripts {
     /// is a valid answer, and the compositor then uses its own plain animation
     /// rather than leaving a window to pop into existence.
     pub(crate) fn opened(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "open", id))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "open", id))
     }
 
     /// Run the handler for a pointer press, while a mode owns input.
     pub(crate) fn click(&mut self, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "click", (x, y)))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "click", (x, y)))
     }
 
     /// Whatever the configuration asked for while it was being read.
@@ -1206,7 +1206,7 @@ impl Scripts {
 
     /// Focus moved to a window.
     pub(crate) fn focused(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "focus", id))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "focus", id))
     }
 
     /// The keyboard's layout, Caps Lock or Num Lock changed: `(state,
@@ -1218,9 +1218,9 @@ impl Scripts {
         changed: &'static str,
         snapshot: Snapshot,
     ) -> Outcome {
-        self.dispatch(snapshot, move |sol| {
+        self.dispatch(snapshot, move |lua, sol| {
             let state: Value = sol.get::<mlua::Function>("keyboard")?.call(())?;
-            call_listeners(sol, "keyboard", (state, changed))
+            call_listeners(lua, "keyboard", (state, changed))
         })
     }
 
@@ -1230,9 +1230,9 @@ impl Scripts {
     /// `text_input::tests::text_input_is_told_when_a_field_is_enabled_and_when_it_is_focused`,
     /// `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
     pub(crate) fn text_input(&mut self, why: &'static str, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| {
+        self.dispatch(snapshot, move |lua, sol| {
             let field: Value = sol.get::<mlua::Function>("text_input")?.call(())?;
-            call_listeners(sol, "text_input", (field, why))
+            call_listeners(lua, "text_input", (field, why))
         })
     }
 
@@ -1250,8 +1250,8 @@ impl Scripts {
     /// and `relaunch::a_genuine_activation_is_told_as_a_request_and_the_view_stays_where_it_is`,
     /// in `state/tests.rs`.
     pub(crate) fn activated(&mut self, id: u64, why: &'static str, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "activate", (id, why))
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "activate", (id, why))
         })
     }
 
@@ -1297,8 +1297,8 @@ impl Scripts {
         sides: (Option<&'static str>, Option<&'static str>),
         snapshot: Snapshot,
     ) -> Outcome {
-        self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "resize", (id, edge_at.0, edge_at.1, sides.0, sides.1))
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "resize", (id, edge_at.0, edge_at.1, sides.0, sides.1))
         })
     }
 
@@ -1309,7 +1309,7 @@ impl Scripts {
     /// — which is what the layouts did instead — cannot tell "closed" from
     /// "moved to another workspace".
     pub(crate) fn closed(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "close", id))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "close", id))
     }
 
     /// The compositor has started closing a window: its leaving animation is
@@ -1324,7 +1324,7 @@ impl Scripts {
     /// answers an open or a resize, and the client catches up inside that
     /// answer (#128).
     pub(crate) fn closing(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "closing", id))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "closing", id))
     }
 
     /// A window that was closing is staying: its client declined, and the
@@ -1335,7 +1335,7 @@ impl Scripts {
     /// on `closing` puts it back here. Not `open`: the window never went, and
     /// an arrival would run `open.lua`'s animation on it a second time.
     pub(crate) fn refused(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "refused", id))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "refused", id))
     }
 
     /// Something the compositor owns changed the space windows get.
@@ -1358,7 +1358,7 @@ impl Scripts {
     /// there when the monitor comes back -- which is exactly what a hardware
     /// test found.
     pub(crate) fn monitors_changed(&mut self, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "monitors", ()))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "monitors", ()))
     }
 
     /// These scripts have replaced a running session's, rather than started one.
@@ -1374,7 +1374,7 @@ impl Scripts {
     /// listens for this is saying "this is what I do differently when I am not
     /// the first configuration this session has had".
     pub(crate) fn restored(&mut self, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "restore", ()))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "restore", ()))
     }
 
     /// A hosted scene sent an action, with data: the `surface` listeners
@@ -1394,8 +1394,8 @@ impl Scripts {
             Value::Nil
         });
         let (name, action) = (name.to_owned(), action.to_owned());
-        self.dispatch(snapshot, move |sol| {
-            call_listeners(sol, "surface", (name.clone(), action.clone(), data.clone()))
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "surface", (name.clone(), action.clone(), data.clone()))
         })
     }
 
@@ -1406,13 +1406,13 @@ impl Scripts {
     /// `tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`.
     pub(crate) fn attempts_settled(&mut self, settled: &[Settled], snapshot: Snapshot) -> Outcome {
         let settled = settled.to_vec();
-        self.dispatch(snapshot, move |sol| {
+        self.dispatch(snapshot, move |lua, sol| {
             let attempts: Table = sol.get("_attempts")?;
             for each in &settled {
                 let done: Option<mlua::Function> = attempts.get(each.attempt)?;
                 attempts.set(each.attempt, Value::Nil)?;
                 let Some(done) = done else { continue };
-                restart_deadline(sol);
+                set_deadline(lua, Some(std::time::Instant::now()));
                 if let Err(err) = done.call::<()>((each.ok, each.reason)) {
                     tracing::error!(%err, "an attempt's done failed");
                 }
@@ -1422,7 +1422,7 @@ impl Scripts {
     }
 
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "layout", ()))
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "layout", ()))
     }
 
     /// A window was dragged and let go.
@@ -1431,7 +1431,9 @@ impl Scripts {
     /// tiled layout leaves the window wherever the cursor stopped, because
     /// nothing ever tells the layout to think again.
     pub(crate) fn dropped(&mut self, id: u64, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "drop", (id, x, y)))
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "drop", (id, x, y))
+        })
     }
 
     /// The pointer wheel turned, with the compositor's modifier held.
@@ -1440,21 +1442,23 @@ impl Scripts {
     /// belonging to whatever is under the cursor. A scrolling layout that ate
     /// every wheel event would make every terminal in it unusable.
     pub(crate) fn scrolled(&mut self, dx: f64, dy: f64, snapshot: Snapshot) -> Outcome {
-        self.dispatch(snapshot, move |sol| call_listeners(sol, "scroll", (dx, dy)))
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "scroll", (dx, dy))
+        })
     }
 
     /// The shared shape of every dispatch: snapshot in, commands out.
     fn dispatch(
         &mut self,
         snapshot: Snapshot,
-        call: impl FnOnce(&Table) -> mlua::Result<bool>,
+        call: impl FnOnce(&Lua, &Table) -> mlua::Result<bool>,
     ) -> Outcome {
         self.lua.set_app_data(snapshot);
         self.lua.set_app_data(Pending::default());
         set_deadline(&self.lua, Some(std::time::Instant::now()));
 
         let handled = match self.lua.globals().get::<Table>("sol") {
-            Ok(sol) => match call(&sol) {
+            Ok(sol) => match call(&self.lua, &sol) {
                 Ok(handled) => handled,
                 Err(err) => {
                     // A script erroring must not take the compositor with it,
@@ -1910,14 +1914,6 @@ fn late(lua: &Lua) -> bool {
     deadline_started(lua).is_some_and(|started| started.elapsed() >= HANDLER_DEADLINE)
 }
 
-/// Start the handler clock again, through `sol._deadline`, for the next
-/// handler. `tests::each_listener_has_the_whole_deadline`.
-fn restart_deadline(sol: &Table) {
-    if let Ok(restart) = sol.get::<mlua::Function>("_deadline") {
-        let _ = restart.call::<()>(());
-    }
-}
-
 /// Run every listener registered for an event.
 ///
 /// One failing listener is logged and the rest still run: a broken script must
@@ -1927,10 +1923,11 @@ fn restart_deadline(sol: &Table) {
 /// `tests::a_listener_stopped_three_times_is_taken_out`,
 /// `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
 fn call_listeners(
-    sol: &Table,
+    lua: &Lua,
     event: &str,
     args: impl mlua::IntoLuaMulti + Clone,
 ) -> mlua::Result<bool> {
+    let sol: Table = lua.globals().get("sol")?;
     let handlers: Table = sol.get("_handlers")?;
     let Value::Table(listeners) = handlers.get::<Value>(event)? else {
         return Ok(false);
@@ -1947,7 +1944,13 @@ fn call_listeners(
                 continue;
             }
         };
-        restart_deadline(sol);
+        // Each listener has the whole deadline, its clock started here and
+        // nowhere a script can reach, so no handler can put its own off and
+        // no configuration can take the next one's away.
+        // `tests::each_listener_has_the_whole_deadline`,
+        // `tests::a_handler_that_calls_sol_deadline_is_still_stopped`,
+        // `tests::replacing_sol_deadline_leaves_each_listener_its_own_deadline`.
+        set_deadline(lua, Some(std::time::Instant::now()));
         match listener.call::<()>(args.clone()) {
             Ok(()) => called = true,
             Err(err) if err.to_string().contains(STOPPED) => {
@@ -2023,17 +2026,6 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `tests::a_listener_stopped_three_times_is_taken_out`,
     // `tests::the_stops_are_counted_by_function_across_events`.
     sol.set("_strikes", lua.create_table()?)?;
-    // Restart the handler clock: called before each listener, and before
-    // each `done` in `Scripts::attempts_settled`, so each has the whole
-    // deadline. `tests::each_listener_has_the_whole_deadline`,
-    // `tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`.
-    sol.set(
-        "_deadline",
-        lua.create_function(|lua, (): ()| {
-            set_deadline(lua, Some(std::time::Instant::now()));
-            Ok(())
-        })?,
-    )?;
     // Where a binding came from, for the combinations a script chose to say.
     // Keyed the same way `_bindings` is -- the canonical spelling -- so the two
     // can be read together, and holding entries for combinations `_bindings`
@@ -3467,7 +3459,6 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         "sol.{name}: {dir:?} is not a direction; it is left, right, up or down"
                     )));
                 }
-                let sol = &lua.globals().get::<Table>("sol")?;
                 // A move is of the focused window, and every placement of it
                 // while the listeners run says so. See `Command::Place::moved`,
                 // and `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`.
@@ -3490,7 +3481,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 // the deadline stops it too.
                 // `tests::a_direction_listener_stopped_at_the_deadline_stops_its_caller_too`.
                 let started = deadline_started(lua);
-                let heard = call_listeners(sol, "direction", (verb, dir));
+                let heard = call_listeners(lua, "direction", (verb, dir));
                 set_deadline(lua, started);
                 with_pending(lua, |pending| pending.moving = outer)?;
                 heard?;
@@ -7645,10 +7636,7 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         let outcome =
             scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
         assert_eq!(
-            (
-                outcome.status.as_deref(),
-                format!("{:?}", outcome.commands)
-            ),
+            (outcome.status.as_deref(), format!("{:?}", outcome.commands)),
             (Some("false true;false true;false true"), "[]".to_owned()),
             "(each call's pcall and whether it said why, the commands queued)"
         );
@@ -7730,6 +7718,45 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         let (directory, mut scripts) = loaded(
             "solium-script-test-deadline-each",
             r#"
+            sol.on("layout", function() while true do end end)
+            sol.on("layout", function() for _ = 1, 200000 do end sol.status("whole") end)
+            "#,
+        );
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert_eq!(outcome.status.as_deref(), Some("whole"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A handler cannot put its own deadline off**: nothing the
+    /// configuration can call starts the clock again, so a loop that tries
+    /// to through `sol._deadline` is stopped like any other. It gives up
+    /// after two seconds, so the test ends either way.
+    #[test]
+    fn a_handler_that_calls_sol_deadline_is_still_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-restart-called",
+            r#"sol.on("layout", function()
+                   local started = os.time()
+                   while os.time() - started < 2 do
+                       if type(sol._deadline) == "function" then sol._deadline() end
+                   end
+                   sol.status("gave up")
+               end)"#,
+        );
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert_eq!(outcome.status, None, "the handler was not stopped");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A configuration that replaces `sol._deadline` still leaves each
+    /// listener its own deadline**: the compositor starts each listener's
+    /// clock itself, so the one after a stopped listener still runs.
+    #[test]
+    fn replacing_sol_deadline_leaves_each_listener_its_own_deadline() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-restart-replaced",
+            r#"
+            sol._deadline = function() end
             sol.on("layout", function() while true do end end)
             sol.on("layout", function() for _ = 1, 200000 do end sol.status("whole") end)
             "#,
@@ -8486,7 +8513,7 @@ mod shipped {
         let Some(production) = SOURCE.split("#[cfg(test)]").next() else {
             panic!("script.rs is empty, which cannot be");
         };
-        let dispatched: Vec<String> = named(production, "call_listeners(sol,")
+        let dispatched: Vec<String> = named(production, "call_listeners(lua,")
             .into_iter()
             .map(|(_, name)| name)
             .collect();
@@ -8498,7 +8525,7 @@ mod shipped {
         assert_eq!(
             dispatched.len(),
             calls,
-            "{calls} dispatches in script.rs but only {} are `call_listeners(sol, \"name\")`; \
+            "{calls} dispatches in script.rs but only {} are `call_listeners(lua, \"name\")`; \
              one of them is written some other way and this check cannot see it",
             dispatched.len()
         );
