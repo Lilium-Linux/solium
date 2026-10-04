@@ -179,10 +179,18 @@ impl Solium {
     /// maximised, which covers the arrangement rather than taking part in it,
     /// so a neighbour a sweep places is not stacked over it.
     /// `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
+    ///
+    /// And one still shrinking back out of either (#49), which is drawn over
+    /// its neighbours until it has: a sweep part of the way through would
+    /// otherwise put a neighbour over it.
+    /// `a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks`.
     fn stays_over_a_layout(&self, window: &Window, now: Duration) -> bool {
         self.panes.of(window).is_some_and(|pane| {
             pane.leaving()
                 || over_the_arrangement(window)
+                || pane
+                    .shrinking()
+                    .is_some_and(|shrinking| now < shrinking.until)
                 || present::frame(pane, self.pane_outer(pane), now).opacity < 1.0
         })
     }
@@ -946,17 +954,8 @@ impl Solium {
             duration: Duration::ZERO,
             easing: present::Curve::OutCubic,
         });
-        // **Over the bars until it has shrunk.** A window going fullscreen is
-        // lifted by being fullscreen, from the moment it starts to grow; one
-        // leaving stops being fullscreen on the toggle, and dropped under the
-        // bars then, it would be shrinking from the size of the monitor with
-        // the bars drawn over it. So it stays lifted for as long as it moves.
-        // `stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`.
-        if change == Change::Fullscreen
-            && let Some(held) = self.panes.get_mut(pane)
-        {
-            let shrinking = !entering && start.is_some();
-            held.set_lifted_until(shrinking.then_some(now + motion.duration));
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_shrinking(None);
         }
         let Some(held) = self.panes.get(pane).filter(|held| !held.leaving()) else {
             return;
@@ -966,6 +965,31 @@ impl Solium {
         };
         let to = grown(held.slot(), self.insets_of(pane));
         present::from(held, to, start, now, motion.duration, motion.easing);
+        let lands = now + motion.duration;
+        let window = held.client().cloned();
+        // **In front while it shrinks, and over the bars leaving fullscreen.**
+        // A window going fullscreen is lifted by being fullscreen, from the
+        // moment it starts to grow; one leaving stops being fullscreen on the
+        // toggle, and dropped under the bars then, it would be shrinking from
+        // the size of the monitor with the bars drawn over it. And a window
+        // going back into a tile has just been placed by the layout's sweep
+        // with its neighbours, and one placed after it was stacked over it: it
+        // shrank from behind that neighbour. So it is raised once the sweep is
+        // done, and stays in front and lifted for as long as it moves.
+        // `stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`,
+        // `a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks`.
+        if !entering {
+            if let Some(held) = self.panes.get_mut(pane) {
+                held.set_shrinking(Some(crate::pane::Shrinking {
+                    until: lands,
+                    lifted: change == Change::Fullscreen,
+                }));
+            }
+            if let Some(window) = window {
+                self.space.raise_element(&window, false);
+                self.lift_modals_over(&window);
+            }
+        }
         self.redraw = true;
     }
 

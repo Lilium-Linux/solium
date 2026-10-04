@@ -5070,6 +5070,11 @@ end)"#,
                 "back and at rest, it holds no transform"
             );
             assert_eq!(desk.drawn(desk.state.clock.now()), before());
+            assert_eq!(
+                desk.state.panes.get(desk.pane).and_then(Pane::lifted_until),
+                None,
+                "and keeps nothing of its shrink once that has landed"
+            );
         }
 
         /// **And maximised, and restored, the same way**, by the key.
@@ -6656,6 +6661,119 @@ end)"#,
             last_configured(&client, toplevel),
             Some((left.size.w, left.size.h))
         );
+    }
+
+    /// **#49: a tiled window leaving fullscreen or maximised stays in front
+    /// of its neighbour while it shrinks into its tile**, whichever of the
+    /// two the layout's sweep places last, and one leaving fullscreen stays
+    /// over the bars too. The left tile's window is placed first, and the
+    /// neighbour placed after it was stacked over it: it shrank from behind
+    /// the neighbour and, no longer the front window, was not lifted. A
+    /// sweep part of the way through -- another window opening, a reload --
+    /// leaves it in front as well.
+    #[test]
+    fn a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let output = one_screen(&mut state);
+        let screen = state.space.output_geometry(&output).expect("mapped");
+        let (first, first_toplevel, first_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (second, second_toplevel, second_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        let directory =
+            std::env::temp_dir().join(format!("solium-shrinks-in-front-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\n\
+                 require(\"modes\")\n\
+                 require(\"workspaces\")\n\
+                 require(\"tiling\")\n\
+                 require(\"fullscreen\")\n\
+                 require(\"direction\")\n",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        state.start_scripts(Some(Scripts::load(&entry).expect("loading")));
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        let tile_of = |state: &Solium, window: &Window| {
+            state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("tiled")
+        };
+        assert!(state.trigger("super+t"));
+        round_trip!();
+        for (surface, window) in [(&first_surface, &first), (&second_surface, &second)] {
+            let tile = tile_of(&state, window);
+            commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+        }
+        round_trip!();
+        state.clock.advance(Duration::from_secs(1));
+        a_frame(&mut state);
+        for (key, lifts) in [("super+f", true), ("super+shift+m", false)] {
+            for (window, toplevel, surface, name) in [
+                (&first, &first_toplevel, &first_surface, "first"),
+                (&second, &second_toplevel, &second_surface, "second"),
+            ] {
+                let tile = tile_of(&state, window);
+                let pane = state.panes.id_of(window).expect("pane");
+                state.focus_window(window, SERIAL_COUNTER.next_serial());
+                assert!(state.trigger(key));
+                round_trip!();
+                let (w, h) = last_configured(&client, toplevel).expect("told a size");
+                commit_buffer(&client, &qh, surface, w, h);
+                round_trip!();
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+                assert!(state.trigger(key));
+                round_trip!();
+                let top = |state: &Solium| {
+                    state
+                        .space
+                        .elements()
+                        .last()
+                        .map(|top| state.window_id(top))
+                };
+                state.clock.advance(Duration::from_millis(50));
+                state.sync_panes();
+                assert_eq!(
+                    (top(&state), state.lifted_on(screen)),
+                    (Some(state.window_id(window)), lifts.then_some(pane)),
+                    "{key}, {name}: in front of its neighbour while it shrinks, \
+                     and over the bars if it was fullscreen"
+                );
+                state.trigger_relayout();
+                state.clock.advance(Duration::from_millis(50));
+                state.sync_panes();
+                assert_eq!(
+                    (top(&state), state.lifted_on(screen)),
+                    (Some(state.window_id(window)), lifts.then_some(pane)),
+                    "{key}, {name}: and still, after a sweep part of the way through"
+                );
+                commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+                round_trip!();
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The shipped `modes`, `workspaces`, `tiling`, `scrolling` and

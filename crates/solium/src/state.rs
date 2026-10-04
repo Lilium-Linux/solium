@@ -1656,6 +1656,23 @@ impl Solium {
         for pane in self.panes.iter() {
             animating |= present::settle(pane, now);
         }
+        // A window shrinking back out of fullscreen or maximised that has
+        // landed is an ordinary window again, with nothing of its shrink kept.
+        // `a_window_glides_into_fullscreen_and_out_again`.
+        let shrunk: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| {
+                pane.shrinking()
+                    .is_some_and(|shrinking| now >= shrinking.until)
+            })
+            .map(Pane::id)
+            .collect();
+        for id in shrunk {
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_shrinking(None);
+            }
+        }
         // And the selections, which animate on the same clock and damage
         // nothing either. Not folded into the loop above: a group is not a
         // pane, and one that has landed has to be released exactly once.
