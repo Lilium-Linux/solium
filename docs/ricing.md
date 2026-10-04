@@ -833,6 +833,38 @@ return { fullscreen = { covers = "none" } }
 See **[shell-boundary.md](shell-boundary.md)** for why hosting is the design,
 and for both ways a shell attaches.
 
+### The preview shell
+
+A fresh install is not a blank desktop. `shell.scene` above defaults to the
+compositor's own preview shell -- a bar along the bottom, built the same way
+any other shell is, on the public API `shell-boundary.md` describes and
+nothing else. It shows:
+
+- the workspaces of this monitor, as page dots -- the current one an accent
+  pill, an occupied one filled -- and a click switches;
+- the running windows of this monitor's current workspace, as chips -- title
+  or app id, the focused one highlighted -- and a click focuses one;
+- the keyboard layout, once more than one is configured;
+- a clock.
+
+Next pieces -- the dock, the island, search, quick settings, a tray, and
+previews -- need services this compositor does not have yet, and are not
+here. `preview.lua` and `qml/preview/` are where all of it lives, so copying
+one file still changes one behaviour, exactly as **[Your own
+frame](#your-own-frame)** and **[Bars, docks and
+wallpapers](#bars-docks-and-wallpapers)** above do it.
+
+Two ways to turn it off, or replace it:
+
+```lua
+return { preview = false }
+```
+
+turns the whole preview shell off and leaves a blank desktop, as before it
+existed. Naming your own `shell.scene` -- or `SOLIUM_SHELL_SCENE` for one run
+-- replaces it outright: the preview shell only ever fills in a default
+nothing else set, and never overrides either one.
+
 ### Your own pointer
 
 The pointer can be a QML scene of yours, named the way a shell is:
