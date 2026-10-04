@@ -1,8 +1,11 @@
 // A small capsule saying what the keyboard just did: `⇪` while Caps Lock is
 // on, the short name of a layout just switched to (EN, RU), `⇭` for Num Lock.
-// After macOS's Caps Lock indicator, in `Theme`'s accent: a round capsule a
-// little taller than a line, an outlined arrow over a bar drawn as a path
-// rather than read from a font, and a soft shadow falling below it.
+// After macOS's Caps Lock indicator: a round capsule a little taller than a
+// line, an outlined arrow over a bar drawn as a path rather than read from a
+// font, and a soft shadow falling below it. The capsule is `Theme.accent` and
+// what is drawn on it `Theme.accentInk`: in the shipped theme a light grey
+// with a dark glyph, which stands out on a dark window, and with its shadow
+// on a light one (`keyboard-pane-drawn.lua`, `keyboard-surface-drawn.lua`).
 //
 // It shows what it is handed and decides nothing. `lua/keyboard_indicator.lua`
 // is the policy -- which changes show it, for how long, where -- and hands it
@@ -157,7 +160,7 @@ Item {
             preferredRendererType: Shape.CurveRenderer
 
             ShapePath {
-                strokeColor: "#ffffff"
+                strokeColor: Theme.accentInk
                 strokeWidth: pill.stroke
                 fillColor: "transparent"
                 joinStyle: ShapePath.RoundJoin
@@ -172,7 +175,7 @@ Item {
                 PathLine { x: 8; y: 1.2 }
             }
             ShapePath {
-                strokeColor: "#ffffff"
+                strokeColor: Theme.accentInk
                 strokeWidth: pill.stroke
                 fillColor: "transparent"
                 joinStyle: ShapePath.RoundJoin
@@ -184,7 +187,7 @@ Item {
             id: text
             anchors.centerIn: parent
             text: pill.label
-            color: "#ffffff"
+            color: Theme.accentInk
             font.family: Theme.fontFamily
             font.weight: Font.Medium
             font.pixelSize: pill.shown === "layout" ? 13 : 17

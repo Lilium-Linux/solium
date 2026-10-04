@@ -2090,4 +2090,81 @@ mod hosting_tests {
             let _ = std::fs::remove_dir_all(&directory);
         });
     }
+
+    /// **Every colour the shipped `Solium.Theme` publishes is a grey**: red,
+    /// green and blue the same. The maintainer's decision for now (2026-10-04)
+    /// is a dark theme in black, greys and white, with no accent hue and none
+    /// of the logo's or the wallpaper's colours, so this is the rule
+    /// `Theme.qml`'s comment states.
+    ///
+    /// The colours are found by walking the singleton from QML rather than by
+    /// a list written here, so one added later is held to the rule too; and
+    /// their number is checked against the `property color` lines in the file,
+    /// so a walk that silently found nothing could not pass.
+    #[test]
+    fn every_colour_the_theme_publishes_is_a_grey() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-theme-greys");
+            let scene = directory.join("Greys.qml");
+            write(
+                &scene,
+                r#"
+                import QtQuick
+                import Solium
+
+                Item {
+                    // "name r g b a", 0 to 255, for every colour on Theme.
+                    readonly property var colours: {
+                        const found = [];
+                        for (const key in Theme) {
+                            const value = Theme[key];
+                            if (value !== null && typeof value === "object"
+                                    && value.hslHue !== undefined) {
+                                found.push([key, value.r, value.g, value.b, value.a]
+                                    .map((it, at) => at === 0 ? it : Math.round(it * 255))
+                                    .join(" "));
+                            }
+                        }
+                        return found;
+                    }
+                }
+                "#,
+            );
+
+            super::start().expect("Qt starts");
+            let built = super::Scene::for_host(&scene, 16, 16, None).expect("the scene builds");
+            let colours = built.string_list("colours");
+
+            let source = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/qml/Solium/Theme.qml"
+            ))
+            .expect("the shipped Theme.qml");
+            let declared = source
+                .lines()
+                .filter(|line| line.contains("property color "))
+                .count();
+            assert!(declared > 0, "Theme.qml declares no colours");
+            assert_eq!(
+                colours.len(),
+                declared,
+                "the walk found {colours:?}, and Theme.qml declares {declared} colours"
+            );
+
+            let tinted: Vec<&String> = colours
+                .iter()
+                .filter(|colour| {
+                    let channels: Vec<&str> = colour.split(' ').skip(1).take(3).collect();
+                    channels.windows(2).any(|pair| pair[0] != pair[1])
+                })
+                .collect();
+            assert!(
+                tinted.is_empty(),
+                "a Theme colour with a hue (name r g b a): {tinted:?}"
+            );
+
+            drop(built);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
 }

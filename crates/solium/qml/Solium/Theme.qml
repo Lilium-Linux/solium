@@ -1,5 +1,5 @@
 // The design system: the colours, fonts and metrics the window frames, the
-// loading window and the tweaks panel are drawn with.
+// loading window, the keyboard pill and the tweaks panel are drawn with.
 //
 // Window decorations and a hosted shell run in the *same* QML engine, so a
 // shell scene that imports `Solium` gets this same singleton — change a colour
@@ -10,36 +10,55 @@
 // Two of the compositor's own scenes do not read it: `cursor.qml`, whose
 // colours are fixed and which says why, and `wallpaper.qml`.
 //
-// **This is not a design. It is a default.** Plain greys, a plain blue, a plain
-// red: what the compositor looks like with nobody having chosen anything. It is
-// meant to be unremarkable, because its job is to show what the compositor does
-// rather than what someone's taste is — and because the first thing a rice does
-// is replace it. `panes/` and `~/.config/solium/qml` are where a look belongs;
+// **This is not a design. It is a default.** Plain greys on near-black: what
+// the compositor looks like with nobody having chosen anything. It is meant to
+// be unremarkable, because its job is to show what the compositor does rather
+// than what someone's taste is — and because the first thing a rice does is
+// replace it. `panes/` and `~/.config/solium/qml` are where a look belongs;
 // this file is deliberately small and dull enough to throw away.
+//
+// **Every colour here is a grey: red, green and blue the same.** That is the
+// maintainer's decision for now (2026-10-04): a dark theme in black, greys and
+// white, with no accent hue and none of the logo's or the wallpaper's colours
+// (`qml::hosting_tests::every_colour_the_theme_publishes_is_a_grey`). A light
+// scheme, or colour accents, may come later as a change of these values only:
+// every name below stays, and what reads them does not change.
 
 pragma Singleton
 import QtQuick
 
 QtObject {
     // --- greys ----------------------------------------------------------
-    readonly property color surface: "#ffffff"
-    readonly property color surfaceInactive: "#f0f0f0"
-    readonly property color edge: "#c0c0c0"
-    readonly property color edgeInactive: "#dcdcdc"
+    // The focused window's bar is a shade lighter than the others', and its
+    // title is light on it and dimmer on theirs
+    // (`tests/scenarios/pane-top-drawn.lua`).
+    readonly property color surface: "#303030"
+    readonly property color surfaceInactive: "#1c1c1c"
+    readonly property color edge: "#4a4a4a"
+    readonly property color edgeInactive: "#2e2e2e"
 
-    readonly property color text: "#202020"
-    readonly property color textDim: "#808080"
+    readonly property color text: "#ebebeb"
+    readonly property color textDim: "#8c8c8c"
 
-    readonly property color control: "#c0c0c0"
-    readonly property color controlInactive: "#e0e0e0"
+    readonly property color control: "#6b6b6b"
+    readonly property color controlInactive: "#3a3a3a"
 
-    // --- the three colours ----------------------------------------------
-    // Stock blue, amber and red. Nothing is tinted, nothing is neon, and
-    // `warning` and `danger` are only ever shown under the pointer — so a
-    // titlebar at rest has no colour in it at all.
-    readonly property color accent: "#0060c0"
-    readonly property color warning: "#c08000"
-    readonly property color danger: "#c02020"
+    // --- the three that were colours ------------------------------------
+    // Still three names, because shells and styles read them, and three
+    // greys now. `accent` is a light grey, a shade off white: the keyboard
+    // pill's capsule, which stands out on a dark window and on a light one
+    // (`tests/scenarios/keyboard-pane-drawn.lua`). `warning` and `danger` are
+    // what the maximise and close buttons turn under the pointer, close the
+    // lighter, so the two are told apart by shade rather than by hue
+    // (`qml::hosting_tests::every_colour_the_theme_publishes_is_a_grey`).
+    readonly property color accent: "#d4d4d4"
+    readonly property color warning: "#a6a6a6"
+    readonly property color danger: "#ebebeb"
+
+    // What is drawn on any of those three: the pill's glyph and label, a
+    // pressed tweak's label. Dark, so it contrasts with all three
+    // (`tests/scenarios/keyboard-pane-drawn.lua`).
+    readonly property color accentInk: "#1c1c1c"
 
     // --- metrics --------------------------------------------------------
     // The compositor reserves space using its own copy of `titlebarHeight`;

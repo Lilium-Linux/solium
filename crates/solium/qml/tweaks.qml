@@ -92,7 +92,7 @@ Item {
                             verticalCenter: parent.verticalCenter
                         }
                         text: modelData.label
-                        color: Theme.text
+                        color: press.pressed ? Theme.accentInk : Theme.text
                         elide: Text.ElideRight
                         width: parent.width - Theme.margin * 2
                         font { pixelSize: Theme.fontSize; family: Theme.fontFamily }

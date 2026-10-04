@@ -13,11 +13,33 @@
 -- show the layer's image and its blending over the client: dormant whenever
 -- nothing shows, awake from the cue that shows one.
 
--- `Theme.accent`, opaque, whatever it is set to -- #0060c0 today, #936DFF
--- once the theme turns violet: blue the strongest channel by a clear
--- margin, which neither the white glyph nor the shadow is.
-local function accent(r, g, b, a)
-    return a == 255 and b > r + 24 and b > g + 24
+-- The capsule, `Theme.accent` whatever it is set to: opaque, a grey (red,
+-- green and blue within 2 of one another), and light -- so it stands out on
+-- a dark window -- yet a shade off white, so it shows on a light one too.
+-- Neither the dark glyph nor the shadow is that.
+local function capsule(r, g, b, a)
+    return a == 255
+        and math.abs(r - g) <= 2 and math.abs(g - b) <= 2
+        and r >= 160 and r <= 224
+end
+
+-- Whether any opaque pixel of `layer` in the box from (x0, y0) to (x1, y1)
+-- is dark: the glyph, drawn on the capsule in a shade that contrasts with it.
+local function inked(world, layer, x0, y0, x1, y1)
+    for y = y0, y1 do
+        for x = x0, x1 do
+            local r, g, b, a = world.pixel(layer, x, y)
+            if a == 255 and r <= 96 and math.abs(r - g) <= 2 and math.abs(g - b) <= 2 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- The shadow below the capsule: something drawn there, and black.
+local function shadowed(r, g, b, a)
+    return a >= 8 and r == 0 and g == 0 and b == 0
 end
 
 local function cue(what, serial, hold, duration, after)
@@ -52,7 +74,11 @@ return {
         {
             expect = function(world)
                 local r, g, b, a = world.pixel("keyboard", 89, 96)
-                assert(accent(r, g, b, a), string.format("the capsule below the caret: %d %d %d %d", r, g, b, a))
+                assert(capsule(r, g, b, a), string.format("the capsule below the caret: %d %d %d %d", r, g, b, a))
+                -- The capsule spans 85 to 116 across and 82 to 109 down.
+                assert(inked(world, "keyboard", 85, 82, 116, 109), "with Caps Lock's glyph dark on it")
+                r, g, b, a = world.pixel("keyboard", 101, 112)
+                assert(shadowed(r, g, b, a), string.format("and its shadow below: %d %d %d %d", r, g, b, a))
                 local _, _, _, above = world.pixel("keyboard", 86, 50)
                 assert(above == 0, "and nothing above it")
                 assert(world.dormant.keyboard == nil, "awake while it shows")
@@ -63,7 +89,7 @@ return {
         { wait = 1500 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 89, 96)), "a held pill stays")
+                assert(capsule(world.pixel("keyboard", 89, 96)), "a held pill stays")
             end,
         },
 
@@ -82,7 +108,7 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 89, 96)), "the layout's pill")
+                assert(capsule(world.pixel("keyboard", 89, 96)), "the layout's pill")
             end,
         },
         { wait = 600 },
@@ -100,7 +126,7 @@ return {
         {
             expect = function(world)
                 -- Its bottom 6 above the caret: rows 246 to 274, middle 260.
-                assert(accent(world.pixel("keyboard", 89, 260)), "above the caret")
+                assert(capsule(world.pixel("keyboard", 89, 260)), "above the caret")
             end,
         },
 
@@ -132,13 +158,13 @@ return {
         { wait = 300 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 89, 96)), "the layout's pill")
+                assert(capsule(world.pixel("keyboard", 89, 96)), "the layout's pill")
             end,
         },
         { wait = 1000 },
         {
             expect = function(world)
-                assert(accent(world.pixel("keyboard", 89, 96)), "Caps Lock's, past the layout's duration")
+                assert(capsule(world.pixel("keyboard", 89, 96)), "Caps Lock's, past the layout's duration")
                 assert(world.dormant.keyboard == nil, "and still awake")
             end,
         },
