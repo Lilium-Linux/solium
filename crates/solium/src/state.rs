@@ -709,6 +709,18 @@ pub(crate) struct Solium {
     /// the pointer grab is the only thing that calls it.
     resize_bridge: Option<Bridged>,
 
+    /// The windows a fullscreen or maximise change has told a new size, each
+    /// held at the rectangle the change gave it until its client answers
+    /// (#49): the hold [`Self::resize_hold`] keeps for a drag, made by the
+    /// change rather than by a pointer. Until then the slot is the window's
+    /// rectangle, and the client's last picture is stretched into it, so a
+    /// client slower than the glide is not shown at its old size where the
+    /// glide landed. Ended by the client's answer, or `resizing::PATIENCE`
+    /// after the glide lands, in `Self::settle`. One per pane.
+    /// `a_slow_client_is_drawn_stretched_until_it_answers`,
+    /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+    answering: Vec<crate::resizing::Held>,
+
     /// The edge drag a layout is being asked about right now.
     ///
     /// Set for the length of one `trigger_resize` and cleared after it, because
@@ -1087,6 +1099,7 @@ impl Solium {
             instances_synced: 0,
             client_sizes: crate::script::ClientSizes::default(),
             resize_hold: None,
+            answering: Vec::new(),
             resize_bridge: None,
             resize_gesture: None,
             resize_ended: None,
@@ -1673,6 +1686,12 @@ impl Solium {
                 pane.set_shrinking(None);
             }
         }
+        // And one a fullscreen or maximise change is holding at its new
+        // rectangle is let go once its client answers, or has had long enough
+        // to. Until then the frames keep coming, or a client that never
+        // answers would be held until something else drew one.
+        // `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+        animating |= self.settle_answering(now);
         // And the selections, which animate on the same clock and damage
         // nothing either. Not folded into the loop above: a group is not a
         // pane, and one that has landed has to be released exactly once.

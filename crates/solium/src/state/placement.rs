@@ -919,10 +919,15 @@ impl Solium {
     /// drawn before the change, [`Self::drawn_before`] -- to the slot with the
     /// frame it now has, and released when it lands, so at rest a window
     /// holds no transform and a fullscreen game or video is a plain element
-    /// again. Until its client commits at the new size its last picture is
-    /// stretched into the rectangle drawn, as on every glide.
-    /// `a_window_glides_into_fullscreen_and_out_again`,
+    /// again. `a_window_glides_into_fullscreen_and_out_again`,
     /// `the_client_is_told_its_new_size_on_the_toggle`.
+    ///
+    /// **Until its client answers it is held at the new rectangle**, as an
+    /// edge drag holds a window ([`Self::hold_for_answer`]), and its last
+    /// picture is stretched into it, through the glide and after it lands --
+    /// for `resizing::PATIENCE` after, if the client says nothing, and then
+    /// the client's own size wins. `a_slow_client_is_drawn_stretched_until_it_answers`,
+    /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
     ///
     /// **The motion is the scripts'**: the listeners of `change`'s event set
     /// it with `sol.animate`, and with no answer -- no listener, or no
@@ -954,6 +959,12 @@ impl Solium {
             duration: Duration::ZERO,
             easing: present::Curve::OutCubic,
         });
+        // A hold an earlier change left, waiting on an answer to a size this
+        // one has just replaced, is this one's to set again or not at all:
+        // left, it stretched the old picture across the new rectangle of an
+        // instant change. And so is a shrink it turned round.
+        // `an_instant_change_part_of_the_way_through_a_glide_holds_nothing`.
+        self.answering.retain(|held| held.pane != pane);
         if let Some(held) = self.panes.get_mut(pane) {
             held.set_shrinking(None);
         }
@@ -979,7 +990,8 @@ impl Solium {
         // picture across the monitor before snapping back to its own size. A
         // glide in flight is stopped too, and the window is drawn as it is
         // from the next frame, as before #49.
-        // `an_instant_change_draws_the_window_as_it_is_on_the_next_frame`.
+        // `an_instant_change_draws_the_window_as_it_is_on_the_next_frame`,
+        // `an_instant_change_part_of_the_way_through_a_glide_holds_nothing`.
         if motion.duration.is_zero() {
             present::release(held);
             self.redraw = true;
@@ -989,6 +1001,9 @@ impl Solium {
         present::from(held, to, start, now, motion.duration, motion.easing);
         let lands = now + motion.duration;
         let window = held.client().cloned();
+        if let Some(window) = &window {
+            self.hold_for_answer(pane, window, now, lands);
+        }
         // **In front while it shrinks, and over the bars leaving fullscreen.**
         // A window going fullscreen is lifted by being fullscreen, from the
         // moment it starts to grow; one leaving stops being fullscreen on the

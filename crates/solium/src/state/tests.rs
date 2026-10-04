@@ -4949,6 +4949,14 @@ end)"#,
                 self.pump();
             }
 
+            /// A frame `after` from now, retired as a frame retires it.
+            fn frame_after(&mut self, after: Duration) {
+                self.state.clock.advance(after);
+                let now = self.state.clock.now();
+                self.state.settle(now);
+                self.state.sync_panes();
+            }
+
             /// Past every animation, retired as a frame retires it.
             fn land(&mut self) {
                 self.state.clock.advance(Duration::from_secs(1));
@@ -5291,6 +5299,132 @@ end)"#,
                 "the first frame draws the committed 400x300 picture, not stretched to the monitor"
             );
             assert!(!desk.transformed(), "and holds no transform");
+        }
+
+        /// **And part of the way through a glide, it holds nothing either**:
+        /// a window maximising, not yet answered, sent fullscreen at once is
+        /// drawn as its client has it on the next frame, not with its old
+        /// picture stretched across the monitor by the hold the maximise
+        /// left.
+        #[test]
+        fn an_instant_change_part_of_the_way_through_a_glide_holds_nothing() {
+            let mut desk = Desk::new(
+                "instant-mid-glide",
+                r#"
+                sol.on("maximize", function() sol.animate({ duration = 220, easing = "linear" }) end)
+                sol.on("fullscreen", function() sol.animate({ duration = 0 }) end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let next = desk.state.clock.now() + Duration::from_millis(16);
+            assert_eq!(
+                desk.drawn(next),
+                Rectangle::new((0, 0).into(), (400, 300).into()).to_f64(),
+                "the committed 400x300 picture where it now lives"
+            );
+            assert!(!desk.transformed(), "with no transform");
+            assert!(!desk.state.holding_resize(desk.pane), "and nothing held");
+        }
+
+        /// **A client slower than the glide is drawn stretched until it
+        /// answers**, at the rectangle the glide landed on: the hold an
+        /// edge drag keeps on a window until its client answers, kept from
+        /// the toggle. Without it, going in, the window was drawn 400x300 in
+        /// the monitor's corner from the moment it landed, and coming out,
+        /// 1920x1080 hanging off the monitor at 300,200. Answered, it is
+        /// drawn as it is and nothing holds it.
+        #[test]
+        fn a_slow_client_is_drawn_stretched_until_it_answers() {
+            let mut desk = Desk::new("slow", SCRIPT);
+            desk.state.resizing.fill = crate::resizing::Fill::Hold;
+            for (size, to) in [((1920, 1080), screen()), ((400, 300), before())] {
+                assert!(desk.state.trigger("super+f"));
+                desk.pump();
+                desk.frame_after(Duration::from_millis(300));
+                assert!(!desk.transformed(), "landed, it holds no transform");
+                assert_eq!(
+                    desk.drawn(desk.state.clock.now()),
+                    to,
+                    "drawn where it landed while its client has not answered"
+                );
+                assert_eq!(
+                    desk.state.resize_fill(desk.pane),
+                    None,
+                    "stretched into it, whatever `resize.fill` says of a drag"
+                );
+                desk.answer(size.0, size.1);
+                desk.frame_after(Duration::from_millis(16));
+                assert_eq!(desk.drawn(desk.state.clock.now()), to, "and once it has");
+                assert!(
+                    !desk.state.holding_resize(desk.pane),
+                    "and nothing holds it once it has answered"
+                );
+                desk.land();
+            }
+        }
+
+        /// **And one that never answers is held only so long**:
+        /// `resizing::PATIENCE` past the landing, as a drag's hold is, and
+        /// then drawn at the size it has, where it lives.
+        #[test]
+        fn a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out() {
+            let mut desk = Desk::new("silent", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                screen(),
+                "the premise: held at the monitor"
+            );
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert!(!desk.state.holding_resize(desk.pane), "no longer held");
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                Rectangle::new((0, 0).into(), (400, 300).into()).to_f64(),
+                "drawn at the size its client has, where it lives"
+            );
+        }
+
+        /// **An edge drag on a window its change is still holding takes
+        /// it**: the change's hold is let go rather than landed, so its
+        /// patience running out part of the way through the drag does not
+        /// put the window at its client's old size under the pointer.
+        #[test]
+        fn an_edge_drag_takes_a_window_its_change_is_holding() {
+            let mut desk = Desk::new("dragged", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert!(
+                desk.state.holding_resize(desk.pane),
+                "the premise: held for its answer"
+            );
+
+            let wanted = Rectangle::new((250, 200).into(), (450, 300).into());
+            desk.state.pending_resize = Some(ResizeRequest {
+                window: desk.window.clone(),
+                wanted,
+                edge_at: (250.0, 200.0),
+                edges: ResizeEdge::Left,
+            });
+            desk.state.settle_resize();
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert_eq!(
+                desk.state.pane_outer_of(desk.pane),
+                Some(wanted),
+                "where the drag has it"
+            );
         }
 
         /// **A window a mode is presenting is left where the mode draws
