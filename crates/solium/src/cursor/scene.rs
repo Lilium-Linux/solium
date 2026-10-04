@@ -1,9 +1,11 @@
 //! The pointer's own scene: `cursor.scene`.
 //!
-//! A QML file the configuration names, found as `shell.scene` is
-//! (`super::theme::tests::a_configured_scene_is_found_as_the_shells_is`), and
-//! drawn for every named shape in place of the theme. It is configured the
-//! way the shell is, in the same engine, and says where its point is with
+//! A QML file the configuration names, found as `shell.scene` is, and drawn
+//! for every named shape in place of the theme
+//! (`crate::models::pointer::tests::a_configured_scene_hears_every_named_shape`).
+//! It is configured the way the shell is and given what the shell is given,
+//! through the same engine: `Solium.cursor` says what the pointer is doing
+//! (`crate::models::pointer`), and the scene says where its point is with
 //! `Solium.cursor.hotspot` on its root.
 //!
 //! Three things make it different from the floor, `qml/cursor.qml`, which is
@@ -256,6 +258,73 @@ fn device(size: (i32, i32), scale: f64) -> (i32, i32) {
     (pixels(size.0), pixels(size.1))
 }
 
+/// One place the pointer was reported, and when, in microseconds on the
+/// input device's own clock.
+#[derive(Clone, Copy, Debug)]
+struct Sample {
+    at: u64,
+    location: Point<f64, Logical>,
+}
+
+/// How long a pause in the pointer's motion still counts as the same
+/// movement, in microseconds: longer, and the first report after it starts a
+/// new one. `tests::velocity_is_the_motion_since_it_was_last_read`.
+const SAME_MOVEMENT: u64 = 100_000;
+
+/// The pointer's motion since its velocity was last read: what
+/// `Solium.cursor.velocity` is made of.
+/// `tests::velocity_is_the_motion_since_it_was_last_read`.
+#[derive(Debug, Default)]
+pub(crate) struct Motion {
+    /// The last report, kept across reads so the next movement measures from
+    /// where this one left off.
+    last: Option<Sample>,
+    /// Where the motion read next starts, and where it has got to.
+    span: Option<(Sample, Sample)>,
+}
+
+impl Motion {
+    /// The pointer was reported at `location`, `at` microseconds into the
+    /// device's clock.
+    pub(crate) fn moved(&mut self, at: u64, location: Point<f64, Logical>) {
+        let now = Sample { at, location };
+        let from = match self.span {
+            Some((from, _)) => from,
+            None => self
+                .last
+                .filter(|last| at.saturating_sub(last.at) <= SAME_MOVEMENT && at >= last.at)
+                .unwrap_or(now),
+        };
+        self.span = Some((from, now));
+        self.last = Some(now);
+    }
+
+    /// How fast the pointer moved since the last read, in logical pixels a
+    /// second, and the start of the next: zero when it did not move, or moved
+    /// only once since a pause, which is a distance with no time to divide it
+    /// by. `tests::velocity_is_the_motion_since_it_was_last_read`.
+    pub(crate) fn velocity(&mut self) -> Point<f64, Logical> {
+        let Some((from, to)) = self.span.take() else {
+            return Point::default();
+        };
+        let elapsed = to.at.saturating_sub(from.at);
+        if elapsed == 0 {
+            return Point::default();
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "microseconds between two reports, far below 2^52"
+        )]
+        let elapsed = elapsed as f64;
+        let moved = to.location - from.location;
+        (
+            moved.x * 1_000_000.0 / elapsed,
+            moved.y * 1_000_000.0 / elapsed,
+        )
+            .into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -263,7 +332,7 @@ mod tests {
     use smithay::backend::renderer::element::Kind;
     use smithay::utils::{Logical, Point};
 
-    use super::{Cursor, origin, plane};
+    use super::{Cursor, Motion, origin, plane};
     use crate::qml::pointer::tests::written;
     use crate::qml::qt_test::on_the_qt_thread;
     use crate::render::Drawn;
@@ -438,5 +507,46 @@ mod tests {
                  read]"
             );
         });
+    }
+
+    /// **Velocity is the motion since it was last read**, in logical pixels a
+    /// second by the device's own clock: zero with no motion, zero for a
+    /// single report after a pause, and measured from the report before a
+    /// read when the motion carries on across it.
+    #[test]
+    fn velocity_is_the_motion_since_it_was_last_read() {
+        let mut motion = Motion::default();
+        let point = |x: f64, y: f64| Point::<f64, Logical>::from((x, y));
+        let still = motion.velocity();
+        motion.moved(1_000_000, point(10.0, 10.0));
+        let after_a_pause = motion.velocity();
+        motion.moved(1_008_000, point(18.0, 10.0));
+        motion.moved(1_016_000, point(26.0, 6.0));
+        let moving = motion.velocity();
+        motion.moved(1_032_000, point(42.0, 6.0));
+        let carried_on = motion.velocity();
+        let stopped = motion.velocity();
+        motion.moved(2_000_000, point(50.0, 6.0));
+        let after_another_pause = motion.velocity();
+        assert_eq!(
+            [
+                still,
+                after_a_pause,
+                moving,
+                carried_on,
+                stopped,
+                after_another_pause
+            ],
+            [
+                point(0.0, 0.0),
+                point(0.0, 0.0),
+                point(1000.0, -250.0),
+                point(1000.0, 0.0),
+                point(0.0, 0.0),
+                point(0.0, 0.0)
+            ],
+            "[nothing, one report after a pause, 16 px in 16 ms, carried on across a read, \
+             nothing since, one report after a second's pause]"
+        );
     }
 }

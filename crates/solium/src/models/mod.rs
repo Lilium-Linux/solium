@@ -7,6 +7,7 @@
 pub(crate) mod diff;
 pub(crate) mod keyboard;
 pub(crate) mod monitors;
+pub(crate) mod pointer;
 
 use crate::qml::hosted::Model;
 
@@ -16,6 +17,8 @@ pub(crate) struct Published {
     monitors: Vec<diff::Row>,
     /// `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
     keyboard: keyboard::Published,
+    /// `pointer::tests::a_named_shape_reaches_solium_cursor_shape`.
+    pointer: pointer::Published,
 }
 
 impl crate::state::Solium {
@@ -38,6 +41,12 @@ impl crate::state::Solium {
         let mut keyboard = std::mem::take(&mut self.published.keyboard);
         keyboard::publish(self, &mut keyboard);
         self.published.keyboard = keyboard;
+        // `Solium.cursor`, while a pointer scene is configured:
+        // `pointer::tests::a_named_shape_reaches_solium_cursor_shape`,
+        // `pointer::tests::nothing_is_published_with_no_scene`.
+        let mut pointer = std::mem::take(&mut self.published.pointer);
+        pointer::publish(self, &mut pointer, crate::qml::pointer::publish);
+        self.published.pointer = pointer;
     }
 }
 

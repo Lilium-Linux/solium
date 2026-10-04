@@ -720,6 +720,9 @@ pub(crate) struct Pointer {
     /// The scene `cursor.scene` names, drawn for every named shape ahead of
     /// any theme. See `scene.rs`.
     hosted: Hosted,
+    /// The pointer's motion, which its velocity is read from.
+    /// `scene::tests::velocity_is_the_motion_since_it_was_last_read`.
+    motion: scene::Motion,
     /// Whether uploading a *themed* cursor has failed and said so.
     ///
     /// Separate from `Cursor::uploading` next door for the reason that one is
@@ -748,6 +751,7 @@ impl Default for Pointer {
             art: None,
             unavailable: false,
             hosted: Hosted::Unbuilt,
+            motion: scene::Motion::default(),
             theming: Said::default(),
         }
     }
@@ -844,6 +848,45 @@ impl Pointer {
             self.status = CursorImageStatus::default_named();
         }
         self.status.clone()
+    }
+
+    /// The named shape [`Pointer::showing`] would draw now, without its write:
+    /// the compositor's over its chrome, a client's named one, and the arrow
+    /// for a cursor surface that has died. `None` while a client's own cursor
+    /// surface is shown, or nothing is, because then no named shape is drawn.
+    /// `crate::models::pointer::tests::a_named_shape_reaches_solium_cursor_shape`.
+    pub(crate) fn shape(&self) -> Option<CursorIcon> {
+        if let Some(icon) = self.chrome {
+            return Some(icon);
+        }
+        match &self.status {
+            CursorImageStatus::Named(icon) => Some(*icon),
+            CursorImageStatus::Surface(surface) if !surface.alive() => Some(CursorIcon::Default),
+            CursorImageStatus::Surface(_) | CursorImageStatus::Hidden => None,
+        }
+    }
+
+    /// Whether a scene is configured for the pointer, built or not.
+    /// `crate::models::pointer::tests::nothing_is_published_with_no_scene`.
+    pub(crate) fn has_scene(&self) -> bool {
+        self.settings.scene.is_some()
+    }
+
+    /// The configured size, in logical pixels.
+    pub(crate) const fn size(&self) -> i32 {
+        self.settings.size
+    }
+
+    /// The pointer was reported at `location`, `at` microseconds into its
+    /// device's clock. `scene::tests::velocity_is_the_motion_since_it_was_last_read`.
+    pub(crate) fn moved(&mut self, at: u64, location: Point<f64, Logical>) {
+        self.motion.moved(at, location);
+    }
+
+    /// How fast the pointer has moved since this was last asked, in logical
+    /// pixels a second. `scene::tests::velocity_is_the_motion_since_it_was_last_read`.
+    pub(crate) fn velocity(&mut self) -> Point<f64, Logical> {
+        self.motion.velocity()
     }
 
     /// Apply what the configuration said, over what the environment says.
@@ -954,10 +997,11 @@ impl Pointer {
     /// becomes the theme's own arrow in [`shape::resolve`] and never reaches
     /// the second arm at all, so a themed session stays wholly themed.
     ///
-    /// **A configured scene comes before both**, for every shape. It is the
-    /// one of the three that can animate, so what comes back says whether it
-    /// still is, as [`Drawn`] does for every other scene
-    /// (`scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`). A scene that would not
+    /// **A configured scene comes before both**, for every shape: it is told
+    /// the shape through `Solium.cursor.shape`, and draws what it likes
+    /// (`crate::models::pointer::tests::a_configured_scene_hears_every_named_shape`). It is the one of
+    /// the three that can animate, so what comes back says whether it still
+    /// is, as [`Drawn`] does for every other scene. A scene that would not
     /// build (`tests::a_reload_swaps_the_scene`), or drew nothing this frame,
     /// leaves the two arms below to draw the pointer as they do with none
     /// configured.
@@ -1690,12 +1734,33 @@ mod tests {
         let nothing = theme::Configured::default();
         let environment = theme::Environment::default();
         pointer.configure(&nothing, &environment);
+        assert!(!pointer.has_scene());
         assert!(pointer.scene().is_none());
         assert!(matches!(pointer.hosted, super::Hosted::Unbuilt));
         assert!(
             !pointer.configure(&nothing, &environment),
             "a reload that changed nothing asked for a frame"
         );
+    }
+
+    /// **A pointer a client hides stays hidden with a scene configured**, and
+    /// one it draws itself stays its own: the scene is told no named shape,
+    /// and `render::cursor` draws nothing for `Hidden` before it ever asks
+    /// for the scene.
+    #[test]
+    fn a_pointer_a_client_hides_stays_hidden_with_a_scene_configured() {
+        let mut pointer = Pointer::default();
+        pointer.configure(
+            &theme::Configured {
+                scene: Some("/solium-test/never-built/Cursor.qml".to_owned()),
+                ..theme::Configured::default()
+            },
+            &theme::Environment::default(),
+        );
+        pointer.show(CursorImageStatus::Hidden);
+        assert!(pointer.has_scene());
+        assert!(matches!(pointer.showing(), CursorImageStatus::Hidden));
+        assert_eq!(pointer.shape(), None);
     }
 
     /// The pointer's own use of the shared cache, at the pointer's own cap.

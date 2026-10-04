@@ -1,9 +1,11 @@
-//! The pointer's half of what the host and a scene say to each other: a
-//! scene whose root item says how big it is
-//! (`tests::a_scene_sized_by_its_root_keeps_its_own_size`), and the hotspot
-//! that root sets (`tests::the_hotspot_the_root_sets_is_the_scenes`).
+//! The pointer's half of what the host and a scene say to each other:
+//! `Solium.cursor`, published from here once a frame
+//! (`tests::a_published_pointer_reaches_solium_cursor`); a scene whose root
+//! item says how big it is (`tests::a_scene_sized_by_its_root_keeps_its_own_size`);
+//! and the hotspot that root sets
+//! (`tests::the_hotspot_the_root_sets_is_the_scenes`).
 
-use std::path::Path;
+use std::{ffi::CString, path::Path};
 
 use anyhow::Result;
 
@@ -11,9 +13,10 @@ use super::Scene;
 
 #[expect(unsafe_code, reason = "the Qt host is C++; this is its C ABI")]
 mod ffi {
-    use std::ffi::c_int;
+    use std::ffi::{c_char, c_int};
 
     unsafe extern "C" {
+        pub(super) fn solium_qml_pointer_publish(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_host_next_sized_by_root(width: c_int, height: c_int);
         pub(super) fn solium_qml_scene_root_size(
             scene: *const super::super::ffi::Scene,
@@ -26,6 +29,20 @@ mod ffi {
             y: *mut f64,
         ) -> c_int;
     }
+}
+
+/// Hand Qt the pointer as `Solium.cursor` reads it, one JSON object. False when
+/// Qt could not take it, before it has started, so the caller sends it again.
+/// `tests::a_published_pointer_reaches_solium_cursor`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn publish(json: &str) -> bool {
+    // A value a binding reads can move a scene's items.
+    super::hosted::touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_pointer_publish(json.as_ptr()) != 0 }
 }
 
 impl Scene {
@@ -98,6 +115,69 @@ pub(crate) mod tests {
 
     fn built(path: &Path) -> Scene {
         Scene::for_host(path, 32, 32, None).expect("the scene builds")
+    }
+
+    /// **What the compositor publishes reaches `Solium.cursor` in every object
+    /// of a scene**: the shape by its CSS name, whether a button is held, the
+    /// velocity along each axis, the monitor's scale and the configured size,
+    /// each notified once when it changes and not when it does not.
+    #[test]
+    fn a_published_pointer_reaches_solium_cursor() {
+        on_the_qt_thread(|| {
+            let (directory, path) = written(
+                "solium-pointer-published",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property string shape: Solium.cursor.shape
+                    readonly property int pressed: Solium.cursor.pressed ? 1 : 0
+                    readonly property int vx: Math.round(Solium.cursor.velocity.x)
+                    readonly property int vy: Math.round(Solium.cursor.velocity.y)
+                    readonly property int scale100: Math.round(Solium.cursor.scale * 100)
+                    readonly property int size: Solium.cursor.size
+                    readonly property string inner: child.shape
+                    property int shapes: 0
+                    Item {
+                        id: child
+                        readonly property string shape: Solium.cursor.shape
+                        onShapeChanged: parent.shapes++
+                    }
+                }
+                "#,
+            );
+            let mut scene = built(&path);
+            assert!(super::publish(
+                r#"{"shape":"wait","pressed":false,"velocity":{"x":0,"y":0},"scale":1,"size":24}"#
+            ));
+            let before = scene.get_int("shapes");
+            assert!(super::publish(
+                r#"{"shape":"text","pressed":true,"velocity":{"x":120,"y":-40},"scale":2,"size":32}"#
+            ));
+            let read = |scene: &mut Scene| {
+                (
+                    scene.get_string_for_test("shape"),
+                    scene.get_string_for_test("inner"),
+                    ["pressed", "vx", "vy", "scale100", "size"].map(|name| scene.get_int(name)),
+                )
+            };
+            assert_eq!(
+                read(&mut scene),
+                ("text".to_owned(), "text".to_owned(), [1, 120, -40, 200, 32]),
+                "(the root's shape, a child's, [pressed, velocity x, velocity y, scale x 100, \
+                 size])"
+            );
+            assert!(super::publish(
+                r#"{"shape":"text","pressed":true,"velocity":{"x":10,"y":0},"scale":2,"size":32}"#
+            ));
+            let shapes = scene.get_int("shapes") - before;
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                shapes, 1,
+                "the shape changed once and was notified {shapes} times"
+            );
+        });
     }
 
     /// **A scene sized by its root keeps its own size**: the compositor never
