@@ -1193,8 +1193,6 @@ impl State {
                 "pacing: GPU time per pass, from GL_EXT_disjoint_timer_query"
             );
             self.solium.timer = Some(timer);
-        }
-        if crate::pacing::enabled() {
             crate::clocks::start(node.major(), node.minor());
         }
         // Hardware buffer sharing, through `zwp_linux_dmabuf_v1` and not

@@ -66,6 +66,10 @@ static PSTATE: AtomicU32 = AtomicU32::new(UNKNOWN);
 /// not itself keep the GPU out of its low states.
 pub(crate) fn start(major: u32, minor: u32) -> Source {
     if std::env::var("SOLIUM_PACING_CLOCKS").is_ok_and(|value| value.trim() == "off") {
+        tracing::info!(
+            clocks = "off",
+            "SOLIUM_PACING_CLOCKS=off: the GPU's clocks are not sampled"
+        );
         return Source::None;
     }
     let (tell, told) = std::sync::mpsc::channel();
