@@ -1004,8 +1004,18 @@ impl Scripts {
         lua.set_app_data(Deadline::default());
         lua.set_global_hook(
             mlua::HookTriggers::new().every_nth_instruction(10_000),
-            |lua, _debug| {
+            |lua, debug| {
                 if late(lua) {
+                    // Where the time ran out, for the log: inside a wrapper,
+                    // such as an `actions.override`, that is the wrapped
+                    // function, where the struck listener is the wrapper.
+                    // `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+                    let source = debug.source();
+                    let file = file_of(source.source.as_deref(), source.short_src.as_deref());
+                    let line = debug.current_line().unwrap_or_default();
+                    if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
+                        deadline.stopped_at = Some(format!("{file}:{line}"));
+                    }
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(mlua::VmState::Continue)
@@ -1431,7 +1441,7 @@ impl Scripts {
                     .ok()
                     .flatten()
                     .map_or(0, |pending| pending.commands.len());
-                set_deadline(lua, Some(std::time::Instant::now()));
+                start_clock(lua);
                 match done.call::<()>((each.ok, each.reason)) {
                     Ok(()) => {}
                     Err(err) if err.to_string().contains(STOPPED) => {
@@ -1449,7 +1459,7 @@ impl Scripts {
                                 attempts.set(attempt, Value::Nil)?;
                             }
                         }
-                        let _ = strike(&strikes, &done, "done", &err)?;
+                        let _ = strike(lua, &strikes, &done, "done", &err)?;
                     }
                     Err(err) => tracing::error!(%err, "an attempt's done failed"),
                 }
@@ -1492,7 +1502,7 @@ impl Scripts {
     ) -> Outcome {
         self.lua.set_app_data(snapshot);
         self.lua.set_app_data(Pending::default());
-        set_deadline(&self.lua, Some(std::time::Instant::now()));
+        start_clock(&self.lua);
 
         let handled = match self.lua.globals().get::<Table>("sol") {
             Ok(sol) => match call(&self.lua, &sol) {
@@ -1926,14 +1936,40 @@ const STOPPED: &str = "this handler ran for longer than 100 ms and was stopped";
 #[derive(Debug, Default)]
 struct Deadline {
     started: Option<std::time::Instant>,
+    /// Where the handler running now was stopped, as `file:line`, once the
+    /// instruction hook has stopped it.
+    /// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+    stopped_at: Option<String>,
 }
 
-/// Start the handler clock, or stop it with `None`.
+/// Start a handler's clock now, with nowhere it was stopped yet.
+/// `tests::each_listener_has_the_whole_deadline`,
+/// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
+fn start_clock(lua: &Lua) {
+    if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
+        deadline.started = Some(std::time::Instant::now());
+        deadline.stopped_at = None;
+    }
+}
+
+/// Set the handler clock back to when it started, or stop it with `None`.
 /// `tests::lua_run_between_dispatches_is_not_stopped`.
 fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
     if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
         deadline.started = started;
     }
+}
+
+/// A file by its whole path, and a chunk of text by the short name Lua's own
+/// messages give it.
+/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+/// `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
+fn file_of(source: Option<&str>, short_src: Option<&str>) -> String {
+    source
+        .and_then(|source| source.strip_prefix('@'))
+        .or(short_src)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// When the handler running now started, if one is running.
@@ -1953,12 +1989,14 @@ fn late(lua: &Lua) -> bool {
 
 /// Count a stop at the deadline against `handler`, a listener of `event` or a
 /// `done` (`event` is then `"done"`), by function, and log it with the file
-/// and line the handler was written at. True from its third stop on, when it
-/// is taken out, which is logged too.
+/// and line the handler was written at, and the file and line it was stopped
+/// at. True from its third stop on, when it is taken out, which is logged too.
 /// `tests::a_listener_stopped_three_times_is_taken_out`,
 /// `tests::a_done_stopped_three_times_is_not_called_again`,
-/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
+/// `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
+/// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
 fn strike(
+    lua: &Lua,
     strikes: &Table,
     handler: &mlua::Function,
     event: &str,
@@ -1967,23 +2005,19 @@ fn strike(
     let count = strikes.get::<Option<u32>>(handler)?.unwrap_or(0) + 1;
     strikes.set(handler, count)?;
     let info = handler.info();
-    // A file by its whole path, and a chunk of text by the short name Lua's
-    // own messages give it.
-    // `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
-    // `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
-    let file = info
-        .source
-        .as_deref()
-        .and_then(|source| source.strip_prefix('@'))
-        .map(str::to_owned)
-        .or(info.short_src)
-        .unwrap_or_default();
+    let file = file_of(info.source.as_deref(), info.short_src.as_deref());
     let line = info.line_defined.unwrap_or_default();
+    let stopped_at = lua
+        .try_app_data_ref::<Deadline>()
+        .ok()
+        .flatten()
+        .and_then(|deadline| deadline.stopped_at.clone());
     tracing::error!(
         %err,
         event,
         file = %file,
         line,
+        stopped_at = stopped_at.as_deref().map(tracing::field::display),
         count,
         "a handler ran for longer than 100 ms and was stopped"
     );
@@ -2034,11 +2068,11 @@ fn call_listeners(
         // `tests::each_listener_has_the_whole_deadline`,
         // `tests::a_handler_that_calls_sol_deadline_is_still_stopped`,
         // `tests::replacing_sol_deadline_leaves_each_listener_its_own_deadline`.
-        set_deadline(lua, Some(std::time::Instant::now()));
+        start_clock(lua);
         match listener.call::<()>(args.clone()) {
             Ok(()) => called = true,
             Err(err) if err.to_string().contains(STOPPED) => {
-                if strike(&strikes, &listener, event, &err)? {
+                if strike(lua, &strikes, &listener, event, &err)? {
                     out.push(listener);
                 }
             }
@@ -7722,6 +7756,35 @@ actions.override("windows.close", nil)"#,
                 false
             ),
             "(whether the replaced override heard it, the acts queued, whether a listener failed):\n{log}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A stopped override is logged where it was stopped**: the listener
+    /// struck is `actions.lua`'s own, so the log also names the file and line
+    /// the handler's time ran out at, which is the override's.
+    #[test]
+    fn a_stopped_override_is_logged_where_it_was_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-actions-override-where",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+local actions = require("actions")
+actions.override("windows.close", function()
+    while true do end
+end)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
+        let log = logged_while(|| {
+            let _ = scripts.surface_action("shell", "windows.close", &data, one_screen(&[]));
+        });
+        let at = format!("stopped_at={}:4", directory.join("init.lua").display());
+        assert!(
+            log.lines()
+                .any(|line| line.contains("was stopped") && line.contains(&at)),
+            "the stop names {at}:\n{log}"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }

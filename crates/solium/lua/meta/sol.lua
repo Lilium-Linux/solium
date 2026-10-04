@@ -732,9 +732,11 @@ function sol.unknown(key, meant) end
 ---is logged while the others still run.
 ---
 ---A listener runs under a 100 ms deadline: one that takes longer is stopped
----with an error and logged with its file and line, the other listeners still
----run, and one stopped three times is taken out until the configuration is
----reloaded. The stops are counted by function, so a function listening for
+---with an error and logged with the file and line it was written at and the
+---file and line it was stopped at (for an `actions.override`, the listener
+---`actions.lua` writes for it, and the override's own line), the other
+---listeners still run, and one stopped three times is taken out until the
+---configuration is reloaded. The stops are counted by function, so a function listening for
 ---two events counts the stops of both, and from its third on is taken out of
 ---each event it is stopped in. Bindings, and each `done` of `sol.act`, run
 ---under the same deadline. A `done` is struck by function too, and one

@@ -235,9 +235,10 @@ sol.on("text_input", function(field, why) end)     -- the focused text field: "f
 
 Every handler, and every binding, has 100 ms, on a clock the compositor starts
 for each one, so nothing a handler calls puts it off: past that it is stopped
-with an error in the log, which names the file and line it was written at, so a
-loop in one cannot freeze the desktop, even inside a coroutine it makes, around
-a `pcall`, `xpcall` or `load`, which hand the stop on, or around
+with an error in the log, which names the file and line it was written at and
+the file and line it was stopped at, so a loop in one cannot freeze the
+desktop, even inside a coroutine it makes, around a `pcall`, `xpcall` or
+`load`, which hand the stop on, or around
 `sol.focus_direction`, and the other listeners still run. The `direction`
 listeners' time counts against the handler that called `sol.focus_direction` or
 `sol.move_direction`, so one stopped there stops that handler too. A `__gc`
@@ -261,6 +262,10 @@ same way
 `script::tests::a_stopped_listener_is_logged_with_its_file_and_line`,
 `script::tests::a_listener_stopped_three_times_is_taken_out`,
 `script::tests::a_done_stopped_three_times_is_not_called_again`).
+An `actions.override` is a listener `actions.lua` writes for you, so its stop
+names `actions.lua` as where it was written, and the override's own line as
+where it was stopped
+(`script::tests::a_stopped_override_is_logged_where_it_was_stopped`).
 
 `surface` is how a `sol.surface` declared with `interactive = true` talks
 back: its scene calls `Solium.send(action, data)`, and you are told the
