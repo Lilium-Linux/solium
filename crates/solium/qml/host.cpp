@@ -319,6 +319,10 @@ struct SoliumQmlScene
      * `qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`. */
     QQmlContext *context = nullptr;
     SoliumHosting *hosting = nullptr;
+    /* A hosted scene's watch on its window's active focus, cut first when
+     * the scene is freed, before any item of it goes.
+     * `qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`. */
+    QMetaObject::Connection focus_watch;
     QImage image;
     /* Device pixels: the size of the image the compositor uploads. */
     int width = 0;
@@ -803,6 +807,25 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     if (scene->hosting != nullptr) {
         QFocusEvent focus(QEvent::FocusIn, Qt::OtherFocusReason);
         QCoreApplication::sendEvent(scene->window, &focus);
+        /* Active focus moving to an item that wants the keyboard, or into
+         * it, is that item asking anew after a let-go, so a field inside a
+         * container that is no focus scope asks for the container.
+         * `qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`. */
+        SoliumHosting *hosting = scene->hosting;
+        QQuickWindow *window = scene->window;
+        scene->focus_watch = QObject::connect(
+            window, &QQuickWindow::activeFocusItemChanged, window, [hosting, window]() {
+                QQuickItem *focused = window->activeFocusItem();
+                if (focused == nullptr) {
+                    return;
+                }
+                for (const QPointer<SoliumKeyboard> &each : hosting->keyboards) {
+                    QQuickItem *item = each != nullptr ? each->item() : nullptr;
+                    if (item != nullptr && (item == focused || item->isAncestorOf(focused))) {
+                        each->focusEntered();
+                    }
+                }
+            });
     }
 
     // Qt tells us when the scene needs redrawing, so an idle bar costs one
@@ -1383,6 +1406,7 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
     // `_new` entry points register on the line after `new`, so a scene is in
     // here for exactly as long as it exists.
     g_scenes.erase(std::remove(g_scenes.begin(), g_scenes.end(), scene), g_scenes.end());
+    QObject::disconnect(scene->focus_watch);
 
     // Before any Qt teardown runs, and for the same reason the render path does
     // it — but the stakes here are higher, because teardown *deletes*.
@@ -2494,20 +2518,30 @@ extern "C" void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene)
     if (scene == nullptr || scene->hosting == nullptr) {
         return;
     }
+    /* The holder loses its focus, and so does the item inside it with
+     * active focus, which a holder that is no focus scope leaves alone: a
+     * field inside such a container shows no caret for keys that go to a
+     * window now. First, so the focus moving is no asking anew.
+     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
+     * `qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`. */
+    SoliumKeyboard *holder = solium_keyboard_holder(scene->hosting);
+    QQuickItem *held = holder != nullptr ? holder->item() : nullptr;
+    if (held != nullptr) {
+        held->setFocus(false);
+        QQuickItem *still = scene->window != nullptr ? scene->window->activeFocusItem() : nullptr;
+        if (still != nullptr && (still == held || held->isAncestorOf(still))) {
+            still->setFocus(false);
+        }
+    }
     /* Every item that wants the keyboard is let go of, not only the one
      * holding it, so the scene does not take it back through another, nor
      * through one whose `wants` is not bound to its focus: each holds none
-     * until it asks anew. The holder loses its focus too.
-     * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`,
-     * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
-    SoliumKeyboard *holder = solium_keyboard_holder(scene->hosting);
+     * until it asks anew.
+     * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`. */
     for (const QPointer<SoliumKeyboard> &each : scene->hosting->keyboards) {
         if (each != nullptr && each->wants()) {
             each->letGo();
         }
-    }
-    if (holder != nullptr && holder->item() != nullptr) {
-        holder->item()->setFocus(false);
     }
 }
 

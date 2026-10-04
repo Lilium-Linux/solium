@@ -258,6 +258,14 @@ void SoliumKeyboard::letGo()
     mark();
 }
 
+void SoliumKeyboard::focusEntered()
+{
+    if (m_let_go) {
+        m_let_go = false;
+        mark();
+    }
+}
+
 void SoliumKeyboard::setClaims(const QStringList &claims)
 {
     if (claims != m_claims) {

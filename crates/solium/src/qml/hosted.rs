@@ -786,6 +786,52 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A let-go takes the focus from a field inside the container that
+    /// wants the keyboard** (Ruling 14): `wants` written on an item that is
+    /// no focus scope, around a focused field, which has active focus while
+    /// the container does not. Let go of, the field loses its focus, so it
+    /// shows no caret for keys that now go to a window, and the scene asks
+    /// anew once the field takes active focus again.
+    #[test]
+    fn a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-let-go-container",
+                r#"
+                import QtQuick
+                import QtQuick.Controls
+                import Solium
+                Item {
+                    property bool refocus: false
+                    readonly property bool typing: field.activeFocus
+                    onRefocusChanged: if (refocus) field.forceActiveFocus()
+                    Solium.keyboard.wants: true
+                    TextField { id: field; width: 40; height: 20; focus: true }
+                }
+                "#,
+                "let-go-container-1",
+            );
+            let first = (scene.take_keyboard(), scene.get_bool("typing"));
+            scene.let_go_keyboard();
+            let let_go = (scene.take_keyboard(), scene.get_bool("typing"));
+            scene.set_bool("refocus", true);
+            let asked_again = (scene.take_keyboard(), scene.get_bool("typing"));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let wanted = KeyboardReport::Wanted(Vec::new());
+            assert_eq!(
+                (first, let_go, asked_again),
+                (
+                    (wanted.clone(), true),
+                    (KeyboardReport::LetGo, false),
+                    (wanted, true),
+                ),
+                "((the first take, the field focused), (after the let-go, the field focused), \
+                 (once the field took the focus again, the field focused))"
+            );
+        });
+    }
+
     /// **A key the scene hears moves its items for the next hit**: Escape
     /// hides the button beside the field, and the point it covered claims
     /// nothing once the key is told.

@@ -216,6 +216,10 @@ public:
      * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`. */
     void letGo();
     bool isLetGo() const { return m_let_go; }
+    /* Its window's active focus moved to its item or into it: asking anew
+     * after a let-go, as its item taking active focus itself is.
+     * `qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`. */
+    void focusEntered();
     /* Its scene's hosting record is going, before it is. */
     void detach() { m_hosting = nullptr; }
 signals:
