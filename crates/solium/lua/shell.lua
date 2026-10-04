@@ -39,7 +39,7 @@ function shell.apply()
     if not chosen then
         -- A surface outlives a reload until something removes it by name, so
         -- a shell taken out of the configuration would otherwise stay on
-        -- screen. See `the_shipped_configuration_hosts_no_shell`.
+        -- screen. See `the_shipped_configuration_hosts_no_shell_with_preview_off`.
         sol.surface("shell", false)
         return
     end

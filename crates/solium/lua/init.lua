@@ -43,6 +43,12 @@ sol.cursor_theme(config.cursor)
 -- The wallpaper is a script like any other mode: `sol.surface` and a QML
 -- file, and nothing in the compositor knows what a wallpaper is.
 require("wallpaper")
+-- The preview shell's default: fills in `config.shell.scene` when nothing
+-- else named one. Before `shell`, which reads that setting once, here.
+-- `preview.init`, not `preview` -- `package.path` has no `?/init.lua`
+-- pattern, only `?.lua`, and Lua's own `require` turns the dot into the
+-- directory separator before that template is tried.
+require("preview.init")
 require("shell")
 -- The keyboard pill near the text field: `keyboard.indicator` in config.lua.
 -- Configuration on the data the compositor publishes, like the two above.

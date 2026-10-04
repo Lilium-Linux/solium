@@ -5569,21 +5569,27 @@ mod tests {
         Some((scripts, commands))
     }
 
-    /// **The shipped configuration hosts no shell**, and says so every time
-    /// the configuration runs rather than by staying quiet.
+    /// **With the preview shell off and nothing else configured, no shell is
+    /// hosted**, and the shipped configuration says so every time it runs
+    /// rather than by staying quiet.
     ///
     /// The second half is what makes taking a shell out of `user.lua` work on
     /// `super+shift+r`: a surface outlives a reload until something removes it
     /// by name, and a reload runs the configuration again, so `shell.lua`
     /// removes `shell` whenever none is configured.
+    ///
+    /// `preview = false` here is what makes this a test of that rather than
+    /// of the preview shell's own default: see
+    /// `the_shipped_configuration_hosts_the_preview_shell_by_default`.
     #[test]
-    fn the_shipped_configuration_hosts_no_shell() {
+    fn the_shipped_configuration_hosts_no_shell_with_preview_off() {
         // The environment has already chosen a shell for this process, and
         // that is what it is for; there is nothing for this test to say.
         if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
             return;
         }
-        let Some((_, commands)) = shell_after_monitors("solium-script-test-no-shell", "return {}")
+        let Some((_, commands)) =
+            shell_after_monitors("solium-script-test-no-shell", "return { preview = false }")
         else {
             return;
         };
@@ -5596,6 +5602,39 @@ mod tests {
             removed,
             "with no shell configured, `shell` must be taken away, or one taken out of \
              user.lua stays on screen after a reload"
+        );
+    }
+
+    /// **The shipped configuration hosts the preview shell by default.**
+    ///
+    /// `lua/preview/init.lua` fills in `config.shell.scene` before
+    /// `shell.lua` reads it, so a fresh install with no `user.lua` at all
+    /// shows the bar rather than a blank desktop. `preview = false` is the
+    /// way back to nothing, checked above.
+    #[test]
+    fn the_shipped_configuration_hosts_the_preview_shell_by_default() {
+        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
+            return;
+        }
+        let Some((_, commands)) =
+            shell_after_monitors("solium-script-test-preview-default", "return {}")
+        else {
+            return;
+        };
+        let (declared, _) = shell_surfaces(&commands);
+        assert_eq!(
+            declared.len(),
+            1,
+            "the shipped configuration did not host the preview shell by default: {declared:?}"
+        );
+        assert_eq!(
+            declared[0].scene,
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/qml/preview/Shell.qml"
+            )),
+            "hosted the wrong scene: {:?}",
+            declared[0].scene
         );
     }
 

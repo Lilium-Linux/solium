@@ -130,6 +130,19 @@ local defaults = {
         keyboard = { bindings = "except_claimed" },
     },
 
+    -- The compositor's own preview shell: a bar, built as configuration on
+    -- the same public API `shell` above describes (`lua/preview/`,
+    -- `qml/preview/`; see docs/ricing.md). On by default, so a fresh install
+    -- shows live workspaces, windows, the keyboard layout and a clock rather
+    -- than a blank desktop.
+    --
+    --     preview = false,
+    --
+    -- Turns it off. Naming your own `shell.scene` above, or `user.lua`'s own
+    -- shell, always wins over it either way -- this only ever fills in a
+    -- default nothing else set.
+    preview = true,
+
     -- The keyboard: its xkb layouts (`layout`, `variant`, `options`, `model`,
     -- `rules`, `active`), the locks (`caps`, `num`), the repeat rate, and the
     -- keyboard pill.
