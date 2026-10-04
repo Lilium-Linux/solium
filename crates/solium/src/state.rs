@@ -125,7 +125,7 @@ use open::Claimed;
 #[cfg(test)]
 use open::{ClientKind, FirstFocus, first_focus};
 pub(crate) use placement::Standing;
-use placement::outer_of;
+use placement::{Change, outer_of};
 #[cfg(test)]
 use snapshot::to_rect;
 pub(crate) use snapshot::{Limits, limits_of};
@@ -646,6 +646,13 @@ pub(crate) struct Solium {
     /// run another. See `Solium::apply`.
     retelling_cramped: bool,
 
+    /// Whether a `fullscreen` or `maximize` event is being told now, so that
+    /// a change one of its listeners makes -- a `sol.toggle_fullscreen` in a
+    /// `fullscreen` listener -- is made at once and not told again, which
+    /// would be told again for ever. See `Solium::transition`.
+    /// `a_listener_that_toggles_the_change_back_is_not_told_it_again`.
+    telling_change: bool,
+
     /// Whether a `sol.monitors{}` was applied since the surfaces were last
     /// placed, so they are placed once the dispatch that applied it is done.
     /// `tests::real_client::a_runtime_primary_change_drops_the_old_primarys_scene`.
@@ -701,6 +708,18 @@ pub(crate) struct Solium {
     /// — because `Self::release_resize` is the only thing that ever ends one and
     /// the pointer grab is the only thing that calls it.
     resize_bridge: Option<Bridged>,
+
+    /// The windows a fullscreen or maximise change has told a new size, each
+    /// held at the rectangle the change gave it until its client answers
+    /// (#49): the hold [`Self::resize_hold`] keeps for a drag, made by the
+    /// change rather than by a pointer. Until then the slot is the window's
+    /// rectangle, and the client's last picture is stretched into it, so a
+    /// client slower than the glide is not shown at its old size where the
+    /// glide landed. Ended by the client's answer, or `resizing::PATIENCE`
+    /// after the glide lands, in `Self::settle`. One per pane.
+    /// `a_slow_client_is_drawn_stretched_until_it_answers`,
+    /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+    answering: Vec<crate::resizing::Held>,
 
     /// The edge drag a layout is being asked about right now.
     ///
@@ -1073,12 +1092,14 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             retelling_cramped: false,
+            telling_change: false,
             monitors_rearranged: false,
             dispatching: 0,
             #[cfg(test)]
             instances_synced: 0,
             client_sizes: crate::script::ClientSizes::default(),
             resize_hold: None,
+            answering: Vec::new(),
             resize_bridge: None,
             resize_gesture: None,
             resize_ended: None,
@@ -1648,6 +1669,29 @@ impl Solium {
         for pane in self.panes.iter() {
             animating |= present::settle(pane, now);
         }
+        // A window shrinking back out of fullscreen or maximised that has
+        // landed is an ordinary window again, with nothing of its shrink kept.
+        // `a_window_glides_into_fullscreen_and_out_again`.
+        let shrunk: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| {
+                pane.shrinking()
+                    .is_some_and(|shrinking| now >= shrinking.until)
+            })
+            .map(Pane::id)
+            .collect();
+        for id in shrunk {
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_shrinking(None);
+            }
+        }
+        // And one a fullscreen or maximise change is holding at its new
+        // rectangle is let go once its client answers, or has had long enough
+        // to. Until then the frames keep coming, or a client that never
+        // answers would be held until something else drew one.
+        // `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+        animating |= self.settle_answering(now);
         // And the selections, which animate on the same clock and damage
         // nothing either. Not folded into the loop above: a group is not a
         // pane, and one that has landed has to be released exactly once.

@@ -819,7 +819,9 @@ output gets the primary monitor.
 A fullscreen window in front of the workspace its monitor is showing covers
 the top layer -- a client's bar, and one declared with `sol.surface` -- and
 takes the clicks where the bar was, while the overlay layer (notifications, an
-OSD, a launcher) stays over it. To keep the bars over fullscreen windows:
+OSD, a launcher) stays over it. It goes over the bars as it starts to grow and
+back under them once it has finished shrinking. To keep the bars over
+fullscreen windows:
 
 ```lua
 return { fullscreen = { covers = "none" } }
@@ -996,6 +998,32 @@ Those are the same four numbers CSS calls `cubic-bezier` and every easing
 generator on the internet hands out, so a feel you found elsewhere transfers
 directly. y may leave 0..1 — that is what overshoot is.
 
+Going fullscreen and maximising are timed the same way, each on its own, and
+both glide by default: the window grows from where it is to cover its monitor,
+or its work area, and shrinks back. `animate = false` makes one instant and
+`animate = true` is the shipped motion again, and `instant` names the
+applications that change at once whatever `animate` says — a game or a video
+player, say:
+
+```lua
+return {
+    fullscreen = {
+        animate = { duration = 200, easing = "inOutCubic" },
+        instant = { app_id = { "mpv", "gamescope" } },
+    },
+    maximize = { animate = false },
+}
+```
+
+The application is told its new size the moment you press the key, and its
+last picture is stretched until it has drawn one at that size — through the
+glide and after it, for a quarter of a second past the landing at most, and
+then the window is shown at whatever size the application has. Once it has
+answered the window is drawn as it is, with nothing in between, so a
+fullscreen game or video can be shown directly. An instant change is just that:
+nothing is stretched or moved, and the window is drawn as it is on the next
+frame. An app id is what `sol.windows()` calls `app_id`.
+
 ### Your own bindings
 
 A `bindings` section in `user.lua`, merged like every other section:
@@ -1063,7 +1091,9 @@ require("bindings")
 it up -- `super+shift+k` is the keyboard layout. At the edge of a screen both go
 on to the next one. `super+f` is fullscreen, `super+shift+m` maximised and
 `super+shift+space` floats a window over the layout; each key again puts it
-back. Rebind any of them in `bindings`:
+back, and fullscreen and maximised glide there and back
+([Your own animation feel](#your-own-animation-feel) times them). Rebind any
+of them in `bindings`:
 
 ```lua
 return {

@@ -527,6 +527,30 @@ pub(crate) struct Pane {
     /// Whether the layout that last placed this pane said its tile is smaller
     /// than the window's own minimum. See `WindowInfo::cramped`.
     cramped: bool,
+    /// A window shrinking back out of fullscreen or maximised, until its
+    /// shrink lands. `None` for every other pane, and cleared once it has
+    /// landed. Written by `Solium::transition`, read by `Solium::lifted_on`
+    /// and `Solium::stays_over_a_layout`, cleared by `Solium::settle`. See
+    /// [`Shrinking`].
+    shrinking: Option<Shrinking>,
+}
+
+/// A window going back from fullscreen or maximised, for as long as it is
+/// drawn shrinking there (#49).
+///
+/// It stays in front of the windows a layout's sweep places while it shrinks
+/// -- a neighbour placed after it would otherwise cover it -- and, leaving
+/// fullscreen, over the bars: the bars come back over it once it has finished
+/// shrinking, not while it is still the size of the monitor.
+/// `a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks`,
+/// `a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Shrinking {
+    /// When the shrink lands.
+    pub(crate) until: Duration,
+    /// Whether it is leaving fullscreen, and so stays over the bars until
+    /// then. A maximised window is under them already.
+    pub(crate) lifted: bool,
 }
 
 impl Pane {
@@ -564,6 +588,7 @@ impl Pane {
             scratch: crate::offscreen::Scratch::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            shrinking: None,
         }
     }
 
@@ -594,6 +619,7 @@ impl Pane {
             scratch: crate::offscreen::Scratch::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            shrinking: None,
         }
     }
 
@@ -616,6 +642,25 @@ impl Pane {
     /// What the layout placing this pane says about its tile.
     pub(crate) const fn set_cramped(&mut self, cramped: bool) {
         self.cramped = cramped;
+    }
+
+    /// Whether this pane is shrinking back out of fullscreen or maximised.
+    /// See [`Shrinking`].
+    pub(crate) const fn shrinking(&self) -> Option<Shrinking> {
+        self.shrinking
+    }
+
+    /// Until when this pane stays lifted over the bars, having left
+    /// fullscreen. See [`Shrinking::lifted`].
+    pub(crate) fn lifted_until(&self) -> Option<Duration> {
+        self.shrinking
+            .filter(|shrinking| shrinking.lifted)
+            .map(|shrinking| shrinking.until)
+    }
+
+    /// Mark this pane shrinking, or no longer: see [`Shrinking`].
+    pub(crate) const fn set_shrinking(&mut self, shrinking: Option<Shrinking>) {
+        self.shrinking = shrinking;
     }
 
     /// Whether a layout may place this pane and count it as a window.

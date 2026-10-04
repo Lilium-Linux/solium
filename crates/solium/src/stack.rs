@@ -113,7 +113,8 @@ pub(crate) struct Candidate {
     /// whose client has gone included, for as long as it is drawn. See
     /// `Solium::lifted_on`.
     pub(crate) shown: bool,
-    /// Its client is fullscreen.
+    /// Its client is fullscreen, or has left fullscreen and is still
+    /// shrinking (`Solium::lifted_on`).
     pub(crate) fullscreen: bool,
 }
 

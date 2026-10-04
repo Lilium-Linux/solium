@@ -40,6 +40,16 @@ pub(crate) enum Standing {
     Within(Rectangle<i32, Logical>),
 }
 
+/// A change a window makes that its scripts are told, and answer with the
+/// motion it is drawn with (#49): which event they hear it as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// Fullscreen, entered or left: `sol.on("fullscreen", fn(id, entering))`.
+    Fullscreen,
+    /// Maximised, or restored: `sol.on("maximize", fn(id, entering))`.
+    Maximize,
+}
+
 /// Whether this window is fullscreen or maximised, as the compositor last
 /// decided it: in the pending state, which is what `Solium::toggle_maximize`
 /// and the fullscreen requests write.
@@ -169,10 +179,18 @@ impl Solium {
     /// maximised, which covers the arrangement rather than taking part in it,
     /// so a neighbour a sweep places is not stacked over it.
     /// `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
+    ///
+    /// And one still shrinking back out of either (#49), which is drawn over
+    /// its neighbours until it has: a sweep part of the way through would
+    /// otherwise put a neighbour over it.
+    /// `a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks`.
     fn stays_over_a_layout(&self, window: &Window, now: Duration) -> bool {
         self.panes.of(window).is_some_and(|pane| {
             pane.leaving()
                 || over_the_arrangement(window)
+                || pane
+                    .shrinking()
+                    .is_some_and(|shrinking| now < shrinking.until)
                 || present::frame(pane, self.pane_outer(pane), now).opacity < 1.0
         })
     }
@@ -865,6 +883,194 @@ impl Solium {
         }
     }
 
+    /// Where a pane is drawn now, as the start of a change it is about to
+    /// make: read before the change, because the change is what moves it.
+    ///
+    /// What [`present::frame`] answers, so for a pane at rest it is its old
+    /// rectangle, and for one part of the way through a change it is where
+    /// that change has got to: a second toggle mid-flight starts from what is
+    /// on screen, not from the slot it left.
+    /// `a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn`.
+    ///
+    /// `None` for a pane with nothing on screen to move from: one never shown,
+    /// or of no size -- a player started with `--fs` asks for fullscreen
+    /// before it has drawn, and its first picture is `open`'s to bring in --
+    /// and one that is leaving, whose picture is its close's.
+    pub(super) fn drawn_before(&self, pane: crate::pane::PaneId) -> Option<Frame> {
+        let held = self
+            .panes
+            .get(pane)
+            .filter(|held| present::was_shown(held) && !held.leaving())?;
+        let outer = self.pane_outer(held);
+        if outer.is_empty() {
+            return None;
+        }
+        Some(present::frame(held, outer, self.clock.now()))
+    }
+
+    /// Tell the scripts a window has gone fullscreen or maximised, or left
+    /// either, and draw it moving there with the motion they answer (#49).
+    ///
+    /// **Called once the change is made**: the client has been sent its new
+    /// size on the toggle, not at the end of the animation, the space and the
+    /// slot say where the window now lives, and a layout has placed it if it
+    /// went back into a tile. What is left is the picture, which is moved the
+    /// way a layout moves one: [`present::from`], from `start` -- where it was
+    /// drawn before the change, [`Self::drawn_before`] -- to the slot with the
+    /// frame it now has, and released when it lands, so at rest a window
+    /// holds no transform and a fullscreen game or video is a plain element
+    /// again. `a_window_glides_into_fullscreen_and_out_again`,
+    /// `the_client_is_told_its_new_size_on_the_toggle`.
+    ///
+    /// **Until its client answers it is held at the new rectangle**, as an
+    /// edge drag holds a window ([`Self::hold_for_answer`]), and its last
+    /// picture is stretched into it, through the glide and after it lands --
+    /// for `resizing::PATIENCE` after, if the client says nothing, and then
+    /// the client's own size wins. `a_slow_client_is_drawn_stretched_until_it_answers`,
+    /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+    ///
+    /// **The motion is the scripts'**: the listeners of `change`'s event set
+    /// it with `sol.animate`, and with no answer -- no listener, or no
+    /// scripts -- the window is where it lives on the next frame, as before
+    /// #49. A layout's own glide for a window going back into a tile is
+    /// replaced, so the change's motion is the one it is drawn with, there as
+    /// anywhere else. `tests::a_change_is_answered_with_the_motion_sol_animate_set`,
+    /// and `tests/scenarios/fullscreen-tiled.lua` for the tile.
+    ///
+    /// **The compositor's move comes after the listeners' commands**, so a
+    /// `sol.present` of the window in one is replaced by it, and a change a
+    /// listener makes -- `sol.toggle_fullscreen` back again -- is made at once
+    /// and not told: telling it would ask the same listener again, for ever.
+    /// `a_listener_that_toggles_the_change_back_is_not_told_it_again`.
+    pub(super) fn transition(
+        &mut self,
+        pane: crate::pane::PaneId,
+        change: Change,
+        entering: bool,
+        start: Option<Frame>,
+    ) {
+        // **A mode's picture is the mode's**, and asked before the listeners
+        // run: a `sol.present` one of them makes is the glide's to replace,
+        // as the move comes after their commands, and asked afterwards it
+        // kept the window at its old rectangle, transformed for good.
+        // `a_present_a_listener_makes_is_replaced_by_the_glide`.
+        let presented = self.panes.get(pane).is_some_and(present::presented);
+        let motion = if self.telling_change {
+            None
+        } else {
+            self.tell_change(pane, change, entering)
+        };
+        let now = self.clock.now();
+        let motion = motion.unwrap_or(AnimationSpec {
+            duration: Duration::ZERO,
+            easing: present::Curve::OutCubic,
+        });
+        // A hold an earlier change left, waiting on an answer to a size this
+        // one has just replaced, is this one's to set again or not at all:
+        // left, it stretched the old picture across the new rectangle of an
+        // instant change. And so is a shrink it turned round.
+        // `an_instant_change_part_of_the_way_through_a_glide_holds_nothing`.
+        self.answering.retain(|held| held.pane != pane);
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_shrinking(None);
+        }
+        let Some(held) = self.panes.get(pane).filter(|held| !held.leaving()) else {
+            return;
+        };
+        // **A mode's picture is the mode's.** A window the overview draws as
+        // a thumbnail stays one: the change is made, and the mode letting go
+        // brings the window to its new rectangle. Replacing the thumbnail
+        // with the glide landed it over the overview's grid while the mode
+        // still held the input.
+        // `a_window_a_mode_presents_stays_where_the_mode_draws_it`.
+        if presented {
+            return;
+        }
+        let Some(start) = start else {
+            return;
+        };
+        // **Instant is no transform at all**, not one of no length: that
+        // one's target -- the new rectangle -- is what the next frame draws,
+        // with the old picture stretched into it, and it is released only
+        // after that frame. A game on the `instant` list flashed its old
+        // picture across the monitor before snapping back to its own size. A
+        // glide in flight is stopped too, and the window is drawn as it is
+        // from the next frame, as before #49.
+        // `an_instant_change_draws_the_window_as_it_is_on_the_next_frame`,
+        // `an_instant_change_part_of_the_way_through_a_glide_holds_nothing`.
+        if motion.duration.is_zero() {
+            present::release(held);
+            self.redraw = true;
+            return;
+        }
+        let to = grown(held.slot(), self.insets_of(pane));
+        present::from(held, to, start, now, motion.duration, motion.easing);
+        let lands = now + motion.duration;
+        let window = held.client().cloned();
+        if let Some(window) = &window {
+            self.hold_for_answer(pane, window, now, lands);
+        }
+        // **In front while it shrinks, and over the bars leaving fullscreen.**
+        // A window going fullscreen is lifted by being fullscreen, from the
+        // moment it starts to grow; one leaving stops being fullscreen on the
+        // toggle, and dropped under the bars then, it would be shrinking from
+        // the size of the monitor with the bars drawn over it. And a window
+        // going back into a tile has just been placed by the layout's sweep
+        // with its neighbours, and one placed after it was stacked over it: it
+        // shrank from behind that neighbour. So it is raised once the sweep is
+        // done, and stays in front and lifted for as long as it moves.
+        // `stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`,
+        // `a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks`.
+        if !entering {
+            if let Some(held) = self.panes.get_mut(pane) {
+                held.set_shrinking(Some(crate::pane::Shrinking {
+                    until: lands,
+                    lifted: change == Change::Fullscreen,
+                }));
+            }
+            if let Some(window) = window {
+                self.space.raise_element(&window, false);
+                self.lift_modals_over(&window);
+            }
+        }
+        self.redraw = true;
+    }
+
+    /// Where a window stands, as the way back a fullscreen or a maximise
+    /// keeps: the slot a hold is keeping -- the rectangle its client was told
+    /// and has not drawn at yet, part of the way out of either -- and where
+    /// the space has it otherwise. The space has the size the client last
+    /// drew, and turned round part of the way out, that is still the
+    /// monitor's: kept, the next way out configured it, and the window lost
+    /// its size for good.
+    /// `turning_round_part_of_the_way_out_keeps_the_way_back`.
+    pub(super) fn standing(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        self.held_slot(window)
+            .or_else(|| self.real_geometry(window))
+    }
+
+    /// The `fullscreen` or `maximize` event, told, and the motion its
+    /// listeners answered with. See [`Self::transition`].
+    fn tell_change(
+        &mut self,
+        pane: crate::pane::PaneId,
+        change: Change,
+        entering: bool,
+    ) -> Option<AnimationSpec> {
+        let snapshot = self.snapshot();
+        let mut scripts = self.scripts.take()?;
+        let outcome = match change {
+            Change::Fullscreen => scripts.fullscreen(pane.get(), entering, snapshot),
+            Change::Maximize => scripts.maximize(pane.get(), entering, snapshot),
+        };
+        self.scripts = Some(scripts);
+        let motion = outcome.motion;
+        self.telling_change = true;
+        self.apply(outcome);
+        self.telling_change = false;
+        motion
+    }
+
     /// Fill the work area, or go back to where the window was.
     pub(super) fn toggle_maximize(&mut self, window: &Window) {
         let Some(id) = self.panes.id_of(window) else {
@@ -901,12 +1107,16 @@ impl Solium {
             return;
         }
 
-        let Some(current) = self.real_geometry(window) else {
+        // Where it stands, which is the way back it keeps below, as
+        // `fullscreen_request` keeps one.
+        // `turning_round_part_of_the_way_out_keeps_the_way_back`.
+        let Some(current) = self.standing(window) else {
             return;
         };
         let Some(filled) = self.maximised(window, current) else {
             return;
         };
+        let start = self.drawn_before(id);
 
         // On the pane and not on its frame, which is where it was until #92.
         // For this toggle a window with no frame to keep it on was latent, not
@@ -960,6 +1170,11 @@ impl Solium {
         });
         toplevel.send_pending_configure();
         if let Some(back) = back {
+            // The slot as well as the space, as `unfullscreen_request` writes
+            // both: it is what `transition` moves the picture to.
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_slot(back);
+            }
             self.map_stacked(window.clone(), back.loc, true);
         }
         // Back in a tile, and the layout says where that is now: a sweep while
@@ -970,6 +1185,16 @@ impl Solium {
         if tiled {
             self.trigger_relayout();
         }
+        // Moved there on screen, from where it was drawn. Not when it is
+        // restored with no size, which its client picks: there is no
+        // rectangle yet to move it to.
+        // `a_window_glides_into_maximised_and_out_again`.
+        self.transition(
+            id,
+            Change::Maximize,
+            maximized,
+            start.filter(|_| back.is_some() || tiled),
+        );
         tracing::debug!(maximized, "window maximise toggled");
     }
 

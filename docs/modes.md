@@ -231,6 +231,8 @@ sol.on("restore",  function() end)                 -- you have replaced a runnin
 sol.on("direction", function(verb, dir) end)       -- a direction key: "focus" or "move", and which way
 sol.on("keyboard", function(state, changed) end)   -- the layout, Caps Lock or Num Lock changed: "layout", "caps" or "num"
 sol.on("text_input", function(field, why) end)     -- the focused text field: "field", "caret" or "framed"
+sol.on("fullscreen", function(id, entering) end)   -- it went fullscreen, or left: answer with sol.animate
+sol.on("maximize", function(id, entering) end)     -- it was maximised, or restored: the same
 ```
 
 Every handler, and every binding, has 100 ms, on a clock the compositor starts
@@ -755,6 +757,86 @@ its tile there, or with no layout at the same place on the new screen as it
 had on the old one. A window floated with `super+shift+space` and then made
 fullscreen stays fullscreen through every layout pass, and leaving goes back to
 where it floated.
+
+### Going fullscreen or maximised, and back
+
+The compositor makes the change and the scripts choose how it looks. On the
+key, or when an application asks, the window is told its new size at once and
+lives at its new rectangle -- the whole monitor it is on, its work area, or
+the place or tile it came from. Then `fullscreen` or `maximize` is told,
+`(id, entering)`, and once every listener has run the window's picture glides
+there from wherever it is drawn, through the same transform a layout's glide
+uses, with the timing a listener set with `sol.animate`. With none set, the
+change is instant:
+
+```lua
+sol.on("fullscreen", function(id, entering)
+    sol.animate({ duration = 260, easing = "outCubic" })
+end)
+```
+
+`lua/fullscreen.lua` is the listener that ships, reading `fullscreen` and
+`maximize` in `config.lua` -- `animate`, or `false`, and `instant.app_id`, each
+section on its own ([ricing.md](ricing.md#your-own-animation-feel)). The rest is
+the compositor's, whatever the listener says:
+
+- **From what is on screen.** Pressing the key again half way turns the window
+  round where it is drawn, not where it was headed or where it came from
+  (`state::tests::real_client::fullscreen_glides::a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn`).
+- **Answered at once.** The application is configured on the key, not when the
+  glide lands
+  (`state::tests::real_client::fullscreen_glides::the_client_is_told_its_new_size_on_the_toggle`),
+  and the window is held at its new rectangle until the application draws at
+  that size, as a window whose edge you drag is: its last picture is stretched
+  into the rectangle the glide has reached, and after the glide lands, into the
+  rectangle it landed on
+  (`state::tests::real_client::fullscreen_glides::a_slow_client_is_drawn_stretched_until_it_answers`).
+  An application that says nothing is held a quarter of a second past the
+  landing, and then shown at the size it has
+  (`state::tests::real_client::fullscreen_glides::a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`);
+  an edge drag on it takes it over
+  (`state::tests::real_client::fullscreen_glides::an_edge_drag_takes_a_window_its_change_is_holding`).
+- **Plain at rest.** The transform is released when the glide lands, so a
+  fullscreen game or video is drawn with nothing in between
+  (`state::tests::real_client::fullscreen_glides::a_window_glides_into_fullscreen_and_out_again`).
+  A monitor unplugged, a reload or a lock part of the way through changes that
+  for nobody: the window comes to rest all the same
+  (`state::tests::real_client::fullscreen_glides::a_monitor_unplugged_mid_glide_leaves_the_window_at_rest`,
+  `state::tests::real_client::fullscreen_glides::a_reload_mid_glide_leaves_the_window_at_rest`,
+  `state::tests::real_client::lock_focus::a_lock_mid_glide_leaves_the_window_at_rest`).
+- **Instant is nothing at all.** A change with no motion -- `animate = false`,
+  an application on the `instant` list, no listener -- puts no transform on
+  the window and holds nothing: the next frame draws it as it is, as before
+  the glide existed, and stops one in flight
+  (`state::tests::real_client::fullscreen_glides::an_instant_change_draws_the_window_as_it_is_on_the_next_frame`,
+  `state::tests::real_client::fullscreen_glides::an_instant_change_part_of_the_way_through_a_glide_holds_nothing`).
+- **Turned round, it keeps its way back.** Pressed again before the application
+  has drawn at the size it went back to, the rectangle kept for the next way
+  out is the one it was told, not the monitor's it has not left yet
+  (`state::tests::real_client::fullscreen_glides::turning_round_part_of_the_way_out_keeps_the_way_back`).
+- **On its own monitor.** A window grows to cover the monitor it is on, and
+  shrinks back on it
+  (`state::tests::real_client::fullscreen_glides::a_window_on_the_second_monitor_glides_to_cover_that_one`).
+- **Over the bars while it is big.** A window going fullscreen goes over the
+  bars as it starts to grow, and one leaving goes back under them once it has
+  finished shrinking; a press goes to what is drawn there
+  (`state::tests::real_client::reflow_on_close::stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`).
+- **Into its tile with its own motion.** A window going back into a tile is
+  placed by the layout, and the change's glide replaces the layout's
+  (`tests/scenarios/fullscreen-tiled.lua`). It shrinks in front of its
+  neighbours, whichever the layout placed last, and a sweep part of the way
+  through leaves it there
+  (`state::tests::real_client::a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks`).
+- **Not told twice.** A listener that toggles the window back has that done at
+  once and is not told it
+  (`state::tests::real_client::fullscreen_glides::a_listener_that_toggles_the_change_back_is_not_told_it_again`).
+
+The compositor's move comes after the listeners' commands, so a `sol.present`
+of the window in one is replaced by it. A window a mode was already presenting
+before the change -- a thumbnail in the overview -- is left where the mode
+draws it: the change is made, and the mode's `sol.present_clear` brings the
+window to its new rectangle
+(`state::tests::real_client::fullscreen_glides::a_window_a_mode_presents_stays_where_the_mode_draws_it`).
 
 ## The arrangements that ship
 

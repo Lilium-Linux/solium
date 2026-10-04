@@ -37,6 +37,9 @@ struct Client {
     told: Vec<(bool, u32)>,
     /// Every `xdg_surface.configure`, for a popup to ack.
     configures: Vec<(wayland_client::backend::ObjectId, u32)>,
+    /// Every size an `xdg_toplevel.configure` told, with the toplevel's id:
+    /// what [`Desk::answer`] commits.
+    sizes: Vec<(wayland_client::backend::ObjectId, i32, i32)>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Client {
@@ -132,7 +135,23 @@ wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
 wayland_client::delegate_noop!(Client: ignore wl_buffer::WlBuffer);
 wayland_client::delegate_noop!(Client: ignore wl_seat::WlSeat);
 wayland_client::delegate_noop!(Client: ignore wl_callback::WlCallback);
-wayland_client::delegate_noop!(Client: ignore xdg_toplevel::XdgToplevel);
+impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Client {
+    fn event(
+        state: &mut Self,
+        toplevel: &xdg_toplevel::XdgToplevel,
+        event: xdg_toplevel::Event,
+        (): &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Configure { width, height, .. } = event {
+            state
+                .sizes
+                .push((wayland_client::Proxy::id(toplevel), width, height));
+        }
+    }
+}
+
 wayland_client::delegate_noop!(Client: ignore xdg_popup::XdgPopup);
 wayland_client::delegate_noop!(Client: ignore xdg_positioner::XdgPositioner);
 wayland_client::delegate_noop!(Client: ignore zwp_text_input_manager_v3::ZwpTextInputManagerV3);
@@ -202,12 +221,30 @@ impl Desk {
 
     /// A window, 200 by 100, with the server's `Window` for it.
     pub(crate) fn window(&mut self) -> (Window, wl_surface::WlSurface, xdg_surface::XdgSurface) {
+        let (window, surface, xdg, _toplevel) = self.window_of(None);
+        (window, surface, xdg)
+    }
+
+    /// [`Self::window`], of the application `app_id` names when it names one,
+    /// with its toplevel as well.
+    pub(crate) fn window_of(
+        &mut self,
+        app_id: Option<&str>,
+    ) -> (
+        Window,
+        wl_surface::WlSurface,
+        xdg_surface::XdgSurface,
+        xdg_toplevel::XdgToplevel,
+    ) {
         let compositor = self.client.compositor.clone().expect("wl_compositor bound");
         let wm_base = self.client.wm_base.clone().expect("xdg_wm_base bound");
         let before: Vec<Window> = self.state.space.elements().cloned().collect();
         let surface = compositor.create_surface(&self.qh, ());
         let xdg = wm_base.get_xdg_surface(&surface, &self.qh, ());
-        let _toplevel = xdg.get_toplevel(&self.qh, ());
+        let toplevel = xdg.get_toplevel(&self.qh, ());
+        if let Some(app_id) = app_id {
+            toplevel.set_app_id(app_id.to_owned());
+        }
         self.buffer(&surface, 200, 100);
         self.pump();
         let window = self
@@ -229,7 +266,29 @@ impl Desk {
         {
             present::settle(pane, now);
         }
-        (window, surface, xdg)
+        (window, surface, xdg, toplevel)
+    }
+
+    /// The client answering the last size `toplevel` was configured with,
+    /// as a client does: a buffer that size. Nothing for a size of zero,
+    /// which leaves the size to the client.
+    pub(crate) fn answer(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        toplevel: &xdg_toplevel::XdgToplevel,
+    ) {
+        let id = wayland_client::Proxy::id(toplevel);
+        let told = self
+            .client
+            .sizes
+            .iter()
+            .rev()
+            .find(|(to, _, _)| *to == id)
+            .map(|&(_, width, height)| (width, height));
+        if let Some((width, height)) = told.filter(|&(width, height)| width > 0 && height > 0) {
+            self.buffer(surface, width, height);
+            self.pump();
+        }
     }
 
     /// Attach a buffer of this size and commit it.

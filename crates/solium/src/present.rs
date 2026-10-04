@@ -745,6 +745,37 @@ pub(crate) fn settle(pane: &Pane, now: Duration) -> bool {
     .unwrap_or(false)
 }
 
+/// Stop transforming a pane now: from the next frame it is drawn as it is.
+///
+/// What an instant fullscreen or maximise leaves behind (#49). A transform of
+/// no length would do the same one frame later, and draw its target on the
+/// frame between: the new rectangle, with the client's old picture stretched
+/// into it. `an_instant_change_draws_the_window_as_it_is_on_the_next_frame`.
+pub(crate) fn release(pane: &Pane) {
+    with_slot(pane, |slot| *slot = None);
+}
+
+/// Whether a pane is held where something presents it: a transform that is
+/// not released when it lands, which is a mode's [`present`] -- the overview's
+/// thumbnail -- until the mode clears it. A fullscreen or maximise glide
+/// leaves such a window where the mode draws it (#49).
+/// `a_window_a_mode_presents_stays_where_the_mode_draws_it`.
+pub(crate) fn presented(pane: &Pane) -> bool {
+    with_slot(pane, |slot| {
+        slot.is_some_and(|transform| !transform.releases())
+    })
+    .unwrap_or(false)
+}
+
+/// Whether a pane holds a transform at all. A window at rest holds none, and
+/// is drawn as a plain element, which is what lets a fullscreen game or video
+/// be scanned out directly once its change has landed.
+/// `a_window_glides_into_fullscreen_and_out_again`.
+#[cfg(test)]
+pub(crate) fn transformed(pane: &Pane) -> bool {
+    with_slot(pane, |slot| slot.is_some()).unwrap_or(true)
+}
+
 /// Claim the first-show moment, returning whether this call won it.
 ///
 /// The moment is the first commit that carries a buffer, not the map request:

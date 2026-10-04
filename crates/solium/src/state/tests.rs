@@ -4812,6 +4812,811 @@ end)"#,
         );
     }
 
+    /// **#49: going fullscreen or maximised, and coming back, is drawn
+    /// moving**, through the placement path and the transform a layout's
+    /// glide uses, on the one clock.
+    ///
+    /// Each window is 400x300 at 300,200 on a 1920x1080 monitor, with no
+    /// frames, and the scripts answer `fullscreen` with 260 ms and `maximize`
+    /// with 220 ms, both linear, so where a frame is drawn is arithmetic. The
+    /// keys are bound as `modes.lua` binds them. Frames are read through
+    /// `Solium::drawn_at`, which is what the renderer and the hit tests draw
+    /// and resolve a pane with, eight of them 45 ms apart as #49's own
+    /// measurement took them -- which found the window at its destination on
+    /// frame 0 and on every frame after.
+    mod fullscreen_glides {
+        use super::*;
+
+        pub(super) const SCRIPT: &str = r#"
+            sol.on("fullscreen", function() sol.animate({ duration = 260, easing = "linear" }) end)
+            sol.on("maximize", function() sol.animate({ duration = 220, easing = "linear" }) end)
+            sol.bind("super+f", function() sol.toggle_fullscreen() end)
+            sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+        "#;
+
+        /// Where the window lives before anything is toggled.
+        pub(super) fn before() -> Rectangle<f64, Logical> {
+            Rectangle::new((300, 200).into(), (400, 300).into()).to_f64()
+        }
+
+        /// The monitor, which is also its work area: there is no bar.
+        pub(super) fn screen() -> Rectangle<f64, Logical> {
+            Rectangle::new((0, 0).into(), (1920, 1080).into()).to_f64()
+        }
+
+        /// One monitor, one client's window shown and at rest, focused, and
+        /// the scripts a test names.
+        struct Desk {
+            display: Display<Solium>,
+            state: Solium,
+            conn: Connection,
+            queue: wayland_client::EventQueue<Client>,
+            qh: QueueHandle<Client>,
+            client: Client,
+            window: Window,
+            toplevel: xdg_toplevel::XdgToplevel,
+            surface: wl_surface::WlSurface,
+            pane: crate::pane::PaneId,
+        }
+
+        impl Desk {
+            fn new(name: &str, script: &str) -> Self {
+                Self::on(name, script, (300, 200), |state| {
+                    one_screen(state);
+                })
+            }
+
+            /// [`Self::new`], with the monitors `screens` maps and the
+            /// window at `at`.
+            fn on(
+                name: &str,
+                script: &str,
+                at: (i32, i32),
+                screens: impl FnOnce(&mut Solium),
+            ) -> Self {
+                let mut display =
+                    Display::<Solium>::new().expect("creating a test wayland display");
+                let mut state = Solium::new(display.handle());
+                state
+                    .decorations
+                    .set_style(&mut state.panes, Some("none".to_string()));
+                screens(&mut state);
+                state.start_scripts(Some(script_at(name, script)));
+
+                let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+                let qh = queue.handle();
+                let (window, toplevel, surface) =
+                    open_surface(&mut display, &mut state, &conn, &client, &qh);
+                commit_buffer(&client, &qh, &surface, 400, 300);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                state.space.map_element(window.clone(), at, false);
+                state.space.refresh();
+                let pane = state.panes.id_of(&window).expect("the window has a pane");
+                state.focus_window(&window, SERIAL_COUNTER.next_serial());
+                let mut desk = Self {
+                    display,
+                    state,
+                    conn,
+                    queue,
+                    qh,
+                    client,
+                    window,
+                    toplevel,
+                    surface,
+                    pane,
+                };
+                desk.land();
+                assert!(!desk.transformed(), "the premise: at rest where it lives");
+                desk
+            }
+
+            fn pump(&mut self) {
+                pump(
+                    &mut self.display,
+                    &mut self.state,
+                    &self.conn,
+                    &self.qh,
+                    &mut self.queue,
+                    &mut self.client,
+                );
+            }
+
+            /// Where the window is drawn at `at`.
+            fn drawn(&self, at: Duration) -> Rectangle<f64, Logical> {
+                let held = self.state.panes.get(self.pane).expect("the pane is here");
+                self.state
+                    .drawn_at(held, self.state.pane_outer(held), at)
+                    .rect
+            }
+
+            /// Eight frames 45 ms apart, from `from`.
+            fn burst(&self, from: Duration) -> Vec<Rectangle<f64, Logical>> {
+                (0..8)
+                    .map(|frame| self.drawn(from + Duration::from_millis(45 * frame)))
+                    .collect()
+            }
+
+            /// The client answering the size it was told, as a client does.
+            fn answer(&mut self, width: i32, height: i32) {
+                commit_buffer(&self.client, &self.qh, &self.surface, width, height);
+                self.pump();
+            }
+
+            /// A frame `after` from now, retired as a frame retires it.
+            fn frame_after(&mut self, after: Duration) {
+                self.state.clock.advance(after);
+                let now = self.state.clock.now();
+                self.state.settle(now);
+                self.state.sync_panes();
+            }
+
+            /// Past every animation, retired as a frame retires it.
+            fn land(&mut self) {
+                self.state.clock.advance(Duration::from_secs(1));
+                let now = self.state.clock.now();
+                self.state.settle(now);
+                self.state.sync_panes();
+            }
+
+            fn transformed(&self) -> bool {
+                self.state
+                    .panes
+                    .get(self.pane)
+                    .is_some_and(present::transformed)
+            }
+        }
+
+        /// `script`, loaded from a file of its own, which is gone again by the
+        /// time this returns.
+        pub(super) fn script_at(name: &str, script: &str) -> Scripts {
+            let directory =
+                std::env::temp_dir().join(format!("solium-glides-{name}-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(&entry, script).expect("writing the test script");
+            let scripts = Scripts::load(&entry).expect("loading the test script");
+            let _ = std::fs::remove_dir_all(&directory);
+            scripts
+        }
+
+        /// Whether `rect` is part of the way from `from` to `to`: strictly
+        /// between them on every edge that moves, and on the others where
+        /// both are.
+        pub(super) fn between(
+            rect: Rectangle<f64, Logical>,
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+        ) -> bool {
+            let part = |value: f64, from: f64, to: f64| {
+                if (from - to).abs() < 0.5 {
+                    (value - from).abs() < 0.5
+                } else {
+                    (value - from) * (to - from) > 0.0 && (value - to) * (from - to) > 0.0
+                }
+            };
+            part(rect.loc.x, from.loc.x, to.loc.x)
+                && part(rect.loc.y, from.loc.y, to.loc.y)
+                && part(rect.size.w, from.size.w, to.size.w)
+                && part(rect.size.h, from.size.h, to.size.h)
+        }
+
+        /// The same, with either end allowed.
+        fn from_to(
+            rect: Rectangle<f64, Logical>,
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+        ) -> bool {
+            rect == from || rect == to || between(rect, from, to)
+        }
+
+        /// That `frames` is a glide from `from` to `to`: frame 0 where it
+        /// was, frames 1 to `moving` part of the way and each further than
+        /// the last, and frame 7, at 315 ms, landed. 5 frames move in a
+        /// 260 ms glide and 4 in a 220 ms one; the frames between the last
+        /// of those and frame 7 are left out, because the glide starts when
+        /// the change is made, after the moment the burst counts from, by
+        /// however long the request took.
+        fn glides(
+            frames: &[Rectangle<f64, Logical>],
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+            moving: usize,
+        ) {
+            assert_eq!(
+                frames[0], from,
+                "frame 0 is where it was drawn: {frames:#?}"
+            );
+            for frame in 1..=moving {
+                assert!(
+                    between(frames[frame], from, to),
+                    "frame {frame} is part of the way from {from:?} to {to:?}: {frames:#?}"
+                );
+                assert!(
+                    between(frames[frame], frames[frame - 1], to),
+                    "frame {frame} is further on than the one before: {frames:#?}"
+                );
+            }
+            assert_eq!(frames[7], to, "and frame 7 has landed: {frames:#?}");
+        }
+
+        /// **A window sent fullscreen grows from where it was to cover the
+        /// monitor, and shrinks back when it leaves**, as its client asks
+        /// both through `xdg_toplevel`. Once each lands, and its client has
+        /// answered, it holds no transform: a plain element, which a
+        /// fullscreen game or video needs to be scanned out directly.
+        #[test]
+        fn a_window_glides_into_fullscreen_and_out_again() {
+            let mut desk = Desk::new("in-and-out", SCRIPT);
+
+            let at = desk.state.clock.now();
+            desk.toplevel.set_fullscreen(None);
+            desk.pump();
+            glides(&desk.burst(at), before(), screen(), 5);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(
+                !desk.transformed(),
+                "fullscreen and at rest, it holds no transform"
+            );
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+
+            let at = desk.state.clock.now();
+            desk.toplevel.unset_fullscreen();
+            desk.pump();
+            glides(&desk.burst(at), screen(), before(), 5);
+            desk.answer(400, 300);
+            desk.land();
+            assert!(
+                !desk.transformed(),
+                "back and at rest, it holds no transform"
+            );
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+            assert_eq!(
+                desk.state.panes.get(desk.pane).and_then(Pane::lifted_until),
+                None,
+                "and keeps nothing of its shrink once that has landed"
+            );
+        }
+
+        /// **And maximised, and restored, the same way**, by the key.
+        #[test]
+        fn a_window_glides_into_maximised_and_out_again() {
+            let mut desk = Desk::new("maximised", SCRIPT);
+
+            let at = desk.state.clock.now();
+            assert!(
+                desk.state.trigger("super+shift+m"),
+                "super+shift+m is bound"
+            );
+            desk.pump();
+            glides(&desk.burst(at), before(), screen(), 4);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(!desk.transformed(), "maximised and at rest, no transform");
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            glides(&desk.burst(at), screen(), before(), 4);
+            desk.answer(400, 300);
+            desk.land();
+            assert!(!desk.transformed(), "restored and at rest, no transform");
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+        }
+
+        /// **The window is told its new size on the toggle**, not when the
+        /// animation lands, and is drawn where it was while it is told: its
+        /// old picture is what is stretched until it answers. Both ways.
+        #[test]
+        fn the_client_is_told_its_new_size_on_the_toggle() {
+            let mut desk = Desk::new("told", SCRIPT);
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"), "super+f is bound");
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((1920, 1080)),
+                "told the monitor's size on the key"
+            );
+            assert_eq!(desk.drawn(at), before(), "while still drawn where it was");
+            desk.answer(1920, 1080);
+            desk.land();
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((400, 300)),
+                "told the size it had, on the key back"
+            );
+            assert_eq!(
+                desk.drawn(at),
+                screen(),
+                "while still drawn covering the monitor"
+            );
+        }
+
+        /// **A second toggle part of the way through the first starts from
+        /// where the window is drawn**, not from the monitor it was headed
+        /// for and not from the slot it left. The first glide, 60 ms on from
+        /// the moment it is read, bounds how far it can have got by the
+        /// time the second key is handled.
+        #[test]
+        fn a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn() {
+            let mut desk = Desk::new("mid-flight", SCRIPT);
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            let at = desk.state.clock.now();
+            let mid = desk.drawn(at);
+            let soon = desk.drawn(at + Duration::from_millis(60));
+            assert!(
+                between(mid, before(), screen()) && between(soon, mid, screen()),
+                "the premise: part of the way into fullscreen, and still going: {mid:?}, {soon:?}"
+            );
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let from = desk.drawn(at);
+            assert!(
+                from_to(from, mid, soon),
+                "the way back starts where the window was drawn, between {mid:?} and \
+                 {soon:?}, and not at the monitor or at the slot it left: {from:?}"
+            );
+            assert!(
+                between(desk.drawn(at + Duration::from_millis(130)), from, before()),
+                "and it shrinks from there"
+            );
+            assert_eq!(
+                desk.drawn(at + Duration::from_millis(400)),
+                before(),
+                "back where it lives"
+            );
+        }
+
+        /// **A listener that toggles the change straight back is not told
+        /// that too**: it would answer it again, and again. Told once, the
+        /// window ends where it started.
+        #[test]
+        fn a_listener_that_toggles_the_change_back_is_not_told_it_again() {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+            let mut desk = Desk::new(
+                "toggled-back",
+                r#"
+                local told = 0
+                sol.on("fullscreen", function(id)
+                    told = told + 1
+                    sol.status(tostring(told))
+                    if told < 5 then sol.toggle_fullscreen(id) end
+                end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            assert_eq!(desk.state.status, "1", "told once");
+            assert!(
+                !in_state(&desk.window, State::Fullscreen),
+                "and the listener's toggle back was made"
+            );
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+            assert!(!desk.transformed());
+        }
+
+        /// The right of two monitors, side by side.
+        fn right() -> Rectangle<f64, Logical> {
+            Rectangle::new((1920, 0).into(), (1920, 1080).into()).to_f64()
+        }
+
+        /// **A window on the second monitor grows to cover that one**, the
+        /// monitor it is on and not the first, and shrinks back to where it
+        /// was on it.
+        #[test]
+        fn a_window_on_the_second_monitor_glides_to_cover_that_one() {
+            let mut desk = Desk::on("second-monitor", SCRIPT, (2220, 200), |state| {
+                side_by_side(state, "left-test");
+            });
+            let was = Rectangle::new((2220, 200).into(), (400, 300).into()).to_f64();
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            glides(&desk.burst(at), was, right(), 5);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(!desk.transformed());
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            glides(&desk.burst(at), right(), was, 5);
+        }
+
+        /// **A monitor unplugged part of the way through leaves no window
+        /// transformed**: the window growing on it is brought onto the one
+        /// left, and is at rest there once that lands.
+        #[test]
+        fn a_monitor_unplugged_mid_glide_leaves_the_window_at_rest() {
+            let mut gone = None;
+            let mut desk = Desk::on("unplugged", SCRIPT, (2220, 200), |state| {
+                gone = Some(side_by_side(state, "left-test").1);
+            });
+            let gone = gone.expect("the right monitor");
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            let was = Rectangle::new((2220, 200).into(), (400, 300).into()).to_f64();
+            assert!(
+                between(desk.drawn(desk.state.clock.now()), was, right()),
+                "the premise: part of the way"
+            );
+            crate::layer::close_all(&gone);
+            desk.state.space.unmap_output(&gone);
+            desk.state.settle_monitors();
+            desk.land();
+            assert!(!desk.transformed(), "at rest once it lands");
+            let drawn = desk.drawn(desk.state.clock.now());
+            assert!(
+                drawn.loc.x < 1920.0,
+                "and drawn on the monitor that is left: {drawn:?}"
+            );
+        }
+
+        /// **An instant change is drawn as the window is on the next frame**:
+        /// a listener answering with no length leaves no transform behind,
+        /// rather than one whose target -- the monitor -- the next frame
+        /// draws with the old 400x300 picture stretched across it.
+        #[test]
+        fn an_instant_change_draws_the_window_as_it_is_on_the_next_frame() {
+            let mut desk = Desk::new(
+                "instant",
+                r#"
+                sol.on("fullscreen", function() sol.animate({ duration = 0 }) end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let next = desk.state.clock.now() + Duration::from_millis(16);
+            let drawn = desk.drawn(next);
+            assert_eq!(
+                (drawn.size.w, drawn.size.h),
+                (400.0, 300.0),
+                "the first frame draws the committed 400x300 picture, not stretched to the monitor"
+            );
+            assert!(!desk.transformed(), "and holds no transform");
+        }
+
+        /// **And part of the way through a glide, it holds nothing either**:
+        /// a window maximising, not yet answered, sent fullscreen at once is
+        /// drawn as its client has it on the next frame, not with its old
+        /// picture stretched across the monitor by the hold the maximise
+        /// left.
+        #[test]
+        fn an_instant_change_part_of_the_way_through_a_glide_holds_nothing() {
+            let mut desk = Desk::new(
+                "instant-mid-glide",
+                r#"
+                sol.on("maximize", function() sol.animate({ duration = 220, easing = "linear" }) end)
+                sol.on("fullscreen", function() sol.animate({ duration = 0 }) end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let next = desk.state.clock.now() + Duration::from_millis(16);
+            assert_eq!(
+                desk.drawn(next),
+                Rectangle::new((0, 0).into(), (400, 300).into()).to_f64(),
+                "the committed 400x300 picture where it now lives"
+            );
+            assert!(!desk.transformed(), "with no transform");
+            assert!(!desk.state.holding_resize(desk.pane), "and nothing held");
+        }
+
+        /// **A client slower than the glide is drawn stretched until it
+        /// answers**, at the rectangle the glide landed on: the hold an
+        /// edge drag keeps on a window until its client answers, kept from
+        /// the toggle. Without it, going in, the window was drawn 400x300 in
+        /// the monitor's corner from the moment it landed, and coming out,
+        /// 1920x1080 hanging off the monitor at 300,200. Answered, it is
+        /// drawn as it is and nothing holds it.
+        #[test]
+        fn a_slow_client_is_drawn_stretched_until_it_answers() {
+            let mut desk = Desk::new("slow", SCRIPT);
+            desk.state.resizing.fill = crate::resizing::Fill::Hold;
+            for (size, to) in [((1920, 1080), screen()), ((400, 300), before())] {
+                assert!(desk.state.trigger("super+f"));
+                desk.pump();
+                desk.frame_after(Duration::from_millis(300));
+                assert!(!desk.transformed(), "landed, it holds no transform");
+                assert_eq!(
+                    desk.drawn(desk.state.clock.now()),
+                    to,
+                    "drawn where it landed while its client has not answered"
+                );
+                assert_eq!(
+                    desk.state.resize_fill(desk.pane),
+                    None,
+                    "stretched into it, whatever `resize.fill` says of a drag"
+                );
+                desk.answer(size.0, size.1);
+                desk.frame_after(Duration::from_millis(16));
+                assert_eq!(desk.drawn(desk.state.clock.now()), to, "and once it has");
+                assert!(
+                    !desk.state.holding_resize(desk.pane),
+                    "and nothing holds it once it has answered"
+                );
+                desk.land();
+            }
+        }
+
+        /// **A window moved by its titlebar while its change holds it is
+        /// where it was moved**: the hold keeps the size the change told its
+        /// client, not the place, so it is drawn under the pointer, and a
+        /// client that never answers lands there rather than back where the
+        /// change put it.
+        #[test]
+        fn a_window_moved_while_its_change_holds_it_stays_where_it_was_moved() {
+            let mut desk = Desk::new("moved-while-held", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert!(desk.state.holding_resize(desk.pane), "the premise: held");
+            // What `MoveGrab::motion` does on every motion.
+            desk.state
+                .space
+                .map_element(desk.window.clone(), (600, 400), false);
+            desk.frame_after(Duration::from_millis(16));
+            let moved = Rectangle::new((600, 400).into(), (400, 300).into()).to_f64();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                moved,
+                "drawn where it was moved, at the size it was told"
+            );
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert!(!desk.state.holding_resize(desk.pane), "no longer held");
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()).loc,
+                moved.loc,
+                "and left there once its patience runs out"
+            );
+        }
+
+        /// **And one that never answers is held only so long**:
+        /// `resizing::PATIENCE` past the landing, as a drag's hold is, and
+        /// then drawn at the size it has, where it lives.
+        #[test]
+        fn a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out() {
+            let mut desk = Desk::new("silent", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                screen(),
+                "the premise: held at the monitor"
+            );
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert!(!desk.state.holding_resize(desk.pane), "no longer held");
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                Rectangle::new((0, 0).into(), (400, 300).into()).to_f64(),
+                "drawn at the size its client has, where it lives"
+            );
+        }
+
+        /// **An edge drag on a window its change is still holding takes
+        /// it**: the change's hold is let go rather than landed, so its
+        /// patience running out part of the way through the drag does not
+        /// put the window at its client's old size under the pointer.
+        #[test]
+        fn an_edge_drag_takes_a_window_its_change_is_holding() {
+            let mut desk = Desk::new("dragged", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert!(
+                desk.state.holding_resize(desk.pane),
+                "the premise: held for its answer"
+            );
+
+            let wanted = Rectangle::new((250, 200).into(), (450, 300).into());
+            desk.state.pending_resize = Some(ResizeRequest {
+                window: desk.window.clone(),
+                wanted,
+                edge_at: (250.0, 200.0),
+                edges: ResizeEdge::Left,
+            });
+            desk.state.settle_resize();
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert_eq!(
+                desk.state.pane_outer_of(desk.pane),
+                Some(wanted),
+                "where the drag has it"
+            );
+        }
+
+        /// **A window a mode is presenting is left where the mode draws
+        /// it**: asking for fullscreen while it is a thumbnail, the client
+        /// is told its new size and the window goes on being drawn as the
+        /// thumbnail, rather than gliding out of the grid and landing over
+        /// it while the mode still holds the input. The mode letting go
+        /// brings it to the monitor.
+        #[test]
+        fn a_window_a_mode_presents_stays_where_the_mode_draws_it() {
+            let mut desk = Desk::new(
+                "presented",
+                &format!(
+                    "{SCRIPT}\n\
+                     sol.bind(\"super+o\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.present(window.id, {{ x = 100, y = 100, w = 200, h = 150 }})\n\
+                         end\n\
+                     end)\n\
+                     sol.bind(\"super+p\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.present_clear(window.id)\n\
+                         end\n\
+                     end)\n"
+                ),
+            );
+            let thumbnail = Rectangle::new((100, 100).into(), (200, 150).into()).to_f64();
+            assert!(desk.state.trigger("super+o"));
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "the premise: presented"
+            );
+
+            desk.toplevel.set_fullscreen(None);
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((1920, 1080)),
+                "the client is told its new size all the same"
+            );
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "and the window is still drawn where the mode draws it"
+            );
+
+            assert!(desk.state.trigger("super+p"));
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+            assert!(!desk.transformed());
+        }
+
+        /// **A `sol.present` a listener makes is replaced by the glide**, as
+        /// the compositor's move comes after the listeners' commands: only a
+        /// picture a mode was presenting *before* the change is the mode's.
+        /// A listener presenting the window it is told about does not keep
+        /// it at its old size, transformed for good.
+        #[test]
+        fn a_present_a_listener_makes_is_replaced_by_the_glide() {
+            let mut desk = Desk::new(
+                "listener-presents",
+                r#"
+                sol.on("fullscreen", function(id)
+                    sol.animate({ duration = 260, easing = "linear" })
+                    sol.present(id, { opacity = 0.5 })
+                end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let midway = desk.state.clock.now() + Duration::from_millis(100);
+            assert!(
+                between(desk.drawn(midway), before(), screen()),
+                "it glides to the monitor: {:?}",
+                desk.drawn(midway)
+            );
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+            assert!(!desk.transformed(), "and at rest it holds no transform");
+        }
+
+        /// **Turning round part of the way out keeps the way back**, for
+        /// fullscreen and maximised alike: pressed again before the client
+        /// has drawn at the size it went back to, what is kept is the
+        /// rectangle it was told, and not the monitor's size it has not
+        /// yet left -- which the next way out configured it with, so the
+        /// window lost its size for good.
+        #[test]
+        fn turning_round_part_of_the_way_out_keeps_the_way_back() {
+            for key in ["super+f", "super+shift+m"] {
+                let mut desk = Desk::new("turned-round", SCRIPT);
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.answer(1920, 1080);
+                desk.land();
+
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.state.clock.advance(Duration::from_millis(100));
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.answer(1920, 1080);
+                desk.land();
+
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                assert_eq!(
+                    last_configured(&desk.client, &desk.toplevel),
+                    Some((400, 300)),
+                    "{key}: the way out is to the size it had"
+                );
+                desk.answer(400, 300);
+                desk.land();
+                assert_eq!(desk.drawn(desk.state.clock.now()), before(), "{key}");
+            }
+        }
+
+        /// **A reload part of the way through leaves no window transformed**:
+        /// the glide goes on under the new scripts and is released when it
+        /// lands, entering and leaving alike.
+        #[test]
+        fn a_reload_mid_glide_leaves_the_window_at_rest() {
+            let mut desk = Desk::new("reloaded", SCRIPT);
+            let directory =
+                std::env::temp_dir().join(format!("solium-glides-reload-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(&entry, SCRIPT).expect("writing the test script");
+
+            for (size, from, to) in [
+                ((1920, 1080), before(), screen()),
+                ((400, 300), screen(), before()),
+            ] {
+                assert!(desk.state.trigger("super+f"));
+                desk.pump();
+                desk.state.clock.advance(Duration::from_millis(100));
+                assert!(
+                    between(desk.drawn(desk.state.clock.now()), from, to),
+                    "the premise: part of the way"
+                );
+                desk.state.reload_from(&entry);
+                desk.answer(size.0, size.1);
+                desk.land();
+                assert!(!desk.transformed(), "at rest once it lands");
+                assert_eq!(desk.drawn(desk.state.clock.now()), to);
+            }
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
     /// **A modal cannot be buried under the window it is waiting on.**
     ///
     /// The regression floating them introduced. Tiled, a dialog took a slot
@@ -6172,6 +6977,119 @@ end)"#,
             last_configured(&client, toplevel),
             Some((left.size.w, left.size.h))
         );
+    }
+
+    /// **#49: a tiled window leaving fullscreen or maximised stays in front
+    /// of its neighbour while it shrinks into its tile**, whichever of the
+    /// two the layout's sweep places last, and one leaving fullscreen stays
+    /// over the bars too. The left tile's window is placed first, and the
+    /// neighbour placed after it was stacked over it: it shrank from behind
+    /// the neighbour and, no longer the front window, was not lifted. A
+    /// sweep part of the way through -- another window opening, a reload --
+    /// leaves it in front as well.
+    #[test]
+    fn a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let output = one_screen(&mut state);
+        let screen = state.space.output_geometry(&output).expect("mapped");
+        let (first, first_toplevel, first_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (second, second_toplevel, second_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        let directory =
+            std::env::temp_dir().join(format!("solium-shrinks-in-front-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\n\
+                 require(\"modes\")\n\
+                 require(\"workspaces\")\n\
+                 require(\"tiling\")\n\
+                 require(\"fullscreen\")\n\
+                 require(\"direction\")\n",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        state.start_scripts(Some(Scripts::load(&entry).expect("loading")));
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        let tile_of = |state: &Solium, window: &Window| {
+            state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("tiled")
+        };
+        assert!(state.trigger("super+t"));
+        round_trip!();
+        for (surface, window) in [(&first_surface, &first), (&second_surface, &second)] {
+            let tile = tile_of(&state, window);
+            commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+        }
+        round_trip!();
+        state.clock.advance(Duration::from_secs(1));
+        a_frame(&mut state);
+        for (key, lifts) in [("super+f", true), ("super+shift+m", false)] {
+            for (window, toplevel, surface, name) in [
+                (&first, &first_toplevel, &first_surface, "first"),
+                (&second, &second_toplevel, &second_surface, "second"),
+            ] {
+                let tile = tile_of(&state, window);
+                let pane = state.panes.id_of(window).expect("pane");
+                state.focus_window(window, SERIAL_COUNTER.next_serial());
+                assert!(state.trigger(key));
+                round_trip!();
+                let (w, h) = last_configured(&client, toplevel).expect("told a size");
+                commit_buffer(&client, &qh, surface, w, h);
+                round_trip!();
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+                assert!(state.trigger(key));
+                round_trip!();
+                let top = |state: &Solium| {
+                    state
+                        .space
+                        .elements()
+                        .last()
+                        .map(|top| state.window_id(top))
+                };
+                state.clock.advance(Duration::from_millis(50));
+                state.sync_panes();
+                assert_eq!(
+                    (top(&state), state.lifted_on(screen)),
+                    (Some(state.window_id(window)), lifts.then_some(pane)),
+                    "{key}, {name}: in front of its neighbour while it shrinks, \
+                     and over the bars if it was fullscreen"
+                );
+                state.trigger_relayout();
+                state.clock.advance(Duration::from_millis(50));
+                state.sync_panes();
+                assert_eq!(
+                    (top(&state), state.lifted_on(screen)),
+                    (Some(state.window_id(window)), lifts.then_some(pane)),
+                    "{key}, {name}: and still, after a sweep part of the way through"
+                );
+                commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+                round_trip!();
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The shipped `modes`, `workspaces`, `tiling`, `scrolling` and
@@ -10087,6 +11005,83 @@ end)"#,
 
             session.assert_sealed("a window opened while locked", selections);
             session.assert_unlocks(lock);
+        }
+
+        /// **#49: a lock part of the way through a glide leaves no window
+        /// transformed**: the glide lands behind the lock as anywhere
+        /// else, the window is a plain element at the monitor's rectangle
+        /// once it has, and it is still there at rest when the lock lifts.
+        #[test]
+        fn a_lock_mid_glide_leaves_the_window_at_rest() {
+            use super::fullscreen_glides::{SCRIPT, before, between, screen, script_at};
+
+            let mut session = Session::new();
+            session
+                .state
+                .start_scripts(Some(script_at("locked-mid-glide", SCRIPT)));
+            let (window, _toplevel, surface, _xdg) =
+                session.app.open(&mut session.display, &mut session.state);
+            commit_buffer(&session.app.client, &session.app.qh, &surface, 400, 300);
+            session.app.pump(&mut session.display, &mut session.state);
+            session
+                .state
+                .space
+                .map_element(window.clone(), (300, 200), false);
+            session.state.space.refresh();
+            session.state.sync_panes();
+            let pane = session.state.panes.id_of(&window).expect("a pane");
+            session
+                .state
+                .focus_window(&window, SERIAL_COUNTER.next_serial());
+            let land = |session: &mut Session, after: Duration| {
+                session.state.clock.advance(after);
+                let now = session.state.clock.now();
+                session.state.settle(now);
+                session.state.sync_panes();
+            };
+            let drawn = |session: &Session| {
+                let held = session.state.panes.get(pane).expect("the pane");
+                session
+                    .state
+                    .drawn_at(
+                        held,
+                        session.state.pane_outer(held),
+                        session.state.clock.now(),
+                    )
+                    .rect
+            };
+            let transformed = |session: &Session| {
+                session
+                    .state
+                    .panes
+                    .get(pane)
+                    .is_some_and(present::transformed)
+            };
+            land(&mut session, Duration::from_secs(1));
+
+            assert!(session.state.trigger("super+f"));
+            session.app.pump(&mut session.display, &mut session.state);
+            session.state.clock.advance(Duration::from_millis(100));
+            assert!(
+                between(drawn(&session), before(), screen()),
+                "the premise: part of the way into fullscreen"
+            );
+            let lock = session.lock();
+            commit_buffer(&session.app.client, &session.app.qh, &surface, 1920, 1080);
+            session.app.pump(&mut session.display, &mut session.state);
+            land(&mut session, Duration::from_secs(1));
+            assert!(!transformed(&session), "landed behind the lock, at rest");
+            assert_eq!(drawn(&session), screen(), "covering the monitor");
+
+            lock.unlock_and_destroy();
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert!(session.state.lock.is_none(), "the premise: unlocked");
+            land(&mut session, Duration::from_millis(16));
+            assert!(!transformed(&session), "and at rest once the lock lifts");
+            assert_eq!(drawn(&session), screen());
         }
 
         /// **What is pressed at the lock screen is not told to the
@@ -22056,6 +23051,71 @@ end)
                     drawn(&desk)
                 );
                 assert_eq!(delivered(&desk, 20.0, 15.0), Some(id(&bar)));
+            }
+
+            /// **#49: a window going fullscreen is lifted over the bar as it
+            /// starts to grow, and one leaving goes back under the bar only
+            /// once it has finished shrinking** -- drawn and pressed alike.
+            /// Lifted, it covers the bar only where it is drawn: at the
+            /// start of growing that is the corner it was in.
+            #[test]
+            fn a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk() {
+                let mut desk = Desk::new();
+                desk.install(
+                    r#"sol.on("fullscreen", function() sol.animate({ duration = 260 }) end)"#,
+                );
+                let (strip, _strip) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state.space.map_element(window.clone(), (10, 5), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let pane = Seen::Pane(opened.pane);
+                let bar = Seen::Layer(id(&strip));
+                assert!(
+                    drawn_over(&desk, bar, pane),
+                    "the premise: the bar over the window: {:?}",
+                    drawn(&desk)
+                );
+
+                opened.toplevel.set_fullscreen(None);
+                desk.pump();
+                assert!(
+                    drawn_over(&desk, pane, bar),
+                    "lifted over the bar as it starts to grow: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    (delivered(&desk, 20.0, 15.0), delivered(&desk, 1500.0, 15.0)),
+                    (Some(surface_id(&window)), Some(id(&strip))),
+                    "(a press on the window over the bar, one on the bar where the \
+                     window is not drawn yet)"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 1920, 1080);
+                desk.pump();
+                landed(&mut desk);
+
+                opened.toplevel.unset_fullscreen();
+                desk.pump();
+                assert!(
+                    drawn_over(&desk, pane, bar),
+                    "still over the bar while it shrinks: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    delivered(&desk, 1500.0, 15.0),
+                    Some(surface_id(&window)),
+                    "and the press where it still covers the bar is the window's"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 64, 64);
+                desk.pump();
+                landed(&mut desk);
+                assert!(
+                    drawn_over(&desk, bar, pane),
+                    "back under the bar once it has shrunk: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(delivered(&desk, 20.0, 15.0), Some(id(&strip)));
             }
 
             /// **A fullscreen window on a workspace that is not shown does
