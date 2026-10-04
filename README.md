@@ -46,10 +46,11 @@ happened yet. What stands in the way is the
 Short of that trial, it has been checked on the hardware at commit `dfc95ce`,
 on a desktop with an NVIDIA RTX 3070 and on a Microsoft Surface Pro 7 (Intel
 Ice Lake integrated graphics), both on Fedora 44. On both, QML renders on the
-GPU and its animations run, closing the lid turns the screen off, the screens
-go off when idle, `swaylock` locks, and the Caps Lock and layout pill works
-with the shipped configuration. Touch reaches applications' windows, but
-nothing Solium draws itself reacts to touch yet ([#181]).
+GPU and its animations run, the screens go off when idle, `swaylock` locks,
+and the Caps Lock and layout pill works with the shipped configuration. On the
+Surface Pro 7, closing the lid turned the screen off, though Solium has no lid
+handling of its own. Touch reaches applications' windows, but nothing Solium
+draws itself reacts to touch yet ([#181]).
 
 And a bug in a compositor takes the session with it. The ones that get found
 are the ones real use finds, which is why the trial matters more than the test

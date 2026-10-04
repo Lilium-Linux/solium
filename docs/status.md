@@ -14,9 +14,10 @@ daily:
 
 It has been checked on the hardware at commit `dfc95ce`, on a desktop with an
 NVIDIA RTX 3070 and on a Microsoft Surface Pro 7 (Intel Ice Lake), both on
-Fedora 44. QML on the GPU, animations, the screen going off when the lid
-closes and when idle, `swaylock`, and the Caps Lock and layout pill all work
-there. Touch reaches applications, but not what Solium draws
+Fedora 44. QML on the GPU, animations, the screens going off when idle,
+`swaylock`, and the Caps Lock and layout pill all work there. On the Surface
+Pro 7 the screen also went off when the lid closed, though Solium has no lid
+handling of its own. Touch reaches applications, but not what Solium draws
 ([#181](https://github.com/Lilium-Linux/solium/issues/181)).
 
 The first release, v0.1.0, will be a preview release, cut only once the

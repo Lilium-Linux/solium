@@ -72,10 +72,12 @@ That gives, in order of how hard they would otherwise be:
   compositor's engine already has them. The plan is for a scene to name an
   item as an anchor (`Solium.region`) and for an animation to aim at that
   name, read again on every frame, so a genie follows an icon while it moves
-  and can never animate against a stale copy. Nothing of that is built yet,
-  and no issue tracks it. Today a genie aims at a window, a `sol.surface`
-  scene or a fixed rectangle ([modes.md](modes.md)). Only a dock that runs as
-  its own program would need a protocol to hand its rectangles over.
+  and can never animate against a stale copy. Nothing of that is built yet;
+  it is tracked under Later in
+  [#169](https://github.com/Lilium-Linux/solium/issues/169). Today a genie
+  aims at a window, a `sol.surface` scene or a fixed rectangle
+  ([modes.md](modes.md)). Only a dock that runs as its own program would need
+  a protocol to hand its rectangles over.
 
 This is the arrangement Apple has, and it is unavailable to anyone configuring
 an existing compositor. It is the reason for writing one.

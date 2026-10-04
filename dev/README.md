@@ -1076,11 +1076,12 @@ for a machine that has nothing else, never as a preference.
 **What the hardware has and has not been through.** Hotplug has (see *Hotplug*
 above). So has `dfc95ce`, on an NVIDIA RTX 3070 desktop and on a Microsoft
 Surface Pro 7 (Intel Ice Lake), both on Fedora 44: QML on the GPU and its
-animations, the screens going off when idle (see *Turning screens off*), the
-screen going off when the lid was closed (seen, though Solium itself has no lid
-handling), `swaylock` locking the session, and the Caps and layout pill with no
-configuration. Touch reaches a client's window (Firefox), but nothing Solium
-draws reacts to it: frame buttons, a hosted shell, overview and the edges
+animations, the screens going off when idle (see *Turning screens off*),
+`swaylock` locking the session, and the Caps and layout pill with no
+configuration. On the Surface Pro 7 the screen also went off when the lid was
+closed, though Solium itself has no lid handling. Touch reaches a client's
+window (Firefox), but nothing Solium draws reacts to it: frame buttons, a
+hosted shell, overview and the edges
 ([#181](https://github.com/Lilium-Linux/solium/issues/181)).
 
 ### Soaking on a TTY, which is the only honest soak

@@ -159,8 +159,14 @@ part of the screen, and blur behind a window
 
 ### [E11](https://github.com/Lilium-Linux/solium/issues/169) — A shell hosted inside Solium is a complete daily desktop
 
-A shell running inside Solium as configuration, hosted in the compositor's QML
-engine, is a full daily desktop.
+A shell runs inside Solium as its configuration: its QML is hosted in the
+compositor's own engine, beside the decorations, rather than run as a program
+of its own. What that still needs was listed by loading a real shell, written
+for Quickshell, in a nested session.
+
+Done when a shell hosted this way is the whole desktop: on every monitor,
+reserving its edges, taking the input its items ask for, and driving the
+windows and workspaces it shows.
 
 **Status.** Open. Milestone 1 of the native shell platform has landed: one
 instance per monitor, each reading `Solium.monitor`
@@ -168,16 +174,26 @@ instance per monitor, each reading `Solium.monitor`
 where its items take it
 ([#173](https://github.com/Lilium-Linux/solium/issues/173)); every
 button, the wheel, `Grab` popups and the keyboard on demand
-([#163](https://github.com/Lilium-Linux/solium/issues/163)); edges
+([#163](https://github.com/Lilium-Linux/solium/issues/163)); and edges
 reserved whatever the scene's size
-([#162](https://github.com/Lilium-Linux/solium/issues/162)); timers on
-an idle desktop ([#164](https://github.com/Lilium-Linux/solium/issues/164));
-and the right environment for the programs it starts
-([#165](https://github.com/Lilium-Linux/solium/issues/165)). The
-Quickshell compatibility layer was removed
-([#172](https://github.com/Lilium-Linux/solium/issues/172)). What is
-left is [#166](https://github.com/Lilium-Linux/solium/issues/166): a
-hosted shell has no window list and sees no workspaces.
+([#162](https://github.com/Lilium-Linux/solium/issues/162)). Separately, a
+hosted shell's timers fire on an idle desktop
+([#164](https://github.com/Lilium-Linux/solium/issues/164)), and a program
+it starts, through `action`, Lua and `sol.spawn`, gets the environment Solium
+started with ([#175](https://github.com/Lilium-Linux/solium/issues/175)).
+The Quickshell compatibility layer was removed
+([#172](https://github.com/Lilium-Linux/solium/issues/172)), and
+[#165](https://github.com/Lilium-Linux/solium/issues/165), about the
+programs that layer's `Process` started, was closed as superseded by it. What
+is left for a daily desktop is
+[#166](https://github.com/Lilium-Linux/solium/issues/166): a hosted shell
+has no window list and sees no workspaces. The epic also still holds
+[#167](https://github.com/Lilium-Linux/solium/issues/167), the services a
+shell shows (audio, notifications, media, battery, network, Bluetooth, the
+tray and the list of applications), which was written against the layer that
+was removed; and, for later, the effects work: a hosted dock naming its icons
+with `Solium.region` for the genie, and widgets that morph into the lock
+screen.
 
 ---
 
@@ -272,12 +288,13 @@ third is tier one.
 runs and from reading. Some has been confirmed on the hardware: hotplug, popups
 and menus, and the drag icon; and, at `dfc95ce` on an NVIDIA RTX 3070 desktop
 and a Surface Pro 7 (Intel Ice Lake), QML on the GPU with animations running,
-the screen going off when the lid closes and when idle, `swaylock`, and the
-Caps Lock and layout pill. The hardware backend brings up more than one
-monitor, picks modes and CRTCs, and has been used with real applications on a
-TTY — but no soak, no leak measurement and no screencopy test has ever run on
-it. That is not a small caveat and it belongs in the plan rather than in a
-footnote.
+the screens going off when idle, `swaylock`, and the Caps Lock and layout
+pill. On the Surface Pro 7 the screen also went off when the lid closed,
+though Solium has no lid handling of its own. The hardware backend brings up
+more than one monitor, picks modes and CRTCs, and has been used with real
+applications on a TTY — but no soak, no leak measurement and no screencopy
+test has ever run on it. That is not a small caveat and it belongs in the plan
+rather than in a footnote.
 
 ---
 

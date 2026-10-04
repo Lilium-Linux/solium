@@ -141,8 +141,12 @@ survive: [#26](https://github.com/Lilium-Linux/solium/issues/26) IME,
 end to end, [#56](https://github.com/Lilium-Linux/solium/issues/56) window
 rules, [#153](https://github.com/Lilium-Linux/solium/issues/153) logind lock
 and sleep, [#157](https://github.com/Lilium-Linux/solium/issues/157) no
-tap-to-click. Each should be named where a stranger will look before they hit
-it, and [docs/gaps.md](gaps.md) is the full list.
+tap-to-click, [#181](https://github.com/Lilium-Linux/solium/issues/181) touch
+on nothing the compositor draws,
+[#180](https://github.com/Lilium-Linux/solium/issues/180) an X11
+application's window never replacing its loading window. Each should be named
+where a stranger will look before they hit it, and [docs/gaps.md](gaps.md) is
+the full list.
 
 **Not features, and do them anyway.** CI runs on Fedora 44 and gates `stage`
 and `release`: fmt, clippy, the build, the tests and `solium --check`. It still
