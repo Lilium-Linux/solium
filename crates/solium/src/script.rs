@@ -1005,16 +1005,7 @@ impl Scripts {
         lua.set_global_hook(
             mlua::HookTriggers::new().every_nth_instruction(10_000),
             |lua, _debug| {
-                let late = lua
-                    .try_app_data_ref::<Deadline>()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|deadline| {
-                        deadline
-                            .started
-                            .is_some_and(|started| started.elapsed() >= HANDLER_DEADLINE)
-                    });
-                if late {
+                if late(lua) {
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(mlua::VmState::Continue)
@@ -1832,6 +1823,21 @@ fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
     if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
         deadline.started = started;
     }
+}
+
+/// When the handler running now started, if one is running.
+/// `tests::a_binding_that_loops_on_focus_direction_is_stopped`.
+fn deadline_started(lua: &Lua) -> Option<std::time::Instant> {
+    lua.try_app_data_ref::<Deadline>()
+        .ok()
+        .flatten()
+        .and_then(|deadline| deadline.started)
+}
+
+/// Whether the handler running now is past its deadline.
+/// `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`.
+fn late(lua: &Lua) -> bool {
+    deadline_started(lua).is_some_and(|started| started.elapsed() >= HANDLER_DEADLINE)
 }
 
 /// Start the handler clock again, through `sol._deadline`, for the next
@@ -3385,9 +3391,19 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     outer = pending.moving;
                     pending.moving = moving.or(outer);
                 })?;
+                // The clock starts again for each `direction` listener, so
+                // the handler that asked gets its own clock back, and is
+                // stopped here once that has run out: a loop of these calls
+                // is stopped however few of its instructions are its own.
+                // `tests::a_binding_that_loops_on_focus_direction_is_stopped`.
+                let started = deadline_started(lua);
                 let heard = call_listeners(sol, "direction", (verb, dir));
+                set_deadline(lua, started);
                 with_pending(lua, |pending| pending.moving = outer)?;
                 heard?;
+                if late(lua) {
+                    return Err(mlua::Error::runtime(STOPPED));
+                }
                 Ok(())
             })?,
         )?;
@@ -7668,6 +7684,28 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
         assert_eq!(
             scripts.evaluate("for _ = 1, 200000 do end return 'finished'"),
             "finished"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A binding that keeps calling `sol.focus_direction` is still
+    /// stopped**: the clock each `direction` listener starts is not the
+    /// binding's.
+    #[test]
+    fn a_binding_that_loops_on_focus_direction_is_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-direction",
+            r#"
+            sol.on("direction", function() end)
+            sol.bind("super+x", function() while true do sol.focus_direction("left") end end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let _ = scripts.key("super+x", one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
