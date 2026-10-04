@@ -759,6 +759,16 @@ sol._attempts = {}
 ---@type table<string, table>
 sol._keeps = {}
 
+---Internal: restarts the handler deadline. Called before each listener.
+---@private
+---@type fun()
+sol._deadline = function() end
+
+---Internal: how many times each listener was stopped, by function.
+---@private
+---@type table<function, integer>
+sol._strikes = {}
+
 ---Internal: the notes `sol.bind` and `sol.unbind` were given, by combination.
 ---@private
 ---@type table<string, string>

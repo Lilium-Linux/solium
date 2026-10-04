@@ -996,6 +996,29 @@ impl Scripts {
             .set("sol", &sol)
             .map_err(failed("installing `sol`"))?;
 
+        // Every 10 000 instructions, a handler past its deadline is unwound
+        // with an error. `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`.
+        lua.set_app_data(Deadline::default());
+        lua.set_hook(
+            mlua::HookTriggers::new().every_nth_instruction(10_000),
+            |lua, _debug| {
+                let late = lua
+                    .try_app_data_ref::<Deadline>()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|deadline| {
+                        deadline
+                            .started
+                            .is_some_and(|started| started.elapsed() >= HANDLER_DEADLINE)
+                    });
+                if late {
+                    return Err(mlua::Error::runtime(STOPPED));
+                }
+                Ok(mlua::VmState::Continue)
+            },
+        )
+        .map_err(failed("installing the handler deadline"))?;
+
         // So a script can `require` its neighbours.
         if let Some(directory) = config.parent().and_then(|path| path.to_str()) {
             let package: Table = lua
@@ -1364,6 +1387,7 @@ impl Scripts {
     ) -> Outcome {
         self.lua.set_app_data(snapshot);
         self.lua.set_app_data(Pending::default());
+        set_deadline(&self.lua, Some(std::time::Instant::now()));
 
         let handled = match self.lua.globals().get::<Table>("sol") {
             Ok(sol) => match call(&sol) {
@@ -1381,6 +1405,7 @@ impl Scripts {
                 false
             }
         };
+        set_deadline(&self.lua, None);
 
         let pending = self.lua.remove_app_data::<Pending>().unwrap_or_default();
 
@@ -1778,10 +1803,46 @@ fn layouts(lua: &Lua) -> mlua::Result<Table> {
     Ok(layout)
 }
 
+/// How long one handler may run before it is stopped (03 §3.3.3, Ruling 16).
+/// `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
+/// `tests::a_binding_that_never_returns_is_stopped`.
+const HANDLER_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+/// How many times a listener may be stopped before it is taken out.
+/// `tests::a_listener_stopped_three_times_is_taken_out`.
+const STRIKES: u32 = 3;
+/// What the error a stopped handler is unwound with says.
+const STOPPED: &str = "this handler ran for longer than 100 ms and was stopped";
+
+/// When the handler running now started, for the instruction hook; `None`
+/// between dispatches.
+/// `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
+/// `tests::lua_run_between_dispatches_is_not_stopped`.
+#[derive(Debug, Default)]
+struct Deadline {
+    started: Option<std::time::Instant>,
+}
+
+/// Start the handler clock, or stop it with `None`.
+fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
+    if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
+        deadline.started = started;
+    }
+}
+
+/// Start the handler clock again, through `sol._deadline`, for the next
+/// handler. `tests::each_listener_has_the_whole_deadline`.
+fn restart_deadline(sol: &Table) {
+    if let Ok(restart) = sol.get::<mlua::Function>("_deadline") {
+        let _ = restart.call::<()>(());
+    }
+}
+
 /// Run every listener registered for an event.
 ///
 /// One failing listener is logged and the rest still run: a broken script must
 /// not silently disable the others, which is what returning early would do.
+/// One stopped at the deadline counts a strike, and is taken out at the third.
+/// `tests::a_listener_stopped_three_times_is_taken_out`.
 fn call_listeners(
     sol: &Table,
     event: &str,
@@ -1791,12 +1852,50 @@ fn call_listeners(
     let Value::Table(listeners) = handlers.get::<Value>(event)? else {
         return Ok(false);
     };
+    let strikes: Table = sol.get("_strikes")?;
 
     let mut called = false;
+    let mut out = Vec::new();
     for listener in listeners.sequence_values::<mlua::Function>() {
-        match listener.and_then(|handler| handler.call::<()>(args.clone())) {
+        let listener = match listener {
+            Ok(listener) => listener,
+            Err(err) => {
+                tracing::error!(%err, event, "a listener failed");
+                continue;
+            }
+        };
+        restart_deadline(sol);
+        match listener.call::<()>(args.clone()) {
             Ok(()) => called = true,
+            Err(err) if err.to_string().contains(STOPPED) => {
+                let count = strikes.get::<Option<u32>>(&listener)?.unwrap_or(0) + 1;
+                strikes.set(&listener, count)?;
+                tracing::error!(
+                    %err,
+                    event,
+                    count,
+                    "a listener ran for longer than 100 ms and was stopped"
+                );
+                if count >= STRIKES {
+                    tracing::error!(
+                        event,
+                        "a listener stopped three times is taken out until the configuration is reloaded"
+                    );
+                    out.push(listener);
+                }
+            }
             Err(err) => tracing::error!(%err, event, "a listener failed"),
+        }
+    }
+    for gone in out {
+        let kept: Vec<mlua::Function> = listeners
+            .sequence_values::<mlua::Function>()
+            .filter_map(Result::ok)
+            .filter(|each| *each != gone)
+            .collect();
+        listeners.clear()?;
+        for (index, each) in kept.into_iter().enumerate() {
+            listeners.set(index + 1, each)?;
         }
     }
     Ok(called)
@@ -1820,6 +1919,18 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
     sol.set("_attempts", lua.create_table()?)?;
     sol.set("_keeps", lua.create_table()?)?;
+    // How many times each listener was stopped at the deadline, by function.
+    // `tests::a_listener_stopped_three_times_is_taken_out`.
+    sol.set("_strikes", lua.create_table()?)?;
+    // Restart the handler clock: called before each listener, so each has
+    // the whole deadline. `tests::each_listener_has_the_whole_deadline`.
+    sol.set(
+        "_deadline",
+        lua.create_function(|lua, (): ()| {
+            set_deadline(lua, Some(std::time::Instant::now()));
+            Ok(())
+        })?,
+    )?;
     // Where a binding came from, for the combinations a script chose to say.
     // Keyed the same way `_bindings` is -- the canonical spelling -- so the two
     // can be read together, and holding entries for combinations `_bindings`
@@ -7389,6 +7500,108 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
                 vec![(first, r#"{"id":1}"#.to_owned()), (second, "2".to_owned())]
             ),
             "(the second id after the first, the commands with their ids and data)"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A listener that never returns is stopped, and the others still run**
+    /// (03 §3.3.3): the compositor answers within the deadline.
+    #[test]
+    fn a_listener_that_never_returns_is_stopped_and_the_others_still_run() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline",
+            r#"
+            sol.on("layout", function() while true do end end)
+            sol.on("layout", function() sol.status("ran") end)
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome.status.as_deref(), Some("ran"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_binding_that_never_returns_is_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-binding",
+            r#"sol.bind("super+x", function() while true do end end)"#,
+        );
+        let started = std::time::Instant::now();
+        let _ = scripts.key("super+x", one_screen(&[]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A listener stopped three times is taken out until the next reload.**
+    #[test]
+    fn a_listener_stopped_three_times_is_taken_out() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-strikes",
+            r#"
+            runs = 0
+            sol.on("layout", function() runs = runs + 1; sol.status(tostring(runs)); while true do end end)
+            "#,
+        );
+        for _ in 0..4 {
+            let _ = scripts.relayout(one_screen(&[]));
+        }
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert_eq!(
+            (outcome.status, scripts.evaluate("return tostring(runs)")),
+            (None, "3".to_owned()),
+            "(what a fifth call said, how many times the listener ran)"
+        );
+        let mut reloaded =
+            Scripts::load(&directory.join("init.lua")).expect("loading the test script again");
+        assert_eq!(
+            reloaded.relayout(one_screen(&[])).status.as_deref(),
+            Some("1"),
+            "a reload did not put the listener back"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **Each listener has the whole deadline**: the clock starts again for
+    /// the next listener, so one that needs a few milliseconds still runs
+    /// after another was stopped.
+    #[test]
+    fn each_listener_has_the_whole_deadline() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-each",
+            r#"
+            sol.on("layout", function() while true do end end)
+            sol.on("layout", function() for _ = 1, 200000 do end sol.status("whole") end)
+            "#,
+        );
+        let outcome = scripts.relayout(one_screen(&[]));
+        assert_eq!(outcome.status.as_deref(), Some("whole"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The clock stops when the dispatch ends**: Lua run between
+    /// dispatches is no handler's, and is not stopped however long after one
+    /// it runs.
+    #[test]
+    fn lua_run_between_dispatches_is_not_stopped() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-between",
+            r#"sol.on("layout", function() end)"#,
+        );
+        let _ = scripts.relayout(one_screen(&[]));
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(
+            scripts.evaluate("for _ = 1, 200000 do end return 'finished'"),
+            "finished"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
