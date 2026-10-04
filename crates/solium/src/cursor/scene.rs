@@ -333,7 +333,7 @@ mod tests {
     use smithay::utils::{Logical, Point};
 
     use super::{Cursor, Motion, origin, plane};
-    use crate::qml::pointer::tests::written;
+    use crate::qml::pointer::tests::{beside, written};
     use crate::qml::qt_test::on_the_qt_thread;
     use crate::render::Drawn;
 
@@ -431,6 +431,7 @@ mod tests {
                 }
                 "##,
             );
+            let bare = beside(&directory, "Bare.qml", "import QtQuick\nItem {}\n");
             let mut cursor = Cursor::configured(&path, 24).expect("the scene builds");
             let size = cursor.own_size();
             let held = cursor.picture(None, super::device(size, 2.0), 2.0);
@@ -450,12 +451,10 @@ mod tests {
             };
             // Premultiplied ARGB8888, little-endian: blue, green, red, alpha.
             let at_hotspot = pixel(&mut cursor, (12, 8));
-            let beside = pixel(&mut cursor, (10, 6));
+            let next_to = pixel(&mut cursor, (10, 6));
             let hotspot = cursor.hotspot();
             drop(cursor);
-            std::fs::write(&path, "import QtQuick\nItem {}\n").expect("writing the scene");
-            crate::qml::clear_cache();
-            let bare = Cursor::configured(&path, 28)
+            let bare = Cursor::configured(&bare, 28)
                 .expect("the scene builds")
                 .own_size();
             let _ = std::fs::remove_dir_all(&directory);
@@ -463,7 +462,7 @@ mod tests {
             let location = Point::<f64, Logical>::from((100.0, 200.0));
             let corner = origin(location, hotspot, 2.0);
             assert_eq!(
-                (size, held, at_hotspot, beside[3], bare),
+                (size, held, at_hotspot, next_to[3], bare),
                 ((40, 32), Some((80, 64)), [0, 0, 255, 255], 0, (28, 28)),
                 "(its own size, the picture at 2x, the pixel at its hotspot, the alpha beside \
                  it, a root with no size)"
@@ -487,16 +486,15 @@ mod tests {
                 "solium-pointer-scene-plane",
                 "import QtQuick\nItem { width: 24; height: 24 }\n",
             );
+            let material = beside(
+                &directory,
+                "Material.qml",
+                "import QtQuick\nimport Solium\nItem {\n    width: 24; height: 24\n    Rectangle { anchors.fill: parent; Solium.material: ({ effect: \"glass-rect\" }) }\n}\n",
+            );
             let plain = Cursor::configured(&path, 24)
                 .expect("the scene builds")
                 .kind();
-            std::fs::write(
-                &path,
-                "import QtQuick\nimport Solium\nItem {\n    width: 24; height: 24\n    Rectangle { anchors.fill: parent; Solium.material: ({ effect: \"glass-rect\" }) }\n}\n",
-            )
-            .expect("writing the scene");
-            crate::qml::clear_cache();
-            let with_material = Cursor::configured(&path, 24)
+            let with_material = Cursor::configured(&material, 24)
                 .expect("the scene builds")
                 .kind();
             let _ = std::fs::remove_dir_all(&directory);

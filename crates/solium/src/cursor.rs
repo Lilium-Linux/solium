@@ -1672,17 +1672,24 @@ mod tests {
             if let Some(scene) = pointer.scene_for_test() {
                 scene.set_int("mark", 7);
             }
-            std::fs::write(
+            // Each edit dated seconds apart, as a person's are: Qt keeps what
+            // it compiled on disk by the file's path and the millisecond it
+            // changed, so an edit in the millisecond of the last build could
+            // build as it was (`crate::qml::pointer::tests::beside`).
+            let edit = |path: &std::path::Path, qml: &str, seconds: u64| {
+                std::fs::write(path, qml).expect("editing the scene");
+                let later = std::time::SystemTime::now() + std::time::Duration::from_secs(seconds);
+                std::fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .and_then(|file| file.set_modified(later))
+                    .expect("dating the edit");
+            };
+            edit(
                 &first,
                 "import QtQuick\nItem { property string name: \"edited\"; property int mark: 0 }\n",
-            )
-            .expect("editing the scene");
-            let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
-            std::fs::File::options()
-                .write(true)
-                .open(&first)
-                .and_then(|file| file.set_modified(later))
-                .expect("dating the edit");
+                5,
+            );
             let edited = configure(&mut pointer, &first, 24);
             seen.push((edited, read(&mut pointer)));
             if let Some(scene) = pointer.scene_for_test() {
@@ -1690,15 +1697,14 @@ mod tests {
             }
             let resized = configure(&mut pointer, &first, 32);
             seen.push((resized, read(&mut pointer)));
-            std::fs::write(&second, "import QtQuick\nItem { this is not QML }\n")
-                .expect("breaking the scene");
+            edit(&second, "import QtQuick\nItem { this is not QML }\n", 10);
             configure(&mut pointer, &second, 32);
             let broken = read(&mut pointer);
-            std::fs::write(
+            edit(
                 &second,
                 "import QtQuick\nItem { property string name: \"mended\"; property int mark: 0 }\n",
-            )
-            .expect("mending the scene");
+                15,
+            );
             let retried = configure(&mut pointer, &second, 32);
             seen.push((retried, read(&mut pointer)));
             drop(pointer);

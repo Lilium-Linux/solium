@@ -113,6 +113,21 @@ pub(crate) mod tests {
         (directory, path)
     }
 
+    /// Another scene beside the one [`written`] wrote, in a file of its own,
+    /// written before anything in the directory is built.
+    ///
+    /// Never the same file written again: Qt keeps what it compiled on disk,
+    /// keyed by the file's path and the millisecond it was changed at, so a
+    /// file rewritten in the millisecond it was first built can build as it
+    /// was the first time, and a test asserting the second version fails once
+    /// in a few runs. And never a file added after a build: Qt keeps the
+    /// directory's listing too, and refuses a file it has not listed.
+    pub(crate) fn beside(directory: &Path, name: &str, qml: &str) -> PathBuf {
+        let path = directory.join(name);
+        std::fs::write(&path, qml).expect("writing the scene");
+        path
+    }
+
     fn built(path: &Path) -> Scene {
         Scene::for_host(path, 32, 32, None).expect("the scene builds")
     }
@@ -190,6 +205,7 @@ pub(crate) mod tests {
                 "solium-pointer-own-size",
                 "import QtQuick\nItem { property int base: 24; width: base + 16; height: base + 8 }\n",
             );
+            let bare = beside(&directory, "Bare.qml", "import QtQuick\nItem {}\n");
             let mut scene = Scene::sized_by_root(&path, 24).expect("the scene builds");
             let built = scene.root_size();
             scene.resize(80, 64, 2.0);
@@ -197,9 +213,7 @@ pub(crate) mod tests {
             scene.set_int("base", 32);
             let rebound = scene.root_size();
             drop(scene);
-            std::fs::write(&path, "import QtQuick\nItem {}\n").expect("writing the scene");
-            crate::qml::clear_cache();
-            let mut bare = Scene::sized_by_root(&path, 30).expect("the scene builds");
+            let mut bare = Scene::sized_by_root(&bare, 30).expect("the scene builds");
             let bare_built = bare.root_size();
             bare.resize(10, 10, 1.0);
             let bare_resized = bare.root_size();
@@ -256,18 +270,19 @@ pub(crate) mod tests {
                 }
                 ",
             );
-            let set = built(&path).cursor_hotspot();
-            std::fs::write(&path, "import QtQuick\nItem { width: 32; height: 32 }\n")
-                .expect("writing the scene");
-            crate::qml::clear_cache();
-            let none = built(&path).cursor_hotspot();
-            std::fs::write(
-                &path,
+            let none = beside(
+                &directory,
+                "None.qml",
+                "import QtQuick\nItem { width: 32; height: 32 }\n",
+            );
+            let nan = beside(
+                &directory,
+                "NotANumber.qml",
                 "import QtQuick\nimport Solium\nItem { Solium.cursor.hotspot: Qt.point(NaN, 3) }\n",
-            )
-            .expect("writing the scene");
-            crate::qml::clear_cache();
-            let nan = built(&path).cursor_hotspot();
+            );
+            let set = built(&path).cursor_hotspot();
+            let none = built(&none).cursor_hotspot();
+            let nan = built(&nan).cursor_hotspot();
             let _ = std::fs::remove_dir_all(&directory);
             assert_eq!(
                 [set, none, nan],
