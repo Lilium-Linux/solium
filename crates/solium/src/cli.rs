@@ -146,11 +146,26 @@ pub(crate) fn help() -> String {
     out
 }
 
+/// What `--version` prints: the version, and the commit this build was made
+/// from when it was made from a git checkout (`build.rs`, `crate::commit`).
+/// `tests::the_version_names_its_commit_when_built_from_one`.
+pub(crate) fn version() -> String {
+    versioned(env!("CARGO_PKG_VERSION"), env!("BUILD_COMMIT"))
+}
+
+fn versioned(version: &str, commit: &str) -> String {
+    if commit.is_empty() {
+        format!("solium {version}")
+    } else {
+        format!("solium {version} ({commit})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Command, Refused, help, parse};
+    use super::{Command, Refused, help, parse, versioned};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|each| (*each).to_owned()).collect()
@@ -162,6 +177,14 @@ mod tests {
         assert_eq!(parse(args(&["-h"])), Ok(Command::Help));
         assert_eq!(parse(args(&["--version"])), Ok(Command::Version));
         assert_eq!(parse(args(&["-V"])), Ok(Command::Version));
+    }
+
+    /// `--version` names the commit the build was made from when it was made
+    /// from a git checkout, and only the version otherwise.
+    #[test]
+    fn the_version_names_its_commit_when_built_from_one() {
+        assert_eq!(versioned("0.0.0", "dfc95ce"), "solium 0.0.0 (dfc95ce)");
+        assert_eq!(versioned("0.0.0", ""), "solium 0.0.0");
     }
 
     #[test]

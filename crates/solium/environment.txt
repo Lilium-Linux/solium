@@ -28,7 +28,9 @@ line; with none it starts a compositor: nested, as a window, when
     session, and exit. Also `-h`. Starts nothing.
 
 --version
-    Print the version and exit. Also `-V`. Starts nothing.
+    Print the version, and the commit it was built from when it was built
+    from a git checkout (`solium 0.0.0 (dfc95ce)`), and exit. Also `-V`.
+    Starts nothing.
 
 --tty
     Run on the hardware from a free virtual terminal, taking the screen, and

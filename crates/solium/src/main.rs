@@ -12,6 +12,8 @@ mod assets;
 mod capture;
 mod cli;
 mod clocks;
+#[cfg(test)]
+mod commit;
 mod cursor;
 mod decoration;
 mod dev;
@@ -292,7 +294,7 @@ fn main() -> Result<std::process::ExitCode> {
             return Ok(std::process::ExitCode::SUCCESS);
         }
         cli::Command::Version => {
-            println!("solium {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", cli::version());
             return Ok(std::process::ExitCode::SUCCESS);
         }
         // Before logging starts: the probe's child answers in one line.
