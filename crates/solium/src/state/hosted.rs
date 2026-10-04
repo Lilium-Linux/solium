@@ -358,8 +358,11 @@ impl Solium {
 
     /// One of the compositor's verbs, as the command that does it, or why it
     /// cannot be done: an action it does not know, logged once by name, data
-    /// with no window's id, or a window that is not there (Ruling 15).
+    /// with no window's id, or a window that is not there (Ruling 15). Only
+    /// `windows.close` reaches a window still loading: the others act on its
+    /// client, which it does not have yet.
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+    /// `state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`.
     pub(crate) fn act(&mut self, action: &str, data: &Json) -> Result<Command, &'static str> {
         let make: fn(u64) -> Command = match action {
@@ -375,7 +378,12 @@ impl Solium {
             }
         };
         let id = data.get("id").and_then(Json::as_u64).ok_or("bad-data")?;
-        if self.panes.by_script_id(id).is_none() {
+        let there = if action == "windows.close" {
+            self.panes.by_script_id(id).is_some()
+        } else {
+            self.window_by_id(id).is_some()
+        };
+        if !there {
             return Err("unknown-window");
         }
         Ok(make(id))

@@ -605,7 +605,7 @@ impl Solium {
     ///
     /// Ids that no longer exist are simply not found — a window closing while a
     /// mode holds its id is ordinary, not an error.
-    fn window_by_id(&self, id: u64) -> Option<Window> {
+    pub(super) fn window_by_id(&self, id: u64) -> Option<Window> {
         self.panes.by_script_id(id).and_then(Pane::client).cloned()
     }
 

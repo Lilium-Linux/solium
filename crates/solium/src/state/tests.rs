@@ -25225,6 +25225,39 @@ sol.on("surface", function(surface, action) if action == "go" then again() end e
                     "((the tries in the first dispatch, the attempts left), the tries after the next)"
                 );
             }
+
+            /// **A window still loading is not a window to focus, send
+            /// fullscreen or maximise**: those three answer `unknown-window`
+            /// for a pane with no client yet, though `sol.windows()` lists it,
+            /// and `windows.close` closes it.
+            #[test]
+            fn sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(reason) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                let source = crate::pane::loading_source(None);
+                let loading = desk.state.open_loading("app", None, source, None);
+                let data = format!(r#"{{"id":{}}}"#, loading.get());
+                queue(
+                    &mut desk,
+                    shell,
+                    &[
+                        ("windows.focus", &data),
+                        ("windows.fullscreen", &data),
+                        ("windows.maximize", &data),
+                        ("windows.close", &data),
+                    ],
+                );
+                desk.state.settle_scenes();
+                assert_eq!(
+                    desk.state.status,
+                    "unknown-window;unknown-window;unknown-window;nil;"
+                );
+            }
         }
     }
 

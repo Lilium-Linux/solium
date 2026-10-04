@@ -623,7 +623,8 @@ function sol.close(id) end
 ---`windows.maximize`, each with `{ id = <window id> }`; the last two toggle.
 ---Queued like every other request, and answered by `done(ok, reason)` once
 ---the compositor has acted, in a handler of its own; `reason` is
----`"unknown-action"`, `"unknown-window"` or `"bad-data"`. A `done` that
+---`"unknown-action"`, `"unknown-window"` or `"bad-data"`. A window still
+---loading is `"unknown-window"` to all but `windows.close`. A `done` that
 ---calls `sol.act` again is told again in the same dispatch, 16 rounds at
 ---most, and the rest at the next one. Answers the attempt's id, one no
 ---earlier `sol.act` answered. A
