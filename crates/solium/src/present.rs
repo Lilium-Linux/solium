@@ -755,6 +755,18 @@ pub(crate) fn release(pane: &Pane) {
     with_slot(pane, |slot| *slot = None);
 }
 
+/// Whether a pane is held where something presents it: a transform that is
+/// not released when it lands, which is a mode's [`present`] -- the overview's
+/// thumbnail -- until the mode clears it. A fullscreen or maximise glide
+/// leaves such a window where the mode draws it (#49).
+/// `a_window_a_mode_presents_stays_where_the_mode_draws_it`.
+pub(crate) fn presented(pane: &Pane) -> bool {
+    with_slot(pane, |slot| {
+        slot.is_some_and(|transform| !transform.releases())
+    })
+    .unwrap_or(false)
+}
+
 /// Whether a pane holds a transform at all. A window at rest holds none, and
 /// is drawn as a plain element, which is what lets a fullscreen game or video
 /// be scanned out directly once its change has landed.

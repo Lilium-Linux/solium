@@ -5293,6 +5293,60 @@ end)"#,
             assert!(!desk.transformed(), "and holds no transform");
         }
 
+        /// **A window a mode is presenting is left where the mode draws
+        /// it**: asking for fullscreen while it is a thumbnail, the client
+        /// is told its new size and the window goes on being drawn as the
+        /// thumbnail, rather than gliding out of the grid and landing over
+        /// it while the mode still holds the input. The mode letting go
+        /// brings it to the monitor.
+        #[test]
+        fn a_window_a_mode_presents_stays_where_the_mode_draws_it() {
+            let mut desk = Desk::new(
+                "presented",
+                &format!(
+                    "{SCRIPT}\n\
+                     sol.bind(\"super+o\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.present(window.id, {{ x = 100, y = 100, w = 200, h = 150 }})\n\
+                         end\n\
+                     end)\n\
+                     sol.bind(\"super+p\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.present_clear(window.id)\n\
+                         end\n\
+                     end)\n"
+                ),
+            );
+            let thumbnail = Rectangle::new((100, 100).into(), (200, 150).into()).to_f64();
+            assert!(desk.state.trigger("super+o"));
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "the premise: presented"
+            );
+
+            desk.toplevel.set_fullscreen(None);
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((1920, 1080)),
+                "the client is told its new size all the same"
+            );
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "and the window is still drawn where the mode draws it"
+            );
+
+            assert!(desk.state.trigger("super+p"));
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+            assert!(!desk.transformed());
+        }
+
         /// **A reload part of the way through leaves no window transformed**:
         /// the glide goes on under the new scripts and is released when it
         /// lands, entering and leaving alike.

@@ -960,6 +960,15 @@ impl Solium {
         let Some(held) = self.panes.get(pane).filter(|held| !held.leaving()) else {
             return;
         };
+        // **A mode's picture is the mode's.** A window the overview draws as
+        // a thumbnail stays one: the change is made, and the mode letting go
+        // brings the window to its new rectangle. Replacing the thumbnail
+        // with the glide landed it over the overview's grid while the mode
+        // still held the input.
+        // `a_window_a_mode_presents_stays_where_the_mode_draws_it`.
+        if present::presented(held) {
+            return;
+        }
         let Some(start) = start else {
             return;
         };
