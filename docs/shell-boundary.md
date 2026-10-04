@@ -553,9 +553,10 @@ vocabulary goes only to the listeners for its surface, as a tweak's does to
 An override is a `surface` listener of its own, under the same 100 ms deadline
 as every listener, so one stopped three times is taken out alone: every other
 action is still routed, and its own goes to `sol.act` again; a later override
-of the same name replaces it
+of the same name replaces it, and one of `nil` gives it back to `sol.act`
 (`script::tests::an_override_stopped_three_times_is_taken_out_alone`,
-`script::tests::a_later_override_of_the_same_name_replaces_the_earlier_one`).
+`script::tests::a_later_override_of_the_same_name_replaces_the_earlier_one`,
+`script::tests::an_override_of_nil_gives_its_action_back_to_the_compositor`).
 A scene that sets a string property named `action`, as scenes did before
 `Solium.send`, is heard the same way, after what it sent, with no data
 (`surface::tests::queued_actions_come_first_and_the_old_action_property_last`).

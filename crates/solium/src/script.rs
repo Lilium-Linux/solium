@@ -7681,6 +7681,51 @@ actions.override("windows.close", function() runs = runs + 1; while true do end 
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **An override of `nil` gives its action back to the compositor**, as
+    /// it did when the overrides were a table: no error, and `sol.act` hears
+    /// the action.
+    #[test]
+    fn an_override_of_nil_gives_its_action_back_to_the_compositor() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-actions-override-nil",
+            &format!(
+                r#"package.path = {shipped:?} .. "/?.lua"
+local actions = require("actions")
+actions.override("windows.close", function() heard = true end)
+actions.override("windows.close", nil)"#,
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        );
+        let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
+        let mut outcome = None;
+        let log = logged_while(|| {
+            outcome =
+                Some(scripts.surface_action("shell", "windows.close", &data, one_screen(&[])));
+        });
+        let acts: Vec<(String, String)> = outcome
+            .iter()
+            .flat_map(|outcome| outcome.commands.iter())
+            .filter_map(|command| match command {
+                Command::Act { action, data, .. } => Some((action.clone(), data.render())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (
+                scripts.evaluate("return tostring(heard)"),
+                acts,
+                log.contains("failed")
+            ),
+            (
+                "nil".to_owned(),
+                vec![("windows.close".to_owned(), r#"{"id":4}"#.to_owned())],
+                false
+            ),
+            "(whether the replaced override heard it, the acts queued, whether a listener failed):\n{log}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **A later override of the same name replaces the earlier one**: only
     /// the last answers, and the action does not also go to the compositor.
     #[test]
