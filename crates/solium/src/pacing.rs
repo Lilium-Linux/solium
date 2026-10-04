@@ -803,6 +803,10 @@ impl Counters {
             .unwrap_or_default();
         let mut qml = String::from("{");
         if let Ok(labels) = self.labels.try_borrow() {
+            // Scenes built from one file share a label, every window's frame
+            // in a style among them, and a JSON object holds a name once, so
+            // theirs are summed: `tests::scenes_that_share_a_label_are_summed_in_a_record`.
+            let mut spent: Vec<(&str, u64)> = Vec::with_capacity(SCENE_SLOTS);
             for (key, nanos) in self
                 .scene_spent
                 .iter()
@@ -812,17 +816,23 @@ impl Counters {
                 let label = usize::try_from(key.saturating_sub(1))
                     .ok()
                     .and_then(|id| labels.get(id))
-                    .and_then(Option::as_ref);
+                    .and_then(Option::as_deref);
                 if let Some(label) = label {
-                    if qml.len() > 1 {
-                        qml.push(',');
+                    match spent.iter_mut().find(|(seen, _)| *seen == label) {
+                        Some((_, sum)) => *sum = sum.saturating_add(nanos),
+                        None => spent.push((label, nanos)),
                     }
-                    qml.push_str(&format!(
-                        "{}:{}",
-                        crate::scripted::json_string(label),
-                        nanos / 1_000
-                    ));
                 }
+            }
+            for (label, nanos) in spent {
+                if qml.len() > 1 {
+                    qml.push(',');
+                }
+                qml.push_str(&format!(
+                    "{}:{}",
+                    crate::scripted::json_string(label),
+                    nanos / 1_000
+                ));
             }
         }
         qml.push('}');
@@ -2700,6 +2710,26 @@ mod tests {
                 "{field} is missing from {record}"
             );
         }
+    }
+
+    /// **Scenes that share a label are one name in a record's `qml`, their
+    /// time summed**: every window's frame in a style is built from the same
+    /// file, and a JSON object holds a name once, so a reader would keep the
+    /// last window's time alone.
+    #[test]
+    fn scenes_that_share_a_label_are_summed_in_a_record() {
+        let counters = counters();
+        let first = counters.intern("rounded/Pane");
+        let second = counters.intern("rounded/Pane");
+        let wallpaper = counters.intern("wallpaper/Wallpaper");
+        counters.charge(first, 400_000);
+        counters.charge(wallpaper, 50_000);
+        counters.charge(second, 300_000);
+        let record = counters.pass_record(1, ms(5), false);
+        assert!(
+            record.contains(r#""qml":{"rounded/Pane":700,"wallpaper/Wallpaper":50},"#),
+            "{record}"
+        );
     }
 
     /// Buffered, and flushed once a second: never a synchronous write per pass.
