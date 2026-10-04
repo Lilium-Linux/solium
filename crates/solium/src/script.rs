@@ -7815,6 +7815,8 @@ mod tests {
 
     /// **`workspaces.go` from a scene switches the monitor it names**, through
     /// `actions.lua` to `workspaces.lua`, which then declares the new state.
+    /// An id that is no workspace's number, `2.5` or none at all, switches
+    /// nothing and is logged.
     #[test]
     fn a_workspaces_go_from_a_scene_switches_the_monitor_it_names() {
         let Some((directory, mut scripts)) = shipped_init_with_user(
@@ -7837,30 +7839,50 @@ mod tests {
         };
         let _ = scripts.startup();
         let _ = scripts.monitors_changed(two());
-        let data =
-            crate::json::Json::parse(r#"{"id":"2","monitor":"test-2"}"#).expect("valid JSON");
-        let outcome = scripts.surface_action("shell", "workspaces.go", &data, two());
-        let showing = outcome
-            .commands
-            .iter()
-            .rev()
-            .find_map(|command| match command {
-                Command::Workspaces(declared) => Some(
-                    declared
-                        .groups
-                        .iter()
-                        .map(|group| (group.id.clone(), group.showing.clone()))
-                        .collect::<Vec<_>>(),
-                ),
-                _ => None,
-            });
+        let go = |scripts: &mut Scripts, data: &str| {
+            let data = crate::json::Json::parse(data).expect("valid JSON");
+            scripts
+                .surface_action("shell", "workspaces.go", &data, two())
+                .commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Workspaces(declared) => Some(
+                        declared
+                            .groups
+                            .iter()
+                            .map(|group| (group.id.clone(), group.showing.clone()))
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+        };
+        let mut others = Vec::new();
+        let log = logged_while(|| {
+            for data in [
+                r#"{"id":2.5,"monitor":"test-2"}"#,
+                r#"{"monitor":"test-2"}"#,
+            ] {
+                others.push(go(&mut scripts, data));
+            }
+        });
+        let showing = go(&mut scripts, r#"{"id":"2","monitor":"test-2"}"#);
         assert_eq!(
-            showing,
-            Some(vec![
-                ("test-1".to_owned(), vec!["1".to_owned()]),
-                ("test-2".to_owned(), vec!["2".to_owned()])
-            ]),
-            "(group, showing): the monitor named switches, not the one in front"
+            (
+                showing,
+                others,
+                log.matches("workspaces.go: answered only as").count()
+            ),
+            (
+                Some(vec![
+                    ("test-1".to_owned(), vec!["1".to_owned()]),
+                    ("test-2".to_owned(), vec!["2".to_owned()])
+                ]),
+                vec![None, None],
+                2
+            ),
+            "(group, showing) after the monitor named switches, not the one in front; \
+             declared after each other form; lines logged"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -7983,8 +8005,9 @@ mod tests {
 
     /// **`windows.send` names its window by number or by digits, and logs
     /// any other form**: `{ id: "8" }` sends window 8 as `{ id: 8 }` would,
-    /// while `{ id, monitor }`, a window that is not open and no id at all
-    /// each move nothing and say so.
+    /// while `{ id, monitor }`, a window that is not open, no id at all and
+    /// a workspace that is no workspace's number, `2.5`, each move nothing
+    /// and say so.
     #[test]
     fn a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form() {
         let Some((directory, mut scripts)) = shipped_init_with_user(
@@ -8014,6 +8037,7 @@ mod tests {
                 r#"{"id":7,"monitor":"test-1"}"#,
                 r#"{"id":99,"workspace":"2"}"#,
                 r#"{"workspace":"2"}"#,
+                r#"{"id":7,"workspace":2.5}"#,
             ] {
                 others.push(send(&mut scripts, data));
             }
@@ -8029,8 +8053,8 @@ mod tests {
                     (7, vec!["1".to_owned()]),
                     (8, vec!["2".to_owned()])
                 ])),
-                vec![None, None, None],
-                3
+                vec![None, None, None, None],
+                4
             ),
             "(declared after an id in digits, declared after each other form, lines logged)"
         );

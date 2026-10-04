@@ -493,12 +493,20 @@ end
 -- `init.lua` requires before this file: a configuration that took it out
 -- routes them its own way, and requiring it here would route each one a
 -- second time. See `workspaces_lua_does_not_route_a_scenes_actions_by_itself`.
+--
+-- A workspace is a whole number or its digits: `2.5` would slide the desks
+-- half a screen, or put a window on no desk at all, so it is logged like any
+-- other form and does nothing. See
+-- `a_workspaces_go_from_a_scene_switches_the_monitor_it_names` and
+-- `a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`.
 local actions = package.loaded["actions"]
 if actions then
     actions.override("workspaces.go", function(data)
-        local index = type(data) == "table" and tonumber(data.id)
+        local index = type(data) == "table" and math.tointeger(tonumber(data.id))
         if index then
             workspaces.go(index, data.monitor)
+        else
+            sol.log("workspaces.go: answered only as { id, monitor }, the id a workspace's number or its digits")
         end
     end)
     -- `{ id, workspace }`, the id a number or its digits, for a window that
@@ -507,7 +515,7 @@ if actions then
     -- `a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`.
     actions.override("windows.send", function(data)
         local id = type(data) == "table" and tonumber(data.id)
-        local index = id and tonumber(data.workspace)
+        local index = id and math.tointeger(tonumber(data.workspace))
         if index and is_open(id) then
             workspaces.send_window(id, index)
         else
