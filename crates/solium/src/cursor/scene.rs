@@ -30,7 +30,9 @@
 //! What animating costs on the GPU path is the readback `super::Backing`
 //! measures, paid on every frame the picture changes rather than once per
 //! size: tens of microseconds at pointer sizes, by `dev/wirecheck`'s sweep. A
-//! scene at rest pays nothing, since nothing is drawn again.
+//! scene at rest pays nothing, since nothing is drawn again, and only the
+//! monitors its picture reaches draw it
+//! (`tests::a_picture_is_drawn_only_on_the_outputs_it_touches`).
 
 use std::path::Path;
 
@@ -40,7 +42,7 @@ use smithay::{
         element::{Kind, memory::MemoryRenderBufferRenderElement},
         gles::GlesRenderer,
     },
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Size},
 };
 
 use super::{Backing, Cursor, KEPT};
@@ -141,6 +143,25 @@ impl Cursor {
         scale: f64,
     ) -> Drawn {
         Drawn::drawing(self, |this| this.placed(renderer, location, scale))
+    }
+
+    /// Whether the picture, placed for the pointer at `location`, reaches onto
+    /// an output of `screen` logical pixels at `scale`, in that output's own
+    /// coordinates. One that does not is not drawn there: an animating scene
+    /// would otherwise be drawn again for every monitor on every frame, at
+    /// each one's own size. One that reaches across an edge is drawn on both
+    /// sides of it, as `render::cursor` requires.
+    /// `tests::a_picture_is_drawn_only_on_the_outputs_it_touches`.
+    pub(crate) fn touches(
+        &self,
+        location: Point<f64, Logical>,
+        scale: f64,
+        screen: Size<i32, Logical>,
+    ) -> bool {
+        let (x, y) = origin(location, self.hotspot(), scale);
+        let (width, height) = device(self.own_size(), scale);
+        let screen = screen.to_f64().to_physical(scale);
+        x < screen.w && y < screen.h && x + f64::from(width) > 0.0 && y + f64::from(height) > 0.0
     }
 
     /// The picture, uploaded and placed with its hotspot on the pointer.
@@ -335,7 +356,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use smithay::backend::renderer::element::Kind;
-    use smithay::utils::{Logical, Point};
+    use smithay::utils::{Logical, Point, Size};
 
     use super::{Cursor, Motion, origin, plane};
     use crate::qml::pointer::tests::{beside, written};
@@ -532,6 +553,42 @@ mod tests {
                 size,
                 (48, 48),
                 "the shipped pointer as a scene at cursor.size 48"
+            );
+        });
+    }
+
+    /// **A picture is drawn only on the outputs it touches**: a 40 by 32
+    /// scene with its hotspot at 6,4 is drawn on a 100 by 100 monitor at 2x
+    /// with the pointer anywhere on it, and on the monitor beside it while it
+    /// reaches across the edge between them; once it is wholly past an edge,
+    /// that monitor draws nothing for it.
+    #[test]
+    fn a_picture_is_drawn_only_on_the_outputs_it_touches() {
+        on_the_qt_thread(|| {
+            let (directory, path) = written(
+                "solium-pointer-scene-touches",
+                "import QtQuick\nimport Solium\nItem {\n    width: 40; height: 32\n    Solium.cursor.hotspot: Qt.point(6, 4)\n}\n",
+            );
+            let cursor = Cursor::configured(&path, 24).expect("the scene builds");
+            let screen = Size::<i32, Logical>::from((100, 100));
+            let at = |x: f64, y: f64| cursor.touches(Point::from((x, y)), 2.0, screen);
+            let seen = [
+                at(50.0, 50.0),
+                at(99.0, 99.0),
+                at(-10.0, 50.0),
+                at(105.0, 50.0),
+                at(-34.0, 50.0),
+                at(50.0, -28.0),
+                at(107.0, 50.0),
+                at(50.0, 105.0),
+            ];
+            drop(cursor);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                seen,
+                [true, true, true, true, false, false, false, false],
+                "[in the middle, in the far corner, reaching in from the left, reaching back from \
+                 the right, wholly left, wholly above, wholly right, wholly below]"
             );
         });
     }

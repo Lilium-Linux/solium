@@ -109,7 +109,7 @@ use smithay::{
         },
     },
     input::pointer::{CursorIcon, CursorImageStatus},
-    utils::{IsAlive as _, Logical, Point, Rectangle, Transform},
+    utils::{IsAlive as _, Logical, Point, Rectangle, Size, Transform},
 };
 
 use crate::{
@@ -992,15 +992,24 @@ impl Pointer {
     /// is, as [`Drawn`] does for every other scene. A scene that would not
     /// build (`tests::a_reload_swaps_the_scene`), or drew nothing this frame,
     /// leaves the two arms below to draw the pointer as they do with none
-    /// configured.
+    /// configured. A scene that does not reach onto this output, of `screen`
+    /// logical pixels, is drawn nothing for here, and neither arm draws in
+    /// its place (`scene::tests::a_picture_is_drawn_only_on_the_outputs_it_touches`).
     pub(crate) fn element(
         &mut self,
         renderer: &mut GlesRenderer,
         icon: CursorIcon,
         location: Point<f64, Logical>,
         scale: f64,
+        screen: Size<i32, Logical>,
     ) -> Drawn {
         if let Some(cursor) = self.scene() {
+            if !cursor.touches(location, scale, screen) {
+                return Drawn {
+                    element: None,
+                    animating: false,
+                };
+            }
             let drawn = cursor.drawn(renderer, location, scale);
             if drawn.element.is_some() {
                 return drawn;
