@@ -963,6 +963,19 @@ impl Solium {
         let Some(start) = start else {
             return;
         };
+        // **Instant is no transform at all**, not one of no length: that
+        // one's target -- the new rectangle -- is what the next frame draws,
+        // with the old picture stretched into it, and it is released only
+        // after that frame. A game on the `instant` list flashed its old
+        // picture across the monitor before snapping back to its own size. A
+        // glide in flight is stopped too, and the window is drawn as it is
+        // from the next frame, as before #49.
+        // `an_instant_change_draws_the_window_as_it_is_on_the_next_frame`.
+        if motion.duration.is_zero() {
+            present::release(held);
+            self.redraw = true;
+            return;
+        }
         let to = grown(held.slot(), self.insets_of(pane));
         present::from(held, to, start, now, motion.duration, motion.easing);
         let lands = now + motion.duration;

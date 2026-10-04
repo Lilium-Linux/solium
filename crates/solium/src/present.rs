@@ -745,6 +745,16 @@ pub(crate) fn settle(pane: &Pane, now: Duration) -> bool {
     .unwrap_or(false)
 }
 
+/// Stop transforming a pane now: from the next frame it is drawn as it is.
+///
+/// What an instant fullscreen or maximise leaves behind (#49). A transform of
+/// no length would do the same one frame later, and draw its target on the
+/// frame between: the new rectangle, with the client's old picture stretched
+/// into it. `an_instant_change_draws_the_window_as_it_is_on_the_next_frame`.
+pub(crate) fn release(pane: &Pane) {
+    with_slot(pane, |slot| *slot = None);
+}
+
 /// Whether a pane holds a transform at all. A window at rest holds none, and
 /// is drawn as a plain element, which is what lets a fullscreen game or video
 /// be scanned out directly once its change has landed.

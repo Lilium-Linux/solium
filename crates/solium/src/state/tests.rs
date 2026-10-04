@@ -5268,6 +5268,31 @@ end)"#,
             );
         }
 
+        /// **An instant change is drawn as the window is on the next frame**:
+        /// a listener answering with no length leaves no transform behind,
+        /// rather than one whose target -- the monitor -- the next frame
+        /// draws with the old 400x300 picture stretched across it.
+        #[test]
+        fn an_instant_change_draws_the_window_as_it_is_on_the_next_frame() {
+            let mut desk = Desk::new(
+                "instant",
+                r#"
+                sol.on("fullscreen", function() sol.animate({ duration = 0 }) end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let next = desk.state.clock.now() + Duration::from_millis(16);
+            let drawn = desk.drawn(next);
+            assert_eq!(
+                (drawn.size.w, drawn.size.h),
+                (400.0, 300.0),
+                "the first frame draws the committed 400x300 picture, not stretched to the monitor"
+            );
+            assert!(!desk.transformed(), "and holds no transform");
+        }
+
         /// **A reload part of the way through leaves no window transformed**:
         /// the glide goes on under the new scripts and is released when it
         /// lands, entering and leaving alike.
