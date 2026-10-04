@@ -759,7 +759,8 @@ sol._attempts = {}
 ---@type table<string, table>
 sol._keeps = {}
 
----Internal: restarts the handler deadline. Called before each listener.
+---Internal: restarts the handler deadline. Called before each listener and
+---each `done`.
 ---@private
 ---@type fun()
 sol._deadline = function() end

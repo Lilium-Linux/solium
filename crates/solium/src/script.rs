@@ -1341,8 +1341,10 @@ impl Scripts {
     }
 
     /// Attempts whose outcomes are known: each one's `done` is called once,
-    /// and forgotten, in a dispatch of its own.
-    /// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
+    /// and forgotten, in a dispatch of its own, each under the whole handler
+    /// deadline.
+    /// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
+    /// `tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`.
     pub(crate) fn attempts_settled(&mut self, settled: &[Settled], snapshot: Snapshot) -> Outcome {
         let settled = settled.to_vec();
         self.dispatch(snapshot, move |sol| {
@@ -1350,9 +1352,9 @@ impl Scripts {
             for each in &settled {
                 let done: Option<mlua::Function> = attempts.get(each.attempt)?;
                 attempts.set(each.attempt, Value::Nil)?;
-                if let Some(done) = done
-                    && let Err(err) = done.call::<()>((each.ok, each.reason))
-                {
+                let Some(done) = done else { continue };
+                restart_deadline(sol);
+                if let Err(err) = done.call::<()>((each.ok, each.reason)) {
                     tracing::error!(%err, "an attempt's done failed");
                 }
             }
@@ -1925,8 +1927,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // How many times each listener was stopped at the deadline, by function.
     // `tests::a_listener_stopped_three_times_is_taken_out`.
     sol.set("_strikes", lua.create_table()?)?;
-    // Restart the handler clock: called before each listener, so each has
-    // the whole deadline. `tests::each_listener_has_the_whole_deadline`.
+    // Restart the handler clock: called before each listener, and before
+    // each `done` in `Scripts::attempts_settled`, so each has the whole
+    // deadline. `tests::each_listener_has_the_whole_deadline`,
+    // `tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`.
     sol.set(
         "_deadline",
         lua.create_function(|lua, (): ()| {
@@ -7610,6 +7614,43 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
             started.elapsed()
         );
         assert_eq!(outcome.status.as_deref(), Some("ran"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A `done` that never returns is stopped, and the next one still hears
+    /// its outcome**, with the whole deadline of its own.
+    #[test]
+    fn a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-done",
+            r#"sol.on("surface", function()
+                   sol.act("windows.focus", { id = 1 }, function() while true do end end)
+                   sol.act("windows.focus", { id = 2 }, function(ok) for _ = 1, 200000 do end sol.status("second " .. tostring(ok)) end)
+               end)"#,
+        );
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        let settled: Vec<Settled> = outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Act { attempt, .. } => Some(Settled {
+                    attempt: *attempt,
+                    ok: true,
+                    reason: None,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(settled.len(), 2, "two acts: {:?}", outcome.commands);
+        let started = std::time::Instant::now();
+        let status = scripts.attempts_settled(&settled, one_screen(&[])).status;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(status.as_deref(), Some("second true"));
         let _ = std::fs::remove_dir_all(&directory);
     }
 
