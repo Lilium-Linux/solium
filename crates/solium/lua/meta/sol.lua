@@ -584,7 +584,9 @@ function sol.toggle_maximize(id) end
 
 ---Move the keyboard to the window beside the focused one. Every `direction`
 ---listener is told `("focus", dir)`, and the layout in charge answers
----(`lua/direction.lua`). Anything but the four directions is an error.
+---(`lua/direction.lua`). Anything but the four directions is an error. The
+---listeners' time counts against the handler that called this, so one stopped
+---at the deadline stops that handler too.
 ---@param dir "left"|"right"|"up"|"down"
 ---@return nil
 function sol.focus_direction(dir) end
@@ -593,6 +595,8 @@ function sol.focus_direction(dir) end
 ---`("move", dir)`. Tiling trades it with its neighbour, scrolling moves it
 ---within or between columns, and a fullscreen or maximised window moved to
 ---another monitor stays so there. Anything but the four directions is an error.
+---The listeners' time counts against the handler that called this, so one
+---stopped at the deadline stops that handler too.
 ---@param dir "left"|"right"|"up"|"down"
 ---@return nil
 function sol.move_direction(dir) end

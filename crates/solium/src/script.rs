@@ -3486,6 +3486,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 // stopped here once that has run out: a loop of these calls
                 // is stopped however few of its instructions are its own.
                 // `tests::a_binding_that_loops_on_focus_direction_is_stopped`.
+                // The listeners' time counts against it, so one stopped at
+                // the deadline stops it too.
+                // `tests::a_direction_listener_stopped_at_the_deadline_stops_its_caller_too`.
                 let started = deadline_started(lua);
                 let heard = call_listeners(sol, "direction", (verb, dir));
                 set_deadline(lua, started);
@@ -7796,6 +7799,30 @@ actions.override("windows.focus", function(data, surface) sol.status("mine " .. 
             started.elapsed() < std::time::Duration::from_secs(2),
             "took {:?}",
             started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A `direction` listener stopped at the deadline stops the handler
+    /// that called `sol.focus_direction` too**: the listeners' time counts
+    /// against that handler, which is what keeps a loop of these calls
+    /// stoppable.
+    #[test]
+    fn a_direction_listener_stopped_at_the_deadline_stops_its_caller_too() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-deadline-direction-caller",
+            r#"
+            sol.on("direction", function() while true do end end)
+            sol.on("layout", function()
+                sol.status("asked")
+                sol.focus_direction("left")
+                sol.status("went on")
+            end)
+            "#,
+        );
+        assert_eq!(
+            scripts.relayout(one_screen(&[])).status.as_deref(),
+            Some("asked")
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
