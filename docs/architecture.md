@@ -229,6 +229,13 @@ its warp, and the warp is drawn once per damage rectangle, under a scissor,
 never whole: the whole mesh drawn over the copy already in the buffer would
 blend its translucent edge twice (`dev/wirecheck` case 11g).
 
+A warped window's popups are not in its capture. They are a capture of their
+own, at the rectangle they cover, which may reach past the window, and are
+drawn as a second warp in front of the window's: the same matrix, pivot and
+deform, meshed over their part of the window's rectangle, with an id and a
+commit of their own. So a menu stays whole and on top of its window's frame
+during a tilt or a genie, and is captured again when it commits.
+
 The texture is the cost. Every visible rounded window keeps one, which is why
 `render::prepare` captures no pane that no monitor shows. What is
 beneath a node, the input a blur would need, is named in `fragment.rs` and

@@ -245,7 +245,10 @@ impl Drawn {
 /// only when the capture is redrawn or the mesh's [`Shape`] changes:
 /// `keyed::tests::a_warp_at_rest_keeps_its_commit`), and a masked client
 /// keeps a texture, the size it was captured at, a radius in physical pixels
-/// and the program to draw it through. See [`crate::pass::Pass`].
+/// and the program to draw it through. See [`crate::pass::Pass`]. A warped
+/// pane's popups are a third list, a warp of their own drawn in front of the
+/// pane's, which also keeps the part of the pane's unit square they cover
+/// (`offscreen::over_job`).
 ///
 /// Built in two phases: every capture's element list first, which can run Qt,
 /// then every capture drawn on one bound carrier, which must not
@@ -253,6 +256,14 @@ impl Drawn {
 #[derive(Default)]
 pub(crate) struct Prepared {
     warps: Vec<(Window, GlesTexture, crate::warp::Program, Id, CommitCounter)>,
+    overs: Vec<(
+        Window,
+        GlesTexture,
+        crate::warp::Program,
+        Id,
+        CommitCounter,
+        crate::warp::UnitRect,
+    )>,
     passes: Vec<(Window, crate::pass::Pass)>,
 }
 
@@ -278,6 +289,37 @@ impl Shape {
             scale,
             aimed,
         }
+    }
+}
+
+/// Which of a warped pane's two warps goes in first, which is nearer the
+/// front: its popups, as on the flat path. `tests::a_warped_panes_popups_are_in_front_of_it`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WarpPiece {
+    Over,
+    Pane,
+}
+
+pub(crate) const WARP_ORDER: [WarpPiece; 2] = [WarpPiece::Over, WarpPiece::Pane];
+
+/// The part of a pane's unit square its popups cover: their rectangle,
+/// relative to the client's corner at `client_corner` in the pane, over the
+/// pane's `outer` size. `tests::the_popups_part_is_their_rectangle_over_the_pane`.
+pub(crate) fn over_part(
+    outer: Size<i32, Logical>,
+    client_corner: Point<i32, Logical>,
+    covered: Rectangle<i32, Logical>,
+) -> crate::warp::UnitRect {
+    let (w, h) = (f64::from(outer.w.max(1)), f64::from(outer.h.max(1)));
+    let (x, y) = (
+        f64::from(client_corner.x + covered.loc.x),
+        f64::from(client_corner.y + covered.loc.y),
+    );
+    crate::warp::UnitRect {
+        u0: x / w,
+        v0: y / h,
+        u1: (x + f64::from(covered.size.w)) / w,
+        v1: (y + f64::from(covered.size.h)) / h,
     }
 }
 
@@ -315,6 +357,27 @@ impl Prepared {
     ) -> Option<(GlesTexture, crate::warp::Program, Id, CommitCounter)> {
         self.warps.iter().find(|(each, ..)| each == window).map(
             |(_, texture, program, id, commit)| (texture.clone(), *program, id.clone(), *commit),
+        )
+    }
+
+    /// Lend the capture of `window`'s popups, for the warp drawn in front of
+    /// its own, with the part of the pane's unit square it covers. Lent for
+    /// `warp`'s reason. `None` when it has no popups open.
+    /// `dev/present-check.sh`'s `menu` case draws it.
+    fn over(
+        &self,
+        window: &Window,
+    ) -> Option<(
+        GlesTexture,
+        crate::warp::Program,
+        Id,
+        CommitCounter,
+        crate::warp::UnitRect,
+    )> {
+        self.overs.iter().find(|(each, ..)| each == window).map(
+            |(_, texture, program, id, commit, part)| {
+                (texture.clone(), *program, id.clone(), *commit, *part)
+            },
         )
     }
 
@@ -388,6 +451,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     state.pool.set_budget(2 * largest);
 
     let mut warps = Vec::new();
+    let mut overs = Vec::new();
     let mut passes = Vec::new();
     let mut jobs = Vec::new();
 
@@ -508,10 +572,26 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
                 // Already drawn from exactly this: no frame (`offscreen::kept`,
                 // `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`).
                 if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
-                    let commit = warp_commit(state, pane, shape, false);
-                    warps.push((window, texture, program, id, commit));
+                    let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, false);
+                    warps.push((window.clone(), texture, program, id, commit));
                 } else {
-                    jobs.push((job, Then::Warp(window, program, pane, shape)));
+                    jobs.push((job, Then::Warp(window.clone(), program, pane, shape)));
+                }
+                // Its popups the same way, in a capture of their own that
+                // `panes` draws in front of the pane's warp
+                // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept
+                // until they commit:
+                // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
+                if let Some((job, part)) =
+                    crate::offscreen::over_job(state, renderer, pane, &window, scale)
+                {
+                    if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
+                        let commit =
+                            warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
+                        overs.push((window, texture, program, id, commit, part));
+                    } else {
+                        jobs.push((job, Then::Over(window, program, pane, shape, part)));
+                    }
                 }
             }
             continue;
@@ -539,38 +619,57 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     for (then, texture, id, commit) in crate::offscreen::draw(state, renderer, jobs) {
         match then {
             Then::Warp(window, program, pane, shape) => {
-                let commit = warp_commit(state, pane, shape, true);
+                let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
                 warps.push((window, texture, program, id, commit));
+            }
+            Then::Over(window, program, pane, shape, part) => {
+                let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
+                overs.push((window, texture, program, id, commit, part));
             }
             Then::Pass(window, pending) => {
                 passes.push((window, pending.with(texture, id, commit)));
             }
         }
     }
-    Prepared { warps, passes }
+    Prepared {
+        warps,
+        overs,
+        passes,
+    }
 }
 
-/// What a capture becomes once drawn: `dev/fence-check.sh` has one of each.
-/// A warp carries its pane and the [`Shape`] its commit is moved by.
+/// What a capture becomes once drawn: `dev/fence-check.sh` has a warp and a
+/// pass, `dev/present-check.sh`'s menu case a warp and its popups. A warp
+/// carries its pane and the [`Shape`] its commit is moved by; its popups' warp
+/// the part of the pane they cover as well.
 #[derive(Debug)]
 enum Then {
     Warp(Window, crate::warp::Program, crate::pane::PaneId, Shape),
+    Over(
+        Window,
+        crate::warp::Program,
+        crate::pane::PaneId,
+        Shape,
+        crate::warp::UnitRect,
+    ),
     Pass(Window, crate::pass::Pending),
 }
 
-/// The commit `pane`'s warp carries this pass: moved when its capture was
-/// `redrawn` or its `shape` changed, and only then.
-/// `keyed::tests::a_warp_at_rest_keeps_its_commit`.
+/// The commit `pane`'s `kind` of warp carries this pass, its own or its
+/// popups': moved when its capture was `redrawn` or its `shape` changed, and
+/// only then. `keyed::tests::a_warp_at_rest_keeps_its_commit`,
+/// `keyed::tests::the_popups_warp_commits_apart_from_the_panes`.
 fn warp_commit(
     state: &mut Solium,
     pane: crate::pane::PaneId,
+    kind: crate::keyed::Kind,
     shape: Shape,
     redrawn: bool,
 ) -> CommitCounter {
     state
         .panes
         .get_mut(pane)
-        .map(|held| held.captures_mut().warp_commit_for(shape, redrawn))
+        .map(|held| held.captures_mut().warp_commit_for(kind, shape, redrawn))
         .unwrap_or_default()
 }
 
@@ -1431,7 +1530,10 @@ fn panes(
         // window is rendered flat into a texture first — frame included — and
         // that texture is bent, so the whole window deforms as one thing
         // instead of the client tilting away from its own titlebar. Its popups
-        // are not in that texture: `state::tests::a_warped_panes_capture_holds_no_popups`.
+        // are not in that texture (`state::tests::a_warped_panes_capture_holds_no_popups`):
+        // they are a capture of their own, bent by the same matrix and deform
+        // over their part of the pane, and drawn in front of it
+        // (`tests::a_warped_panes_popups_are_in_front_of_it`).
         //
         // The deform's anchor is resolved *here*, on the frame that draws it,
         // because what it is aimed at moves — see `present::Anchor`. An anchor
@@ -1440,26 +1542,59 @@ fn panes(
         // an effect.
         let aimed = state.aimed_at_for(pane, frame.deform);
         if (!frame.matrix.is_identity() || aimed.is_some())
-            && let Some(mesh) = warp_mesh_on(
+            && let Some((texture, program, id, commit)) = prepared.warp(&window)
+            && let Some(pane_mesh) = warp_mesh_on(
                 screen,
                 &drawn_global,
                 aimed,
                 crate::warp::UnitRect::WHOLE,
                 scale,
             )
-            && let Some((texture, program, id, commit)) = prepared.warp(&window)
         {
-            // Its pane capture's id for life, and the commit `prepare` moved
-            // only if the picture or the mesh changed, so a still warp is not
-            // damaged and a moving one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
-            elements.push(Element::Warped(crate::warp::Warp::new(
-                id,
-                commit,
-                texture,
-                mesh,
-                frame.opacity,
-                program,
-            )));
+            // The pane's own mesh first: it can fail (a vertex behind the
+            // viewer), and then nothing of the warp is pushed and the pane
+            // falls through to the flat path below, as before. A popups' mesh
+            // that fails alone drops the popups for that frame and keeps the
+            // pane. Popups first, nearer the front:
+            // `tests::a_warped_panes_popups_are_in_front_of_it`, and
+            // `dev/present-check.sh`'s `menu` case through the real draw.
+            let mut pane_warp = Some((id, texture, pane_mesh));
+            for piece in WARP_ORDER {
+                match piece {
+                    WarpPiece::Over => {
+                        if let Some((over_texture, over_program, over_id, over_commit, part)) =
+                            prepared.over(&window)
+                            && let Some(mesh) =
+                                warp_mesh_on(screen, &drawn_global, aimed, part, scale)
+                        {
+                            elements.push(Element::Warped(crate::warp::Warp::new(
+                                over_id,
+                                over_commit,
+                                over_texture,
+                                mesh,
+                                frame.opacity,
+                                over_program,
+                            )));
+                        }
+                    }
+                    WarpPiece::Pane => {
+                        // Its pane capture's id for life, and the commit
+                        // `prepare` moved only if the picture or the mesh
+                        // changed, so a still warp is not damaged and a moving
+                        // one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
+                        if let Some((id, texture, mesh)) = pane_warp.take() {
+                            elements.push(Element::Warped(crate::warp::Warp::new(
+                                id,
+                                commit,
+                                texture,
+                                mesh,
+                                frame.opacity,
+                                program,
+                            )));
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -1554,6 +1689,10 @@ fn panes(
         // frontmost thing its window owns while it is up -- that is what a
         // grab means -- and a style's overlay layer covering one would be the
         // same bug with a different layer's name on it.
+        //
+        // In front on both paths: a warped pane's popups are a capture of
+        // their own, drawn as a warp in front of the pane's above
+        // (`tests::a_warped_panes_popups_are_in_front_of_it`).
         let (popups, _) = popup_elements(renderer, &window, origin, output_scale, frame.opacity);
         // Scaled with the window and not cut to its tile: a menu has to reach
         // past its parent's tile, and a menu cut to it would lose every item
@@ -1976,10 +2115,11 @@ fn cursor(
 /// window is being deformed and comes back when it lands, which is visible but
 /// is not wrong pixels.
 ///
-/// **No popups.** A warped pane's popups are a capture of their own, drawn in
-/// front of the warp (Task 20): inside this one they sat under the titlebar
-/// and were cut at the window's edge.
-/// `state::tests::a_warped_panes_capture_holds_no_popups`.
+/// **No popups.** A warped pane's popups are a capture of their own
+/// (`offscreen::over_job`), drawn in front of the warp: inside this one they
+/// sat under the titlebar and were cut at the window's edge.
+/// `state::tests::a_warped_panes_capture_holds_no_popups`,
+/// `tests::a_warped_panes_popups_are_in_front_of_it`.
 pub(crate) fn flat_window_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -2633,6 +2773,34 @@ mod tests {
         assert_eq!(
             super::wanted_capture(super::Route::Flat, &[Effect::rounded(Corners::all(12.0))]),
             Some(crate::keyed::Kind::Client)
+        );
+    }
+
+    /// **A warped pane's popups are in front of it**, as on the flat path.
+    #[test]
+    fn a_warped_panes_popups_are_in_front_of_it() {
+        assert_eq!(
+            super::WARP_ORDER,
+            [super::WarpPiece::Over, super::WarpPiece::Pane]
+        );
+    }
+
+    /// The popups' part of the pane: their rectangle, moved by the client's
+    /// corner in the pane, over the pane's size; past the pane, past 1.
+    #[test]
+    fn the_popups_part_is_their_rectangle_over_the_pane() {
+        let outer = smithay::utils::Size::from((400, 300));
+        let corner = smithay::utils::Point::from((0, 30));
+        let covered = smithay::utils::Rectangle::new((300, 240).into(), (200, 90).into());
+        let part = super::over_part(outer, corner, covered);
+        assert_eq!(
+            part,
+            crate::warp::UnitRect {
+                u0: 0.75,
+                v0: 0.9,
+                u1: 1.25,
+                v1: 1.2
+            }
         );
     }
 

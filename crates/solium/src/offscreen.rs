@@ -18,7 +18,8 @@
 //! `keyed::tests::a_genie_costs_one_texture_and_not_one_a_frame`.
 //!
 //! **Built first, drawn after.** `render::prepare` builds every capture's
-//! element list first ([`pane_job`], [`client_job`]), which can run Qt, and
+//! element list first ([`pane_job`], [`over_job`], [`client_job`]), which can
+//! run Qt, and
 //! then [`draw`] binds a 1x1 carrier once and draws each capture into its own
 //! target, a frame each, which must not run Qt.
 //! `render::tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
@@ -34,7 +35,7 @@ use smithay::{
         },
     },
     desktop::Window,
-    utils::{Buffer as BufferCoords, Logical, Physical, Rectangle, Scale, Size, Transform},
+    utils::{Buffer as BufferCoords, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
 };
 
 use crate::{pane::PaneId, state::Solium};
@@ -93,10 +94,11 @@ fn client_pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
 
 /// One capture to draw: what, into which of a pane's captures, how big.
 ///
-/// Built by [`pane_job`] or [`client_job`] while `render::prepare` walks the
-/// panes, which can run Qt, and drawn by [`draw`] once every job is built,
-/// which must not. `dev/fence-check.sh` draws both kinds in one pass, and
-/// `dev/present-check.sh` every warp it measures.
+/// Built by [`pane_job`], [`over_job`] or [`client_job`] while
+/// `render::prepare` walks the panes, which can run Qt, and drawn by [`draw`]
+/// once every job is built, which must not. `dev/fence-check.sh` draws a warp
+/// and a client pass in one pass, and `dev/present-check.sh` every warp it
+/// measures, a menu's among them.
 pub(crate) struct Job {
     pub(crate) pane: PaneId,
     pub(crate) kind: crate::keyed::Kind,
@@ -160,6 +162,57 @@ pub(crate) fn pane_job(
         elements,
         inputs,
     })
+}
+
+/// A warped pane's popups, captured at the rectangle they cover, and their
+/// part of the pane's unit square. `None` when it has none open.
+///
+/// The rectangle may reach past the window, so a menu is captured whole and
+/// not cut at the window's edge (`state::tests::a_popup_past_the_window_is_captured_whole`);
+/// it is keyed on the popups' own surfaces, so a menu that commits during a
+/// flight is captured again
+/// (`state::tests::a_commit_on_a_popup_makes_the_popups_capture_stale`).
+/// `render::panes` draws it as a second warp in front of the pane's, through
+/// the same matrix and deform, meshed over that part
+/// (`render::tests::a_warped_panes_popups_are_in_front_of_it`,
+/// `render::tests::the_popups_part_is_their_rectangle_over_the_pane`).
+pub(crate) fn over_job(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: PaneId,
+    window: &Window,
+    scale: f64,
+) -> Option<(Job, crate::warp::UnitRect)> {
+    let flat = crate::render::flat(state, window)?;
+    let corner = Point::<i32, Logical>::from((flat.insets.left, flat.insets.top));
+    let (_, covered) =
+        crate::render::popup_elements(renderer, window, (0, 0).into(), Scale::from(scale), 1.0);
+    let covered = covered?;
+    // Drawn so the covered rectangle's corner is the texture's: a menu drawn
+    // anywhere else is cut at the texture's edge, which
+    // `dev/present-check.sh`'s `menu` case measures.
+    let origin =
+        (Point::<i32, Logical>::from((0, 0)) - covered.loc).to_physical_precise_round(scale);
+    let (popups, _) =
+        crate::render::popup_elements(renderer, window, origin, Scale::from(scale), 1.0);
+    let elements: Vec<crate::render::Element> = popups
+        .into_iter()
+        .map(crate::render::Element::Window2)
+        .collect();
+    let (kind, size) = (crate::keyed::Kind::Over, pixels(covered.size, scale));
+    let inputs = crate::keyed::Inputs::of(kind, size, scale, &elements);
+    let part = crate::render::over_part(flat.outer, corner, covered);
+    Some((
+        Job {
+            pane,
+            kind,
+            size,
+            scale,
+            elements,
+            inputs,
+        },
+        part,
+    ))
 }
 
 /// `window`'s **client and nothing else**, at the size its pane shows it — its

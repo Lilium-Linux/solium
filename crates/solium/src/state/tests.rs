@@ -7824,6 +7824,55 @@ end)"#,
         );
     }
 
+    /// **A menu that commits during a flight is captured again**: the popups'
+    /// own capture is keyed on the popups' surfaces, so a warped window's menu
+    /// shows its live content, not the picture it had when the flight began.
+    #[test]
+    fn a_commit_on_a_popup_makes_the_popups_capture_stale() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface, xdg_surface) =
+            open_xdg(&mut display, &mut state, &conn, &client, &qh);
+        let popup = drawn_popup(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+            &xdg_surface,
+            (10, 10),
+            (40, 30),
+        );
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let key = |renderer: &mut DummyRenderer| {
+            let (elements, covered) =
+                crate::render::popup_elements(renderer, &window, (0, 0).into(), scale, 1.0);
+            let size = covered.map_or((1, 1).into(), |rect| (rect.size.w, rect.size.h).into());
+            crate::keyed::Inputs::of(crate::keyed::Kind::Over, size, 1.0, &elements)
+        };
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, key(&mut renderer));
+        assert!(
+            !capture.stale(&key(&mut renderer)),
+            "nothing committed, and the menu would be drawn again"
+        );
+        commit_buffer(&client, &qh, &popup, 40, 30);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert!(
+            capture.stale(&key(&mut renderer)),
+            "the menu committed and its capture did not notice"
+        );
+    }
+
     /// **#133 review, finding 8: a menu past its parent's tile takes the
     /// press.**
     ///
