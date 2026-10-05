@@ -70,6 +70,32 @@ fn a_pane_is_on_a_monitor_only_if_some_monitor_covers_part_of_it() {
     assert!(!anywhere_on(at(100, 100, 800, 600), []));
 }
 
+/// **A deform at rest is aimed at nothing**, so a window brought back from a
+/// genie with `sol.present(id, {})` is not captured and warped on every frame
+/// for good (#140).
+#[test]
+fn a_deform_at_rest_is_aimed_at_nothing() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let state = Solium::new(display.handle());
+    let genie = |progress| crate::present::Deform {
+        effect: solium_effects::Deform::Genie {
+            progress,
+            spread: 1.4,
+            axis: solium_effects::Axis::Down,
+        },
+        anchor: crate::present::Anchor::Rect(crate::present::logical((10.0, 10.0), (120.0, 24.0))),
+    };
+    assert!(
+        state.aimed_at(Some(genie(0.0))).is_none(),
+        "a genie at rest still aims"
+    );
+    assert!(
+        state.aimed_at(Some(genie(0.5))).is_some(),
+        "a genie under way must aim"
+    );
+}
+
 /// **What the notice at the end of a reload is looking at.**
 ///
 /// The recovery half of #116 shipped with no test at all, which is how the

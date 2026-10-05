@@ -311,6 +311,24 @@ impl Frame {
         }
     }
 
+    /// Whether this frame draws a pane exactly at rest at `real`: its own
+    /// rectangle, opaque, flat, undeformed, unzoomed and at depth 0.
+    /// `tests::a_held_transform_that_lands_on_the_panes_own_frame_is_released`.
+    pub(crate) fn is_rest_of(&self, real: Rectangle<i32, Logical>) -> bool {
+        let real = real.to_f64();
+        let near = |a: f64, b: f64| (a - b).abs() <= 1e-6;
+        near(self.rect.loc.x, real.loc.x)
+            && near(self.rect.loc.y, real.loc.y)
+            && near(self.rect.size.w, real.size.w)
+            && near(self.rect.size.h, real.size.h)
+            && self.opacity >= 1.0 - 1e-6
+            && self.matrix.is_identity()
+            && self.deform.is_none_or(|deform| deform.effect.is_at_rest())
+            && near(self.zoom.0, 1.0)
+            && near(self.zoom.1, 1.0)
+            && self.z.abs() <= 1e-6
+    }
+
     /// The [`Self::zoom`] that draws a pane whose own rectangle is `real` at
     /// `rect`: a script's rectangle, read as a picture of the window it puts
     /// there.
@@ -729,7 +747,13 @@ pub(crate) fn frame(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -
 }
 
 /// Retire finished transforms. Returns whether this window is still animating.
-pub(crate) fn settle(pane: &Pane, now: Duration) -> bool {
+///
+/// A releasing transform is dropped when it lands, and so is a held one that
+/// lands on the pane's own rest frame: holding it would hold nothing and cost
+/// a capture a frame for good (#140, §6.5 C3).
+/// `tests::a_held_transform_that_lands_on_the_panes_own_frame_is_released`,
+/// `tests::a_held_transform_away_from_rest_is_kept`.
+pub(crate) fn settle(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -> bool {
     with_slot(pane, |slot| {
         let Some(transform) = *slot else {
             return false;
@@ -737,7 +761,7 @@ pub(crate) fn settle(pane: &Pane, now: Duration) -> bool {
         if !transform.finished(now) {
             return true;
         }
-        if transform.releases() {
+        if transform.releases() || transform.target().is_rest_of(real) {
             *slot = None;
         }
         false
@@ -1197,7 +1221,7 @@ mod tests {
             "and home, so the desk's offset is the whole of where it is drawn"
         );
         assert!(
-            !settle(&pane, Duration::from_millis(800)),
+            !settle(&pane, real, Duration::from_millis(800)),
             "and then it stops being transformed at all: a window that came              from nowhere goes back to costing nothing"
         );
         assert_eq!(
@@ -1292,6 +1316,64 @@ mod tests {
                 spread: 1.0,
                 axis: solium_effects::Axis::Down,
             })
+        );
+    }
+
+    /// **A held transform that lands on the pane's own frame is released**, so
+    /// the pane is drawn where the layout puts it next, and costs nothing.
+    #[test]
+    fn a_held_transform_that_lands_on_the_panes_own_frame_is_released() {
+        let real = rect(100, 100, 400, 300);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            real,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        present(
+            &pane,
+            real,
+            Frame::real(real),
+            Duration::ZERO,
+            Duration::from_millis(100),
+            Curve::OutCubic,
+        );
+        assert!(!settle(&pane, real, Duration::from_millis(200)), "landed");
+        let moved = rect(600, 100, 400, 300);
+        assert_eq!(
+            frame(&pane, moved, Duration::from_millis(300)),
+            Frame::real(moved),
+            "still held at the old frame"
+        );
+    }
+
+    /// The guard: a held transform away from rest is kept.
+    #[test]
+    fn a_held_transform_away_from_rest_is_kept() {
+        let real = rect(100, 100, 400, 300);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            real,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        let dimmed = Frame::real(real).with_opacity(0.5);
+        present(
+            &pane,
+            real,
+            dimmed,
+            Duration::ZERO,
+            Duration::from_millis(100),
+            Curve::OutCubic,
+        );
+        assert!(!settle(&pane, real, Duration::from_millis(200)));
+        assert_eq!(
+            frame(&pane, rect(600, 100, 400, 300), Duration::from_millis(300)),
+            dimmed
         );
     }
 }

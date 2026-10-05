@@ -410,6 +410,10 @@ function sol.window_at(x, y, skip) end
 ---A transform: the window keeps its place and its client is told nothing, so
 ---`sol.present_clear` puts it back exactly. Input follows the rect it is drawn
 ---at.
+---
+---A present that lands exactly on the window's own frame (no rect, no rotation,
+---full opacity) lets the window go, as `sol.present_clear` does, rather than
+---holding it there.
 ---@param id integer
 ---@param options? sol.PresentOptions
 ---@return nil

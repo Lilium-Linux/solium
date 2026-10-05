@@ -94,6 +94,10 @@ sol.present_clear(id)   -- animate back to real geometry and stop transforming
 The distinction is why leaving overview is exact rather than approximate. The
 layout was never disturbed, so there is nothing to restore.
 
+A present that lands exactly on the window's own frame (no rect, no rotation,
+full opacity: `sol.present(id, {})`) lets the window go, as `sol.present_clear`
+does, rather than holding it there.
+
 `sol.present_from(id, rect)` is the third: draw the window at `rect` and animate
 it to where it lives. That is every "appears from somewhere" animation — a
 window opening, or growing out of a dock icon.

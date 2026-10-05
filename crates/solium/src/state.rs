@@ -1416,8 +1416,13 @@ impl Solium {
     /// `None` when the anchor names nothing: the pane has closed, or never
     /// existed. The caller draws the window flat, which is the failure that
     /// loses an effect rather than the frame.
+    ///
+    /// A deform at rest aims at nothing, so the window takes the flat path:
+    /// `tests::a_deform_at_rest_is_aimed_at_nothing`. Resolved here and not in
+    /// `Deform::blend`, which must keep the anchor for a reversal mid-flight
+    /// (`solium_effects`' `blending_from_nothing_starts_at_rest_and_lands_on_the_deform`).
     pub(crate) fn aimed_at(&self, deform: Option<present::Deform>) -> Option<present::Aimed> {
-        let deform = deform?;
+        let deform = deform.filter(|deform| !deform.effect.is_at_rest())?;
         let to = match deform.anchor {
             present::Anchor::Rect(rect) => rect,
             present::Anchor::Pane(id) => {
@@ -1631,7 +1636,7 @@ impl Solium {
     pub(crate) fn settle(&mut self, now: std::time::Duration) -> bool {
         let mut animating = false;
         for pane in self.panes.iter() {
-            animating |= present::settle(pane, now);
+            animating |= present::settle(pane, self.pane_outer(pane), now);
         }
         // And the selections, which animate on the same clock and damage
         // nothing either. Not folded into the loop above: a group is not a
