@@ -131,11 +131,10 @@ light ([#69]); a virtual machine or a remote desktop cannot have Super
 ([#58]); and portal dialogs cannot be parented to the window that opened them
 ([#67]). Screenshots and recording come from `wlr-screencopy`, so `grim` and
 `wf-recorder` should work, but the portals, screen sharing included, have never
-been tested end to end ([#83]). `--help`, and any flag Solium does not know,
-starts a compositor instead of answering ([#156]). Nothing the compositor
-draws reacts to touch yet (frame buttons, a hosted shell, the overview, window
-edges), though touch reaches applications' windows ([#181]); touch gestures
-are the touch epic ([#7]) and come after v0.1.0.
+been tested end to end ([#83]). Nothing the compositor draws reacts to touch
+yet (frame buttons, a hosted shell, the overview, window edges), though touch
+reaches applications' windows ([#181]); touch gestures are the touch epic
+([#7]) and come after v0.1.0.
 [docs/gaps.md](docs/gaps.md) is everything not built yet, at length.
 
 ## Building
@@ -232,9 +231,12 @@ Three flags worth knowing:
 
 | | |
 |---|---|
-| `--check` | would the configuration load? which bindings survived? |
+| `--check` | would the configuration load? which bindings survived? do its scenes and your styles build? |
 | `--probe` | every connector and every mode it offers, without taking the screen |
 | `--debug-mode` | adds the Developer Tweaks panel, on `super+shift+d` |
+
+`solium --help` lists every flag and the variables that change a session, and
+a flag Solium does not know is refused rather than started with.
 
 `super+shift+q` ends the session and `super+shift+r` reloads the configuration
 without ending it. The rest of the bindings come from `--check`, because they
@@ -343,8 +345,10 @@ return {
 
 Press `super+shift+r` and every open window is framed again, with its
 titlebar down the left side. `solium --check` says, without starting anything,
-whether the configuration would load, which bindings it made, and which
-settings it sets that nothing reads, with what you probably meant. A reload whose
+whether the configuration would load, which bindings it made, which
+settings it sets that nothing reads, with what you probably meant, and whether
+every scene it declares at load and every pane style of your own builds
+without an error or a QML warning. A reload whose
 configuration fails to load keeps the session as it was, and says why in the
 log:
 `~/.local/state/solium/session.log` for a session from the login screen or
@@ -561,7 +565,6 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#151]: https://github.com/Lilium-Linux/solium/issues/151
 [#152]: https://github.com/Lilium-Linux/solium/issues/152
 [#153]: https://github.com/Lilium-Linux/solium/issues/153
-[#156]: https://github.com/Lilium-Linux/solium/issues/156
 [#157]: https://github.com/Lilium-Linux/solium/issues/157
 [#161]: https://github.com/Lilium-Linux/solium/issues/161
 [#162]: https://github.com/Lilium-Linux/solium/issues/162
