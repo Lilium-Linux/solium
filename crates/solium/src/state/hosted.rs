@@ -426,9 +426,11 @@ impl Solium {
                 .iter()
                 .find(|entry| entry.uri == uri)
                 .ok_or("unknown-file")?;
-            if entry.hidden || entry.is_dir {
+            if entry.is_dir {
                 // A folder window is `Later` (04-ui.md §4.9): nothing opens
-                // one yet.
+                // one yet. A hidden entry opens like any other when it is
+                // shown at all (`showHidden`, Desktop.qml) -- `hidden` plays
+                // no part in whether `folder.open` runs it.
                 return Err("unsupported");
             }
             let path = crate::folder::path_from_uri(&entry.uri).ok_or("bad-data")?;
