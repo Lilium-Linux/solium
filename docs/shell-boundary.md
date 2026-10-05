@@ -637,7 +637,10 @@ the simplest durable way this repo already has instead -- a plain file of
 trusted absolute paths under `$XDG_DATA_HOME/solium/desktop-trust`
 (`crate::folder::Trust`), the same `fs::write` shape `session.rs` and
 `launch.rs` already use for small state. `sol.store` would be the natural
-fit once it exists.
+fit once it exists. `done`'s `reason` here adds `"unknown-file"` (no such
+entry), `"no-handler"` (no default application for the MIME type) and
+`"untrusted"` (an un-trusted launcher) to the vocabulary above -- not yet
+listed there, the same gap `apps.launch`'s own `"unknown-app"` already left.
 
 What is cut from this version: a subdirectory is one `isDir` row, not walked
 (a folder window is a scene's own concern, not here yet); MIME detection is
