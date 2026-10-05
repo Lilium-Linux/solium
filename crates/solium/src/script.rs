@@ -1016,8 +1016,11 @@ impl Scripts {
 
         let source = std::fs::read_to_string(config)
             .with_context(|| format!("reading {}", config.display()))?;
+        // Named `@<path>`, as Lua names a file it loads itself, so an error
+        // reads `<path>:<line>:` and a failed reload is put on the overlay at
+        // its line (`tests::a_configuration_error_names_its_file_and_line`).
         lua.load(&source)
-            .set_name(config.to_string_lossy().as_ref())
+            .set_name(format!("@{}", config.to_string_lossy()))
             .exec()
             .map_err(failed("running the configuration"))?;
 
@@ -6113,6 +6116,30 @@ mod tests {
                 (3, 1.0, 1.0),
             ],
             "the parent of a window did not survive the trip into Lua"
+        );
+    }
+
+    /// **A configuration that fails to load names its file and line** as
+    /// `<path>:<line>:`, the form every other Lua error in Solium takes, so
+    /// a failed reload can be put on the overlay where it is
+    /// (`effect::host::config_problem`). Named as a bare string, the chunk
+    /// read `[string "<path>"]:2:`.
+    #[test]
+    fn a_configuration_error_names_its_file_and_line() {
+        let directory =
+            std::env::temp_dir().join(format!("solium-config-error-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(&config, "sol.pane('none')\nthis is not lua\n")
+            .expect("writing the test script");
+        let error = Scripts::load(&config)
+            .err()
+            .map(|err| format!("{err:#}"))
+            .expect("a configuration that is not Lua fails to load");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            error.contains(&format!("{}:2: ", config.display())),
+            "{error}"
         );
     }
 
