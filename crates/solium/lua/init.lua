@@ -49,6 +49,8 @@ require("shell")
 require("keyboard_indicator")
 
 require("tweaks")
+-- What is broken in an effect or the configuration, on screen while it is.
+require("problems")
 
 require("modes")
 require("open")

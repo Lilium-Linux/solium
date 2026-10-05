@@ -112,6 +112,85 @@ fn a_reload_reads_the_effect_folders_again() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// **A broken configuration reload is a problem**, so the overlay of the
+/// configuration still running lists it, a second failure replaces it rather
+/// than adding to it, and a reload that works clears it.
+#[test]
+fn a_failed_reload_is_a_problem_until_one_succeeds() {
+    let directory = crate::effect::host::tests::scratch("state-config-problem");
+    let entry = directory.join("init.lua");
+    std::fs::write(&entry, "sol.pane('none')\n").expect("writing");
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    let config = |state: &Solium| -> Vec<crate::effect::host::Problem> {
+        state
+            .effects
+            .problems()
+            .iter()
+            .filter(|each| each.effect == "config")
+            .cloned()
+            .collect()
+    };
+    std::fs::write(&entry, "sol.pane('none')\nthis is not lua\n").expect("breaking it");
+    state.reload_from(&entry);
+    let problems = config(&state);
+    let [problem] = problems.as_slice() else {
+        panic!("one config problem: {problems:?}");
+    };
+    assert_eq!(problem.line, Some(2), "{problem:?}");
+    assert_eq!(problem.file, entry, "{problem:?}");
+    std::fs::write(&entry, "sol.pane('none')\n\nthis is not lua either\n").expect("again");
+    state.reload_from(&entry);
+    let lines: Vec<Option<u32>> = config(&state).iter().map(|each| each.line).collect();
+    assert_eq!(lines, [Some(3)], "the second failure replaces the first");
+    std::fs::write(&entry, "sol.pane('none')\n").expect("mending it");
+    state.reload_from(&entry);
+    assert!(
+        state
+            .effects
+            .problems()
+            .iter()
+            .all(|each| each.effect != "config")
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// **The scripts hear of changed problems once, after the frame**: `settle`
+/// fires `problems` when they changed since it last told them, and not again
+/// until they change.
+#[test]
+fn settle_tells_the_scripts_once_per_change_of_the_problems() {
+    let directory = crate::effect::host::tests::scratch("state-problems-told");
+    let entry = directory.join("init.lua");
+    std::fs::write(
+        &entry,
+        "local n = 0\nsol.on('problems', function() n = n + 1; sol.status(tostring(n)) end)\n",
+    )
+    .expect("writing");
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.start_scripts(Some(
+        crate::script::Scripts::load(&entry).expect("loading the test script"),
+    ));
+    let mut told = Vec::new();
+    state.settle(state.clock.now());
+    told.push(state.status.clone());
+    state
+        .effects
+        .push_problem(crate::effect::host::config_problem("no line"));
+    state.settle(state.clock.now());
+    told.push(state.status.clone());
+    state.settle(state.clock.now());
+    told.push(state.status.clone());
+    state.effects.clear_problems_of("config");
+    state.settle(state.clock.now());
+    told.push(state.status.clone());
+    let _ = std::fs::remove_dir_all(directory);
+    assert_eq!(told, ["", "1", "1", "2"]);
+}
+
 /// **A deform at rest is aimed at nothing**, so a window brought back from a
 /// genie with `sol.present(id, {})` is not captured and warped on every frame
 /// for good (#140).

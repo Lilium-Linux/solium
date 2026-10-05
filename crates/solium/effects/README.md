@@ -40,6 +40,22 @@ before it running; an effect that has never compiled is left out, as if it
 were not named. A shader that failed to compile is not compiled again until
 its file changes, or until a reload, which tries every failure once more.
 
+## When something is wrong
+
+What is broken is named with its file and line in the top-right corner of
+your primary monitor, for as long as it is broken: a Lua error in an
+`effect.lua`, a check of a shader that fails, a compile the GPU refused. A
+configuration that fails to reload is listed there too, at its own line, and
+the configuration that was running before it keeps running. The list goes
+when a reload leaves nothing broken. A version of an effect that fails keeps
+the one that ran, as above, and a reload tries every recorded failure once
+more.
+
+The list is configuration like the rest. The compositor hands the rows to Lua
+as `sol.problems()` and tells a `problems` listener when they change;
+`lua/problems.lua` and `qml/problems.qml` draw them, and a configuration that
+leaves out `require("problems")` has no overlay.
+
 ## What `effect.lua` returns
 
 `effect.lua` returns one table. Every key in it is checked, and a key Solium

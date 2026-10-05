@@ -593,6 +593,10 @@ pub(crate) struct Solium {
     /// compiled at the top of `render::prepare` (Ruling 7).
     /// `effect::host::tests::an_empty_host_touches_no_gl`.
     pub(crate) effects: crate::effect::host::Host,
+    /// The problems' generation the scripts were last told about, so `settle`
+    /// fires `problems` once per change:
+    /// `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.
+    pub(crate) problems_told: u64,
 
     /// GPU time per pass, only while pacing is on: `gputime.rs`. On the state
     /// rather than the backend so a capture can time itself (Ruling 5).
@@ -1057,6 +1061,7 @@ impl Solium {
             pointer: crate::cursor::Pointer::default(),
             programs: crate::pass::Programs::default(),
             effects: crate::effect::host::Host::new(crate::effect::host::Library::new()),
+            problems_told: 0,
             timer: None,
             textures: None,
             focusing: false,
@@ -1675,6 +1680,13 @@ impl Solium {
         // (Ruling 11):
         // `tests::real_client::reflow_on_close::hosted::a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame`.
         self.settle_scenes();
+        // The overlay hears about a changed problem once, after the frame
+        // that found it:
+        // `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.
+        if self.effects.problems_generation() != self.problems_told {
+            self.problems_told = self.effects.problems_generation();
+            self.trigger_problems_changed();
+        }
         self.animating = animating;
         animating
     }

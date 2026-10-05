@@ -108,6 +108,16 @@
 ---@field w? number
 ---@field h? number
 
+---One row of `sol.problems()`: something broken in an effect, a rule or the
+---configuration, and where.
+---@class sol.Problem
+---@field effect string The effect's name, or `"config"` for the configuration.
+---@field file string The file the problem is in.
+---@field line? integer Its line in that file, where one is known.
+---@field column? integer Its column, where the compiler gave one.
+---@field message string What is wrong.
+---@field severity "error"|"warning" An error keeps the effect or the configuration from running as written; a warning does not.
+
 ---What `sol.keyboard{ ... }` may change. Every key is optional and one left
 ---out is left as it is. The first five are xkb names; setting any of them
 ---compiles a new keymap, and one left blank falls back to the matching
@@ -284,6 +294,7 @@
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
 ---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
+---| "problems" # The problems changed: something broke, or a reload mended it: `()`. `sol.problems()` answers what they are now. Told once a change, after the frame that found it.
 ---| "text_input" # The focused text field changed: `(field, why)`, `field` being what `sol.text_input()` answers at that moment and `why` what changed -- `"field"`, one was enabled, or focused again by its window getting the keyboard back; `"caret"`, its client moved its caret; `"framed"`, its window started or stopped being drawn in a frame, as one going fullscreen does. Told at most once a pass of the event loop, before the frame is drawn, as the most that changed: a caret moved twice since the last frame is told once, where it is now, and a field enabled and then given its caret, as kitty gives it with its first key, is told once as `"field"`. A window moving with its field in it is not told. A field disabled, or its window losing the keyboard, is not told: `sol.text_input()` answers `nil` from then on, and `field` is never `nil` here.
 ---| "keyboard" # The live layout, Caps Lock or Num Lock changed, by a key or by `sol.keyboard{ ... }`: `(state, changed)`, `state` being what `sol.keyboard()` answers now and `changed` `"layout"`, `"caps"` or `"num"`. Never for ordinary typing, a new keymap or a configuration starting, nor while the session is locked: what is pressed at the lock screen is the lock screen's, and a lock screen that wants a Caps Lock warning draws its own. A change a `keyboard` listener makes is not told back to it.
 
@@ -358,6 +369,13 @@ function sol.keyboard(options) end
 ---framed or left bare.
 ---@return sol.TextField|nil
 function sol.text_input() end
+
+---What is broken in an effect, a rule or the configuration now, with its file
+---and line. The shipped `lua/problems.lua` shows them on the primary monitor
+---while there are any. A failed reload is one, under `"config"`, until a
+---reload succeeds.
+---@return sol.Problem[]
+function sol.problems() end
 
 ---Read the monitors, or arrange them.
 ---
@@ -710,7 +728,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "click", handler: fun(x: number, y: number))
 ---@overload fun(event: "surface", handler: fun(name: string, action: string))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
----@overload fun(event: "layout"|"monitors"|"restore", handler: fun())
+---@overload fun(event: "layout"|"monitors"|"restore"|"problems", handler: fun())
 ---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))
 ---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
 ---@param event sol.Event

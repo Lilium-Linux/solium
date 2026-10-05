@@ -257,6 +257,23 @@ pub(crate) struct Snapshot {
     /// The focused text field and its caret, for `sol.text_input()`:
     /// `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`.
     pub(crate) text_input: Option<crate::text_input::Field>,
+    /// What is broken in an effect, a rule or the configuration, for
+    /// `sol.problems()`:
+    /// `tests::a_broken_effect_reaches_sol_problems_with_its_file_and_line`.
+    pub(crate) problems: Vec<ProblemRow>,
+}
+
+/// One problem, as `sol.problems()` hands it over: an effect, a rule or the
+/// configuration, where, and what. Rust publishes; `lua/problems.lua` shows
+/// (`tests::a_broken_effect_reaches_sol_problems_with_its_file_and_line`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ProblemRow {
+    pub(crate) effect: String,
+    pub(crate) file: String,
+    pub(crate) line: Option<u32>,
+    pub(crate) column: Option<u32>,
+    pub(crate) message: String,
+    pub(crate) severity: &'static str,
 }
 
 /// How a batch of transforms should animate.
@@ -1260,6 +1277,12 @@ impl Scripts {
         self.dispatch(snapshot, move |sol| call_listeners(sol, "monitors", ()))
     }
 
+    /// The problems changed: an effect broke or was mended, or a reload failed.
+    /// `tests::the_problems_event_reaches_its_listeners`.
+    pub(crate) fn problems_changed(&mut self, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |sol| call_listeners(sol, "problems", ()))
+    }
+
     /// These scripts have replaced a running session's, rather than started one.
     ///
     /// The first half of the reload contract on [`Self::load_carrying`], and
@@ -1835,6 +1858,27 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             keeps.set(name, &table)?;
             Ok(table)
+        })?,
+    )?;
+
+    // What is wrong in an effect, a rule or the configuration, with its file
+    // and line: `tests::a_broken_effect_reaches_sol_problems_with_its_file_and_line`.
+    sol.set(
+        "problems",
+        lua.create_function(|lua, ()| {
+            let snapshot = snapshot(lua)?;
+            let rows = lua.create_table()?;
+            for (index, problem) in snapshot.problems.iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("effect", problem.effect.clone())?;
+                row.set("file", problem.file.clone())?;
+                row.set("line", problem.line)?;
+                row.set("column", problem.column)?;
+                row.set("message", problem.message.clone())?;
+                row.set("severity", problem.severity)?;
+                rows.set(index + 1, row)?;
+            }
+            Ok(rows)
         })?,
     )?;
 
@@ -4471,6 +4515,7 @@ mod tests {
             cursor: (0.0, 0.0),
             screens: Vec::new(),
             text_input: None,
+            problems: Vec::new(),
         };
 
         let outcome = scripts.key("super+space", snapshot);
@@ -6143,6 +6188,136 @@ mod tests {
         );
     }
 
+    /// **A broken effect reaches `sol.problems()` with its file and line.**
+    #[test]
+    fn a_broken_effect_reaches_sol_problems_with_its_file_and_line() {
+        let directory =
+            std::env::temp_dir().join(format!("solium-problems-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+P", function()
+                local row = sol.problems()[1]
+                sol.status(string.format("%s %s %d %s", row.effect, row.file, row.line, row.message))
+            end)
+        "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let mut snapshot = empty_snapshot();
+        snapshot.problems = vec![super::ProblemRow {
+            effect: "blur".to_owned(),
+            file: "/x/blur/down.frag".to_owned(),
+            line: Some(2),
+            column: None,
+            message: "`p_ofset` is not a param".to_owned(),
+            severity: "error",
+        }];
+        let outcome = scripts.key("super+p", snapshot);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("blur /x/blur/down.frag 2 `p_ofset` is not a param")
+        );
+    }
+
+    /// **The `problems` event fires once per change**, to every listener.
+    #[test]
+    fn the_problems_event_reaches_its_listeners() {
+        let directory =
+            std::env::temp_dir().join(format!("solium-problems-event-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            "local n = 0\nsol.on('problems', function() n = n + 1; sol.status(tostring(n)) end)\n",
+        )
+        .expect("writing");
+        let mut scripts = Scripts::load(&config).expect("loading");
+        let outcome = scripts.problems_changed(empty_snapshot());
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(outcome.status.as_deref(), Some("1"));
+    }
+
+    /// **The shipped configuration shows the problems on the primary
+    /// monitor**, in its top-right corner as `file:line: message` rows, at
+    /// most eight and then a count, taking no input; and takes the overlay
+    /// away when none are left.
+    #[test]
+    fn the_shipped_overlay_lists_the_problems_on_the_primary_monitor() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-problems-overlay", "return {}")
+        else {
+            return;
+        };
+        let mut snapshot = one_screen(&[]);
+        snapshot.problems = (1..=10)
+            .map(|line| super::ProblemRow {
+                effect: "blur".to_owned(),
+                file: "/x/blur/down.frag".to_owned(),
+                line: Some(line),
+                column: None,
+                message: "`p_ofset` is not a param".to_owned(),
+                severity: if line == 1 { "warning" } else { "error" },
+            })
+            .collect();
+        let shown = scripts.problems_changed(snapshot).commands;
+        let gone = scripts.problems_changed(one_screen(&[])).commands;
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let declared: Vec<&crate::scripted::Declaration> = shown
+            .iter()
+            .filter_map(|command| match command {
+                Command::Surface(declared) if declared.name == "problems" => Some(&**declared),
+                _ => None,
+            })
+            .collect();
+        let [overlay] = declared.as_slice() else {
+            panic!("one overlay, not {}: {shown:?}", declared.len());
+        };
+        assert!(
+            overlay.scene.ends_with("problems.qml"),
+            "{:?}",
+            overlay.scene
+        );
+        assert_eq!(overlay.layer, crate::scripted::Layer::Overlay);
+        assert!(!overlay.interactive, "the overlay takes no input");
+        assert_eq!(
+            overlay.on,
+            crate::scripted::On::Rect(smithay::utils::Rectangle::new(
+                (840, 0).into(),
+                (760, 240).into()
+            )),
+            "the top-right corner of the 1600-wide primary monitor"
+        );
+        let properties = overlay.properties.render();
+        assert!(
+            properties.contains(
+                r#"{"severity":"warning","text":"/x/blur/down.frag:1: `p_ofset` is not a param"}"#
+            ),
+            "{properties}"
+        );
+        assert!(
+            properties.contains(r#""text":"/x/blur/down.frag:8: "#),
+            "{properties}"
+        );
+        assert!(
+            !properties.contains(r#""text":"/x/blur/down.frag:9: "#),
+            "{properties}"
+        );
+        assert!(
+            properties.contains(r#""text":"and 2 more""#),
+            "{properties}"
+        );
+        assert!(
+            gone.iter()
+                .any(|command| matches!(command, Command::SurfaceGone(name) if name == "problems")),
+            "the overlay stays with nothing left to show: {gone:?}"
+        );
+    }
+
     /// A snapshot with nothing in it, for the tests that only want a call made.
     fn empty_snapshot() -> Snapshot {
         Snapshot {
@@ -6153,6 +6328,7 @@ mod tests {
             cursor: (0.0, 0.0),
             screens: Vec::new(),
             text_input: None,
+            problems: Vec::new(),
         }
     }
 
@@ -6634,6 +6810,7 @@ mod tests {
             cursor: (0.0, 0.0),
             screens: Vec::new(),
             text_input: None,
+            problems: Vec::new(),
         }
     }
 

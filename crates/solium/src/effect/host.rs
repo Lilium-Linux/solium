@@ -755,20 +755,14 @@ impl<P: Clone> Host<P> {
             .and_then(|program| program.as_ref().ok())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 5's sol.problems is its reader")
-    )]
     pub(crate) fn problems(&self) -> &[Problem] {
         &self.problems
     }
 
-    #[expect(dead_code, reason = "Task 5's problems event is its reader")]
     pub(crate) fn problems_generation(&self) -> u64 {
         self.generation
     }
 
-    #[expect(dead_code, reason = "Task 5's failed reload is its first caller")]
     pub(crate) fn push_problem(&mut self, problem: Problem) {
         self.add_problems(vec![problem]);
     }
@@ -802,6 +796,36 @@ impl<P: Clone> Host<P> {
             && self.slots.values().all(|slot| slot.pending.is_none())
             && self.wanted.values().all(BTreeSet::is_empty)
     }
+}
+
+/// A configuration error as a problem: the first `<file>.lua:<line>:` in it
+/// names where (`tests::a_config_problem_is_at_the_first_lua_file_and_line_in_the_error`,
+/// `state::tests::a_failed_reload_is_a_problem_until_one_succeeds`).
+pub(crate) fn config_problem(error: &str) -> Problem {
+    for (at, _) in error.match_indices(".lua:") {
+        let start = error
+            .get(..at)
+            .and_then(|before| {
+                before
+                    .char_indices()
+                    .rev()
+                    .find(|&(_, c)| c.is_whitespace() || c == '"' || c == '\'')
+            })
+            .map_or(0, |(index, c)| index + c.len_utf8());
+        let (Some(file), Some(from)) = (error.get(start..at + 4), error.get(start..)) else {
+            continue;
+        };
+        let (line, message) = super::sandbox::located(from, Path::new(file));
+        if line.is_some() {
+            return Problem::error("config", Path::new(file), line, message);
+        }
+    }
+    Problem::error(
+        "config",
+        Path::new("init.lua"),
+        None,
+        error.lines().next().unwrap_or(error).to_owned(),
+    )
 }
 
 /// A `frag` effect's signature at its defaults: its params' kinds, no `uses`,
@@ -1519,5 +1543,56 @@ pub(crate) mod tests {
         assert!(host.by_id(old).is_none());
         assert!(host.id("a").is_some_and(|new| new != old));
         let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A configuration error is put where it is**: the first
+    /// `<file>.lua:<line>:` in the error names the file and the line, a path
+    /// Lua cut short with `...` included, and an error naming none is the
+    /// configuration's, with no line.
+    #[test]
+    fn a_config_problem_is_at_the_first_lua_file_and_line_in_the_error() {
+        let problem = super::config_problem(
+            "running the configuration: syntax error: /home/u/.config/solium/init.lua:6: \
+             syntax error near 'is'",
+        );
+        assert_eq!(
+            (
+                problem.effect.as_str(),
+                problem.file.as_path(),
+                problem.line,
+                problem.message.as_str()
+            ),
+            (
+                "config",
+                Path::new("/home/u/.config/solium/init.lua"),
+                Some(6),
+                "syntax error near 'is'"
+            )
+        );
+        let module = super::config_problem(
+            "running the configuration: runtime error: ...ong/way/down/solium/lua/tiling.lua:12: \
+             attempt to index a nil value\nstack traceback:\n\t[C]: in ?",
+        );
+        assert_eq!(
+            (module.file.as_path(), module.line, module.message.as_str()),
+            (
+                Path::new("...ong/way/down/solium/lua/tiling.lua"),
+                Some(12),
+                "attempt to index a nil value"
+            )
+        );
+        let nowhere = super::config_problem("reading /x/init.lua: No such file or directory");
+        assert_eq!(
+            (
+                nowhere.file.as_path(),
+                nowhere.line,
+                nowhere.message.as_str()
+            ),
+            (
+                Path::new("init.lua"),
+                None,
+                "reading /x/init.lua: No such file or directory"
+            )
+        );
     }
 }

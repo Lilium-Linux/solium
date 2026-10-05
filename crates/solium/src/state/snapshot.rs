@@ -403,6 +403,22 @@ impl Solium {
             cursor: (cursor.x, cursor.y),
             screens: self.screens(),
             text_input: self.text_field(),
+            problems: self
+                .effects
+                .problems()
+                .iter()
+                .map(|problem| crate::script::ProblemRow {
+                    effect: problem.effect.clone(),
+                    file: problem.file.display().to_string(),
+                    line: problem.line,
+                    column: problem.column,
+                    message: problem.message.clone(),
+                    severity: match problem.severity {
+                        solium_effects::spec::Severity::Error => "error",
+                        solium_effects::spec::Severity::Warning => "warning",
+                    },
+                })
+                .collect(),
         }
     }
 

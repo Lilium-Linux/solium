@@ -35,6 +35,7 @@ a titlebar is.
 | the wallpaper | `qml/wallpaper.qml` | `wallpaper = ...` (see [ricing.md](ricing.md)) |
 | a shell (bar, dock, launcher) | nothing ships | `shell = { scene = ... }` |
 | the keyboard pill, on a surface of its own | `qml/indicator/keyboard.qml` | `keyboard.indicator` in `config.lua` (`lua/keyboard_indicator.lua` declares it through `sol.surface`) |
+| what is broken in an effect or the configuration, on the primary monitor while anything is | `qml/problems.qml` | `require("problems")` in `init.lua` (`lua/problems.lua` declares it through `sol.surface` from `sol.problems()`) |
 | any other scene | `qml/tweaks.qml`, the Developer Tweaks panel (`--debug-mode` only) | `sol.surface(name, { scene = ... })` |
 | the pointer, with no cursor theme | `qml/cursor.qml` | `SOLIUM_QML_CURSOR`, for one run |
 

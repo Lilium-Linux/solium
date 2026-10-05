@@ -619,6 +619,9 @@ impl Solium {
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
                 self.decorations.clear_values();
                 self.start_scripts(Some(scripts));
+                // A configuration that loads mends the one that did not
+                // (`a_failed_reload_is_a_problem_until_one_succeeds`).
+                self.effects.clear_problems_of("config");
                 // The effect folders, read again: a changed one is pending
                 // until the next `prepare` compiles it, and a broken one
                 // keeps what ran (`a_reload_reads_the_effect_folders_again`).
@@ -659,6 +662,13 @@ impl Solium {
             }
             Err(err) => {
                 tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
+                // On the overlay of the configuration still running, at its
+                // file and line (`a_failed_reload_is_a_problem_until_one_succeeds`).
+                // Replacing the last one: a second failed reload is one
+                // problem, not two.
+                self.effects.clear_problems_of("config");
+                self.effects
+                    .push_problem(crate::effect::host::config_problem(&format!("{err:#}")));
             }
         }
     }
@@ -690,6 +700,19 @@ impl Solium {
             return;
         };
         let outcome = scripts.monitors_changed(snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Tell the scripts the problems changed. From `Solium::settle`, after
+    /// the frame, never from `render::prepare`
+    /// (`tests::settle_tells_the_scripts_once_per_change_of_the_problems`).
+    pub(crate) fn trigger_problems_changed(&mut self) {
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.problems_changed(snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
     }
