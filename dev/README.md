@@ -432,8 +432,8 @@ over the top, so the only place the failure shows is the hardware.
 `present-check.sh` exists because the wiring between a script and the screen is
 the one part of a presentation transform that no unit test reaches. `z` and
 `pivot` are read in `script.rs`, carried through `present::Frame`, and spent in
-`render::by_depth` and `warp::mesh` — all of which are pure functions with tests
-of their own. What sits between them is two field initialisers in the
+`render::by_depth` and `warp::mesh_part` — all of which are pure functions with
+tests of their own. What sits between them is two field initialisers in the
 `Command::Present` arm in `state/commands.rs`, and reverting *both* of those to
 their defaults passes the entire suite. So this measures pixels instead: it
 places one window at a known rect, turns it twenty degrees about two different

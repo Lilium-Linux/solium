@@ -45,8 +45,9 @@ use crate::{pane::PaneId, state::Solium};
 /// which is the whole reason a cache keyed on it ever hits. `present.rs`'s
 /// first rule is that a transform never changes real geometry: the matrix, the
 /// deform and the animated `Frame::rect` are applied to this texture
-/// afterwards, by `warp::mesh`, and not one of them is read here. So a window
-/// bending through a genie is captured at the same size on every frame of it.
+/// afterwards, by `warp::mesh_part`, and not one of them is read here. So a
+/// window bending through a genie is captured at the same size on every frame
+/// of it.
 ///
 /// The sizes that do change it are all one-offs — the client actually resizing,
 /// its frame's insets changing, the window crossing onto a monitor at another
@@ -167,7 +168,8 @@ pub(crate) fn pane_job(
 /// way to that tile.
 ///
 /// The sibling of [`pane_job`], and the difference is the whole reason there
-/// are two. That one draws the window as it appears — frame, layers, popups —
+/// are two. That one draws the window as it appears — frame and layers, not
+/// its popups (`state::tests::a_warped_panes_capture_holds_no_popups`) —
 /// because a warp bends the whole thing as one object. This one draws only the
 /// application's own surface tree, because what a `client.radius` masks is the
 /// *client*: its frame is Qt's and rounds itself from `clientRadius` (see

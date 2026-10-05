@@ -367,9 +367,10 @@ mod tests {
     /// A warped window holds still long enough for its target to be reused
     /// because the size a capture asks for is the window's own
     /// (`offscreen::pixels`), never anything the warp does: a transform is
-    /// applied to the texture afterwards, by `warp::mesh`, and `present.rs`'s
-    /// first rule is that it never changes the geometry the texture is sized
-    /// from. So sixty frames ask for one size, and get one target.
+    /// applied to the texture afterwards, by `warp::mesh_part`, and
+    /// `present.rs`'s first rule is that it never changes the geometry the
+    /// texture is sized from. So sixty frames ask for one size, and get one
+    /// target.
     ///
     /// Arithmetic, and it needs neither Qt nor a GPU — which is the only
     /// reason there is any coverage of this at all. `cargo test` runs in a

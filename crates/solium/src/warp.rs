@@ -152,7 +152,40 @@ impl Mesh {
     }
 }
 
-/// Cut a rectangle into a mesh and project it, about `pivot`.
+/// A part of a pane's unit square: (0,0)-(1,1) is the pane, and a popup may
+/// reach past it. `tests::a_part_of_the_pane_lands_where_the_whole_pane_puts_those_points`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UnitRect {
+    pub(crate) u0: f64,
+    pub(crate) v0: f64,
+    pub(crate) u1: f64,
+    pub(crate) v1: f64,
+}
+
+impl UnitRect {
+    pub(crate) const WHOLE: Self = Self {
+        u0: 0.0,
+        v0: 0.0,
+        u1: 1.0,
+        v1: 1.0,
+    };
+}
+
+/// [`mesh_part`] over the whole pane, which is the mesh as it was before parts:
+/// the tests' way of saying "the whole window".
+/// `tests::the_whole_part_is_the_whole_mesh`.
+#[cfg(test)]
+pub(crate) fn mesh(
+    rect: Rectangle<f64, smithay::utils::Logical>,
+    matrix: Mat4,
+    deform: Option<crate::present::Aimed>,
+    pivot: (f32, f32),
+    scale: f64,
+) -> Option<Mesh> {
+    mesh_part(rect, UnitRect::WHOLE, matrix, deform, pivot, scale)
+}
+
+/// Cut `part` of a rectangle into a mesh and project it, about `pivot`.
 ///
 /// The deform moves points around inside the window's own space; the matrix
 /// then places that in 3D. Both are optional and they compose, which is what
@@ -167,11 +200,22 @@ impl Mesh {
 /// `present::Anchor` — because the thing it is aimed at moves, and the frame
 /// being drawn is the only moment its position is known.
 ///
+/// `part` is a piece of the rectangle's unit square, [`UnitRect::WHOLE`] for
+/// the whole window: each point lands where the whole window's mesh puts it --
+/// the same rect, matrix, pivot and deform -- and the texture's 0..1 runs
+/// across the part, so a texture of the part alone is drawn through it. A part
+/// past the window is extrapolated, not clamped: the rect and the deform place
+/// points past the unit square by the same functions as inside it.
+/// `tests::a_part_of_the_pane_lands_where_the_whole_pane_puts_those_points`;
+/// the whole part is the mesh before parts bit for bit,
+/// `tests::the_whole_part_is_the_whole_mesh`.
+///
 /// Returns `None` when any vertex lands at or behind the viewer: a shape with
 /// one vertex projected from behind is not that shape any more, and drawing it
 /// anyway folds the texture across the screen.
-pub(crate) fn mesh(
+pub(crate) fn mesh_part(
     rect: Rectangle<f64, smithay::utils::Logical>,
+    part: UnitRect,
     matrix: Mat4,
     deform: Option<crate::present::Aimed>,
     pivot: (f32, f32),
@@ -198,9 +242,11 @@ pub(crate) fn mesh(
 
     let mut grid = Vec::with_capacity(((columns + 1) * (rows + 1)) as usize);
     for row in 0..=rows {
-        let v = f64::from(row) / f64::from(rows);
+        let along_v = f64::from(row) / f64::from(rows);
+        let v = part.v0 + (part.v1 - part.v0) * along_v;
         for column in 0..=columns {
-            let u = f64::from(column) / f64::from(columns);
+            let along_u = f64::from(column) / f64::from(columns);
+            let u = part.u0 + (part.u1 - part.u0) * along_u;
             let (x, y) = match morph {
                 Some((effect, to)) => effect.place(from, to, u, v),
                 None => from.at(u, v),
@@ -214,8 +260,8 @@ pub(crate) fn mesh(
             grid.push(Corner {
                 x: origin_x + projected_x * scale32,
                 y: origin_y + projected_y * scale32,
-                u: u as f32,
-                v: v as f32,
+                u: along_u as f32,
+                v: along_v as f32,
                 q: 1.0 / w,
             });
         }
@@ -516,5 +562,77 @@ mod tests {
             (average_x - 190.0).abs() < 0.001 && (average_y - 170.0).abs() < 0.001,
             "the mesh's mean is the pivot, which is the centre, got ({average_x}, {average_y})"
         );
+    }
+
+    /// The whole pane, as a part, is exactly the old mesh, bit for bit.
+    #[test]
+    fn the_whole_part_is_the_whole_mesh() {
+        use super::{UnitRect, mesh_part};
+        let rect = Rectangle::<f64, Logical>::new((40.0, 90.0).into(), (200.0, 100.0).into());
+        let whole = mesh(rect, Mat4::rotate_y(0.3), None, (0.5, 0.5), 1.0).expect("a mesh");
+        let part = mesh_part(
+            rect,
+            UnitRect::WHOLE,
+            Mat4::rotate_y(0.3),
+            None,
+            (0.5, 0.5),
+            1.0,
+        )
+        .expect("a mesh");
+        assert!(
+            whole
+                .vertices
+                .iter()
+                .zip(&part.vertices)
+                .all(|(a, b)| a.x == b.x && a.y == b.y && a.u == b.u && a.v == b.v && a.q == b.q)
+        );
+    }
+
+    /// **A part of the pane lands where the whole pane puts those points**: a
+    /// menu turns and folds with its window, about the window's own pivot.
+    #[test]
+    fn a_part_of_the_pane_lands_where_the_whole_pane_puts_those_points() {
+        use super::{UnitRect, mesh_part};
+        let rect = Rectangle::<f64, Logical>::new((40.0, 90.0).into(), (200.0, 100.0).into());
+        let turn = Mat4::rotate_y(0.3);
+        let whole = mesh(rect, turn, None, (0.5, 0.5), 1.0).expect("a mesh");
+        let right = mesh_part(
+            rect,
+            UnitRect {
+                u0: 0.5,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+            },
+            turn,
+            None,
+            (0.5, 0.5),
+            1.0,
+        )
+        .expect("a mesh");
+        // One cell each: whole is (0,0) (1,0) (1,1) …; the right half's (1,0)
+        // corner is the whole's (1,0) corner.
+        let (a, b) = (whole.vertices[1], right.vertices[1]);
+        assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3);
+        assert!(
+            (right.vertices[1].u - 1.0).abs() < 1e-6,
+            "texture coordinates run 0..1 across the part"
+        );
+        // A part reaching past the pane is extrapolated, not clamped.
+        let past = mesh_part(
+            rect,
+            UnitRect {
+                u0: 0.8,
+                v0: 0.8,
+                u1: 1.3,
+                v1: 1.4,
+            },
+            Mat4::IDENTITY,
+            None,
+            (0.5, 0.5),
+            1.0,
+        )
+        .expect("a mesh");
+        assert!((past.vertices[2].x - (40.0 + 200.0 * 1.3)).abs() < 1e-3);
     }
 }

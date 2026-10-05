@@ -1217,14 +1217,15 @@ pub(crate) fn stacked(
     drawn
 }
 
-/// A warp's mesh on one screen: the frame and its deform's target, both in
-/// global space, moved onto the screen together.
-/// `tests::a_genie_on_the_second_monitor_lands_on_its_target`,
+/// A warp's mesh on one screen, over `part` of the pane's unit square: the
+/// frame and its deform's target, both in global space, moved onto the screen
+/// together. `tests::a_genie_on_the_second_monitor_lands_on_its_target`,
 /// `tests::a_genie_on_the_first_monitor_is_unchanged`.
 pub(crate) fn warp_mesh_on(
     screen: Rectangle<i32, Logical>,
     frame: &present::Frame,
     aimed: Option<present::Aimed>,
+    part: crate::warp::UnitRect,
     scale: f64,
 ) -> Option<crate::warp::Mesh> {
     let shift = Point::<f64, Logical>::from((-f64::from(screen.loc.x), -f64::from(screen.loc.y)));
@@ -1233,7 +1234,14 @@ pub(crate) fn warp_mesh_on(
         to: onto(aimed.to),
         ..aimed
     });
-    crate::warp::mesh(onto(frame.rect), frame.matrix, aimed, frame.pivot, scale)
+    crate::warp::mesh_part(
+        onto(frame.rect),
+        part,
+        frame.matrix,
+        aimed,
+        frame.pivot,
+        scale,
+    )
 }
 
 /// Draw panes, in the order given.
@@ -1420,9 +1428,10 @@ fn panes(
         };
 
         // A transform that is not identity cannot be drawn as a rectangle. The
-        // window is rendered flat into a texture first — frame and popups
-        // included — and that texture is bent, so the whole window deforms as
-        // one thing instead of the client tilting away from its own titlebar.
+        // window is rendered flat into a texture first — frame included — and
+        // that texture is bent, so the whole window deforms as one thing
+        // instead of the client tilting away from its own titlebar. Its popups
+        // are not in that texture: `state::tests::a_warped_panes_capture_holds_no_popups`.
         //
         // The deform's anchor is resolved *here*, on the frame that draws it,
         // because what it is aimed at moves — see `present::Anchor`. An anchor
@@ -1431,7 +1440,13 @@ fn panes(
         // an effect.
         let aimed = state.aimed_at_for(pane, frame.deform);
         if (!frame.matrix.is_identity() || aimed.is_some())
-            && let Some(mesh) = warp_mesh_on(screen, &drawn_global, aimed, scale)
+            && let Some(mesh) = warp_mesh_on(
+                screen,
+                &drawn_global,
+                aimed,
+                crate::warp::UnitRect::WHOLE,
+                scale,
+            )
             && let Some((texture, program, id, commit)) = prepared.warp(&window)
         {
             // Its pane capture's id for life, and the commit `prepare` moved
@@ -1539,35 +1554,17 @@ fn panes(
         // frontmost thing its window owns while it is up -- that is what a
         // grab means -- and a style's overlay layer covering one would be the
         // same bug with a different layer's name on it.
-        if let Some(surface) = window
-            .toplevel()
-            .map(|toplevel| toplevel.wl_surface().clone())
-        {
-            for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-                let popup_origin =
-                    origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-                let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                    render_elements_from_surface_tree(
-                        renderer,
-                        popup.wl_surface(),
-                        popup_origin,
-                        output_scale,
-                        frame.opacity,
-                        Kind::Unspecified,
-                    );
-                // Scaled with the window and not cut to its tile: a menu has
-                // to reach past its parent's tile, and a menu cut to it would
-                // lose every item past the tile's edge. The window's own fit
-                // with the cut taken off, which is
-                // `a_popup_reaches_past_its_parents_tile`. This loop is the
-                // only place a toplevel's popups are drawn on this path -- the
-                // toplevel itself is drawn from its own surface tree, which
-                // holds no popups; see [`toplevel_elements`].
-                elements.extend(popup_elements.into_iter().filter_map(|element| {
-                    fitted(element, origin, fitting.uncut(), output_scale).map(Fitted::into_element)
-                }));
-            }
-        }
+        let (popups, _) = popup_elements(renderer, &window, origin, output_scale, frame.opacity);
+        // Scaled with the window and not cut to its tile: a menu has to reach
+        // past its parent's tile, and a menu cut to it would lose every item
+        // past the tile's edge. The window's own fit with the cut taken off,
+        // which is `a_popup_reaches_past_its_parents_tile`. This is the only
+        // place a toplevel's popups are drawn on this path -- the toplevel
+        // itself is drawn from its own surface tree, which holds no popups;
+        // see [`toplevel_elements`].
+        elements.extend(popups.into_iter().filter_map(|element| {
+            fitted(element, origin, fitting.uncut(), output_scale).map(Fitted::into_element)
+        }));
 
         // **This is the sandwich.** The client goes into the list between the
         // layers its own style produced -- `above` and `frame` are already in
@@ -1956,28 +1953,33 @@ fn cursor(
 /// deformed as one thing. Built at the origin because the texture *is* the
 /// window's own space; where it lands on screen is the warp's business.
 ///
-/// **At the pane's size, from [`flat`], which for a tiled client that
-/// committed more than its tile is the tile (#133).** `warp::mesh` spreads the
-/// whole texture over the frame's rect, and that rect is the pane's; a capture
-/// at the committed size pressed the whole buffer into the tile for the
-/// length of a genie or a tilt, and told the frame the uncapped width as well,
-/// so its titlebar was laid out at one width while warped and another once
-/// landed. The client's surfaces are drawn at their own size, so what reaches
-/// past the tile is simply off the texture's edge -- the cut `elements` makes
-/// with a crop, made here by the framebuffer.
+/// **At the pane's size, from [`flat`], which for a tiled client that committed
+/// more than its tile is the tile (#133).** `warp::mesh_part` spreads the whole
+/// texture over the frame's rect, and that rect is the pane's; a capture at the
+/// committed size pressed the whole buffer into the tile for the length of a
+/// genie or a tilt, and told the frame the uncapped width as well, so its
+/// titlebar was laid out at one width while warped and another once landed. The
+/// client's surfaces are drawn at their own size, so what reaches past the tile
+/// is simply off the texture's edge -- the cut `elements` makes with a crop,
+/// made here by the framebuffer.
 ///
 /// **A deformed window loses its bleed, and that is a known limit rather than
 /// an oversight.** `offscreen::pane_job` sizes its texture from the window's
 /// outer rect, so a layer placed at `(-bleed.left, -bleed.top)` falls outside
 /// the framebuffer and is clipped by the renderer — the spikes are simply not
 /// in the picture that gets bent. Fixing it means capturing at the decoration's
-/// widest canvas *and* building `warp::mesh` over that larger rectangle, since
-/// the mesh is what maps the texture back onto the window; both the genie's
-/// anchor arithmetic and `crates/effects` are written against the window's own
-/// rect today. It is `capture`'s change and the effects plan's, not this one's.
-/// What it costs meanwhile is an effect that disappears while a window is being
-/// deformed and comes back when it lands, which is visible but is not wrong
-/// pixels.
+/// widest canvas *and* building `warp::mesh_part` over that larger rectangle,
+/// since the mesh is what maps the texture back onto the window; both the
+/// genie's anchor arithmetic and `crates/effects` are written against the
+/// window's own rect today. It is `capture`'s change and the effects plan's,
+/// not this one's. What it costs meanwhile is an effect that disappears while a
+/// window is being deformed and comes back when it lands, which is visible but
+/// is not wrong pixels.
+///
+/// **No popups.** A warped pane's popups are a capture of their own, drawn in
+/// front of the warp (Task 20): inside this one they sat under the titlebar
+/// and were cut at the window's edge.
+/// `state::tests::a_warped_panes_capture_holds_no_popups`.
 pub(crate) fn flat_window_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -2036,32 +2038,11 @@ pub(crate) fn flat_window_elements(
         //
         // What it costs meanwhile is visible but is not wrong pixels, which is
         // the same trade the bleed already makes.
-        Piece::Client => {
-            if let Some(surface) = window
-                .toplevel()
-                .map(|toplevel| toplevel.wl_surface().clone())
-            {
-                for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-                    let popup_origin =
-                        origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-                    let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                        render_elements_from_surface_tree(
-                            renderer,
-                            popup.wl_surface(),
-                            popup_origin,
-                            output_scale,
-                            1.0,
-                            Kind::Unspecified,
-                        );
-                    elements.extend(popup_elements.into_iter().map(Element::Window2));
-                }
-            }
-
-            // The toplevel's own tree: its popups are the loop above's.
-            let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                toplevel_elements(renderer, window, origin, output_scale, 1.0);
-            elements.extend(window_elements.into_iter().map(Element::Window2));
-        }
+        Piece::Client => elements.extend(
+            client_piece(renderer, window, origin, output_scale)
+                .into_iter()
+                .map(Element::Window2),
+        ),
     });
     elements
 }
@@ -2537,6 +2518,72 @@ where
     }
 }
 
+/// A toplevel's popups, drawn from the client's corner at `origin`, and the
+/// rectangle they cover relative to that corner, which may reach past the
+/// window. The one walk of `popups_for_surface`: the flat path draws these in
+/// front of the whole sandwich, a warped pane in front of its warp (Ruling 15).
+/// `state::tests::a_warped_panes_capture_holds_no_popups`,
+/// `state::tests::a_popup_past_the_window_is_captured_whole`.
+pub(crate) fn popup_elements<R>(
+    renderer: &mut R,
+    window: &Window,
+    origin: Point<i32, Physical>,
+    scale: Scale<f64>,
+    alpha: f32,
+) -> (
+    Vec<WaylandSurfaceRenderElement<R>>,
+    Option<Rectangle<i32, Logical>>,
+)
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let mut elements = Vec::new();
+    let mut covered: Option<Rectangle<i32, Logical>> = None;
+    let Some(surface) = window
+        .toplevel()
+        .map(|toplevel| toplevel.wl_surface().clone())
+    else {
+        return (elements, covered);
+    };
+    for (popup, offset) in PopupManager::popups_for_surface(&surface) {
+        let at = origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
+        elements.extend(render_elements_from_surface_tree(
+            renderer,
+            popup.wl_surface(),
+            at,
+            scale,
+            alpha,
+            Kind::Unspecified,
+        ));
+        // The tree where it is drawn, not the popup's window geometry: a popup
+        // that sets none has a zero-sized one, and what a capture of it must
+        // hold is everything drawn above.
+        // `state::tests::a_warped_panes_capture_holds_no_popups`.
+        let rect = smithay::desktop::utils::bbox_from_surface_tree(
+            popup.wl_surface(),
+            offset - popup.geometry().loc,
+        );
+        covered = Some(covered.map_or(rect, |held| held.merge(rect)));
+    }
+    (elements, covered)
+}
+
+/// What a pane's capture draws of its client: its own surface tree, no
+/// popups. `state::tests::a_warped_panes_capture_holds_no_popups`.
+pub(crate) fn client_piece<R>(
+    renderer: &mut R,
+    window: &Window,
+    origin: Point<i32, Physical>,
+    scale: Scale<f64>,
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    toplevel_elements(renderer, window, origin, scale, 1.0)
+}
+
 /// Drawn size over real size, guarding the degenerate case.
 ///
 /// A zero-sized window is not drawable, but it is reachable: a client can
@@ -2612,7 +2659,14 @@ mod tests {
             (800, 600).into(),
         ));
         let aimed = genie_to(crate::present::logical((2800.0, 1000.0), (120.0, 24.0)));
-        let mesh = super::warp_mesh_on(screen, &frame, Some(aimed), 1.25).expect("a mesh");
+        let mesh = super::warp_mesh_on(
+            screen,
+            &frame,
+            Some(aimed),
+            crate::warp::UnitRect::WHOLE,
+            1.25,
+        )
+        .expect("a mesh");
         let (left, top) = ((2800.0 - 1920.0) * 1.25, 1000.0 * 1.25);
         for corner in mesh.vertices() {
             let (x, y) = (f64::from(corner.x), f64::from(corner.y));
@@ -2635,7 +2689,14 @@ mod tests {
             (800, 600).into(),
         ));
         let aimed = genie_to(crate::present::logical((880.0, 1000.0), (120.0, 24.0)));
-        let on = super::warp_mesh_on(screen, &frame, Some(aimed), 1.25).expect("a mesh");
+        let on = super::warp_mesh_on(
+            screen,
+            &frame,
+            Some(aimed),
+            crate::warp::UnitRect::WHOLE,
+            1.25,
+        )
+        .expect("a mesh");
         let direct = crate::warp::mesh(frame.rect, frame.matrix, Some(aimed), frame.pivot, 1.25)
             .expect("a mesh");
         let pairs = on.vertices().iter().zip(direct.vertices());
@@ -3120,15 +3181,15 @@ mod tests {
 
             let source = include_str!("render.rs");
             let popups = source
-                .find("for (popup, offset) in PopupManager::popups_for_surface(&surface) {")
-                .expect("`elements` still walks the popups");
+                .find("let (popups, _) = popup_elements(")
+                .expect("`elements` still draws the popups");
             let sandwich = source[popups..]
                 .find("// **This is the sandwich.**")
                 .map(|at| popups + at)
                 .expect("and the sandwich still follows them");
             assert!(
                 source[popups..sandwich].contains("fitting.uncut()"),
-                "the popup loop in `elements` no longer draws through the uncut fit"
+                "the popups in `elements` no longer draw through the uncut fit"
             );
         }
     }
