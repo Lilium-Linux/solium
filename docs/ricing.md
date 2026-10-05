@@ -888,6 +888,37 @@ nothing else. It shows:
   and the "us,ru" layout-correction pass -- it needs the compositor's own
   keymap, which nothing here exposes yet.
 
+- desktop icons: `Solium.dirs.desktop` (`$XDG_DESKTOP_DIR`, or
+  `user-dirs.dirs`; nothing drawn, and nothing scanned, when it is unset or
+  is `$HOME`), on their own surface -- `layer = "bottom"`, below ordinary
+  windows, the same as a real desktop, and below the bar above -- 96x100
+  cells with 48 px icons, column by column from the top right, folders
+  first then by name. A click selects (Ctrl or Shift adds), a double-click
+  opens: a regular file through its MIME type's default application, a
+  `.desktop` launcher through its own `Exec=` once trusted, asked for once
+  in a small card. Live through inotify: a file that appears or disappears
+  on the desktop updates the icons at once, no reload needed.
+
+  ```lua
+  return { preview = { desktop = {
+      from = "top-left",                   -- or "top-right" (default)
+      cell = { width = 110, height = 112 }, -- default 96x100
+      labels = 1,                          -- label lines, default 2
+      open = "single",                     -- or "double" (default)
+      show_hidden = true,                  -- default false
+  } } }
+  ```
+
+  Cut from this first version (`crates/solium/src/folder.rs` and
+  `qml/preview/Desktop.qml` both say why, in full): dragging and saved
+  positions (there is nowhere durable to keep them yet), the right-click
+  menus, a rubber band, showing the desktop (`super+ctrl+d` needs a
+  window-presenting pass this compositor does not have), Open With and
+  thumbnails, MIME detection by content rather than by extension, and the
+  arrow-key/Return navigation the design note asks for (nothing yet gives
+  the desktop the keyboard on demand, so claiming it unconditionally would
+  only fight the dock and quick search for focus).
+
 Next pieces -- the island, quick settings, a tray, and previews -- need
 services this compositor does not have yet, and are not here. `lua/preview/`
 and `qml/preview/` are where all of it lives, so copying one file still
