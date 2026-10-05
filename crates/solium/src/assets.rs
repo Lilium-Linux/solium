@@ -153,10 +153,6 @@ pub(crate) fn lua() -> PathBuf {
 /// of `qml/` and `lua/` alone is found:
 /// `tests::a_development_build_finds_its_own_build_tree`). Beside them:
 /// `effect::host::tests::the_shipped_effects_are_beside_the_qml_and_the_lua`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 4's host is its first reader")
-)]
 pub(crate) fn effects() -> PathBuf {
     root().join("effects")
 }

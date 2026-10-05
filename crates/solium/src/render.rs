@@ -316,6 +316,14 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // for exactly that reason. See `pacing::Phase`.
     let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
     state.memory_report();
+    // Effects compile here, between frames, where the context is current:
+    // nothing at all when no effect is wanted (spec §8.4,
+    // `effect::host::tests::an_empty_host_touches_no_gl`).
+    if !state.effects.is_idle() {
+        state
+            .effects
+            .compile_pending(&mut crate::effect::GlCompiler(renderer));
+    }
     // What the pointer is standing on can change without the pointer moving --
     // a window slides under it, a mode opens -- and there is no input event for
     // that. Asked here rather than in `Solium::settle`, which runs *after* the

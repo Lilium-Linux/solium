@@ -70,6 +70,48 @@ fn a_pane_is_on_a_monitor_only_if_some_monitor_covers_part_of_it() {
     assert!(!anywhere_on(at(100, 100, 800, 600), []));
 }
 
+/// **A reload reads the effect folders again**: the configuration's
+/// `reload_from` leaves a changed effect pending for the next `prepare`.
+#[test]
+fn a_reload_reads_the_effect_folders_again() {
+    let directory = crate::effect::host::tests::scratch("state-reload");
+    let entry = directory.join("init.lua");
+    std::fs::write(&entry, "sol.pane('none')\n").expect("writing the test script");
+    let effects = directory.join("effects");
+    let frag = "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n";
+    let dir = crate::effect::host::tests::folder(
+        &effects,
+        "a",
+        "return { api = 1, frag = 'effect.frag' }",
+        &[("effect.frag", frag)],
+    );
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.effects = crate::effect::host::Host::new(crate::effect::host::Library::with(
+        Some(effects.clone()),
+        effects.join("none"),
+    ));
+    state.effects.want("rules", ["a".to_owned()]);
+    let v1 = state
+        .effects
+        .pending_hash("a")
+        .expect("the premise: a cold load is pending until prepare");
+    std::fs::write(
+        dir.join("effect.frag"),
+        "vec4 sol_effect(vec2 uv) { return vec4(1.0); }\n",
+    )
+    .expect("v2");
+    state.reload_from(&entry);
+    assert_ne!(
+        state.effects.pending_hash("a"),
+        Some(v1),
+        "the reload did not read the folder again"
+    );
+    assert!(state.effects.pending_hash("a").is_some());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// **A deform at rest is aimed at nothing**, so a window brought back from a
 /// genie with `sol.present(id, {})` is not captured and warped on every frame
 /// for good (#140).

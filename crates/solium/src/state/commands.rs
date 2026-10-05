@@ -619,6 +619,10 @@ impl Solium {
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
                 self.decorations.clear_values();
                 self.start_scripts(Some(scripts));
+                // The effect folders, read again: a changed one is pending
+                // until the next `prepare` compiles it, and a broken one
+                // keeps what ran (`a_reload_reads_the_effect_folders_again`).
+                self.effects.reload();
                 // The re-announcement, in the order the doc comment states.
                 // Three dispatches and not one, each with its own snapshot,
                 // because what `monitors` does changes what `layout` is

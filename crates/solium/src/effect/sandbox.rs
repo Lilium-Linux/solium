@@ -42,7 +42,7 @@ impl Budget {
         memory: 16 << 20,
     };
     /// A per-frame `mesh` call (Task 26).
-    #[cfg_attr(test, expect(dead_code, reason = "Task 26's mesh call is its reader"))]
+    #[expect(dead_code, reason = "Task 26's mesh call is its reader")]
     pub(crate) const MESH: Duration = Duration::from_millis(2);
 }
 
@@ -102,12 +102,9 @@ impl Sandbox {
         })
     }
 
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "Task 8's stages and Task 26's mesh call through it"
-        )
+    #[expect(
+        dead_code,
+        reason = "Task 8's stages and Task 26's mesh call through it"
     )]
     pub(crate) fn lua(&self) -> &Lua {
         &self.lua
@@ -115,6 +112,7 @@ impl Sandbox {
 
     /// Whether a call was stopped by its budget, so this state must not run
     /// again. `tests::an_effect_that_never_returns_is_stopped_within_its_budget`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 26's revive reads it"))]
     pub(crate) fn poisoned(&self) -> bool {
         self.poisoned.get()
     }
@@ -197,6 +195,10 @@ impl Sandbox {
     }
 
     /// The table `effect.lua` returned.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 8's stages read the table through it")
+    )]
     pub(crate) fn returned(&self) -> Result<Table, Problem> {
         let key = self.returned.as_ref().ok_or_else(|| {
             Problem::error(
@@ -213,6 +215,13 @@ impl Sandbox {
 
     /// The params as the `p` table every function of them is called with.
     /// `tests::reach_as_a_function_is_called_with_the_params`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Loaded::bind's, which Task 14's rules bind through"
+        )
+    )]
     pub(crate) fn params_table(&self, params: &[(String, Value)]) -> Result<Table, Problem> {
         let build = || -> mlua::Result<Table> {
             let table = self.lua.create_table()?;
@@ -234,6 +243,13 @@ impl Sandbox {
     }
 
     /// `reach` or `bleed` for these params. `tests::reach_as_a_function_is_called_with_the_params`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Loaded::bind's, which Task 14's rules bind through"
+        )
+    )]
     pub(crate) fn extent(&self, key: &str, params: &[(String, Value)]) -> Result<f64, Problem> {
         let value: LuaValue = self
             .returned()?

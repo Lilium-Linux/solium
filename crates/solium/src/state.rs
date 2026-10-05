@@ -589,6 +589,11 @@ pub(crate) struct Solium {
     /// not something a client binds.
     pub(crate) programs: crate::pass::Programs,
 
+    /// The effects the configuration wants: loaded GPU-free at config load,
+    /// compiled at the top of `render::prepare` (Ruling 7).
+    /// `effect::host::tests::an_empty_host_touches_no_gl`.
+    pub(crate) effects: crate::effect::host::Host,
+
     /// GPU time per pass, only while pacing is on: `gputime.rs`. On the state
     /// rather than the backend so a capture can time itself (Ruling 5).
     pub(crate) timer: Option<crate::gputime::Timer>,
@@ -1051,6 +1056,7 @@ impl Solium {
             decorations: Decorations::default(),
             pointer: crate::cursor::Pointer::default(),
             programs: crate::pass::Programs::default(),
+            effects: crate::effect::host::Host::new(crate::effect::host::Library::new()),
             timer: None,
             textures: None,
             focusing: false,

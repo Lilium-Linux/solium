@@ -58,6 +58,8 @@ judged at the very end.
 | 11d | the same through raw GL, as the warp samples (FX0) | the same, sampled with the raw texture name in a program of its own, no `glWaitSync` | `round N: a capture sampled through raw GL …` |
 | 11e | the warp program (FX0) | `warp/gl.rs`'s program compiles and draws a texture through a full-target mesh | `the warp drew … at the centre, not the texture` |
 | 11f | a pooled target (FX0) | `pool.rs`'s target is drawn through its own framebuffer object in a frame opened on a 1x1 carrier, and the carrier keeps its blue; painted again with nothing, the target reads back transparent | `the pooled target is not what was drawn into it`, `a pooled target painted with nothing is not transparent`, `the carrier is no longer blue…` |
+| 12a | a .frag's error at its own line (FX2) | a typo on line 3 of the user's string; the driver's log through `glsl::compile_log`, with the driver's `#line` rule read from its log of `glsl::line_probe` (`glsl::line_shift`, as the compositor's `GlCompiler` reads it), says string 1, line 3. Run on NVIDIA, which calls the line after `#line 0 1` line 0, GLSL ES 3.00's rule where GLSL ES 1.00 says 1 (`1(2) : error C1503: undefined variable …`, shift 1); iris is unverified until the laptop runs `WIRECHECK_ONLY=fx2` | `the log did not map to string 1, line 3` |
+| 12b | the prelude compiles; introspection agrees (FX2) | `glGetActiveUniform` reports float, int, vec4 and sampler2D as the prelude declared | `<name> is …, not GL type …` |
 | 12 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
 | 13 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
 | 14 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
@@ -705,7 +707,7 @@ control has shown can fail.
 | `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
 | `WIRECHECK_STOP_THE_CLOCK` | stop ticking from the rebind onward — the animation control above |
 | `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |
-| `WIRECHECK_ONLY=fx0` | runs only the FX0 cases (11b onwards), with no Qt started; that is how the Surface Pro 7 runs them from a copied binary |
+| `WIRECHECK_ONLY=fx0`, `fx2` | runs only the FX0 cases (11b to 11f), or only FX2's (12a onwards), with no Qt started; that is how the Surface Pro 7 runs them from a copied binary |
 | `WIRECHECK_FX0_CROSS` | with `WIRECHECK_ONLY=fx0`, also runs the fence control above |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
 | `WIRECHECK_NO_RESTORE` | skip both restores of the compositor's context around the first scene's build and first render, the early one included. Every restore after that still runs |
