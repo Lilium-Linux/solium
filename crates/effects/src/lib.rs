@@ -44,6 +44,7 @@
 
 pub mod ffi;
 pub mod fragment;
+pub mod glsl;
 pub mod spec;
 
 /// A rectangle, in whatever coordinates the caller is using.

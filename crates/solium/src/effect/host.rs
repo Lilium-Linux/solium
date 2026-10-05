@@ -196,8 +196,9 @@ impl<P> Loaded<P> {
     }
 }
 
-/// A folder's identity: every file in it, sorted by name, bytes and all
-/// (FNV-1a, 64 bits). `tests::a_folders_hash_is_its_files`.
+/// A folder's identity: every file in it, sorted by name, its name and its
+/// bytes two parts of `glsl::content_hash`, the hash programs are keyed by.
+/// `tests::a_folders_hash_is_its_files`.
 pub(crate) fn folder_hash(dir: &Path) -> u64 {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|entries| {
@@ -209,22 +210,18 @@ pub(crate) fn folder_hash(dir: &Path) -> u64 {
         })
         .unwrap_or_default();
     files.sort();
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for file in files {
-        let name = file
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        for byte in name
-            .bytes()
-            .chain([0xff])
-            .chain(std::fs::read(&file).unwrap_or_default())
-            .chain([0xfe])
-        {
-            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    hash
+    let parts: Vec<Vec<u8>> = files
+        .iter()
+        .flat_map(|file| {
+            let name = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned().into_bytes())
+                .unwrap_or_default();
+            [name, std::fs::read(file).unwrap_or_default()]
+        })
+        .collect();
+    let slices: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    solium_effects::glsl::content_hash(&slices)
 }
 
 #[cfg(test)]
@@ -411,6 +408,8 @@ pub(crate) mod tests {
 
     /// Two folders with the same files have the same hash, and one changed
     /// byte gives another: what Task 4's "unchanged is not reloaded" rests on.
+    /// The hash is the one content hash programs are keyed by, over each
+    /// file's name and bytes in name order.
     #[test]
     fn a_folders_hash_is_its_files() {
         let place = scratch("hash");
@@ -421,6 +420,16 @@ pub(crate) mod tests {
         let hash = |dir: &Path| super::folder_hash(dir);
         assert_eq!(hash(&a), hash(&b));
         assert_ne!(hash(&a), hash(&c));
+        assert_eq!(
+            hash(&a),
+            solium_effects::glsl::content_hash(&[
+                b"effect.frag",
+                b"x",
+                b"effect.lua",
+                lua.as_bytes()
+            ]),
+            "each file's name and bytes, in name order, through glsl::content_hash"
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 
