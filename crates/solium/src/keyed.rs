@@ -5,6 +5,9 @@
 //! only when redrawn, so a capture of a still window is neither drawn nor
 //! damaged. `tests::a_redrawn_capture_moves_its_commit_and_keeps_its_id`,
 //! `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`.
+//! A pane's warp carries its pane capture's id and a commit of its own, which
+//! moves when that capture is redrawn and when the warp's mesh changes shape:
+//! `tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
 
 use smithay::{
     backend::renderer::{
@@ -167,12 +170,18 @@ impl<T: Clone> Capture<Target<T>> {
     }
 }
 
-/// Every capture one pane keeps, by kind. Owned by the pane, as
-/// `offscreen::Scratch` was. `tests::a_pane_switching_kinds_lets_the_other_capture_go`.
+/// Every capture one pane keeps, by kind, and the commit its warp carries.
+/// Owned by the pane, as `offscreen::Scratch` was.
+/// `tests::a_pane_switching_kinds_lets_the_other_capture_go`,
+/// `tests::a_warp_at_rest_keeps_its_commit`.
 #[derive(Debug)]
 pub(crate) struct Captures<T = GlesTexture> {
     pub(crate) pane: Capture<Target<T>>,
     pub(crate) client: Capture<Target<T>>,
+    /// The shape the warp's mesh was last drawn from.
+    shape: Option<crate::render::Shape>,
+    /// The warp's commit: its id is the pane capture's.
+    warp_commit: CommitCounter,
 }
 
 impl<T> Default for Captures<T> {
@@ -180,7 +189,27 @@ impl<T> Default for Captures<T> {
         Self {
             pane: Capture::default(),
             client: Capture::default(),
+            shape: None,
+            warp_commit: CommitCounter::default(),
         }
+    }
+}
+
+impl<T> Captures<T> {
+    /// The warp's commit this pass: moved when its capture was redrawn or its
+    /// shape changed, and only then.
+    /// `tests::a_warp_at_rest_keeps_its_commit`,
+    /// `tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
+    pub(crate) fn warp_commit_for(
+        &mut self,
+        shape: crate::render::Shape,
+        redrawn: bool,
+    ) -> CommitCounter {
+        if redrawn || self.shape != Some(shape) {
+            self.warp_commit.increment();
+            self.shape = Some(shape);
+        }
+        self.warp_commit
     }
 }
 
@@ -244,6 +273,36 @@ mod tests {
     #[test]
     fn a_capture_never_drawn_is_stale() {
         assert!(Capture::<u32>::default().stale(&nothing(Kind::Pane)));
+    }
+
+    fn shape(turn: f32) -> crate::render::Shape {
+        let frame = crate::present::Frame {
+            matrix: crate::mat4::Mat4::rotate_z(turn),
+            ..crate::present::Frame::real(smithay::utils::Rectangle::new(
+                (100, 100).into(),
+                (400, 400).into(),
+            ))
+        };
+        crate::render::Shape::of(&frame, None, 1.0)
+    }
+
+    /// **A warp whose mesh moves inside the same bounds is given a new
+    /// commit**: a square turned a quarter has the same box and another mesh.
+    #[test]
+    fn a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit() {
+        let mut captures = Captures::<u32>::default();
+        let first = captures.warp_commit_for(shape(0.0), false);
+        let turned = captures.warp_commit_for(shape(std::f32::consts::FRAC_PI_2), false);
+        assert_ne!(first, turned);
+    }
+
+    /// A warp at rest keeps its commit, and one whose capture was redrawn does not.
+    #[test]
+    fn a_warp_at_rest_keeps_its_commit() {
+        let mut captures = Captures::<u32>::default();
+        let first = captures.warp_commit_for(shape(0.3), false);
+        assert_eq!(captures.warp_commit_for(shape(0.3), false), first);
+        assert_ne!(captures.warp_commit_for(shape(0.3), true), first);
     }
 
     /// A GBM buffer freed when its last handle goes, as `offscreen`'s tests

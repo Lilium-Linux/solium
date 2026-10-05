@@ -240,17 +240,45 @@ impl Drawn {
 /// underneath a bind is the frozen-compositor failure above.
 ///
 /// Two lists rather than one keyed by kind, because they are different things:
-/// a warp keeps a texture and the program to draw it through, and a masked
-/// client keeps a texture, the size it was captured at, a radius in physical
-/// pixels and the program to draw it through. See [`crate::pass::Pass`].
+/// a warp keeps a texture, the program to draw it through, and the id and
+/// commit its element carries (its pane capture's id, and a commit that moves
+/// only when the capture is redrawn or the mesh's [`Shape`] changes:
+/// `keyed::tests::a_warp_at_rest_keeps_its_commit`), and a masked client
+/// keeps a texture, the size it was captured at, a radius in physical pixels
+/// and the program to draw it through. See [`crate::pass::Pass`].
 ///
 /// Built in two phases: every capture's element list first, which can run Qt,
 /// then every capture drawn on one bound carrier, which must not
 /// (`offscreen::draw`).
 #[derive(Default)]
 pub(crate) struct Prepared {
-    warps: Vec<(Window, GlesTexture, crate::warp::Program)>,
+    warps: Vec<(Window, GlesTexture, crate::warp::Program, Id, CommitCounter)>,
     passes: Vec<(Window, crate::pass::Pass)>,
+}
+
+/// What a warp's mesh is a function of, in global space, so one comparison
+/// serves every output and screencopy. Exact comparison: a `NaN` always
+/// differs, which recommits, the safe way round.
+/// `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Shape {
+    rect: Rectangle<f64, Logical>,
+    matrix: crate::mat4::Mat4,
+    pivot: (f32, f32),
+    scale: f64,
+    aimed: Option<present::Aimed>,
+}
+
+impl Shape {
+    pub(crate) fn of(frame: &present::Frame, aimed: Option<present::Aimed>, scale: f64) -> Self {
+        Self {
+            rect: frame.rect,
+            matrix: frame.matrix,
+            pivot: frame.pivot,
+            scale,
+            aimed,
+        }
+    }
 }
 
 /// What `prepare` does with a pane. `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
@@ -274,18 +302,20 @@ pub(crate) fn route(warped: bool, program: bool) -> Route {
 }
 
 impl Prepared {
-    /// Lend the texture captured for `window`, and the program to draw it
-    /// through, if there is one.
+    /// Lend the texture captured for `window`, the program to draw it
+    /// through, and the id and commit its warp carries, if there is one.
     ///
     /// Lent rather than taken: with more than one monitor `elements` runs once
     /// per output, and a texture removed by the first one would leave a
     /// deformed window undrawn on every other screen. `GlesTexture` is a
     /// handle, so the clone is a refcount, and the program is GL names.
-    fn warp(&self, window: &Window) -> Option<(GlesTexture, crate::warp::Program)> {
-        self.warps
-            .iter()
-            .find(|(each, _, _)| each == window)
-            .map(|(_, texture, program)| (texture.clone(), *program))
+    fn warp(
+        &self,
+        window: &Window,
+    ) -> Option<(GlesTexture, crate::warp::Program, Id, CommitCounter)> {
+        self.warps.iter().find(|(each, ..)| each == window).map(
+            |(_, texture, program, id, commit)| (texture.clone(), *program, id.clone(), *commit),
+        )
     }
 
     /// The pass captured for `window`, if its style asked for one.
@@ -438,8 +468,8 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // A deformed window with no warp program takes the flat path below
         // instead of being captured for a warp that cannot be drawn:
         // `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
-        let warped =
-            !frame.matrix.is_identity() || state.aimed_at_for(pane, frame.deform).is_some();
+        let aimed = state.aimed_at_for(pane, frame.deform);
+        let warped = !frame.matrix.is_identity() || aimed.is_some();
         let program = if warped {
             state.programs.warp(renderer)
         } else {
@@ -465,6 +495,10 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         }
         if let (Route::Warp, Some(program)) = (routed, program) {
             let scale = state.scale_of(outer);
+            // What its mesh is drawn from, in global space: the warp's commit
+            // moves when this does, as well as when its capture is redrawn.
+            // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
+            let shape = Shape::of(&frame, aimed, scale);
             let (panes, pool) = (&mut state.panes, &mut state.pool);
             if let Some(held) = panes.get_mut(pane) {
                 held.captures_mut()
@@ -473,10 +507,11 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             if let Some(job) = crate::offscreen::pane_job(state, renderer, pane, &window, scale) {
                 // Already drawn from exactly this: no frame (`offscreen::kept`,
                 // `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`).
-                if let Some((texture, _id, _commit)) = crate::offscreen::kept(state, &job) {
-                    warps.push((window, texture, program));
+                if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
+                    let commit = warp_commit(state, pane, shape, false);
+                    warps.push((window, texture, program, id, commit));
                 } else {
-                    jobs.push((job, Then::Warp(window, program)));
+                    jobs.push((job, Then::Warp(window, program, pane, shape)));
                 }
             }
             continue;
@@ -503,7 +538,10 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // Every list is built: draw them all, on one carrier.
     for (then, texture, id, commit) in crate::offscreen::draw(state, renderer, jobs) {
         match then {
-            Then::Warp(window, program) => warps.push((window, texture, program)),
+            Then::Warp(window, program, pane, shape) => {
+                let commit = warp_commit(state, pane, shape, true);
+                warps.push((window, texture, program, id, commit));
+            }
             Then::Pass(window, pending) => {
                 passes.push((window, pending.with(texture, id, commit)));
             }
@@ -513,10 +551,27 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
 }
 
 /// What a capture becomes once drawn: `dev/fence-check.sh` has one of each.
+/// A warp carries its pane and the [`Shape`] its commit is moved by.
 #[derive(Debug)]
 enum Then {
-    Warp(Window, crate::warp::Program),
+    Warp(Window, crate::warp::Program, crate::pane::PaneId, Shape),
     Pass(Window, crate::pass::Pending),
+}
+
+/// The commit `pane`'s warp carries this pass: moved when its capture was
+/// `redrawn` or its `shape` changed, and only then.
+/// `keyed::tests::a_warp_at_rest_keeps_its_commit`.
+fn warp_commit(
+    state: &mut Solium,
+    pane: crate::pane::PaneId,
+    shape: Shape,
+    redrawn: bool,
+) -> CommitCounter {
+    state
+        .panes
+        .get_mut(pane)
+        .map(|held| held.captures_mut().warp_commit_for(shape, redrawn))
+        .unwrap_or_default()
 }
 
 /// The effects a pane's style declares, copied out so nothing borrows the
@@ -1377,11 +1432,14 @@ fn panes(
         let aimed = state.aimed_at_for(pane, frame.deform);
         if (!frame.matrix.is_identity() || aimed.is_some())
             && let Some(mesh) = warp_mesh_on(screen, &drawn_global, aimed, scale)
-            && let Some((texture, program)) = prepared.warp(&window)
+            && let Some((texture, program, id, commit)) = prepared.warp(&window)
         {
+            // Its pane capture's id for life, and the commit `prepare` moved
+            // only if the picture or the mesh changed, so a still warp is not
+            // damaged and a moving one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
             elements.push(Element::Warped(crate::warp::Warp::new(
-                Id::new(),
-                CommitCounter::default(),
+                id,
+                commit,
                 texture,
                 mesh,
                 frame.opacity,

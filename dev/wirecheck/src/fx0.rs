@@ -31,6 +31,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     no_wait_through_raw_gl(renderer)?;
     warp_program_draws(renderer)?;
     pooled_target_through_the_carrier(renderer)?;
+    a_warp_redrawn_under_partial_damage_blends_once(renderer)?;
     Ok(())
 }
 
@@ -487,7 +488,7 @@ fn warp_program_draws(renderer: &mut GlesRenderer) -> Result<()> {
         let name = texture.tex_id();
         // SAFETY: inside the frame's context; the program and texture are its.
         frame
-            .with_context(|gl| unsafe { program.draw(gl, &projection, name, &vertices, 1.0) })
+            .with_context(|gl| unsafe { program.draw(gl, &projection, name, &vertices, 1.0, &[]) })
             .map_err(|err| anyhow!("{err}"))?;
         frame
             .finish()
@@ -586,5 +587,74 @@ fn pooled_target_through_the_carrier(renderer: &mut GlesRenderer) -> Result<()> 
         "  drawn through its own framebuffer, and cleared transparent; the carrier untouched; \
          the framebuffer deleted at the sweep"
     );
+    Ok(())
+}
+
+/// **Case 11g: a warp redrawn under partial damage blends once.** A
+/// translucent warp over the whole target, then the left half cleared and
+/// drawn again under its scissor: a pixel in the right half is unchanged.
+fn a_warp_redrawn_under_partial_damage_blends_once(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX0: a warp redrawn under partial damage blends once ===");
+    let side = 64;
+    let grey: Vec<u8> = [128_u8, 128, 128, 128].repeat((side * side) as usize);
+    let texture = renderer
+        .import_memory(&grey, Fourcc::Abgr8888, (side, side).into(), false)
+        .map_err(|err| anyhow!("{err}"))?;
+    // SAFETY: `with_context` makes the context current.
+    let program = renderer
+        .with_context(|gl| unsafe { warp_gl::Program::compile(gl) })
+        .map_err(|err| anyhow!("{err}"))?
+        .map_err(|why| anyhow!("{why}"))?;
+    let edge = side as f32;
+    let vertices: Vec<f32> = [
+        (0.0, 0.0, 0.0, 0.0),
+        (edge, 0.0, 1.0, 0.0),
+        (edge, edge, 1.0, 1.0),
+        (0.0, 0.0, 0.0, 0.0),
+        (edge, edge, 1.0, 1.0),
+        (0.0, edge, 0.0, 1.0),
+    ]
+    .iter()
+    .flat_map(|(x, y, u, v)| [*x, *y, *u, *v, 1.0])
+    .collect();
+    let mut target: GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, (side, side).into())
+        .map_err(|err| anyhow!("{err}"))?;
+    let whole = Rectangle::from_size((side, side).into());
+    let left = Rectangle::from_size((side / 2, side).into());
+    for (clear, damage) in [(whole, None), (left, Some(left))] {
+        let mut framebuffer = renderer.bind(&mut target).map_err(|err| anyhow!("{err}"))?;
+        let mut frame = renderer
+            .render(&mut framebuffer, (side, side).into(), Transform::Normal)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .clear(Color32F::TRANSPARENT, &[clear])
+            .map_err(|err| anyhow!("{err}"))?;
+        let projection = *frame.projection();
+        let name = texture.tex_id();
+        let scissors: Vec<[i32; 4]> = damage
+            .map(|rect| vec![warp_gl::scissor_box(&projection, [0, 0, side, side], rect)])
+            .unwrap_or_default();
+        // SAFETY: inside the frame's context.
+        frame
+            .with_context(|gl| unsafe {
+                program.draw(gl, &projection, name, &vertices, 1.0, &scissors)
+            })
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let pixels = read(renderer, &mut target, side)?;
+    let right = (((side / 2) * side + side * 3 / 4) * 4) as usize;
+    let alpha = pixels.get(right + 3).copied();
+    if alpha != Some(128) {
+        return Err(anyhow!(
+            "a pixel outside the damage has alpha {alpha:?}, not 128: the warp was blended twice"
+        ));
+    }
+    println!("  outside the damage, blended once");
     Ok(())
 }

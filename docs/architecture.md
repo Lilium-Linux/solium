@@ -221,6 +221,14 @@ one id for life and moving its commit only when redrawn. So a still rounded
 window costs no pass and no damage, and one whose client is painting pays a pass
 a commit. `SOLIUM_RECAPTURE=always` draws every capture on every pass, as before.
 
+A warp, a pane's capture drawn through a mesh, carries that capture's id and a
+commit of its own, which moves when the capture is redrawn or the mesh's shape
+changes (its rectangle, matrix, pivot, scale, or the target its deform is aimed
+at). So a window held still at a tilt is neither captured again nor damaged by
+its warp, and the warp is drawn once per damage rectangle, under a scissor,
+never whole: the whole mesh drawn over the copy already in the buffer would
+blend its translucent edge twice (`dev/wirecheck` case 11g).
+
 The texture is the cost. Every visible rounded window keeps one, which is why
 `render::prepare` captures no pane that no monitor shows. What is
 beneath a node, the input a blur would need, is named in `fragment.rs` and

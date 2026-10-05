@@ -4,10 +4,14 @@
 )]
 
 //! The warp's program and its draw, in raw GL. Smithay and std only, so
-//! `dev/wirecheck` compiles and draws it on a GPU (case 11e). Compiled between
-//! frames by `pass::Programs::warp`, latched there, and carried by each `Warp`.
+//! `dev/wirecheck` compiles and draws it on a GPU (cases 11e and 11g).
+//! Compiled between frames by `pass::Programs::warp`, latched there, and
+//! carried by each `Warp`.
 
-use smithay::backend::renderer::gles::ffi;
+use smithay::{
+    backend::renderer::gles::ffi,
+    utils::{Physical, Rectangle},
+};
 
 const VERTEX: &str = r"
 precision highp float;
@@ -39,6 +43,54 @@ void main() {
     gl_FragColor = texture2D(tex, uv) * alpha;
 }
 ";
+
+/// The scissor box, in window pixels (`[x, y, w, h]` for `glScissor`), of a
+/// rectangle in the frame's physical pixels: its corners through the frame's
+/// projection (column-major, as `UniformMatrix3fv(…, FALSE, …)` takes it) to
+/// clip space, then through the viewport, and their bounding box. Right for
+/// every output transform, because the eight take axis-aligned rectangles to
+/// axis-aligned ones. `warp::tests::a_damage_rectangle_scissors_where_the_projection_puts_it`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "window coordinates, rounded"
+)]
+pub(crate) fn scissor_box(
+    projection: &[f32; 9],
+    viewport: [i32; 4],
+    rect: Rectangle<i32, Physical>,
+) -> [i32; 4] {
+    let corner = |x: i32, y: i32| {
+        let (x, y) = (x as f32, y as f32);
+        let clip_x = projection[0] * x + projection[3] * y + projection[6];
+        let clip_y = projection[1] * x + projection[4] * y + projection[7];
+        (
+            viewport[0] as f32 + (clip_x + 1.0) / 2.0 * viewport[2] as f32,
+            viewport[1] as f32 + (clip_y + 1.0) / 2.0 * viewport[3] as f32,
+        )
+    };
+    let (x0, y0, x1, y1) = (
+        rect.loc.x,
+        rect.loc.y,
+        rect.loc.x + rect.size.w,
+        rect.loc.y + rect.size.h,
+    );
+    let points = [
+        corner(x0, y0),
+        corner(x1, y0),
+        corner(x0, y1),
+        corner(x1, y1),
+    ];
+    let left = points.iter().map(|p| p.0).fold(f32::MAX, f32::min).round();
+    let right = points.iter().map(|p| p.0).fold(f32::MIN, f32::max).round();
+    let bottom = points.iter().map(|p| p.1).fold(f32::MAX, f32::min).round();
+    let top = points.iter().map(|p| p.1).fold(f32::MIN, f32::max).round();
+    [
+        left as i32,
+        bottom as i32,
+        (right - left) as i32,
+        (top - bottom) as i32,
+    ]
+}
 
 /// The compiled warp program: GL names only, so `Copy`.
 #[derive(Clone, Copy, Debug)]
@@ -99,7 +151,8 @@ impl Program {
     }
 
     /// Draw `vertices` (x, y, u·q, v·q, q per vertex, physical pixels) with
-    /// `texture`, through `projection`.
+    /// `texture`, through `projection`: once, or with `scissors` (window
+    /// boxes, from [`scissor_box`]) once under each.
     ///
     /// # Safety
     /// A GL context is current, and every name is this context's.
@@ -110,6 +163,7 @@ impl Program {
         texture: ffi::types::GLuint,
         vertices: &[f32],
         alpha: f32,
+        scissors: &[[i32; 4]],
     ) {
         // SAFETY: the caller's contract.
         unsafe {
@@ -194,7 +248,23 @@ impl Program {
                 reason = "a mesh is thousands of vertices, not billions"
             )]
             let count = (vertices.len() / 5) as i32;
-            gl.DrawArrays(ffi::TRIANGLES, 0, count);
+            if scissors.is_empty() {
+                gl.DrawArrays(ffi::TRIANGLES, 0, count);
+            } else {
+                // Once per damage rectangle: drawing the whole mesh under
+                // partial damage blends its translucent pixels a second time
+                // over the copy already there (wirecheck case 11g). The box
+                // smithay left is put back: it leaves the scissor on at the
+                // whole output (`gles/mod.rs:2058-2059`).
+                let mut saved = [0_i32; 4];
+                gl.GetIntegerv(ffi::SCISSOR_BOX, saved.as_mut_ptr());
+                gl.Enable(ffi::SCISSOR_TEST);
+                for [x, y, w, h] in scissors {
+                    gl.Scissor(*x, *y, *w, *h);
+                    gl.DrawArrays(ffi::TRIANGLES, 0, count);
+                }
+                gl.Scissor(saved[0], saved[1], saved[2], saved[3]);
+            }
 
             // Put back what Smithay expects to find: it does not re-bind
             // everything per element, so leaving our buffer and attributes

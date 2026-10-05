@@ -283,7 +283,7 @@ impl RenderElement<GlesRenderer> for Warp {
         &self,
         frame: &mut GlesFrame<'_, '_>,
         _src: Rectangle<f64, BufferCoords>,
-        _dst: Rectangle<i32, Physical>,
+        dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         _opaque_regions: &[Rectangle<i32, Physical>],
     ) -> Result<(), GlesError> {
@@ -294,12 +294,30 @@ impl RenderElement<GlesRenderer> for Warp {
         let texture = self.texture.tex_id();
         let vertices = self.mesh.interleaved();
         let (program, alpha) = (self.program, self.alpha);
+        // Only the damage, each rectangle under its own scissor: the damage is
+        // relative to `dst`, the mesh is in the frame's pixels. A warp kept
+        // across passes (its id is its capture's) is handed partial damage,
+        // and the whole mesh drawn under it would blend its translucent edge
+        // twice: wirecheck case 11g,
+        // `tests::a_damage_rectangle_scissors_where_the_projection_puts_it`.
+        let rects: Vec<Rectangle<i32, Physical>> = damage
+            .iter()
+            .map(|rect| Rectangle::new(dst.loc + rect.loc, rect.size))
+            .collect();
         // A program compiled between frames and carried here, so a warp cannot
         // fail to draw for want of one: `pass::tests::a_program_that_will_not_compile_is_tried_once`.
         frame.with_context(|gl| {
+            let mut viewport = [0_i32; 4];
             // SAFETY: a context is current inside `with_context`; the program's
             // names were made against this renderer's context.
-            unsafe { program.draw(gl, &projection, texture, &vertices, alpha) }
+            unsafe {
+                gl.GetIntegerv(ffi::VIEWPORT, viewport.as_mut_ptr());
+                let scissors: Vec<[i32; 4]> = rects
+                    .iter()
+                    .map(|rect| self::gl::scissor_box(&projection, viewport, *rect))
+                    .collect();
+                program.draw(gl, &projection, texture, &vertices, alpha, &scissors);
+            }
         })
     }
 
@@ -340,6 +358,58 @@ mod tests {
 
     use super::mesh;
     use crate::mat4::Mat4;
+
+    /// smithay's projection for an output of `w`x`h` under `transform`
+    /// (`gles/mod.rs:2065-2090`), column-major as `frame.projection()` gives it.
+    fn projection(w: i32, h: i32, transform: smithay::utils::Transform) -> [f32; 9] {
+        let (mut w, mut h) = (w as f32, h as f32);
+        if matches!(
+            transform,
+            smithay::utils::Transform::_90
+                | smithay::utils::Transform::_270
+                | smithay::utils::Transform::Flipped90
+                | smithay::utils::Transform::Flipped270
+        ) {
+            std::mem::swap(&mut w, &mut h);
+        }
+        let ortho = [2.0 / w, 0.0, 0.0, 0.0, -2.0 / h, 0.0, -1.0, 1.0, 1.0];
+        let turn: [f32; 9] = *AsRef::<[f32; 9]>::as_ref(&transform.matrix());
+        let flip = [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0];
+        let times = |a: &[f32; 9], b: &[f32; 9]| {
+            let mut out = [0.0; 9];
+            for column in 0..3 {
+                for row in 0..3 {
+                    out[column * 3 + row] =
+                        (0..3).map(|k| a[k * 3 + row] * b[column * 3 + k]).sum();
+                }
+            }
+            out
+        };
+        times(&times(&flip, &turn), &ortho)
+    }
+
+    /// **A damage rectangle scissors where the projection puts it.** Under no
+    /// transform the box is the rectangle; under a quarter turn or a flip it
+    /// keeps its area.
+    #[test]
+    fn a_damage_rectangle_scissors_where_the_projection_puts_it() {
+        use smithay::utils::{Rectangle, Transform};
+        let rect = Rectangle::new((100, 50).into(), (200, 100).into());
+        let normal = super::gl::scissor_box(
+            &projection(1920, 1080, Transform::Normal),
+            [0, 0, 1920, 1080],
+            rect,
+        );
+        assert_eq!(normal, [100, 50, 200, 100]);
+        for transform in [Transform::_90, Transform::Flipped180] {
+            let [_, _, w, h] = super::gl::scissor_box(
+                &projection(1920, 1080, transform),
+                [0, 0, 1920, 1080],
+                rect,
+            );
+            assert_eq!(w * h, 200 * 100, "{transform:?} changed the area");
+        }
+    }
 
     /// A quarter turn about the centre moves every corner. The same turn about
     /// the top-left corner leaves that corner exactly where it was -- which is
