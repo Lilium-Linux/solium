@@ -569,6 +569,41 @@ the log names each once
 `models::workspaces::tests::a_workspace_declared_twice_is_one_row`,
 `models::workspaces::tests::a_workspace_of_a_group_left_out_is_not_logged_as_declared_twice`).
 
+**Installed applications, and their icons.** `Apps` (03 §3.2.13) is every
+installed, visible application (`NoDisplay` and `Hidden` entries are left out
+at the source, not filtered in a scene), a row model like `Windows` and
+`Workspaces`: `entries` is itself (so `ListView { model: Apps.entries }` and
+`ListView { model: Apps }` are the same list), and `Apps.get(id)` a facade
+that is never null, with `valid` false for an id nothing installed answers --
+so a pinned app that was removed is a ghost, not a hole, the same Ruling 17
+convention `Windows` and `Workspaces` already keep. `Apps.ready` is false
+until the first scan completes. A row: `id` (the desktop file id), `name`,
+`genericName`, `icon` (an `image://solium/icon/...` URL, ready for an
+`Image`), `categories`, `keywords`. A scene launches one with
+`Solium.send("apps.launch", { id })`, routed to the compositor's existing
+spawn path (`launch.rs`) the same way `windows.focus` is; a running app is
+found by joining `Windows`' `appId` to an `Apps` row's `id` in the scene or in
+Lua, not by anything `Apps` itself tracks (no `running`, no `windowCount`
+here yet -- `qml/preview/Dock.qml` is the one place in this tree that does
+that join, and its own file doc says why it is one `WindowList` per app
+rather than a single pass over `Windows`). `sol.apps()` is the same list,
+read from Lua, for config written against what is actually installed
+(`lua/preview/dock.lua`'s first-run pins) -- but, like `sol.windows()` and
+`sol.monitors()`, only meaningfully inside a dispatch: a `.lua` file's top
+level runs before the first real snapshot arrives, so `sol.apps()` there
+reads empty (`lua/preview/dock.lua`'s own module doc works through this).
+`image://solium/icon/<name>?size=48&scale=2` is the one provider behind
+`Apps`' own `icon` and anything else a scene wants a theme icon for, by
+plain name (an absolute path is refused, not resolved -- P1, `icon.rs`'s
+module doc). What is cut from this version of both: inotify (a scan is
+redone wholesale, synchronously, at startup and on a reload, not on every
+directory change); a cache in the icon provider (every request re-walks the
+theme chain); `sol.icons{ theme = ... }` (the theme is always GTK's
+`settings.ini`, then Adwaita, then hicolor); SVG rasterises only where the
+Qt installation has the `imageformats/libqsvg` plugin, which this project's
+own container image does not ship, so a PNG icon resolves everywhere this
+builds and an SVG-only one falls back to the default glyph there.
+
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
 (the live layout's index into `layouts`, from 0), `layoutName` (`"Russian"`),

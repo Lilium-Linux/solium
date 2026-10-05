@@ -842,15 +842,33 @@ nothing else. It shows:
 
 - the workspaces of this monitor, as page dots -- the current one an accent
   pill, an occupied one filled -- and a click switches;
-- the running windows of this monitor's current workspace, as chips -- title
-  or app id, the focused one highlighted -- and a click focuses one;
+- the running windows of this monitor's current workspace, as chips -- icon,
+  title or app id, the focused one highlighted -- and a click focuses one;
 - the keyboard layout, once more than one is configured;
-- a clock.
+- a clock;
+- a top dock: pinned apps, then a hairline, then running ones that are not
+  pinned, each a theme icon with a dot under a running one. Autohidden by
+  default -- nothing is reserved, and it slides in when the pointer reaches
+  the top edge, out a little after it leaves. A click on an app that is not
+  running launches it (`Solium.Apps`, 03 §3.2.13); on one that is, focuses its
+  most recently used window.
 
-Next pieces -- the dock, the island, search, quick settings, a tray, and
-previews -- need services this compositor does not have yet, and are not
-here. `lua/preview/` and `qml/preview/` are where all of it lives, so copying
-one file still changes one behaviour, exactly as **[Your own
+  ```lua
+  return { preview = { dock = {
+      pinned = { "org.mozilla.firefox", "kitty" }, -- desktop ids, left unset
+                                                    -- the dock picks a
+                                                    -- terminal, a file
+                                                    -- manager and a browser
+                                                    -- from what is installed
+      visibility = "always",                       -- or "autohide" (default)
+      icon_size = 48,                               -- default 40
+  } } }
+  ```
+
+Next pieces -- the island, search, quick settings, a tray, and previews --
+need services this compositor does not have yet, and are not here.
+`lua/preview/` and `qml/preview/` are where all of it lives, so copying one
+file still changes one behaviour, exactly as **[Your own
 frame](#your-own-frame)** and **[Bars, docks and
 wallpapers](#bars-docks-and-wallpapers)** above do it.
 
