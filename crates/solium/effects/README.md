@@ -28,6 +28,18 @@ your configuration names, in a rule, in `effects.on` or in a binding, and the
 effects those name in turn. Every other folder is left alone, yours and the
 shipped ones alike.
 
+## When it is read, and when it compiles
+
+An effect's folder is read when your configuration loads, and again at every
+reload, with no GPU: its `effect.lua`, its params and the checks of its
+shaders below. Its shaders are compiled on the GPU just before the next frame.
+An effect whose files have not changed is kept as it is, compiled and all, so
+a reload that changes something else rebuilds nothing. A new version that
+fails, in its Lua, its checks or its compile, leaves the version that ran
+before it running; an effect that has never compiled is left out, as if it
+were not named. A shader that failed to compile is not compiled again until
+its file changes, or until a reload, which tries every failure once more.
+
 ## What `effect.lua` returns
 
 `effect.lua` returns one table. Every key in it is checked, and a key Solium
@@ -105,7 +117,8 @@ vec4 sol_effect(vec2 uv) {
 `uv` runs from 0 to 1 across the box the pass draws, (0, 0) at its top-left.
 Your file is compiled as it is, between a prelude Solium writes for the pass
 and a few lines that call `sol_effect`, and it stays a source string of its
-own, so the line numbers a compiler gives are your file's own lines. Do not
+own, so the line numbers Solium reports from the compiler are your file's own
+lines, however the driver counts them. Do not
 write `#version`, a `precision` or a `uniform` named `p_…` or `sol_…`: the
 prelude has them, and a `uniform` of yours with one of those names is an
 error at its line.

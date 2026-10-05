@@ -214,6 +214,23 @@ which is why `render::prepare` captures no pane that no monitor shows. What is
 beneath a node, the input a blur would need, is named in `fragment.rs` and
 nothing constructs it yet; rounded corners are the one effect there is.
 
+### Effect folders load in two phases
+
+An effect is a folder of Lua and GLSL a user can copy and change
+(`crates/solium/effects/README.md`), and it loads in two phases, because a
+configuration reload has no renderer and `render::prepare` is the first place
+the compositor holds a GL context between frames. At config load, with no
+GPU, `effect::host::Host` reads every folder the configuration wants, runs its
+`effect.lua` in a Lua of its own (`effect/sandbox.rs`), lints its shaders and
+hashes the folder; one whose hash has not changed keeps everything. At the top
+of the next `prepare` the host compiles what changed, in raw GL from three
+source strings (`effect/gl.rs`: a prelude, the user's file untouched, an
+epilogue), so the driver's log names the user's own line, which smithay's
+program API would drop. Programs are keyed by the hash of what they compile,
+so two effects with the same program share it, and a version swaps in only
+once all of its programs compiled: one that fails leaves the version that ran.
+With no effect wanted, `prepare` asks the host one question and touches no GL.
+
 ### The arrangements are a crate too
 
 `crates/layout` is the third engine crate with nothing in `[dependencies]`:
@@ -292,6 +309,9 @@ renderer to choose instead. Drawing does not stay behind Smithay's generic
   compile a deformed window is drawn flat rather than not at all);
 - a fragment program of Solium's own, for rounded corners (`pass.rs`, which
   compiles the GLSL ES source kept in `crates/effects`);
+- effect programs from user folders, compiled from three source strings and
+  failing with the driver's log (`effect/gl.rs`), neither of which smithay's
+  program API gives;
 - the EGL context and fence that QML on the GPU shares with Qt (`qml/paint.rs`,
   `surface.rs`).
 
