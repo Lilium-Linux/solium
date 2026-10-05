@@ -8,7 +8,10 @@ import Solium
 Item {
     id: cell
 
-    required property string appId
+    // Not `required`: a `Repeater` over `dock.effectivePinned` built every
+    // cell with `modelData` undefined when this was, measured directly
+    // (solium-notes' own shots README, under this same date, says where).
+    property string appId: ""
     property int iconSize: 40
     property bool pinned: false
 

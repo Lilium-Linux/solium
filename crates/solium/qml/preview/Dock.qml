@@ -62,7 +62,28 @@ Item {
         function onReadyChanged() { dock.defaultPins = dock.computeDefaultPins() }
     }
 
-    readonly property var effectivePinned: pinned !== undefined ? pinned : defaultPins
+    // `pinned` (`root.dockPinned`) crosses from Lua through the C ABI as a
+    // `QVariantList`, not a native JS one: it iterates fine (`.length`,
+    // `[i]`, `JSON.stringify`) but fails `Array.isArray`, measured directly
+    // with a capture (solium-notes' own shots README). `DockIcon.appId` not
+    // being `required` any more is what actually fixed the `Repeater` below
+    // building its cells with no `modelData` -- a `QVariantList`'s own
+    // oddness was a real difference worth normalising away anyway, since
+    // `effectivePinned.indexOf(...)` further down wants a genuine array.
+    function toArray(value) {
+        if (Array.isArray(value)) {
+            return value;
+        }
+        const out = [];
+        if (value) {
+            for (let i = 0; i < value.length; i++) {
+                out.push(value[i]);
+            }
+        }
+        return out;
+    }
+
+    readonly property var effectivePinned: pinned !== undefined ? toArray(pinned) : defaultPins
 
     anchors { top: parent.top; horizontalCenter: parent.horizontalCenter }
     width: parent.width
