@@ -28,6 +28,9 @@ function preview.apply()
     -- before it (it reads and writes `config.shell`, which this function
     -- just gave a default `scene`).
     require("preview.dock")
+    -- Quick search's own policy (04-ui.md §4.7: the key, the matching, the
+    -- commands) -- see its module doc for the same ordering reason.
+    require("preview.search")
 end
 
 preview.apply()

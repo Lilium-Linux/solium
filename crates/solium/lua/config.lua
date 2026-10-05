@@ -148,6 +148,12 @@ local defaults = {
     -- icon_size = 48 } }`. `pinned` is a list of desktop ids; left unset,
     -- the dock picks the first installed terminal, file manager and browser
     -- itself. `visibility` is `"always"` or `"autohide"` (the default).
+    --
+    -- Quick search (`lua/preview/search.lua`, 04-ui.md §4.7) opens on
+    -- `super+d`: `preview = { search = { key = "super+alt+space" } }` binds
+    -- a different one instead. It searches installed applications, open
+    -- windows and a few compositor commands; see `docs/ricing.md` for what
+    -- is cut from this first version.
     preview = true,
 
     -- The keyboard: its xkb layouts (`layout`, `variant`, `options`, `model`,
