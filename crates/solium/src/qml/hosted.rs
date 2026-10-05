@@ -3114,6 +3114,100 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A `WindowList` bound to `Workspaces.showing(monitor).id` picks up a
+    /// window mapped after the shell already started**, the preview bar's
+    /// own pattern (`qml/preview/WindowChips.qml`): the workspace a monitor
+    /// shows is declared only once something needs laying out, so a shell
+    /// hosted at startup, with no window yet, first binds to the empty
+    /// facade `showing` lazily creates; the fix this guards is that the
+    /// `WindowList.workspace` property re-reads it once the real workspace
+    /// is declared and once a window is tagged with it, not only once at
+    /// construction.
+    #[test]
+    fn a_window_list_bound_to_showing_sees_a_window_mapped_after_the_shell_started() {
+        use crate::json::Json;
+        use crate::models::diff::{Row, diff, render};
+
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-bar-chips",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    WindowList {
+                        id: chips
+                        monitor: Solium.monitor.name
+                        workspace: Workspaces.showing(Solium.monitor.name).id
+                    }
+                    readonly property int count: chips.count
+                    readonly property string boundWorkspace: chips.workspace
+                }
+                "#,
+                "bar-1",
+            );
+            // The shell loads before anything has been declared: no
+            // workspace shown yet, and no window.
+            assert_eq!(
+                scene.get_int("count"),
+                0,
+                "no window published yet, so none should show"
+            );
+
+            // The first `"layout"` declares the one workspace this monitor
+            // shows, still with no window on it.
+            let group_row = Row {
+                key: "bar-1/1".to_owned(),
+                values: std::collections::BTreeMap::from([
+                    ("key", Json::Text("bar-1/1".to_owned())),
+                    ("id", Json::Text("1".to_owned())),
+                    ("name", Json::Text("1".to_owned())),
+                    ("group", Json::Text("bar-1".to_owned())),
+                    ("monitors", Json::List(vec![Json::Text("bar-1".to_owned())])),
+                    ("active", Json::Bool(true)),
+                    ("focused", Json::Bool(true)),
+                ]),
+            };
+            assert!(super::apply_rows(
+                super::Model::Workspaces,
+                &render(&diff(&[], std::slice::from_ref(&group_row)))
+            ));
+            assert_eq!(
+                scene.get_string_for_test("boundWorkspace"),
+                "1",
+                "WindowList.workspace did not pick up the newly declared showing workspace"
+            );
+
+            // A window maps on this monitor, on the workspace just shown --
+            // exactly as `workspaces.declare()` tags a window that opens
+            // while the compositor is looking (`workspaces.at`).
+            let mut window = window_row(501, "bar-1", true, 0);
+            window
+                .values
+                .insert("workspace", Json::Text("1".to_owned()));
+            assert!(super::apply_rows(
+                super::Model::Windows,
+                &render(&diff(&[], std::slice::from_ref(&window)))
+            ));
+
+            let count = scene.get_int("count");
+
+            // Left as empty as it was found: these rows are process-wide
+            // (`hosted`'s own doc), and another test's monitor is not this
+            // one, but the row *keys* ("501", "bar-1/1") are shared across
+            // every hosted test in the binary.
+            let _ = super::apply_rows(super::Model::Windows, &render(&diff(&[window], &[])));
+            let _ = super::apply_rows(super::Model::Workspaces, &render(&diff(&[group_row], &[])));
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                count, 1,
+                "a window on the workspace its monitor shows must appear in WindowList"
+            );
+        });
+    }
+
     /// **A shell's own file named like a singleton of the module is hidden
     /// by it**: a `Monitors.qml` beside a scene that imports `Solium` is the
     /// `Monitors` model there, which cannot be created, so the scene does not
