@@ -183,13 +183,17 @@ corners, and its shader is compiled into the crate. See
 
 The split with the compositor is the anchor. A deformation morphs between two
 rectangles, and the far one is named rather than given: `deform = { effect =
-"genie", to = { window = id } }` carries an *identity*, which `Solium::aimed_at`
-resolves on the frame that draws it, and `to = { surface = name }` aims at a
-`sol.surface` scene the same way. A rectangle read out of a Lua table when the
-binding was pressed aims at where a dock icon was half a second ago, which is
-the stale-copy failure the anchors planned in `docs/shell-boundary.md` are meant
-to rule out for a hosted dock. `crates/effects` never sees the identity — it has
-no idea what a pane is, which is what keeps it testable without a session.
+"genie", to = { window = id } }` carries an *identity*, which
+`Solium::aimed_at_for` resolves on the frame that draws it, and `to = { surface =
+name }` aims at a `sol.surface` scene the same way: at its instance on the
+window's own monitor, not on the one the pointer is on. Both ends are in global
+space and are moved onto each screen together, so a genie on a monitor that is
+not at the origin lands where it was aimed (#143). A rectangle read out of a
+Lua table when the binding was pressed aims at where a dock icon was half a
+second ago, which is the stale-copy failure the anchors planned in
+`docs/shell-boundary.md` are meant to rule out for a hosted dock.
+`crates/effects` never sees the identity — it has no idea what a pane is, which
+is what keeps it testable without a session.
 
 `Deform::from_name` is what scripts bind to, exactly as `Curve::from_name` is,
 and `script::shipped` checks the shipped Lua against both.

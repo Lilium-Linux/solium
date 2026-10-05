@@ -127,7 +127,7 @@ pub(crate) fn for_effects(rect: Rectangle<f64, Logical>) -> solium_effects::Rect
 /// design rules already forbid for mirrors.
 ///
 /// So the identity is carried and the compositor resolves it once per frame,
-/// in `Solium::aimed_at`. What can be named is deliberately small: a fixed
+/// in `Solium::aimed_at_for`. What can be named is deliberately small: a fixed
 /// place on screen, which does not move and is honest about it, and two things
 /// that do.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,10 +142,12 @@ pub(crate) enum Anchor {
     Pane(u64),
     /// A surface a script declared — which is where a real dock icon lives.
     ///
-    /// Resolved to where that surface is drawn on the monitor the user is
-    /// working on, carried by whatever selection it is in. A surface declared
+    /// Resolved to where that surface is drawn on the window's own monitor,
+    /// carried by whatever selection it is in. A surface declared
     /// `on = "every-monitor"` is several things wearing one name and this takes
-    /// the one in front of you, which is the one a window is minimising into.
+    /// the one on the monitor the window is on, which is the one it is
+    /// minimising into, wherever the pointer is (#143).
+    /// `state::tests::real_client::a_genie_aimed_at_a_surface_aims_at_its_instance_on_the_windows_own_monitor`.
     ///
     /// A [`crate::scripted::SurfaceId`] and not the name the script wrote,
     /// because this type is inside a [`Frame`] and a `Frame` is `Copy`. That

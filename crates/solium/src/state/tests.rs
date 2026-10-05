@@ -77,7 +77,16 @@ fn a_pane_is_on_a_monitor_only_if_some_monitor_covers_part_of_it() {
 fn a_deform_at_rest_is_aimed_at_nothing() {
     let display = smithay::reexports::wayland_server::Display::<Solium>::new()
         .expect("creating a test wayland display");
-    let state = Solium::new(display.handle());
+    let mut state = Solium::new(display.handle());
+    // A `Rect` anchor never reads the pane, so any pane serves.
+    let pane = state.panes.open(Pane::loading(
+        "aimed",
+        None,
+        Rectangle::new((100, 100).into(), (400, 300).into()),
+        std::path::PathBuf::new(),
+        None,
+        state.clock.now(),
+    ));
     let genie = |progress| crate::present::Deform {
         effect: solium_effects::Deform::Genie {
             progress,
@@ -87,11 +96,11 @@ fn a_deform_at_rest_is_aimed_at_nothing() {
         anchor: crate::present::Anchor::Rect(crate::present::logical((10.0, 10.0), (120.0, 24.0))),
     };
     assert!(
-        state.aimed_at(Some(genie(0.0))).is_none(),
+        state.aimed_at_for(pane, Some(genie(0.0))).is_none(),
         "a genie at rest still aims"
     );
     assert!(
-        state.aimed_at(Some(genie(0.5))).is_some(),
+        state.aimed_at_for(pane, Some(genie(0.5))).is_some(),
         "a genie under way must aim"
     );
 }
@@ -7609,6 +7618,45 @@ end)"#,
         assert!(
             own.iter().all(|element| element.id() != &popup_id),
             "and its popup is not, because every caller draws that itself"
+        );
+    }
+
+    /// **A genie aimed at a surface aims at its instance on the window's own
+    /// monitor**, not on the monitor the pointer is on (#143). A missing scene
+    /// file builds no scene (`scripted.rs`, `Surface::sync`), so no Qt is
+    /// started.
+    #[test]
+    fn a_genie_aimed_at_a_surface_aims_at_its_instance_on_the_windows_own_monitor() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _ = (&conn, &mut queue, &mut client);
+        let (_left, _right) = side_by_side(&mut state, "aim-left");
+        state.declare_surface(crate::scripted::Declaration::for_test(
+            "dock",
+            std::path::PathBuf::from("/nonexistent/solium-test-dock.qml"),
+            crate::scripted::Layer::Top,
+            crate::scripted::On::EveryMonitor,
+        ));
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (2020, 100), false);
+        let pane = state.panes.id_of(&window).expect("a pane for the window");
+        let dock = state.surfaces.named("dock").expect("the dock is declared");
+        let deform = crate::present::Deform {
+            effect: solium_effects::Deform::Genie {
+                progress: 0.5,
+                spread: 1.4,
+                axis: solium_effects::Axis::Down,
+            },
+            anchor: crate::present::Anchor::Surface(dock),
+        };
+        let to = state
+            .aimed_at_for(pane, Some(deform))
+            .expect("the dock resolves")
+            .to;
+        assert!(
+            to.loc.x >= 1920.0,
+            "aimed at the dock on the pointer's monitor, at x = {}",
+            to.loc.x
         );
     }
 

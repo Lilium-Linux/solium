@@ -3,7 +3,7 @@
 # Does a presentation transform put pixels where it says it does, and does the
 # pointer still land where it should?
 #
-# Four claims, none of which `cargo test` can reach. The `Command::Present` ->
+# Five claims, none of which `cargo test` can reach. The `Command::Present` ->
 # `Frame` wiring in `state/commands.rs` is the seam this exists for: reverting
 # `z` and `pivot` there to their defaults passes the whole unit suite, because
 # every test of them is a test of `script.rs` and of pure functions below it,
@@ -28,6 +28,13 @@
 #           lives at. This is the load-bearing half: `state/hit_test.rs`
 #           asks whether the pane as `drawn_at(..)` draws it owns the point,
 #           and a regression to `outer.contains` would pass the other three.
+#
+#   aim     a genie on a monitor not at the origin lands on its target (#143).
+#           Two nested monitors; one window on the right one is pulled at
+#           progress 1 into a rectangle on the right one, and every pixel of
+#           it must be inside that rectangle. The deform's target is moved
+#           onto the screen with the window, which `render::warp_mesh_on`'s
+#           tests pin; this is the same thing through the real draw.
 #
 # A reverted `z` reads as "nothing sorts" and would be caught by looking. A
 # reverted `pivot` is not, and the strongest statement of that is measured:
@@ -336,6 +343,27 @@ then
     fi
 else
     fail "the rect capture did not run"
+fi
+
+echo "present-check: aim on the second monitor"
+ready=$(ready_at 1)
+if shoot aim "$here/aim.lua" $((ready + 1400)) 1 16 $((ready + 2000)) \
+    "$(printf 'SOLIUM_OUTPUTS=2\nSOLIUM_TRIGGER_AT=%d:super+g' $((ready + 700)))" \
+    "window:20a0c0"
+then
+    read -r tx ty tw th < <(grep -o 'AIM_TARGET [0-9]* [0-9]* [0-9]* [0-9]*' "$out/aim/log" | tail -1 | cut -d' ' -f2-)
+    span=$(measure span "$out/aim/f" "${WINDOW[@]}" 8)
+    note "target" "($tx,$ty) ${tw}x${th}"
+    note "window drawn" "${span#*= }"
+    # measure.py span prints "<file> rgb(r, g, b) n=<count> x <x0>..<x1>  y <y0>..<y1>  centroid (…)".
+    read -r x0 x1 y0 y1 < <(echo "$span" | sed -n 's/.* x \(-\?[0-9]*\)\.\.\(-\?[0-9]*\)  y \(-\?[0-9]*\)\.\.\(-\?[0-9]*\).*/\1 \2 \3 \4/p')
+    if [[ -z "${x0:-}" || -z "${tx:-}" ]]; then
+        fail "aim: the window or the target could not be found (see $out/aim/log)"
+    elif (( x0 < tx - TOLERANCE || y0 < ty - TOLERANCE || x1 > tx + tw + TOLERANCE || y1 > ty + th + TOLERANCE )); then
+        fail "aim: the genie landed at ($x0,$y0)-($x1,$y1), outside its target ($tx,$ty) ${tw}x${th}"
+    fi
+else
+    fail "the aim capture did not run"
 fi
 
 if [[ "$failures" -gt 0 ]]; then

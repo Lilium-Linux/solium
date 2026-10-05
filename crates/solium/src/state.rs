@@ -1417,24 +1417,36 @@ impl Solium {
     /// existed. The caller draws the window flat, which is the failure that
     /// loses an effect rather than the frame.
     ///
+    /// `pane` is the pane the deform belongs to, which is what a surface
+    /// anchor resolves against: the instance on that window's own monitor
+    /// (#143), `tests::real_client::a_genie_aimed_at_a_surface_aims_at_its_instance_on_the_windows_own_monitor`.
+    ///
     /// A deform at rest aims at nothing, so the window takes the flat path:
     /// `tests::a_deform_at_rest_is_aimed_at_nothing`. Resolved here and not in
     /// `Deform::blend`, which must keep the anchor for a reversal mid-flight
     /// (`solium_effects`' `blending_from_nothing_starts_at_rest_and_lands_on_the_deform`).
-    pub(crate) fn aimed_at(&self, deform: Option<present::Deform>) -> Option<present::Aimed> {
+    pub(crate) fn aimed_at_for(
+        &self,
+        pane: crate::pane::PaneId,
+        deform: Option<present::Deform>,
+    ) -> Option<present::Aimed> {
         let deform = deform.filter(|deform| !deform.effect.is_at_rest())?;
         let to = match deform.anchor {
             present::Anchor::Rect(rect) => rect,
             present::Anchor::Pane(id) => {
-                let pane = self.panes.by_script_id(id)?;
-                self.drawn(pane.id(), self.pane_outer(pane)).rect
+                let other = self.panes.by_script_id(id)?;
+                self.drawn(other.id(), self.pane_outer(other)).rect
             }
-            // The monitor in front of the user, and the primary one when there
-            // is no pointer yet. Not "the first output that answers": that is
-            // stable only until somebody plugs a screen in on the other side.
+            // The window's own monitor, by its centre as `output_of` decides a
+            // scale; then the one in front of the user; then the primary.
+            // `tests::a_genie_aimed_at_a_surface_aims_at_its_instance_on_the_windows_own_monitor`.
             present::Anchor::Surface(id) => {
                 let surface = self.surfaces.get(id)?;
-                let output = self.active_output().or_else(|| self.primary_output())?;
+                let output = self
+                    .pane_outer_of(pane)
+                    .and_then(|slot| self.output_of(slot))
+                    .or_else(|| self.active_output())
+                    .or_else(|| self.primary_output())?;
                 let geometry = self.space.output_geometry(&output)?;
                 let primary = self.primary_output();
                 let area = surface.area_on(&output, geometry, primary.as_ref())?;

@@ -427,7 +427,8 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // A deformed window with no warp program takes the flat path below
         // instead of being captured for a warp that cannot be drawn:
         // `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
-        let warped = !frame.matrix.is_identity() || state.aimed_at(frame.deform).is_some();
+        let warped =
+            !frame.matrix.is_identity() || state.aimed_at_for(pane, frame.deform).is_some();
         let program = if warped {
             state.programs.warp(renderer)
         } else {
@@ -1090,6 +1091,25 @@ pub(crate) fn stacked(
     drawn
 }
 
+/// A warp's mesh on one screen: the frame and its deform's target, both in
+/// global space, moved onto the screen together.
+/// `tests::a_genie_on_the_second_monitor_lands_on_its_target`,
+/// `tests::a_genie_on_the_first_monitor_is_unchanged`.
+pub(crate) fn warp_mesh_on(
+    screen: Rectangle<i32, Logical>,
+    frame: &present::Frame,
+    aimed: Option<present::Aimed>,
+    scale: f64,
+) -> Option<crate::warp::Mesh> {
+    let shift = Point::<f64, Logical>::from((-f64::from(screen.loc.x), -f64::from(screen.loc.y)));
+    let onto = |rect: Rectangle<f64, Logical>| Rectangle::new(rect.loc + shift, rect.size);
+    let aimed = aimed.map(|aimed| present::Aimed {
+        to: onto(aimed.to),
+        ..aimed
+    });
+    crate::warp::mesh(onto(frame.rect), frame.matrix, aimed, frame.pivot, scale)
+}
+
 /// Draw panes, in the order given.
 #[expect(
     clippy::too_many_arguments,
@@ -1215,6 +1235,7 @@ fn panes(
         {
             continue;
         }
+        let drawn_global = frame;
         frame.rect = onto(frame.rect);
         // Where this pane's layers go, computed once for all three depths.
         let drawing = crate::decoration::Drawing {
@@ -1282,10 +1303,9 @@ fn panes(
         // that resolves to nothing leaves `aimed` empty, and a window with no
         // matrix then takes the flat path below as if it had never asked for
         // an effect.
-        let aimed = state.aimed_at(frame.deform);
+        let aimed = state.aimed_at_for(pane, frame.deform);
         if (!frame.matrix.is_identity() || aimed.is_some())
-            && let Some(mesh) =
-                crate::warp::mesh(frame.rect, frame.matrix, aimed, frame.pivot, scale)
+            && let Some(mesh) = warp_mesh_on(screen, &drawn_global, aimed, scale)
             && let Some((texture, program)) = prepared.warp(&window)
         {
             elements.push(Element::Warped(crate::warp::Warp::new(
@@ -2419,6 +2439,61 @@ mod tests {
         assert_eq!(route(true, true), Route::Warp);
         assert_eq!(route(true, false), Route::Flat, "no program, no warp");
         assert_eq!(route(false, true), Route::Flat, "nothing to warp");
+    }
+
+    fn genie_to(
+        to: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+    ) -> crate::present::Aimed {
+        crate::present::Aimed {
+            effect: solium_effects::Deform::Genie {
+                progress: 1.0,
+                spread: 1.4,
+                axis: solium_effects::Axis::Down,
+            },
+            to,
+        }
+    }
+
+    /// **A genie on the second monitor lands on its target**: at progress 1 the
+    /// whole window is inside the target, moved onto the screen with it.
+    #[test]
+    fn a_genie_on_the_second_monitor_lands_on_its_target() {
+        let screen = smithay::utils::Rectangle::new((1920, 0).into(), (1920, 1080).into());
+        let frame = crate::present::Frame::real(smithay::utils::Rectangle::new(
+            (2100, 100).into(),
+            (800, 600).into(),
+        ));
+        let aimed = genie_to(crate::present::logical((2800.0, 1000.0), (120.0, 24.0)));
+        let mesh = super::warp_mesh_on(screen, &frame, Some(aimed), 1.25).expect("a mesh");
+        let (left, top) = ((2800.0 - 1920.0) * 1.25, 1000.0 * 1.25);
+        for corner in mesh.vertices() {
+            let (x, y) = (f64::from(corner.x), f64::from(corner.y));
+            assert!(
+                x >= left - 1e-3
+                    && x <= left + 150.0 + 1e-3
+                    && y >= top - 1e-3
+                    && y <= top + 30.0 + 1e-3,
+                "({x}, {y}) is outside the target on the screen"
+            );
+        }
+    }
+
+    /// The guard: on the first monitor, nothing moves.
+    #[test]
+    fn a_genie_on_the_first_monitor_is_unchanged() {
+        let screen = smithay::utils::Rectangle::new((0, 0).into(), (1920, 1080).into());
+        let frame = crate::present::Frame::real(smithay::utils::Rectangle::new(
+            (180, 100).into(),
+            (800, 600).into(),
+        ));
+        let aimed = genie_to(crate::present::logical((880.0, 1000.0), (120.0, 24.0)));
+        let on = super::warp_mesh_on(screen, &frame, Some(aimed), 1.25).expect("a mesh");
+        let direct = crate::warp::mesh(frame.rect, frame.matrix, Some(aimed), frame.pivot, 1.25)
+            .expect("a mesh");
+        let pairs = on.vertices().iter().zip(direct.vertices());
+        assert!(
+            pairs.clone().count() > 0 && pairs.into_iter().all(|(a, b)| a.x == b.x && a.y == b.y)
+        );
     }
 
     /// **#133: what a tiled client's surfaces become on their way to the

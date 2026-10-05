@@ -144,6 +144,14 @@ impl Mesh {
     }
 }
 
+#[cfg(test)]
+impl Mesh {
+    /// Its vertices, for the tests of where a mesh lands.
+    pub(crate) fn vertices(&self) -> &[Corner] {
+        &self.vertices
+    }
+}
+
 /// Cut a rectangle into a mesh and project it, about `pivot`.
 ///
 /// The deform moves points around inside the window's own space; the matrix
