@@ -54,6 +54,14 @@
 ---@field cramped boolean Whether the layout last placed it with `cramped = true`.
 ---@field shown boolean Whether its application has shown its first frame yet.
 
+---One row of `sol.apps()`: an installed, visible application.
+---@class sol.App
+---@field id string The desktop file id, such as `"org.mozilla.firefox"`.
+---@field name string Its localised name.
+---@field generic_name string Its localised generic name (`"Web Browser"`); empty when it named none.
+---@field icon string A theme icon name, or an absolute path when `Icon=` gave one.
+---@field categories string[] Its `Categories=`, split on `;`.
+
 ---One row of `sol.monitors()`. `x`, `y`, `w` and `h` are the work area: the
 ---monitor less what layer-shell bars and hosted surfaces reserve.
 ---@class sol.Monitor: sol.Rect
@@ -317,6 +325,17 @@ function sol.keep(name, defaults) end
 ---longer exists do nothing.
 ---@return sol.Window[]
 function sol.windows() end
+
+---Every installed, visible application (NoDisplay and Hidden entries are
+---left out at the source), by name.
+---
+---A snapshot taken for this handler, not a live view, and -- unlike
+---`sol.windows()` and `sol.monitors()` -- empty at the top level of a
+---configuration file: it reads before the first real one arrives, and
+---before the index has even scanned once on a first start. A scene reads
+---`Solium.Apps` instead, which is live from the moment it is drawn.
+---@return sol.App[]
+function sol.apps() end
 
 ---Draw a QML scene: a wallpaper, a bar, a dock, a heads-up display.
 ---

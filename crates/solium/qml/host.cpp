@@ -56,6 +56,7 @@
 #include <QtCore/QObject>
 
 #include "attached.h"
+#include "icon.h"
 
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
@@ -563,6 +564,8 @@ static bool start_common(const char *import_path)
     solium_qml_register_types();
     g_engine = new QQmlEngine();
     add_import_paths(g_engine, import_path);
+    // `image://solium/icon/...` (03 §3.2.14): the engine takes ownership.
+    g_engine->addImageProvider(QStringLiteral("solium"), new SoliumIconProvider());
     return true;
 }
 

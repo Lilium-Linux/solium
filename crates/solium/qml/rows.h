@@ -281,6 +281,61 @@ private:
     QString m_monitor;
 };
 
+/* An installed application's row: one row of `Apps` (03 §3.2.13). A pinned
+ * app that is no longer installed reads `present` and `valid` false
+ * (Ruling 17), the same ghost-not-a-hole convention as a window or a
+ * workspace that has gone. */
+class SoliumApp : public SoliumRow
+{
+    Q_OBJECT
+    Q_PROPERTY(bool present READ isPresent NOTIFY changed)
+    Q_PROPERTY(bool valid READ isPresent NOTIFY changed)
+    Q_PROPERTY(QString id READ id NOTIFY changed)
+    Q_PROPERTY(QString name READ name NOTIFY changed)
+    Q_PROPERTY(QString genericName READ genericName NOTIFY changed)
+    Q_PROPERTY(QString icon READ icon NOTIFY changed)
+    Q_PROPERTY(QStringList categories READ categories NOTIFY changed)
+    Q_PROPERTY(QStringList keywords READ keywords NOTIFY changed)
+public:
+    using SoliumRow::SoliumRow;
+    bool isPresent() const { return present; }
+    /* The key role, so even a ghost `get(id)` -- made with no row ever
+     * applied -- answers its own id: `SoliumRows::row_for` inserts the
+     * requested key under this same role name for exactly that reason
+     * (`rows.cpp`, and `SoliumWindow::id`/`SoliumWorkspace::key` do the same). */
+    QString id() const { return value("id").toString(); }
+    QString name() const { return value("name").toString(); }
+    QString genericName() const { return value("genericName").toString(); }
+    QString icon() const { return value("icon").toString(); }
+    QStringList categories() const { return value("categories").toStringList(); }
+    QStringList keywords() const { return value("keywords").toStringList(); }
+    void announce() override { emit changed(); }
+signals:
+    void changed();
+};
+
+/* `Apps`: every installed, visible application, and whether the first scan
+ * has completed (`Solium.Apps.ready`, 04-ui.md §4.6: a pin's slot exists
+ * before the index is ready; whether it is a ghost is not known until it
+ * is). */
+class SoliumAppRows : public SoliumRows
+{
+    Q_OBJECT
+    Q_PROPERTY(QObject *entries READ entries CONSTANT)
+    Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
+public:
+    SoliumAppRows();
+    QObject *entries() { return this; }
+    bool ready() const { return m_ready; }
+    void setReady(bool ready);
+
+signals:
+    void readyChanged();
+
+private:
+    bool m_ready = false;
+};
+
 /* The store for a SOLIUM_QML_ROWS_* number, built on first use.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 SoliumRows *solium_rows(int model);

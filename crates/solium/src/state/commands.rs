@@ -686,6 +686,11 @@ impl Solium {
         match Scripts::load_carrying(path, carried) {
             Ok(scripts) => {
                 crate::qml::clear_cache();
+                // Installed applications can change between one session and
+                // the next edit of a configuration (an install, an update), so
+                // a reload is the one point this version rescans them
+                // (`apps.rs`'s module doc, `models::mod`'s `publish_models`).
+                self.apps_scan_pending = true;
                 // And with Qt's cache of a scene that would not load gone, the
                 // scene is tried again: a reload is what anybody presses after
                 // mending one (`a_reload_tries_again_a_scene_that_would_not_load`).

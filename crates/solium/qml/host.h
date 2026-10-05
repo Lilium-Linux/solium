@@ -521,6 +521,7 @@ int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
 #define SOLIUM_QML_ROWS_MONITORS 0
 #define SOLIUM_QML_ROWS_WINDOWS 1
 #define SOLIUM_QML_ROWS_WORKSPACES 2
+#define SOLIUM_QML_ROWS_APPS 3
 
 /* Apply one batch of row operations, rendered by `crate::models::diff::render`,
  * to a model: in order, every row's values written before any row is
@@ -540,6 +541,9 @@ int solium_qml_set_status(const char *text);
 /* `Workspaces.arrangement`, from JSON. 1 when Qt took it.
  * `models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`. */
 int solium_qml_set_arrangement(const char *json);
+
+/* `Apps.ready`: false until the first scan completes. 1 when Qt took it. */
+int solium_qml_set_apps_ready(int ready);
 
 #ifdef __cplusplus
 }

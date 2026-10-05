@@ -232,6 +232,18 @@ pub(crate) struct MonitorInfo {
     pub(crate) off: bool,
 }
 
+/// An installed application as a script sees it (03 §3.2.13), for
+/// `sol.apps()` -- `dock.lua`'s first-run pins check a candidate id against
+/// this list (`04-ui.md` §4.6's "checked against `sol.apps()`").
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AppInfo {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) generic_name: String,
+    pub(crate) icon: String,
+    pub(crate) categories: Vec<String>,
+}
+
 /// What the compositor looked like when a handler was called.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Snapshot {
@@ -239,6 +251,9 @@ pub(crate) struct Snapshot {
     pub(crate) windows: Vec<WindowInfo>,
     /// Every monitor, in the order the compositor holds them.
     pub(crate) monitors: Vec<MonitorInfo>,
+    /// Installed, visible applications, by name (`crate::apps::scan`'s own
+    /// order). `sol.apps()`.
+    pub(crate) apps: Vec<AppInfo>,
     /// The keyboard, for `sol.keyboard()` and for a shell that wants to draw
     /// a layout indicator.
     pub(crate) keyboard: crate::keymap::State,
@@ -2294,6 +2309,34 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
+        })?,
+    )?;
+
+    // Installed, visible applications (03 §3.2.13), by name. A read, the
+    // same shape as `sol.windows()` above -- and, like it, only meaningful
+    // inside a dispatch: a `.lua` file's top level runs before the first
+    // real snapshot arrives, so this reads empty there
+    // (`lua/preview/dock.lua`'s module doc goes through why its own pin
+    // policy reads `Solium.Apps` in QML instead, live, rather than this).
+    sol.set(
+        "apps",
+        lua.create_function(|lua, ()| {
+            let snapshot = snapshot(lua)?;
+            let apps = lua.create_table()?;
+            for (index, app) in snapshot.apps.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("id", app.id.clone())?;
+                entry.set("name", app.name.clone())?;
+                entry.set("generic_name", app.generic_name.clone())?;
+                entry.set("icon", app.icon.clone())?;
+                let categories = lua.create_table()?;
+                for (n, category) in app.categories.iter().enumerate() {
+                    categories.set(n + 1, category.clone())?;
+                }
+                entry.set("categories", categories)?;
+                apps.set(index + 1, entry)?;
+            }
+            Ok(apps)
         })?,
     )?;
 
@@ -5031,6 +5074,7 @@ mod tests {
             cursor: (0.0, 0.0),
             screens: Vec::new(),
             text_input: None,
+            apps: Vec::new(),
         };
 
         let outcome = scripts.key("super+space", snapshot);
@@ -6769,6 +6813,7 @@ mod tests {
             cursor: (0.0, 0.0),
             screens: Vec::new(),
             text_input: None,
+            apps: Vec::new(),
         }
     }
 
@@ -7250,6 +7295,7 @@ mod tests {
             cursor: (0.0, 0.0),
             screens: Vec::new(),
             text_input: None,
+            apps: Vec::new(),
         }
     }
 

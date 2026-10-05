@@ -20,8 +20,8 @@
 //! C++ side: the crate's own `crates/solium/qml/host.cpp`, compiled from source.
 
 use anyhow::{Context, Result, anyhow};
-use smithay::backend::allocator::{Buffer as _, Fourcc};
 use smithay::backend::allocator::gbm::GbmDevice;
+use smithay::backend::allocator::{Buffer as _, Fourcc};
 use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::egl::fence::EGLFence;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
@@ -32,8 +32,8 @@ use smithay::backend::renderer::gles::{
 };
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{
-    Bind as _, Color32F, ExportMem as _, Frame as _, ImportDma as _, ImportMem as _, Offscreen as _,
-    Renderer as _,
+    Bind as _, Color32F, ExportMem as _, Frame as _, ImportDma as _, ImportMem as _,
+    Offscreen as _, Renderer as _,
 };
 use smithay::utils::{DeviceFd, Rectangle, Scale, Transform};
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
@@ -42,7 +42,10 @@ use std::os::fd::{FromRawFd as _, OwnedFd};
 // The crate's own allocator, included by path relative to this file rather
 // than copied: `allocate` and `as_ffi` here are the real functions.
 #[path = "../../../crates/solium/src/qml/target.rs"]
-#[allow(dead_code, reason = "target.rs carries fields only the compositor reads")]
+#[allow(
+    dead_code,
+    reason = "target.rs carries fields only the compositor reads"
+)]
 mod target;
 
 unsafe extern "C" {
@@ -59,7 +62,8 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn solium_qml_scene_render_gpu(scene: *mut c_void, fence_fd: *mut c_int) -> c_int;
     fn solium_qml_host_next_sized_by_root(width: c_int, height: c_int);
-    fn solium_qml_scene_root_size(scene: *const c_void, width: *mut f64, height: *mut f64) -> c_int;
+    fn solium_qml_scene_root_size(scene: *const c_void, width: *mut f64, height: *mut f64)
+    -> c_int;
     fn solium_qml_scene_resize(scene: *mut c_void, width: c_int, height: c_int, scale: f64);
     fn solium_qml_scene_rebind(
         scene: *mut c_void,
@@ -141,6 +145,33 @@ extern "C" fn solium_qml_log_from_qt(
     eprintln!("qt {name} [{}]: {}", borrowed(category), borrowed(message));
 }
 
+/// `icon.cpp`'s other half, same as `solium_qml_log_from_qt` above: nothing
+/// in this binary links `crates/solium/src/icon.rs`, so the symbol has to
+/// exist here too. Nothing this harness renders asks for
+/// `image://solium/icon/...`, so there is nothing to resolve: always "not
+/// found", which is a real, valid answer `icon.cpp` already handles (an
+/// empty `QImage`), not a special case.
+#[unsafe(no_mangle)]
+extern "C" fn solium_icon_lookup(_name: *const c_char, _size: c_int, _scale: c_int) -> *mut c_char {
+    std::ptr::null_mut()
+}
+
+/// Always called with what `solium_icon_lookup` returned, which is always
+/// null here, so there is nothing to free; defined anyway because `icon.cpp`
+/// calls it unconditionally when a lookup does return something.
+#[unsafe(no_mangle)]
+extern "C" fn solium_icon_lookup_free(path: *mut c_char) {
+    if path.is_null() {
+        return;
+    }
+    // SAFETY: only ever a pointer `solium_icon_lookup` returned, which here
+    // is always null -- this path never runs, kept only so the two symbols
+    // match the real compositor's contract exactly.
+    unsafe {
+        drop(std::ffi::CString::from_raw(path));
+    }
+}
+
 /// This checkout, from where the binary was compiled rather than from where it
 /// happens to be run.
 fn repo() -> std::path::PathBuf {
@@ -197,10 +228,10 @@ fn expected_argb(w: i32, h: i32) -> Vec<u8> {
     for y in 0..h {
         for x in 0..w {
             let px: [u8; 4] = match (y >= h / 2, x >= w / 2) {
-                (false, false) => [255, 0, 0, 255],     // blue
-                (false, true) => [0, 255, 0, 255],      // green
-                (true, false) => [255, 255, 255, 255],  // white
-                (true, true) => [0, 0, 255, 255],       // red
+                (false, false) => [255, 0, 0, 255],    // blue
+                (false, true) => [0, 255, 0, 255],     // green
+                (true, false) => [255, 255, 255, 255], // white
+                (true, true) => [0, 0, 255, 255],      // red
             };
             let i = ((y * w + x) * 4) as usize;
             out[i..i + 4].copy_from_slice(&px);
@@ -208,7 +239,6 @@ fn expected_argb(w: i32, h: i32) -> Vec<u8> {
     }
     out
 }
-
 
 /// A distinct picture per guard texture, so a name that got swapped for another
 /// is as visible as a name that got deleted.
@@ -232,7 +262,6 @@ fn guard_image(index: usize, w: i32, h: i32) -> Vec<u8> {
     }
     out
 }
-
 
 /// Which GL object names exist in the compositor's context right now.
 ///
@@ -334,7 +363,12 @@ fn wait_for(renderer: &mut GlesRenderer, fence: OwnedFd) -> Result<()> {
 ///
 /// `glFinish` rather than a fence: this has to have landed before Qt is asked
 /// to draw over it, and the point of the wipe is defeated by racing it.
-fn wipe(renderer: &mut GlesRenderer, buffer: &smithay::backend::allocator::dmabuf::Dmabuf, w: i32, h: i32) -> Result<()> {
+fn wipe(
+    renderer: &mut GlesRenderer,
+    buffer: &smithay::backend::allocator::dmabuf::Dmabuf,
+    w: i32,
+    h: i32,
+) -> Result<()> {
     let mut buffer = buffer.clone();
     {
         let mut framebuffer = renderer
@@ -344,9 +378,14 @@ fn wipe(renderer: &mut GlesRenderer, buffer: &smithay::backend::allocator::dmabu
             .render(&mut framebuffer, (w, h).into(), Transform::Normal)
             .map_err(|err| anyhow!("wiping: {err}"))?;
         frame
-            .clear(Color32F::TRANSPARENT, &[Rectangle::from_size((w, h).into())])
+            .clear(
+                Color32F::TRANSPARENT,
+                &[Rectangle::from_size((w, h).into())],
+            )
             .map_err(|err| anyhow!("clearing: {err}"))?;
-        let _ = frame.finish().map_err(|err| anyhow!("finishing the wipe: {err}"))?;
+        let _ = frame
+            .finish()
+            .map_err(|err| anyhow!("finishing the wipe: {err}"))?;
     }
     renderer
         .with_context(|gl| unsafe { gl.Finish() })
@@ -521,8 +560,13 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
                 false,
             )
             .map_err(|err| anyhow!("import_memory for the {what} variant: {err}"))?;
-        let out =
-            draw_through_program(renderer, &source, program, SIDE, (RADIUS, RADIUS, RADIUS, RADIUS))?;
+        let out = draw_through_program(
+            renderer,
+            &source,
+            program,
+            SIDE,
+            (RADIUS, RADIUS, RADIUS, RADIUS),
+        )?;
         let at = |x: i32, y: i32| -> [u8; 4] {
             let i = ((y * SIDE + x) * 4) as usize;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -579,12 +623,7 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
         // for one quadrant rather than folded with `abs()`, or a
         // `corner_radius` that never arrived -- and the per-corner case below
         // tells them apart, since an unset uniform cuts nothing anywhere.
-        for (x, y) in [
-            (0, 0),
-            (SIDE - 1, 0),
-            (0, SIDE - 1),
-            (SIDE - 1, SIDE - 1),
-        ] {
+        for (x, y) in [(0, 0), (SIDE - 1, 0), (0, SIDE - 1), (SIDE - 1, SIDE - 1)] {
             let corner = at(x, y);
             if corner[3] != 0 {
                 return Err(anyhow!(
@@ -843,7 +882,12 @@ fn draw_and_read(
         let src = element.src();
         let dst = element.geometry(Scale::from(scale));
         <TextureRenderElement<GlesTexture> as RenderElement<GlesRenderer>>::draw(
-            element, &mut frame, src, dst, &whole, &[],
+            element,
+            &mut frame,
+            src,
+            dst,
+            &whole,
+            &[],
         )
         .map_err(|err| anyhow!("drawing the element: {err}"))?;
         let _ = frame.finish().map_err(|err| anyhow!("finishing: {err}"))?;
@@ -852,7 +896,11 @@ fn draw_and_read(
         .bind(&mut into)
         .map_err(|err| anyhow!("re-binding to read back: {err}"))?;
     let mapping = renderer
-        .copy_framebuffer(&framebuffer, Rectangle::from_size((w, h).into()), Fourcc::Argb8888)
+        .copy_framebuffer(
+            &framebuffer,
+            Rectangle::from_size((w, h).into()),
+            Fourcc::Argb8888,
+        )
         .map_err(|err| anyhow!("copying the framebuffer: {err}"))?;
     drop(framebuffer);
     let pixels = renderer
@@ -926,7 +974,11 @@ fn read_dmabuf(
         .bind(&mut texture)
         .map_err(|err| anyhow!("binding a buffer to read it back: {err}"))?;
     let mapping = renderer
-        .copy_framebuffer(&framebuffer, Rectangle::from_size((w, h).into()), Fourcc::Argb8888)
+        .copy_framebuffer(
+            &framebuffer,
+            Rectangle::from_size((w, h).into()),
+            Fourcc::Argb8888,
+        )
         .map_err(|err| anyhow!("copying a buffer to read it back: {err}"))?;
     drop(framebuffer);
     Ok(renderer
@@ -1083,7 +1135,9 @@ fn appear_animation(
     };
     restore(renderer)?;
     if scene.is_null() {
-        return Err(anyhow!("a GPU host could not build dev/wirecheck/appear.qml"));
+        return Err(anyhow!(
+            "a GPU host could not build dev/wirecheck/appear.qml"
+        ));
     }
 
     // A window that has been sitting there. Forty frames of the compositor
@@ -1211,7 +1265,9 @@ fn timer_between_frames(
     };
     restore(renderer)?;
     if scene.is_null() {
-        return Err(anyhow!("a GPU host could not build dev/wirecheck/timer.qml"));
+        return Err(anyhow!(
+            "a GPU host could not build dev/wirecheck/timer.qml"
+        ));
     }
     // Drawn once, so the scene is clean and a change is a change.
     let mut fence: c_int = -1;
@@ -1464,7 +1520,12 @@ fn main() -> Result<()> {
     );
     let mut renderer = if late {
         // Qt first, exactly as the compositor orders it.
-        let import_path = CString::new(repo().join("crates/solium/qml").as_os_str().as_encoded_bytes())?;
+        let import_path = CString::new(
+            repo()
+                .join("crates/solium/qml")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )?;
         if unsafe { solium_qml_start_gpu(import_path.as_ptr()) } != 1 {
             return Err(anyhow!("start_gpu refused"));
         }
@@ -1500,11 +1561,19 @@ fn main() -> Result<()> {
         scale,
     );
     let reference = draw_and_read(&mut renderer, &reference_element, pixels, pixels, scale)?;
-    println!("  reference drawn through import_memory ({} bytes)", reference.len());
+    println!(
+        "  reference drawn through import_memory ({} bytes)",
+        reference.len()
+    );
 
     // Qt, on the GPU (already up when WIRECHECK_LATE_RENDERER is set).
     if !late {
-        let import_path = CString::new(repo().join("crates/solium/qml").as_os_str().as_encoded_bytes())?;
+        let import_path = CString::new(
+            repo()
+                .join("crates/solium/qml")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )?;
         if unsafe { solium_qml_start_gpu(import_path.as_ptr()) } != 1 {
             return Err(anyhow!("start_gpu refused"));
         }
@@ -1595,7 +1664,10 @@ fn main() -> Result<()> {
                 .render(&mut framebuffer, (pixels, pixels).into(), Transform::Normal)
                 .map_err(|err| anyhow!("rendering into our own dmabuf: {err}"))?;
             frame
-                .clear(Color32F::new(0.0, 1.0, 0.0, 1.0), &[Rectangle::from_size((pixels, pixels).into())])
+                .clear(
+                    Color32F::new(0.0, 1.0, 0.0, 1.0),
+                    &[Rectangle::from_size((pixels, pixels).into())],
+                )
                 .map_err(|err| anyhow!("clearing: {err}"))?;
             let _ = frame.finish().map_err(|err| anyhow!("finishing: {err}"))?;
         }
@@ -1607,13 +1679,22 @@ fn main() -> Result<()> {
             .bind(&mut control)
             .map_err(|err| anyhow!("binding the control texture: {err}"))?;
         let mapping = renderer
-            .copy_framebuffer(&framebuffer, Rectangle::from_size((pixels, pixels).into()), Fourcc::Argb8888)
+            .copy_framebuffer(
+                &framebuffer,
+                Rectangle::from_size((pixels, pixels).into()),
+                Fourcc::Argb8888,
+            )
             .map_err(|err| anyhow!("copying the control texture: {err}"))?;
         drop(framebuffer);
-        let raw = renderer.map_texture(&mapping).map_err(|err| anyhow!("mapping: {err}"))?.to_vec();
+        let raw = renderer
+            .map_texture(&mapping)
+            .map_err(|err| anyhow!("mapping: {err}"))?
+            .to_vec();
         println!(
             "  CONTROL smithay writes a dmabuf and re-imports it: {} of {} bytes non-zero, first px {:?}",
-            raw.iter().filter(|b| **b != 0).count(), raw.len(), &raw[..4]
+            raw.iter().filter(|b| **b != 0).count(),
+            raw.len(),
+            &raw[..4]
         );
     }
 
@@ -1628,10 +1709,22 @@ fn main() -> Result<()> {
         let mut raw = vec![0u8; (pixels * pixels * 4) as usize];
         let node_c = CString::new(node.as_str())?;
         let rc = unsafe {
-            join_readback(node_c.as_ptr(), fd, pixels, pixels, stride, modifier, fourcc, raw.as_mut_ptr())
+            join_readback(
+                node_c.as_ptr(),
+                fd,
+                pixels,
+                pixels,
+                stride,
+                modifier,
+                fourcc,
+                raw.as_mut_ptr(),
+            )
         };
         let nonzero = raw.iter().filter(|b| **b != 0).count();
-        println!("  INDEPENDENT display reading the same fd: rc={rc}, {nonzero} of {} bytes non-zero", raw.len());
+        println!(
+            "  INDEPENDENT display reading the same fd: rc={rc}, {nonzero} of {} bytes non-zero",
+            raw.len()
+        );
         // Checked, not printed. This is the only control separating "the
         // compositor cannot see these pixels" from "there are no pixels", and a
         // printed rc=-1 on a box whose render node enumerates differently
@@ -1655,11 +1748,20 @@ fn main() -> Result<()> {
     {
         use smithay::backend::renderer::Texture as _;
         let format = scene_target.dmabuf.format();
-        let renderable = renderer.egl_context().dmabuf_render_formats().contains(&format);
-        let samplable = renderer.egl_context().dmabuf_texture_formats().contains(&format);
+        let renderable = renderer
+            .egl_context()
+            .dmabuf_render_formats()
+            .contains(&format);
+        let samplable = renderer
+            .egl_context()
+            .dmabuf_texture_formats()
+            .contains(&format);
         println!(
             "  texture {:?}; format {:?} mod 0x{:016x}: in render formats {renderable}, in texture formats {samplable} (external = {})",
-            texture.size(), format.code, u64::from(format.modifier), !renderable
+            texture.size(),
+            format.code,
+            u64::from(format.modifier),
+            !renderable
         );
     }
     // What smithay itself sees in the buffer, with no draw in between: bind the
@@ -1670,22 +1772,42 @@ fn main() -> Result<()> {
             .bind(&mut direct)
             .map_err(|err| anyhow!("binding the imported texture: {err}"))?;
         let mapping = renderer
-            .copy_framebuffer(&framebuffer, Rectangle::from_size((pixels, pixels).into()), Fourcc::Argb8888)
+            .copy_framebuffer(
+                &framebuffer,
+                Rectangle::from_size((pixels, pixels).into()),
+                Fourcc::Argb8888,
+            )
             .map_err(|err| anyhow!("copying the imported texture: {err}"))?;
         drop(framebuffer);
-        let raw = renderer.map_texture(&mapping).map_err(|err| anyhow!("mapping: {err}"))?.to_vec();
+        let raw = renderer
+            .map_texture(&mapping)
+            .map_err(|err| anyhow!("mapping: {err}"))?
+            .to_vec();
         let nonzero = raw.iter().filter(|b| **b != 0).count();
-        println!("  straight read of the imported texture: {nonzero} of {} bytes non-zero", raw.len());
+        println!(
+            "  straight read of the imported texture: {nonzero} of {} bytes non-zero",
+            raw.len()
+        );
         let at = |x: i32, y: i32| {
             let i = ((y * pixels + x) * 4) as usize;
             [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]
         };
-        println!("    corners bgra: tl {:?} tr {:?} bl {:?} br {:?}",
-            at(pixels/4, pixels/4), at(3*pixels/4, pixels/4),
-            at(pixels/4, 3*pixels/4), at(3*pixels/4, 3*pixels/4));
+        println!(
+            "    corners bgra: tl {:?} tr {:?} bl {:?} br {:?}",
+            at(pixels / 4, pixels / 4),
+            at(3 * pixels / 4, pixels / 4),
+            at(pixels / 4, 3 * pixels / 4),
+            at(3 * pixels / 4, 3 * pixels / 4)
+        );
     }
 
-    let got_element = element_for(&renderer, texture, (pixels, pixels), (logical, logical), scale);
+    let got_element = element_for(
+        &renderer,
+        texture,
+        (pixels, pixels),
+        (logical, logical),
+        scale,
+    );
     let got = draw_and_read(&mut renderer, &got_element, pixels, pixels, scale)?;
 
     for (name, buf) in [("reference", &reference), ("gpu", &got)] {
@@ -1695,8 +1817,10 @@ fn main() -> Result<()> {
         };
         println!(
             "  {name:>9} corners bgra: tl {:?} tr {:?} bl {:?} br {:?}  ({} non-zero bytes)",
-            at(pixels/4, pixels/4), at(3*pixels/4, pixels/4),
-            at(pixels/4, 3*pixels/4), at(3*pixels/4, 3*pixels/4),
+            at(pixels / 4, pixels / 4),
+            at(3 * pixels / 4, pixels / 4),
+            at(pixels / 4, 3 * pixels / 4),
+            at(3 * pixels / 4, 3 * pixels / 4),
             buf.iter().filter(|b| **b != 0).count()
         );
     }
@@ -1779,10 +1903,19 @@ fn main() -> Result<()> {
         let uploaded = renderer
             .import_memory(&raw, Fourcc::Argb8888, (pixels, pixels).into(), false)
             .map_err(|err| anyhow!("import_memory on the readback: {err}"))?;
-        let element = element_for(&renderer, uploaded, (pixels, pixels), (logical, logical), scale);
+        let element = element_for(
+            &renderer,
+            uploaded,
+            (pixels, pixels),
+            (logical, logical),
+            scale,
+        );
         let drawn = draw_and_read(&mut renderer, &element, pixels, pixels, scale)?;
         let (bad, _) = differing(&reference, &drawn);
-        println!("  and drawn through an element: {bad} of {} bytes differ", reference.len());
+        println!(
+            "  and drawn through an element: {bad} of {} bytes differ",
+            reference.len()
+        );
         if bad != 0 {
             return Err(anyhow!(
                 "the pointer's readback route does not draw what the software path draws: \
@@ -1841,12 +1974,20 @@ fn main() -> Result<()> {
         let texture = renderer
             .import_dmabuf(&scene_target.dmabuf, None)
             .map_err(|err| anyhow!("frame {frame}: import_dmabuf: {err}"))?;
-        let element =
-            element_for(&renderer, texture, (pixels, pixels), (logical, logical), scale);
+        let element = element_for(
+            &renderer,
+            texture,
+            (pixels, pixels),
+            (logical, logical),
+            scale,
+        );
         let got = draw_and_read(&mut renderer, &element, pixels, pixels, scale)?;
         let (bad, _) = differing(&reference, &got);
         worst = worst.max(bad);
-        println!("  frame {frame}: {bad} of {} bytes differ from the reference", reference.len());
+        println!(
+            "  frame {frame}: {bad} of {} bytes differ from the reference",
+            reference.len()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2141,8 +2282,7 @@ fn main() -> Result<()> {
             (big_logical, big_logical),
             scale,
         );
-        let big_got =
-            draw_and_read(&mut renderer, &big_element, big_pixels, big_pixels, scale)?;
+        let big_got = draw_and_read(&mut renderer, &big_element, big_pixels, big_pixels, scale)?;
         let (big_bad, _) = differing(&big_reference, &big_got);
         println!(
             "  the resized picture vs the software path: {big_bad} of {} bytes differ",
@@ -2252,12 +2392,18 @@ fn main() -> Result<()> {
     let mut kept_buffers: Vec<target::Target> = Vec::new();
     for (what, file, w, h, dress) in [
         ("cursor", "crates/solium/qml/cursor.qml", 64, 64, false),
-        ("pane layer", "crates/solium/qml/panes/top/Frame.qml", 640, 480, true),
+        (
+            "pane layer",
+            "crates/solium/qml/panes/top/Frame.qml",
+            640,
+            480,
+            true,
+        ),
         ("delegate", "dev/wirecheck/delegate.qml", 64, 64, false),
     ] {
         let path = CString::new(repo().join(file).as_os_str().as_encoded_bytes())?;
-        let buffer = target::allocate(&gbm, w, h)
-            .with_context(|| format!("the {what} scene's buffer"))?;
+        let buffer =
+            target::allocate(&gbm, w, h).with_context(|| format!("the {what} scene's buffer"))?;
         wipe(&mut renderer, &buffer.dmabuf, w, h)?;
         let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
         let built = unsafe {
@@ -2577,11 +2723,14 @@ fn main() -> Result<()> {
         let buffer = target::allocate(&gbm, SIDE, SIDE).context("the glowing pointer's buffer")?;
         wipe(&mut renderer, &buffer.dmabuf, SIDE, SIDE)?;
         let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
-        let rebound =
-            unsafe { solium_qml_scene_rebind(built, fd, stride, modifier, fourcc, SIDE, SIDE, 1.0) };
+        let rebound = unsafe {
+            solium_qml_scene_rebind(built, fd, stride, modifier, fourcc, SIDE, SIDE, 1.0)
+        };
         restore(&renderer)?;
         if !rebound {
-            return Err(anyhow!("the pointer scene would not move onto its own size's buffer"));
+            return Err(anyhow!(
+                "the pointer scene would not move onto its own size's buffer"
+            ));
         }
         drop(first);
         // A few frames, so the effect's own layer of the square is rendered
@@ -2592,7 +2741,9 @@ fn main() -> Result<()> {
             let rendered = unsafe { solium_qml_scene_render_gpu(built, &raw mut fence) };
             restore(&renderer)?;
             if rendered == 0 {
-                return Err(anyhow!("the glowing pointer scene did not render on the GPU"));
+                return Err(anyhow!(
+                    "the glowing pointer scene did not render on the GPU"
+                ));
             }
             if fence >= 0 {
                 wait_for(&mut renderer, unsafe { OwnedFd::from_raw_fd(fence) })?;
@@ -2768,10 +2919,19 @@ fn main() -> Result<()> {
         let texture = renderer
             .import_dmabuf(&real.dmabuf, None)
             .map_err(|err| anyhow!("import_dmabuf on the first rebind's buffer: {err}"))?;
-        let element = element_for(&renderer, texture, (pixels, pixels), (logical, logical), scale);
+        let element = element_for(
+            &renderer,
+            texture,
+            (pixels, pixels),
+            (logical, logical),
+            scale,
+        );
         let got = draw_and_read(&mut renderer, &element, pixels, pixels, scale)?;
         let (bad, _) = differing(&reference, &got);
-        println!("  the picture after it vs the software path: {bad} of {} bytes differ", reference.len());
+        println!(
+            "  the picture after it vs the software path: {bad} of {} bytes differ",
+            reference.len()
+        );
         if bad != 0 {
             return Err(anyhow!(
                 "a scene rebound before it had ever rendered does not draw its new buffer: \
@@ -2885,8 +3045,13 @@ fn main() -> Result<()> {
                 false,
             )
             .map_err(|err| anyhow!("guard texture {index}: {err}"))?;
-        let element =
-            element_for(&renderer, texture.clone(), (pixels, pixels), (logical, logical), scale);
+        let element = element_for(
+            &renderer,
+            texture.clone(),
+            (pixels, pixels),
+            (logical, logical),
+            scale,
+        );
         let before = draw_and_read(&mut renderer, &element, pixels, pixels, scale)?;
         guards.push((texture, before));
     }
@@ -2958,14 +3123,17 @@ fn main() -> Result<()> {
         .iter()
         .filter(|it| live_before_qt.contains(***&it))
         .collect();
-    println!(
-        "  ...of which existed before Qt was started, so are certainly ours: {ours:?}"
-    );
+    println!("  ...of which existed before Qt was started, so are certainly ours: {ours:?}");
 
     let mut clobbered = 0usize;
     for (index, (texture, before)) in guards.iter().enumerate() {
-        let element =
-            element_for(&renderer, texture.clone(), (pixels, pixels), (logical, logical), scale);
+        let element = element_for(
+            &renderer,
+            texture.clone(),
+            (pixels, pixels),
+            (logical, logical),
+            scale,
+        );
         let after = draw_and_read(&mut renderer, &element, pixels, pixels, scale)?;
         let (bad, _) = differing(before, &after);
         if bad != 0 {

@@ -128,6 +128,16 @@ impl Json {
         }
     }
 
+    /// This value as text, or `None` for anything that is not exactly one
+    /// string: `apps::tests` (`state::hosted`'s `apps.launch` reads a desktop
+    /// id this way, a string rather than `as_u64`'s window id).
+    pub(crate) fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
     /// A whole, non-negative number below 2^53: a window's id.
     /// `tests::only_a_whole_non_negative_number_is_an_id`.
     pub(crate) fn as_u64(&self) -> Option<u64> {

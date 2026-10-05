@@ -644,6 +644,12 @@ void solium_qml_register_types()
     /* Named, since a scene writes one: `WorkspaceList { ... }`.
      * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
     qmlRegisterType<SoliumWorkspaceList>(SOLIUM_NATIVE_URI, 1, 0, "WorkspaceList");
+    /* An app's row is nameless like a monitor's or a window's, so a shell's
+     * own `App.qml` is its own (03 §3.2.13, Ruling 1a). */
+    qmlRegisterAnonymousType<SoliumApp>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Apps",
+                                 qobject_cast<SoliumAppRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_APPS)));
 }
 
 /* What `Solium.status` reads: the text `sol.status` set.

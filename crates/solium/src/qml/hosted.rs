@@ -34,6 +34,7 @@ mod ffi {
         pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_status(text: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_arrangement(json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_apps_ready(ready: c_int) -> c_int;
         pub(super) fn solium_qml_scene_pointer_event(
             scene: *mut super::super::ffi::Scene,
             kind: c_int,
@@ -97,6 +98,7 @@ pub(crate) enum Model {
     Monitors = 0,
     Windows = 1,
     Workspaces = 2,
+    Apps = 3,
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
@@ -127,6 +129,15 @@ pub(crate) fn set_status(text: &str) -> bool {
     };
     // SAFETY: `text` outlives the call; the host copies it.
     unsafe { ffi::solium_qml_set_status(text.as_ptr()) != 0 }
+}
+
+/// `Apps.ready`: false until the first scan (`models::mod`'s
+/// `publish_models`) completes. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_apps_ready(ready: bool) -> bool {
+    touched();
+    // SAFETY: no pointer, nothing to outlive.
+    unsafe { ffi::solium_qml_set_apps_ready(c_int::from(ready)) != 0 }
 }
 
 /// `Workspaces.arrangement`, from JSON. Whether Qt took it.

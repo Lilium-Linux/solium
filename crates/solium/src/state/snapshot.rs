@@ -395,9 +395,22 @@ impl Solium {
             })
             .collect();
 
+        let apps = self
+            .apps
+            .iter()
+            .map(|entry| crate::script::AppInfo {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                generic_name: entry.generic_name.clone(),
+                icon: entry.icon.clone(),
+                categories: entry.categories.clone(),
+            })
+            .collect();
+
         Snapshot {
             windows,
             monitors,
+            apps,
             keyboard: self.keyboard.clone(),
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),

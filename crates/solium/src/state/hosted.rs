@@ -369,6 +369,30 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`,
     /// `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
     pub(crate) fn act(&mut self, action: &str, data: &Json) -> Result<Command, &'static str> {
+        // Not a window action: `apps.launch { id }` names a desktop id, not a
+        // window, and what it starts is `Command::Spawn` -- Solium's existing
+        // spawn path (`launch.rs`, `state/open.rs::spawn`), so a launch from
+        // the dock gets the same clean environment and loading window
+        // `super+return` already does (03 §3.2.13's "what a launch does").
+        if action == "apps.launch" {
+            let id = data.get("id").and_then(Json::as_str).ok_or("bad-data")?;
+            let entry = self
+                .apps
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or("unknown-app")?;
+            let mut argv = crate::apps::launch_argv(entry, &crate::apps::LaunchContext::default())
+                .map_err(|_| "bad-data")?
+                .into_iter();
+            // `launch_argv` never returns `Ok` with an empty list (it is an
+            // `Err` instead: `apps::tests::a_field_with_nothing_to_fill_it_is_dropped`
+            // covers the field-code side of that).
+            let program = argv.next().ok_or("bad-data")?;
+            return Ok(Command::Spawn {
+                program,
+                args: argv.collect(),
+            });
+        }
         let make: fn(u64) -> Command = match action {
             "windows.focus" => |id| Command::Focus { id },
             "windows.close" => |id| Command::Close { id },

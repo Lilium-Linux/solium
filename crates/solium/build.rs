@@ -33,6 +33,8 @@ fn main() {
     println!("cargo:rerun-if-changed=qml/keyboard.h");
     println!("cargo:rerun-if-changed=qml/pointer.cpp");
     println!("cargo:rerun-if-changed=qml/pointer.h");
+    println!("cargo:rerun-if-changed=qml/icon.cpp");
+    println!("cargo:rerun-if-changed=qml/icon.h");
 
     let mut build = cc::Build::new();
     build
@@ -47,6 +49,7 @@ fn main() {
         .file("qml/rows.cpp")
         .file("qml/keyboard.cpp")
         .file("qml/pointer.cpp")
+        .file("qml/icon.cpp")
         .include("qml");
 
     // Qt6Quick pulls in Core, Gui and Qml transitively.

@@ -4,6 +4,7 @@
 //! `tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
 //! `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
 
+pub(crate) mod apps;
 pub(crate) mod diff;
 pub(crate) mod keyboard;
 pub(crate) mod monitors;
@@ -20,10 +21,15 @@ pub(crate) struct Published {
     windows: Vec<diff::Row>,
     /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
     workspaces: Vec<diff::Row>,
+    /// `Apps`' rows (`models::apps::rows`).
+    apps: Vec<diff::Row>,
     /// What `Solium.status` and `Workspaces.arrangement` last took.
     /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
     status: Option<String>,
     arrangement: Option<String>,
+    /// `Apps.ready`, once true never sent false again (a rescan never empties
+    /// the index back to nothing worth distrusting it over).
+    apps_ready: bool,
     /// `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
     keyboard: keyboard::Published,
     /// `pointer::tests::a_named_shape_reaches_solium_cursor_shape`.
@@ -38,6 +44,28 @@ impl crate::state::Solium {
         // The caret each decoration is told this frame:
         // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
         self.settle_caret();
+        // Apps: scanned once, lazily, on the first call this process ever
+        // makes here, and again whenever a reload asked for one
+        // (`state/commands.rs`'s `reload_from`). No worker thread and no
+        // inotify in this version (see `apps.rs`'s module doc for why), so
+        // this is the one rescan trigger there is.
+        if self.apps_scan_pending {
+            self.apps = crate::apps::scan(
+                &crate::apps::search_dirs(),
+                &crate::apps::preferred_locales(),
+            );
+            self.apps_scan_pending = false;
+            if !self.published.apps_ready && crate::qml::hosted::set_apps_ready(true) {
+                self.published.apps_ready = true;
+            }
+        }
+        let apps = apps::rows(&self.apps);
+        publish(
+            Model::Apps,
+            &mut self.published.apps,
+            apps,
+            crate::qml::hosted::apply_rows,
+        );
         let monitors = monitors::rows(self);
         publish(
             Model::Monitors,

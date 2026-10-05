@@ -284,6 +284,16 @@ pub(crate) struct Solium {
     /// `tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`.
     pub(crate) workspaces: Option<crate::models::workspaces::Declared>,
 
+    /// Installed, visible applications: `Apps`' rows and `sol.apps()`
+    /// (03 §3.2.13). Filled by `crate::apps::scan` when
+    /// [`Self::apps_scan_pending`] asks for one; empty until the first scan.
+    pub(crate) apps: Vec<crate::apps::Entry>,
+    /// True from startup, and again after a reload
+    /// (`state/commands.rs::reload_from`), until `publish_models` has
+    /// rescanned. No worker thread and no inotify in this version (see
+    /// `apps.rs`'s module doc): this flag is the only rescan trigger there is.
+    pub(crate) apps_scan_pending: bool,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -1089,6 +1099,8 @@ impl Solium {
             focus_history: Vec::new(),
             urgent: std::collections::HashSet::new(),
             workspaces: None,
+            apps: Vec::new(),
+            apps_scan_pending: true,
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),

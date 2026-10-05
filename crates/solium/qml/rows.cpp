@@ -32,6 +32,11 @@ SoliumRow *make_workspace(QObject *parent)
     return new SoliumWorkspace(parent);
 }
 
+SoliumRow *make_app(QObject *parent)
+{
+    return new SoliumApp(parent);
+}
+
 SoliumWindow *window_at(const QAbstractItemModel *model, int row)
 {
     const auto *rows = qobject_cast<const SoliumRows *>(model);
@@ -413,6 +418,22 @@ void SoliumWorkspaceRows::setArrangement(const QVariantMap &arrangement)
     }
 }
 
+/* `Retire::Never`, like `Monitors`: an app that is uninstalled (or has never
+ * been scanned yet) is a ghost, not a hole, so a pinned slot never disappears
+ * from under a dock (03 §3.2.13). */
+SoliumAppRows::SoliumAppRows()
+    : SoliumRows(&SoliumApp::staticMetaObject, make_app, Retire::Never, "id")
+{
+}
+
+void SoliumAppRows::setReady(bool ready)
+{
+    if (ready != m_ready) {
+        m_ready = ready;
+        emit readyChanged();
+    }
+}
+
 SoliumWorkspaceList::SoliumWorkspaceList(QObject *parent) : QSortFilterProxyModel(parent)
 {
     setSourceModel(solium_rows(SOLIUM_QML_ROWS_WORKSPACES));
@@ -459,6 +480,7 @@ SoliumRows *solium_rows(int model)
     static SoliumRows *monitors = nullptr;
     static SoliumRows *windows = nullptr;
     static SoliumRows *workspaces = nullptr;
+    static SoliumRows *apps = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -479,6 +501,11 @@ SoliumRows *solium_rows(int model)
             workspaces = new SoliumWorkspaceRows();
         }
         return workspaces;
+    case SOLIUM_QML_ROWS_APPS:
+        if (apps == nullptr) {
+            apps = new SoliumAppRows();
+        }
+        return apps;
     default:
         return nullptr;
     }
@@ -512,5 +539,16 @@ extern "C" int solium_qml_set_arrangement(const char *json)
         return 0;
     }
     rows->setArrangement(document.object().toVariantMap());
+    return 1;
+}
+
+/* `Apps.ready`, once the first scan completes. */
+extern "C" int solium_qml_set_apps_ready(int ready)
+{
+    auto *rows = qobject_cast<SoliumAppRows *>(solium_rows(SOLIUM_QML_ROWS_APPS));
+    if (rows == nullptr) {
+        return 0;
+    }
+    rows->setReady(ready != 0);
     return 1;
 }
