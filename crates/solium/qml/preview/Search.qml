@@ -127,7 +127,14 @@ Item {
         Solium.send("search.closed")
     }
 
-    onRowsChanged: list.currentIndex = firstSelectable()
+    // `Qt.callLater`, not a direct assignment: a `ListView` resets its own
+    // `currentIndex` to -1 the moment its `model` changes identity, which a
+    // fresh array from Lua does on every keystroke -- so a direct
+    // assignment here was overwritten right back to -1 by the view's own
+    // reaction to that same change, measured directly (no row ever showed
+    // selected). Deferred, this runs after the view has settled on the new
+    // model.
+    onRowsChanged: Qt.callLater(function() { list.currentIndex = root.firstSelectable() })
     onVisibleChanged: if (visible) {
         field.text = ""
         field.forceActiveFocus()
