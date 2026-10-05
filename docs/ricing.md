@@ -849,7 +849,7 @@ nothing else. It shows:
 
 Next pieces -- the dock, the island, search, quick settings, a tray, and
 previews -- need services this compositor does not have yet, and are not
-here. `preview.lua` and `qml/preview/` are where all of it lives, so copying
+here. `lua/preview/` and `qml/preview/` are where all of it lives, so copying
 one file still changes one behaviour, exactly as **[Your own
 frame](#your-own-frame)** and **[Bars, docks and
 wallpapers](#bars-docks-and-wallpapers)** above do it.
