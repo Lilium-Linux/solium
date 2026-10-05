@@ -477,6 +477,14 @@ pub(crate) enum Command {
         program: String,
         args: Vec<String>,
     },
+    /// `folder.trust { uri }`, validated and resolved to an absolute path by
+    /// `Solium::act` (04-ui.md §4.9): mark a desktop launcher trusted,
+    /// durably, so `folder.open` will run it. Its own command, rather than a
+    /// direct mutation inside `act`, for the same "intent, then applied"
+    /// split every other verb here keeps.
+    FolderTrust {
+        absolute: String,
+    },
     /// How a window behaves between being asked for and its application
     /// arriving. See `Loading`.
     Loading(Loading),

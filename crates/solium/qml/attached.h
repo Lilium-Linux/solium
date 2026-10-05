@@ -299,6 +299,23 @@ signals:
     void changed();
 };
 
+/* `Solium.dirs`: `crate::folder::desktop_dir`, for `Solium.dirs.desktop`.
+ * One per process, made on first use, the same shape as `SoliumStatus`. */
+class SoliumDirs : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(QString desktop READ desktop NOTIFY desktopChanged)
+public:
+    static SoliumDirs &instance();
+    QString desktop() const { return m_desktop; }
+    void setDesktop(const QString &desktop);
+signals:
+    void desktopChanged();
+
+private:
+    QString m_desktop;
+};
+
 /* What every item reads as `Solium.<name>`.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 class SoliumAttached : public QObject
@@ -318,6 +335,8 @@ class SoliumAttached : public QObject
     /* `Solium.status`: the text `sol.status` set.
      * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    /* `Solium.dirs.desktop`: `crate::folder::desktop_dir` (04-ui.md §4.9). */
+    Q_PROPERTY(SoliumDirs *dirs READ dirs CONSTANT)
     /* `Solium.cursor`: the pointer as the compositor publishes it, and the
      * hotspot the pointer's scene sets on its root.
      * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`,
@@ -341,6 +360,7 @@ public:
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
     QString status() const;
+    SoliumDirs *dirs() const { return &SoliumDirs::instance(); }
     SoliumCursor *cursor();
     /* The object's `Solium.cursor` if anything has made it, else null.
      * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */

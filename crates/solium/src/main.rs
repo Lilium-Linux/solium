@@ -15,6 +15,7 @@ mod cursor;
 mod decoration;
 mod dev;
 mod focus;
+mod folder;
 mod group;
 mod icon;
 mod idle;

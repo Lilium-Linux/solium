@@ -522,6 +522,7 @@ int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
 #define SOLIUM_QML_ROWS_WINDOWS 1
 #define SOLIUM_QML_ROWS_WORKSPACES 2
 #define SOLIUM_QML_ROWS_APPS 3
+#define SOLIUM_QML_ROWS_FOLDER 4
 
 /* Apply one batch of row operations, rendered by `crate::models::diff::render`,
  * to a model: in order, every row's values written before any row is
@@ -544,6 +545,10 @@ int solium_qml_set_arrangement(const char *json);
 
 /* `Apps.ready`: false until the first scan completes. 1 when Qt took it. */
 int solium_qml_set_apps_ready(int ready);
+
+/* `Solium.dirs.desktop`: `crate::folder::desktop_dir`, "" when nothing names
+ * one. 1 when Qt took it. */
+int solium_qml_set_dirs_desktop(const char *text);
 
 #ifdef __cplusplus
 }

@@ -475,6 +475,15 @@ impl Solium {
                     }
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
+                Command::FolderTrust { absolute } => {
+                    self.folder_trust.trust(&absolute);
+                    if let Some(entry) = self.folder.iter_mut().find(|entry| {
+                        crate::folder::path_from_uri(&entry.uri)
+                            .is_some_and(|path| path.display().to_string() == absolute)
+                    }) {
+                        entry.trusted = true;
+                    }
+                }
                 Command::Reload => self.request = Some(Request::Reload),
                 Command::Keyboard(request) => {
                     let keymap = self.keymap.clone();
@@ -691,6 +700,12 @@ impl Solium {
                 // a reload is the one point this version rescans them
                 // (`apps.rs`'s module doc, `models::mod`'s `publish_models`).
                 self.apps_scan_pending = true;
+                // `Solium.dirs.desktop` can change too (a session's
+                // `XDG_DESKTOP_DIR` edited, `user-dirs.dirs` regenerated), so
+                // a reload re-resolves and rescans the desktop folder the
+                // same way (`folder.rs`'s module doc, `models::mod`'s
+                // `publish_models`).
+                self.folder_scan_pending = true;
                 // And with Qt's cache of a scene that would not load gone, the
                 // scene is tried again: a reload is what anybody presses after
                 // mending one (`a_reload_tries_again_a_scene_that_would_not_load`).

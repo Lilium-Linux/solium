@@ -31,6 +31,9 @@ function preview.apply()
     -- Quick search's own policy (04-ui.md §4.7: the key, the matching, the
     -- commands) -- see its module doc for the same ordering reason.
     require("preview.search")
+    -- The desktop icons' own policy (04-ui.md §4.9: the corner, the cell,
+    -- the label lines) -- see its module doc for the same ordering reason.
+    require("preview.desktop")
 end
 
 preview.apply()

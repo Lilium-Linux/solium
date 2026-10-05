@@ -306,6 +306,23 @@ SoliumStatus &SoliumStatus::instance()
     return *status;
 }
 
+SoliumDirs &SoliumDirs::instance()
+{
+    static SoliumDirs *dirs = nullptr;
+    if (dirs == nullptr) {
+        dirs = new SoliumDirs();
+    }
+    return *dirs;
+}
+
+void SoliumDirs::setDesktop(const QString &desktop)
+{
+    if (desktop != m_desktop) {
+        m_desktop = desktop;
+        emit desktopChanged();
+    }
+}
+
 SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item)
 {
     QObject::connect(&SoliumStatus::instance(), &SoliumStatus::changed, this,
@@ -650,6 +667,13 @@ void solium_qml_register_types()
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Apps",
                                  qobject_cast<SoliumAppRows *>(
                                      solium_rows(SOLIUM_QML_ROWS_APPS)));
+    /* A folder entry's row is nameless like an app's or a window's, so a
+     * shell's own `Folder.qml`, if it ever wrote one, would still be its
+     * own (04-ui.md §4.9). */
+    qmlRegisterAnonymousType<SoliumFolderEntry>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Folder",
+                                 qobject_cast<SoliumFolderRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_FOLDER)));
 }
 
 /* What `Solium.status` reads: the text `sol.status` set.
@@ -665,5 +689,16 @@ extern "C" int solium_qml_set_status(const char *text)
         status.text = next;
         emit status.changed();
     }
+    return 1;
+}
+
+/* `Solium.dirs.desktop`: `crate::folder::desktop_dir`, `""` when nothing
+ * names one. */
+extern "C" int solium_qml_set_dirs_desktop(const char *text)
+{
+    if (QCoreApplication::instance() == nullptr) {
+        return 0;
+    }
+    SoliumDirs::instance().setDesktop(QString::fromUtf8(text != nullptr ? text : ""));
     return 1;
 }

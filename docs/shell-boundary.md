@@ -604,6 +604,52 @@ Qt installation has the `imageformats/libqsvg` plugin, which this project's
 own container image does not ship, so a PNG icon resolves everywhere this
 builds and an SVG-only one falls back to the default glyph there.
 
+**The desktop folder, live.** `Folder` (04-ui.md §4.9) is every entry of
+`Solium.dirs.desktop`, a row model like `Apps`: `uri`, `name`, `displayName`
+(a launcher's own `Name=`, else `name`), `mime`, `icon` (ready for
+`image://solium/icon/`, as `Apps`' own is), `isDir`, `isLauncher`, `trusted`,
+`hidden` and `modified`. Unlike `Apps`, a row that leaves the folder is gone
+outright, not a ghost (nothing pins a desktop file the way a dock pins an
+app id), and unlike `Apps`' wholesale rescan on a reload only, `Folder` is
+live: `crate::folder::Watcher` holds one inotify watch on the directory,
+polled every frame, and any change rescans the whole folder, wholesale,
+exactly the way `Apps` already prefers a simple rescan over incremental
+tracking. Empty, and costing nothing to watch or scan, with
+`Solium.dirs.desktop` empty. `Solium.dirs.desktop` is `$XDG_DESKTOP_DIR`, or
+the same key read from `user-dirs.dirs`, empty when neither names one or it
+names `$HOME` itself -- a user whose whole home is "the desktop" gets no
+icons drawn over every file in it (`crate::folder::desktop_dir`).
+
+A scene asks the compositor to do something about one entry the same way it
+asks anything else, `Solium.send(action, data)`, answered by `lua/actions.lua`
+forwarding to `sol.act` (the `folder` service alongside `windows`,
+`workspaces` and `apps`): `folder.open { uri }` runs it -- a regular file
+through the default application for its MIME type (the freedesktop
+`mimeapps.list`/`mimeinfo.cache` convention, `crate::folder::default_app_id`),
+a `.desktop` launcher through its own `Exec=` once trusted -- launched the
+same way `apps.launch` launches, through `crate::apps::launch_argv` and the
+same `Command::Spawn`, so it gets the same clean environment and loading
+window. `folder.trust { uri }` marks a launcher trusted, durably, so it will
+run: tried first, `gio set <file> metadata::trusted true` itself answers
+"not supported" on this machine (GIO's `metadata::` namespace needs the gvfs
+metadata daemon, which nothing here can assume is running), so trust is kept
+the simplest durable way this repo already has instead -- a plain file of
+trusted absolute paths under `$XDG_DATA_HOME/solium/desktop-trust`
+(`crate::folder::Trust`), the same `fs::write` shape `session.rs` and
+`launch.rs` already use for small state. `sol.store` would be the natural
+fit once it exists. `done`'s `reason` here adds `"unknown-file"` (no such
+entry), `"no-handler"` (no default application for the MIME type) and
+`"untrusted"` (an un-trusted launcher) to the vocabulary above -- not yet
+listed there, the same gap `apps.launch`'s own `"unknown-app"` already left.
+
+What is cut from this version: a subdirectory is one `isDir` row, not walked
+(a folder window is a scene's own concern, not here yet); MIME detection is
+`/usr/share/mime/globs2`'s extension table, by hand, with no content
+sniffing; hidden follows only the leading-dot convention, not a `.hidden`
+list; `folder.open_with` (quick search as an app picker) and a durable,
+position-aware store once `sol.store` exists are both `Later`
+(`crates/solium/src/folder.rs`'s own module doc has the rest).
+
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
 (the live layout's index into `layouts`, from 0), `layoutName` (`"Russian"`),

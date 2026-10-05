@@ -6,6 +6,7 @@
 
 pub(crate) mod apps;
 pub(crate) mod diff;
+pub(crate) mod folder;
 pub(crate) mod keyboard;
 pub(crate) mod monitors;
 pub(crate) mod pointer;
@@ -23,10 +24,14 @@ pub(crate) struct Published {
     workspaces: Vec<diff::Row>,
     /// `Apps`' rows (`models::apps::rows`).
     apps: Vec<diff::Row>,
-    /// What `Solium.status` and `Workspaces.arrangement` last took.
+    /// `Folder`'s rows (`models::folder::rows`, 04-ui.md §4.9).
+    folder: Vec<diff::Row>,
+    /// What `Solium.status`, `Workspaces.arrangement` and `Solium.dirs.desktop`
+    /// last took.
     /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
     status: Option<String>,
     arrangement: Option<String>,
+    dirs_desktop: Option<String>,
     /// `Apps.ready`, once true never sent false again (a rescan never empties
     /// the index back to nothing worth distrusting it over).
     apps_ready: bool,
@@ -66,6 +71,48 @@ impl crate::state::Solium {
             apps,
             crate::qml::hosted::apply_rows,
         );
+        // `Folder`: the desktop directory, resolved once (again on a
+        // reload) and rescanned wholesale whenever `folder_scan_pending`
+        // asks for one or the inotify watch says something changed.
+        // `with no desktop folder nothing is drawn and nothing costs
+        // anything` (04-ui.md §4.9): `self.folder_dir` is `None`, the watch
+        // is never armed, and every call below is one cheap option check.
+        if self.folder_scan_pending {
+            self.folder_dir = crate::folder::desktop_dir();
+            self.folder_watcher.set_path(self.folder_dir.as_deref());
+            self.folder = self
+                .folder_dir
+                .as_deref()
+                .map(|dir| crate::folder::scan(dir, &self.folder_trust))
+                .unwrap_or_default();
+            self.folder_scan_pending = false;
+        } else if self.folder_dir.is_some()
+            && (std::mem::take(&mut self.folder_changed) | self.folder_watcher.poll())
+        {
+            self.folder = self
+                .folder_dir
+                .as_deref()
+                .map(|dir| crate::folder::scan(dir, &self.folder_trust))
+                .unwrap_or_default();
+        }
+        let folder = folder::rows(&self.folder);
+        publish(
+            Model::Folder,
+            &mut self.published.folder,
+            folder,
+            crate::qml::hosted::apply_rows,
+        );
+        let dirs_desktop = self
+            .folder_dir
+            .as_deref()
+            .and_then(|dir| dir.to_str())
+            .unwrap_or("")
+            .to_owned();
+        if self.published.dirs_desktop.as_deref() != Some(dirs_desktop.as_str())
+            && crate::qml::hosted::set_dirs_desktop(&dirs_desktop)
+        {
+            self.published.dirs_desktop = Some(dirs_desktop);
+        }
         let monitors = monitors::rows(self);
         publish(
             Model::Monitors,
