@@ -82,10 +82,9 @@ is the format written out in full -- all three depths, both spellings of
 
     solium --check-qml crates/solium/tests/fixtures/panes/example/Pane.qml
 
-says whether it still parses. It prints `ok` or what Qt reported, and exits 0
-either way, so read what it prints. It does not follow `source:`, so run it on
-**each file** of a bundle you write: that is what catches a layer whose content
-will not build.
+says whether it still parses. It loads every layer the style names in
+`source:` too, prints `ok` for each file or what Qt reported, and exits with 1
+when any of them does not build, naming the file.
 
 A style that cannot be loaded -- a layer that will not build, a `requires`
 that cannot be met, a name that is nowhere -- leaves each window it was for

@@ -293,6 +293,17 @@ impl Deform {
         }
     }
 
+    /// Whether this deform draws the window exactly where it is: progress 0,
+    /// or below it, which clamps to the same picture.
+    /// `tests::at_rest_a_deform_draws_the_window_exactly_where_it_is` shows the
+    /// picture; `tests::a_genie_at_progress_zero_or_below_is_at_rest` the rule.
+    #[must_use]
+    pub fn is_at_rest(self) -> bool {
+        match self {
+            Self::Genie { progress, .. } => progress <= 0.0,
+        }
+    }
+
     /// Blend two deforms, either of which may be absent.
     ///
     /// Absent means "not deformed", which for a genie is progress 0 -- so a
@@ -445,6 +456,21 @@ mod tests {
                 assert_eq!(genie(0.0, axis).place(WINDOW, ICON, u, v), WINDOW.at(u, v));
             }
         }
+    }
+
+    /// A genie at progress 0, or below it (which clamps to the same picture),
+    /// is at rest; any progress past 0 is not.
+    #[test]
+    fn a_genie_at_progress_zero_or_below_is_at_rest() {
+        let genie = |progress| Deform::Genie {
+            progress,
+            spread: 1.4,
+            axis: Axis::Down,
+        };
+        assert!(genie(0.0).is_at_rest());
+        assert!(genie(-0.5).is_at_rest());
+        assert!(!genie(0.01).is_at_rest());
+        assert!(genie(1.0).at_rest().is_at_rest());
     }
 
     #[test]

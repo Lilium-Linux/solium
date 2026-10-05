@@ -6,7 +6,7 @@
 //! surfaces are rendered into a texture of their own, and *that* is drawn,
 //! through a fragment program, in the client's place.
 //!
-//! The capture is [`crate::offscreen::capture_client`], a sibling of the one
+//! The capture is [`crate::offscreen::client_job`], a sibling of the one
 //! the genie already uses, and it keeps its texture on the pane rather than
 //! allocating one a frame. That was made a prerequisite of this work rather
 //! than a follow-up for exactly this reason: an effect system multiplies a
@@ -255,7 +255,7 @@ pub(crate) fn placed(
 
 /// Whether `regions` leave no part of a `size`-sized rectangle uncovered.
 ///
-/// Asked of a capture once, in `offscreen::capture_client`, with the opaque
+/// Asked of a capture once, in `offscreen::client_job`, with the opaque
 /// regions the client's own surfaces declared. The capture is cleared to
 /// transparent and the client draws into it, so the only thing that makes any
 /// of it opaque is the client saying so -- and a translucent client is
@@ -436,6 +436,22 @@ fn side_inset(radius: f64, widen: f64) -> f64 {
     (radius * widen).max(radius.max(0.5) * widen - 0.5)
 }
 
+/// Compile once and keep it, or latch the failure and never try again.
+/// `tests::a_program_that_will_not_compile_is_tried_once`.
+fn once<'a, T>(
+    slot: &'a mut Option<T>,
+    failed: &mut bool,
+    compile: impl FnOnce() -> Option<T>,
+) -> Option<&'a T> {
+    if slot.is_none() && !*failed {
+        match compile() {
+            Some(made) => *slot = Some(made),
+            None => *failed = true,
+        }
+    }
+    slot.as_ref()
+}
+
 /// The compiled fragment programs, one of each, for the life of the renderer.
 ///
 /// Compiling a shader is not a per-frame cost anybody should pay, and
@@ -471,6 +487,10 @@ pub(crate) struct Programs {
     /// Set once a compile has been tried and failed, so the warning is logged
     /// once rather than at sixty or two hundred and sixty hertz.
     rounded_failed: bool,
+    /// The warp's program (`warp/gl.rs`), on the same terms as `rounded`.
+    warp: Option<crate::warp::Program>,
+    /// As `rounded_failed`, for the warp.
+    warp_failed: bool,
     /// Set once an effect this renderer cannot run has been named, for the
     /// same reason and on the same terms. See [`Programs::refuse`].
     refused: bool,
@@ -483,31 +503,58 @@ impl Programs {
     /// window square rather than not at all: a driver that cannot build this
     /// program should cost someone their rounded corners, not their desktop.
     pub(crate) fn rounded(&mut self, renderer: &mut GlesRenderer) -> Option<&GlesTexProgram> {
-        if self.rounded.is_none() && !self.rounded_failed {
-            match renderer.compile_custom_texture_shader(
-                ROUNDED_CORNERS,
-                &[
-                    UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
-                    // Ours because smithay gives a texture program no `size`.
-                    UniformName::new(SIZE_UNIFORM, UniformType::_2f),
-                ],
-            ) {
-                Ok(program) => self.rounded = Some(program),
-                Err(err) => {
-                    // Latched before the warning and never cleared, because the
-                    // thing that failed is a string constant against a driver:
-                    // it will fail identically on the next frame and the one
-                    // after, and a warning per frame per window is how a log
-                    // stops being readable at the moment somebody needs it.
-                    self.rounded_failed = true;
+        // Latched and never cleared, because the thing that failed is a
+        // string constant against a driver: it will fail identically on the
+        // next frame and the one after, and a warning per frame per window is
+        // how a log stops being readable at the moment somebody needs it
+        // (`tests::a_program_that_will_not_compile_is_tried_once`).
+        once(&mut self.rounded, &mut self.rounded_failed, || {
+            renderer
+                .compile_custom_texture_shader(
+                    ROUNDED_CORNERS,
+                    &[
+                        UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
+                        // Ours because smithay gives a texture program no `size`.
+                        UniformName::new(SIZE_UNIFORM, UniformType::_2f),
+                    ],
+                )
+                .inspect_err(|err| {
                     tracing::warn!(
                         ?err,
                         "the rounded-corner shader did not compile; windows will be drawn square"
                     );
+                })
+                .ok()
+        })
+    }
+
+    /// The warp program, compiled on first use and between frames, for the
+    /// reason this type's own doc gives. `None` means it did not compile and a
+    /// deformed window is drawn flat rather than not at all (#140, §6.5 C3).
+    #[expect(unsafe_code, reason = "compiling the warp's GL program")]
+    pub(crate) fn warp(&mut self, renderer: &mut GlesRenderer) -> Option<crate::warp::Program> {
+        once(&mut self.warp, &mut self.warp_failed, || {
+            // SAFETY: `with_context` makes the renderer's context current, and
+            // this runs between frames (`render::prepare`).
+            match renderer.with_context(|gl| unsafe { crate::warp::Program::compile(gl) }) {
+                Ok(Ok(program)) => Some(program),
+                Ok(Err(why)) => {
+                    tracing::warn!(
+                        why,
+                        "the warp shader did not compile; deformed windows will be drawn flat"
+                    );
+                    None
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        "no context to compile the warp shader in; deformed windows will be drawn flat"
+                    );
+                    None
                 }
             }
-        }
-        self.rounded.as_ref()
+        })
+        .copied()
     }
 
     /// Say, once, that a style declares an effect this renderer cannot run.
@@ -564,6 +611,9 @@ pub(crate) struct Pass {
     /// [`covers`], which answers it, and [`opaque_of`], which reads it.
     opaque: bool,
     program: GlesTexProgram,
+    /// The capture's own id and commit: see [`Pass::at`].
+    id: Id,
+    commit: CommitCounter,
 }
 
 impl Pass {
@@ -571,6 +621,10 @@ impl Pass {
     ///
     /// `scale` is the monitor the capture was taken at, and is the one number
     /// that turns `effect`'s logical radii into the shader's physical ones.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a capture's texture, its identity, and what it is drawn through"
+    )]
     pub(crate) fn new(
         texture: GlesTexture,
         size: Size<i32, Physical>,
@@ -578,6 +632,8 @@ impl Pass {
         scale: f64,
         opaque: bool,
         program: GlesTexProgram,
+        id: Id,
+        commit: CommitCounter,
     ) -> Self {
         Self {
             texture,
@@ -585,21 +641,21 @@ impl Pass {
             radii: physical_radii(effect, scale),
             opaque,
             program,
+            id,
+            commit,
         }
     }
 
     /// This pass, placed at `dst` on one output, at the pane's opacity.
     ///
-    /// A fresh [`Id`] every time, exactly as `warp.rs` does, and for the
-    /// stronger version of its reason: the capture is cleared and redrawn on
-    /// every frame, so the texture behind this element is new pixels every
-    /// frame and full damage is the truth. A stable id with an unchanged
-    /// [`CommitCounter`] would report *no* damage after the first frame, and a
-    /// window whose client was painting would freeze on screen.
+    /// The capture's own id and commit: the id is the pane's for life, and the
+    /// commit moves only when the capture was drawn again, so a still client
+    /// is not redrawn and neither is anything under it.
+    /// `keyed::tests::a_redrawn_capture_moves_its_commit_and_keeps_its_id`.
     pub(crate) fn at(&self, dst: Rectangle<i32, Physical>, alpha: f32) -> Rounded {
         Rounded {
-            id: Id::new(),
-            commit: CommitCounter::default(),
+            id: self.id.clone(),
+            commit: self.commit,
             texture: self.texture.clone(),
             size: self.size,
             dst,
@@ -608,6 +664,53 @@ impl Pass {
             program: self.program.clone(),
             alpha,
         }
+    }
+}
+
+/// A pass whose capture is not drawn yet: everything [`Pass`] needs but the
+/// texture, which `offscreen::draw` hands back once every capture's element
+/// list is built. Like the rest of this file it needs a GL context to make, so
+/// it is first seen on a screen: `dev/fence-check.sh`'s rounded windows are
+/// client passes drawn through it.
+#[derive(Clone, Debug)]
+pub(crate) struct Pending {
+    size: Size<i32, Physical>,
+    effect: Effect,
+    scale: f64,
+    opaque: bool,
+    program: GlesTexProgram,
+}
+
+impl Pending {
+    pub(crate) fn new(
+        size: Size<i32, Physical>,
+        effect: Effect,
+        scale: f64,
+        opaque: bool,
+        program: GlesTexProgram,
+    ) -> Self {
+        Self {
+            size,
+            effect,
+            scale,
+            opaque,
+            program,
+        }
+    }
+
+    /// The pass, once its capture is in `texture`, with the capture's id and
+    /// commit (`offscreen::draw`, or `offscreen::kept` for one not drawn again).
+    pub(crate) fn with(self, texture: GlesTexture, id: Id, commit: CommitCounter) -> Pass {
+        Pass::new(
+            texture,
+            self.size,
+            self.effect,
+            self.scale,
+            self.opaque,
+            self.program,
+            id,
+            commit,
+        )
     }
 }
 
@@ -634,7 +737,7 @@ impl Pass {
 /// nothing to forget to clear.
 ///
 /// **Almost none of it is covered by a test, and not for want of trying.**
-/// `offscreen::Scratch` is generic over what it keeps so its policy can be
+/// `pool::Pool` is generic over what it keeps so its policy can be
 /// driven without a GPU; the same trick does not work here, because a
 /// `GlesTexProgram` is as unconstructable without a context as a `GlesTexture`
 /// is and this element holds one. The exception is `opaque_regions`, which is
@@ -675,7 +778,7 @@ impl Element for Rounded {
 
     fn src(&self) -> Rectangle<f64, BufferCoords> {
         // The whole capture. It was created at exactly these pixels -- see
-        // `offscreen::capture_client` -- so this is exact rather than rounded,
+        // `offscreen::client_job` -- so this is exact rather than rounded,
         // and stating anything else samples outside it or crops a corner off.
         Rectangle::from_size((f64::from(self.size.w), f64::from(self.size.h)).into())
     }
@@ -952,6 +1055,34 @@ mod tests {
         assert!(
             !programs.refuse(Effect::rounded(Corners::all(4.0))),
             "nor a different one"
+        );
+    }
+
+    /// **A program that will not compile is tried once**, not on every frame:
+    /// the thing that failed is a string against a driver, and it will fail the
+    /// same way next frame. The warp's and the rounded program's latch.
+    #[test]
+    fn a_program_that_will_not_compile_is_tried_once() {
+        let (mut slot, mut failed, mut tries) = (None::<u32>, false, 0);
+        for _ in 0..3 {
+            assert!(
+                super::once(&mut slot, &mut failed, || {
+                    tries += 1;
+                    None
+                })
+                .is_none()
+            );
+        }
+        assert_eq!(tries, 1, "a failed compile was tried again");
+        let (mut slot, mut failed) = (None::<u32>, false);
+        assert_eq!(
+            super::once(&mut slot, &mut failed, || Some(7)).copied(),
+            Some(7)
+        );
+        assert_eq!(
+            super::once(&mut slot, &mut failed, || Some(8)).copied(),
+            Some(7),
+            "compiled once and kept"
         );
     }
 
@@ -1517,7 +1648,7 @@ mod tests {
         );
     }
 
-    /// The sum `capture_client` makes before it asks [`covers`] anything.
+    /// The sum `client_job` makes before it asks [`covers`] anything.
     ///
     /// Stated as a case that is covered **only** if the shift happens and only
     /// if it is an addition: the region says (0, 0) and the element sits at

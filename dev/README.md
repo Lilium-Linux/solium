@@ -101,9 +101,10 @@ runs is what is checked out.
 `dev/gate.sh` checks the formatting with `cargo fmt --check`, then runs clippy
 with warnings denied, the tests and a build, then two checks on the built
 binaries that nothing else reaches: `solium --check`, which loads the Lua
-configuration, and `dev/wirecheck`, which drives the QML GPU path against the
-machine's own render node. Run `cargo fmt --all` first if the formatting step
-fails. It runs cargo natively unless told otherwise:
+configuration and builds the scenes it declares, and `dev/wirecheck`, which
+drives the QML GPU path against the machine's own render node. Run
+`cargo fmt --all` first if the formatting step fails. It runs cargo natively
+unless told otherwise:
 
 | Variable | Effect |
 |---|---|
@@ -252,6 +253,10 @@ reads one that file does not list.
 | `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the shipped one. | |
 | `SOLIUM_TERMINAL=<command line>` | The terminal `super+return` opens, split on spaces. | |
 | `SOLIUM_PANE=<name or path>` | The frame style for this run. | |
+| `SOLIUM_FENCE_WAIT=off` | A window capture drops its fence instead of waiting for it on the CPU. The default waits, and each session's log says which it ran with. | |
+| `SOLIUM_RECAPTURE=always` | Draw every window capture (a warp's, a rounded client's) on every pass, as before captures were kept until what they show changes. For an A/B on one build, and the control of `dev/pacing-nested.sh`'s capture count. | |
+| `SOLIUM_PACING` | Say where a pass's time went, on passes that overran the tightest monitor's frame; with it, GPU time, clocks and late flips. Misses are counted without it. | |
+| `SOLIUM_TRACE=<path>` | One JSON line per pass and per flip, and `SOLIUM_PACING` on. See *Measuring frame pacing on a TTY*. | |
 | `SOLIUM_QML=<mode>` | `auto`, `gpu` or `software`; see *QML on the GPU*. | |
 | `SOLIUM_SESSION_BUS=<address>` | The D-Bus bus to tell about the session and to own `org.freedesktop.ScreenSaver` on, instead of the session bus. A nested run, or `solium --tty` without `--session`, tells nobody anything without it. To check the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. | |
 | `RUST_LOG=<filter>` | Log levels, `info` by default. `solium::qml` carries Qt's own messages. | |
@@ -403,7 +408,9 @@ that should not be.
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
-| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, and clicks follow the rect a window is drawn at without following the `z` it is drawn above |
+| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, clicks follow the rect a window is drawn at without following the `z` it is drawn above, and a genie on a second monitor lands on its target |
+| `dev/fence-check.sh` | skipping a capture's CPU fence wait (`SOLIUM_FENCE_WAIT=off`) changes no pixel |
+| `dev/pulse-control.sh [env…]` | the renderer is not frozen: a focused window in the `pulse` style moves in 150 ms |
 | `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. `--no-check` skipping the installed binary's check. A system prefix (`--prefix /usr` and `/usr/local`): everything under the prefix and nothing in `XDG_CONFIG_HOME`, no `config.sha256` and no `sudo` line, `--session-dir` refused, and `--check` passing from the staged `/usr/share/solium` with a broken user configuration. The Fedora package: `dev/rpm/solium.spec`'s `%files` against that install both ways; its `License` naming every installed `.license`; each `Requires` and `Recommends` naming the package that has the file (the Qt QML modules the shipped QML imports with the Qt version clause, Xwayland, flock, xdg-desktop-portal and the backends `lilium-portals.conf` names, and foot); and the spec refusing to parse without `commit` and `commitdate`. See *Installing it* and *A Fedora package* |
 | `dev/rpm.sh [--jobs N] [--image IMAGE]` | the package built from the commit checked out, unpacked without installing, passes `solium --check` with an empty configuration and takes its QML and Lua from its own `usr/share/solium`. See *A Fedora package* |
 
@@ -463,6 +470,22 @@ stacking order and asks whether each one, as it is drawn at that moment
 
 Kept out of `gate.sh` deliberately: it needs a host compositor to nest in and a
 client to open, and a gate that cannot run headless is a gate that gets skipped.
+
+`dev/fence-check.sh` captures the same two windows with the capture's fence
+wait on twice, off once, and tilted a degree more once, and fails unless the
+first three are byte-identical and the fourth is not. Both windows are rounded
+and the first is tilted, so a capture runs for each on every frame. Every run
+sets `SOLIUM_RECAPTURE=always`: the windows' content is fixed, so a kept capture
+would be drawn once at startup and the fence wait would have nothing to skip on
+the frames compared. Forced, every capture is drawn, and waited for or not, on
+every frame. A race that shows once in several hundred frames is wirecheck's to
+catch (cases 11c and 11d), not this.
+
+`dev/pulse-control.sh` runs one focused window in the `pulse` style nested and
+fails unless two captures 150 ms apart differ: the known-animating control a
+nested capture is judged beside. Its arguments are extra environment for the
+compositor; `dev/pulse-control.sh SOLIUM_PANE=none` is its own fail-first, since
+nothing on screen moves then.
 
 `clipboard-check.sh` runs its X11 half in a container, so the host needs no
 `xclip`. **Run it more than once.** The bug it was
@@ -801,8 +824,8 @@ anything in the checkout reloads the scene within half a second.
 
 `solium --check-qml <file>` loads one file without starting a compositor and
 prints `ok` or the errors Qt reported — the quick way through a chain of "type
-X unavailable" errors while writing a shell. It exits 0 either way, so read
-what it prints.
+X unavailable" errors while writing a shell. It exits with 1 when the file
+does not load.
 
 ## QML on the GPU
 
@@ -1002,11 +1025,9 @@ Five things worth knowing about the GPU path on a TTY:
 ## Running it on a TTY, as a real session
 
 The compositor picks its backend from the environment: nested when there is a
-compositor to nest in, on the hardware otherwise. Only the first argument
-chooses what Solium does, so write `solium --tty --debug-mode`, not the other
-way round, and don't pass a flag it does not know: anything else in first
-place, `--help` included, starts a compositor
-([#156](https://github.com/Lilium-Linux/solium/issues/156)).
+compositor to nest in, on the hardware otherwise. `--tty` asks for the
+hardware wherever it is on the line, and a flag Solium does not know starts
+nothing: it is refused with exit status 2. `solium --help` lists the flags.
 
 **First, from your desktop, check what the hardware offers.** This opens the
 card read-only and takes no DRM master, so it is safe to run inside a running
@@ -1115,6 +1136,60 @@ made with `dev/soak.sh --triggers`. What churns is the client side: terminals
 opened and closed, and an X11 client now and then. Nested, the whole cycle
 runs. Until the hardware backend reads the triggers, a soak of the window
 lifecycle on a TTY needs the windows opened and closed from outside it.
+
+### Measuring frame pacing on a TTY
+
+`dev/pacing-tty.sh` runs pinned scenes on the hardware and measures every
+pass of them, with `SOLIUM_TRACE` writing a line per pass and per flip. S1 is
+the `rounded` pane style, four idle terminals and one player at fixed
+rectangles on the monitor you name, over the shipped wallpaper; S1 tilted is
+the same with the player held at 6 degrees, so its picture is captured again
+whenever it draws; and the tilt scene is two tilted terminals, one idle and
+one ticking. It is what Phase 0 of the shader work is judged by (FX-S1), and
+the 260 Hz numbers come only from here: nested, there is no page flip and
+QML is software. The tilts are made by the scenes' Lua, because the hardware
+backend reads none of the scripted knobs.
+
+    dev/pacing-tty.sh before DP-1     # fourteen runs, about 21 minutes
+    dev/pacing-tty.sh after DP-1      # nine runs, about 14 minutes
+    dev/pacing-tty.sh fence DP-1      # one fence pair, about 3 minutes
+    dev/pacing-tty.sh one DP-1        # one run, to try it
+
+Run it on a free VT, logged in, from the worktree the measured binary was
+built in, and keep your hands off the keyboard and mouse until it says
+`done`. Nothing else should be building or running on the GPU meanwhile;
+each run's `meta.txt` records the load and any `cargo` or `rustc` it saw.
+Each run is capped by a timeout; Ctrl+Alt+Backspace stops the compositor at
+any moment and the script with it. It writes under
+`~/.local/state/solium/pacing/<date>-<protocol>/`: per run, `meta.txt` (the
+build, the player, the kernel, the load, the driver and its clocks before
+the run), `stderr.log`, the trace and `summary.txt`; and `results.txt` with
+every summary. The compositor's own state and configuration directories are
+the run's, so your `session.log` and `user.lua` are untouched. Without mpv
+and `PACING_CLIP`, ffplay plays a test pattern; every run that is compared
+must use the same player.
+
+`PACING_BINARY` runs a binary frozen for a measurement. Freeze a release
+build (`cargo build --release`) in a worktree of its own and run the script
+from that worktree: the binary finds its QML and Lua in the tree it was
+built from, so a worktree that keeps changing would change what is
+measured, and the dev profile's `missed` is not the shipped one's.
+`after` also runs `PACING_ANCHOR`, the build an earlier run measured, once,
+so two sittings can be compared through it. `dev/pacing-nested.sh <label>`
+runs the same scenes nested (`PACING_SCENE=tilt`, `PACING_TILT=6`) and
+prints the same summary; its numbers are not the TTY's. Nested, only the
+captures are GPU-timed: timing the window's own draw needs a GL call after
+its swap, which leaves the window's surface uncurrent, so the next pass
+could not read its buffer age and would redraw everything.
+
+A pass record carries `pass`, `t_ns` (CLOCK_MONOTONIC at its start),
+`total_us`, `deadline_us`, `monitor`, `missed`, each phase as `<phase>_us`,
+`captures`, `panes`, `drew`, `scenes`, `animating`, `rendered`, `built`,
+`rebound`, `qml` (Qt's microseconds per scene), `clocks`, `gpu_mhz`,
+`mem_mhz`, `pstate`, `gpu` (`ok`, `unsupported`, `late` or `disjoint`),
+`gpu_us`, `gpu_prep_us` and `gpu_out_us`. A flip record carries `flip` (the
+pass), `monitor`, `seq`, `at_ns`, `queued_ns` and `late`, the vblanks it
+missed. `dev/pacing-summary.py` reads them.
 
 ## Installing it
 

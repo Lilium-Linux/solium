@@ -48,6 +48,8 @@ use std::os::fd::{FromRawFd as _, OwnedFd};
 )]
 mod target;
 
+mod fx0;
+
 unsafe extern "C" {
     fn solium_qml_start_gpu(import_path: *const c_char) -> c_int;
     fn solium_qml_scene_new_gpu(
@@ -435,7 +437,7 @@ fn draw_through_program(
         let mut frame = renderer
             .render(&mut framebuffer, size, Transform::Normal)
             .map_err(|err| anyhow!("starting the program draw: {err}"))?;
-        // Transparent, as `offscreen::capture_client` clears to, so a cut
+        // Transparent, as `offscreen::client_job` clears to, so a cut
         // corner reads back as nothing rather than as black.
         frame
             .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size)])
@@ -856,7 +858,8 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
 
 /// Draw one element into a fresh offscreen texture and read the pixels back.
 ///
-/// The same shape as `offscreen::capture`: bind, render, draw, copy back.
+/// The shape a capture had before the pool (`offscreen::draw` now draws through
+/// `pool::frame_for`): bind, render, draw, copy back.
 fn draw_and_read(
     renderer: &mut GlesRenderer,
     element: &TextureRenderElement<GlesTexture>,
@@ -1518,6 +1521,17 @@ fn main() -> Result<()> {
         if late { "after" } else { "before" },
         if separate { "its own" } else { "the buffers'" }
     );
+    // `WIRECHECK_ONLY=fx0`: the FX0 cases alone, with no Qt, so they can be
+    // run on a machine that has only this binary (the Surface Pro 7).
+    if std::env::var("WIRECHECK_ONLY").as_deref() == Ok("fx0") {
+        let mut renderer = make_renderer(&gbm)?;
+        fx0::all(&mut renderer)?;
+        if std::env::var_os("WIRECHECK_FX0_CROSS").is_some() {
+            fx0::cross_control(&mut renderer, &gbm, &node)?;
+        }
+        println!("\nFX0 cases passed");
+        return Ok(());
+    }
     let mut renderer = if late {
         // Qt first, exactly as the compositor orders it.
         let import_path = CString::new(
@@ -2821,6 +2835,9 @@ fn main() -> Result<()> {
             ));
         }
     }
+
+    // Case 11b onwards: Phase 0 of the shader work, in `fx0.rs`.
+    fx0::all(&mut renderer)?;
 
     // ------------------------------------------------------------------
     // The first rebind, on a scene that has never rendered.

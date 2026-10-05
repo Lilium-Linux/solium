@@ -17,21 +17,28 @@
 
 ## Flags
 
-Only the **first** argument chooses what Solium does, and it is one of
-`--tty`, `--check`, `--check-qml` and `--probe`. Anything else in first
-place, an unknown flag or `--help` included, starts a compositor: nested, as a
-window, when `WAYLAND_DISPLAY` or `DISPLAY` is set, and on the hardware
-otherwise. So `solium --debug-mode --tty` never reaches `--tty`; write
-`solium --tty --debug-mode`.
+Every argument is checked before anything starts, and one Solium does not
+know is refused with exit status 2. One of `--tty`, `--check`, `--check-qml`,
+`--probe`, `--help` and `--version` chooses what Solium does, anywhere on the
+line; with none it starts a compositor: nested, as a window, when
+`WAYLAND_DISPLAY` or `DISPLAY` is set, and on the hardware otherwise.
+
+--help
+    Print how to run Solium, its flags and the variables that change a
+    session, and exit. Also `-h`. Starts nothing.
+
+--version
+    Print the version, and the commit it was built from when it was built
+    from a git checkout (`solium 0.0.0 (dfc95ce)`), and exit. Also `-V`.
+    Starts nothing.
 
 --tty
-    Run on the hardware from a free virtual terminal, taking the screen. The
-    session log, `$XDG_STATE_HOME/solium/session.log` (or
-    `~/.local/state/solium/session.log`), is written only when this is the
-    **first** argument.
+    Run on the hardware from a free virtual terminal, taking the screen, and
+    write the session log, `$XDG_STATE_HOME/solium/session.log` (or
+    `~/.local/state/solium/session.log`).
 
 --session
-    Read only after `--tty`, anywhere after it. `solium --tty --session` is
+    Only with `--tty`, anywhere on the line. `solium --tty --session` is
     the user's graphical session, and tells systemd and D-Bus so: it exports
     `WAYLAND_DISPLAY` and the rest, starts `solium-session.target`, and
     undoes both on exit. `solium-session`, which the session file starts,
@@ -40,12 +47,20 @@ otherwise. So `solium --debug-mode --tty` never reaches `--tty`; write
 
 --check
     Load the configuration, print every binding it registered and every one
-    it removed, and exit. Exits with 1 when the configuration fails to load or
-    sets a key nothing reads. Starts no compositor and needs no display.
+    it removed, build every scene it declares at load and every pane style of
+    your own, and exit; also the pane style and the loading scene this run's
+    environment names. Exits with 1 when anything fails: the configuration
+    fails to load or sets a key nothing reads, or a scene fails to build,
+    misses a required property, or warns while it is built and first drawn.
+    Scenes are built in software, on one monitor. `--check <file.qml>` checks
+    one QML file instead, as `--check-qml` does. Starts no compositor and
+    needs no display.
 
 --check-qml <file.qml>
-    Load one QML file in software, print `ok` or what went wrong, and exit.
-    Starts no compositor.
+    The old spelling of `--check <file.qml>`: load one QML file in software
+    and, for a style's `Pane.qml`, every layer it names; print what went
+    wrong; exit with 1 when anything did. A style that requires the GPU is
+    said to, and its layers are not loaded. Starts no compositor.
 
 --probe
     Print every connector and every mode it offers, without taking the
@@ -211,7 +226,60 @@ SOLIUM_MEMDIAG
 
 SOLIUM_PACING
     Set to anything, say where a frame's time went on the frames that took
-    longer than the monitor's frame interval.
+    longer than the monitor's frame interval, and say it too when a monitor
+    flipped late, which is counted apart as `late`: the vblanks a monitor
+    should have flipped at and did not, summed over the monitors, from the
+    kernel's flips (always 0 nested, where there are none). On a monitor with
+    vrr on, whose vblank waits for its frame, a slow frame drawn at a flip
+    delays the next vblank instead of missing it and is rarely counted, while
+    one started from idle is still judged against the monitor's fastest rate,
+    so vrr's `late` does not compare with a fixed rate's. A line carries the
+    slowest pass since the last line: each phase on the CPU, the three
+    scenes Qt spent the most of it on, costliest first (`qml_top`, as
+    `rounded/Frame=410`: each scene's folder and file, `@` the monitor it is
+    hosted on if it is, and its microseconds), how many windows were
+    captured (`captures`), and the GPU's time for the pass
+    (`gpu`, `gpu_us`, and `gpu_prep_us` for the captures), which is read a
+    few passes later, so a line waits up to eight passes for it and goes
+    without it (`gpu="unread"`) after that, or sooner, still `gpu="unread"`,
+    if nothing is being drawn and it has still not come (always nested,
+    where the time is read only when a pass draws); `gpu` reads
+    `unsupported` on a GPU that cannot time itself and `disjoint` when its
+    clock jumped. `unread` is not `late`, which counts flips. Nested,
+    only the captures and, with several monitors, each monitor are timed on
+    the GPU, not the window's own draw. Each line also carries the GPU's
+    clocks as that pass ended: where they come from (`clocks`: `nvml`,
+    `i915` or `none`), `gpu_mhz`, `mem_mhz` (0 on i915) and NVIDIA's
+    `pstate` (-1 where unknown), sampled four times a second by a thread of
+    their own, and `none` until that thread has found them, which NVML can
+    take a second or more to do; the log says what it found when it has.
+    Misses and late flips are counted whether or not this is set, and every
+    session ends with one `pacing` line of totals.
+
+SOLIUM_FENCE_WAIT=<on|off>
+    `off` (or `0`, `no`, `skip`) drops a window capture's fence instead of
+    waiting for it on the CPU: the GPU orders the read after the draw on the
+    one context. `on`, or unset, waits, which is the default until #59 lands.
+    Each session's log says which it ran with.
+
+SOLIUM_RECAPTURE=always
+    Draw every window capture (a warp's, a rounded client's) on every pass,
+    as before captures were kept until what they show changes. For measuring
+    the difference on one build.
+
+SOLIUM_PACING_CLOCKS=off
+    With `SOLIUM_PACING`, do not start the thread that samples the GPU's
+    clocks (NVML, or i915's sysfs). For checking that sampling them does not
+    itself keep the GPU out of its low-power states.
+
+SOLIUM_TRACE=<path>
+    Write one JSON line per pass (`drew` 0 for one in which no monitor was
+    ready to draw), and one per page flip, to `<path>`, and turn
+    `SOLIUM_PACING` on. Buffered and written once a second; put it on
+    `$XDG_RUNTIME_DIR`. Not passed on to the programs Solium starts, so a
+    Solium started inside a traced one does not write over its file.
+    `dev/pacing-summary.py` reads it; the fields are in `dev/README.md`,
+    under *Measuring frame pacing on a TTY*.
 
 SOLIUM_RESIZE_TRACE=<file>
     Append a per-frame trace of every resize drag to `<file>`.

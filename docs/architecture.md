@@ -183,13 +183,17 @@ corners, and its shader is compiled into the crate. See
 
 The split with the compositor is the anchor. A deformation morphs between two
 rectangles, and the far one is named rather than given: `deform = { effect =
-"genie", to = { window = id } }` carries an *identity*, which `Solium::aimed_at`
-resolves on the frame that draws it, and `to = { surface = name }` aims at a
-`sol.surface` scene the same way. A rectangle read out of a Lua table when the
-binding was pressed aims at where a dock icon was half a second ago, which is
-the stale-copy failure the anchors planned in `docs/shell-boundary.md` are meant
-to rule out for a hosted dock. `crates/effects` never sees the identity — it has
-no idea what a pane is, which is what keeps it testable without a session.
+"genie", to = { window = id } }` carries an *identity*, which
+`Solium::aimed_at_for` resolves on the frame that draws it, and `to = { surface =
+name }` aims at a `sol.surface` scene the same way: at its instance on the
+window's own monitor, not on the one the pointer is on. Both ends are in global
+space and are moved onto each screen together, so a genie on a monitor that is
+not at the origin lands where it was aimed (#143). A rectangle read out of a
+Lua table when the binding was pressed aims at where a dock icon was half a
+second ago, which is the stale-copy failure the anchors planned in
+`docs/shell-boundary.md` are meant to rule out for a hosted dock.
+`crates/effects` never sees the identity — it has no idea what a pane is, which
+is what keeps it testable without a session.
 
 `Deform::from_name` is what scripts bind to, exactly as `Curve::from_name` is,
 and `script::shipped` checks the shipped Lua against both.
@@ -205,8 +209,28 @@ as source text. `pass.rs` compiles it, renders the client's surfaces into a
 texture kept on the pane, and draws that through the program in the client's
 place. An effect that reads nothing needs no pass at all.
 
-The texture is the cost. Every visible rounded window pays a pass every frame,
-which is why `render::prepare` captures no pane that no monitor shows. What is
+The texture is a target from the renderer's pool (`pool.rs`), made once with its
+own framebuffer object and kept by the pane (`keyed.rs`) for as long as the
+window keeps its size. `render::prepare` builds every capture's elements first,
+then binds a 1x1 carrier once and draws each capture into its target, a frame
+each, so nothing that draws a capture can run Qt.
+
+A capture records what it was drawn from (each element's id, commit, geometry,
+source, alpha and transform) and is drawn again only when that changes, keeping
+one id for life and moving its commit only when redrawn. So a still rounded
+window costs no pass and no damage, and one whose client is painting pays a pass
+a commit. `SOLIUM_RECAPTURE=always` draws every capture on every pass, as before.
+
+A warp, a pane's capture drawn through a mesh, carries that capture's id and a
+commit of its own, which moves when the capture is redrawn or the mesh's shape
+changes (its rectangle, matrix, pivot, scale, or the target its deform is aimed
+at). So a window held still at a tilt is neither captured again nor damaged by
+its warp, and the warp is drawn once per damage rectangle, under a scissor,
+never whole: the whole mesh drawn over the copy already in the buffer would
+blend its translucent edge twice (`dev/wirecheck` case 11g).
+
+The texture is the cost. Every visible rounded window keeps one, which is why
+`render::prepare` captures no pane that no monitor shows. What is
 beneath a node, the input a blur would need, is named in `fragment.rs` and
 nothing constructs it yet; rounded corners are the one effect there is.
 
@@ -283,7 +307,9 @@ renderer to choose instead. Drawing does not stay behind Smithay's generic
 `Renderer` and `Frame` traits, because three things it needs are not on them:
 
 - drawing a texture through four independent corners, for perspective and the
-  genie (`warp.rs`, the only Rust file that makes raw GL calls);
+  genie (`warp.rs`, with its program and draw in raw GL in `warp/gl.rs`; the
+  program is compiled once, between frames, in `pass.rs`, and if it does not
+  compile a deformed window is drawn flat rather than not at all);
 - a fragment program of Solium's own, for rounded corners (`pass.rs`, which
   compiles the GLSL ES source kept in `crates/effects`);
 - the EGL context and fence that QML on the GPU shares with Qt (`qml/paint.rs`,

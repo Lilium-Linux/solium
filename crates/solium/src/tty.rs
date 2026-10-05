@@ -429,6 +429,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         drm: None,
         signal: event_loop.get_signal(),
         active: true,
+        chain: None,
     };
 
     // Whether the seat has been handed over yet.
@@ -499,23 +500,40 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                     }
                 }
 
+                // The kernel's flip, for `late`: counted whether or not
+                // anything asked for presentation feedback. The rules are
+                // `pacing::vblanks_missed`'s tests; this wiring needs a GPU,
+                // and no test reaches it.
+                let flip = match metadata.as_ref().map(|it| (it.time, it.sequence)) {
+                    Some((DrmEventTime::Monotonic(at), seq)) => {
+                        Some(crate::pacing::Flip { seq, at })
+                    }
+                    _ => None,
+                };
+                if let (Some(flip), Some(queued)) = (flip, screen.queued.take()) {
+                    let late = crate::pacing::vblanks_missed(
+                        queued,
+                        flip,
+                        frame_interval(&screen.output),
+                        screen.blank,
+                    );
+                    crate::pacing::flipped(late, queued, flip, || screen.output.name());
+                }
+
                 // The frame is on the screen, and *this* is the moment clients
                 // asked about. The kernel's own flip timestamp and sequence
                 // number, not ours: a number we invented here would be a guess
                 // at the thing the protocol exists to stop clients guessing.
                 if let Some(mut feedback) = screen.pending_feedback.take() {
-                    let (time, sequence) = match metadata.as_ref().map(|it| (it.time, it.sequence)) {
-                        Some((DrmEventTime::Monotonic(time), sequence)) => (time, sequence),
-                        // Realtime, or no metadata at all on a driver that does
-                        // not provide it. Discarded rather than answered with
-                        // our own clock, because the client was told these
-                        // timestamps are CLOCK_MONOTONIC and a realtime one
-                        // would be off by the epoch.
-                        _ => {
-                            feedback.discarded();
-                            screen.pending = false;
-                            return;
-                        }
+                    // No `flip`: a realtime timestamp, or no metadata at all
+                    // on a driver that does not provide it. Discarded rather
+                    // than answered with our own clock, because the client
+                    // was told these timestamps are CLOCK_MONOTONIC and a
+                    // realtime one would be off by the epoch.
+                    let Some(crate::pacing::Flip { seq: sequence, at: time }) = flip else {
+                        feedback.discarded();
+                        screen.pending = false;
+                        return;
                     };
                     // This monitor's refresh, not some other monitor's: a
                     // client on a 60 Hz panel told it has 3.8 ms to draw will
@@ -546,7 +564,11 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 // on its behalf.
                 let owed = state.screens.iter().any(|screen| screen.owed);
                 if state.solium.redraw || state.animating || owed {
+                    state.chain = flip.map(|flip| (crtc, flip));
                     state.render();
+                    state.chain = None;
+                } else {
+                    state.idle();
                 }
             }
             DrmEvent::Error(err) => tracing::error!(?err, "DRM error"),
@@ -607,9 +629,14 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 }
                 // No vblank is coming while the session is away, so a frame
                 // left marked in-flight would block every render on return --
-                // on every screen, because every screen has its own.
+                // on every screen, because every screen has its own. Nor is
+                // its flip, and a frame left waiting for one would be paired
+                // with the next flip this screen reports and judged late by
+                // the whole time away (`pacing::vblanks_missed`); this handler
+                // needs a session, and no test reaches it.
                 for screen in &mut state.screens {
                     screen.pending = false;
+                    screen.queued = None;
                 }
             }
             SessionEvent::ActivateSession => {
@@ -689,6 +716,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         })
         .map_err(|err| anyhow!("arming the input watchdog: {err}"))?;
 
+    // Said once at startup, so every session log records which way captures
+    // ran: `dev::tests::the_fence_wait_stays_on_unless_switched_off`.
+    crate::dev::fence_wait();
+
     tracing::info!(
         socket = %state.solium.socket_name,
         "solium is up on the hardware -- run clients with WAYLAND_DISPLAY set to this"
@@ -751,7 +782,12 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             state.qt.arm(coming);
             let _ = state.solium.display_handle.flush_clients();
         })
+        // The totals however the loop ended: a session that died is the one
+        // whose numbers are wanted. This needs a session, and no test
+        // reaches it.
+        .inspect_err(|_| crate::pacing::summary())
         .map_err(|err| anyhow!("running the event loop: {err}"))?;
+    crate::pacing::summary();
     state.solium.session.end();
     Ok(())
 }
@@ -808,6 +844,13 @@ struct Screen {
     /// What has been done to this display on its way off and back. See
     /// `power.rs`: the monitor stays in the session whatever this says.
     lit: Lit,
+    /// The frame queued on this screen and not yet flipped, for `late`.
+    /// `pacing::tests::a_frame_held_past_a_vblank_by_its_fence_is_late`.
+    queued: Option<crate::pacing::Queued>,
+    /// How long its mode's vertical blank lasts, at whose end a flip is
+    /// stamped, for `late`.
+    /// `pacing::tests::a_flip_from_idle_on_a_cea_1080p60_mode_is_judged_by_its_blank`.
+    blank: Duration,
 }
 
 impl std::fmt::Debug for Screen {
@@ -854,6 +897,10 @@ pub(crate) struct State {
     node: Option<DrmNode>,
     signal: LoopSignal,
     active: bool,
+    /// The flip whose vblank handler is drawing right now, and its CRTC: a
+    /// frame queued in that render is chained to it.
+    /// `pacing::tests::a_chained_frame_that_skipped_a_vblank_is_one_late`.
+    chain: Option<(crtc::Handle, crate::pacing::Flip)>,
 }
 
 impl State {
@@ -887,6 +934,7 @@ impl State {
             connector.interface_id()
         );
         let (width, height) = mode.size();
+        let (_, _, scanned) = mode.vsync();
         tracing::info!(
             monitor = name,
             mode = format!("{width}x{height}@{:.0}", f64::from(mode.vrefresh())),
@@ -949,6 +997,7 @@ impl State {
         // not.
         output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
         output.set_preferred(wl_mode);
+        let blank = crate::pacing::vertical_blank(frame_interval(&output), height, scanned);
         // Mapped anywhere; `place_outputs` decides where, once, from the
         // configured arrangement — the same call the nested backend makes,
         // so both get the same layout from the same configuration.
@@ -1015,6 +1064,8 @@ impl State {
             pending_feedback: None,
             owed: false,
             lit: Lit::On,
+            queued: None,
+            blank,
         });
         true
     }
@@ -1204,7 +1255,17 @@ impl State {
         let egl = unsafe { EGLDisplay::new(gbm.clone()) }.context("creating the EGL display")?;
         let context = EGLContext::new(&egl).context("creating the EGL context")?;
         #[expect(unsafe_code, reason = "GlesRenderer::new is unsafe by contract")]
-        let renderer = unsafe { GlesRenderer::new(context) }.context("creating the renderer")?;
+        let mut renderer =
+            unsafe { GlesRenderer::new(context) }.context("creating the renderer")?;
+        if crate::pacing::enabled() {
+            let timer = crate::gputime::Timer::new(&mut renderer);
+            tracing::info!(
+                supported = timer.supported(),
+                "pacing: GPU time per pass, from GL_EXT_disjoint_timer_query"
+            );
+            self.solium.timer = Some(timer);
+            crate::clocks::start(node.major(), node.minor());
+        }
         // Hardware buffer sharing, through `zwp_linux_dmabuf_v1` and not
         // through `wl_drm`.
         //
@@ -1334,22 +1395,32 @@ impl State {
             .iter()
             .any(|step| matches!(step, Some(Step::Draw | Step::Wake)));
 
-        // `SOLIUM_PACING`. Off, everything below is a thread-local load and a
-        // branch; see `pacing.rs`, which argues that trade at 260 Hz.
+        // `SOLIUM_PACING`. Off, a pass reads the clock twice and counts
+        // itself and its miss (`pacing::tests::a_miss_is_counted_with_the_knob_off`),
+        // and each frame it queues reads it once more, for `late`
+        // (`pacing::tests::a_late_flip_is_counted_with_the_knob_off`); see
+        // `pacing.rs`, which argues that trade at 260 Hz.
         let pace = crate::pacing::frame();
+        // GPU time, read passes later: `gputime::tests::a_pass_is_read_three_passes_later_and_never_waited_for`.
+        if let Some(timer) = self.solium.timer.as_mut() {
+            timer.begin_pass(renderer, pace.serial());
+            for (pass, gpu) in timer.take_resolved() {
+                crate::pacing::gpu_resolved(pass, gpu);
+            }
+        }
         // The tightest interval among the monitors being *driven*, not among
         // the ones this pass gets to draw. One event loop draws both screens,
         // so a pass that overruns has held every monitor off for the whole of
         // it, whichever one it was drawing at the time. `Frame::deadline` has
-        // the argument in full; the name is only taken when the knob is on,
-        // because `Output::name` allocates.
-        if pace.on()
-            && let Some(screen) = self
-                .screens
-                .iter()
-                .min_by_key(|screen| frame_interval(&screen.output))
+        // the argument in full. Taken on every pass, because every pass is
+        // counted; the name only with the knob on, because `Output::name`
+        // allocates: `pacing::tests::the_deadline_takes_no_name_with_the_knob_off`.
+        if let Some(screen) = self
+            .screens
+            .iter()
+            .min_by_key(|screen| frame_interval(&screen.output))
         {
-            pace.deadline(frame_interval(&screen.output), &screen.output.name());
+            pace.deadline(frame_interval(&screen.output), || screen.output.name());
         }
 
         // Once per frame and not once per screen: offscreen captures, the QML
@@ -1458,6 +1529,12 @@ impl State {
             // so the mark brackets the call rather than a scope of ours, and is
             // dropped before the result is matched on. See
             // `qml::no_frame_in_flight`.
+            let region = crate::gputime::Region::Output(u8::try_from(index).unwrap_or(u8::MAX));
+            let stamp = self
+                .solium
+                .timer
+                .as_mut()
+                .map(|timer| timer.open(renderer, region));
             let frame = crate::qml::frame_in_flight();
             let gles = crate::pacing::span(crate::pacing::Phase::Gles);
             let rendered = screen.compositor.render_frame(
@@ -1468,6 +1545,9 @@ impl State {
             );
             drop(gles);
             drop(frame);
+            if let (Some(timer), Some(stamp)) = (self.solium.timer.as_mut(), stamp) {
+                timer.close(renderer, stamp);
+            }
             pace.drew();
             // The atomic commit, measured apart from the drawing it commits.
             // They fail and stall for completely unrelated reasons -- one is
@@ -1480,6 +1560,14 @@ impl State {
                     match screen.compositor.queue_frame(built_under) {
                         Ok(()) => {
                             screen.pending = true;
+                            screen.queued = Some(crate::pacing::Queued {
+                                at: crate::pacing::monotonic_now(),
+                                after: self
+                                    .chain
+                                    .filter(|(crtc, _)| *crtc == screen.crtc)
+                                    .map(|(_, flip)| flip),
+                                pass: pace.serial(),
+                            });
                             // Taken now, reported at *this* screen's flip. The
                             // callbacks belong to the frame just queued here, and
                             // neither a later frame's commits nor another
@@ -1506,6 +1594,29 @@ impl State {
             self.animating = self.solium.settle(now);
         }
         pace.finish(self.solium.panes.len());
+    }
+
+    /// A flip landed and nothing is to be drawn: what has flipped has
+    /// finished on the GPU, so its time is read, and once no monitor waits on
+    /// a flip a report still waiting for its time goes, or one a late flip
+    /// made due. `pacing::tests::idle_flushes_a_parked_report`,
+    /// `pacing::tests::a_late_flip_before_idle_is_reported_at_idle`.
+    fn idle(&mut self) {
+        if let (Some(timer), Some(renderer)) = (self.solium.timer.as_mut(), self.renderer.as_mut())
+        {
+            timer.idle(renderer);
+            for (pass, gpu) in timer.take_resolved() {
+                crate::pacing::gpu_resolved(pass, gpu);
+            }
+        }
+        // A monitor still waiting has its own flip to come, which calls this
+        // again, or `render`, whose `begin_pass` reads the time and whose
+        // `frame` sends the line after eight passes. The rule is
+        // `tests::a_parked_report_waits_for_every_monitors_flip`; this call
+        // needs a GPU, and no test reaches it.
+        if nothing_in_flight(self.screens.iter().map(|screen| screen.pending)) {
+            crate::pacing::idle();
+        }
     }
 
     /// One frame of black on screen `index`, on its way off.
@@ -2025,9 +2136,15 @@ fn start_socket(event_loop: &mut EventLoop<State>, display: Display<Solium>) -> 
     Ok(name)
 }
 
+/// No monitor waits on a flip, so every frame queued has been drawn.
+/// `tests::a_parked_report_waits_for_every_monitors_flip`.
+fn nothing_in_flight(pending: impl IntoIterator<Item = bool>) -> bool {
+    !pending.into_iter().any(|pending| pending)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{gone, on_first_pass};
+    use super::{gone, nothing_in_flight, on_first_pass};
 
     use std::{
         cell::RefCell, collections::VecDeque, io::Read as _, io::Write as _,
@@ -2183,6 +2300,19 @@ mod tests {
                 "key first: {key_first}"
             );
         }
+    }
+
+    /// A parked report goes at idle only once every monitor has flipped: a
+    /// flip of one can land while the pass just drawn on another is still
+    /// on the GPU, whose time the report is waiting for.
+    #[test]
+    fn a_parked_report_waits_for_every_monitors_flip() {
+        assert!(
+            !nothing_in_flight([false, true]),
+            "one monitor still waits on its flip"
+        );
+        assert!(nothing_in_flight([false, false]));
+        assert!(nothing_in_flight([]));
     }
 
     #[test]

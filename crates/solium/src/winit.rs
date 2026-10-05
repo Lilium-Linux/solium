@@ -208,6 +208,22 @@ pub(crate) fn run() -> Result<()> {
     state.textures = Some(crate::remains::Textures::Gles(
         smithay::backend::renderer::Renderer::context_id(backend.renderer()),
     ));
+    if crate::pacing::enabled() {
+        let timer = crate::gputime::Timer::new(backend.renderer());
+        tracing::info!(
+            supported = timer.supported(),
+            "pacing: GPU time per pass, from GL_EXT_disjoint_timer_query"
+        );
+        state.timer = Some(timer);
+    }
+    if crate::pacing::enabled()
+        && let Ok(device) = smithay::backend::egl::EGLDevice::device_for_display(
+            backend.renderer().egl_context().display(),
+        )
+        && let Ok(Some(node)) = device.try_get_render_node()
+    {
+        crate::clocks::start(node.major(), node.minor());
+    }
 
     // The same hardware buffer sharing the hardware backend offers, so that a
     // client taking the fast path is exercised here rather than first
@@ -408,6 +424,10 @@ pub(crate) fn run() -> Result<()> {
     // wl_surface.enter, which is after the first frames. So it is reported once,
     // as soon as it is knowable.
     let mut monitor_reported = false;
+
+    // Said once at startup, so every session log records which way captures
+    // ran: `dev::tests::the_fence_wait_stays_on_unless_switched_off`.
+    crate::dev::fence_wait();
 
     // Deliberately not exported into our own environment: clients need it in
     // *theirs*, and silently inheriting it is how a nested client ends up on the
@@ -670,18 +690,39 @@ pub(crate) fn run() -> Result<()> {
         // above the commit -- which is where this instrument's own correctness
         // lives.
         let pace = if wanted {
-            crate::pacing::frame()
+            let pace = crate::pacing::frame();
+            // GPU time, read passes later: `gputime::tests::a_pass_is_read_three_passes_later_and_never_waited_for`.
+            // After `age` was read above, and before anything is drawn: this
+            // `with_context` leaves the window's surface uncurrent until the
+            // window's own render makes it current again. `bind()` does not
+            // (smithay 0.7), so a pass whose window draw finds no damage
+            // leaves it so, and the next pass's `buffer_age()` fails and draws
+            // in full: seen nested, a cost of measuring that the TTY, which
+            // has no window surface, does not pay.
+            if let Some(timer) = state.timer.as_mut() {
+                timer.begin_pass(backend.renderer(), pace.serial());
+                for (pass, gpu) in timer.take_resolved() {
+                    crate::pacing::gpu_resolved(pass, gpu);
+                }
+            }
+            pace
         } else {
+            // Nothing to draw. No `timer.idle` here, unlike the TTY: a
+            // `with_context` now would leave the window's surface uncurrent,
+            // and the next pass's `buffer_age()` (read before anything is
+            // drawn) would fail with EGL_BAD_SURFACE and fall back to 0, a
+            // full redraw. The next `begin_pass` resolves what is in; a parked
+            // report is sent now without waiting for it.
+            // `pacing::tests::idle_flushes_a_parked_report`.
+            crate::pacing::idle();
             crate::pacing::Frame::off()
         };
-        if pace.on()
-            && let Some((interval, name)) = state
-                .space
-                .outputs()
-                .map(|output| (frame_interval(output), output.name()))
-                .min_by_key(|(interval, _)| *interval)
+        if let Some(output) = state
+            .space
+            .outputs()
+            .min_by_key(|output| frame_interval(output))
         {
-            pace.deadline(interval, &name);
+            pace.deadline(frame_interval(output), || output.name());
         }
 
         // The renderer borrow must end before submit(), so rendering happens in
@@ -1061,6 +1102,7 @@ pub(crate) fn run() -> Result<()> {
         }
     }
 
+    crate::pacing::summary();
     state.session.end();
     Ok(())
 }

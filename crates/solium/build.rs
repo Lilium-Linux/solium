@@ -6,6 +6,9 @@
 
 use std::path::PathBuf;
 
+#[path = "src/commit.rs"]
+mod commit;
+
 /// The headers moc runs on: every one that declares a Q_OBJECT type.
 /// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
 const MOC_HEADERS: &[&str] = &[
@@ -35,6 +38,24 @@ fn main() {
     println!("cargo:rerun-if-changed=qml/pointer.h");
     println!("cargo:rerun-if-changed=qml/icon.cpp");
     println!("cargo:rerun-if-changed=qml/icon.h");
+
+    // The commit `solium --version` names (#156; `commit::tests`), and empty
+    // outside a git checkout, so `env!("BUILD_COMMIT")` is always this build's
+    // own and never a variable the environment happened to hold.
+    // `cli::tests::the_version_names_its_commit_when_built_from_one`.
+    let root = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(|dir| PathBuf::from(dir).join("../.."))
+        .unwrap_or_default();
+    let short = match commit::find(&root) {
+        Some(commit) => {
+            for path in &commit.watch {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+            commit.short
+        }
+        None => String::new(),
+    };
+    println!("cargo:rustc-env=BUILD_COMMIT={short}");
 
     let mut build = cc::Build::new();
     build

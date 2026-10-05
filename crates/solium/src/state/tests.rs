@@ -70,6 +70,41 @@ fn a_pane_is_on_a_monitor_only_if_some_monitor_covers_part_of_it() {
     assert!(!anywhere_on(at(100, 100, 800, 600), []));
 }
 
+/// **A deform at rest is aimed at nothing**, so a window brought back from a
+/// genie with `sol.present(id, {})` is not captured and warped on every frame
+/// for good (#140).
+#[test]
+fn a_deform_at_rest_is_aimed_at_nothing() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    // A `Rect` anchor never reads the pane, so any pane serves.
+    let pane = state.panes.open(Pane::loading(
+        "aimed",
+        None,
+        Rectangle::new((100, 100).into(), (400, 300).into()),
+        std::path::PathBuf::new(),
+        None,
+        state.clock.now(),
+    ));
+    let genie = |progress| crate::present::Deform {
+        effect: solium_effects::Deform::Genie {
+            progress,
+            spread: 1.4,
+            axis: solium_effects::Axis::Down,
+        },
+        anchor: crate::present::Anchor::Rect(crate::present::logical((10.0, 10.0), (120.0, 24.0))),
+    };
+    assert!(
+        state.aimed_at_for(pane, Some(genie(0.0))).is_none(),
+        "a genie at rest still aims"
+    );
+    assert!(
+        state.aimed_at_for(pane, Some(genie(0.5))).is_some(),
+        "a genie under way must aim"
+    );
+}
+
 /// **What the notice at the end of a reload is looking at.**
 ///
 /// The recovery half of #116 shipped with no test at all, which is how the
@@ -7963,7 +7998,7 @@ end)"#,
     ///
     /// Driven through the real placement and the real transform, and read
     /// through `render::place_client`, which is what `elements` draws the
-    /// surfaces with and what `offscreen::capture_client` sizes a masked
+    /// surfaces with and what `offscreen::client_job` sizes a masked
     /// client from. Three frames: the first, one a little way in, and one
     /// most of the way.
     #[test]
@@ -8373,7 +8408,7 @@ end)"#,
     /// committed size -- so an oversized tiled client was squashed into
     /// its tile for the length of a genie or a tilt, and its frame was told
     /// the uncapped width while warped and the tile's once it landed.
-    /// `render::flat` is what both `offscreen::capture` and
+    /// `render::flat` is what both `offscreen::pane_job` and
     /// `flat_window_elements` read, the texture size and the frame's
     /// `Drawing.outer` alike.
     #[test]
@@ -8524,6 +8559,132 @@ end)"#,
         assert!(
             own.iter().all(|element| element.id() != &popup_id),
             "and its popup is not, because every caller draws that itself"
+        );
+    }
+
+    /// **A genie aimed at a surface aims at its instance on the window's own
+    /// monitor**, not on the monitor the pointer is on (#143). A missing scene
+    /// file builds no scene (`scripted.rs`, `Surface::sync`), so no Qt is
+    /// started.
+    #[test]
+    fn a_genie_aimed_at_a_surface_aims_at_its_instance_on_the_windows_own_monitor() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _ = (&conn, &mut queue, &mut client);
+        let (_left, _right) = side_by_side(&mut state, "aim-left");
+        state.declare_surface(crate::scripted::Declaration::for_test(
+            "dock",
+            std::path::PathBuf::from("/nonexistent/solium-test-dock.qml"),
+            crate::scripted::Layer::Top,
+            crate::scripted::On::EveryMonitor,
+        ));
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (2020, 100), false);
+        let pane = state.panes.id_of(&window).expect("a pane for the window");
+        let dock = state.surfaces.named("dock").expect("the dock is declared");
+        let deform = crate::present::Deform {
+            effect: solium_effects::Deform::Genie {
+                progress: 0.5,
+                spread: 1.4,
+                axis: solium_effects::Axis::Down,
+            },
+            anchor: crate::present::Anchor::Surface(dock),
+        };
+        let to = state
+            .aimed_at_for(pane, Some(deform))
+            .expect("the dock resolves")
+            .to;
+        assert!(
+            to.loc.x >= 1920.0,
+            "aimed at the dock on the pointer's monitor, at x = {}",
+            to.loc.x
+        );
+    }
+
+    /// **A capture whose surface tree has not committed is not drawn again.**
+    /// Its key is built from the same elements the capture draws, on
+    /// smithay's `DummyRenderer`, so this needs no GPU.
+    #[test]
+    fn a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (_pane, tile) = tiled_alone(&mut state, &window);
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let size = (tile.size.w, tile.size.h).into();
+        let key = |renderer: &mut DummyRenderer| {
+            let elements =
+                crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
+            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+        };
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, key(&mut renderer));
+        assert!(
+            !capture.stale(&key(&mut renderer)),
+            "nothing committed, and it would be drawn again"
+        );
+    }
+
+    /// **A commit on a subsurface alone makes the capture stale**: "commits
+    /// anywhere in the surface tree" ([16] 0.4).
+    #[test]
+    fn a_commit_on_a_subsurface_alone_makes_the_capture_stale() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (_pane, tile) = tiled_alone(&mut state, &window);
+        let compositor = client.compositor.clone().expect("wl_compositor bound");
+        let subcompositor = client
+            .subcompositor
+            .clone()
+            .expect("wl_subcompositor bound");
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &surface, &qh, ());
+        subsurface.set_desync();
+        commit_buffer(&client, &qh, &child, 40, 30);
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let size = (tile.size.w, tile.size.h).into();
+        let key = |renderer: &mut DummyRenderer| {
+            let elements =
+                crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
+            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+        };
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, key(&mut renderer));
+        commit_buffer(&client, &qh, &child, 40, 30);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert!(
+            capture.stale(&key(&mut renderer)),
+            "the subsurface committed and the capture did not notice"
         );
     }
 

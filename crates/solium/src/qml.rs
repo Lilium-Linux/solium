@@ -274,6 +274,11 @@ extern "C" fn solium_qml_log_from_qt(
         };
     }
 
+    // Counted for `--check`, which fails a scene that warns while it is
+    // built: `tests::qt_warnings_and_errors_are_counted`.
+    if level >= LOG_WARN {
+        WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     match level {
         LOG_DEBUG => forward!(debug),
         LOG_INFO => forward!(info),
@@ -284,6 +289,22 @@ extern "C" fn solium_qml_log_from_qt(
         // warning, and the drift is worth seeing.
         _ => forward!(warn),
     }
+}
+
+/// How many warnings and errors Qt has said in this process. One count for
+/// every thread, because the handler above may be called from any of them.
+/// `tests::qt_warnings_and_errors_are_counted`.
+static WARNINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where the count of Qt's warnings stands now, for [`warnings_since`].
+pub(crate) fn warning_mark() -> u64 {
+    WARNINGS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many warnings and errors Qt has said since `mark`.
+/// `tests::qt_warnings_and_errors_are_counted`.
+pub(crate) fn warnings_since(mark: u64) -> u64 {
+    warning_mark().saturating_sub(mark)
 }
 
 /// Start Qt. Idempotent, and must happen on the thread that renders.
@@ -1038,6 +1059,9 @@ pub(crate) struct Scene {
     /// re-imports the same dmabuf to sample what Qt drew, so it has to still
     /// exist. Nothing else owns it.
     target: Option<target::Target>,
+    /// What the pacing counters call this scene.
+    /// `pacing::tests::qml_time_is_charged_to_the_scene_that_spent_it`.
+    pacing: crate::pacing::SceneId,
 }
 
 // The scene is bound to the GL context it was created on, and that context
@@ -1060,8 +1084,8 @@ impl Scene {
     /// construction, each refusal logged as its own unrelated failure. A
     /// fourth caller answering this question for itself is the same bug again.
     ///
-    /// `main.rs`'s `--check-qml` is the one deliberate exception and says so
-    /// where it sits: its host is software in every mode, so its scene is
+    /// `check.rs`, behind `--check-qml`, is the one deliberate exception and
+    /// says so where it sits: its host is software in every mode, so its scene is
     /// software by construction and not by preference. See
     /// `renderer::check_qml_is_software_in_every_mode`.
     pub(crate) fn for_host(
@@ -1082,12 +1106,29 @@ impl Scene {
         // *stall on a running desktop*, which is very much the shape of thing
         // "sometimes everything lags" is made of. It should say so in Qt's
         // column, with `built` beside it.
-        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
+        //
+        // Interned from the path before the build, so the build's time is
+        // charged to the scene being built
+        // (`hosting_tests::a_scenes_build_and_render_are_charged_to_it`), and
+        // given back when the build fails
+        // (`hosted::tests::a_hosted_scene_is_named_by_its_file_and_monitor_and_gives_it_back`).
+        let id = crate::pacing::scene_id(&crate::pacing::label_of(qml_path));
+        let _qml = crate::pacing::qml(id);
         crate::pacing::scene_built();
-        if on_gpu() {
+        let built = if on_gpu() {
             Self::gpu_sized(qml_path, width, height, initial)
         } else {
             Self::with_properties(qml_path, width, height, initial)
+        };
+        match built {
+            Ok(mut scene) => {
+                scene.pacing = id;
+                Ok(scene)
+            }
+            Err(err) => {
+                crate::pacing::forget_scene(id);
+                Err(err)
+            }
         }
     }
 
@@ -1095,8 +1136,8 @@ impl Scene {
     ///
     /// Named for what it is rather than `new`, because `new` reads as the
     /// normal constructor and this one is an exception with exactly one
-    /// legitimate caller: `main.rs`'s `--check-qml`, which validates a file and
-    /// exits. Anything that will be *drawn* wants [`Scene::for_host`], and on a
+    /// legitimate caller: `check.rs`, behind `--check-qml`, which validates a
+    /// file and exits. Anything that will be *drawn* wants [`Scene::for_host`], and on a
     /// GPU host this scene would be refused at construction — see `host.cpp`'s
     /// software constructor.
     ///
@@ -1107,6 +1148,19 @@ impl Scene {
     /// See `renderer::check_qml_is_software_in_every_mode`.
     pub(crate) fn software(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
         Self::with_properties(qml_path, width, height, None)
+    }
+
+    /// Call this scene something more telling than its file, in the pacing
+    /// report: a hosted scene's monitor, say. The name it had is given back.
+    /// `hosted::tests::a_hosted_scene_is_named_by_its_file_and_monitor_and_gives_it_back`.
+    pub(crate) fn label(&mut self, label: &str) {
+        crate::pacing::forget_scene(self.pacing);
+        self.pacing = crate::pacing::scene_id(label);
+    }
+
+    /// What the pacing counters call this scene.
+    pub(crate) const fn pacing(&self) -> crate::pacing::SceneId {
+        self.pacing
     }
 
     /// Build a scene, supplying properties it declares as required.
@@ -1161,6 +1215,7 @@ impl Scene {
             size: (width, height),
             scale: 1.0,
             target: None,
+            pacing: crate::pacing::SceneId::NONE,
         })
     }
 
@@ -1249,6 +1304,7 @@ impl Scene {
             size: (width, height),
             scale: 1.0,
             target: Some(target),
+            pacing: crate::pacing::SceneId::NONE,
         })
     }
 
@@ -1484,8 +1540,9 @@ impl Scene {
         // Qt's share of the frame, on the software path: the whole of the scene
         // graph rasterised into a `QImage`. The copy out of that image and the
         // upload of it are the compositor's and the driver's respectively, and
-        // are measured where they happen -- see `pacing::Phase::Qml`.
-        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
+        // are measured where they happen -- see `pacing::Phase::Qml`. Charged
+        // to this scene too: `hosting_tests::a_scenes_build_and_render_are_charged_to_it`.
+        let _qml = crate::pacing::qml(self.pacing);
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         let status = unsafe { ffi::solium_qml_scene_render(self.scene) };
         if status == 0 {
@@ -1709,6 +1766,10 @@ impl Scene {
 impl Drop for Scene {
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     fn drop(&mut self) {
+        // The pacing counters' name for it is given back:
+        // `hosted::tests::a_hosted_scene_is_named_by_its_file_and_monitor_and_gives_it_back`.
+        crate::pacing::forget_scene(self.pacing);
+
         // The buffer goes after the scene, which is what the field order in the
         // struct buys: a `Drop` body runs before the fields are dropped. Qt's
         // teardown releases the EGLImage it made from the dmabuf, and doing
@@ -1829,6 +1890,32 @@ pub(crate) mod qt_test {
 
 #[cfg(test)]
 mod tests {
+    /// **Qt's warnings and errors are counted**, for `--check` to fail on;
+    /// its debug and info lines are not.
+    #[test]
+    fn qt_warnings_and_errors_are_counted() {
+        super::qt_test::on_the_qt_thread(|| {
+            let message = c"counted";
+            let mark = super::warning_mark();
+            for level in [
+                super::LOG_DEBUG,
+                super::LOG_INFO,
+                super::LOG_WARN,
+                super::LOG_ERROR,
+            ] {
+                super::solium_qml_log_from_qt(
+                    level,
+                    std::ptr::null(),
+                    message.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            }
+            assert_eq!(super::warnings_since(mark), 2);
+        });
+    }
+
     /// The guard has to actually catch the thing it exists for, and a guard
     /// that is never exercised is a comment with a runtime cost.
     #[test]
@@ -2164,6 +2251,39 @@ mod hosting_tests {
             );
 
             drop(built);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **The time Qt spends building a scene and drawing it is charged to
+    /// that scene**, inside a measured pass, under its folder and file.
+    #[test]
+    fn a_scenes_build_and_render_are_charged_to_it() {
+        on_the_qt_thread(|| {
+            let directory = fixture_dir("solium-qml-test-charged");
+            let path = directory.join("Charged.qml");
+            write(&path, "import QtQuick\nRectangle { color: \"red\" }\n");
+            super::start().expect("Qt starts");
+
+            let _measured = crate::pacing::measured();
+            let pass = crate::pacing::frame();
+            let mut scene = super::Scene::for_host(&path, 16, 16, None).expect("the scene builds");
+            let built = crate::pacing::spent(scene.pacing());
+            let label = crate::pacing::label(scene.pacing());
+            let drawn = if super::on_gpu() {
+                None
+            } else {
+                scene.render().expect("the scene renders");
+                Some(crate::pacing::spent(scene.pacing()))
+            };
+            pass.finish(0);
+
+            assert_eq!(label.as_deref(), Some("solium-qml-test-charged/Charged"));
+            assert!(built > 0, "the build was charged to no scene");
+            if let Some(drawn) = drawn {
+                assert!(drawn > built, "the render was charged to no scene");
+            }
+            drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
         });
     }

@@ -12,7 +12,7 @@ use super::*;
 /// neither can a `Space` with monitors mapped into it. This is the half that
 /// decides, so this is the half that is testable, and [`Solium::on_any_output`]
 /// is the two-line adapter that feeds it `space.outputs()`. Same trick, same
-/// reason, as `offscreen::Scratch` being generic over what it keeps.
+/// reason, as `pool::Pool` being generic over what it keeps.
 ///
 /// Through [`crate::render::drawn_on`], the very call `render::elements`
 /// makes when it culls a pane against one screen -- so exclusive: a window

@@ -76,4 +76,6 @@ Linked at build time and found on the system, never bundled: Qt 6 (Core, Gui,
 Qml and Quick, and the modules they require; LGPL-3.0, or GPL), Wayland (MIT),
 libinput (MIT), libseat (MIT), libxkbcommon (MIT), Mesa's GBM and EGL (MIT),
 libdrm (MIT) and systemd's libudev (LGPL-2.1-or-later). Each is used through
-its public interface and is compatible with GPL-3.0.
+its public interface and is compatible with GPL-3.0. With `SOLIUM_PACING` set,
+NVIDIA's management library, `libnvidia-ml.so.1`, is opened at run time if the
+driver installed it, to read the GPU's clocks; it is never linked or shipped.

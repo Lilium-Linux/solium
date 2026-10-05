@@ -264,7 +264,7 @@ impl Desk {
             .id_of(&window)
             .and_then(|id| self.state.panes.get(id))
         {
-            present::settle(pane, now);
+            present::settle(pane, self.state.pane_outer(pane), now);
         }
         (window, surface, xdg, toplevel)
     }

@@ -3,7 +3,7 @@
 # Does a presentation transform put pixels where it says it does, and does the
 # pointer still land where it should?
 #
-# Four claims, none of which `cargo test` can reach. The `Command::Present` ->
+# Five claims, none of which `cargo test` can reach. The `Command::Present` ->
 # `Frame` wiring in `state/commands.rs` is the seam this exists for: reverting
 # `z` and `pivot` there to their defaults passes the whole unit suite, because
 # every test of them is a test of `script.rs` and of pure functions below it,
@@ -28,6 +28,13 @@
 #           lives at. This is the load-bearing half: `state/hit_test.rs`
 #           asks whether the pane as `drawn_at(..)` draws it owns the point,
 #           and a regression to `outer.contains` would pass the other three.
+#
+#   aim     a genie on a monitor not at the origin lands on its target (#143).
+#           Two nested monitors; one window on the right one is pulled at
+#           progress 1 into a rectangle on the right one, and every pixel of
+#           it must be inside that rectangle. The deform's target is moved
+#           onto the screen with the window, which `render::warp_mesh_on`'s
+#           tests pin; this is the same thing through the real draw.
 #
 # A reverted `z` reads as "nothing sorts" and would be caught by looking. A
 # reverted `pivot` is not, and the strongest statement of that is measured:
@@ -75,14 +82,22 @@ fail() { echo "  FAIL: $*"; failures=$((failures + 1)); }
 # Every pid started here is recorded, and only those are ever killed. A
 # developer running this has their own session -- and quite possibly their own
 # nested Solium -- and `pkill solium` would take both.
-pids="$out/pids"
-: >"$pids"
+#
+# **Recorded in the shell, not in a file under `$out`.** A passing run removes
+# `$out` before the exit trap runs, so a list kept there was gone by the time
+# the trap read it ("pids: No such file or directory"), and every compositor
+# of a passing run stayed up, holding the nested lock. A signal is turned into
+# an exit, so the same trap runs when `timeout` stops the run.
+pids=()
 cleanup() {
-    while read -r pid; do [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; done <"$pids"
+    local pid
+    for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null; done
     sleep 0.4
-    while read -r pid; do [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null; done <"$pids"
+    for pid in "${pids[@]}"; do kill -9 "$pid" 2>/dev/null; done
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # Clients are started one at a time, because every configuration places them by
 # the order they open. `ready_at` is when the last of them is certainly mapped
@@ -143,7 +158,7 @@ shoot() {
 
     env "${environment[@]}" "$binary" >"$dir/log" 2>&1 &
     local solium=$!
-    echo "$solium" >>"$pids"
+    pids+=("$solium")
 
     # The socket is chosen at runtime, so it is read back rather than assumed.
     local socket=""
@@ -171,7 +186,7 @@ shoot() {
             -o "enable_audio_bell=no" -o "font_size=14" \
             sh -c "printf '\033[?25l\033[H\033[48;2;255;255;0m    \033[0m'; sleep 600" \
             >"$dir/client-$index.log" 2>&1 &
-        echo "$!" >>"$pids"
+        pids+=("$!")
         index=$((index + 1))
         sleep "$(awk "BEGIN{print $SPAWN_INTERVAL/1000}")"
     done
@@ -328,6 +343,27 @@ then
     fi
 else
     fail "the rect capture did not run"
+fi
+
+echo "present-check: aim on the second monitor"
+ready=$(ready_at 1)
+if shoot aim "$here/aim.lua" $((ready + 1400)) 1 16 $((ready + 2000)) \
+    "$(printf 'SOLIUM_OUTPUTS=2\nSOLIUM_TRIGGER_AT=%d:super+g' $((ready + 700)))" \
+    "window:20a0c0"
+then
+    read -r tx ty tw th < <(grep -o 'AIM_TARGET [0-9]* [0-9]* [0-9]* [0-9]*' "$out/aim/log" | tail -1 | cut -d' ' -f2-)
+    span=$(measure span "$out/aim/f" "${WINDOW[@]}" 8)
+    note "target" "($tx,$ty) ${tw}x${th}"
+    note "window drawn" "${span#*= }"
+    # measure.py span prints "<file> rgb(r, g, b) n=<count> x <x0>..<x1>  y <y0>..<y1>  centroid (…)".
+    read -r x0 x1 y0 y1 < <(echo "$span" | sed -n 's/.* x \(-\?[0-9]*\)\.\.\(-\?[0-9]*\)  y \(-\?[0-9]*\)\.\.\(-\?[0-9]*\).*/\1 \2 \3 \4/p')
+    if [[ -z "${x0:-}" || -z "${tx:-}" ]]; then
+        fail "aim: the window or the target could not be found (see $out/aim/log)"
+    elif (( x0 < tx - TOLERANCE || y0 < ty - TOLERANCE || x1 > tx + tw + TOLERANCE || y1 > ty + th + TOLERANCE )); then
+        fail "aim: the genie landed at ($x0,$y0)-($x1,$y1), outside its target ($tx,$ty) ${tw}x${th}"
+    fi
+else
+    fail "the aim capture did not run"
 fi
 
 if [[ "$failures" -gt 0 ]]; then

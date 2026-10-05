@@ -187,7 +187,7 @@
 ---A deformation, named by effect. Its other keys are that effect's parameters.
 ---@class sol.Deform
 ---@field effect "genie" The effect, from `crates/effects`. An unknown one is logged and the window drawn undeformed.
----@field to { window: integer }|{ surface: string }|sol.Rect What the window is pulled into or drawn out of. A window or a surface is followed as it moves; a rect stays where it is.
+---@field to { window: integer }|{ surface: string }|sol.Rect What the window is pulled into or drawn out of. A window or a surface is followed as it moves; a rect stays where it is. A surface on several monitors is the one on the window's own monitor.
 ---@field axis? "down"|"up"|"left"|"right" For the genie: which edge leads.
 ---@field spread? number For the genie: how much of the window is in motion at once. 0 is rigid.
 
@@ -464,6 +464,10 @@ function sol.window_at(x, y, skip) end
 ---A transform: the window keeps its place and its client is told nothing, so
 ---`sol.present_clear` puts it back exactly. Input follows the rect it is drawn
 ---at.
+---
+---A present that lands exactly on the window's own frame (no rect, no rotation,
+---full opacity) lets the window go, as `sol.present_clear` does, rather than
+---holding it there.
 ---@param id integer
 ---@param options? sol.PresentOptions
 ---@return nil

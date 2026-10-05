@@ -400,13 +400,14 @@ SOLIUM_LOADING=mine    ./target/debug/solium     # one run, one loading scene
 solium --check-qml path/to/thing.qml             # does it even load?
 ```
 
-`--check-qml` loads one file and prints `ok` or what Qt reported, without
-starting a compositor. Read what it prints: it exits 0 either way. It loads
-the file in software, so it cannot check a `requires: ["gpu"]` style's
-shaders, and on a `Pane.qml` it does not follow `source:`, so run it on each
-file of a bundle. Porting a scene means walking a chain of "type X
-unavailable" errors, and doing that through a real session costs ten seconds a
-link.
+`--check-qml` loads one file and prints `ok` and its path, or what Qt
+reported, without starting a compositor, and exits with 1 when anything did
+not load. On a `Pane.qml` it loads every layer the style names in `source:`
+too, and a broken one fails the check by name. It loads in software, so it
+cannot build a `requires: ["gpu"]` style: it says so and leaves that style's
+layers unloaded, which is not a failure. `--check <file.qml>` is the same
+check. Porting a scene means walking a chain of "type X unavailable" errors,
+and doing that through a real session costs ten seconds a link.
 
 `super+shift+r` in a running session reads the configuration again, drops the
 QML cache and rebuilds every frame. Windows keep their slots and each client is

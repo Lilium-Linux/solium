@@ -482,7 +482,7 @@ impl Gpu {
         // `import_dmabuf`. The whole of what a cache miss owes, which is
         // precisely what is worth being able to see -- see `pacing::Phase::Qml`
         // and `Kept`, whose entire reason to exist is how expensive this is.
-        let _qml = crate::pacing::span(crate::pacing::Phase::Qml);
+        let _qml = crate::pacing::qml(scene.pacing());
         crate::pacing::scene_rendered();
         let rendered = self.render(scene, size, scale);
         // Unconditional, and underneath every way out of the call above,
