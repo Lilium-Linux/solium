@@ -57,6 +57,7 @@ judged at the very end.
 | 11c | a capture sampled with no CPU wait, through smithay (FX0) | 100 rounds of 500 fills into 1024², the fence dropped, sampled at once with `render_texture_from_to`: every pixel is the round's colour | `round N: a capture sampled with no CPU wait read pixels it had not finished` |
 | 11d | the same through raw GL, as the warp samples (FX0) | the same, sampled with the raw texture name in a program of its own, no `glWaitSync` | `round N: a capture sampled through raw GL …` |
 | 11e | the warp program (FX0) | `warp/gl.rs`'s program compiles and draws a texture through a full-target mesh | `the warp drew … at the centre, not the texture` |
+| 11f | a pooled target (FX0) | `pool.rs`'s target is drawn through its own framebuffer object in a frame opened on a 1x1 carrier, and the carrier keeps its blue; painted again with nothing, the target reads back transparent | `the pooled target is not what was drawn into it`, `a pooled target painted with nothing is not transparent`, `the carrier is no longer blue…` |
 | 12 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
 | 13 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
 | 14 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |

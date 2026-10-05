@@ -32,6 +32,7 @@ mod offscreen;
 mod pacing;
 mod pane;
 mod pass;
+mod pool;
 mod power;
 mod present;
 mod qml;

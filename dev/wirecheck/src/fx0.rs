@@ -19,6 +19,10 @@ mod gputime;
 #[allow(dead_code, reason = "the compositor's warp program")]
 mod warp_gl;
 
+#[path = "../../../crates/solium/src/pool.rs"]
+#[allow(dead_code, reason = "the compositor's pool, of which this case needs part")]
+mod pool;
+
 /// Every FX0 case, in order.
 pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     gpu_timestamps(renderer)?;
@@ -26,6 +30,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     no_wait_through_smithay(renderer)?;
     no_wait_through_raw_gl(renderer)?;
     warp_program_draws(renderer)?;
+    pooled_target_through_the_carrier(renderer)?;
     Ok(())
 }
 
@@ -497,5 +502,89 @@ fn warp_program_draws(renderer: &mut GlesRenderer) -> Result<()> {
         return Err(anyhow!("the warp drew {got:?} at the centre, not the texture"));
     }
     println!("  the warp program drew its texture");
+    Ok(())
+}
+
+/// **Case 11f: a pooled target is drawn through its own framebuffer object,
+/// in a frame opened on the carrier, and the carrier is untouched.** That
+/// nothing between `render` and `finish` rebinds the draw framebuffer is what
+/// the pool rests on. Painted again with nothing, the target reads back
+/// transparent: `paint`'s clear reaches it too.
+fn pooled_target_through_the_carrier(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::element::{Id, Kind, solid::SolidColorRenderElement};
+    use smithay::backend::renderer::utils::CommitCounter;
+    println!("\n=== FX0: a pooled target drawn through its own framebuffer, on the carrier ===");
+    let side = 64;
+    let mut pool = pool::Pool::new(64 << 20);
+    let target = pool
+        .target(&mut pool::Gl(renderer), (side, side).into())
+        .ok_or_else(|| anyhow!("no pooled target"))?;
+    let mut carrier = pool.carrier(renderer).ok_or_else(|| anyhow!("no carrier"))?;
+    {
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame = renderer
+            .render(&mut bound, (1, 1).into(), Transform::Normal)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .clear(Color32F::new(0.0, 0.0, 1.0, 1.0), &[Rectangle::from_size((1, 1).into())])
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    {
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame =
+            pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+        let white = SolidColorRenderElement::new(
+            Id::new(),
+            Rectangle::from_size((side, side).into()),
+            CommitCounter::default(),
+            Color32F::new(1.0, 1.0, 1.0, 1.0),
+            Kind::Unspecified,
+        );
+        pool::paint(&mut frame, (side, side).into(), &[white], 1.0)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let mut drawn = target.texture().clone();
+    if !all_are(&read(renderer, &mut drawn, side)?, 255) {
+        return Err(anyhow!("the pooled target is not what was drawn into it"));
+    }
+    {
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame =
+            pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+        pool::paint::<SolidColorRenderElement>(&mut frame, (side, side).into(), &[], 1.0)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    if !read(renderer, &mut drawn, side)?.iter().all(|byte| *byte == 0) {
+        return Err(anyhow!("a pooled target painted with nothing is not transparent"));
+    }
+    // Blue is one full channel of three, in either byte order; white is three.
+    let carried = read(renderer, &mut carrier, 1)?;
+    let full = carried.iter().take(3).filter(|byte| **byte == 255).count();
+    if full != 1 {
+        return Err(anyhow!(
+            "the carrier is no longer blue ({carried:?}): the draw went to the carrier, not the target"
+        ));
+    }
+    drop(target);
+    pool.sweep(renderer);
+    println!(
+        "  drawn through its own framebuffer, and cleared transparent; the carrier untouched; \
+         the framebuffer deleted at the sweep"
+    );
     Ok(())
 }
