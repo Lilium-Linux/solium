@@ -154,6 +154,17 @@ local defaults = {
     -- a different one instead. It searches installed applications, open
     -- windows and a few compositor commands; see `docs/ricing.md` for what
     -- is cut from this first version.
+    --
+    -- Desktop icons (`lua/preview/desktop.lua`, 04-ui.md §4.9) show
+    -- `Solium.dirs.desktop` (`$XDG_DESKTOP_DIR`, or `user-dirs.dirs`; empty
+    -- draws nothing): `preview = { desktop = { icons = true, from =
+    -- "top-right", cell = { width = 96, height = 100 }, labels = 2, open =
+    -- "double", show_hidden = false, reveal_on_click = false } }`. `icons =
+    -- false` turns them off; `from` is `"top-right"` (the default) or
+    -- `"top-left"`; `open` is `"double"` (the default) or `"single"`. See
+    -- `docs/ricing.md` for what is cut from this first version (dragging
+    -- and saved positions, right-click menus, showing the desktop, Open
+    -- With, thumbnails).
     preview = true,
 
     -- The keyboard: its xkb layouts (`layout`, `variant`, `options`, `model`,
