@@ -75,14 +75,22 @@ fail() { echo "  FAIL: $*"; failures=$((failures + 1)); }
 # Every pid started here is recorded, and only those are ever killed. A
 # developer running this has their own session -- and quite possibly their own
 # nested Solium -- and `pkill solium` would take both.
-pids="$out/pids"
-: >"$pids"
+#
+# **Recorded in the shell, not in a file under `$out`.** A passing run removes
+# `$out` before the exit trap runs, so a list kept there was gone by the time
+# the trap read it ("pids: No such file or directory"), and every compositor
+# of a passing run stayed up, holding the nested lock. A signal is turned into
+# an exit, so the same trap runs when `timeout` stops the run.
+pids=()
 cleanup() {
-    while read -r pid; do [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; done <"$pids"
+    local pid
+    for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null; done
     sleep 0.4
-    while read -r pid; do [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null; done <"$pids"
+    for pid in "${pids[@]}"; do kill -9 "$pid" 2>/dev/null; done
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # Clients are started one at a time, because every configuration places them by
 # the order they open. `ready_at` is when the last of them is certainly mapped
@@ -143,7 +151,7 @@ shoot() {
 
     env "${environment[@]}" "$binary" >"$dir/log" 2>&1 &
     local solium=$!
-    echo "$solium" >>"$pids"
+    pids+=("$solium")
 
     # The socket is chosen at runtime, so it is read back rather than assumed.
     local socket=""
@@ -171,7 +179,7 @@ shoot() {
             -o "enable_audio_bell=no" -o "font_size=14" \
             sh -c "printf '\033[?25l\033[H\033[48;2;255;255;0m    \033[0m'; sleep 600" \
             >"$dir/client-$index.log" 2>&1 &
-        echo "$!" >>"$pids"
+        pids+=("$!")
         index=$((index + 1))
         sleep "$(awk "BEGIN{print $SPAWN_INTERVAL/1000}")"
     done
