@@ -15,7 +15,7 @@
 local actions = {}
 
 -- The services whose actions make up the vocabulary in this release.
-local services = { windows = true, workspaces = true }
+local services = { windows = true, workspaces = true, apps = true }
 
 -- Each name's override now, so one replaced by a later override of the same
 -- name answers nothing. See `a_later_override_of_the_same_name_replaces_the_earlier_one`.
