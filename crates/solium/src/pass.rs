@@ -436,6 +436,22 @@ fn side_inset(radius: f64, widen: f64) -> f64 {
     (radius * widen).max(radius.max(0.5) * widen - 0.5)
 }
 
+/// Compile once and keep it, or latch the failure and never try again.
+/// `tests::a_program_that_will_not_compile_is_tried_once`.
+fn once<'a, T>(
+    slot: &'a mut Option<T>,
+    failed: &mut bool,
+    compile: impl FnOnce() -> Option<T>,
+) -> Option<&'a T> {
+    if slot.is_none() && !*failed {
+        match compile() {
+            Some(made) => *slot = Some(made),
+            None => *failed = true,
+        }
+    }
+    slot.as_ref()
+}
+
 /// The compiled fragment programs, one of each, for the life of the renderer.
 ///
 /// Compiling a shader is not a per-frame cost anybody should pay, and
@@ -471,6 +487,10 @@ pub(crate) struct Programs {
     /// Set once a compile has been tried and failed, so the warning is logged
     /// once rather than at sixty or two hundred and sixty hertz.
     rounded_failed: bool,
+    /// The warp's program (`warp/gl.rs`), on the same terms as `rounded`.
+    warp: Option<crate::warp::Program>,
+    /// As `rounded_failed`, for the warp.
+    warp_failed: bool,
     /// Set once an effect this renderer cannot run has been named, for the
     /// same reason and on the same terms. See [`Programs::refuse`].
     refused: bool,
@@ -483,31 +503,58 @@ impl Programs {
     /// window square rather than not at all: a driver that cannot build this
     /// program should cost someone their rounded corners, not their desktop.
     pub(crate) fn rounded(&mut self, renderer: &mut GlesRenderer) -> Option<&GlesTexProgram> {
-        if self.rounded.is_none() && !self.rounded_failed {
-            match renderer.compile_custom_texture_shader(
-                ROUNDED_CORNERS,
-                &[
-                    UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
-                    // Ours because smithay gives a texture program no `size`.
-                    UniformName::new(SIZE_UNIFORM, UniformType::_2f),
-                ],
-            ) {
-                Ok(program) => self.rounded = Some(program),
-                Err(err) => {
-                    // Latched before the warning and never cleared, because the
-                    // thing that failed is a string constant against a driver:
-                    // it will fail identically on the next frame and the one
-                    // after, and a warning per frame per window is how a log
-                    // stops being readable at the moment somebody needs it.
-                    self.rounded_failed = true;
+        // Latched and never cleared, because the thing that failed is a
+        // string constant against a driver: it will fail identically on the
+        // next frame and the one after, and a warning per frame per window is
+        // how a log stops being readable at the moment somebody needs it
+        // (`tests::a_program_that_will_not_compile_is_tried_once`).
+        once(&mut self.rounded, &mut self.rounded_failed, || {
+            renderer
+                .compile_custom_texture_shader(
+                    ROUNDED_CORNERS,
+                    &[
+                        UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
+                        // Ours because smithay gives a texture program no `size`.
+                        UniformName::new(SIZE_UNIFORM, UniformType::_2f),
+                    ],
+                )
+                .inspect_err(|err| {
                     tracing::warn!(
                         ?err,
                         "the rounded-corner shader did not compile; windows will be drawn square"
                     );
+                })
+                .ok()
+        })
+    }
+
+    /// The warp program, compiled on first use and between frames, for the
+    /// reason this type's own doc gives. `None` means it did not compile and a
+    /// deformed window is drawn flat rather than not at all (#140, §6.5 C3).
+    #[expect(unsafe_code, reason = "compiling the warp's GL program")]
+    pub(crate) fn warp(&mut self, renderer: &mut GlesRenderer) -> Option<crate::warp::Program> {
+        once(&mut self.warp, &mut self.warp_failed, || {
+            // SAFETY: `with_context` makes the renderer's context current, and
+            // this runs between frames (`render::prepare`).
+            match renderer.with_context(|gl| unsafe { crate::warp::Program::compile(gl) }) {
+                Ok(Ok(program)) => Some(program),
+                Ok(Err(why)) => {
+                    tracing::warn!(
+                        why,
+                        "the warp shader did not compile; deformed windows will be drawn flat"
+                    );
+                    None
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        "no context to compile the warp shader in; deformed windows will be drawn flat"
+                    );
+                    None
                 }
             }
-        }
-        self.rounded.as_ref()
+        })
+        .copied()
     }
 
     /// Say, once, that a style declares an effect this renderer cannot run.
@@ -952,6 +999,34 @@ mod tests {
         assert!(
             !programs.refuse(Effect::rounded(Corners::all(4.0))),
             "nor a different one"
+        );
+    }
+
+    /// **A program that will not compile is tried once**, not on every frame:
+    /// the thing that failed is a string against a driver, and it will fail the
+    /// same way next frame. The warp's and the rounded program's latch.
+    #[test]
+    fn a_program_that_will_not_compile_is_tried_once() {
+        let (mut slot, mut failed, mut tries) = (None::<u32>, false, 0);
+        for _ in 0..3 {
+            assert!(
+                super::once(&mut slot, &mut failed, || {
+                    tries += 1;
+                    None
+                })
+                .is_none()
+            );
+        }
+        assert_eq!(tries, 1, "a failed compile was tried again");
+        let (mut slot, mut failed) = (None::<u32>, false);
+        assert_eq!(
+            super::once(&mut slot, &mut failed, || Some(7)).copied(),
+            Some(7)
+        );
+        assert_eq!(
+            super::once(&mut slot, &mut failed, || Some(8)).copied(),
+            Some(7),
+            "compiled once and kept"
         );
     }
 

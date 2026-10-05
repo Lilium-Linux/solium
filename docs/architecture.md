@@ -283,7 +283,9 @@ renderer to choose instead. Drawing does not stay behind Smithay's generic
 `Renderer` and `Frame` traits, because three things it needs are not on them:
 
 - drawing a texture through four independent corners, for perspective and the
-  genie (`warp.rs`, the only Rust file that makes raw GL calls);
+  genie (`warp.rs`, with its program and draw in raw GL in `warp/gl.rs`; the
+  program is compiled once, between frames, in `pass.rs`, and if it does not
+  compile a deformed window is drawn flat rather than not at all);
 - a fragment program of Solium's own, for rounded corners (`pass.rs`, which
   compiles the GLSL ES source kept in `crates/effects`);
 - the EGL context and fence that QML on the GPU shares with Qt (`qml/paint.rs`,

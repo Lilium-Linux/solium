@@ -6,7 +6,8 @@ use anyhow::{Result, anyhow};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture, ffi};
 use smithay::backend::renderer::{
-    Bind as _, Color32F, ExportMem as _, Frame as _, Offscreen as _, Renderer as _,
+    Bind as _, Color32F, ExportMem as _, Frame as _, ImportMem as _, Offscreen as _,
+    Renderer as _,
 };
 use smithay::utils::{Rectangle, Transform};
 
@@ -14,12 +15,17 @@ use smithay::utils::{Rectangle, Transform};
 #[allow(dead_code, reason = "the compositor's timer, of which this case needs part")]
 mod gputime;
 
+#[path = "../../../crates/solium/src/warp/gl.rs"]
+#[allow(dead_code, reason = "the compositor's warp program")]
+mod warp_gl;
+
 /// Every FX0 case, in order.
 pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     gpu_timestamps(renderer)?;
     closed_outside_a_frame(renderer)?;
     no_wait_through_smithay(renderer)?;
     no_wait_through_raw_gl(renderer)?;
+    warp_program_draws(renderer)?;
     Ok(())
 }
 
@@ -430,5 +436,66 @@ pub(crate) fn cross_control(
         }
     }
     println!("  a reader on another display saw an unfinished picture in {stale} of 100 rounds");
+    Ok(())
+}
+
+/// **Case 11e: the warp program compiles and draws its texture.** A 64² target,
+/// a full-target mesh of two triangles over a solid texture: the interior is
+/// the texture's colour. Nothing else in the gate compiles the warp's shaders.
+fn warp_program_draws(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX0: the warp program compiles and draws ===");
+    let side = 64;
+    let solid: Vec<u8> = [32_u8, 160, 192, 255].repeat((side * side) as usize);
+    let texture = renderer
+        .import_memory(&solid, Fourcc::Abgr8888, (side, side).into(), false)
+        .map_err(|err| anyhow!("{err}"))?;
+    // SAFETY: `with_context` makes the context current.
+    let program = renderer
+        .with_context(|gl| unsafe { warp_gl::Program::compile(gl) })
+        .map_err(|err| anyhow!("{err}"))?
+        .map_err(|why| anyhow!("{why}"))?;
+    let edge = side as f32;
+    // x, y, u·q, v·q, q: two triangles over the whole target, q = 1.
+    let vertices: Vec<f32> = [
+        (0.0, 0.0, 0.0, 0.0),
+        (edge, 0.0, 1.0, 0.0),
+        (edge, edge, 1.0, 1.0),
+        (0.0, 0.0, 0.0, 0.0),
+        (edge, edge, 1.0, 1.0),
+        (0.0, edge, 0.0, 1.0),
+    ]
+    .iter()
+    .flat_map(|(x, y, u, v)| [*x, *y, *u, *v, 1.0])
+    .collect();
+    let mut target: GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, (side, side).into())
+        .map_err(|err| anyhow!("{err}"))?;
+    {
+        let mut framebuffer = renderer.bind(&mut target).map_err(|err| anyhow!("{err}"))?;
+        let mut frame = renderer
+            .render(&mut framebuffer, (side, side).into(), Transform::Normal)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .clear(Color32F::TRANSPARENT, &[Rectangle::from_size((side, side).into())])
+            .map_err(|err| anyhow!("{err}"))?;
+        let projection = *frame.projection();
+        let name = texture.tex_id();
+        // SAFETY: inside the frame's context; the program and texture are its.
+        frame
+            .with_context(|gl| unsafe { program.draw(gl, &projection, name, &vertices, 1.0) })
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let pixels = read(renderer, &mut target, side)?;
+    let centre = ((side / 2) * side + side / 2) as usize * 4;
+    let got = pixels.get(centre..centre + 3).map(<[u8]>::to_vec);
+    if got.as_deref() != Some(&[192, 160, 32][..]) && got.as_deref() != Some(&[32, 160, 192][..]) {
+        return Err(anyhow!("the warp drew {got:?} at the centre, not the texture"));
+    }
+    println!("  the warp program drew its texture");
     Ok(())
 }

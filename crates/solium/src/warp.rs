@@ -1,15 +1,16 @@
 #![expect(
     unsafe_code,
-    reason = "the one file that makes GL calls itself: Smithay's traits \
+    reason = "the warp makes GL calls itself: Smithay's traits \
               cannot place four corners independently -- see \
               docs/spikes/2026-09-06-3d-presentation.md"
 )]
 
-//! Drawing a texture through arbitrary corners: the one file with raw GL calls.
+//! Drawing a texture through arbitrary corners, with raw GL calls: the program
+//! and its draw are in `warp/gl.rs`.
 //!
 //! Nothing in Smithay's renderer traits can place a texture's four corners
 //! independently, and without that there is no perspective, no genie and no
-//! fold — so this file draws with GL itself, through `with_context`. It is not
+//! fold — so this module draws with GL itself, through `with_context`. It is not
 //! the only GLES in the renderer: the element set, the rounded-corner pass and
 //! QML on the GPU are GLES too, and
 //! `docs/spikes/2026-08-27-vulkan-on-smithay.md` lists what a Vulkan backend
@@ -26,8 +27,6 @@
 //! perspective. Each corner carries `q = 1/w` and the fragment shader divides,
 //! which is what makes a receding edge compress its texture the way it should.
 
-use std::cell::RefCell;
-
 use smithay::{
     backend::renderer::{
         Texture,
@@ -40,6 +39,9 @@ use smithay::{
 };
 
 use crate::mat4::Mat4;
+
+mod gl;
+pub(crate) use gl::Program;
 
 /// One corner: where it lands, and its projective weight.
 #[derive(Clone, Copy, Debug)]
@@ -63,16 +65,18 @@ pub(crate) struct Warp {
     mesh: Mesh,
     bounds: Rectangle<i32, Physical>,
     alpha: f32,
+    program: Program,
 }
 
 impl Warp {
-    /// Draw `texture` through `mesh`.
+    /// Draw `texture` through `mesh`, with `program`.
     pub(crate) fn new(
         id: Id,
         commit: CommitCounter,
         texture: GlesTexture,
         mesh: Mesh,
         alpha: f32,
+        program: Program,
     ) -> Self {
         // The bounding box is what the damage tracker reasons about: a warped
         // texture can land anywhere, and claiming a smaller area than it
@@ -108,6 +112,7 @@ impl Warp {
             mesh,
             bounds,
             alpha,
+            program,
         }
     }
 }
@@ -120,6 +125,23 @@ impl Warp {
 pub(crate) struct Mesh {
     /// A triangle list, three vertices per triangle.
     vertices: Vec<Corner>,
+}
+
+impl Mesh {
+    /// Five floats a vertex, as the program reads them: x, y, u·q, v·q, q.
+    pub(crate) fn interleaved(&self) -> Vec<f32> {
+        let mut vertices = Vec::with_capacity(self.vertices.len() * 5);
+        for corner in &self.vertices {
+            vertices.extend_from_slice(&[
+                corner.x,
+                corner.y,
+                corner.u * corner.q,
+                corner.v * corner.q,
+                corner.q,
+            ]);
+        }
+        vertices
+    }
 }
 
 /// Cut a rectangle into a mesh and project it, about `pivot`.
@@ -262,26 +284,14 @@ impl RenderElement<GlesRenderer> for Warp {
         }
         let projection = *frame.projection();
         let texture = self.texture.tex_id();
-        let mesh = &self.mesh;
-        let alpha = self.alpha;
-
+        let vertices = self.mesh.interleaved();
+        let (program, alpha) = (self.program, self.alpha);
+        // A program compiled between frames and carried here, so a warp cannot
+        // fail to draw for want of one: `pass::tests::a_program_that_will_not_compile_is_tried_once`.
         frame.with_context(|gl| {
-            PROGRAM.with_borrow_mut(|slot| {
-                let program = match slot {
-                    Some(program) => program,
-                    None => {
-                        // SAFETY: a GL context is current for the duration of
-                        // `with_context`, which is the whole contract of it.
-                        match unsafe { Program::compile(gl) } {
-                            Some(program) => slot.insert(program),
-                            None => return,
-                        }
-                    }
-                };
-                // SAFETY: as above; every name used was created by `compile`
-                // against this same context.
-                unsafe { program.draw(gl, &projection, texture, mesh, alpha) }
-            });
+            // SAFETY: a context is current inside `with_context`; the program's
+            // names were made against this renderer's context.
+            unsafe { program.draw(gl, &projection, texture, &vertices, alpha) }
         })
     }
 
@@ -289,249 +299,6 @@ impl RenderElement<GlesRenderer> for Warp {
         // Never a scanout candidate: the point of this element is that it is
         // not a rectangle, and a plane can only show a rectangle.
         None
-    }
-}
-
-thread_local! {
-    /// The compiled program, kept for the life of the context.
-    ///
-    /// Thread-local rather than global because a GL context belongs to the
-    /// thread that made it current, and this is only ever reached from inside
-    /// `with_context` on the render thread.
-    static PROGRAM: RefCell<Option<Program>> = const { RefCell::new(None) };
-}
-
-const VERTEX: &str = r"
-precision highp float;
-uniform mat3 projection;
-attribute vec2 position;
-attribute vec3 uvq;
-// Explicitly highp on both sides: a varying whose precision differs between
-// the two stages is a link error the driver is free to resolve by handing the
-// fragment stage zeroes, which looks exactly like an attribute that was never
-// uploaded.
-varying highp vec3 v_uvq;
-void main() {
-    vec3 clip = projection * vec3(position, 1.0);
-    gl_Position = vec4(clip.xy, 0.0, 1.0);
-    v_uvq = uvq;
-}
-";
-
-const FRAGMENT: &str = r"
-precision highp float;
-uniform sampler2D tex;
-uniform float alpha;
-varying highp vec3 v_uvq;
-void main() {
-    // The divide is the perspective correction: without it the texture is
-    // interpolated affinely across each triangle and creases along the
-    // diagonal they share.
-    vec2 uv = v_uvq.xy / v_uvq.z;
-    gl_FragColor = texture2D(tex, uv) * alpha;
-}
-";
-
-#[derive(Debug)]
-struct Program {
-    id: ffi::types::GLuint,
-    projection: ffi::types::GLint,
-    tex: ffi::types::GLint,
-    alpha: ffi::types::GLint,
-    position: ffi::types::GLuint,
-    uvq: ffi::types::GLuint,
-    buffer: ffi::types::GLuint,
-}
-
-impl Program {
-    unsafe fn compile(gl: &ffi::Gles2) -> Option<Self> {
-        unsafe {
-            let vertex = compile_stage(gl, ffi::VERTEX_SHADER, VERTEX)?;
-            let fragment = compile_stage(gl, ffi::FRAGMENT_SHADER, FRAGMENT)?;
-            let id = gl.CreateProgram();
-            gl.AttachShader(id, vertex);
-            gl.AttachShader(id, fragment);
-            gl.LinkProgram(id);
-            gl.DeleteShader(vertex);
-            gl.DeleteShader(fragment);
-
-            let mut linked = 0;
-            gl.GetProgramiv(id, ffi::LINK_STATUS, &raw mut linked);
-            if linked == 0 {
-                tracing::error!("the warp program did not link");
-                gl.DeleteProgram(id);
-                return None;
-            }
-
-            let mut buffer = 0;
-            gl.GenBuffers(1, &raw mut buffer);
-
-            Some(Self {
-                id,
-                projection: gl.GetUniformLocation(id, c"projection".as_ptr().cast()),
-                tex: gl.GetUniformLocation(id, c"tex".as_ptr().cast()),
-                alpha: gl.GetUniformLocation(id, c"alpha".as_ptr().cast()),
-                #[expect(
-                    clippy::cast_sign_loss,
-                    reason = "a located attribute is never negative"
-                )]
-                position: gl.GetAttribLocation(id, c"position".as_ptr().cast()) as u32,
-                #[expect(clippy::cast_sign_loss, reason = "as above")]
-                uvq: gl.GetAttribLocation(id, c"uvq".as_ptr().cast()) as u32,
-                buffer,
-            })
-            .inspect(|program| {
-                tracing::debug!(
-                    position = program.position,
-                    uvq = program.uvq,
-                    projection = program.projection,
-                    tex = program.tex,
-                    alpha = program.alpha,
-                    "warp program linked"
-                );
-            })
-        }
-    }
-
-    unsafe fn draw(
-        &self,
-        gl: &ffi::Gles2,
-        projection: &[f32; 9],
-        texture: ffi::types::GLuint,
-        mesh: &Mesh,
-        alpha: f32,
-    ) {
-        let mut vertices = Vec::with_capacity(mesh.vertices.len() * 5);
-        for corner in &mesh.vertices {
-            vertices.extend_from_slice(&[
-                corner.x,
-                corner.y,
-                corner.u * corner.q,
-                corner.v * corner.q,
-                corner.q,
-            ]);
-        }
-
-        unsafe {
-            gl.UseProgram(self.id);
-            gl.UniformMatrix3fv(self.projection, 1, ffi::FALSE, projection.as_ptr());
-            gl.Uniform1f(self.alpha, alpha);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, texture);
-            // Clamped, so the divide landing a hair outside 0..1 at an edge
-            // samples the edge rather than wrapping to the far side.
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_WRAP_S,
-                i32::try_from(ffi::CLAMP_TO_EDGE).unwrap_or_default(),
-            );
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_WRAP_T,
-                i32::try_from(ffi::CLAMP_TO_EDGE).unwrap_or_default(),
-            );
-            // Linear, and explicitly: a texture whose min filter still wants
-            // mipmaps -- the GL default, and what `create_buffer` hands back --
-            // is incomplete, and an incomplete texture samples as opaque
-            // black. That reads as "the capture drew nothing" and sends you
-            // looking in entirely the wrong place.
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MIN_FILTER,
-                i32::try_from(ffi::LINEAR).unwrap_or_default(),
-            );
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MAG_FILTER,
-                i32::try_from(ffi::LINEAR).unwrap_or_default(),
-            );
-            gl.Uniform1i(self.tex, 0);
-
-            gl.Enable(ffi::BLEND);
-            gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
-
-            gl.BindBuffer(ffi::ARRAY_BUFFER, self.buffer);
-            gl.BufferData(
-                ffi::ARRAY_BUFFER,
-                isize::try_from(std::mem::size_of_val(vertices.as_slice())).unwrap_or_default(),
-                vertices.as_ptr().cast(),
-                ffi::STREAM_DRAW,
-            );
-
-            let stride = i32::try_from(5 * std::mem::size_of::<f32>()).unwrap_or_default();
-            gl.EnableVertexAttribArray(self.position);
-            gl.VertexAttribPointer(
-                self.position,
-                2,
-                ffi::FLOAT,
-                ffi::FALSE,
-                stride,
-                std::ptr::null(),
-            );
-            gl.EnableVertexAttribArray(self.uvq);
-            gl.VertexAttribPointer(
-                self.uvq,
-                3,
-                ffi::FLOAT,
-                ffi::FALSE,
-                stride,
-                (2 * std::mem::size_of::<f32>()) as *const _,
-            );
-
-            // Per vertex, not per instance. The divisor is state on the
-            // attribute *index*, not on the program, and Smithay draws its own
-            // elements instanced with a divisor of 1 on index 1 -- which is
-            // where `uvq` happens to land. Inherit that and every vertex reads
-            // corner 0's texture coordinate, so the whole quad samples one
-            // texel: the window renders as a single flat colour, geometry
-            // perfectly correct, which is a memorably confusing way to fail.
-            gl.VertexAttribDivisor(self.position, 0);
-            gl.VertexAttribDivisor(self.uvq, 0);
-
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a mesh is thousands of vertices, not billions"
-            )]
-            let count = mesh.vertices.len() as i32;
-            gl.DrawArrays(ffi::TRIANGLES, 0, count);
-
-            // Put back what Smithay expects to find: it does not re-bind
-            // everything per element, so leaving our buffer and attributes
-            // enabled corrupts whatever draws next.
-            gl.DisableVertexAttribArray(self.position);
-            gl.DisableVertexAttribArray(self.uvq);
-            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
-            gl.BindTexture(ffi::TEXTURE_2D, 0);
-            gl.UseProgram(0);
-        }
-    }
-}
-
-unsafe fn compile_stage(
-    gl: &ffi::Gles2,
-    kind: ffi::types::GLenum,
-    source: &str,
-) -> Option<ffi::types::GLuint> {
-    unsafe {
-        let shader = gl.CreateShader(kind);
-        let length = i32::try_from(source.len()).unwrap_or_default();
-        gl.ShaderSource(
-            shader,
-            1,
-            [source.as_ptr().cast()].as_ptr(),
-            &raw const length,
-        );
-        gl.CompileShader(shader);
-
-        let mut compiled = 0;
-        gl.GetShaderiv(shader, ffi::COMPILE_STATUS, &raw mut compiled);
-        if compiled == 0 {
-            tracing::error!(kind, "a warp shader did not compile");
-            gl.DeleteShader(shader);
-            return None;
-        }
-        Some(shader)
     }
 }
 

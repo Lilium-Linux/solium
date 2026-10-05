@@ -240,34 +240,55 @@ impl Drawn {
 /// underneath a bind is the frozen-compositor failure above.
 ///
 /// Two lists rather than one keyed by kind, because they are different things:
-/// a warp keeps only a texture, and a masked client keeps a texture, the size
-/// it was captured at, a radius in physical pixels and the program to draw it
-/// through. See [`crate::pass::Pass`].
+/// a warp keeps a texture and the program to draw it through, and a masked
+/// client keeps a texture, the size it was captured at, a radius in physical
+/// pixels and the program to draw it through. See [`crate::pass::Pass`].
 #[derive(Default)]
 pub(crate) struct Prepared {
-    warps: Vec<(Window, GlesTexture)>,
+    warps: Vec<(Window, GlesTexture, crate::warp::Program)>,
     passes: Vec<(Window, crate::pass::Pass)>,
 }
 
+/// What `prepare` does with a pane. `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Route {
+    /// Captured, and drawn through the warp.
+    Warp,
+    /// The flat path, through its style's client pass if it has one.
+    Flat,
+}
+
+/// Warp a pane only when it is deformed **and** there is a program to warp it
+/// with; otherwise it takes the flat path, where a missing warp costs a tilt
+/// and never the window.
+pub(crate) fn route(warped: bool, program: bool) -> Route {
+    if warped && program {
+        Route::Warp
+    } else {
+        Route::Flat
+    }
+}
+
 impl Prepared {
-    /// Lend the texture captured for `window`, if there is one.
+    /// Lend the texture captured for `window`, and the program to draw it
+    /// through, if there is one.
     ///
     /// Lent rather than taken: with more than one monitor `elements` runs once
     /// per output, and a texture removed by the first one would leave a
     /// deformed window undrawn on every other screen. `GlesTexture` is a
-    /// handle, so the clone is a refcount.
-    fn texture(&self, window: &Window) -> Option<GlesTexture> {
+    /// handle, so the clone is a refcount, and the program is GL names.
+    fn warp(&self, window: &Window) -> Option<(GlesTexture, crate::warp::Program)> {
         self.warps
             .iter()
-            .find(|(each, _)| each == window)
-            .map(|(_, texture)| texture.clone())
+            .find(|(each, _, _)| each == window)
+            .map(|(_, texture, program)| (texture.clone(), *program))
     }
 
     /// The pass captured for `window`, if its style asked for one.
     ///
     /// `None` for every window on a machine nobody has styled, and it is the
     /// answer that keeps the ordinary client on the path it has always taken.
-    /// Borrowed rather than cloned for the same reason `texture` is lent: one
+    /// Borrowed rather than cloned for the same reason `warp` lends: one
     /// capture is placed once per output the window is on.
     fn pass(&self, window: &Window) -> Option<&crate::pass::Pass> {
         self.passes
@@ -402,12 +423,22 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // drawn on a 2x screen is the blur this whole change exists to remove
         // -- and, for a pass, the radius that is right on one screen and wrong
         // on the other.
-        if !frame.matrix.is_identity() || state.aimed_at(frame.deform).is_some() {
+        //
+        // A deformed window with no warp program takes the flat path below
+        // instead of being captured for a warp that cannot be drawn:
+        // `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
+        let warped = !frame.matrix.is_identity() || state.aimed_at(frame.deform).is_some();
+        let program = if warped {
+            state.programs.warp(renderer)
+        } else {
+            None
+        };
+        if let (Route::Warp, Some(program)) = (route(warped, program.is_some()), program) {
             let scale = state.scale_of(outer);
             if let Some((texture, _size)) =
                 crate::offscreen::capture(state, renderer, pane, &window, scale)
             {
-                warps.push((window, texture));
+                warps.push((window, texture, program));
             }
             continue;
         }
@@ -1255,7 +1286,7 @@ fn panes(
         if (!frame.matrix.is_identity() || aimed.is_some())
             && let Some(mesh) =
                 crate::warp::mesh(frame.rect, frame.matrix, aimed, frame.pivot, scale)
-            && let Some(texture) = prepared.texture(&window)
+            && let Some((texture, program)) = prepared.warp(&window)
         {
             elements.push(Element::Warped(crate::warp::Warp::new(
                 Id::new(),
@@ -1263,6 +1294,7 @@ fn panes(
                 texture,
                 mesh,
                 frame.opacity,
+                program,
             )));
             continue;
         }
@@ -2378,6 +2410,16 @@ pub(crate) fn ratio(drawn: f64, real: i32) -> f64 {
 mod tests {
     use super::{Drawn, Fit, Fitted, Painted, by_depth, fit, fitted, origin_at, ratio};
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **A window whose warp has no program is not captured**, and goes the
+    /// flat way, rounded corners included, rather than being drawn as nothing.
+    #[test]
+    fn a_window_whose_warp_has_no_program_is_drawn_flat() {
+        use super::{Route, route};
+        assert_eq!(route(true, true), Route::Warp);
+        assert_eq!(route(true, false), Route::Flat, "no program, no warp");
+        assert_eq!(route(false, true), Route::Flat, "nothing to warp");
+    }
 
     /// **#133: what a tiled client's surfaces become on their way to the
     /// damage tracker**, with smithay's own wrappers and a stand-in surface.
