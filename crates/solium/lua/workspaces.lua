@@ -524,11 +524,25 @@ if actions then
     end)
 end
 
--- A new window belongs to the workspace its own monitor is showing.
+-- A new window belongs to the workspace its own monitor is showing, and is
+-- declared there at once.
+--
+-- **`"open"` is the only event some windows ever see.** `"layout"`, which the
+-- handler below also declares from, fires only while a layout is arranging
+-- something -- so a *floating* window (`modes.lua`'s own default, with no
+-- layout registered at all) never gets one. Without the `declare()` here, a
+-- floating window's row never carries a `workspace`, forever rather than for
+-- one frame, because nothing else ever asks: `workspaces.of` (and
+-- `workspaces.at`'s fallback) already had the right answer, live, which is
+-- why `search.lua`'s own query of it was never wrong -- only a hosted shell
+-- reading the *published* `Workspaces`/`WindowList` was, since publishing is
+-- this call's job and nobody else's.
+-- `a_window_that_opens_while_floating_is_declared_with_no_relayout_to_ask_for_it`.
 sol.on("open", function(id)
     if workspaces.settings.follow_new_windows then
         workspaces.of[id] = workspaces.on(monitors.of(id))
     end
+    workspaces.declare()
 end)
 
 -- An application you launched was already running, and answered by bringing

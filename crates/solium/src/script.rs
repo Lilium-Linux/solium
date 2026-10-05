@@ -8188,6 +8188,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **A window that opens while floating (the default mode) is declared
+    /// on the workspace its monitor shows too, with no `relayout` to ask for
+    /// it**: `"open"` is the only event a floating window ever sees, since
+    /// nothing arranges it, so a hosted shell reading `Workspaces`/
+    /// `WindowList` must learn its workspace from `"open"` alone, not only
+    /// from the `"layout"` a tiling mode would have fired next
+    /// (`qml/preview/WindowChips.qml` read `Workspaces.showing(monitor).id`
+    /// and never saw a window opened this way).
+    #[test]
+    fn a_window_that_opens_while_floating_is_declared_with_no_relayout_to_ask_for_it() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-workspaces-floating-open",
+            "return { workspaces = { per_monitor = true } }",
+        ) else {
+            return;
+        };
+        let _ = scripts.startup();
+        let _ = scripts.monitors_changed(one_screen(&[]));
+        // Only `opened`, exactly what a floating window gets: nothing here
+        // asks for a layout.
+        let outcome = scripts.opened(9, one_screen(&[9]));
+        let windows = outcome
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::Workspaces(declared) => Some(declared.windows.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            windows,
+            Some(std::collections::BTreeMap::from([(
+                9,
+                vec!["1".to_owned()]
+            )])),
+            "a floating window's open must declare its workspace by itself"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **The declared arrangement is the shape the workspaces make**: the
     /// shipped row of four is four by one, not the grid's `rows`; a column
     /// is one wide; and a row of none is the one workspace there is.
