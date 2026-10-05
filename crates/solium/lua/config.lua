@@ -141,6 +141,13 @@ local defaults = {
     -- Turns it off. Naming your own `shell.scene` above, or `user.lua`'s own
     -- shell, always wins over it either way -- this only ever fills in a
     -- default nothing else set.
+    --
+    -- A table instead of `true` reaches the top dock
+    -- (`lua/preview/dock.lua`, 04-ui.md §4.6): `preview = { dock = {
+    -- pinned = { "org.mozilla.firefox", "kitty" }, visibility = "always",
+    -- icon_size = 48 } }`. `pinned` is a list of desktop ids; left unset,
+    -- the dock picks the first installed terminal, file manager and browser
+    -- itself. `visibility` is `"always"` or `"autohide"` (the default).
     preview = true,
 
     -- The keyboard: its xkb layouts (`layout`, `variant`, `options`, `model`,

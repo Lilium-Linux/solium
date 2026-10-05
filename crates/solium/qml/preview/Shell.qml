@@ -14,10 +14,25 @@ import Solium
 Item {
     id: root
 
+    // `lua/preview/dock.lua`'s settings, written here by name
+    // (`shell.lua`'s generic `properties` passthrough): `undefined` for
+    // `dockPinned` until it does, which is how `Dock.qml` tells "nothing
+    // configured, compute the default" from "configured, even to an empty
+    // list".
+    property var dockPinned
+    property string dockVisibility: "autohide"
+    property int dockIconSize: 40
+
     // Keep windows off the bar's strip. A resting value, never an animated
     // one (docs/shell-boundary.md, "Room of its own"): islands are 36 tall,
     // 6 above the edge.
     Solium.surface.reserve.bottom: 42
+
+    Dock {
+        pinned: root.dockPinned
+        visibility: root.dockVisibility
+        iconSize: root.dockIconSize
+    }
 
     Row {
         id: leading

@@ -23,6 +23,11 @@ function preview.apply()
     if not config.shell.scene then
         config.shell.scene = "preview/Shell.qml"
     end
+    -- The top dock's own policy (pins, visibility): see its module doc for
+    -- why it is a separate file and why it runs after the line above, not
+    -- before it (it reads and writes `config.shell`, which this function
+    -- just gave a default `scene`).
+    require("preview.dock")
 end
 
 preview.apply()
