@@ -253,6 +253,7 @@ reads one that file does not list.
 | `SOLIUM_TERMINAL=<command line>` | The terminal `super+return` opens, split on spaces. | |
 | `SOLIUM_PANE=<name or path>` | The frame style for this run. | |
 | `SOLIUM_FENCE_WAIT=off` | A window capture drops its fence instead of waiting for it on the CPU. The default waits, and each session's log says which it ran with. | |
+| `SOLIUM_RECAPTURE=always` | Draw every window capture (a warp's, a rounded client's) on every pass, as before captures were kept until what they show changes. For an A/B on one build, and the control of `dev/pacing-nested.sh`'s capture count. | |
 | `SOLIUM_PACING` | Say where a pass's time went, on passes that overran the tightest monitor's frame; with it, GPU time, clocks and late flips. Misses are counted without it. | |
 | `SOLIUM_TRACE=<path>` | One JSON line per pass and per flip, and `SOLIUM_PACING` on. See *Measuring frame pacing on a TTY*. | |
 | `SOLIUM_QML=<mode>` | `auto`, `gpu` or `software`; see *QML on the GPU*. | |
@@ -472,9 +473,12 @@ client to open, and a gate that cannot run headless is a gate that gets skipped.
 `dev/fence-check.sh` captures the same two windows with the capture's fence
 wait on twice, off once, and tilted a degree more once, and fails unless the
 first three are byte-identical and the fourth is not. Both windows are rounded
-and the first is tilted, so a capture runs for each on every frame. A race that
-shows once in several hundred frames is wirecheck's to catch (cases 11c and
-11d), not this.
+and the first is tilted, so a capture runs for each on every frame. Every run
+sets `SOLIUM_RECAPTURE=always`: the windows' content is fixed, so a kept capture
+would be drawn once at startup and the fence wait would have nothing to skip on
+the frames compared. Forced, every capture is drawn, and waited for or not, on
+every frame. A race that shows once in several hundred frames is wirecheck's to
+catch (cases 11c and 11d), not this.
 
 `dev/pulse-control.sh` runs one focused window in the `pulse` style nested and
 fails unless two captures 150 ms apart differ: the known-animating control a

@@ -215,8 +215,14 @@ window keeps its size. `render::prepare` builds every capture's elements first,
 then binds a 1x1 carrier once and draws each capture into its target, a frame
 each, so nothing that draws a capture can run Qt.
 
-The texture is the cost. Every visible rounded window pays a pass every frame,
-which is why `render::prepare` captures no pane that no monitor shows. What is
+A capture records what it was drawn from (each element's id, commit, geometry,
+source, alpha and transform) and is drawn again only when that changes, keeping
+one id for life and moving its commit only when redrawn. So a still rounded
+window costs no pass and no damage, and one whose client is painting pays a pass
+a commit. `SOLIUM_RECAPTURE=always` draws every capture on every pass, as before.
+
+The texture is the cost. Every visible rounded window keeps one, which is why
+`render::prepare` captures no pane that no monitor shows. What is
 beneath a node, the input a blur would need, is named in `fragment.rs` and
 nothing constructs it yet; rounded corners are the one effect there is.
 

@@ -1,11 +1,18 @@
 //! A pane's captures, each kept in a pooled target between passes.
 //!
-//! Task 17 keys each one on what it was drawn from; for now a capture is a
-//! target held for its kind, given back when the pane stops needing it.
+//! Each records what it was drawn from ([`Inputs`]) and is drawn again only
+//! when that differs (Ruling 9); it keeps one id for life and moves its commit
+//! only when redrawn, so a capture of a still window is neither drawn nor
+//! damaged. `tests::a_redrawn_capture_moves_its_commit_and_keeps_its_id`,
+//! `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`.
 
 use smithay::{
-    backend::renderer::gles::GlesTexture,
-    utils::{Physical, Size},
+    backend::renderer::{
+        element::{Element, Id},
+        gles::GlesTexture,
+        utils::CommitCounter,
+    },
+    utils::{Physical, Rectangle, Scale, Size, Transform},
 };
 
 use crate::pool::{Alloc, Pool, Target};
@@ -21,15 +28,111 @@ pub(crate) enum Kind {
     Client,
 }
 
-/// One capture a pane keeps.
+/// One element a capture was drawn from: what the damage tracker itself
+/// compares (smithay `damage/mod.rs`), so this asks the tracker's question.
+#[derive(Clone, Debug, PartialEq)]
+struct Seen {
+    id: Id,
+    commit: CommitCounter,
+    geometry: Rectangle<i32, Physical>,
+    /// The source rectangle's four floats, as bits: a crop that moves by a
+    /// fraction is a change.
+    src: [u64; 4],
+    alpha: u32,
+    transform: Transform,
+}
+
+/// What a capture was drawn from: enough to know that drawing it again would
+/// change no pixel. `tests::a_capture_of_another_kind_at_the_same_size_is_stale`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Inputs {
+    kind: Kind,
+    size: Size<i32, Physical>,
+    scale: u64,
+    seen: Vec<Seen>,
+}
+
+impl Inputs {
+    pub(crate) fn of<E: Element>(
+        kind: Kind,
+        size: Size<i32, Physical>,
+        scale: f64,
+        elements: &[E],
+    ) -> Self {
+        let output = Scale::from(scale);
+        let seen = elements
+            .iter()
+            .map(|element| {
+                let src = element.src();
+                Seen {
+                    id: element.id().clone(),
+                    commit: element.current_commit(),
+                    geometry: element.geometry(output),
+                    src: [
+                        src.loc.x.to_bits(),
+                        src.loc.y.to_bits(),
+                        src.size.w.to_bits(),
+                        src.size.h.to_bits(),
+                    ],
+                    alpha: element.alpha().to_bits(),
+                    transform: element.transform(),
+                }
+            })
+            .collect();
+        Self {
+            kind,
+            size,
+            scale: scale.to_bits(),
+            seen,
+        }
+    }
+}
+
+/// One capture a pane keeps: a target, the id and commit the element drawn
+/// from it carries, and what it was last drawn from.
 #[derive(Debug)]
 pub(crate) struct Capture<T = Target> {
+    id: Id,
+    commit: CommitCounter,
     target: Option<T>,
+    drawn_from: Option<Inputs>,
 }
 
 impl<T> Default for Capture<T> {
     fn default() -> Self {
-        Self { target: None }
+        Self {
+            id: Id::new(),
+            commit: CommitCounter::default(),
+            target: None,
+            drawn_from: None,
+        }
+    }
+}
+
+impl<T> Capture<T> {
+    /// Whether drawing it now could change a pixel. `tests::a_capture_never_drawn_is_stale`.
+    pub(crate) fn stale(&self, inputs: &Inputs) -> bool {
+        self.target.is_none() || self.drawn_from.as_ref() != Some(inputs)
+    }
+
+    /// It was drawn into `target` from `inputs`.
+    /// `tests::a_redrawn_capture_moves_its_commit_and_keeps_its_id`.
+    pub(crate) fn drawn(&mut self, target: T, inputs: Inputs) {
+        self.target = Some(target);
+        self.drawn_from = Some(inputs);
+        self.commit.increment();
+    }
+
+    pub(crate) fn id(&self) -> &Id {
+        &self.id
+    }
+
+    pub(crate) fn commit(&self) -> CommitCounter {
+        self.commit
+    }
+
+    pub(crate) fn target(&self) -> Option<&T> {
+        self.target.as_ref()
     }
 }
 
@@ -55,24 +158,12 @@ impl<T: Clone> Capture<Target<T>> {
         pool.target(alloc, size)
     }
 
-    /// Keep `target` as this capture's.
-    pub(crate) fn hold(&mut self, target: Target<T>) {
-        self.target = Some(target);
-    }
-
     /// Give the target back. `tests::a_pane_that_stops_warping_gives_the_texture_back`.
     pub(crate) fn release(&mut self, pool: &mut Pool<T>) {
         if let Some(target) = self.target.take() {
             pool.give_back(target);
         }
-    }
-
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read once a kept capture is reused (Task 17)")
-    )]
-    pub(crate) fn target(&self) -> Option<&Target<T>> {
-        self.target.as_ref()
+        self.drawn_from = None;
     }
 }
 
@@ -118,10 +209,42 @@ impl<T: Clone> Captures<T> {
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
     use smithay::utils::{Physical, Size};
 
-    use super::{Captures, Kind};
+    use super::{Capture, Captures, Inputs, Kind};
     use crate::pool::{Alloc, Pool};
+
+    fn nothing(kind: Kind) -> Inputs {
+        Inputs::of::<SolidColorRenderElement>(kind, size(1150, 850), 1.0, &[])
+    }
+
+    /// The kind is in the key: a pane switching between a warp and a client
+    /// capture at the same size does not reuse the other's picture.
+    #[test]
+    fn a_capture_of_another_kind_at_the_same_size_is_stale() {
+        let mut capture = Capture::<u32>::default();
+        capture.drawn(1, nothing(Kind::Pane));
+        assert!(!capture.stale(&nothing(Kind::Pane)));
+        assert!(capture.stale(&nothing(Kind::Client)));
+    }
+
+    /// **A redrawn capture moves its commit and keeps its id**, which is what
+    /// lets the damage tracker skip one that did not change.
+    #[test]
+    fn a_redrawn_capture_moves_its_commit_and_keeps_its_id() {
+        let mut capture = Capture::<u32>::default();
+        let (id, before) = (capture.id().clone(), capture.commit());
+        capture.drawn(1, nothing(Kind::Pane));
+        assert_eq!(capture.id(), &id);
+        assert_ne!(capture.commit(), before);
+    }
+
+    /// A capture with nothing in it is stale, whatever it is asked.
+    #[test]
+    fn a_capture_never_drawn_is_stale() {
+        assert!(Capture::<u32>::default().stale(&nothing(Kind::Pane)));
+    }
 
     /// A GBM buffer freed when its last handle goes, as `offscreen`'s tests
     /// modelled it: a `GlesTexture` is an `Arc`, and the memory comes back
@@ -205,7 +328,9 @@ mod tests {
                 .get_mut(Kind::Pane)
                 .target_for(&mut pool, &mut alloc, size(1150, 850))
                 .expect("a target");
-            captures.get_mut(Kind::Pane).hold(target);
+            captures
+                .get_mut(Kind::Pane)
+                .drawn(target, nothing(Kind::Pane));
         }
         assert_eq!(
             alloc.made, 1,
@@ -223,12 +348,16 @@ mod tests {
             .get_mut(Kind::Pane)
             .target_for(&mut pool, &mut alloc, size(1150, 850))
             .expect("a target");
-        captures.get_mut(Kind::Pane).hold(first);
+        captures
+            .get_mut(Kind::Pane)
+            .drawn(first, nothing(Kind::Pane));
         let second = captures
             .get_mut(Kind::Pane)
             .target_for(&mut pool, &mut alloc, size(1200, 850))
             .expect("a target");
-        captures.get_mut(Kind::Pane).hold(second);
+        captures
+            .get_mut(Kind::Pane)
+            .drawn(second, nothing(Kind::Pane));
         assert_eq!(
             alloc.freed.get(),
             1,
@@ -245,7 +374,9 @@ mod tests {
             .get_mut(Kind::Pane)
             .target_for(&mut pool, &mut alloc, size(1150, 850))
             .expect("a target");
-        captures.get_mut(Kind::Pane).hold(target);
+        captures
+            .get_mut(Kind::Pane)
+            .drawn(target, nothing(Kind::Pane));
         captures.keep_only(None, &mut pool);
         assert_eq!(alloc.freed.get(), 1);
         assert!(captures.get_mut(Kind::Pane).target().is_none());
@@ -261,12 +392,16 @@ mod tests {
             .get_mut(Kind::Pane)
             .target_for(&mut pool, &mut alloc, size(1150, 900))
             .expect("a target");
-        captures.get_mut(Kind::Pane).hold(warp);
+        captures
+            .get_mut(Kind::Pane)
+            .drawn(warp, nothing(Kind::Pane));
         let client = captures
             .get_mut(Kind::Client)
             .target_for(&mut pool, &mut alloc, size(1136, 820))
             .expect("a target");
-        captures.get_mut(Kind::Client).hold(client);
+        captures
+            .get_mut(Kind::Client)
+            .drawn(client, nothing(Kind::Client));
         captures.keep_only(Some(Kind::Client), &mut pool);
         assert!(captures.get_mut(Kind::Pane).target().is_none());
         assert!(

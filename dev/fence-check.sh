@@ -17,6 +17,11 @@
 # is no systematic difference. A race that shows once in several hundred
 # frames is wirecheck's to catch (cases 11c and 11d), not this.
 #
+# Every run sets SOLIUM_RECAPTURE=always: the windows' content is fixed, so a
+# kept capture would be drawn once at startup and the fence wait would have
+# nothing to skip on the frames compared. Forced, every capture is drawn, and
+# waited for or not, on every frame.
+#
 #   SOLIUM_CHECK_DIR=/somewhere   keep the captures and the logs
 set -uo pipefail
 
@@ -55,7 +60,7 @@ shoot() {
     local dir="$out/$name"
     mkdir -p "$dir"
     rm -f "$dir"/f-*
-    env "$@" SOLIUM_LUA_INIT="$here/scene.lua" SOLIUM_QML=software \
+    env "$@" SOLIUM_RECAPTURE=always SOLIUM_LUA_INIT="$here/scene.lua" SOLIUM_QML=software \
         SOLIUM_TRIGGER_AT="$TILT_AT:super+t" SOLIUM_CAPTURE="$dir/f" \
         SOLIUM_CAPTURE_AT="$CAPTURE_AT" SOLIUM_CAPTURE_FRAMES="$FRAMES" SOLIUM_CAPTURE_INTERVAL=100 \
         "$binary" >"$dir/log" 2>&1 &

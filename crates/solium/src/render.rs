@@ -471,7 +471,13 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
                     .keep_only(Some(crate::keyed::Kind::Pane), pool);
             }
             if let Some(job) = crate::offscreen::pane_job(state, renderer, pane, &window, scale) {
-                jobs.push((job, Then::Warp(window, program)));
+                // Already drawn from exactly this: no frame (`offscreen::kept`,
+                // `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`).
+                if let Some((texture, _id, _commit)) = crate::offscreen::kept(state, &job) {
+                    warps.push((window, texture, program));
+                } else {
+                    jobs.push((job, Then::Warp(window, program)));
+                }
             }
             continue;
         }
@@ -483,17 +489,24 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // already has. See `flat_window_elements`.
         if let Some((job, then)) = client_job_for(state, renderer, pane, &window, outer, &declared)
         {
-            jobs.push((job, then));
+            match (crate::offscreen::kept(state, &job), then) {
+                (Some((texture, id, commit)), Then::Pass(window, pending)) => {
+                    passes.push((window, pending.with(texture, id, commit)));
+                }
+                (_, then) => jobs.push((job, then)),
+            }
             continue;
         }
         release(state);
     }
 
     // Every list is built: draw them all, on one carrier.
-    for (then, texture) in crate::offscreen::draw(state, renderer, jobs) {
+    for (then, texture, id, commit) in crate::offscreen::draw(state, renderer, jobs) {
         match then {
             Then::Warp(window, program) => warps.push((window, texture, program)),
-            Then::Pass(window, pass) => passes.push((window, pass.with(texture))),
+            Then::Pass(window, pending) => {
+                passes.push((window, pending.with(texture, id, commit)));
+            }
         }
     }
     Prepared { warps, passes }

@@ -611,6 +611,9 @@ pub(crate) struct Pass {
     /// [`covers`], which answers it, and [`opaque_of`], which reads it.
     opaque: bool,
     program: GlesTexProgram,
+    /// The capture's own id and commit: see [`Pass::at`].
+    id: Id,
+    commit: CommitCounter,
 }
 
 impl Pass {
@@ -618,6 +621,10 @@ impl Pass {
     ///
     /// `scale` is the monitor the capture was taken at, and is the one number
     /// that turns `effect`'s logical radii into the shader's physical ones.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a capture's texture, its identity, and what it is drawn through"
+    )]
     pub(crate) fn new(
         texture: GlesTexture,
         size: Size<i32, Physical>,
@@ -625,6 +632,8 @@ impl Pass {
         scale: f64,
         opaque: bool,
         program: GlesTexProgram,
+        id: Id,
+        commit: CommitCounter,
     ) -> Self {
         Self {
             texture,
@@ -632,21 +641,21 @@ impl Pass {
             radii: physical_radii(effect, scale),
             opaque,
             program,
+            id,
+            commit,
         }
     }
 
     /// This pass, placed at `dst` on one output, at the pane's opacity.
     ///
-    /// A fresh [`Id`] every time, exactly as `warp.rs` does, and for the
-    /// stronger version of its reason: the capture is cleared and redrawn on
-    /// every frame, so the texture behind this element is new pixels every
-    /// frame and full damage is the truth. A stable id with an unchanged
-    /// [`CommitCounter`] would report *no* damage after the first frame, and a
-    /// window whose client was painting would freeze on screen.
+    /// The capture's own id and commit: the id is the pane's for life, and the
+    /// commit moves only when the capture was drawn again, so a still client
+    /// is not redrawn and neither is anything under it.
+    /// `keyed::tests::a_redrawn_capture_moves_its_commit_and_keeps_its_id`.
     pub(crate) fn at(&self, dst: Rectangle<i32, Physical>, alpha: f32) -> Rounded {
         Rounded {
-            id: Id::new(),
-            commit: CommitCounter::default(),
+            id: self.id.clone(),
+            commit: self.commit,
             texture: self.texture.clone(),
             size: self.size,
             dst,
@@ -689,7 +698,9 @@ impl Pending {
         }
     }
 
-    pub(crate) fn with(self, texture: GlesTexture) -> Pass {
+    /// The pass, once its capture is in `texture`, with the capture's id and
+    /// commit (`offscreen::draw`, or `offscreen::kept` for one not drawn again).
+    pub(crate) fn with(self, texture: GlesTexture, id: Id, commit: CommitCounter) -> Pass {
         Pass::new(
             texture,
             self.size,
@@ -697,6 +708,8 @@ impl Pending {
             self.scale,
             self.opaque,
             self.program,
+            id,
+            commit,
         )
     }
 }

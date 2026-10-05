@@ -28,8 +28,9 @@ use smithay::{
         allocator::Fourcc,
         renderer::{
             Bind, Color32F, Frame as _, Offscreen, Renderer,
-            element::{Element as _, RenderElement},
+            element::{Element as _, Id, RenderElement},
             gles::{GlesRenderer, GlesTexture},
+            utils::CommitCounter,
         },
     },
     desktop::Window,
@@ -101,6 +102,9 @@ pub(crate) struct Job {
     pub(crate) size: Size<i32, Physical>,
     pub(crate) scale: f64,
     pub(crate) elements: Vec<crate::render::Element>,
+    /// What the capture is drawn from, built from `elements`: a capture that
+    /// was last drawn from exactly this is kept ([`kept`]).
+    pub(crate) inputs: crate::keyed::Inputs,
 }
 
 impl std::fmt::Debug for Job {
@@ -145,12 +149,15 @@ pub(crate) fn pane_job(
         tracing::warn!("a warped window had nothing to draw offscreen");
         return None;
     }
+    let (kind, size) = (crate::keyed::Kind::Pane, pixels(outer, scale));
+    let inputs = crate::keyed::Inputs::of(kind, size, scale, &elements);
     Some(Job {
         pane,
-        kind: crate::keyed::Kind::Pane,
-        size: pixels(outer, scale),
+        kind,
+        size,
         scale,
         elements,
+        inputs,
     })
 }
 
@@ -246,13 +253,16 @@ pub(crate) fn client_job(
             )
         }),
     );
+    let kind = crate::keyed::Kind::Client;
+    let inputs = crate::keyed::Inputs::of(kind, size, scale, &elements);
     Some((
         Job {
             pane,
-            kind: crate::keyed::Kind::Client,
+            kind,
             size,
             scale,
             elements,
+            inputs,
         },
         opaque,
     ))
@@ -262,15 +272,16 @@ pub(crate) fn client_job(
 /// capture, every element list already built so nothing here runs Qt.
 ///
 /// Each job comes with what it becomes once drawn (`then`), handed back beside
-/// its texture; a job that could not be drawn is left out, and its window is
-/// drawn the way it would be with no capture at all. `dev/fence-check.sh`
+/// its texture and the capture's id and commit, the commit moved by this draw;
+/// a job that could not be drawn is left out, and its window is drawn the way
+/// it would be with no capture at all. `dev/fence-check.sh`
 /// checks the pictures, a warp and a client pass on one carrier, byte for byte
 /// with the fence wait on and off.
 pub(crate) fn draw<T>(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     jobs: Vec<(Job, T)>,
-) -> Vec<(T, GlesTexture)> {
+) -> Vec<(T, GlesTexture, Id, CommitCounter)> {
     // Nothing captured this pass, which is every pass of an unstyled,
     // unwarped desktop: no carrier bound, no framebuffer released, no context
     // made current, as before captures went through the pool. Only targets
@@ -335,9 +346,15 @@ pub(crate) fn draw<T>(
                         if drawn {
                             crate::pacing::captured();
                             if let Some(held) = state.panes.get_mut(job.pane) {
-                                held.captures_mut().get_mut(job.kind).hold(target.clone());
+                                let capture = held.captures_mut().get_mut(job.kind);
+                                capture.drawn(target.clone(), job.inputs);
+                                done.push((
+                                    then,
+                                    target.texture().clone(),
+                                    capture.id().clone(),
+                                    capture.commit(),
+                                ));
                             }
-                            done.push((then, target.texture().clone()));
                         }
                     }
                 }
@@ -350,6 +367,31 @@ pub(crate) fn draw<T>(
     crate::warp::release_framebuffer(renderer);
     state.pool.sweep(renderer);
     done
+}
+
+/// The capture `job` would draw, when it is already drawn from exactly this:
+/// no frame, no GPU work, and the same id and commit as last pass.
+/// `keyed::tests::a_capture_never_drawn_is_stale` and
+/// `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`
+/// are the property; `SOLIUM_RECAPTURE=always` turns it off
+/// (`dev::tests::recapture_always_is_asked_for_by_name`).
+pub(crate) fn kept(state: &mut Solium, job: &Job) -> Option<(GlesTexture, Id, CommitCounter)> {
+    if crate::dev::recapture_always() {
+        return None;
+    }
+    let capture = state
+        .panes
+        .get_mut(job.pane)?
+        .captures_mut()
+        .get_mut(job.kind);
+    if capture.stale(&job.inputs) {
+        return None;
+    }
+    Some((
+        capture.target()?.texture().clone(),
+        capture.id().clone(),
+        capture.commit(),
+    ))
 }
 
 /// A pane capturing nothing this pass gives every capture back.
@@ -578,18 +620,21 @@ mod tests {
         i64::from(size.w) * i64::from(size.h) * 4
     }
 
-    /// **The scale is not separately part of the key, and does not need to be.**
+    /// **The scale is not separately part of a target's size, and does not
+    /// need to be.**
     ///
     /// `qml::paint`'s `Drawn` carries the pixels *and* the scale because one
     /// buffer size holds two different pictures at two scales — the host is
-    /// handed both and lays the scene out from the pair. What a pane's
-    /// capture keeps (`keyed::Captures`) is not a picture: `draw` clears and
-    /// redraws the whole target on every frame, so a buffer with the right
-    /// number of pixels is the right buffer whatever last drew into it.
+    /// handed both and lays the scene out from the pair. A target a pane's
+    /// capture holds (`keyed::Captures`) is not a picture: `draw` clears and
+    /// redraws the whole target whenever it draws it, so a buffer with the
+    /// right number of pixels is the right buffer whatever last drew into it.
+    /// Whether it is drawn again at all is `keyed::Inputs`' question
+    /// (`keyed::tests::a_capture_of_another_kind_at_the_same_size_is_stale`).
     ///
-    /// The scale still decides the key, through the size it multiplies, which
-    /// is what makes a window crossing to a 2x monitor a miss rather than a
-    /// window drawn at half its resolution.
+    /// The scale still decides the target, through the size it multiplies,
+    /// which is what makes a window crossing to a 2x monitor a miss rather
+    /// than a window drawn at half its resolution.
     #[test]
     fn a_window_crossing_to_a_2x_monitor_asks_for_a_different_buffer() {
         let outer = window();
@@ -624,7 +669,10 @@ mod tests {
                 .get_mut(kind)
                 .target_for(&mut pool, &mut made, pixels(outer, scale))
                 .expect("a counting allocator cannot fail");
-            captures.get_mut(kind).hold(target);
+            let inputs = crate::keyed::Inputs::of::<
+                smithay::backend::renderer::element::solid::SolidColorRenderElement,
+            >(kind, pixels(outer, scale), scale, &[]);
+            captures.get_mut(kind).drawn(target, inputs);
         }
         assert_eq!(
             made.0, 2,

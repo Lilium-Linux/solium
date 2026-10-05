@@ -7660,6 +7660,93 @@ end)"#,
         );
     }
 
+    /// **A capture whose surface tree has not committed is not drawn again.**
+    /// Its key is built from the same elements the capture draws, on
+    /// smithay's `DummyRenderer`, so this needs no GPU.
+    #[test]
+    fn a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (_pane, tile) = tiled_alone(&mut state, &window);
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let size = (tile.size.w, tile.size.h).into();
+        let key = |renderer: &mut DummyRenderer| {
+            let elements =
+                crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
+            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+        };
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, key(&mut renderer));
+        assert!(
+            !capture.stale(&key(&mut renderer)),
+            "nothing committed, and it would be drawn again"
+        );
+    }
+
+    /// **A commit on a subsurface alone makes the capture stale**: "commits
+    /// anywhere in the surface tree" ([16] 0.4).
+    #[test]
+    fn a_commit_on_a_subsurface_alone_makes_the_capture_stale() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (_pane, tile) = tiled_alone(&mut state, &window);
+        let compositor = client.compositor.clone().expect("wl_compositor bound");
+        let subcompositor = client
+            .subcompositor
+            .clone()
+            .expect("wl_subcompositor bound");
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &surface, &qh, ());
+        subsurface.set_desync();
+        commit_buffer(&client, &qh, &child, 40, 30);
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let size = (tile.size.w, tile.size.h).into();
+        let key = |renderer: &mut DummyRenderer| {
+            let elements =
+                crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
+            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+        };
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, key(&mut renderer));
+        commit_buffer(&client, &qh, &child, 40, 30);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert!(
+            capture.stale(&key(&mut renderer)),
+            "the subsurface committed and the capture did not notice"
+        );
+    }
+
     /// **#133 review, finding 8: a menu past its parent's tile takes the
     /// press.**
     ///
