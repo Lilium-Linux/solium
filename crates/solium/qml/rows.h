@@ -336,6 +336,59 @@ private:
     bool m_ready = false;
 };
 
+/* One entry of the desktop folder: one row of `Folder` (04-ui.md §4.9). A
+ * file that leaves the folder is gone outright -- no ghost, unlike `Apps`'
+ * `Retire::Never` -- so `SoliumFolderRows` below retires it `AfterGrace`,
+ * the same lifecycle `Windows` and `Workspaces` already keep for things
+ * that come and go rather than a fixed, pinned registry. */
+class SoliumFolderEntry : public SoliumRow
+{
+    Q_OBJECT
+    Q_PROPERTY(bool present READ isPresent NOTIFY changed)
+    Q_PROPERTY(bool valid READ isPresent NOTIFY changed)
+    Q_PROPERTY(QString uri READ uri NOTIFY changed)
+    Q_PROPERTY(QString name READ name NOTIFY changed)
+    Q_PROPERTY(QString displayName READ displayName NOTIFY changed)
+    Q_PROPERTY(QString mime READ mime NOTIFY changed)
+    Q_PROPERTY(QString icon READ icon NOTIFY changed)
+    Q_PROPERTY(bool isDir READ isDir NOTIFY changed)
+    Q_PROPERTY(bool isLauncher READ isLauncher NOTIFY changed)
+    Q_PROPERTY(bool trusted READ trusted NOTIFY changed)
+    Q_PROPERTY(bool hidden READ hidden NOTIFY changed)
+    Q_PROPERTY(double modified READ modified NOTIFY changed)
+public:
+    using SoliumRow::SoliumRow;
+    bool isPresent() const { return present; }
+    /* The key role, so even a ghost reached during its 10 s grace answers
+     * its own uri -- the same reason `SoliumApp::id` reads it off `value()`
+     * rather than a cached field. */
+    QString uri() const { return value("uri").toString(); }
+    QString name() const { return value("name").toString(); }
+    QString displayName() const { return value("displayName").toString(); }
+    QString mime() const { return value("mime").toString(); }
+    QString icon() const { return value("icon").toString(); }
+    bool isDir() const { return value("isDir").toBool(); }
+    bool isLauncher() const { return value("isLauncher").toBool(); }
+    bool trusted() const { return value("trusted").toBool(); }
+    bool hidden() const { return value("hidden").toBool(); }
+    double modified() const { return value("modified").toDouble(); }
+    void announce() override { emit changed(); }
+signals:
+    void changed();
+};
+
+/* `Folder`: every entry of the desktop directory, live through inotify
+ * (`crate::folder::Watcher`). Empty, and costing nothing to scan, with no
+ * desktop directory configured (04-ui.md §4.9). */
+class SoliumFolderRows : public SoliumRows
+{
+    Q_OBJECT
+    Q_PROPERTY(QObject *entries READ entries CONSTANT)
+public:
+    SoliumFolderRows();
+    QObject *entries() { return this; }
+};
+
 /* The store for a SOLIUM_QML_ROWS_* number, built on first use.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 SoliumRows *solium_rows(int model);

@@ -37,6 +37,11 @@ SoliumRow *make_app(QObject *parent)
     return new SoliumApp(parent);
 }
 
+SoliumRow *make_folder_entry(QObject *parent)
+{
+    return new SoliumFolderEntry(parent);
+}
+
 SoliumWindow *window_at(const QAbstractItemModel *model, int row)
 {
     const auto *rows = qobject_cast<const SoliumRows *>(model);
@@ -434,6 +439,14 @@ void SoliumAppRows::setReady(bool ready)
     }
 }
 
+/* `Retire::AfterGrace`, like `Windows`: a file that leaves the desktop is
+ * gone, not a ghost -- there is no pin referencing it the way a dock pin
+ * references an `Apps` id. */
+SoliumFolderRows::SoliumFolderRows()
+    : SoliumRows(&SoliumFolderEntry::staticMetaObject, make_folder_entry, Retire::AfterGrace, "uri")
+{
+}
+
 SoliumWorkspaceList::SoliumWorkspaceList(QObject *parent) : QSortFilterProxyModel(parent)
 {
     setSourceModel(solium_rows(SOLIUM_QML_ROWS_WORKSPACES));
@@ -481,6 +494,7 @@ SoliumRows *solium_rows(int model)
     static SoliumRows *windows = nullptr;
     static SoliumRows *workspaces = nullptr;
     static SoliumRows *apps = nullptr;
+    static SoliumRows *folder = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -506,6 +520,11 @@ SoliumRows *solium_rows(int model)
             apps = new SoliumAppRows();
         }
         return apps;
+    case SOLIUM_QML_ROWS_FOLDER:
+        if (folder == nullptr) {
+            folder = new SoliumFolderRows();
+        }
+        return folder;
     default:
         return nullptr;
     }

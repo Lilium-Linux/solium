@@ -393,6 +393,71 @@ impl Solium {
                 args: argv.collect(),
             });
         }
+        // `folder.trust { uri }`: a desktop launcher may run once trusted.
+        // `uri` is looked up in `self.folder` (what the last scan actually
+        // listed) and resolved to its absolute path there, so an id outside
+        // what is on the desktop, or a non-launcher, is refused rather than
+        // trusting a path the caller merely claims is a launcher.
+        if action == "folder.trust" {
+            let uri = data.get("uri").and_then(Json::as_str).ok_or("bad-data")?;
+            let entry = self
+                .folder
+                .iter()
+                .find(|entry| entry.uri == uri)
+                .ok_or("unknown-file")?;
+            if !entry.is_launcher {
+                return Err("bad-data");
+            }
+            let absolute = crate::folder::path_from_uri(&entry.uri).ok_or("bad-data")?;
+            return Ok(Command::FolderTrust {
+                absolute: absolute.display().to_string(),
+            });
+        }
+        // `folder.open { uri }`: a trusted launcher runs its own `Exec=`;
+        // anything else runs through the default application for its MIME
+        // type -- both launched the same way `apps.launch` launches
+        // (`crate::apps::launch_argv`, `Command::Spawn`), so a file opened
+        // from the desktop gets the same clean environment and loading
+        // window a launch from the dock does.
+        if action == "folder.open" {
+            let uri = data.get("uri").and_then(Json::as_str).ok_or("bad-data")?;
+            let entry = self
+                .folder
+                .iter()
+                .find(|entry| entry.uri == uri)
+                .ok_or("unknown-file")?;
+            if entry.hidden || entry.is_dir {
+                // A folder window is `Later` (04-ui.md §4.9): nothing opens
+                // one yet.
+                return Err("unsupported");
+            }
+            let path = crate::folder::path_from_uri(&entry.uri).ok_or("bad-data")?;
+            let launch_entry = if entry.is_launcher {
+                if !entry.trusted {
+                    return Err("untrusted");
+                }
+                crate::folder::launcher_entry(&path).ok_or("unknown-file")?
+            } else {
+                let id = crate::folder::default_app_id(&entry.mime).ok_or("no-handler")?;
+                self.apps
+                    .iter()
+                    .find(|app| app.id == id)
+                    .cloned()
+                    .ok_or("no-handler")?
+            };
+            let ctx = crate::apps::LaunchContext {
+                files: vec![path.display().to_string()],
+                uris: vec![entry.uri.clone()],
+            };
+            let mut argv = crate::apps::launch_argv(&launch_entry, &ctx)
+                .map_err(|_| "bad-data")?
+                .into_iter();
+            let program = argv.next().ok_or("bad-data")?;
+            return Ok(Command::Spawn {
+                program,
+                args: argv.collect(),
+            });
+        }
         let make: fn(u64) -> Command = match action {
             "windows.focus" => |id| Command::Focus { id },
             "windows.close" => |id| Command::Close { id },

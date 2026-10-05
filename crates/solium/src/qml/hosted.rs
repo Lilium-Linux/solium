@@ -35,6 +35,7 @@ mod ffi {
         pub(super) fn solium_qml_set_status(text: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_arrangement(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_apps_ready(ready: c_int) -> c_int;
+        pub(super) fn solium_qml_set_dirs_desktop(text: *const c_char) -> c_int;
         pub(super) fn solium_qml_scene_pointer_event(
             scene: *mut super::super::ffi::Scene,
             kind: c_int,
@@ -99,6 +100,7 @@ pub(crate) enum Model {
     Windows = 1,
     Workspaces = 2,
     Apps = 3,
+    Folder = 4,
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
@@ -138,6 +140,18 @@ pub(crate) fn set_apps_ready(ready: bool) -> bool {
     touched();
     // SAFETY: no pointer, nothing to outlive.
     unsafe { ffi::solium_qml_set_apps_ready(c_int::from(ready)) != 0 }
+}
+
+/// `Solium.dirs.desktop`: `crate::folder::desktop_dir`, or `""` when nothing
+/// names one. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_dirs_desktop(text: &str) -> bool {
+    touched();
+    let Ok(text) = CString::new(text) else {
+        return false;
+    };
+    // SAFETY: `text` outlives the call; the host copies it.
+    unsafe { ffi::solium_qml_set_dirs_desktop(text.as_ptr()) != 0 }
 }
 
 /// `Workspaces.arrangement`, from JSON. Whether Qt took it.

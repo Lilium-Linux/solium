@@ -294,6 +294,25 @@ pub(crate) struct Solium {
     /// `apps.rs`'s module doc): this flag is the only rescan trigger there is.
     pub(crate) apps_scan_pending: bool,
 
+    /// The desktop folder's entries: `Folder`'s rows (04-ui.md §4.9). Empty
+    /// until the first scan, and whenever [`Self::folder_dir`] is `None`.
+    pub(crate) folder: Vec<crate::folder::Entry>,
+    /// `Solium.dirs.desktop`, resolved once and again on a reload
+    /// (`state/commands.rs::reload_from`); `None` when nothing names a
+    /// desktop directory or it is `$HOME` itself.
+    pub(crate) folder_dir: Option<std::path::PathBuf>,
+    /// True from startup, and again after a reload, until `publish_models`
+    /// has resolved [`Self::folder_dir`] and scanned it once. Unlike
+    /// [`Self::apps_scan_pending`], this is not the only rescan trigger:
+    /// [`Self::folder_watcher`] asks for one too, live.
+    pub(crate) folder_scan_pending: bool,
+    /// The live inotify watch on `folder_dir`, polled each `publish_models`.
+    pub(crate) folder_watcher: crate::folder::Watcher,
+    /// Which launchers on the desktop are trusted to run, durable across a
+    /// restart (`folder.rs`'s module doc says why a plain file rather than
+    /// `gio`'s metadata convention).
+    pub(crate) folder_trust: crate::folder::Trust,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -1101,6 +1120,11 @@ impl Solium {
             workspaces: None,
             apps: Vec::new(),
             apps_scan_pending: true,
+            folder: Vec::new(),
+            folder_dir: None,
+            folder_scan_pending: true,
+            folder_watcher: crate::folder::Watcher::new(),
+            folder_trust: crate::folder::Trust::load(),
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),
