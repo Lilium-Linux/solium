@@ -89,6 +89,43 @@ has 100 ms, and its Lua 16 MiB. One that runs longer, or holds more, is
 stopped; an effect stopped by the clock runs nothing more until it is loaded
 again. A Lua error is reported at its file and line.
 
+## Writing a `.frag`
+
+A shader file is GLSL ES 1.00 (`#version 100`), the language every program in
+Solium is written in, the warp's included. It defines one function, which is
+called for every pixel the pass draws:
+
+```glsl
+vec4 sol_effect(vec2 uv) {
+    vec4 c = sol_tex(uv);
+    return vec4(mix(c.rgb, vec3(c.a), p_amount), c.a);
+}
+```
+
+`uv` runs from 0 to 1 across the box the pass draws, (0, 0) at its top-left.
+Your file is compiled as it is, between a prelude Solium writes for the pass
+and a few lines that call `sol_effect`, and it stays a source string of its
+own, so the line numbers a compiler gives are your file's own lines. Do not
+write `#version`, a `precision` or a `uniform` named `p_…` or `sol_…`: the
+prelude has them, and a `uniform` of yours with one of those names is an
+error at its line.
+
+| Name | What it is |
+|---|---|
+| `sol_tex(uv)` | the pass's input: the previous pass's result, or the effect's first input in the first pass, clamped at its edge |
+| `sol_texel`, `sol_size` | one texel of that input, in `uv`; the size of what the pass draws, in pixels |
+| `p_<param>` | each of the effect's params, declared from `params`: a number is a `float` (an `int` with `int = true`), a boolean an `int` 0 or 1, four numbers a `vec4`; a word has none |
+| `sol_<name>(uv)`, `SOL_HAS_<name>` | another texture the effect reads, by name: `sol_self`, `sol_backdrop`, or `sol_<n>` for `state:<n>`. One the pass does not list in its `uses` reads transparent and its `SOL_HAS_<name>` is 0, so one file can be written for both cases |
+| `sol_shape(uv)`, `sol_sdf(px)` | the part's shape: its coverage, and its signed distance in pixels, negative inside, exact for a rounded box |
+| `sol_content`, `sol_to_content(uv)`, `sol_to_uv(px)`, `sol_sdf_rrect(px, size, radii)` | the part's rectangle inside the box the pass draws, the maps between `uv` and the part's pixels, and the rounded-box distance itself |
+| `sol_progress`, `sol_clamped`, `sol_direction`, `sol_seed`, `sol_time` | in a transition: its progress, which a spring may carry past 1; the same clamped to 0..1; +1 arriving, −1 leaving, 0 resizing; a random number fixed for the transition; seconds |
+| `sol_noise(p)` | value noise |
+
+A `p_` name the effect has no param for, and a `sol_` name that is none of
+these, are errors at their line, with the param you probably meant; reading a
+texture the pass does not list in its `uses` is a warning, since it reads
+transparent. Comments are skipped.
+
 ## The shipped folders
 
 None yet.
