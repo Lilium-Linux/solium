@@ -26,7 +26,12 @@
 -- empty-query suggestions ("never blank") are cut the same way
 -- `preview/dock.lua`'s own first-run pins are: `sol.store` is not here yet,
 -- so there is no usage to rank by, and faking "recent" with nothing real
--- behind it would be worse than an honestly empty panel.
+-- behind it would be worse than an honestly empty panel. A command row also
+-- carries no `icon` (unlike an app or window row), so `Search.qml`'s own
+-- delegate draws it with no leading glyph -- 04-ui.md's own mockup shows
+-- only a generic glyph there too, but this file has no generic icon name of
+-- its own to hand through the provider, so it is left off rather than
+-- invented.
 --
 -- **The layout-correction pass ("us,ru correction with no table") is not
 -- here.** 04-ui.md's own words are the tell: it wants this done "because

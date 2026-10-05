@@ -52,7 +52,18 @@ Item {
     // The panel's own, locally-assignable state, kept in step with `open`
     // whenever Lua's side of it changes -- see the property doc above.
     property bool shown: false
-    onOpenChanged: shown = open
+    // Only a genuine false->true edge on `open` is "the panel just opened".
+    // `shown` (and so `visible`, below) also flips on every monitor purely
+    // from `Solium.monitor.active` changing -- moving the pointer across
+    // monitors while a search is already open -- and resetting the field
+    // from that edge too would wipe whatever was typed on the monitor the
+    // pointer returns to. See `onVisibleChanged` below.
+    onOpenChanged: {
+        if (open) {
+            field.text = ""
+        }
+        shown = open
+    }
 
     anchors.fill: parent
     visible: root.shown && Solium.monitor.active
@@ -135,8 +146,11 @@ Item {
     // selected). Deferred, this runs after the view has settled on the new
     // model.
     onRowsChanged: Qt.callLater(function() { list.currentIndex = root.firstSelectable() })
+    // Focus only, not a reset: `visible` also flips just from this monitor
+    // becoming (or stopping being) the active one, with `open` never having
+    // gone false in between (`onOpenChanged` above is where a genuine open
+    // clears the field).
     onVisibleChanged: if (visible) {
-        field.text = ""
         field.forceActiveFocus()
     }
 
