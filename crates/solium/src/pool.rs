@@ -15,7 +15,7 @@
 //! with the target's framebuffer object bound inside: [`frame_for`]. Nothing
 //! between `render` and `finish` rebinds the draw framebuffer in smithay 0.7
 //! (`render_texture_from_to`, `draw_solid` and `clear` do not); wirecheck's
-//! case 11f pins it, and [16] decision 1's revisit at Smithay 0.8 must check
+//! case 11f pins it, and \[16\] decision 1's revisit at Smithay 0.8 must check
 //! it again.
 //!
 //! Smithay and std only, so `dev/wirecheck` includes this file.
