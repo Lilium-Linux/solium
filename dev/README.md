@@ -101,9 +101,10 @@ runs is what is checked out.
 `dev/gate.sh` checks the formatting with `cargo fmt --check`, then runs clippy
 with warnings denied, the tests and a build, then two checks on the built
 binaries that nothing else reaches: `solium --check`, which loads the Lua
-configuration, and `dev/wirecheck`, which drives the QML GPU path against the
-machine's own render node. Run `cargo fmt --all` first if the formatting step
-fails. It runs cargo natively unless told otherwise:
+configuration and builds the scenes it declares, and `dev/wirecheck`, which
+drives the QML GPU path against the machine's own render node. Run
+`cargo fmt --all` first if the formatting step fails. It runs cargo natively
+unless told otherwise:
 
 | Variable | Effect |
 |---|---|
@@ -819,8 +820,8 @@ anything in the checkout reloads the scene within half a second.
 
 `solium --check-qml <file>` loads one file without starting a compositor and
 prints `ok` or the errors Qt reported — the quick way through a chain of "type
-X unavailable" errors while writing a shell. It exits 0 either way, so read
-what it prints.
+X unavailable" errors while writing a shell. It exits with 1 when the file
+does not load.
 
 ## QML on the GPU
 
@@ -1020,11 +1021,9 @@ Five things worth knowing about the GPU path on a TTY:
 ## Running it on a TTY, as a real session
 
 The compositor picks its backend from the environment: nested when there is a
-compositor to nest in, on the hardware otherwise. Only the first argument
-chooses what Solium does, so write `solium --tty --debug-mode`, not the other
-way round, and don't pass a flag it does not know: anything else in first
-place, `--help` included, starts a compositor
-([#156](https://github.com/Lilium-Linux/solium/issues/156)).
+compositor to nest in, on the hardware otherwise. `--tty` asks for the
+hardware wherever it is on the line, and a flag Solium does not know starts
+nothing: it is refused with exit status 2. `solium --help` lists the flags.
 
 **First, from your desktop, check what the hardware offers.** This opens the
 card read-only and takes no DRM master, so it is safe to run inside a running

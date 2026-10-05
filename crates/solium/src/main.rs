@@ -10,7 +10,11 @@
 
 mod assets;
 mod capture;
+mod check;
+mod cli;
 mod clocks;
+#[cfg(test)]
+mod commit;
 mod cursor;
 mod decoration;
 mod dev;
@@ -141,126 +145,6 @@ fn log_panics() {
     }));
 }
 
-/// Load one QML file and report the outcome.
-/// Load the configuration, report what it would do, and exit.
-///
-/// Reports the bindings it registered as well as any error, because "it
-/// parsed" is not the question a ricer is asking -- "did my binding survive
-/// the edit" is.
-///
-/// ## Why a file that loads can still fail this
-///
-/// It used to answer that question for bindings alone, and answer "ok" to
-/// everything else. `config.lua` merges a `user.lua` over its defaults key by
-/// key and validated nothing, so `tilling = { split = 0.6 }` was merged in as a
-/// new section, read by nothing, for ever -- and the one command whose entire
-/// job is telling you whether your configuration worked said it loaded fine
-/// (#117). It had. It just was not doing what the file said.
-///
-/// So an unrecognised setting exits non-zero, and that is deliberate. The
-/// question is not "did Lua run" -- a syntax error already answered that -- it
-/// is "will this configuration do what I wrote", and a key nothing reads means
-/// no. It also makes this usable from a script or a pre-commit hook, which a
-/// command that always succeeds is not.
-fn check_config() -> anyhow::Result<()> {
-    let path = script::Scripts::config_path();
-    println!("checking {}", path.display());
-    match script::Scripts::load(&path) {
-        Ok(scripts) => {
-            let bindings = scripts.bindings();
-            println!("  ok: {} binding(s)", bindings.len());
-            for binding in bindings {
-                // Padded so the notes line up into a column of their own, and
-                // only when there is a note -- most configurations have none,
-                // and trailing space on every line of the common case is
-                // noise.
-                match binding.note {
-                    Some(note) => println!("    {:<28}{note}", binding.combo),
-                    None => println!("    {}", binding.combo),
-                }
-            }
-
-            // A binding taken away is the one thing the list above cannot
-            // show: in a list of what survived, a key removed on purpose looks
-            // exactly like one that never existed.
-            let unbound = scripts.unbound();
-            if !unbound.is_empty() {
-                println!(
-                    "  {} binding(s) removed by the configuration:",
-                    unbound.len()
-                );
-                for binding in unbound {
-                    match binding.note {
-                        Some(note) => println!("    {:<28}{note}", binding.combo),
-                        None => println!("    {}", binding.combo),
-                    }
-                }
-            }
-
-            let unknown = scripts.unknown_settings();
-            if unknown.is_empty() {
-                return Ok(());
-            }
-            println!(
-                "  {} unrecognised setting(s) -- written, merged, and read by nothing:",
-                unknown.len()
-            );
-            for setting in unknown {
-                match setting.meant {
-                    Some(meant) => println!("    {:<28}did you mean {meant}?", setting.key),
-                    None => println!("    {}", setting.key),
-                }
-            }
-            std::process::exit(1);
-        }
-        Err(err) => {
-            // Printed rather than only returned: this is a command someone
-            // runs to read the answer, and the chain is where the answer is.
-            println!("  failed:");
-            for (depth, cause) in err.chain().enumerate() {
-                println!("    {:indent$}{cause}", "", indent = depth * 2);
-            }
-            std::process::exit(1);
-        }
-    }
-}
-
-fn check_qml(path: Option<String>) -> Result<()> {
-    let Some(path) = path else {
-        anyhow::bail!("usage: solium --check-qml <file.qml>");
-    };
-    // Software in every mode, so this is a software scene by construction
-    // rather than by preference — the one caller in the compositor that is
-    // right not to go through `qml::Scene::for_host`. It loads one file to say
-    // whether it parses and then exits; nothing here is ever drawn, and asking
-    // for a dmabuf would make the answer depend on whether the machine has a
-    // render node rather than on the QML being checked. See
-    // `renderer::check_qml_is_software_in_every_mode`.
-    qml::renderer::decide(
-        qml::renderer::Entry::CheckQml,
-        &qml::renderer::Configured::default(),
-    );
-    qml::start()?;
-    match qml::Scene::software(std::path::Path::new(&path), 400, 200) {
-        Ok(_) => {
-            println!("ok");
-            Ok(())
-        }
-        Err(err) => {
-            let message = err.to_string();
-            // A `pragma Singleton` file cannot be built as a component, so Qt
-            // answers with nothing rather than a reason. Say so, instead of
-            // printing a blank line that reads like success.
-            if message.trim().is_empty() || message.trim().ends_with(':') {
-                println!("(no component: a singleton, or an empty error)");
-            } else {
-                println!("{message}");
-            }
-            Ok(())
-        }
-    }
-}
-
 /// What `main` does first, before any thread starts: note the environment
 /// every program Solium starts is given, and only then take the session's
 /// input method out of the compositor's own Qt.
@@ -271,16 +155,33 @@ fn prepare_environment() {
     qml::keep_input_methods_out();
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<std::process::ExitCode> {
     // First, before Qt, EGL or a library they load has written anything into
     // the environment, and before any thread starts: it is what every program
     // Solium starts is given. See
     // `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`.
     prepare_environment();
-    let backend = std::env::args().nth(1);
-    // Before logging starts: the probe's child answers in one line.
-    if backend.as_deref() == Some(qml::renderer::PROBE) {
-        qml::renderer::probe_child();
+    // Every argument decided before anything starts: `cli::tests`, and the
+    // process tests in `tests/cli.rs`.
+    let command = match cli::parse(std::env::args().skip(1)) {
+        Ok(command) => command,
+        Err(refused) => {
+            eprintln!("solium: {refused}. See solium --help.");
+            return Ok(std::process::ExitCode::from(cli::USAGE_ERROR));
+        }
+    };
+    match command {
+        cli::Command::Help => {
+            print!("{}", cli::help());
+            return Ok(std::process::ExitCode::SUCCESS);
+        }
+        cli::Command::Version => {
+            println!("{}", cli::version());
+            return Ok(std::process::ExitCode::SUCCESS);
+        }
+        // Before logging starts: the probe's child answers in one line.
+        cli::Command::ProbeQmlGpu => qml::renderer::probe_child(),
+        _ => {}
     }
     // On the hardware the screen belongs to the compositor, so anything printed
     // to the terminal is printed underneath itself and lost. Whatever went
@@ -288,9 +189,7 @@ fn main() -> Result<()> {
     // a file — under state rather than the runtime dir, because the first time
     // this went wrong the only way out was a reboot, and the runtime dir does
     // not survive one.
-    let log = matches!(backend.as_deref(), Some("--tty"))
-        .then(open_log)
-        .flatten();
+    let log = (command == cli::Command::Tty).then(open_log).flatten();
     start_logging(log);
 
     log_panics();
@@ -302,23 +201,24 @@ fn main() -> Result<()> {
     // Nested when there is a compositor to nest in, on the hardware otherwise.
     // `--probe` reports what the hardware offers without taking it, which is
     // the only one of the three that is safe to run inside another session.
-    match backend.as_deref() {
+    let ran = match command {
         // Loads one QML file and says what went wrong, without starting a
         // compositor. Writing a shell means walking a chain of "type X
         // unavailable" errors, and doing that through a real session costs ten
         // seconds a link.
-        Some("--check-qml") => check_qml(std::env::args().nth(2)),
+        cli::Command::CheckQml(path) => return Ok(check::run(Some(&path))),
         // Loads the configuration and says whether it would run, without
         // touching a session. A typo found here costs a line of output; the
         // same typo found by reloading costs whatever you were doing.
-        Some("--check") => check_config(),
-        Some("--probe") => tty::probe(),
-        Some("--tty") => tty::run(session::Place::tty(std::env::args().skip(2))),
+        cli::Command::Check(file) => return Ok(check::run(file.as_deref())),
+        cli::Command::Probe => tty::probe(),
+        cli::Command::Tty => tty::run(session::Place::tty(std::env::args().skip(1))),
         _ if std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var_os("DISPLAY").is_some() =>
         {
             winit::run()
         }
         _ => tty::run(session::Place::Console),
-    }
+    };
+    ran.map(|()| std::process::ExitCode::SUCCESS)
 }

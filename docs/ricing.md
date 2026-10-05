@@ -6,7 +6,7 @@ one thing in them.
 
 Two commands are worth knowing first:
 
-    solium --check          # would my configuration run? which bindings survived?
+    solium --check          # would my configuration run? which bindings survived? do its scenes build?
     super+shift+r           # read it again, in the running session
 
 `--check` is the one that saves afternoons. A configuration that fails to load
@@ -23,6 +23,15 @@ you probably meant, and exits non-zero.
     open.scal                   did you mean open.scale?
     tilling                     did you mean tiling?
 ```
+
+Then it builds every scene the configuration declares when it loads (the
+wallpaper, the shell, any `sol.surface` of your own) on one monitor, draws each
+once, and loads every pane style in your own `qml/panes/`, every layer
+included, with the pane style and loading scene `SOLIUM_PANE` and
+`SOLIUM_LOADING` name when they are set. A scene that fails to build, misses a
+required property or prints a QML warning while it is built fails the check
+too. It builds them in software, so a style that needs the GPU is named and
+not built, and a scene declared later, by a handler, is not seen.
 
 Three things it cannot see, so that its silence means something: the contents
 of a list (`monitors` entries are replaced whole and not descended into), the

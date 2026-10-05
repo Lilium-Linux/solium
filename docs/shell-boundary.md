@@ -139,7 +139,7 @@ A shell that imports its own files by relative path needs nothing more.
 
 `solium --check-qml <file>` loads one file without starting a compositor and
 prints `ok` or what Qt reported, which is the quick way through a chain of
-"type X unavailable" errors. It exits 0 either way.
+"type X unavailable" errors. It exits with 1 when the file does not load.
 
 ## What a hosted shell is given
 

@@ -1865,6 +1865,17 @@ fn say_what_was_built(dir: &Path, decoration: &Decoration) {
     );
 }
 
+/// The file a pane style is built from, by the lookup a window's frame takes:
+/// a bundle's `Pane.qml`, or a single-file decoration, or `None` for a name
+/// that is neither. For `solium --check`, which loads it.
+/// `check::tests::a_pane_knob_naming_a_broken_style_fails`.
+pub(crate) fn style_file(style: Option<&str>) -> Option<PathBuf> {
+    match bundle(style) {
+        Some(dir) => Some(dir.join("Pane.qml")),
+        None => qml_path(style),
+    }
+}
+
 /// The style bundle this setting asks for, if it asks for one at all.
 ///
 /// `SOLIUM_QML_TITLEBAR` and any name ending in `.qml` are a *file* and never a
