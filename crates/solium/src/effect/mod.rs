@@ -9,3 +9,5 @@
     expect(dead_code, reason = "nothing loads an effect until Task 4")
 )]
 pub(crate) mod host;
+#[cfg_attr(not(test), expect(dead_code, reason = "Task 4 loads effects"))]
+pub(crate) mod sandbox;

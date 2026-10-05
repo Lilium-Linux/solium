@@ -6,7 +6,10 @@
 //! how finely the window has to be cut for the result to read as a curve
 //! rather than as a fan of flat pieces. Everything else -- capture,
 //! projection, damage, blending between two of them -- is the same code for
-//! all of them and lives in the compositor.
+//! all of them and lives in the compositor. It also holds the effect format:
+//! what an `effect.lua` may say (`spec`), the GLSL every `.frag` is compiled
+//! with (`glsl`), and the stage list an effect flattens to (`stage`): data and
+//! text only, so the crate still has no dependencies.
 //!
 //! ## Why this is a crate and not a shader
 //!
@@ -41,6 +44,7 @@
 
 pub mod ffi;
 pub mod fragment;
+pub mod spec;
 
 /// A rectangle, in whatever coordinates the caller is using.
 ///

@@ -1,0 +1,1 @@
+return { api = 1, inputs = { "self" }, reach = 48, params = { tint = { 0.12, min = 0, max = 1 }, passes = { 2, int = true } }, stages = function(p) return { { "use", "kawase", passes = p.passes }, { "use", "tint", amount = p.tint } } end }
