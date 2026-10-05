@@ -525,7 +525,7 @@ impl AsRef<[u8]> for Pixels<'_> {
 ///
 /// Binds a framebuffer, so it must not run underneath another bind — every
 /// backend builds its elements before it binds anything, which is the same
-/// convention `offscreen::capture` relies on.
+/// convention `offscreen::draw` relies on.
 ///
 /// `said` is the caller's latch and not this function's own, because the three
 /// failures below are three stages of one operation: the first one reached is

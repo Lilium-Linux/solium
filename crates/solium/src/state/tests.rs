@@ -7057,7 +7057,7 @@ end)"#,
     ///
     /// Driven through the real placement and the real transform, and read
     /// through `render::place_client`, which is what `elements` draws the
-    /// surfaces with and what `offscreen::capture_client` sizes a masked
+    /// surfaces with and what `offscreen::client_job` sizes a masked
     /// client from. Three frames: the first, one a little way in, and one
     /// most of the way.
     #[test]
@@ -7467,7 +7467,7 @@ end)"#,
     /// committed size -- so an oversized tiled client was squashed into
     /// its tile for the length of a genie or a tilt, and its frame was told
     /// the uncapped width while warped and the tile's once it landed.
-    /// `render::flat` is what both `offscreen::capture` and
+    /// `render::flat` is what both `offscreen::pane_job` and
     /// `flat_window_elements` read, the texture size and the frame's
     /// `Drawing.outer` alike.
     #[test]

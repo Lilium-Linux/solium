@@ -243,6 +243,10 @@ impl Drawn {
 /// a warp keeps a texture and the program to draw it through, and a masked
 /// client keeps a texture, the size it was captured at, a radius in physical
 /// pixels and the program to draw it through. See [`crate::pass::Pass`].
+///
+/// Built in two phases: every capture's element list first, which can run Qt,
+/// then every capture drawn on one bound carrier, which must not
+/// (`offscreen::draw`).
 #[derive(Default)]
 pub(crate) struct Prepared {
     warps: Vec<(Window, GlesTexture, crate::warp::Program)>,
@@ -342,21 +346,30 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         crate::qml::tick(state.clock.now());
     }
 
+    // Twice the largest monitor's bytes may wait on the pool's free list
+    // (Ruling 10): `pool::tests::a_target_given_back_over_budget_is_dropped`.
+    let largest = state
+        .space
+        .outputs()
+        .filter_map(|output| output.current_mode().map(|mode| mode.size))
+        .map(|size| usize::try_from(size.w).unwrap_or(0) * usize::try_from(size.h).unwrap_or(0) * 4)
+        .max()
+        .unwrap_or(0);
+    state.pool.set_budget(2 * largest);
+
     let mut warps = Vec::new();
     let mut passes = Vec::new();
+    let mut jobs = Vec::new();
 
     for (pane, window) in state.on_screen() {
-        // Nothing captured means nothing to keep. A pane holds the texture it
-        // was last captured into between frames -- megabytes of it -- and
-        // there is no later frame on which handing it back gets cheaper, so an
-        // overview that warps twenty windows and is then closed would
+        // Nothing captured means nothing to keep. A pane holds the targets it
+        // was last captured into between frames -- megabytes of them -- and
+        // there is no later frame on which handing them back gets cheaper, so
+        // an overview that warps twenty windows and is then closed would
         // otherwise leave twenty behind for the session. See
-        // `offscreen::Scratch`.
-        let release = |state: &mut Solium| {
-            if let Some(pane) = state.panes.get_mut(pane) {
-                pane.scratch_mut().release();
-            }
-        };
+        // `keyed::Captures`, and
+        // `keyed::tests::a_pane_that_stops_warping_gives_the_texture_back`.
+        let release = |state: &mut Solium| crate::offscreen::release(state, pane);
         let Some(window) = window else {
             release(state);
             continue;
@@ -377,10 +390,8 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // It was survivable while a capture meant a warp: a window is deformed
         // for the length of an animation and then stops. A `client.radius` is
         // permanent, so twelve windows across three workspaces became twelve
-        // full-window offscreen renders a frame and ~47 MB of `Scratch` held
-        // for the session, a third of it for windows nothing ever draws. The
-        // arithmetic on `offscreen::KEPT` is written against the transient
-        // case and says so.
+        // full-window offscreen renders a frame and ~47 MB of captures held
+        // for the session, a third of it for windows nothing ever draws.
         //
         // **The slot, through the same `pane_outer_of` call `elements` makes,
         // and not the `outer` above.** They differ in exactly two places and
@@ -434,72 +445,116 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         } else {
             None
         };
-        if let (Route::Warp, Some(program)) = (route(warped, program.is_some()), program) {
+        let routed = route(warped, program.is_some());
+        let declared = declared_effects(state, pane);
+        // A pane neither warped nor styled builds no job (spec §8.4).
+        // `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
+        if wanted_capture(routed, &declared).is_none() {
+            // Said out loud rather than skipped. `needs_pass` answering `None`
+            // for `Inputs::Backdrop` is right -- there is nothing composited
+            // beneath a node for this renderer to sample -- but a blur that
+            // silently renders as no blur looks like a style that failed to
+            // load and is never reported as a compositor bug. See
+            // `fragment::Inputs::Backdrop`, and
+            // `pass::tests::an_effect_that_cannot_be_run_is_named_once_and_not_every_frame`.
+            if let Some(refused) = crate::pass::refused(&declared) {
+                state.programs.refuse(refused);
+            }
+            release(state);
+            continue;
+        }
+        if let (Route::Warp, Some(program)) = (routed, program) {
             let scale = state.scale_of(outer);
-            if let Some((texture, _size)) =
-                crate::offscreen::capture(state, renderer, pane, &window, scale)
-            {
-                warps.push((window, texture, program));
+            let (panes, pool) = (&mut state.panes, &mut state.pool);
+            if let Some(held) = panes.get_mut(pane) {
+                held.captures_mut()
+                    .keep_only(Some(crate::keyed::Kind::Pane), pool);
+            }
+            if let Some(job) = crate::offscreen::pane_job(state, renderer, pane, &window, scale) {
+                jobs.push((job, Then::Warp(window, program)));
             }
             continue;
         }
 
         // Flat, so its style may still want its client masked. Asked *after*
-        // the warp branch and never as well as it, because both want the one
-        // texture a pane keeps and at different sizes -- and because a
-        // deformed window loses its effects for the length of the deform, the
-        // same recorded limit its bleed already has. See
-        // `flat_window_elements`.
-        if let Some(pass) = client_pass(state, renderer, pane, &window, outer) {
-            passes.push((window, pass));
+        // the warp branch and never as well as it, because the two want
+        // different sizes -- and because a deformed window loses its effects
+        // for the length of the deform, the same recorded limit its bleed
+        // already has. See `flat_window_elements`.
+        if let Some((job, then)) = client_job_for(state, renderer, pane, &window, outer, &declared)
+        {
+            jobs.push((job, then));
             continue;
         }
         release(state);
     }
 
+    // Every list is built: draw them all, on one carrier.
+    for (then, texture) in crate::offscreen::draw(state, renderer, jobs) {
+        match then {
+            Then::Warp(window, program) => warps.push((window, texture, program)),
+            Then::Pass(window, pass) => passes.push((window, pass.with(texture))),
+        }
+    }
     Prepared { warps, passes }
 }
 
-/// Capture and prepare this pane's client pass, if its style asked for one.
-///
-/// `None` is the answer for every window on a machine nobody has styled, and
-/// it is the answer that costs nothing: `needs_pass` on an empty slice, and
-/// out.
-///
-/// Every later `None` is a refusal to make a window worse than it was --
-/// a shader that would not compile, a client with nothing mapped yet -- and
-/// each of them leaves the client drawn square through the path it has always
-/// taken, rather than not drawn at all.
-fn client_pass(
-    state: &mut Solium,
-    renderer: &mut GlesRenderer,
+/// What a capture becomes once drawn: `dev/fence-check.sh` has one of each.
+#[derive(Debug)]
+enum Then {
+    Warp(Window, crate::warp::Program),
+    Pass(Window, crate::pass::Pending),
+}
+
+/// The effects a pane's style declares, copied out so nothing borrows the
+/// state: nought or one, and `Vec::new()` (no allocation) for every
+/// unstyled window. Lifted from what was `client_pass`.
+/// `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
+fn declared_effects(
+    state: &Solium,
     pane: crate::pane::PaneId,
-    window: &Window,
-    outer: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
-) -> Option<crate::pass::Pass> {
-    // Copied out before anything borrows the state mutably: the capture below
-    // wants `&mut Solium`, and the effects are reached *through* the pane.
-    // `Effect` is `Copy` and a style declares at most one, so this is a vector
-    // of nought or one -- and `Vec::new()` for the empty case, which is every
-    // window on an unstyled machine, allocates nothing.
-    let declared: Vec<solium_effects::fragment::Effect> = state
+) -> Vec<solium_effects::fragment::Effect> {
+    state
         .panes
         .get(pane)
         .and_then(Pane::decoration)
         .map(crate::decoration::Decoration::effects)
         .unwrap_or_default()
-        .to_vec();
-    let Some(effect) = crate::pass::needs_pass(&declared) else {
-        // Said out loud rather than skipped. `needs_pass` answering `None` for
-        // `Inputs::Backdrop` is right -- there is nothing composited beneath a
-        // node for this renderer to sample -- but a blur that silently renders
-        // as no blur looks like a style that failed to load and is never
-        // reported as a compositor bug. See `fragment::Inputs::Backdrop`.
-        if let Some(refused) = crate::pass::refused(&declared) {
-            state.programs.refuse(refused);
-        }
-        return None;
-    };
+        .to_vec()
+}
+
+/// Which capture a pane wants this pass: its warp's, its style's client
+/// pass, or none, which is every unstyled, unwarped window.
+/// `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
+pub(crate) fn wanted_capture(
+    route: Route,
+    declared: &[solium_effects::fragment::Effect],
+) -> Option<crate::keyed::Kind> {
+    match route {
+        Route::Warp => Some(crate::keyed::Kind::Pane),
+        Route::Flat => crate::pass::needs_pass(declared).map(|_| crate::keyed::Kind::Client),
+    }
+}
+
+/// Build this pane's client pass, if its style asked for one: the capture's
+/// job, and the pass waiting for its texture.
+///
+/// `declared` is [`declared_effects`]' answer, which `prepare` has already
+/// asked [`wanted_capture`] about, so a pane reaching here wants a pass.
+///
+/// Every `None` is a refusal to make a window worse than it was -- a shader
+/// that would not compile, a client with nothing mapped yet -- and each of
+/// them leaves the client drawn square through the path it has always taken,
+/// rather than not drawn at all.
+fn client_job_for(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: crate::pane::PaneId,
+    window: &Window,
+    outer: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    declared: &[solium_effects::fragment::Effect],
+) -> Option<(crate::offscreen::Job, Then)> {
+    let effect = crate::pass::needs_pass(declared)?;
     let scale = state.scale_of(outer);
     // The program first, and the capture only if there is one: a driver that
     // cannot build this shader should cost someone their rounded corners, not
@@ -510,11 +565,14 @@ fn client_pass(
     // `compile_custom_texture_shader`'s `make_current` is safe. `Programs`
     // says why at length, and the borrow checker enforces it.
     let program = state.programs.rounded(renderer)?.clone();
-    let (texture, size, opaque) =
-        crate::offscreen::capture_client(state, renderer, pane, window, scale)?;
-    Some(crate::pass::Pass::new(
-        texture, size, effect, scale, opaque, program,
-    ))
+    let (job, opaque) = crate::offscreen::client_job(state, renderer, pane, window, scale)?;
+    let (panes, pool) = (&mut state.panes, &mut state.pool);
+    if let Some(held) = panes.get_mut(pane) {
+        held.captures_mut()
+            .keep_only(Some(crate::keyed::Kind::Client), pool);
+    }
+    let pending = crate::pass::Pending::new(job.size, effect, scale, opaque, program);
+    Some((job, Then::Pass(window.clone(), pending)))
 }
 
 /// Everything to draw this frame, topmost first.
@@ -1838,7 +1896,7 @@ fn cursor(
 /// with a crop, made here by the framebuffer.
 ///
 /// **A deformed window loses its bleed, and that is a known limit rather than
-/// an oversight.** `offscreen::capture` sizes its texture from the window's
+/// an oversight.** `offscreen::pane_job` sizes its texture from the window's
 /// outer rect, so a layer placed at `(-bleed.left, -bleed.top)` falls outside
 /// the framebuffer and is clipped by the renderer — the spikes are simply not
 /// in the picture that gets bent. Fixing it means capturing at the decoration's
@@ -1861,7 +1919,7 @@ pub(crate) fn flat_window_elements(
     };
     let output_scale = Scale::from(scale);
     // `None` only for a window smithay put in the space behind our back, which
-    // `offscreen::capture` cannot produce -- it is holding the pane. Its layers
+    // `offscreen::pane_job` cannot produce -- it is holding the pane. Its layers
     // are skipped rather than the whole window, which is what the `if let`
     // around the old single `frame` call did: a window drawn without its chrome
     // is a window, and one skipped entirely is a hole in the picture.
@@ -1899,11 +1957,11 @@ pub(crate) fn flat_window_elements(
         //
         // It is not an oversight and it is not one line. A pass needs a
         // texture of the client alone, and the texture it would be drawn into
-        // is the one this function is filling -- so the pane would need two,
-        // where `offscreen::Scratch` deliberately keeps one and the arithmetic
-        // for why is written out on `KEPT`. The honest fix is the same fix the
-        // bleed needs: capture at the decoration's widest canvas and map the
-        // mesh over it, which is `capture`'s change and not this one's.
+        // is the one this function is filling -- so the pane would need two
+        // captures in one pass, where `render::wanted_capture` deliberately
+        // picks one. The honest fix is the same fix the bleed needs: capture
+        // at the decoration's widest canvas and map the mesh over it, which is
+        // `pane_job`'s change and not this one's.
         //
         // What it costs meanwhile is visible but is not wrong pixels, which is
         // the same trade the bleed already makes.
@@ -1939,9 +1997,9 @@ pub(crate) fn flat_window_elements(
 
 /// One window's **client**, flat, at the origin and its real size.
 ///
-/// What `offscreen::capture_client` draws into the texture a fragment program
+/// What `offscreen::client_job` draws into the texture a fragment program
 /// then masks. The client and nothing else: no frame, no layers, no popups,
-/// and the reason for each is on `capture_client` — briefly, a layer's pixels
+/// and the reason for each is on `client_job` — briefly, a layer's pixels
 /// are Qt's and Qt rounds itself, and a popup is its own window and must not
 /// be clipped to the one it belongs to.
 ///
@@ -1990,7 +2048,7 @@ pub(crate) struct Flat {
     pub(crate) insets: crate::decoration::Insets,
 }
 
-/// What `offscreen::capture` and [`flat_window_elements`] draw a warped window
+/// What `offscreen::pane_job` and [`flat_window_elements`] draw a warped window
 /// at: **the pane's own outer rectangle**, which is the rectangle `elements`
 /// builds the warp's mesh over, so the texture and the mesh are one size.
 ///
@@ -2035,7 +2093,7 @@ pub(crate) struct Placed {
 /// `outer` is the pane's own outer size -- what its frame canvas is
 /// rasterised at -- and `committed` the size its client committed. The one
 /// answer every reader of a client's picture shares: `elements` draws the
-/// surfaces through it, `offscreen::capture_client` sizes a masked client's
+/// surfaces through it, `offscreen::client_job` sizes a masked client's
 /// texture from its [`Fit::shown`], and `Solium::surface_under` inverts it, so
 /// a press lands on the pixel the picture put there.
 pub(crate) fn place_client(
@@ -2287,7 +2345,7 @@ impl Fitted<crate::remains::Surface> {
 /// on its first frame and one pulled into the dock by a genie pops back to
 /// full size before it fades. Both are keyed by the client's `Window`, which a
 /// window that has gone no longer has, and [`prepare`] releases the pane's
-/// `offscreen::Scratch` on the first frame it has none -- where the last
+/// captures (`keyed::Captures`) on the first frame it has none -- where the last
 /// capture of it was, which either could have been drawn from. The default
 /// style, `top`, has no client pass, and the tilt and the genie are what
 /// `init.lua`'s dev bindings and `tweaks.lua`'s effects ask for.
@@ -2439,6 +2497,25 @@ mod tests {
         assert_eq!(route(true, true), Route::Warp);
         assert_eq!(route(true, false), Route::Flat, "no program, no warp");
         assert_eq!(route(false, true), Route::Flat, "nothing to warp");
+    }
+
+    /// **The guard (spec §8.4): a pane neither warped nor styled wants no
+    /// capture**, so it builds no job, and a pass of such panes binds no
+    /// carrier: `offscreen::draw` returns at once on an empty list. A warp
+    /// wants its pane's capture, and a rounded style its client pass (until
+    /// Task 23a draws rounding inline).
+    #[test]
+    fn a_pane_neither_warped_nor_styled_wants_no_capture() {
+        use solium_effects::fragment::{Corners, Effect};
+        assert_eq!(super::wanted_capture(super::Route::Flat, &[]), None);
+        assert_eq!(
+            super::wanted_capture(super::Route::Warp, &[]),
+            Some(crate::keyed::Kind::Pane)
+        );
+        assert_eq!(
+            super::wanted_capture(super::Route::Flat, &[Effect::rounded(Corners::all(12.0))]),
+            Some(crate::keyed::Kind::Client)
+        );
     }
 
     fn genie_to(

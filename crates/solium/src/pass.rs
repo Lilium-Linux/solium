@@ -6,7 +6,7 @@
 //! surfaces are rendered into a texture of their own, and *that* is drawn,
 //! through a fragment program, in the client's place.
 //!
-//! The capture is [`crate::offscreen::capture_client`], a sibling of the one
+//! The capture is [`crate::offscreen::client_job`], a sibling of the one
 //! the genie already uses, and it keeps its texture on the pane rather than
 //! allocating one a frame. That was made a prerequisite of this work rather
 //! than a follow-up for exactly this reason: an effect system multiplies a
@@ -255,7 +255,7 @@ pub(crate) fn placed(
 
 /// Whether `regions` leave no part of a `size`-sized rectangle uncovered.
 ///
-/// Asked of a capture once, in `offscreen::capture_client`, with the opaque
+/// Asked of a capture once, in `offscreen::client_job`, with the opaque
 /// regions the client's own surfaces declared. The capture is cleared to
 /// transparent and the client draws into it, so the only thing that makes any
 /// of it opaque is the client saying so -- and a translucent client is
@@ -658,6 +658,49 @@ impl Pass {
     }
 }
 
+/// A pass whose capture is not drawn yet: everything [`Pass`] needs but the
+/// texture, which `offscreen::draw` hands back once every capture's element
+/// list is built. Like the rest of this file it needs a GL context to make, so
+/// it is first seen on a screen: `dev/fence-check.sh`'s rounded windows are
+/// client passes drawn through it.
+#[derive(Clone, Debug)]
+pub(crate) struct Pending {
+    size: Size<i32, Physical>,
+    effect: Effect,
+    scale: f64,
+    opaque: bool,
+    program: GlesTexProgram,
+}
+
+impl Pending {
+    pub(crate) fn new(
+        size: Size<i32, Physical>,
+        effect: Effect,
+        scale: f64,
+        opaque: bool,
+        program: GlesTexProgram,
+    ) -> Self {
+        Self {
+            size,
+            effect,
+            scale,
+            opaque,
+            program,
+        }
+    }
+
+    pub(crate) fn with(self, texture: GlesTexture) -> Pass {
+        Pass::new(
+            texture,
+            self.size,
+            self.effect,
+            self.scale,
+            self.opaque,
+            self.program,
+        )
+    }
+}
+
 /// A client's own texture, drawn through a fragment program.
 ///
 /// Hand-written rather than a `TextureRenderElement` because none of that
@@ -681,7 +724,7 @@ impl Pass {
 /// nothing to forget to clear.
 ///
 /// **Almost none of it is covered by a test, and not for want of trying.**
-/// `offscreen::Scratch` is generic over what it keeps so its policy can be
+/// `pool::Pool` is generic over what it keeps so its policy can be
 /// driven without a GPU; the same trick does not work here, because a
 /// `GlesTexProgram` is as unconstructable without a context as a `GlesTexture`
 /// is and this element holds one. The exception is `opaque_regions`, which is
@@ -722,7 +765,7 @@ impl Element for Rounded {
 
     fn src(&self) -> Rectangle<f64, BufferCoords> {
         // The whole capture. It was created at exactly these pixels -- see
-        // `offscreen::capture_client` -- so this is exact rather than rounded,
+        // `offscreen::client_job` -- so this is exact rather than rounded,
         // and stating anything else samples outside it or crops a corner off.
         Rectangle::from_size((f64::from(self.size.w), f64::from(self.size.h)).into())
     }
@@ -1592,7 +1635,7 @@ mod tests {
         );
     }
 
-    /// The sum `capture_client` makes before it asks [`covers`] anything.
+    /// The sum `client_job` makes before it asks [`covers`] anything.
     ///
     /// Stated as a case that is covered **only** if the shift happens and only
     /// if it is an addition: the region says (0, 0) and the element sits at

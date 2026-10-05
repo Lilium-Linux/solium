@@ -209,6 +209,12 @@ as source text. `pass.rs` compiles it, renders the client's surfaces into a
 texture kept on the pane, and draws that through the program in the client's
 place. An effect that reads nothing needs no pass at all.
 
+The texture is a target from the renderer's pool (`pool.rs`), made once with its
+own framebuffer object and kept by the pane (`keyed.rs`) for as long as the
+window keeps its size. `render::prepare` builds every capture's elements first,
+then binds a 1x1 carrier once and draws each capture into its target, a frame
+each, so nothing that draws a capture can run Qt.
+
 The texture is the cost. Every visible rounded window pays a pass every frame,
 which is why `render::prepare` captures no pane that no monitor shows. What is
 beneath a node, the input a blur would need, is named in `fragment.rs` and

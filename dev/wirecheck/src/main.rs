@@ -396,7 +396,7 @@ fn draw_through_program(
         let mut frame = renderer
             .render(&mut framebuffer, size, Transform::Normal)
             .map_err(|err| anyhow!("starting the program draw: {err}"))?;
-        // Transparent, as `offscreen::capture_client` clears to, so a cut
+        // Transparent, as `offscreen::client_job` clears to, so a cut
         // corner reads back as nothing rather than as black.
         frame
             .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size)])
@@ -817,7 +817,8 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
 
 /// Draw one element into a fresh offscreen texture and read the pixels back.
 ///
-/// The same shape as `offscreen::capture`: bind, render, draw, copy back.
+/// The shape a capture had before the pool (`offscreen::draw` now draws through
+/// `pool::frame_for`): bind, render, draw, copy back.
 fn draw_and_read(
     renderer: &mut GlesRenderer,
     element: &TextureRenderElement<GlesTexture>,

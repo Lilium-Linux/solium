@@ -2,7 +2,6 @@
     unsafe_code,
     reason = "a framebuffer object per pooled texture, made and deleted in raw GL"
 )]
-#![expect(dead_code, reason = "nothing draws through the pool until Task 16")]
 
 //! Render targets made once and reused, each with a framebuffer object made
 //! once: what captures draw into now, and what P17's `View` and X1.3's effect
@@ -36,7 +35,8 @@ use smithay::{
 };
 
 /// What makes a target, so the pool's policy is tested with no GPU, as
-/// `offscreen::Scratch`'s was. `tests::a_target_is_made_once_and_its_fbo_with_it`.
+/// `offscreen::Scratch`'s was before the pool replaced it.
+/// `tests::a_target_is_made_once_and_its_fbo_with_it`.
 pub(crate) trait Alloc {
     type Tex: Clone;
     fn make(&mut self, size: Size<i32, Physical>) -> Option<Self::Tex>;
@@ -266,6 +266,10 @@ pub(crate) fn paint<E: RenderElement<GlesRenderer>>(
 /// The levels of a mip chain from `base` down to `fit`: halved, rounded up,
 /// until both sides fit. P17 and X1.3 draw through them.
 /// `tests::the_chain_halves_until_the_fit`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "P17 and X1.3 draw through a chain")
+)]
 pub(crate) fn chain_sizes(
     base: Size<i32, Physical>,
     fit: Size<i32, Physical>,

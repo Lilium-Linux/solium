@@ -21,6 +21,7 @@ mod idle;
 mod input;
 mod json;
 mod keyboard_change;
+mod keyed;
 mod keymap;
 mod launch;
 mod layer;
