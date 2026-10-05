@@ -24,9 +24,12 @@
 use std::{
     collections::HashMap,
     fs,
+    os::fd::{AsFd, OwnedFd},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
+
+use smithay::reexports::rustix::event::epoll;
 
 /// One entry on the desktop: `Folder`'s row (04-ui.md §4.9's "Data").
 #[derive(Clone, Debug, PartialEq)]
@@ -458,13 +461,25 @@ fn default_from_mime_cache(contents: &str, mime: &str) -> Option<String> {
 }
 
 /// Live updates: one inotify watch on the desktop directory, read
-/// non-blocking on the compositor's own clock -- the same shape every other
-/// descriptor `qml::wake` already polls. This module does not compute what
-/// changed, only *that* something did, and asks for a wholesale [`scan`]
-/// again (its own module doc above says why that is the right size here).
+/// non-blocking off a descriptor the event loop itself watches -- `tty.rs`
+/// and `winit.rs` register [`Watcher::source`] once, at start-up, the same
+/// `Generic`+`Interest::READ`+`Mode::Level` shape every other descriptor
+/// `qml::wake` already polls -- so a change is seen on an otherwise idle
+/// desktop, not only when some other redraw happens to reach
+/// [`Watcher::poll`] first. This module does not compute what changed, only
+/// *that* something did, and asks for a wholesale [`scan`] again (its own
+/// module doc above says why that is the right size here).
 #[derive(Debug)]
 pub(crate) struct Watcher {
     inner: Option<WatcherInner>,
+    /// A permanent epoll instance that mirrors whichever inotify descriptor
+    /// `inner` currently holds. Permanent so the event loop can hold one
+    /// stable descriptor for the whole session (registered once, at
+    /// start-up) instead of one that comes and goes with [`Watcher::set_path`]
+    /// -- `set_path` only adds or removes the current inotify descriptor
+    /// from it, it never rebuilds it. `None` when creating it failed, the
+    /// same kind of warning as not being able to watch at all.
+    outer: Option<OwnedFd>,
 }
 
 #[derive(Debug)]
@@ -476,7 +491,18 @@ struct WatcherInner {
 
 impl Watcher {
     pub(crate) fn new() -> Self {
-        Self { inner: None }
+        let outer = match epoll::create(epoll::CreateFlags::CLOEXEC) {
+            Ok(outer) => Some(outer),
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "cannot prepare the desktop folder's watch for the event loop; it will \
+                     only refresh when something else asks for a frame"
+                );
+                None
+            }
+        };
+        Self { inner: None, outer }
     }
 
     /// Point the watch at `dir`, or take it down for `None`. A no-op when
@@ -489,10 +515,31 @@ impl Watcher {
             return;
         }
         if let Some(inner) = self.inner.take() {
+            if let Some(outer) = &self.outer {
+                let _ = epoll::delete(outer, inner.inotify.as_fd());
+            }
             let _ = inner.inotify.watches().remove(inner.watch);
         }
         self.inner = dir.and_then(|dir| match install(dir) {
-            Ok(inner) => Some(inner),
+            Ok(inner) => {
+                let added = self.outer.as_ref().map(|outer| {
+                    epoll::add(
+                        outer,
+                        inner.inotify.as_fd(),
+                        epoll::EventData::new_u64(0),
+                        epoll::EventFlags::IN,
+                    )
+                });
+                if let Some(Err(err)) = added {
+                    tracing::warn!(
+                        ?dir,
+                        ?err,
+                        "cannot put the desktop folder's watch in the event loop; it will \
+                         only refresh when something else asks for a frame"
+                    );
+                }
+                Some(inner)
+            }
             Err(err) => {
                 tracing::warn!(?dir, ?err, "cannot watch the desktop folder for changes");
                 None
@@ -512,6 +559,13 @@ impl Watcher {
             Ok(events) => events.count() > 0,
             Err(_) => false,
         }
+    }
+
+    /// A dup of the permanent epoll descriptor that mirrors whichever
+    /// directory is watched, for the event loop to hold: see this struct's
+    /// own doc. `None` when [`Watcher::new`] could not create it.
+    pub(crate) fn source(&self) -> Option<OwnedFd> {
+        self.outer.as_ref().and_then(|outer| outer.try_clone().ok())
     }
 }
 
@@ -729,6 +783,55 @@ mod tests {
             wait_for(|| watcher.poll()),
             "a removed file should be seen live"
         );
+    }
+
+    /// Unlike the test above, this never calls `poll` to find out: it
+    /// registers [`Watcher::source`] with a real `calloop` event loop, the
+    /// same way `tty.rs` and `winit.rs` do, and only dispatches that loop --
+    /// so a change reaching it with no `poll` in the loop proves the
+    /// descriptor itself wakes the loop, not just that the data is there
+    /// once something else asks.
+    #[test]
+    fn the_event_loop_source_wakes_on_a_change_with_no_poll_in_the_loop() {
+        use smithay::reexports::calloop::{
+            EventLoop, Interest, Mode, PostAction, generic::Generic,
+        };
+
+        let dir = tmp("live-source");
+        let mut watcher = Watcher::new();
+        watcher.set_path(Some(&dir));
+        // Draining whatever the watch's own creation buffered, same as above.
+        watcher.poll();
+
+        let source = watcher.source().expect("an epoll instance");
+        let mut event_loop: EventLoop<bool> = EventLoop::try_new().expect("an event loop");
+        event_loop
+            .handle()
+            .insert_source(
+                Generic::new(source, Interest::READ, Mode::Level),
+                |_, _, woke| {
+                    *woke = true;
+                    Ok(PostAction::Continue)
+                },
+            )
+            .expect("inserting the source");
+
+        write(&dir, "new.txt", "");
+
+        let mut woke = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !woke && Instant::now() < deadline {
+            event_loop
+                .dispatch(Some(Duration::from_millis(20)), &mut woke)
+                .expect("dispatching");
+        }
+        assert!(
+            woke,
+            "the registered source should wake the loop on its own, with nothing polling \
+             the watcher directly"
+        );
+        // Draining so the fd is not left readable for whatever runs next.
+        watcher.poll();
     }
 
     #[test]

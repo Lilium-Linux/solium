@@ -126,6 +126,27 @@ pub(crate) fn run() -> Result<()> {
         },
     )?;
 
+    // The desktop folder's inotify watch, so a file that appears or
+    // disappears is seen on an otherwise idle desktop instead of waiting for
+    // some unrelated redraw to reach `publish_models`. `None` only when
+    // `folder::Watcher::new` could not prepare it, already warned there.
+    if let Some(folder_watch) = state.folder_watcher.source() {
+        event_loop
+            .handle()
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    folder_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                |_, _, state: &mut Solium| {
+                    state.redraw = true;
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("watching the desktop folder: {e}"))?;
+    }
+
     // The app_id is stable and specific so the host compositor can be told
     // where to put this window and to leave the focus alone -- developing a
     // compositor should not steal focus from whatever is already running.

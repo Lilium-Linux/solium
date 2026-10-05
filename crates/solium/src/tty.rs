@@ -388,6 +388,26 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         },
     )?;
 
+    // The desktop folder's inotify watch, so a file that appears or
+    // disappears is seen on an otherwise idle desktop instead of waiting for
+    // some unrelated redraw to reach `publish_models`. `None` only when
+    // `folder::Watcher::new` could not prepare it, already warned there.
+    if let Some(folder_watch) = solium.folder_watcher.source() {
+        loop_handle
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    folder_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                |_, _, state: &mut State| {
+                    state.solium.redraw = true;
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|err| anyhow!("watching the desktop folder: {err}"))?;
+    }
+
     let mut state = State {
         solium,
         qt,
