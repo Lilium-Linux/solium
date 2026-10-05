@@ -1202,13 +1202,13 @@ dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for th
 
 | | |
 |---|---|
-| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/share/solium/{qml,lua}`, and the generated `DIR/share/solium/solium.desktop`. `/usr` and `/usr/local` are system prefixes, below |
+| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/share/solium/{qml,lua,effects}`, and the generated `DIR/share/solium/solium.desktop`. `/usr` and `/usr/local` are system prefixes, below |
 | `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`: `systemd/user/solium-session.target`, `systemd/user/solium-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
 | `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there. Refused with a system prefix |
 | `--no-build` | install the release binary already in `target/install` |
 | `--no-check` | skip the installed binary's `--check`: for a package built from source, whose binary still finds its build tree during `%install` and would fail the asset check |
 | `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
-| `--uninstall` | remove `bin/solium`, `bin/solium-session`, `share/solium/{qml,lua}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
+| `--uninstall` | remove `bin/solium`, `bin/solium-session`, `share/solium/{qml,lua,effects}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
 | `DESTDIR=` | stage the prefix and `XDG_CONFIG_HOME` under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp`. It may contain a `~`, as rpmbuild's buildroot does |
 | `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`$XDG_CACHE_HOME/solium-build.lock`, or `~/.cache/solium-build.lock` when `XDG_CACHE_HOME` is unset) and the container's memory cap (`6g`). `dev/build-release.sh` reads both, so they apply to `dev/rpm.sh` too |
 
@@ -1281,7 +1281,7 @@ replace (found through `/proc/<pid>/exe`, as `fuser` does; it refuses and
 stops nothing), checked again once the build is over, since a session can
 start from the old install while it runs; that the build image exists; and
 that nothing it would delete is reached through a link. Install replaces
-`share/solium/{qml,lua}` and uninstall removes them with `rm -rf`, so a
+`share/solium/{qml,lua,effects}` and uninstall removes them with `rm -rf`, so a
 `share/solium` left linked to a checkout would lose the checkout's QML and
 Lua: both refuse while `share/solium` is a link, or while it resolves into
 the checkout. A prefix or a `share` that is itself a link (moved to another
@@ -1392,7 +1392,7 @@ another release needs its own build, and COPR is where that will happen.
 `dev/rpm/solium.spec` drives `%install` through
 `dev/install.sh --no-build --prefix /usr`, the system layout, so the package
 holds exactly what that installs: `/usr/bin/{solium,solium-session}`,
-`/usr/share/solium/{qml,lua}`, `/usr/share/wayland-sessions/solium.desktop`
+`/usr/share/solium/{qml,lua,effects}`, `/usr/share/wayland-sessions/solium.desktop`
 with `Exec=/usr/bin/solium-session`, the two units in `/usr/lib/systemd/user`
 and `lilium-portals.conf` in `/usr/share/xdg-desktop-portal`, plus the licences
 and two documents. rpmbuild fails on a file one has and the other does not, and

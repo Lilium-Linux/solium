@@ -88,11 +88,11 @@ check "  and says why" grep -q "may only contain" "$work/refused-destdir.log"
 check "  and nothing was written" [ ! -e "$work/with space" ]
 
 echo "refusing to delete through a link"
-# Install replaces share/solium/{qml,lua} and uninstall removes them. Through a
-# link, that deletes whatever the link points at: a share/solium left linked to
-# a checkout would lose its QML and Lua, uncommitted work included. Each case
-# plants files where the link leads, and both install and uninstall have to
-# refuse and leave them there.
+# Install replaces share/solium/{qml,lua,effects} and uninstall removes them.
+# Through a link, that deletes whatever the link points at: a share/solium left
+# linked to a checkout would lose its QML and Lua, uncommitted work included.
+# Each case plants files where the link leads, and both install and uninstall
+# have to refuse and leave them there.
 wip() {
     mkdir -p "$1/qml" "$1/lua"
     echo wip >"$1/qml/Mine.qml"
@@ -183,11 +183,12 @@ check "bin/solium-session is executable" [ -x "$dest/bin/solium-session" ]
 check "  and a copy of dev/session/solium-session" cmp -s "$dest/bin/solium-session" "$root/dev/session/solium-session"
 check "share/solium/qml is a copy of crates/solium/qml" diff -r "$root/crates/solium/qml" "$share/qml"
 check "share/solium/lua is a copy of crates/solium/lua" diff -r "$root/crates/solium/lua" "$share/lua"
+check "share/solium/effects is a copy of crates/solium/effects" diff -r "$root/crates/solium/effects" "$share/effects"
 check "a file left by an earlier install is gone" [ ! -e "$share/qml/removed-since.qml" ]
 check "nothing staged is a symlink" [ -z "$(find "$destdir" -type l)" ]
 # The binary, solium-session, the session file, three configuration files and
 # the record of them.
-expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 7))
+expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 7))
 check "exactly those files, solium-session, the session file, the units, the portal choice and their record ($expected_files)" \
     [ "$(count_files "$destdir")" -eq "$expected_files" ]
 for entry in "${config_files[@]}"; do
@@ -345,7 +346,7 @@ nc_root="$work/no-check-checkout"
 mkdir -p "$nc_root/dev" "$nc_root/crates/solium" "$nc_root/target/install/release"
 cp "$install_sh" "$nc_root/dev/install.sh"
 cp -R "$root/dev/session" "$nc_root/dev/session"
-cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$nc_root/crates/solium/"
+cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" "$nc_root/crates/solium/"
 printf '#!/bin/sh\nexit 1\n' >"$nc_root/target/install/release/solium"
 chmod +x "$nc_root/target/install/release/solium"
 DESTDIR="$work/no-check" "$nc_root/dev/install.sh" --no-build --no-check --prefix /usr \
@@ -408,6 +409,7 @@ check "bin/solium and bin/solium-session are in /usr/bin" \
 check "the QML and Lua are copies in /usr/share/solium" \
     diff -r "$root/crates/solium/qml" "$sys_share/qml"
 check "  both of them" diff -r "$root/crates/solium/lua" "$sys_share/lua"
+check "  all three of them" diff -r "$root/crates/solium/effects" "$sys_share/effects"
 sys_session="$sys/usr/share/wayland-sessions/solium.desktop"
 check "the session file is in /usr/share/wayland-sessions" [ -f "$sys_session" ]
 check "  mode 644" [ "$(stat -c %a "$sys_session" 2>/dev/null)" = 644 ]
@@ -424,8 +426,8 @@ done
 check "nothing went into XDG_CONFIG_HOME" [ ! -e "$sys$broken" ]
 check "share/solium has no session file and no checksums" \
     [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/config.sha256" ]
-check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 6)))" \
-    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua") + 6))" ]
+check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 6)))" \
+    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 6))" ]
 check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
 check "--check passed, using the staged /usr/share/solium" \
     grep -qF -- "--check passed (ok: " "$work/system.log"

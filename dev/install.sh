@@ -30,13 +30,13 @@ usage: dev/install.sh [options]
 
   --prefix DIR        where to install (default: \$HOME/.local)
                         DIR/bin/{solium,solium-session},
-                        DIR/share/solium/{qml,lua,solium.desktop}
+                        DIR/share/solium/{qml,lua,effects,solium.desktop}
                         and into \$XDG_CONFIG_HOME (default: \$HOME/.config):
                         systemd/user/solium-{session,autostart}.target
                         and xdg-desktop-portal/lilium-portals.conf
                       /usr and /usr/local are system prefixes, all of it
                         under DIR: bin/{solium,solium-session},
-                        share/solium/{qml,lua},
+                        share/solium/{qml,lua,effects},
                         share/wayland-sessions/solium.desktop,
                         lib/systemd/user/solium-{session,autostart}.target
                         and share/xdg-desktop-portal/lilium-portals.conf
@@ -192,13 +192,14 @@ ours() {
     [[ -n "$recorded" && "$(sha256sum <"$path" | cut -d' ' -f1)" == "$recorded" ]]
 }
 
-# Install replaces $share/qml and $share/lua, and uninstall removes them, with
-# `rm -rf`. Through a link that deletes whatever the link leads to: a
-# share/solium left linked to a checkout would lose its QML and Lua, uncommitted
-# work included. So neither goes on while share/solium is a link, or while it
-# resolves into this checkout by any other route. A linked <prefix>/share is
-# fine -- a ~/.local/share moved to another disk is an ordinary setup -- because
-# the realpath check below still catches one that leads into this checkout.
+# Install replaces $share/qml, $share/lua and $share/effects, and uninstall
+# removes them, with `rm -rf`. Through a link that deletes whatever the link
+# leads to: a share/solium left linked to a checkout would lose its QML and Lua,
+# uncommitted work included. So neither goes on while share/solium is a link,
+# or while it resolves into this checkout by any other route. A linked
+# <prefix>/share is fine -- a ~/.local/share moved to another disk is an
+# ordinary setup -- because the realpath check below still catches one that
+# leads into this checkout.
 # dev/install-check.sh plants files behind each case and asserts that install
 # and uninstall both refuse and the files survive.
 for path in "$share"; do
@@ -269,7 +270,7 @@ if [[ $uninstall -eq 1 ]]; then
             removed+=("$path")
         fi
     done
-    for path in "$share/qml" "$share/lua" "$staged_session"; do
+    for path in "$share/qml" "$share/lua" "$share/effects" "$staged_session"; do
         if [[ -e "$path" ]]; then
             rm -rf "$path"
             removed+=("$path")
@@ -336,8 +337,8 @@ install -m755 "$source_wrapper" "$wrapper"
 # Copied, not linked, so a later `git checkout` cannot change a running
 # session. dev/install-check.sh diffs the copy against the checkout and asserts
 # there are no symlinks in it.
-rm -rf "$share/qml" "$share/lua"
-cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$share/"
+rm -rf "$share/qml" "$share/lua" "$share/effects"
+cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" "$share/"
 
 # The Exec names solium-session by its full path, and solium-session runs the
 # solium beside it. Plasma Login starts a session with
@@ -512,8 +513,8 @@ cat <<EOF
 Installed Solium into $dest
   binary        $bin
   started by    $wrapper
-  QML and Lua   $share/qml, $share/lua
-                (copies: rebuilding or checking out another branch does not change them)
+  QML, Lua and effects   $share/qml, $share/lua, $share/effects
+                         (copies: rebuilding or checking out another branch does not change them)
   session file  $staged_session
                 ($(grep -m1 '^Exec=' "$staged_session"))
   units         $units/solium-session.target

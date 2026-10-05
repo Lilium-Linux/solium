@@ -45,6 +45,7 @@ COPIED = [
     "dev/qtprobe/README.md",
     "dev/host-window-rule.md",
     "crates/solium/qml/panes/README.md",
+    "crates/solium/effects/README.md",
 ]
 COPIES = "generated/repo"
 

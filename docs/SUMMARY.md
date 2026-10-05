@@ -16,6 +16,7 @@
 - [Desktop modes](modes.md)
 - [Animation](animation.md)
 - [Decorations](decorations.md)
+- [Effects](generated/repo/crates/solium/effects/README.md)
 
 # Shells and QML
 

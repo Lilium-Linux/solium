@@ -68,7 +68,7 @@ use std::{
 /// ```sh
 /// SOLIUM_DATADIR=%{_datadir}/solium cargo build --release
 /// install -d       %{buildroot}%{_datadir}/solium
-/// cp -r crates/solium/qml crates/solium/lua %{buildroot}%{_datadir}/solium/
+/// cp -r crates/solium/qml crates/solium/lua crates/solium/effects %{buildroot}%{_datadir}/solium/
 /// ```
 ///
 /// `build.rs` carries the matching `rerun-if-env-changed`, so changing it
@@ -144,6 +144,21 @@ pub(crate) fn qml() -> PathBuf {
 /// The shipped Lua: `init.lua` and every module it pulls in.
 pub(crate) fn lua() -> PathBuf {
     root().join("lua")
+}
+
+/// The shipped effect folders: `effects/<name>/`, beside `qml/` and `lua/`.
+///
+/// Not part of what `holds_assets` looks for: a build without them is a
+/// session without the shipped effects, not a session without scripts (a root
+/// of `qml/` and `lua/` alone is found:
+/// `tests::a_development_build_finds_its_own_build_tree`). Beside them:
+/// `effect::host::tests::the_shipped_effects_are_beside_the_qml_and_the_lua`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task 4's host is its first reader")
+)]
+pub(crate) fn effects() -> PathBuf {
+    root().join("effects")
 }
 
 /// Resolve now, so the answer is logged at a known moment.

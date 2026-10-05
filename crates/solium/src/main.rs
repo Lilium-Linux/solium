@@ -18,6 +18,7 @@ mod commit;
 mod cursor;
 mod decoration;
 mod dev;
+mod effect;
 mod focus;
 mod gputime;
 mod group;
