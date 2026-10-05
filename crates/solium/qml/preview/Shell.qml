@@ -23,6 +23,13 @@ Item {
     property string dockVisibility: "autohide"
     property int dockIconSize: 40
 
+    // `lua/preview/search.lua`'s own round trip: `searchOpen` toggles on
+    // `super+d` (or `preview.search.key`), and `searchResults` is the ranked
+    // rows for whatever was last typed -- see `qml/preview/Search.qml`'s own
+    // module doc for why matching happens there rather than here.
+    property bool searchOpen: false
+    property var searchResults: []
+
     // Keep windows off the bar's strip. A resting value, never an animated
     // one (docs/shell-boundary.md, "Room of its own"): islands are 36 tall,
     // 6 above the edge.
@@ -50,5 +57,10 @@ Item {
 
         LayoutChip {}
         ClockPill {}
+    }
+
+    Search {
+        open: root.searchOpen
+        results: root.searchResults
     }
 }

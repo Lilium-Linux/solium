@@ -865,12 +865,34 @@ nothing else. It shows:
   } } }
   ```
 
-Next pieces -- the island, search, quick settings, a tray, and previews --
-need services this compositor does not have yet, and are not here.
-`lua/preview/` and `qml/preview/` are where all of it lives, so copying one
-file still changes one behaviour, exactly as **[Your own
-frame](#your-own-frame)** and **[Bars, docks and
-wallpapers](#bars-docks-and-wallpapers)** above do it.
+- quick search, `super+d`: a centred panel with a field, the live keyboard
+  layout beside it, and results grouped into applications (matched by name
+  and generic name), open windows (title or app id, with the workspace) and
+  a few compositor commands that already exist -- Overview, Tile windows,
+  Fullscreen window, Reload configuration, Quit Solium. Arrow keys move the
+  selection, Return activates it, Escape or a click outside closes.
+
+  ```lua
+  return { preview = { search = {
+      key = "super+alt+space", -- default "super+d"
+  } } }
+  ```
+
+  Cut from this first version (`lua/preview/search.lua` and
+  `qml/preview/Search.qml` both say why, in full): the detail pane, a row's
+  own actions, Alt+digits, Ctrl+Return, the empty-query suggestions (there
+  is no usage history yet to rank by), app keywords (the plain array this
+  searches, `sol.apps()`, does not carry them -- a real gap, not a corner
+  cut), the settings and desktop-file sources, the container transform from
+  the bar's own search button (the bar has no search button yet either),
+  and the "us,ru" layout-correction pass -- it needs the compositor's own
+  keymap, which nothing here exposes yet.
+
+Next pieces -- the island, quick settings, a tray, and previews -- need
+services this compositor does not have yet, and are not here. `lua/preview/`
+and `qml/preview/` are where all of it lives, so copying one file still
+changes one behaviour, exactly as **[Your own frame](#your-own-frame)** and
+**[Bars, docks and wallpapers](#bars-docks-and-wallpapers)** above do it.
 
 Two ways to turn it off, or replace it:
 
