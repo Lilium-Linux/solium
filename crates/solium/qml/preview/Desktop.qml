@@ -179,7 +179,7 @@ Item {
                         maximumLineCount: root.labelLines
                         elide: Text.ElideRight
                         style: Text.Raised
-                        styleColor: "#000000"
+                        styleColor: Theme.surfaceInactive
                     }
                 }
 
@@ -199,7 +199,7 @@ Item {
                     maximumLineCount: root.labelLines
                     elide: Text.ElideRight
                     style: Text.Raised
-                    styleColor: "#000000"
+                    styleColor: Theme.surfaceInactive
                 }
             }
 
