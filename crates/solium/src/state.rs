@@ -306,8 +306,14 @@ pub(crate) struct Solium {
     /// [`Self::apps_scan_pending`], this is not the only rescan trigger:
     /// [`Self::folder_watcher`] asks for one too, live.
     pub(crate) folder_scan_pending: bool,
-    /// The live inotify watch on `folder_dir`, polled each `publish_models`.
+    /// The live inotify watch on `folder_dir`. Drained by the event loop's
+    /// own source the moment it is readable (`tty.rs`, `winit.rs`), which
+    /// sets [`Self::folder_changed`]; never left for a drawn frame to drain,
+    /// because with nothing drawing the level-triggered source would wake the
+    /// loop on every iteration.
     pub(crate) folder_watcher: crate::folder::Watcher,
+    /// The watch saw a change the next `publish_models` has not rescanned.
+    pub(crate) folder_changed: bool,
     /// Which launchers on the desktop are trusted to run, durable across a
     /// restart (`folder.rs`'s module doc says why a plain file rather than
     /// `gio`'s metadata convention).
@@ -1124,6 +1130,7 @@ impl Solium {
             folder_dir: None,
             folder_scan_pending: true,
             folder_watcher: crate::folder::Watcher::new(),
+            folder_changed: false,
             folder_trust: crate::folder::Trust::load(),
             groups: crate::group::Groups::default(),
             keymap: None,

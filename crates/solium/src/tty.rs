@@ -401,7 +401,14 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                     smithay::reexports::calloop::Mode::Level,
                 ),
                 |_, _, state: &mut State| {
-                    state.solium.redraw = true;
+                    // Drained here, not on the next drawn frame: the source is
+                    // level-triggered, so left readable with nothing drawing it
+                    // would wake the loop on every iteration
+                    // (`one_poll_drains_everything_buffered_so_the_source_is_not_left_readable`).
+                    if state.solium.folder_watcher.poll() {
+                        state.solium.folder_changed = true;
+                        state.solium.redraw = true;
+                    }
                     Ok(smithay::reexports::calloop::PostAction::Continue)
                 },
             )

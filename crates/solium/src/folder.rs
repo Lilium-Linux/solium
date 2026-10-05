@@ -548,17 +548,24 @@ impl Watcher {
     }
 
     /// Whether anything changed since the last call: a non-blocking drain of
-    /// whatever inotify has buffered, so the next call does not see the same
-    /// events twice. `false` with nothing watched.
+    /// *everything* inotify has buffered, read after read until it would
+    /// block, so the next call does not see the same events twice and the
+    /// level-triggered loop source is not left readable
+    /// (`one_poll_drains_everything_buffered_so_the_source_is_not_left_readable`).
+    /// `false` with nothing watched.
     pub(crate) fn poll(&mut self) -> bool {
         let Some(inner) = &mut self.inner else {
             return false;
         };
         let mut buffer = [0_u8; 4096];
-        match inner.inotify.read_events(&mut buffer) {
-            Ok(events) => events.count() > 0,
-            Err(_) => false,
+        let mut changed = false;
+        while let Ok(events) = inner.inotify.read_events(&mut buffer) {
+            if events.count() == 0 {
+                break;
+            }
+            changed = true;
         }
+        changed
     }
 
     /// A dup of the permanent epoll descriptor that mirrors whichever
@@ -782,6 +789,29 @@ mod tests {
         assert!(
             wait_for(|| watcher.poll()),
             "a removed file should be seen live"
+        );
+    }
+
+    /// More events than one 4096-byte read holds (three hundred files at
+    /// once, an unzip onto the desktop) are drained by one `poll`, so the
+    /// level-triggered loop source `tty.rs` and `winit.rs` register is not
+    /// left readable. Left readable with nothing drawing to drain it (the
+    /// session switched away, every monitor off), it would wake the loop
+    /// on every iteration.
+    #[test]
+    fn one_poll_drains_everything_buffered_so_the_source_is_not_left_readable() {
+        let dir = tmp("drain");
+        let mut watcher = Watcher::new();
+        watcher.set_path(Some(&dir));
+        watcher.poll();
+
+        for n in 0..300 {
+            write(&dir, &format!("file-{n:03}.txt"), "");
+        }
+        assert!(watcher.poll(), "three hundred new files should be seen");
+        assert!(
+            !watcher.poll(),
+            "one poll should have drained every buffered event, leaving nothing for a second"
         );
     }
 

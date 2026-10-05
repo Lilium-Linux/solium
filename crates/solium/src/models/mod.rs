@@ -86,7 +86,9 @@ impl crate::state::Solium {
                 .map(|dir| crate::folder::scan(dir, &self.folder_trust))
                 .unwrap_or_default();
             self.folder_scan_pending = false;
-        } else if self.folder_dir.is_some() && self.folder_watcher.poll() {
+        } else if self.folder_dir.is_some()
+            && (std::mem::take(&mut self.folder_changed) | self.folder_watcher.poll())
+        {
             self.folder = self
                 .folder_dir
                 .as_deref()
