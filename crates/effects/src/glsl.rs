@@ -5,10 +5,14 @@
 //! buffer before compiling (`shader_source` in `shaderapi.c`), so the prelude
 //! ends with `#line 0 1` and the epilogue begins with `#line 0 2`: under GLSL
 //! ES 1.00 §3.4 compiling continues at line `line + 1` of the string named, so
-//! every driver numbers the user's file from line 1 of string 1, and the
-//! string index says whose the error was
+//! a driver numbers the user's file from line 1 of string 1, and the string
+//! index says whose the error was
 //! (`tests::the_users_file_is_its_own_source_string`,
-//! `tests::nvidia_mesa_and_angle_logs_map_to_the_users_line`).
+//! `tests::nvidia_mesa_and_angle_logs_map_to_the_users_line`). A driver that
+//! applies GLSL ES 3.00's rule instead, where the next line is `line`, numbers
+//! it from 0 (NVIDIA, wirecheck case 12a): [`line_shift`] reads which rule a
+//! driver follows from its log of [`line_probe`]
+//! (`tests::a_drivers_line_rule_is_read_from_the_probe`).
 
 use crate::spec::{Severity, Value};
 
@@ -451,6 +455,38 @@ pub fn compile_log(log: &str) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// A `.frag` whose one error is on its own line 1, `sol_line_probe` being
+/// declared nowhere: what tells a driver's `#line` rule.
+/// `tests::a_drivers_line_rule_is_read_from_the_probe`.
+pub const LINE_PROBE: &str = "vec4 sol_effect(vec2 uv) { return sol_line_probe; }\n";
+
+/// [`LINE_PROBE`]'s three strings, against no params and no textures.
+/// `tests::a_drivers_line_rule_is_read_from_the_probe`.
+pub fn line_probe() -> Sources {
+    let nothing = Signature {
+        host: Host::Pass,
+        params: Vec::new(),
+        uses: Vec::new(),
+        known: Vec::new(),
+    };
+    assemble(&nothing, LINE_PROBE)
+}
+
+/// How many lines lower than GLSL ES 1.00's `#line` rule a driver numbers
+/// the user's file, read from its log of [`line_probe`]: 1 where it applies
+/// GLSL ES 3.00's rule and calls the probe's line 1 line 0 (NVIDIA, wirecheck
+/// case 12a), else 0, a log that names no line of string 1 included.
+/// `tests::a_drivers_line_rule_is_read_from_the_probe`.
+pub fn line_shift(probe_log: &str) -> u32 {
+    let first = compile_log(probe_log)
+        .into_iter()
+        .find(|each| each.string == Some(1));
+    match first.and_then(|each| each.line) {
+        Some(0) => 1,
+        _ => 0,
+    }
+}
+
 /// FNV-1a 64 over `parts`, a 0xff byte after each so `["ab","c"]` and
 /// `["a","bc"]` differ. Stable across builds, so a log line can name a version.
 /// `tests::the_content_hash_is_stable_and_parts_do_not_run_together`.
@@ -467,8 +503,8 @@ pub fn content_hash(parts: &[&[u8]]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Host, PASS_VERTEX, ParamKind, Signature, assemble, compile_log, content_hash, kind_of,
-        lint, prelude,
+        Host, LINE_PROBE, PASS_VERTEX, ParamKind, Signature, assemble, compile_log, content_hash,
+        kind_of, line_probe, line_shift, lint, prelude,
     };
     use crate::spec::Severity;
 
@@ -661,6 +697,37 @@ mod tests {
         let raw = compile_log("something no form matches");
         assert_eq!((raw[0].string, raw[0].line), (None, None));
         assert_eq!(raw[0].message, "something no form matches");
+    }
+
+    /// **A driver's `#line` rule is read from its log of the probe**: NVIDIA
+    /// calls the line after `#line 0 1` line 0 (GLSL ES 3.00's rule; its own
+    /// log, wirecheck case 12a), Mesa and ANGLE line 1 (GLSL ES 1.00's); a
+    /// log naming no line of string 1, from a driver that ignored `#line`,
+    /// shifts nothing.
+    #[test]
+    fn a_drivers_line_rule_is_read_from_the_probe() {
+        assert_eq!(
+            line_shift("1(0) : error C1503: undefined variable \"sol_line_probe\""),
+            1
+        );
+        assert_eq!(line_shift("1:1(35): error: `sol_line_probe' undeclared"), 0);
+        assert_eq!(
+            line_shift("ERROR: 1:1: 'sol_line_probe' : undeclared identifier"),
+            0
+        );
+        assert_eq!(
+            line_shift("0:61(35): error: `sol_line_probe' undeclared"),
+            0
+        );
+        assert_eq!(line_shift("something no form matches"), 0);
+        let probe = line_probe();
+        assert_eq!(probe.user, LINE_PROBE);
+        assert_eq!(
+            LINE_PROBE.lines().count(),
+            1,
+            "the probe's error is on line 1"
+        );
+        assert!(probe.prelude.ends_with("#line 0 1\n"));
     }
 
     /// A param's kind is its default's: a boolean is an `int` 0 or 1, and a
