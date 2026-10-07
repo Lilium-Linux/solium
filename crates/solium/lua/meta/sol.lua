@@ -231,6 +231,15 @@
 ---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
 ---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
 
+---The input profile's focus policy (#219). A key left out keeps whatever it
+---already answered -- there is no fixed default here the way `sol.idle` has
+---one, since that would have to know the machine's own form factor
+---(#159) and a mode calling this does not.
+---@class sol.FocusModeOptions
+---@field click? boolean Whether a press focuses the window it lands on.
+---@field follow? boolean Whether moving the pointer over a window focuses it.
+---@field clear_on_empty_click? boolean Whether a press on empty desktop, the wallpaper, or a shell surface that does not take the keyboard clears keyboard focus.
+
 ---The pointer's theme. A key left out, or no table, means the configuration
 ---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
 ---@class sol.CursorOptions
@@ -437,6 +446,12 @@ function sol.monitor_power(which, mode) end
 ---@param options? sol.IdleOptions
 ---@return nil
 function sol.idle(options) end
+
+---Override the focus input policy: `config.focus`, which `lua/modes.lua`
+---hands over on every mode change as well as at load. See #219.
+---@param options? sol.FocusModeOptions
+---@return nil
+function sol.focus_mode(options) end
 
 ---The work area of the monitor a window is on, or of the active monitor when
 ---no window is named or the id is unknown.

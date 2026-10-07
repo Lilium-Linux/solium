@@ -22,9 +22,11 @@
 -- Not here yet, because nothing reads them from this file
 -- ([#159](https://github.com/Lilium-Linux/solium/issues/159)):
 --
---   * Whether focus follows the pointer, natural scrolling, and the key held
---     to drag a window: SOLIUM_FORM_FACTOR picks all three, and
---     SOLIUM_DRAG_MODIFIER the key alone.
+--   * Natural scrolling and the key held to drag a window:
+--     SOLIUM_FORM_FACTOR picks the first, and SOLIUM_DRAG_MODIFIER the
+--     second. Whether focus follows the pointer moved into `focus` below
+--     with #219, which needed it per mode; the other two are still only the
+--     environment's to say.
 --   * The terminal `super+return` opens: SOLIUM_TERMINAL, or bind
 --     `super+return` yourself in `bindings` below.
 --   * The overview's animations, fixed in `lua/overview.lua` at 260 ms in and
@@ -645,6 +647,48 @@ local defaults = {
         dbus_inhibit = true,
     },
 
+    -- Who takes the keyboard on a click or a hover, and when nobody does
+    -- (#219). `lua/modes.lua` hands this over on every mode change, so a
+    -- mode's own entry below answers immediately, without waiting for a
+    -- reload.
+    focus = {
+        -- A press on empty desktop, the wallpaper, or a shell surface that
+        -- does not take the keyboard clears keyboard focus, so a window you
+        -- clicked away from stops taking what you type. `false` leaves the
+        -- last focused window holding the keyboard until something else
+        -- takes it.
+        clear_on_empty_click = true,
+
+        -- Per mode (the names `modes.register` uses): `"click"` focuses a
+        -- window only on a press; `"follow"` also focuses it when the
+        -- pointer moves over it, which is what every tiling compositor
+        -- people arrive from does, and the compositor's own default for the
+        -- machine ([#159](https://github.com/Lilium-Linux/solium/issues/159),
+        -- `SOLIUM_FORM_FACTOR`) when a mode says neither.
+        --
+        -- Floating -- the desktop, with no layout in charge and windows free
+        -- to overlap -- defaults to click-only here: a window you are not
+        -- using sits under the pointer on the way to the one you want, and
+        -- hovering it should not steal the keyboard from what you were
+        -- typing into. Every other mode keeps the machine's own default
+        -- unless you name it too:
+        --
+        --     focus = { modes = { floating = "follow", scrolling = "click" } },
+        --
+        modes = {
+            floating = "click",
+        },
+
+        -- `click` and `follow` above, for every mode at once rather than one
+        -- at a time -- not here by default, so that `nil` can mean "whatever
+        -- this machine's form factor already answered" rather than a fixed
+        -- default that cannot know it:
+        --
+        --     focus = { follow = false },   -- never follow the pointer, in any mode
+        --     focus = { click = false },    -- a mode must `sol.focus` its own clicks
+        --
+    },
+
     -- Telling the rest of the session that Solium is its desktop.
     --
     -- Portals, programs D-Bus starts on demand, ~/.config/autostart and user
@@ -1226,6 +1270,15 @@ local open_sections = {
         num = true,
     },
     cursor = { theme = true, size = true, scene = true },
+    -- `click` and `follow` are deliberately absent from `focus` above, so
+    -- that leaving either out of a `user.lua` means "nil", not "zero" --
+    -- the same reason `keyboard` and `cursor` need naming here rather than
+    -- being read off their own defaults.
+    focus = { click = true, follow = true },
+    -- Mode names are open-ended, the same as a key combination: a mode
+    -- outside this file can register any name with `modes.register` and
+    -- give `focus.modes` an entry of its own.
+    ["focus.modes"] = true,
     -- `true` rather than a set of names: everything is accepted.
     bindings = true,
 }
