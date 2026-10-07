@@ -271,6 +271,13 @@ them: a fullscreen window, a window that draws its own decorations, and every
 window under `pane = "none"` are bare, and only your own rules reach those
 (`match = { style = "none" }` names them).
 
+A rule's `part = "region:titlebar"` is read from the insets: the band along
+the one side the style reserves most for, `top/`'s 32 pixels across the
+whole window above the client, its two outer corners rounded as the
+client's largest, or `left/`'s 34 down its side, square. A style that
+reserves its most on two sides or more (`border/` and `proximity/`, the same
+all round) or nothing at all has no titlebar region.
+
 The file runs in an effect's Lua, not your configuration's: `math`, `table`
 and `string`, and no `sol`, no files and no `require`, stopped if it runs
 longer than 100 ms. It is read when the style is applied (at startup, at each

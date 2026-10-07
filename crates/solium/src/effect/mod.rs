@@ -8,6 +8,11 @@
 
 pub(crate) mod gl;
 pub(crate) mod host;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task 18's slot plan gives each part its mask")
+)]
+pub(crate) mod mask;
 pub(crate) mod plan;
 #[cfg_attr(
     not(test),

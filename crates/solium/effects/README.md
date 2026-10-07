@@ -49,11 +49,11 @@ return {
 | Key | What it takes |
 |---|---|
 | `match` | `"*"`, or a table of what to match: `app_id`, `title`, `monitor`, `style` (a bare window's is `"none"`), and `focused` and `fullscreen` as `true` or `false`, for a window's parts; `surface` for a scripted surface's; `layer_shell` for a layer surface's. A word is exact, `"*"`, or a prefix ending in `*` (`"org.gnome.*"`); there are no Lua patterns. A key of another kind of part's is refused |
-| `part` | `pane` (the window's frame and client, not its popups), `client`, `popup` (all of a window's popups at once), `layer:<name>` (a pane style's layer), `region:titlebar`, `surface:<name>` (one scripted surface on one monitor) or `layer_shell:<namespace>` |
+| `part` | `pane` (the window's frame and client, not its popups), `client`, `popup` (all of a window's popups at once), `layer:<name>` (a pane style's layer), `region:titlebar` (the band along the one side a pane style reserves most for: the window's full width above or below the client, its two outer corners rounded as the client's largest, or square down a side between those; a style that reserves its most on two sides or more, such as `border`, or nothing, and a bare window have none), `surface:<name>` (one scripted surface on one monitor) or `layer_shell:<namespace>` |
 | `slot` | `behind` the part, in `front` of it, or `replace` it |
 | `effect` | an effect's name; a link, `{ "blur", passes = 3 }`, with the effect's params beside its name; a chain of links, run in order, each reading the last one's result, `{ { "blur", source = "self" }, { "tint", amount = 0.1 } }`; or `false`, which empties the slot |
 | `source` | what the chain's first input reads in place of its own: `"self"`, the part's own pixels. On the rule or in its first link, never a later one |
-| `mask` | how the result is cut: `"shape"`, the part's own shape (the default), or `"alpha"`, the alpha of the part's own pixels, which needs `source = "self"` |
+| `mask` | how the result is cut: `"shape"`, the part's own shape (the default: the client's own rectangle and rounded corners for `client`; the whole window rounded at its largest corner for `pane`; the band, as above, for `region:titlebar`; the rectangle for the rest), or `"alpha"`, the alpha of the part's own pixels, which needs `source = "self"` |
 
 A link may also give `reach` and `bleed`, in pixels, in place of the
 effect's own. A chain reads as far around its part as its first link

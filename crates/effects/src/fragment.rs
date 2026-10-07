@@ -230,6 +230,76 @@ void main() {
 }
 ";
 
+/// A padded texture cut to a rounded rectangle inside it: an effect's result
+/// in its slot, multiplied by the part's mask (\[16\] §2's last stage).
+/// [`MASK_RECT_UNIFORM`] is the rectangle in the texture's own pixels,
+/// [`MASK_RADII_UNIFORM`] its corners, [`MASK_SIZE_UNIFORM`] the texture's
+/// size. The distance is [`ROUNDED_CORNERS`]' and the effect prelude's
+/// `sol_sdf_rrect`, and the coverage `sol_shape`'s: one pixel of antialias.
+/// A texture program in smithay's contract, every variant handled as
+/// [`ROUNDED_CORNERS`] handles them.
+/// `tests::the_masked_program_keeps_inside_and_cuts_outside_its_rect` and
+/// `tests::the_shader_handles_every_variant_smithay_compiles_it_into`.
+pub const MASKED_TEXTURE: &str = r"#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+uniform vec4 mask_rect;
+uniform vec4 mask_radii;
+uniform vec2 mask_size;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+void main() {
+    vec4 colour = texture2D(tex, v_coords);
+#if defined(NO_ALPHA)
+    colour = vec4(colour.rgb, 1.0) * alpha;
+#else
+    colour = colour * alpha;
+#endif
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        colour = vec4(0.0, 0.2, 0.0, 0.2) + colour * 0.8;
+#endif
+    // Into the mask's rectangle, then ROUNDED_CORNERS' field; the mask goes
+    // after the tint, as there.
+    vec2 px = v_coords * mask_size - mask_rect.xy;
+    vec2 half_size = mask_rect.zw * 0.5;
+    vec2 at = px - half_size;
+    float picked = at.x < 0.0 ? (at.y < 0.0 ? mask_radii.x : mask_radii.z) : (at.y < 0.0 ? mask_radii.y : mask_radii.w);
+    float r = min(picked, min(half_size.x, half_size.y));
+    vec2 p = abs(at) - (half_size - vec2(r));
+    float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;
+    float coverage = clamp(0.5 - away, 0.0, 1.0);
+    gl_FragColor = colour * coverage;
+}
+";
+/// The mask's rectangle in the texture's own pixels, `(x, y, w, h)`.
+pub const MASK_RECT_UNIFORM: &str = "mask_rect";
+/// The mask's corner radii in the texture's own pixels, `(tl, tr, bl, br)`.
+pub const MASK_RADII_UNIFORM: &str = "mask_radii";
+/// The texture's size in its own pixels.
+pub const MASK_SIZE_UNIFORM: &str = "mask_size";
+
 /// The 3x3 matrix taking a surface's texture coordinate to the client's own
 /// physical pixels, column-major. Computed per draw by whoever draws the
 /// surface; wirecheck's case 11h sets it by hand.
@@ -497,7 +567,23 @@ mod tests {
     /// for the wrong marker, which is a prefix of the right one. All three
     /// compile. All three fail only on a GPU, silently.
     fn has_line(wanted: &str) -> bool {
-        ROUNDED_CORNERS.lines().any(|line| line.trim() == wanted)
+        has_line_in(ROUNDED_CORNERS, wanted)
+    }
+
+    /// [`has_line`] in another program's source.
+    fn has_line_in(source: &str, wanted: &str) -> bool {
+        source.lines().any(|line| line.trim() == wanted)
+    }
+
+    /// The rounded-box distance the programs compute, transcribed: `at`
+    /// measured from the rectangle's top-left corner, the rectangle `w` by
+    /// `h`, all four corners at `r`. Negative inside.
+    fn rrect_distance(at_x: f64, at_y: f64, w: f64, h: f64, r: f64) -> f64 {
+        let (half_x, half_y) = (w * 0.5, h * 0.5);
+        let r = r.min(half_x.min(half_y));
+        let p_x = (at_x - half_x).abs() - (half_x - r);
+        let p_y = (at_y - half_y).abs() - (half_y - r);
+        p_x.max(p_y).min(0.0) + p_x.max(0.0).hypot(p_y.max(0.0)) - r
     }
 
     /// Four corners, and the shader has to tell them apart. A single radius is
@@ -683,27 +769,85 @@ mod tests {
         );
     }
 
+    /// For both texture programs: [`ROUNDED_CORNERS`] and [`MASKED_TEXTURE`].
     #[test]
     fn the_shader_handles_every_variant_smithay_compiles_it_into() {
-        for required in [
-            "#if defined(NO_ALPHA)",
-            "#if defined(EXTERNAL)",
-            "#extension GL_OES_EGL_image_external : require",
-            "uniform samplerExternalOES tex;",
-            "uniform sampler2D tex;",
+        for (name, source) in [
+            ("ROUNDED_CORNERS", ROUNDED_CORNERS),
+            ("MASKED_TEXTURE", MASKED_TEXTURE),
         ] {
+            for required in [
+                "#if defined(NO_ALPHA)",
+                "#if defined(EXTERNAL)",
+                "#if defined(DEBUG_FLAGS)",
+                "#extension GL_OES_EGL_image_external : require",
+                "uniform samplerExternalOES tex;",
+                "uniform sampler2D tex;",
+            ] {
+                assert!(
+                    has_line_in(source, required),
+                    "{name} has no `{required}`: one of smithay's variants would draw wrong"
+                );
+            }
+            // And the NO_ALPHA arm has to *do* something. A branch that takes
+            // the same path under a different name satisfies every assertion
+            // above and still draws an invisible window.
             assert!(
-                has_line(required),
-                "no `{required}`: one of smithay's three variants would draw wrong"
+                has_line_in(source, "colour = vec4(colour.rgb, 1.0) * alpha;"),
+                "{name}: NO_ALPHA has to replace the alpha channel, not sample it"
             );
         }
-        // And the NO_ALPHA arm has to *do* something. A branch that takes the
-        // same path under a different name satisfies every assertion above and
-        // still draws an invisible window.
+    }
+
+    /// **The masked program keeps inside and cuts outside its rect**, at a
+    /// rect offset by a padding: the program's own distance, transcribed in
+    /// [`rrect_distance`] and evaluated here, its lines pinned so the two
+    /// cannot drift apart. Wirecheck draws it (Task 17's case 12h).
+    #[test]
+    fn the_masked_program_keeps_inside_and_cuts_outside_its_rect() {
         assert!(
-            has_line("colour = vec4(colour.rgb, 1.0) * alpha;"),
-            "NO_ALPHA has to replace the alpha channel, not sample it"
+            MASKED_TEXTURE.starts_with("#version 100\n"),
+            "a texture program supplies its own version"
         );
+        assert!(
+            has_line_in(MASKED_TEXTURE, "//_DEFINES_"),
+            "smithay's texture program contract"
+        );
+        for declaration in [
+            format!("uniform vec4 {MASK_RECT_UNIFORM};"),
+            format!("uniform vec4 {MASK_RADII_UNIFORM};"),
+            format!("uniform vec2 {MASK_SIZE_UNIFORM};"),
+        ] {
+            assert!(
+                has_line_in(MASKED_TEXTURE, &declaration),
+                "no `{declaration}`"
+            );
+        }
+        // The distance, line by line, as `rrect_distance` transcribes it: the
+        // texture's pixel taken into the rectangle, the quadrant's radius
+        // picked unfolded and clamped, and both halves of the field.
+        for line in [
+            "vec2 px = v_coords * mask_size - mask_rect.xy;",
+            "vec2 half_size = mask_rect.zw * 0.5;",
+            "vec2 at = px - half_size;",
+            "float picked = at.x < 0.0 ? (at.y < 0.0 ? mask_radii.x : mask_radii.z) : (at.y < 0.0 ? mask_radii.y : mask_radii.w);",
+            "float r = min(picked, min(half_size.x, half_size.y));",
+            "vec2 p = abs(at) - (half_size - vec2(r));",
+            "float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;",
+            "float coverage = clamp(0.5 - away, 0.0, 1.0);",
+            "gl_FragColor = colour * coverage;",
+        ] {
+            assert!(has_line_in(MASKED_TEXTURE, line), "no `{line}`");
+        }
+        // The distance at points of a 100×50 rect at (24, 24) in a 148×98
+        // texture, radius 10: inside, on the edge, outside, and inside the
+        // rect but past a corner's arc.
+        let at = |x: f64, y: f64| rrect_distance(x - 24.0, y - 24.0, 100.0, 50.0, 10.0);
+        assert!(at(74.0, 49.0) < 0.0);
+        assert!(at(24.0, 49.0).abs() < 1e-9);
+        assert!(at(10.0, 10.0) > 0.0);
+        assert!(at(25.0, 25.0) > 0.5, "the corner is cut");
+        assert!(at(30.0, 49.0) < -0.5, "the left edge's middle is kept");
     }
 
     /// **A radius larger than the window degrades to a stadium; it does not
