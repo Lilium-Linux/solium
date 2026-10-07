@@ -221,15 +221,21 @@ An effect is a folder of Lua and GLSL a user can copy and change
 configuration reload has no renderer and `render::prepare` is the first place
 the compositor holds a GL context between frames. At config load, with no
 GPU, `effect::host::Host` reads every folder the configuration wants, runs its
-`effect.lua` in a Lua of its own (`effect/sandbox.rs`), lints its shaders and
-hashes the folder; one whose hash has not changed keeps everything. At the top
-of the next `prepare` the host compiles what changed, in raw GL from three
-source strings (`effect/gl.rs`: a prelude, the user's file untouched, an
-epilogue), so the driver's log names the user's own line, which smithay's
-program API would drop. Programs are keyed by the hash of what they compile,
-so two effects with the same program share it, and a version swaps in only
-once all of its programs compiled: one that fails leaves the version that ran.
-With no effect wanted, `prepare` asks the host one question and touches no GL.
+`effect.lua` in a Lua of its own (`effect/sandbox.rs`), flattens its stages
+into one plan for its defaults and one for each `fallback` rung
+(`solium_effects::stage`), lints every pass's shader and hashes the folder;
+one whose hash has not changed keeps everything. At the top of the next
+`prepare` the host compiles what changed, in raw GL from three source strings
+(`effect/gl.rs`: a prelude, the user's file untouched, an epilogue), so the
+driver's log names the user's own line, which smithay's program API would
+drop. Programs are keyed by the hash of what they compile, so two effects
+with the same program share it, and a version swaps in only once all of its
+programs compiled: one that fails leaves the version that ran. Before its
+first compile, `prepare` asks the GPU once, with a 1×1 target, whether it
+renders into `rgba16f` (`pool::formats`); from then a plan drawing into a
+format the GPU lacks is dropped at bind, so the effect starts at its first
+rung that runs, and until then every rung is kept. With no effect wanted,
+`prepare` asks the host one question and touches no GL.
 
 ### The arrangements are a crate too
 

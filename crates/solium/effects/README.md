@@ -75,9 +75,11 @@ Its shaders are compiled on this machine's GPU, on the first render node, and
 only there: a compile says what this machine's driver accepts and nothing
 more. NVIDIA's accepts GLSL that Mesa's refuses, such as a loop bound that is
 not a constant, or an `int` where a `float` is wanted, so an effect meant for
-other machines is worth checking on one with Mesa as well. With no render
-node it says `shaders not compiled: no render node`, and that is not a
-failure.
+other machines is worth checking on one with Mesa as well. The same GPU is
+asked whether it can draw into `rgba16f`, so an effect whose every version
+needs it fails there. With no render node it says `shaders not compiled: no
+render node` and `formats not checked: no render node`, keeps every version,
+and that is not a failure.
 
 Plain `solium --check` checks every folder in your `effects/` this way,
 named or not, and every effect your configuration names. There a folder with
@@ -109,6 +111,23 @@ never quietly means a default.
 An effect draws something, and says how once: `frag` or `stages`, not both,
 or a `mesh`, or `pixels`. `motion` is refused until motion tokens exist; give
 `duration` and `easing`. `image:` inputs are not read yet, and are refused.
+
+### Fallbacks
+
+```lua
+fallback = { { passes = 2 }, { passes = 1 }, "frost" },
+```
+
+Wherever the effect is used, its stages are put in place for the params it
+was given, and again for each `fallback` in order: a table of params given
+over those, or another effect at its defaults. That happens when the
+configuration loads, never once a frame. A GPU that cannot draw into
+`rgba16f` drops every version with a pass or a state in that format, so the
+effect starts at the first version that does not; if none is left, the
+effect is not drawn and is named on the overlay. Until Solium's first frame
+has asked the GPU, every version is kept. An effect a `fallback` names is
+loaded with it, and an effect draws only once the shaders of every version
+compiled.
 
 ### Params
 
@@ -151,7 +170,7 @@ effect draws.
 
 | Stage | What it does |
 |---|---|
-| `{ "pass", "<file>.frag" }` | draws one shader into a texture of its own. `sol_tex` reads the last result, or the effect's first input in the first pass. `scale =` sizes it against what it reads, 1 when not given; `format =` is `"rgba8"`, the default, or `"rgba16f"`; `uses = { … }` lists the other textures it reads, by name; `input =` names what `sol_tex` reads in place of the last result |
+| `{ "pass", "<file>.frag" }` | draws one shader into a texture of its own. `sol_tex` reads the last result, or the effect's first input in the first pass. `scale =` sizes it against what it reads, rounded up to whole pixels, 1 when not given; `format =` is `"rgba8"`, the default, or `"rgba16f"`; `uses = { … }` lists the other textures it reads, by name; `input =` names what `sol_tex` reads in place of the last result |
 | `{ "repeat", over = { 64, 32, … }, as = "<name>", <stages> }` | runs the stages after its kind once for each number in `over`, with `p_<name>` set to that number. The name is a new one, not one of the effect's params |
 | `{ "save", "<name>" }`, `{ "get", "<name>" }` | names the last result; makes a named result the last one again |
 | `{ "use", "<effect>", <param> = <value>, … }` | runs another effect's stages here, on the last result, with those params. The names it saves are its own, and where it reads its first input by name it reads what it was given. It is put in place when the effect is loaded, so it costs nothing while the effect draws |
