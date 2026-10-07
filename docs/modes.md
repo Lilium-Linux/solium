@@ -756,7 +756,8 @@ them replaceable in `config.bindings`:
 
 | keys | |
 |---|---|
-| `super+arrows`, `super+h` `j` `k` `l` | focus that way |
+| `super+h` `j` `k` `l` | focus that way |
+| `super+arrows` | focus that way, except with no layout in charge, where `lua/floating.lua`'s snap takes them over instead (#222, "Modes that are not layouts" below) |
 | `super+shift+arrows`, `super+shift+h` `j` `l`, `super+alt+k` | move that way |
 | `super+f` | fullscreen, and back |
 | `super+shift+m` | maximised, and back |
