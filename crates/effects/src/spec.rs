@@ -111,7 +111,7 @@ pub struct EffectSpec {
 
 /// A name GLSL can carry as `p_<name>` or `sol_<name>`: lower-case letters,
 /// digits and `_`, not starting with a digit.
-fn is_identifier(name: &str) -> bool {
+pub(crate) fn is_identifier(name: &str) -> bool {
     let mut bytes = name.bytes();
     bytes
         .next()
