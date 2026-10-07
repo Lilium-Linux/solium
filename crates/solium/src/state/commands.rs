@@ -384,6 +384,24 @@ impl Solium {
                     }
                 }
                 Command::Idle(settings) => self.idle.configure(settings),
+                Command::FocusMode {
+                    click,
+                    follow,
+                    clear_on_empty_click,
+                } => {
+                    // `None` leaves the profile's current answer alone --
+                    // see `Command::FocusMode`'s own doc for why there is no
+                    // fixed default to fall back to instead.
+                    if let Some(click) = click {
+                        self.profile.click_to_focus = click;
+                    }
+                    if let Some(follow) = follow {
+                        self.profile.focus_follows_mouse = follow;
+                    }
+                    if let Some(clear) = clear_on_empty_click {
+                        self.profile.clear_focus_on_empty_click = clear;
+                    }
+                }
                 Command::Power { monitor, on } => match monitor {
                     None => self.power_all(on),
                     Some(name) => {
