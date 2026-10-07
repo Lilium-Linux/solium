@@ -1163,6 +1163,18 @@ impl<P: Clone> Host<P> {
         self.replace_problems(effect, Vec::new());
     }
 
+    /// Take every problem of an effect named under `prefix` (every pane
+    /// style's, `"style:"`), in one change, and none when there was nothing
+    /// to take. `tests::clearing_by_prefix_is_one_change`.
+    pub(crate) fn clear_problems_prefixed(&mut self, prefix: &str) {
+        let before = self.problems.len();
+        self.problems
+            .retain(|each| !each.effect.starts_with(prefix));
+        if self.problems.len() != before {
+            self.generation += 1;
+        }
+    }
+
     /// Add what is not already listed: two effects binding one broken
     /// `.frag` name it once (`tests::a_broken_frag_two_effects_bind_is_named_once`).
     fn add_problems(&mut self, problems: Vec<Problem>) {
@@ -1845,6 +1857,40 @@ pub(crate) mod tests {
         );
         host.want("rules", []);
         assert_eq!(host.problems(), &[], "a name nobody wants is still listed");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **Every pane style's problems are cleared at once, in one change**:
+    /// each effect named under the prefix and nothing else, with one bump of
+    /// the generation the `problems` event is told by, and none when there
+    /// was nothing to clear.
+    #[test]
+    fn clearing_by_prefix_is_one_change() {
+        let place = scratch("prefixed-problems");
+        let mut host = host_with(&place);
+        for effect in ["style:a", "style:b", "rules"] {
+            host.push_problem(super::Problem::error(
+                effect,
+                Path::new("effects.lua"),
+                None,
+                "wrong".to_owned(),
+            ));
+        }
+        let before = host.problems_generation();
+        host.clear_problems_prefixed("style:");
+        let left: Vec<&str> = host
+            .problems()
+            .iter()
+            .map(|each| each.effect.as_str())
+            .collect();
+        assert_eq!(left, ["rules"]);
+        assert_eq!(host.problems_generation(), before + 1);
+        host.clear_problems_prefixed("style:");
+        assert_eq!(
+            host.problems_generation(),
+            before + 1,
+            "nothing to clear is no change"
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 

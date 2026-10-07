@@ -482,6 +482,10 @@ function sol.reload() end
 ---`qml/panes`, or a single file under `~/.config/solium/qml/decorations`; a
 ---path is anyone's; `"none"` draws no frame. `SOLIUM_PANE`, when set, wins over
 ---the name given here.
+---
+---A style folder's `effects.lua`, if it has one, is read here, every time, and
+---its effect rules bound for the windows it frames; what is wrong with it is
+---listed by `sol.problems()` under `style:<folder>`.
 ---@param name? string
 ---@return nil
 function sol.pane(name) end

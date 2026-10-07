@@ -1900,6 +1900,19 @@ pub(crate) fn style_file(style: Option<&str>) -> Option<PathBuf> {
     }
 }
 
+/// The style folder a window's frame is built from, by the lookup [`build`]
+/// takes (the default style when none is named), or `None` for `none`, a
+/// single-file decoration or a name that is nowhere: where
+/// `Solium::apply_style_rules` reads `effects.lua` from.
+/// `state::tests::the_formats_probe_rebinds_the_styles_rules_too`,
+/// `state::tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`.
+pub(crate) fn style_dir(style: Option<&str>) -> Option<PathBuf> {
+    if bare(style) {
+        return None;
+    }
+    bundle(Some(style.unwrap_or(DEFAULT_STYLE)))
+}
+
 /// The style bundle this setting asks for, if it asks for one at all.
 ///
 /// `SOLIUM_QML_TITLEBAR` and any name ending in `.qml` are a *file* and never a

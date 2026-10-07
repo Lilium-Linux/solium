@@ -59,9 +59,11 @@ A link may also give `reach` and `bleed`, in pixels, in place of the
 effect's own. A chain reads as far around its part as its first link
 reaches, and draws as far beyond it as all its links bleed together.
 
-For one part and one slot the later rule wins: a pane style's rules first,
-then yours, so yours win over a style's, and a later one of yours over an
-earlier one. `effect = false` in a later rule empties the slot an earlier one
+A pane style may give rules of its own, for the windows it frames, in an
+`effects.lua` beside its `Pane.qml`
+([pane styles](../qml/panes/README.md#effectslua)). For one part and one slot
+the later rule wins: a pane style's rules first, then yours, so yours win
+over a style's, and a later one of yours over an earlier one. `effect = false` in a later rule empties the slot an earlier one
 filled. The part itself is always drawn: `behind` and `front` only add, and a
 `replace` whose effect fails draws the part as if no rule named it.
 
@@ -100,7 +102,8 @@ its file changes, or until a reload, which tries every failure once more.
 What is broken is named with its file and line in the top-right corner of
 your primary monitor, for as long as it is broken: a Lua error in an
 `effect.lua`, a check of a shader that fails, a compile the GPU refused, a
-rule that cannot be applied (above). A
+rule that cannot be applied (above), a pane style's `effects.lua` that does
+not run or a rule of it that cannot be bound. A
 configuration that fails to reload is listed there too, at its own line, and
 the configuration that was running before it keeps running. The list goes
 when a reload leaves nothing broken. A version of an effect that fails keeps
@@ -142,7 +145,9 @@ named or not, and every effect your configuration's rules name, and then
 binds each rule as the compositor would, so a rule it would refuse fails
 there too. Rules that do not parse fail by their number and key, and are not
 bound: it says `rules not checked: effects.rules did not parse`. A folder with no `effect.lua` fails, and so does one whose name
-cannot name an effect, such as `Blur`, since nothing could use it.
+cannot name an effect, such as `Blur`, since nothing could use it. The
+`effects.lua` of each pane style of your own is read too, and fails on what
+the overlay would name.
 
 ## What `effect.lua` returns
 

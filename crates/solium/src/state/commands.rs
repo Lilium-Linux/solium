@@ -412,6 +412,11 @@ impl Solium {
                         // layout's arithmetic and only the layout can redo it.
                         self.trigger_relayout();
                     }
+                    // Changed or not: the configuration's first `sol.pane`
+                    // may name the style already set, and its rules are
+                    // bound when the style is applied (Ruling 15,
+                    // `tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`).
+                    self.apply_style_rules();
                 }
                 Command::PaneValues(fields) => {
                     if self.decorations.merge_values(fields) {
@@ -626,6 +631,11 @@ impl Solium {
                 // hands over bind against the folders as they now are
                 // (`a_reload_binds_the_rules_against_the_folders_it_read`).
                 self.effects.reload();
+                // The style's rules, read and bound again against the folders
+                // as they now are, for a configuration that does not name its
+                // style again
+                // (`tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`).
+                self.apply_style_rules();
                 self.start_scripts(Some(scripts));
                 // A configuration that loads mends the one that did not
                 // (`a_failed_reload_is_a_problem_until_one_succeeds`).
@@ -800,12 +810,116 @@ impl Solium {
 
     /// Bind every rule again, after the formats probe changed what is known
     /// (Ruling 11): the user's rules through `apply_effects`, a new
-    /// generation, so every slot starts afresh. Task 15 adds the style's.
-    /// `tests::the_formats_probe_rebinds_the_rules_after_the_frame`.
+    /// generation, so every slot starts afresh, and the style's through
+    /// `apply_style_rules`.
+    /// `tests::the_formats_probe_rebinds_the_rules_after_the_frame`,
+    /// `tests::the_formats_probe_rebinds_the_styles_rules_too`.
     pub(crate) fn rebind_effects(&mut self) {
         self.rebind = false;
         let user = self.rules.user().to_vec();
         self.apply_effects(Ok(user));
+        self.apply_style_rules();
+    }
+
+    /// The configured style's `effects.lua`: its problems on the overlay
+    /// under `style:<name>`, its effects wanted (origin `"style"`) and every
+    /// rule bound now, never lazily in `prepare` (Ruling 15). A rule that
+    /// cannot bind is a problem too, at the file and line of what failed or
+    /// else at `effects.lua`, and its slot stays empty; the others run.
+    /// `tests::a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overlay`,
+    /// `tests::a_style_rule_that_cannot_bind_is_a_problem_and_the_others_run`,
+    /// `tests::the_formats_probe_rebinds_the_styles_rules_too`.
+    pub(crate) fn apply_style_rules_from(&mut self, dir: Option<&std::path::Path>) {
+        use crate::effect::host::Problem;
+        use crate::effect::plan::Chains;
+        use crate::effect::rules::{Fill, Origin, RuleKey};
+        let read = dir.map_or_else(crate::style::StyleRules::none, crate::style::rules_of);
+        let names: Vec<String> = read
+            .rules
+            .iter()
+            .filter_map(|rule| match &rule.fill {
+                Fill::Chain(links) => Some(links.iter().map(|link| link.effect.clone())),
+                Fill::Off => None,
+            })
+            .flatten()
+            .collect();
+        self.effects.want("style", names);
+        let effect = dir
+            .and_then(std::path::Path::file_name)
+            .map(|name| format!("style:{}", name.to_string_lossy()))
+            .unwrap_or_default();
+        let file = dir.map(|dir| dir.join("effects.lua")).unwrap_or_default();
+        let mut problems = read.problems.clone();
+        for (index, rule) in read.rules.iter().enumerate() {
+            if rule.fill == Fill::Off {
+                continue;
+            }
+            let key = RuleKey {
+                origin: Origin::Style,
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+                generation: read.generation,
+            };
+            match Chains::bind(&mut self.effects, rule) {
+                Ok(chain) => self.chains.insert(key, chain),
+                Err(problem) => {
+                    self.chains.remove(key);
+                    problems.push(Problem {
+                        effect: effect.clone(),
+                        message: format!("effects.lua, rule {}: {}", index + 1, problem.message),
+                        file: if problem.line.is_some() {
+                            problem.file
+                        } else {
+                            file.clone()
+                        },
+                        ..problem
+                    });
+                }
+            }
+        }
+        self.chains
+            .retain_generation(Origin::Style, read.generation);
+        // What the style's chains run is held with the rest, so a style
+        // replaced gives its programs back and nothing it asked for is
+        // forgotten before it compiles
+        // (`tests::a_replaced_style_holds_only_its_own_programs`).
+        self.effects.hold(self.chains.programs());
+        self.list_style_problems(problems);
+        self.redraw = true;
+    }
+
+    /// `apply_style_rules_from` for the folder the configured style's frames
+    /// are built from (`decoration::style_dir`: none for `none`, a
+    /// single-file decoration or a name that is nowhere).
+    /// `tests::the_formats_probe_rebinds_the_styles_rules_too`,
+    /// `tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`.
+    pub(crate) fn apply_style_rules(&mut self) {
+        let dir = crate::decoration::style_dir(self.decorations.style());
+        self.apply_style_rules_from(dir.as_deref());
+    }
+
+    /// Every pane style's problems, now `problems`: replaced only when they
+    /// differ from what is listed, so a style applied again unchanged tells
+    /// the `problems` listeners nothing
+    /// (`tests::a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overlay`).
+    fn list_style_problems(&mut self, problems: Vec<crate::effect::host::Problem>) {
+        let mut unique: Vec<crate::effect::host::Problem> = Vec::with_capacity(problems.len());
+        for problem in problems {
+            if !unique.contains(&problem) {
+                unique.push(problem);
+            }
+        }
+        let listed = self
+            .effects
+            .problems()
+            .iter()
+            .filter(|each| each.effect.starts_with("style:"));
+        if listed.eq(unique.iter()) {
+            return;
+        }
+        self.effects.clear_problems_prefixed("style:");
+        for problem in unique {
+            self.effects.push_problem(problem);
+        }
     }
 
     /// Tell the scripts they have replaced a running session's, not started one.

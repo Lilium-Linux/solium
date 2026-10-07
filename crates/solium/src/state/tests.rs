@@ -498,6 +498,292 @@ fn a_refused_rule_set_leaves_no_compile_asked_for() {
     let _ = std::fs::remove_dir_all(place);
 }
 
+/// Whether this run's environment has chosen the pane style already, so a
+/// test that names one stands down rather than asserting about another.
+fn the_environment_names_a_style() -> bool {
+    ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+}
+
+/// A pane style folder `frosted` in `place`, with `effects.lua` as given and
+/// a manifest nothing here builds.
+fn style_with_rules(place: &std::path::Path, effects_lua: &str) -> std::path::PathBuf {
+    let style = place.join("frosted");
+    std::fs::create_dir_all(&style).expect("a style folder");
+    std::fs::write(
+        style.join("Pane.qml"),
+        "import Solium\nPaneStyle { Layer { depth: \"frame\"; name: \"bar\" } }\n",
+    )
+    .expect("writing the manifest");
+    std::fs::write(style.join("effects.lua"), effects_lua).expect("writing effects.lua");
+    style
+}
+
+/// The style's newest bound plan's first step's program, as a test reads it.
+fn style_step(state: &Solium) -> Option<u64> {
+    state
+        .chains
+        .first_plan_for_test(crate::effect::rules::Origin::Style)
+        .and_then(|plan| plan.steps.first())
+        .map(|step| step.key)
+}
+
+/// **A style's rules are bound when it is applied, and a broken
+/// `effects.lua` is on the overlay** (Ruling 15): its effects are wanted and
+/// its rules bound at config load, not when a frame first resolves one; a
+/// broken edit lists its line, and the rules that ran stay bound. Applied
+/// again unchanged it tells the overlay nothing, and mended it leaves
+/// nothing there.
+#[test]
+fn a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overlay() {
+    let place = crate::effect::host::tests::scratch("state-style-rules");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let style = style_with_rules(
+        &place,
+        "return { { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } } }",
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.apply_style_rules_from(Some(&style));
+    assert!(
+        state.effects.has_pending("tint"),
+        "the style's effect is not wanted when the style is applied"
+    );
+    assert!(
+        state
+            .chains
+            .first_plan_for_test(crate::effect::rules::Origin::Style)
+            .is_some(),
+        "the style's rule is not bound when the style is applied"
+    );
+    std::fs::write(
+        style.join("effects.lua"),
+        "return {\n  {\n    part = = 'client' } }",
+    )
+    .expect("breaking it");
+    state.apply_style_rules_from(Some(&style));
+    assert!(
+        state
+            .effects
+            .problems()
+            .iter()
+            .any(|each| each.effect.starts_with("style:") && each.line == Some(3)),
+        "{:?}",
+        state.effects.problems()
+    );
+    assert!(
+        state
+            .chains
+            .first_plan_for_test(crate::effect::rules::Origin::Style)
+            .is_some(),
+        "the rules that ran went with the broken edit"
+    );
+    let told = state.effects.problems_generation();
+    state.apply_style_rules_from(Some(&style));
+    assert_eq!(
+        state.effects.problems_generation(),
+        told,
+        "applied again unchanged, the overlay was told of a change"
+    );
+    std::fs::write(style.join("effects.lua"), "return {}").expect("mending it");
+    state.apply_style_rules_from(Some(&style));
+    assert!(
+        !state
+            .effects
+            .problems()
+            .iter()
+            .any(|each| each.effect.starts_with("style:")),
+        "{:?}",
+        state.effects.problems()
+    );
+    assert!(
+        state
+            .chains
+            .first_plan_for_test(crate::effect::rules::Origin::Style)
+            .is_none(),
+        "a rule the mended file no longer has is still bound"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **A style's rule that cannot bind is a problem at its `effects.lua`, and
+/// the others run** (Ruling 15): where your own set is taken whole, a
+/// style's rules are bound one by one, so one naming an effect nobody ships
+/// costs only its own slot.
+#[test]
+fn a_style_rule_that_cannot_bind_is_a_problem_and_the_others_run() {
+    let place = crate::effect::host::tests::scratch("state-style-rule-unbound");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let style = style_with_rules(
+        &place,
+        "return {
+            { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } },
+            { match = '*', part = 'client', slot = 'behind', effect = 'nobody' },
+        }",
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.apply_style_rules_from(Some(&style));
+    assert!(
+        style_step(&state).is_some(),
+        "the style's rule that binds did not run beside the one that does not"
+    );
+    assert!(
+        state
+            .effects
+            .problems()
+            .iter()
+            .any(|each| each.effect == "style:frosted"
+                && each.message.contains("rule 2")
+                && each.file == style.join("effects.lua")),
+        "{:?}",
+        state.effects.problems()
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **A style's rules hold the programs they run, and a style replacing them
+/// gives them back**, as your own set's do: what one style bound is not held
+/// for the rest of the session.
+#[test]
+fn a_replaced_style_holds_only_its_own_programs() {
+    let place = crate::effect::host::tests::scratch("state-style-held");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    crate::effect::host::tests::folder(
+        &place,
+        "plain",
+        "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+        &[(
+            "effect.frag",
+            "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+        )],
+    );
+    let style = style_with_rules(
+        &place,
+        "return { { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } } }",
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.apply_style_rules_from(Some(&style));
+    let tint = style_step(&state).expect("bound");
+    assert!(
+        state.effects.held_for_test().contains(&tint),
+        "the style's program is not held"
+    );
+    std::fs::write(
+        style.join("effects.lua"),
+        "return { { match = '*', part = 'client', slot = 'front', effect = { 'plain', source = 'self' } } }",
+    )
+    .expect("editing it");
+    state.apply_style_rules_from(Some(&style));
+    let plain = style_step(&state).expect("bound");
+    assert_eq!(
+        state
+            .effects
+            .held_for_test()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![plain],
+        "the replaced style's program is still held"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **`sol.pane` binds its style's rules, and a reload binds them again**
+/// (Ruling 15): naming a style applies its `effects.lua` there and then, and
+/// a reload reads the file again even when the configuration does not name
+/// the style again.
+#[test]
+fn sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again() {
+    if the_environment_names_a_style() {
+        return;
+    }
+    let directory = crate::effect::host::tests::scratch("state-style-reload");
+    let effects = directory.join("effects");
+    crate::effect::host::tests::folder(&effects, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    crate::effect::host::tests::folder(
+        &effects,
+        "plain",
+        "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+        &[(
+            "effect.frag",
+            "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+        )],
+    );
+    let style = style_with_rules(
+        &directory,
+        "return { { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } } }",
+    );
+    let entry = directory.join("init.lua");
+    std::fs::write(&entry, format!("sol.pane('{}')\n", style.display()))
+        .expect("writing the test script");
+    let (_display, mut state) = state_with_effects_in(&effects);
+    state.reload_from(&entry);
+    let tint = style_step(&state).expect("sol.pane did not bind its style's rules");
+    std::fs::write(
+        style.join("effects.lua"),
+        "return { { match = '*', part = 'client', slot = 'front', effect = { 'plain', source = 'self' } } }",
+    )
+    .expect("editing it");
+    std::fs::write(&entry, "-- the style stays as it was\n").expect("writing the test script");
+    state.reload_from(&entry);
+    let plain = style_step(&state).expect("bound");
+    assert_ne!(
+        plain, tint,
+        "the reload did not bind the style's rules again"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// **The probe's first answer rebinds the style's rules too, and one this
+/// GPU cannot run leaves its slot empty** (Rulings 11, 15): a style rule
+/// bound before the probe keeps an effect that only draws into `rgba16f`;
+/// the probe says no; after the frame its chain is gone, and said.
+#[test]
+fn the_formats_probe_rebinds_the_styles_rules_too() {
+    if the_environment_names_a_style() {
+        return;
+    }
+    let place = crate::effect::host::tests::scratch("state-style-formats");
+    crate::effect::host::tests::folder(
+        &place,
+        "wide",
+        "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'a.frag', format = 'rgba16f' } } }",
+        &[(
+            "a.frag",
+            "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+        )],
+    );
+    let style = style_with_rules(
+        &place,
+        "return { { match = '*', part = 'client', slot = 'replace', effect = { 'wide', source = 'self' } } }",
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    state
+        .decorations
+        .set_style(&mut state.panes, Some(style.display().to_string()));
+    state.apply_style_rules();
+    assert!(
+        style_step(&state).is_some(),
+        "the premise: unknown formats keep the rgba16f plan"
+    );
+    crate::render::note_formats(&mut state, crate::pool::Formats { rgba16f: false });
+    let _ = state.settle(state.clock.now());
+    assert!(
+        style_step(&state).is_none(),
+        "a style rule this GPU cannot run is still bound after the probe"
+    );
+    assert!(
+        state
+            .effects
+            .problems()
+            .iter()
+            .any(|each| each.effect == "style:frosted"),
+        "{:?}",
+        state.effects.problems()
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
 /// **A deform at rest is aimed at nothing**, so a window brought back from a
 /// genie with `sol.present(id, {})` is not captured and warped on every frame
 /// for good (#140).

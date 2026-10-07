@@ -292,6 +292,15 @@ rules bind against the folders as they now are, and the probe's first answer
 binds them again after the frame (`Solium::settle`), since rules bound before
 it kept every rung.
 
+A pane style's rules come from its `effects.lua`, read by `style::rules_of`
+in an effect's sandbox, once per folder and content, and carried on each
+pane's `Decoration` with their generation, so a bare pane has none.
+`Solium::apply_style_rules` wants their effects and binds them when the style
+is applied (each `sol.pane`, a reload, the probe's rebind), never in
+`prepare`; unlike the user's set they bind one by one, a rule that cannot
+leaving its slot empty, and a file that does not run keeps the rules that
+ran, its problems under `style:<folder>`.
+
 A plan is run by `effect/run.rs`, in raw GL like the programs: each step is
 drawn into a pooled target in a frame opened on the carrier, reading
 `sol_tex` on texture unit 0 and the textures it `uses` on the next, at most

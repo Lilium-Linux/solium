@@ -95,6 +95,12 @@ impl Chains {
         self.by_key.insert(key, chain);
     }
 
+    /// Drop one rule's chain: a style's rule that no longer binds leaves its
+    /// slot empty. `state::tests::the_formats_probe_rebinds_the_styles_rules_too`.
+    pub(crate) fn remove(&mut self, key: RuleKey) {
+        self.by_key.remove(&key);
+    }
+
     #[expect(dead_code, reason = "Task 18's slot plan looks a slot's chain up")]
     pub(crate) fn get(&self, key: RuleKey) -> Option<&BoundChain> {
         self.by_key.get(&key)

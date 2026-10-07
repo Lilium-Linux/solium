@@ -56,7 +56,7 @@ PaneStyle {
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today: the software scene graph does not implement `ShaderEffect`, and `Canvas` does not appear to paint on it, so a style using either says so. A style whose terms this session cannot meet, or that names one this build has never heard of, is refused rather than drawn wrong: its windows are left bare, and the log names the term. A nested session renders in software under the default `qml.renderer = "auto"` |
 | `client.radius` | rounds the client's own surfaces, in logical pixels. The compositor cuts the corners as it draws the client, at no extra cost: no pass and no copy of the window (see "What it costs"). `0` is no effect at all, and so is leaving the key out — which is what nine of the eleven bundles that ship do. The example fixture writes `0`, to show the key exists and costs nothing; `rounded/` and `flush/` are the two that round |
 | `client.radiusTopLeft`, `.radiusTopRight`, `.radiusBottomLeft`, `.radiusBottomRight` | one corner each, in logical pixels. Every one of them defaults to `client.radius`, so a style that wants four the same writes one key and these never come up. **A `0` has to be written out**: squaring a corner is half of what these are for, so an absent corner follows `radius` rather than being square. `flush/` is the shipped example |
-| `client.shadow` | reserved for the shadow cast by the client's silhouette; declared, and read by nobody yet |
+| `client.shadow` | reserved, and read by nobody: a shadow is an effect rule in the style's `effects.lua` (below) |
 | the `Layer` children | the layers, in declaration order |
 
 Insets are on the style and never on a layer. The client is placed once and
@@ -250,6 +250,42 @@ compositor at about a tenth of a core with `pulse` animating at the screen's
 full rate. Bind an endless animation to `focused`, as `pulse` and the `wave`
 demonstration do, and an unfocused window costs nothing.
 
+## effects.lua
+
+A style folder may hold `effects.lua` beside its `Pane.qml`: a list of effect
+rules for the windows this style frames, and for no others.
+
+```lua
+-- ~/.config/solium/qml/panes/mine/effects.lua
+return {
+    { match = "*", part = "pane", slot = "behind", effect = { "glow", spread = 24 } },
+}
+```
+
+Each rule is the rule `effects.rules` takes in your configuration, with every
+key it has ([the effects reference](../../effects/README.md#rules)), and the
+effects it names are effect folders, yours or the shipped ones: a style ships
+rules, not effects of its own. Your own `effects.rules` win over a style's,
+for the same part and slot. A window the style does not frame gets none of
+them: a fullscreen window, a window that draws its own decorations, and every
+window under `pane = "none"` are bare, and only your own rules reach those
+(`match = { style = "none" }` names them).
+
+The file runs in an effect's Lua, not your configuration's: `math`, `table`
+and `string`, and no `sol`, no files and no `require`, stopped if it runs
+longer than 100 ms. It is read when the style is applied (at startup, at each
+`sol.pane`, at every reload), once for as long as it does not change, and
+every effect it names is loaded and every rule bound then. What is wrong with
+it is named in the top-right corner of your primary monitor, under
+`style:<folder>` and at `effects.lua`'s line: a file that does not run keeps
+the rules that ran before it, and a rule that cannot be bound (a key
+misspelled, an effect nobody ships, a param it does not have) is named by its
+number, its slot is left empty, and the rest run. `solium --check` reads the
+`effects.lua` of each style of your own and fails on the same things.
+
+As with your own rules, this build reads, checks and binds them, and does not
+draw an effect in its slot yet.
+
 ## What is here
 
 | folder | |
@@ -276,7 +312,7 @@ rest are here to show what layers add:
 | `flush/` | the same seam the other way up: `radiusTopLeft` and `radiusTopRight` at `0`, so the client's top is square, the bar's own rounded top is the window's top, and the two meet flat. The only shipped bundle whose four corners differ |
 | `shadow/` | `behind` plus `bleed`: stacked rectangles standing in for a blur |
 
-And four demonstrations, which are not shipped and are never offered by name.
+And five demonstrations, which are not shipped and are never offered by name.
 They live with the test fixtures in a checkout, in
 `crates/solium/tests/fixtures/panes/`, and `SOLIUM_PANE=<that path>/<name>`
 puts one on every window:
@@ -287,6 +323,7 @@ puts one on every window:
 | `sandwich/` | one layer behind the client and one above it, in colours that cannot be confused |
 | `wave/` | sine waves flowing round the whole window, outside it, all `bleed` at `behind` and nothing reserved |
 | `bleedy/` | what bleed does to hit-testing, and to the window next door |
+| `frosted/` | a translucent bar, and an `effects.lua` putting an effect behind the titlebar |
 
 ## The keyboard pill
 
@@ -343,7 +380,8 @@ is the only place those numbers can live. It has no manifest to add
 `KeyboardPillLayer {}` to either, so with `keyboard.indicator.show = "pane"`
 its windows show no keyboard pill: draw one at `caret` yourself (with
 `property bool overlay: true`, since it paints over the client), or set
-`show = "surface"`.
+`show = "surface"`. Nor has it a folder to keep an `effects.lua` in, so it
+gives its windows no effect rules.
 
 Nothing ships as one any more: the eight above were single files until the
 pane-styles work moved them into folders. The path stays because those files

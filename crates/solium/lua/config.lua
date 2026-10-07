@@ -663,7 +663,9 @@ local defaults = {
     -- "rounded" and "flush" cut the client's corners as it is drawn, at no
     -- extra cost: no pass and no copy of the window. The panes README,
     -- `qml/panes/README.md`, has what each style is made of and costs.
-    -- SOLIUM_PANE overrides this, for one run.
+    -- A style folder may also give its windows effect rules, in an
+    -- `effects.lua` beside its Pane.qml; yours in `effects.rules` win over
+    -- them. SOLIUM_PANE overrides this, for one run.
     --
     -- A single QML file still works and is still called a decoration: drop one
     -- in ~/.config/solium/qml/decorations and name it here. It is one layer in
@@ -1051,6 +1053,7 @@ local defaults = {
         --
         -- A list, so yours replaces this one whole. A set with a broken rule
         -- is refused whole, named on the overlay, and the rules that ran stay.
+        -- A pane style's own rules, in its effects.lua, come first: yours win.
         rules = {},
     },
 
