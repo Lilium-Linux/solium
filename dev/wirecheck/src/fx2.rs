@@ -50,6 +50,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     rgba16f_is_renderable_or_reported(renderer)?;
     an_identity_pass_returns_its_input(renderer)?;
     a_kawase_blur_matches_the_cpu(renderer)?;
+    the_shipped_blur_matches_a_dual_kawase_reference(renderer)?;
     a_pass_reading_three_textures_samples_each(renderer)?;
     smithay_draws_as_before_after_a_run(renderer)?;
     a_withheld_program_is_pending(renderer)?;
@@ -278,6 +279,32 @@ fn kawase(passes: u32, offset: f64) -> Fixture {
             (
                 "up.frag",
                 include_str!("../../../crates/solium/tests/fixtures/effects/kawase/up.frag"),
+            ),
+        ],
+    }
+}
+
+/// The shipped `blur/` at `passes` and `offset`, as its `stages` make it
+/// (no Lua here): `passes` down at half scale and as many up at twice, its
+/// own frags, its input the backdrop.
+fn shipped_blur(passes: u32, offset: f64) -> Fixture {
+    let mut stages: Vec<Stage> = (0..passes).map(|_| pass("down.frag", 0.5, &[])).collect();
+    stages.extend((0..passes).map(|_| pass("up.frag", 2.0, &[])));
+    Fixture {
+        inputs: &["backdrop"],
+        stages,
+        params: vec![
+            ("offset".to_owned(), Value::Number(offset)),
+            ("passes".to_owned(), Value::Int(i64::from(passes))),
+        ],
+        frags: &[
+            (
+                "down.frag",
+                include_str!("../../../crates/solium/effects/blur/down.frag"),
+            ),
+            (
+                "up.frag",
+                include_str!("../../../crates/solium/effects/blur/up.frag"),
             ),
         ],
     }
@@ -597,7 +624,7 @@ impl Cpu {
         })
     }
 
-    /// One Kawase pass of the fixture's `down.frag` or `up.frag` into `size`,
+    /// One Kawase pass, `down.frag` or `up.frag` (the fixture's and blur's), into `size`,
     /// each channel rounded to a byte as an `rgba8` target stores it.
     #[expect(clippy::cast_precision_loss, reason = "a texture side")]
     fn kawase(&self, up: bool, offset: f64, size: (usize, usize)) -> Cpu {
@@ -648,6 +675,45 @@ impl Cpu {
 /// clamped at the edge, every channel within 1 of the CPU's.
 fn a_kawase_blur_matches_the_cpu(renderer: &mut GlesRenderer) -> Result<()> {
     println!("\n=== FX2: a dual Kawase built from pass matches a CPU reference within one ===");
+    let (off, (x, y)) = kawase_against_the_cpu(renderer, kawase(2, 2.0), 2.0)?;
+    if off > 1.0 {
+        return Err(anyhow!(
+            "the kawase blur differs from the CPU reference by {off} at ({x}, {y})"
+        ));
+    }
+    println!("  two down and two up over 257×129: at most {off} from the CPU's, at ({x}, {y})");
+    Ok(())
+}
+
+/// **Case 12i: the shipped blur matches a dual Kawase reference within
+/// one.** `crates/solium/effects/blur/`'s own `down.frag` and `up.frag`, in
+/// the plan its `stages` make at `passes = 3, offset = 3` (three down at
+/// half scale, three up at twice), over 12e's checkerboard and against 12e's
+/// CPU reference at the same params: sizes 129×65, 65×33, 33×17 and back to
+/// 257×129, every channel within 1. Its input is the backdrop, as the
+/// folder declares it, which the run reads by that name.
+fn the_shipped_blur_matches_a_dual_kawase_reference(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX2: the shipped blur matches a dual Kawase reference within one ===");
+    let (off, (x, y)) = kawase_against_the_cpu(renderer, shipped_blur(3, 3.0), 3.0)?;
+    if off > 1.0 {
+        return Err(anyhow!(
+            "the shipped blur differs from the CPU reference by {off} at ({x}, {y})"
+        ));
+    }
+    println!("  three down and three up over 257×129: at most {off} from the CPU's, at ({x}, {y})");
+    Ok(())
+}
+
+/// 12e's and 12i's harness: `fixture`, a dual Kawase at `offset`, run once
+/// over a 257×129 checkerboard of 8-pixel squares, 0 and 255 at a different
+/// phase in each channel, its one input bound under the plan's first input's
+/// name; and [`Cpu::kawase`] over the same picture, pass for pass at the
+/// plan's sizes. The worst channel's difference and where it is.
+fn kawase_against_the_cpu(
+    renderer: &mut GlesRenderer,
+    fixture: Fixture,
+    offset: f64,
+) -> Result<(f64, (usize, usize))> {
     let size = (257, 129);
     let phases: [(usize, usize); 4] = [(0, 0), (3, 5), (5, 2), (2, 7)];
     let checker = |x: usize, y: usize| -> [u8; 4] {
@@ -657,8 +723,7 @@ fn a_kawase_blur_matches_the_cpu(renderer: &mut GlesRenderer) -> Result<()> {
         })
     };
     let (input, bytes) = upload(renderer, size, checker)?;
-    let offset = 2.0;
-    let (plan, programs) = build(renderer, kawase(2, offset))?;
+    let (plan, programs) = build(renderer, fixture)?;
     let padded = (257, 129);
     let (sizes, _) = plan.sizes(padded);
     let mut cpu = Cpu {
@@ -680,7 +745,7 @@ fn a_kawase_blur_matches_the_cpu(renderer: &mut GlesRenderer) -> Result<()> {
     }
     let mut pool = pool::Pool::new(0);
     let mut held = run::Held::default();
-    let textures = [("self", input, run::BoxMap::WHOLE)];
+    let textures = [(plan.first_input.as_str(), input, run::BoxMap::WHOLE)];
     let outcome = run_once(
         renderer,
         &mut pool,
@@ -709,14 +774,7 @@ fn a_kawase_blur_matches_the_cpu(renderer: &mut GlesRenderer) -> Result<()> {
     held.release(&mut pool);
     pool.sweep(renderer);
     free(renderer, programs)?;
-    let (off, (x, y)) = worst;
-    if off > 1.0 {
-        return Err(anyhow!(
-            "the kawase blur differs from the CPU reference by {off} at ({x}, {y})"
-        ));
-    }
-    println!("  two down and two up over 257×129: at most {off} from the CPU's, at ({x}, {y})");
-    Ok(())
+    Ok(worst)
 }
 
 /// **Case 12f: a pass reading three textures samples each.** The `three`

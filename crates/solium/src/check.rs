@@ -1497,4 +1497,26 @@ mod tests {
         let (_, out) = reported(|report| super::rules(report, &library, rules.as_deref(), None));
         assert!(!out.contains("ok") && out.contains("not checked"), "{out}");
     }
+
+    /// **The shipped effects pass the check**, every one of them, GPU-free.
+    #[test]
+    fn the_shipped_effects_pass_the_check() {
+        let shipped = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/effects"));
+        let folders: Vec<_> = std::fs::read_dir(shipped)
+            .expect("the shipped folders")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.join("effect.lua").is_file())
+            .collect();
+        assert!(
+            !folders.is_empty(),
+            "no shipped effect folder: the walk is broken"
+        );
+        for dir in folders {
+            let (passed, out) = reported(|report| {
+                effect_folder::<Counting>(report, &dir, shipped, None);
+            });
+            assert!(passed, "{}: {out}", dir.display());
+        }
+    }
 }

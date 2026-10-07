@@ -292,14 +292,17 @@ were running, and is named in the top-right corner of your primary monitor,
 at its rule number or at the effect's own file and line. `solium --check`
 fails on it too. With no rules nothing changes, and nothing costs anything.
 
-`blur` is not shipped yet. An effect of your own that reads the part's own
-pixels (`self`, or `source = "self"`) is drawn in its slot, and runs again
-only when the window draws something new, changes size, or the rule's params
-change: a still window's effect runs once and is then placed as it was. An
-effect that reads nothing of the window, only its shape (a border, a glow
-behind it), is drawn too, with no capture of the window at all: it runs once,
-and again only when the window changes size or the rule's params change,
-however much the window draws.
+`blur` ships with Solium, a dual Kawase blur with `passes` and `offset`
+([its folder](../crates/solium/effects/blur/README.md)); copy the folder to
+`~/.config/solium/effects/blur/` to change it, and your copy is used instead.
+An effect that reads the part's own pixels (`self`, or `source = "self"`, as
+the rule above gives the blur) is drawn in its slot, and runs again only when
+the window draws something new, changes size, or the rule's params change:
+a still window's effect runs once and is then placed as it was. An effect
+that reads nothing of the window, only its shape (a border, a glow behind
+it), is drawn too, with no capture of the window at all: it runs once, and
+again only when the window changes size or the rule's params change, however
+much the window draws.
 [The effects reference](../crates/solium/effects/README.md#rules) has every
 key a rule takes, and how to write an effect of your own.
 

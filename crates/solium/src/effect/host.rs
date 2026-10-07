@@ -2516,4 +2516,50 @@ pub(crate) mod tests {
         assert!(!host.wants_formats(), "probed twice");
         let _ = std::fs::remove_dir_all(place);
     }
+
+    fn shipped() -> PathBuf {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/effects")).to_path_buf()
+    }
+
+    /// **The shipped blur loads and binds**: six steps at its defaults (three
+    /// down, three up), its rungs four and two, its reach 48 px.
+    #[test]
+    fn the_shipped_blur_loads_and_binds_at_every_rung() {
+        let mut host: super::Host<u32> = super::Host::new(Library::with(None, shipped()));
+        host.want("rules", ["blur".to_owned()]);
+        let bound = host.bind("blur", &[]).expect("binds");
+        let steps: Vec<usize> = bound.plans.iter().map(|plan| plan.steps.len()).collect();
+        assert_eq!(steps, [6, 4, 2]);
+        assert!((bound.reach - 48.0).abs() < f64::EPSILON, "{}", bound.reach);
+        assert!(
+            bound.plans[0].reads.backdrop,
+            "its input is the backdrop, rebound by a rule's source"
+        );
+    }
+
+    /// **A user's `blur` folder shadows the shipped one**, which is there to
+    /// be shadowed.
+    #[test]
+    fn a_users_blur_folder_shadows_the_shipped_one() {
+        assert_eq!(
+            Library::with(None, shipped()).resolve("blur"),
+            Some(shipped().join("blur")),
+            "no shipped blur to shadow"
+        );
+        let user = scratch("user-blur");
+        let mine = folder(
+            &user,
+            "blur",
+            "return { api = 1, inputs = { 'backdrop' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        assert_eq!(
+            Library::with(Some(user.clone()), shipped()).resolve("blur"),
+            Some(mine)
+        );
+        let _ = std::fs::remove_dir_all(user);
+    }
 }

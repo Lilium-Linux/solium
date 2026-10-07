@@ -315,4 +315,6 @@ transparent. Comments are skipped.
 
 ## The shipped folders
 
-None yet.
+| Folder | What it is |
+|---|---|
+| [`blur`](blur/README.md) | a dual Kawase blur, `passes` halvings and as many doublings back at `offset` texels; its input is the backdrop, so until xray a rule gives it `source = "self"` |
