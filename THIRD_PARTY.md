@@ -10,9 +10,11 @@ its code, and the licences of what Solium links.
 | Where | From | Licence |
 |---|---|---|
 | `fit` in `crates/layout/src/scroller.rs` | niri's `compute_new_view_offset`, `src/layout/scrolling.rs` at [niri-wm/niri@97c96a1](https://github.com/niri-wm/niri/blob/97c96a13829ec74c83e976c2ea34e7cc717b02ec/src/layout/scrolling.rs), © the niri contributors | GPL-3.0-or-later |
+| `texture_mat` in `crates/solium/src/clip.rs` | smithay's `build_texture_mat` and `y_inverted` flip, `src/backend/renderer/gles/mod.rs` in smithay 0.7.0, © 2017 Victor Berger and Victoria Brekenfeld | MIT |
 
 GPL-3.0-or-later code may be used in a GPL-3.0-only work, and the file's own
-header says which passage it is.
+header says which passage it is. MIT code may be used in a GPL-3.0-only work
+with its notice kept, and the notice is kept beside the function.
 
 ## Behaviour modelled on other projects, with no code from them
 

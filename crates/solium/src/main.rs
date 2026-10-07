@@ -12,6 +12,7 @@ mod assets;
 mod capture;
 mod check;
 mod cli;
+mod clip;
 mod clocks;
 #[cfg(test)]
 mod commit;
