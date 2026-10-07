@@ -219,6 +219,18 @@ impl<P> Loaded<P> {
         self.hash
     }
 
+    /// The effects its plans splice in: those its `use` stages name at the
+    /// defaults, and a `fallback` naming another effect
+    /// (`tests::an_effect_changed_under_its_user_gives_its_old_program_back`).
+    fn splices(&self) -> impl Iterator<Item = &String> {
+        self.used
+            .iter()
+            .chain(self.spec.fallback.iter().filter_map(|rung| match rung {
+                Rung::Effect(name) => Some(name),
+                Rung::Params(_) => None,
+            }))
+    }
+
     /// The stages for `params` as bound: those read at load when they are
     /// the defaults, else what `stages(p)` gives now. At load and at bind,
     /// never per frame. `tests::a_fallback_naming_another_effect_binds_it_at_load`.
@@ -341,6 +353,11 @@ struct Versions<P> {
     index: u32,
     generation: u32,
     current: Option<Rc<Loaded<P>>>,
+    /// The programs the running version holds, which `drop_unused` keeps:
+    /// its `needs` when it swapped in, bound again when an effect its plans
+    /// splice in changed under it
+    /// (`tests::an_effect_changed_under_its_user_gives_its_old_program_back`).
+    holds: Vec<u64>,
     pending: Option<Loaded<P>>,
 }
 
@@ -356,8 +373,8 @@ pub(crate) struct Host<P = super::gl::Program> {
     next_index: u32,
     asked: HashMap<u64, Asked>,
     programs: HashMap<u64, Result<P, Arc<str>>>,
-    /// Programs bound plans hold beyond each version's own `needs` (a rule's
-    /// params can pick other steps; Tasks 9 and 14 add them through
+    /// Programs bound plans hold beyond what each running version holds (a
+    /// rule's params can pick other steps; Tasks 9 and 14 add them through
     /// [`Self::hold`]), so `drop_unused` keeps them.
     held: BTreeSet<u64>,
     /// A program may be referenced by nothing now (a version went, or what is
@@ -429,25 +446,39 @@ impl<P: Clone> Host<P> {
             let Some(loaded) = self.latest(&name) else {
                 continue;
             };
-            let named = loaded.spec().fallback.iter().filter_map(|rung| match rung {
-                Rung::Effect(name) => Some(name.clone()),
-                Rung::Params(_) => None,
-            });
-            let used = loaded.used.iter().cloned();
-            for more in loaded
-                .spec()
-                .pixels
-                .iter()
-                .cloned()
-                .chain(named)
-                .chain(used)
-            {
+            for more in loaded.spec().pixels.iter().chain(loaded.splices()).cloned() {
                 if names.insert(more.clone()) {
                     queue.push(more);
                 }
             }
         }
         names
+    }
+
+    /// Every loaded effect but `changed` whose plans splice one of them in,
+    /// at any depth: a `use` of a `use` holds the innermost's programs too
+    /// (`tests::an_effect_changed_under_its_user_gives_its_old_program_back`).
+    fn users_of(&self, changed: &[String]) -> Vec<String> {
+        let mut under: BTreeSet<&str> = changed.iter().map(String::as_str).collect();
+        let mut users = Vec::new();
+        loop {
+            let more: Vec<&str> = self
+                .slots
+                .keys()
+                .map(String::as_str)
+                .filter(|name| !under.contains(name))
+                .filter(|name| {
+                    self.latest(name).is_some_and(|loaded| {
+                        loaded.splices().any(|each| under.contains(each.as_str()))
+                    })
+                })
+                .collect();
+            if more.is_empty() {
+                return users;
+            }
+            under.extend(more.iter().copied());
+            users.extend(more.into_iter().map(str::to_owned));
+        }
     }
 
     /// `origin` now wants exactly `names`. A name newly wanted is loaded now,
@@ -511,8 +542,8 @@ impl<P: Clone> Host<P> {
         // Bound once the whole closure is loaded, since a version's plans
         // splice in the effects it uses and falls back to
         // (`tests::a_fallback_naming_another_effect_binds_it_at_load`).
-        for name in fresh {
-            self.programs_of(&name);
+        for name in &fresh {
+            self.programs_of(name);
         }
         let keep = self.all_wanted();
         let gone: Vec<String> = self
@@ -530,6 +561,13 @@ impl<P: Clone> Host<P> {
                 self.sweep = true;
             }
             self.clear_problems_of(&name);
+        }
+        // An effect whose own folder is unchanged is bound again when one its
+        // plans splice in changed, so it holds that one's new programs and
+        // the old version's are given back
+        // (`tests::an_effect_changed_under_its_user_gives_its_old_program_back`).
+        for name in self.users_of(&fresh) {
+            self.programs_of(&name);
         }
         // With nothing wanted nothing is compiled: what was asked for and is
         // no longer wanted is not asked for any more
@@ -587,6 +625,7 @@ impl<P: Clone> Host<P> {
                     index,
                     generation: 0,
                     current: None,
+                    holds: Vec::new(),
                     pending: None,
                 });
                 slot.pending = Some(loaded);
@@ -599,11 +638,18 @@ impl<P: Clone> Host<P> {
     /// Bind a pending version at its defaults and record every program its
     /// plans ask for as its `needs`, so it swaps in only once each compiled;
     /// a plan that cannot be made, or a lint error, refuses the version and
-    /// keeps the one that ran.
+    /// keeps the one that ran. With nothing pending, the running version is
+    /// bound instead, and holds what its plans ask for now.
     /// `tests::a_stage_effect_swaps_in_only_once_every_step_compiled`,
-    /// `tests::a_reload_whose_stage_fails_its_lints_keeps_the_one_that_ran`.
+    /// `tests::a_reload_whose_stage_fails_its_lints_keeps_the_one_that_ran`,
+    /// `tests::an_effect_changed_under_its_user_gives_its_old_program_back`.
     fn programs_of(&mut self, name: &str) {
         if !self.has_pending(name) {
+            if let Ok((_, holds)) = self.bind_plans(name, &[])
+                && let Some(slot) = self.slots.get_mut(name)
+            {
+                slot.holds = holds;
+            }
             return;
         }
         match self.bind_plans(name, &[]) {
@@ -911,6 +957,7 @@ impl<P: Clone> Host<P> {
                 .all(|key| matches!(self.programs.get(key), Some(Ok(_))))
             {
                 slot.generation += 1;
+                slot.holds = pending.needs.clone();
                 slot.current = Some(Rc::new(pending));
             }
         }
@@ -923,8 +970,8 @@ impl<P: Clone> Host<P> {
         let live: BTreeSet<u64> = self
             .slots
             .values()
-            .filter_map(|slot| slot.current.as_ref())
-            .flat_map(|loaded| loaded.needs.iter().copied())
+            .filter(|slot| slot.current.is_some())
+            .flat_map(|slot| slot.holds.iter().copied())
             .chain(self.held.iter().copied())
             .collect();
         let dead: Vec<u64> = self
@@ -965,6 +1012,17 @@ impl<P: Clone> Host<P> {
             .get(name)
             .and_then(|slot| slot.pending.as_ref())
             .map(Loaded::hash)
+    }
+
+    /// What the running version of `name` holds, for a test to compare
+    /// across a reload.
+    #[cfg(test)]
+    pub(crate) fn holds(&self, name: &str) -> Vec<u64> {
+        self.slots
+            .get(name)
+            .filter(|slot| slot.current.is_some())
+            .map(|slot| slot.holds.clone())
+            .unwrap_or_default()
     }
 
     /// Every asked program compiled and no version waiting: the effects'
@@ -1821,6 +1879,80 @@ pub(crate) mod tests {
         host.compile_pending(&mut compiler);
         assert_eq!(compiler.compiled.len(), 2, "the premise: v2 compiled");
         assert_eq!(compiler.deleted, vec![1], "v1's program was kept");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **An effect changed under its user gives its old program back**: a
+    /// reload that changes only the folder of an effect others splice in,
+    /// through a `use` (at any depth) or a `fallback`, binds those others
+    /// again, so each holds the new version's program and the old one is
+    /// deleted between frames (Ruling 7).
+    #[test]
+    fn an_effect_changed_under_its_user_gives_its_old_program_back() {
+        let place = scratch("changed-under");
+        folder(
+            &place,
+            "outer",
+            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'user' } } }",
+            &[],
+        );
+        folder(
+            &place,
+            "user",
+            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'plain' } } }",
+            &[],
+        );
+        folder(
+            &place,
+            "rich",
+            "return { api = 1, inputs = { 'self' }, frag = 'rich.frag', fallback = { 'plain' } }",
+            &[(
+                "rich.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv).bgra; }\n",
+            )],
+        );
+        let plain = folder(&place, "plain", ONE_PASS, &[("effect.frag", FRAG)]);
+        let mut host = host_with(&place);
+        host.want("rules", ["outer".to_owned(), "rich".to_owned()]);
+        let mut compiler = Counting::default();
+        host.compile_pending(&mut compiler);
+        let old = host.holds("plain");
+        assert_eq!(old.len(), 1, "the premise: plain runs");
+        assert!(
+            host.holds("outer") == old && host.holds("user") == old,
+            "the premise: its users hold plain's program"
+        );
+        assert!(host.holds("rich").contains(&old[0]));
+        std::fs::write(
+            plain.join("effect.frag"),
+            "vec4 sol_effect(vec2 uv) { return vec4(1.0); }\n",
+        )
+        .expect("v2");
+        host.reload();
+        host.compile_pending(&mut compiler);
+        let new = host.holds("plain");
+        assert!(new.len() == 1 && new != old, "the premise: plain's v2 runs");
+        assert_eq!(host.holds("user"), new, "a use still holds plain's v1");
+        assert_eq!(
+            host.holds("outer"),
+            new,
+            "a use of a use still holds plain's v1"
+        );
+        let rich = host.holds("rich");
+        assert!(
+            rich.contains(&new[0]) && !rich.contains(&old[0]),
+            "a fallback still holds plain's v1: {rich:?}"
+        );
+        let v1 = compiler
+            .compiled
+            .iter()
+            .position(|key| *key == old[0])
+            .expect("plain's v1 compiled");
+        assert_eq!(
+            compiler.deleted,
+            vec![u32::try_from(v1).expect("a short list") + 1],
+            "plain's v1 program was kept"
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 
