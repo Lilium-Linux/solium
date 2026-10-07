@@ -43,7 +43,7 @@ Each of these is a day where somebody stops using the compositor.
 | | what breaks without it |
 |---|---|
 | [#26](https://github.com/Lilium-Linux/solium/issues/26) `input-method-v2` | no CJK, no emoji picker, no on-screen keyboard — and the on-screen keyboard is what a phone is. `text-input-v3` is answered, but only to learn where the focused field's caret is: no text goes back to it. A compose key does work meanwhile: `keyboard = { options = "compose:ralt" }` |
-| [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a shell cannot list windows, so it cannot have a task switcher; switching to one needs `zwlr_foreign_toplevel_management_v1` as well. A hosted shell has no window list either ([#166](https://github.com/Lilium-Linux/solium/issues/166)) |
+| [#50](https://github.com/Lilium-Linux/solium/issues/50) `ext-foreign-toplevel-list` | a shell that is a program of its own cannot list windows, so it cannot have a task switcher; switching to one needs `zwlr_foreign_toplevel_management_v1` as well |
 | [#51](https://github.com/Lilium-Linux/solium/issues/51) `wlr-output-management` | monitors are arranged by the configuration: `sol.monitors` places and scales them, and `super+shift+r` applies a change. No client can do it, so `kanshi` and a settings panel cannot work, and a monitor's mode and rotation are read only when it is added |
 | [#52](https://github.com/Lilium-Linux/solium/issues/52) data-control | no clipboard manager can work |
 | [#55](https://github.com/Lilium-Linux/solium/issues/55) `zwp_virtual_keyboard_v1` | the other half of an on-screen keyboard. `input-method-v2` says what was typed; this is how anything types it |
@@ -59,7 +59,7 @@ Not a whole day lost — one application, or one workflow, that does not work.
 | [#59](https://github.com/Lilium-Linux/solium/issues/59) `linux-drm-syncobj` (explicit sync) | modern Vulkan and NVIDIA clients. Its absence is stutter and the occasional torn frame, and it is the single most-reported "your compositor is broken" on other projects |
 | [#67](https://github.com/Lilium-Linux/solium/issues/67) `xdg-foreign-v2` | a file chooser or a screen-share dialog that has to be parented to the window that opened it. Otherwise it lands wherever the layout puts it |
 | [#68](https://github.com/Lilium-Linux/solium/issues/68) `wp-security-context-v1` | how a Flatpak identifies itself. Without it there is no way to treat sandboxed clients differently, ever |
-| [#60](https://github.com/Lilium-Linux/solium/issues/60) `ext-workspace-v1` | Solium *has* workspaces, in `workspaces.lua`, and no client can see or switch them. A shell cannot show which one you are on, nor can a hosted shell ([#166](https://github.com/Lilium-Linux/solium/issues/166)) |
+| [#60](https://github.com/Lilium-Linux/solium/issues/60) `ext-workspace-v1` | Solium *has* workspaces, in `workspaces.lua`, and no client can see or switch them. A shell that is a client cannot show which one you are on; a hosted shell can, through `Workspaces` ([#166](https://github.com/Lilium-Linux/solium/issues/166)) |
 | [#69](https://github.com/Lilium-Linux/solium/issues/69) `zwlr_gamma_control_v1` | night light. `gammastep` and `redshift` speak only this |
 | [#61](https://github.com/Lilium-Linux/solium/issues/61) KDE `server-decoration` | some Qt applications ask for decorations with this and nothing else, and draw none when it is missing |
 | [#62](https://github.com/Lilium-Linux/solium/issues/62) `zwp_tablet_manager_v2` | drawing tablets, and the stylus on any 2-in-1 — which is a form factor this project is explicitly for |
@@ -91,7 +91,6 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 
 | | |
 |---|---|
-| [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | the `Lock` and `PrepareForSleep` signals are ignored, so `loginctl lock-session` and whatever locks that way do nothing, and locking before suspend is up to `swayidle -w` |
 | [#151](https://github.com/Lilium-Linux/solium/issues/151) media keys | no volume, brightness, media, screenshot or lock keys are bound by default |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput device settings | none are set: no tap-to-click, which libinput leaves off, so tapping a touchpad does nothing; no acceleration profile or speed, disable-while-typing, left-handed mode or middle-button emulation; and natural scrolling comes only from the form factor, for every device at once |
 
@@ -126,7 +125,6 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 | [#181](https://github.com/Lilium-Linux/solium/issues/181) touch on the compositor's own UI | touch reaches applications' windows and a tap focuses the window under it, but nothing the compositor draws reacts to a finger (frame buttons, a hosted shell scene, the overview, window edges), because touch goes only to client surfaces; a script hears no touch either |
 | [E8](https://github.com/Lilium-Linux/solium/issues/8) settings | a surface built from what scripts declare rather than a fixed schema |
 | **the dock, and the morph** | `sol.present_from` already grows a window out of the rectangle an icon occupied, and a genie can aim at a window or a scripted surface. What is missing is a dock icon to aim at. A dock hosted in the compositor is in the same engine, and the plan is for its QML to name the icon so an animation can follow it while it moves; nothing of that is built, and it is tracked under Later in [#169](https://github.com/Lilium-Linux/solium/issues/169). Only a dock that runs as its own program would need a protocol to hand the rectangle over |
-| [#49](https://github.com/Lilium-Linux/solium/issues/49) fullscreen animation | entering fullscreen snaps |
 | [#30](https://github.com/Lilium-Linux/solium/issues/30) a minimise state | so the genie animation means something |
 | [#83](https://github.com/Lilium-Linux/solium/issues/83) portals | `xdg-desktop-portal-wlr` can screen-share through `wlr-screencopy`, but nothing has been configured or tested end to end, and file chooser and settings portals are separate again |
 
@@ -135,7 +133,7 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 ## What this list is not
 
 It is not a plan, and length is not weight: `wp_alpha_modifier_v1` is close to
-free, since the render path already carries an opacity, while #153 is the
-difference between a laptop that locks before it sleeps and one that wakes
-up unlocked. The label orders these and the roadmap says why; this only
-makes sure none of them is forgotten.
+free, since the render path already carries an opacity, while #157 is the
+difference between a touchpad where tapping works and one where every click
+has to be physical. The label orders these and the roadmap says why; this
+only makes sure none of them is forgotten.

@@ -248,7 +248,9 @@ where
     let output_scale = Scale::from(scale);
     match source {
         PartSource::Client(window) => {
-            let origin = corner - window.geometry().loc.to_physical_precise_round(scale);
+            // The same `window_surface_origin` every other client piece is
+            // placed by (#232), so a self capture cannot drift from them.
+            let origin = crate::render::window_surface_origin(corner, window, scale);
             crate::render::client_piece(renderer, window, origin, output_scale)
         }
         PartSource::Popups(window) => {

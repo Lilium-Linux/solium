@@ -37,7 +37,7 @@
 //! theme, and keeping the two apart is what lets the whole shape-to-name
 //! mapping be asserted with no theme on disk at all.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
@@ -104,6 +104,9 @@ const SIZES_KEPT: usize = 4;
 pub(crate) struct Configured {
     pub(crate) theme: Option<String>,
     pub(crate) size: Option<i32>,
+    /// `cursor.scene`: the pointer's own QML scene, as written, before it is
+    /// looked for. See [`Settings::resolve`].
+    pub(crate) scene: Option<String>,
 }
 
 /// `XCURSOR_THEME` and `XCURSOR_SIZE` as this process sees them.
@@ -120,6 +123,9 @@ pub(crate) struct Environment {
     /// Raw, and parsed by [`Settings::resolve`] rather than here, so that
     /// `XCURSOR_SIZE=enormous` is a case the precedence tests can state.
     pub(crate) size: Option<String>,
+    /// `SOLIUM_QML_CURSOR`: the pointer's scene for one run.
+    /// `tests::the_environment_overrides_the_configured_scene`.
+    pub(crate) scene: Option<String>,
 }
 
 impl Environment {
@@ -132,6 +138,7 @@ impl Environment {
         Self {
             theme: read("XCURSOR_THEME"),
             size: read("XCURSOR_SIZE"),
+            scene: read("SOLIUM_QML_CURSOR"),
         }
     }
 }
@@ -143,6 +150,9 @@ pub(crate) struct Settings {
     pub(crate) theme: Option<String>,
     /// How big the pointer is, in **logical** pixels. See [`pixels`].
     pub(crate) size: i32,
+    /// The pointer's scene, found, or `None` for the theme and then Solium's
+    /// own QML pointer. `tests::a_configured_scene_is_found_as_the_shells_is`.
+    pub(crate) scene: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -150,6 +160,7 @@ impl Default for Settings {
         Self {
             theme: None,
             size: SIZE,
+            scene: None,
         }
     }
 }
@@ -204,7 +215,32 @@ impl Settings {
             })
             .unwrap_or(SIZE);
 
-        Self { theme, size }
+        // The other way round from the two above, and on purpose:
+        // `SOLIUM_QML_CURSOR` is set for one run, as `SOLIUM_SHELL_SCENE` is
+        // over `shell.scene`, so it wins over the configuration. Found as the
+        // shell's scene is; a bare name that is in neither QML directory is
+        // no scene, and says so, so the theme and Solium's own pointer are
+        // what is drawn.
+        // `tests::the_environment_overrides_the_configured_scene`,
+        // `tests::a_configured_scene_is_found_as_the_shells_is`.
+        let scene = environment
+            .scene
+            .as_deref()
+            .or(configured.scene.as_deref())
+            .filter(|name| !name.is_empty())
+            .and_then(|name| {
+                let found = crate::scripted::find_scene(name);
+                if found.is_none() {
+                    tracing::warn!(
+                        scene = name,
+                        "no pointer scene by that name in ~/.config/solium/qml or the shipped \
+                         QML; drawing the theme or Solium's own pointer"
+                    );
+                }
+                found
+            });
+
+        Self { theme, size, scene }
     }
 }
 
@@ -529,6 +565,7 @@ mod tests {
         Configured {
             theme: theme.map(str::to_owned),
             size,
+            scene: None,
         }
     }
 
@@ -536,7 +573,80 @@ mod tests {
         Environment {
             theme: theme.map(str::to_owned),
             size: size.map(str::to_owned),
+            scene: None,
         }
+    }
+
+    /// **`SOLIUM_QML_CURSOR` is the pointer's scene for one run**, over
+    /// `cursor.scene`, as `SOLIUM_SHELL_SCENE` is over `shell.scene`: the other
+    /// way round from the theme and the size, which the configuration wins.
+    #[test]
+    fn the_environment_overrides_the_configured_scene() {
+        let scene = |configured: Option<&str>, environment: Option<&str>| {
+            Settings::resolve(
+                &Configured {
+                    scene: configured.map(str::to_owned),
+                    ..Configured::default()
+                },
+                &Environment {
+                    scene: environment.map(str::to_owned),
+                    ..Environment::default()
+                },
+            )
+            .scene
+        };
+        assert_eq!(
+            [
+                scene(Some("/configured/Cursor.qml"), Some("/run/Cursor.qml")),
+                scene(Some("/configured/Cursor.qml"), None),
+                scene(None, None),
+            ],
+            [
+                Some("/run/Cursor.qml".into()),
+                Some("/configured/Cursor.qml".into()),
+                None
+            ],
+            "[both, the configuration's alone, neither]"
+        );
+    }
+
+    /// **A configured scene is found as the shell's is**, through
+    /// `scripted::find_scene`: `~/` is the home directory, an absolute path is
+    /// taken as given, a bare name is the user's QML directory's and then the
+    /// shipped one's, and a bare name that is in neither is no scene at all,
+    /// so the theme and then Solium's own pointer are drawn.
+    #[test]
+    fn a_configured_scene_is_found_as_the_shells_is() {
+        let scene = |name: &str| {
+            Settings::resolve(
+                &Configured {
+                    scene: Some(name.to_owned()),
+                    ..Configured::default()
+                },
+                &Environment::default(),
+            )
+            .scene
+        };
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        assert_eq!(
+            [
+                scene("~/cursor/Cursor.qml"),
+                scene("/somewhere/Cursor.qml"),
+                scene("cursor.qml"),
+                scene("solium-no-such-pointer-scene.qml"),
+            ],
+            [
+                home.map(|home| home.join("cursor/Cursor.qml")),
+                Some("/somewhere/Cursor.qml".into()),
+                crate::scripted::find_scene("cursor.qml"),
+                None,
+            ],
+            "[~/, absolute, a bare name that ships, a bare name that is nowhere]"
+        );
+        assert!(
+            crate::scripted::find_scene("cursor.qml").is_some(),
+            "the premise: cursor.qml ships"
+        );
     }
 
     /// The precedence, stated once as the three-way case it is.

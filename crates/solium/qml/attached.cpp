@@ -6,6 +6,10 @@
 
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
+#include <QtCore/QCoreApplication>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonValue>
 #include <QtCore/QMetaObject>
 #include <QtQuick/QQuickItem>
 
@@ -16,6 +20,25 @@ namespace {
 /* The dynamic property a hosted scene's context carries.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 constexpr const char kHosting[] = "_soliumHosting";
+
+/* The item Qt draws a Qt Quick Controls `Popup` as: its child of type
+ * QQuickPopupItem, which the popup makes with itself, so it is there from
+ * the popup's first binding, before any content item is; null for any
+ * other object.
+ * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`,
+ * `qml::hosted::tests::a_controls_popup_is_a_grabs_target`. */
+QQuickItem *popup_item_of(QObject *object)
+{
+    if (object == nullptr || !object->inherits("QQuickPopup")) {
+        return nullptr;
+    }
+    for (QObject *child : object->children()) {
+        if (child->inherits("QQuickPopupItem")) {
+            return qobject_cast<QQuickItem *>(child);
+        }
+    }
+    return nullptr;
+}
 
 } // namespace
 
@@ -151,11 +174,7 @@ QQuickItem *SoliumGrab::target_item() const
     if (auto *item = qobject_cast<QQuickItem *>(m_target.data())) {
         return item;
     }
-    if (m_target != nullptr && m_target->inherits("QQuickPopup")) {
-        auto *content = m_target->property("contentItem").value<QQuickItem *>();
-        return content != nullptr ? content->parentItem() : nullptr;
-    }
-    return nullptr;
+    return popup_item_of(m_target.data());
 }
 
 void SoliumGrab::setActive(bool active)
@@ -176,24 +195,6 @@ namespace {
  * last is known.
  * `qml::hosted::tests::the_holder_is_the_focused_wanting_item_else_the_one_that_wanted_last`. */
 quint64 g_wants = 0;
-
-/* The item Qt draws a Qt Quick Controls `Popup` as: its child of type
- * QQuickPopupItem, which the popup makes with itself, so it is there from
- * the popup's first binding, before any content item is; null for any
- * other object.
- * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
-QQuickItem *popup_item_of(QObject *object)
-{
-    if (object == nullptr || !object->inherits("QQuickPopup")) {
-        return nullptr;
-    }
-    for (QObject *child : object->children()) {
-        if (child->inherits("QQuickPopupItem")) {
-            return qobject_cast<QQuickItem *>(child);
-        }
-    }
-    return nullptr;
-}
 
 } // namespace
 
@@ -258,6 +259,14 @@ void SoliumKeyboard::letGo()
     mark();
 }
 
+void SoliumKeyboard::focusEntered()
+{
+    if (m_let_go) {
+        m_let_go = false;
+        mark();
+    }
+}
+
 void SoliumKeyboard::setClaims(const QStringList &claims)
 {
     if (claims != m_claims) {
@@ -288,7 +297,42 @@ SoliumKeyboard *solium_keyboard_holder(SoliumHosting *hosting)
     return holder;
 }
 
-SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item) {}
+SoliumStatus &SoliumStatus::instance()
+{
+    static SoliumStatus *status = nullptr;
+    if (status == nullptr) {
+        status = new SoliumStatus();
+    }
+    return *status;
+}
+
+SoliumDirs &SoliumDirs::instance()
+{
+    static SoliumDirs *dirs = nullptr;
+    if (dirs == nullptr) {
+        dirs = new SoliumDirs();
+    }
+    return *dirs;
+}
+
+void SoliumDirs::setDesktop(const QString &desktop)
+{
+    if (desktop != m_desktop) {
+        m_desktop = desktop;
+        emit desktopChanged();
+    }
+}
+
+SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item)
+{
+    QObject::connect(&SoliumStatus::instance(), &SoliumStatus::changed, this,
+                     &SoliumAttached::statusChanged);
+}
+
+QString SoliumAttached::status() const
+{
+    return SoliumStatus::instance().text;
+}
 
 SoliumKeyboard *SoliumAttached::keyboard()
 {
@@ -318,6 +362,57 @@ SoliumKeyboard *SoliumAttached::keyboard()
         }
     }
     return m_keyboard;
+}
+
+SoliumCursor *SoliumAttached::cursor()
+{
+    /* One per object, made when first read or written: the published values
+     * are the same in every one, and the hotspot is the object's own, read
+     * from the scene's root.
+     * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+    if (m_cursor == nullptr) {
+        m_cursor = new SoliumCursor(this);
+    }
+    return m_cursor;
+}
+
+void SoliumAttached::setRegion(const QString &region)
+{
+    if (region != m_region) {
+        m_region = region;
+        emit regionChanged();
+    }
+}
+
+void SoliumAttached::setMaterial(const QVariant &material)
+{
+    if (material != m_material) {
+        m_material = material;
+        emit materialChanged();
+    }
+}
+
+void SoliumAttached::send(const QString &action, const QJSValue &data)
+{
+    /* A scene that is not hosted has no surface to send from, so nothing is
+     * queued.
+     * `qml::hosted::tests::an_unhosted_scene_may_send_and_queues_nothing`. */
+    SoliumHosting *hosting = solium_hosting_of(m_item);
+    if (hosting == nullptr) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            qWarning("Solium.send in a scene the compositor did not host for a sol.surface "
+                     "does nothing");
+        }
+        return;
+    }
+    /* In an object, so a bare value or nothing at all is still one JSON
+     * document. `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+    const QJsonObject wrapped{
+        {QStringLiteral("data"),
+         QJsonValue::fromVariant(data.toVariant(QJSValue::ConvertJSObjects))}};
+    hosting->actions.append({action, QJsonDocument(wrapped).toJson(QJsonDocument::Compact)});
 }
 
 SoliumMonitor *SoliumAttached::monitor() const
@@ -533,10 +628,77 @@ void solium_qml_register_types()
     /* `Solium.keyboard`'s group, nameless for the same reason.
      * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     qmlRegisterAnonymousType<SoliumKeyboard>(SOLIUM_NATIVE_URI, 1);
+    /* `Solium.cursor`'s group, nameless for the same reason.
+     * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`. */
+    qmlRegisterAnonymousType<SoliumCursor>(SOLIUM_NATIVE_URI, 1);
     /* Named, since a scene writes one: `Grab { ... }`.
      * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
     qmlRegisterType<SoliumGrab>(SOLIUM_NATIVE_URI, 1, 0, "Grab");
     /* `Keyboard`, unqualified like `Theme`, in every scene.
      * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`. */
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Keyboard", solium_keyboard());
+    /* The models, as singletons, each the one store Rust publishes into.
+     * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`. */
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Monitors",
+                                 solium_rows(SOLIUM_QML_ROWS_MONITORS));
+    /* A window's row is nameless like a monitor's: a named `Window` would
+     * hide Qt Quick's `Window` in every scene that imports both.
+     * `qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`. */
+    qmlRegisterAnonymousType<SoliumWindow>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Windows",
+                                 qobject_cast<SoliumWindowRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_WINDOWS)));
+    /* Named, since a scene writes one: `WindowList { ... }`.
+     * `qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`. */
+    qmlRegisterType<SoliumWindowList>(SOLIUM_NATIVE_URI, 1, 0, "WindowList");
+    /* A workspace's row is nameless like a monitor's, so a shell's own
+     * `Workspace.qml` is its own.
+     * `qml::hosted::tests::a_shell_file_named_like_a_workspace_is_still_the_shells`. */
+    qmlRegisterAnonymousType<SoliumWorkspace>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Workspaces",
+                                 qobject_cast<SoliumWorkspaceRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_WORKSPACES)));
+    /* Named, since a scene writes one: `WorkspaceList { ... }`.
+     * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+    qmlRegisterType<SoliumWorkspaceList>(SOLIUM_NATIVE_URI, 1, 0, "WorkspaceList");
+    /* An app's row is nameless like a monitor's or a window's, so a shell's
+     * own `App.qml` is its own (03 §3.2.13, Ruling 1a). */
+    qmlRegisterAnonymousType<SoliumApp>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Apps",
+                                 qobject_cast<SoliumAppRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_APPS)));
+    /* A folder entry's row is nameless like an app's or a window's, so a
+     * shell's own `Folder.qml`, if it ever wrote one, would still be its
+     * own (04-ui.md §4.9). */
+    qmlRegisterAnonymousType<SoliumFolderEntry>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Folder",
+                                 qobject_cast<SoliumFolderRows *>(
+                                     solium_rows(SOLIUM_QML_ROWS_FOLDER)));
+}
+
+/* What `Solium.status` reads: the text `sol.status` set.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+extern "C" int solium_qml_set_status(const char *text)
+{
+    if (QCoreApplication::instance() == nullptr) {
+        return 0;
+    }
+    SoliumStatus &status = SoliumStatus::instance();
+    const QString next = QString::fromUtf8(text != nullptr ? text : "");
+    if (next != status.text) {
+        status.text = next;
+        emit status.changed();
+    }
+    return 1;
+}
+
+/* `Solium.dirs.desktop`: `crate::folder::desktop_dir`, `""` when nothing
+ * names one. */
+extern "C" int solium_qml_set_dirs_desktop(const char *text)
+{
+    if (QCoreApplication::instance() == nullptr) {
+        return 0;
+    }
+    SoliumDirs::instance().setDesktop(QString::fromUtf8(text != nullptr ? text : ""));
+    return 1;
 }

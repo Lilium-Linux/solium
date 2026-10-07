@@ -831,6 +831,146 @@ fn a_deform_at_rest_is_aimed_at_nothing() {
     );
 }
 
+/// **`automatic = false` leaves nothing watched** (#223): the enforcement
+/// point for "never reloads" is that the loop source which would otherwise
+/// wake for a change is never armed in the first place, not merely that the
+/// quiet period never elapses. No Qt thread needed: `configure_autoreload`
+/// touches only the watch and the stored settings. See
+/// `crate::autoreload::tests` for the directory-resolution and debounce
+/// logic this builds on.
+#[test]
+fn automatic_false_leaves_nothing_watched() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+
+    state.configure_autoreload(crate::autoreload::Settings {
+        automatic: false,
+        quiet_ms: 300,
+    });
+    assert!(
+        !state.autoreload_watcher.is_watching(),
+        "automatic = false must not watch anything, whatever directories exist on this machine"
+    );
+}
+
+/// **Turning `automatic` off clears a deadline already pending** (#223
+/// review): the gap between a change being noted and the timer that would
+/// fire for it actually running is real -- nothing in `tty.rs`/`winit.rs`
+/// can cancel a `calloop` timer once armed -- so `configure_autoreload`
+/// resetting the debounce the moment settings change is what keeps a stale
+/// deadline from answering `due` later, after `automatic` is back on with no
+/// new change behind it. The timer callback's own re-check of `automatic`
+/// (`crate::autoreload::decide_timer_outcome`) is the other half, covered by
+/// `autoreload::tests::off_drops_the_timer_without_reloading_even_when_due`.
+#[test]
+fn turning_automatic_off_clears_a_pending_deadline() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+
+    state.configure_autoreload(crate::autoreload::Settings {
+        automatic: true,
+        quiet_ms: 300,
+    });
+    let now = state.clock.now();
+    state
+        .autoreload_debounce
+        .note(now, std::time::Duration::from_millis(300));
+
+    state.configure_autoreload(crate::autoreload::Settings {
+        automatic: false,
+        quiet_ms: 300,
+    });
+
+    assert!(
+        !state
+            .autoreload_debounce
+            .due(now + std::time::Duration::from_millis(300)),
+        "a deadline noted before automatic turned off must not still be pending after"
+    );
+}
+
+/// **A loading scene set outside every watched root is warned about, once**
+/// (#223 review): the gap `autoreload`'s module doc names -- a plain
+/// absolute path, with no `SOLIUM_LOADING` naming it instead to fold its
+/// directory into `watch_roots` through `override_roots`.
+#[test]
+fn warns_once_for_a_loading_scene_set_outside_every_watched_root() {
+    if std::env::var_os("SOLIUM_LOADING").is_some() {
+        // The environment has already chosen a loading scene for this
+        // process; this test is not the one to say anything about that.
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "solium-state-test-unwatched-loading-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let scene = dir.join("Loading.qml");
+    std::fs::write(&scene, "").expect("writing a throwaway scene file");
+
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.autoreload_settings.automatic = true;
+    state.loading.scene = Some(scene.to_str().expect("utf-8 temp path").to_string());
+
+    state.warn_about_unwatched_configured_paths();
+    assert!(
+        state.autoreload_unwatched_warned.contains(&scene),
+        "a loading scene outside the watched roots and the shipped assets must be warned about"
+    );
+
+    state.warn_about_unwatched_configured_paths();
+    assert_eq!(
+        state.autoreload_unwatched_warned.len(),
+        1,
+        "checking again must not warn about the same path twice"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The shipped default loading scene never warns**: with nothing
+/// configured, `pane::loading_source` resolves under the shipped `qml/`
+/// directory, which [`Solium::warn_about_unwatched_configured_paths`] pads
+/// the watched roots with for exactly this reason.
+#[test]
+fn does_not_warn_for_the_shipped_default_loading_scene() {
+    if std::env::var_os("SOLIUM_LOADING").is_some() {
+        return;
+    }
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.autoreload_settings.automatic = true;
+
+    state.warn_about_unwatched_configured_paths();
+
+    assert!(
+        state.autoreload_unwatched_warned.is_empty(),
+        "the shipped default must not be reported as unwatched: {:?}",
+        state.autoreload_unwatched_warned
+    );
+}
+
+/// **`automatic = false` warns about nothing**, however configured: the
+/// warning is about what automatic reload does not cover, so it has nothing
+/// to say while automatic reload is off altogether.
+#[test]
+fn automatic_false_warns_about_nothing() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.autoreload_settings.automatic = false;
+    state.loading.scene = Some("/does/not/exist/anywhere/Loading.qml".to_string());
+
+    state.warn_about_unwatched_configured_paths();
+
+    assert!(state.autoreload_unwatched_warned.is_empty());
+}
+
 /// **What the notice at the end of a reload is looking at.**
 ///
 /// The recovery half of #116 shipped with no test at all, which is how the
@@ -5573,6 +5713,811 @@ end)"#,
         );
     }
 
+    /// **#49: going fullscreen or maximised, and coming back, is drawn
+    /// moving**, through the placement path and the transform a layout's
+    /// glide uses, on the one clock.
+    ///
+    /// Each window is 400x300 at 300,200 on a 1920x1080 monitor, with no
+    /// frames, and the scripts answer `fullscreen` with 260 ms and `maximize`
+    /// with 220 ms, both linear, so where a frame is drawn is arithmetic. The
+    /// keys are bound as `modes.lua` binds them. Frames are read through
+    /// `Solium::drawn_at`, which is what the renderer and the hit tests draw
+    /// and resolve a pane with, eight of them 45 ms apart as #49's own
+    /// measurement took them -- which found the window at its destination on
+    /// frame 0 and on every frame after.
+    mod fullscreen_glides {
+        use super::*;
+
+        pub(super) const SCRIPT: &str = r#"
+            sol.on("fullscreen", function() sol.animate({ duration = 260, easing = "linear" }) end)
+            sol.on("maximize", function() sol.animate({ duration = 220, easing = "linear" }) end)
+            sol.bind("super+f", function() sol.toggle_fullscreen() end)
+            sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+        "#;
+
+        /// Where the window lives before anything is toggled.
+        pub(super) fn before() -> Rectangle<f64, Logical> {
+            Rectangle::new((300, 200).into(), (400, 300).into()).to_f64()
+        }
+
+        /// The monitor, which is also its work area: there is no bar.
+        pub(super) fn screen() -> Rectangle<f64, Logical> {
+            Rectangle::new((0, 0).into(), (1920, 1080).into()).to_f64()
+        }
+
+        /// One monitor, one client's window shown and at rest, focused, and
+        /// the scripts a test names.
+        struct Desk {
+            display: Display<Solium>,
+            state: Solium,
+            conn: Connection,
+            queue: wayland_client::EventQueue<Client>,
+            qh: QueueHandle<Client>,
+            client: Client,
+            window: Window,
+            toplevel: xdg_toplevel::XdgToplevel,
+            surface: wl_surface::WlSurface,
+            pane: crate::pane::PaneId,
+        }
+
+        impl Desk {
+            fn new(name: &str, script: &str) -> Self {
+                Self::on(name, script, (300, 200), |state| {
+                    one_screen(state);
+                })
+            }
+
+            /// [`Self::new`], with the monitors `screens` maps and the
+            /// window at `at`.
+            fn on(
+                name: &str,
+                script: &str,
+                at: (i32, i32),
+                screens: impl FnOnce(&mut Solium),
+            ) -> Self {
+                let mut display =
+                    Display::<Solium>::new().expect("creating a test wayland display");
+                let mut state = Solium::new(display.handle());
+                state
+                    .decorations
+                    .set_style(&mut state.panes, Some("none".to_string()));
+                screens(&mut state);
+                state.start_scripts(Some(script_at(name, script)));
+
+                let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+                let qh = queue.handle();
+                let (window, toplevel, surface) =
+                    open_surface(&mut display, &mut state, &conn, &client, &qh);
+                commit_buffer(&client, &qh, &surface, 400, 300);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                state.space.map_element(window.clone(), at, false);
+                state.space.refresh();
+                let pane = state.panes.id_of(&window).expect("the window has a pane");
+                state.focus_window(&window, SERIAL_COUNTER.next_serial());
+                let mut desk = Self {
+                    display,
+                    state,
+                    conn,
+                    queue,
+                    qh,
+                    client,
+                    window,
+                    toplevel,
+                    surface,
+                    pane,
+                };
+                desk.land();
+                assert!(!desk.transformed(), "the premise: at rest where it lives");
+                desk
+            }
+
+            fn pump(&mut self) {
+                pump(
+                    &mut self.display,
+                    &mut self.state,
+                    &self.conn,
+                    &self.qh,
+                    &mut self.queue,
+                    &mut self.client,
+                );
+            }
+
+            /// Where the window is drawn at `at`.
+            fn drawn(&self, at: Duration) -> Rectangle<f64, Logical> {
+                let held = self.state.panes.get(self.pane).expect("the pane is here");
+                self.state
+                    .drawn_at(held, self.state.pane_outer(held), at)
+                    .rect
+            }
+
+            /// Eight frames 45 ms apart, from `from`.
+            fn burst(&self, from: Duration) -> Vec<Rectangle<f64, Logical>> {
+                (0..8)
+                    .map(|frame| self.drawn(from + Duration::from_millis(45 * frame)))
+                    .collect()
+            }
+
+            /// The client answering the size it was told, as a client does.
+            fn answer(&mut self, width: i32, height: i32) {
+                commit_buffer(&self.client, &self.qh, &self.surface, width, height);
+                self.pump();
+            }
+
+            /// A frame `after` from now, retired as a frame retires it.
+            fn frame_after(&mut self, after: Duration) {
+                self.state.clock.advance(after);
+                let now = self.state.clock.now();
+                self.state.settle(now);
+                self.state.sync_panes();
+            }
+
+            /// Past every animation, retired as a frame retires it.
+            fn land(&mut self) {
+                self.state.clock.advance(Duration::from_secs(1));
+                let now = self.state.clock.now();
+                self.state.settle(now);
+                self.state.sync_panes();
+            }
+
+            fn transformed(&self) -> bool {
+                self.state
+                    .panes
+                    .get(self.pane)
+                    .is_some_and(present::transformed)
+            }
+        }
+
+        /// `script`, loaded from a file of its own, which is gone again by the
+        /// time this returns.
+        pub(super) fn script_at(name: &str, script: &str) -> Scripts {
+            let directory =
+                std::env::temp_dir().join(format!("solium-glides-{name}-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(&entry, script).expect("writing the test script");
+            let scripts = Scripts::load(&entry).expect("loading the test script");
+            let _ = std::fs::remove_dir_all(&directory);
+            scripts
+        }
+
+        /// Whether `rect` is part of the way from `from` to `to`: strictly
+        /// between them on every edge that moves, and on the others where
+        /// both are.
+        pub(super) fn between(
+            rect: Rectangle<f64, Logical>,
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+        ) -> bool {
+            let part = |value: f64, from: f64, to: f64| {
+                if (from - to).abs() < 0.5 {
+                    (value - from).abs() < 0.5
+                } else {
+                    (value - from) * (to - from) > 0.0 && (value - to) * (from - to) > 0.0
+                }
+            };
+            part(rect.loc.x, from.loc.x, to.loc.x)
+                && part(rect.loc.y, from.loc.y, to.loc.y)
+                && part(rect.size.w, from.size.w, to.size.w)
+                && part(rect.size.h, from.size.h, to.size.h)
+        }
+
+        /// The same, with either end allowed.
+        fn from_to(
+            rect: Rectangle<f64, Logical>,
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+        ) -> bool {
+            rect == from || rect == to || between(rect, from, to)
+        }
+
+        /// That `frames` is a glide from `from` to `to`: frame 0 where it
+        /// was, frames 1 to `moving` part of the way and each further than
+        /// the last, and frame 7, at 315 ms, landed. 5 frames move in a
+        /// 260 ms glide and 4 in a 220 ms one; the frames between the last
+        /// of those and frame 7 are left out, because the glide starts when
+        /// the change is made, after the moment the burst counts from, by
+        /// however long the request took.
+        fn glides(
+            frames: &[Rectangle<f64, Logical>],
+            from: Rectangle<f64, Logical>,
+            to: Rectangle<f64, Logical>,
+            moving: usize,
+        ) {
+            assert_eq!(
+                frames[0], from,
+                "frame 0 is where it was drawn: {frames:#?}"
+            );
+            for frame in 1..=moving {
+                assert!(
+                    between(frames[frame], from, to),
+                    "frame {frame} is part of the way from {from:?} to {to:?}: {frames:#?}"
+                );
+                assert!(
+                    between(frames[frame], frames[frame - 1], to),
+                    "frame {frame} is further on than the one before: {frames:#?}"
+                );
+            }
+            assert_eq!(frames[7], to, "and frame 7 has landed: {frames:#?}");
+        }
+
+        /// **A window sent fullscreen grows from where it was to cover the
+        /// monitor, and shrinks back when it leaves**, as its client asks
+        /// both through `xdg_toplevel`. Once each lands, and its client has
+        /// answered, it holds no transform: a plain element, which a
+        /// fullscreen game or video needs to be scanned out directly.
+        #[test]
+        fn a_window_glides_into_fullscreen_and_out_again() {
+            let mut desk = Desk::new("in-and-out", SCRIPT);
+
+            let at = desk.state.clock.now();
+            desk.toplevel.set_fullscreen(None);
+            desk.pump();
+            glides(&desk.burst(at), before(), screen(), 5);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(
+                !desk.transformed(),
+                "fullscreen and at rest, it holds no transform"
+            );
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+
+            let at = desk.state.clock.now();
+            desk.toplevel.unset_fullscreen();
+            desk.pump();
+            glides(&desk.burst(at), screen(), before(), 5);
+            desk.answer(400, 300);
+            desk.land();
+            assert!(
+                !desk.transformed(),
+                "back and at rest, it holds no transform"
+            );
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+            assert_eq!(
+                desk.state.panes.get(desk.pane).and_then(Pane::lifted_until),
+                None,
+                "and keeps nothing of its shrink once that has landed"
+            );
+        }
+
+        /// **And maximised, and restored, the same way**, by the key.
+        #[test]
+        fn a_window_glides_into_maximised_and_out_again() {
+            let mut desk = Desk::new("maximised", SCRIPT);
+
+            let at = desk.state.clock.now();
+            assert!(
+                desk.state.trigger("super+shift+m"),
+                "super+shift+m is bound"
+            );
+            desk.pump();
+            glides(&desk.burst(at), before(), screen(), 4);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(!desk.transformed(), "maximised and at rest, no transform");
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            glides(&desk.burst(at), screen(), before(), 4);
+            desk.answer(400, 300);
+            desk.land();
+            assert!(!desk.transformed(), "restored and at rest, no transform");
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+        }
+
+        /// **The window is told its new size on the toggle**, not when the
+        /// animation lands, and is drawn where it was while it is told: its
+        /// old picture is what is stretched until it answers. Both ways.
+        #[test]
+        fn the_client_is_told_its_new_size_on_the_toggle() {
+            let mut desk = Desk::new("told", SCRIPT);
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"), "super+f is bound");
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((1920, 1080)),
+                "told the monitor's size on the key"
+            );
+            assert_eq!(desk.drawn(at), before(), "while still drawn where it was");
+            desk.answer(1920, 1080);
+            desk.land();
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((400, 300)),
+                "told the size it had, on the key back"
+            );
+            assert_eq!(
+                desk.drawn(at),
+                screen(),
+                "while still drawn covering the monitor"
+            );
+        }
+
+        /// **A second toggle part of the way through the first starts from
+        /// where the window is drawn**, not from the monitor it was headed
+        /// for and not from the slot it left. The first glide, 60 ms on from
+        /// the moment it is read, bounds how far it can have got by the
+        /// time the second key is handled.
+        #[test]
+        fn a_second_toggle_mid_flight_starts_from_where_the_window_is_drawn() {
+            let mut desk = Desk::new("mid-flight", SCRIPT);
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            let at = desk.state.clock.now();
+            let mid = desk.drawn(at);
+            let soon = desk.drawn(at + Duration::from_millis(60));
+            assert!(
+                between(mid, before(), screen()) && between(soon, mid, screen()),
+                "the premise: part of the way into fullscreen, and still going: {mid:?}, {soon:?}"
+            );
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let from = desk.drawn(at);
+            assert!(
+                from_to(from, mid, soon),
+                "the way back starts where the window was drawn, between {mid:?} and \
+                 {soon:?}, and not at the monitor or at the slot it left: {from:?}"
+            );
+            assert!(
+                between(desk.drawn(at + Duration::from_millis(130)), from, before()),
+                "and it shrinks from there"
+            );
+            assert_eq!(
+                desk.drawn(at + Duration::from_millis(400)),
+                before(),
+                "back where it lives"
+            );
+        }
+
+        /// **A listener that toggles the change straight back is not told
+        /// that too**: it would answer it again, and again. Told once, the
+        /// window ends where it started.
+        #[test]
+        fn a_listener_that_toggles_the_change_back_is_not_told_it_again() {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+            let mut desk = Desk::new(
+                "toggled-back",
+                r#"
+                local told = 0
+                sol.on("fullscreen", function(id)
+                    told = told + 1
+                    sol.status(tostring(told))
+                    if told < 5 then sol.toggle_fullscreen(id) end
+                end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            assert_eq!(desk.state.status, "1", "told once");
+            assert!(
+                !in_state(&desk.window, State::Fullscreen),
+                "and the listener's toggle back was made"
+            );
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), before());
+            assert!(!desk.transformed());
+        }
+
+        /// The right of two monitors, side by side.
+        fn right() -> Rectangle<f64, Logical> {
+            Rectangle::new((1920, 0).into(), (1920, 1080).into()).to_f64()
+        }
+
+        /// **A window on the second monitor grows to cover that one**, the
+        /// monitor it is on and not the first, and shrinks back to where it
+        /// was on it.
+        #[test]
+        fn a_window_on_the_second_monitor_glides_to_cover_that_one() {
+            let mut desk = Desk::on("second-monitor", SCRIPT, (2220, 200), |state| {
+                side_by_side(state, "left-test");
+            });
+            let was = Rectangle::new((2220, 200).into(), (400, 300).into()).to_f64();
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            glides(&desk.burst(at), was, right(), 5);
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(!desk.transformed());
+
+            let at = desk.state.clock.now();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            glides(&desk.burst(at), right(), was, 5);
+        }
+
+        /// **A monitor unplugged part of the way through leaves no window
+        /// transformed**: the window growing on it is brought onto the one
+        /// left, and is at rest there once that lands.
+        #[test]
+        fn a_monitor_unplugged_mid_glide_leaves_the_window_at_rest() {
+            let mut gone = None;
+            let mut desk = Desk::on("unplugged", SCRIPT, (2220, 200), |state| {
+                gone = Some(side_by_side(state, "left-test").1);
+            });
+            let gone = gone.expect("the right monitor");
+
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            let was = Rectangle::new((2220, 200).into(), (400, 300).into()).to_f64();
+            assert!(
+                between(desk.drawn(desk.state.clock.now()), was, right()),
+                "the premise: part of the way"
+            );
+            crate::layer::close_all(&gone);
+            desk.state.space.unmap_output(&gone);
+            desk.state.settle_monitors();
+            desk.land();
+            assert!(!desk.transformed(), "at rest once it lands");
+            let drawn = desk.drawn(desk.state.clock.now());
+            assert!(
+                drawn.loc.x < 1920.0,
+                "and drawn on the monitor that is left: {drawn:?}"
+            );
+        }
+
+        /// **An instant change is drawn as the window is on the next frame**:
+        /// a listener answering with no length leaves no transform behind,
+        /// rather than one whose target -- the monitor -- the next frame
+        /// draws with the old 400x300 picture stretched across it.
+        #[test]
+        fn an_instant_change_draws_the_window_as_it_is_on_the_next_frame() {
+            let mut desk = Desk::new(
+                "instant",
+                r#"
+                sol.on("fullscreen", function() sol.animate({ duration = 0 }) end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let next = desk.state.clock.now() + Duration::from_millis(16);
+            let drawn = desk.drawn(next);
+            assert_eq!(
+                (drawn.size.w, drawn.size.h),
+                (400.0, 300.0),
+                "the first frame draws the committed 400x300 picture, not stretched to the monitor"
+            );
+            assert!(!desk.transformed(), "and holds no transform");
+        }
+
+        /// **And part of the way through a glide, it holds nothing either**:
+        /// a window maximising, not yet answered, sent fullscreen at once is
+        /// drawn as its client has it on the next frame, not with its old
+        /// picture stretched across the monitor by the hold the maximise
+        /// left.
+        #[test]
+        fn an_instant_change_part_of_the_way_through_a_glide_holds_nothing() {
+            let mut desk = Desk::new(
+                "instant-mid-glide",
+                r#"
+                sol.on("maximize", function() sol.animate({ duration = 220, easing = "linear" }) end)
+                sol.on("fullscreen", function() sol.animate({ duration = 0 }) end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                sol.bind("super+shift+m", function() sol.toggle_maximize() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            desk.state.clock.advance(Duration::from_millis(100));
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let next = desk.state.clock.now() + Duration::from_millis(16);
+            assert_eq!(
+                desk.drawn(next),
+                Rectangle::new((0, 0).into(), (400, 300).into()).to_f64(),
+                "the committed 400x300 picture where it now lives"
+            );
+            assert!(!desk.transformed(), "with no transform");
+            assert!(!desk.state.holding_resize(desk.pane), "and nothing held");
+        }
+
+        /// **A client slower than the glide is drawn stretched until it
+        /// answers**, at the rectangle the glide landed on: the hold an
+        /// edge drag keeps on a window until its client answers, kept from
+        /// the toggle. Without it, going in, the window was drawn 400x300 in
+        /// the monitor's corner from the moment it landed, and coming out,
+        /// 1920x1080 hanging off the monitor at 300,200. Answered, it is
+        /// drawn as it is and nothing holds it.
+        #[test]
+        fn a_slow_client_is_drawn_stretched_until_it_answers() {
+            let mut desk = Desk::new("slow", SCRIPT);
+            desk.state.resizing.fill = crate::resizing::Fill::Hold;
+            for (size, to) in [((1920, 1080), screen()), ((400, 300), before())] {
+                assert!(desk.state.trigger("super+f"));
+                desk.pump();
+                desk.frame_after(Duration::from_millis(300));
+                assert!(!desk.transformed(), "landed, it holds no transform");
+                assert_eq!(
+                    desk.drawn(desk.state.clock.now()),
+                    to,
+                    "drawn where it landed while its client has not answered"
+                );
+                assert_eq!(
+                    desk.state.resize_fill(desk.pane),
+                    None,
+                    "stretched into it, whatever `resize.fill` says of a drag"
+                );
+                desk.answer(size.0, size.1);
+                desk.frame_after(Duration::from_millis(16));
+                assert_eq!(desk.drawn(desk.state.clock.now()), to, "and once it has");
+                assert!(
+                    !desk.state.holding_resize(desk.pane),
+                    "and nothing holds it once it has answered"
+                );
+                desk.land();
+            }
+        }
+
+        /// **A window moved by its titlebar while its change holds it is
+        /// where it was moved**: the hold keeps the size the change told its
+        /// client, not the place, so it is drawn under the pointer, and a
+        /// client that never answers lands there rather than back where the
+        /// change put it.
+        #[test]
+        fn a_window_moved_while_its_change_holds_it_stays_where_it_was_moved() {
+            let mut desk = Desk::new("moved-while-held", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert!(desk.state.holding_resize(desk.pane), "the premise: held");
+            // What `MoveGrab::motion` does on every motion.
+            desk.state
+                .space
+                .map_element(desk.window.clone(), (600, 400), false);
+            desk.frame_after(Duration::from_millis(16));
+            let moved = Rectangle::new((600, 400).into(), (400, 300).into()).to_f64();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                moved,
+                "drawn where it was moved, at the size it was told"
+            );
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert!(!desk.state.holding_resize(desk.pane), "no longer held");
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()).loc,
+                moved.loc,
+                "and left there once its patience runs out"
+            );
+        }
+
+        /// **And one that never answers is held only so long**:
+        /// `resizing::PATIENCE` past the landing, as a drag's hold is, and
+        /// then drawn at the size it has, where it lives.
+        #[test]
+        fn a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out() {
+            let mut desk = Desk::new("silent", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                screen(),
+                "the premise: held at the monitor"
+            );
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert!(!desk.state.holding_resize(desk.pane), "no longer held");
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                Rectangle::new((0, 0).into(), (400, 300).into()).to_f64(),
+                "drawn at the size its client has, where it lives"
+            );
+        }
+
+        /// **An edge drag on a window its change is still holding takes
+        /// it**: the change's hold is let go rather than landed, so its
+        /// patience running out part of the way through the drag does not
+        /// put the window at its client's old size under the pointer.
+        #[test]
+        fn an_edge_drag_takes_a_window_its_change_is_holding() {
+            let mut desk = Desk::new("dragged", SCRIPT);
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            desk.frame_after(Duration::from_millis(300));
+            assert!(
+                desk.state.holding_resize(desk.pane),
+                "the premise: held for its answer"
+            );
+
+            let wanted = Rectangle::new((250, 200).into(), (450, 300).into());
+            desk.state.pending_resize = Some(ResizeRequest {
+                window: desk.window.clone(),
+                wanted,
+                edge_at: (250.0, 200.0),
+                edges: ResizeEdge::Left,
+            });
+            desk.state.settle_resize();
+            desk.frame_after(crate::resizing::PATIENCE);
+            assert_eq!(
+                desk.state.pane_outer_of(desk.pane),
+                Some(wanted),
+                "where the drag has it"
+            );
+        }
+
+        /// **A window a mode is presenting is left where the mode draws
+        /// it**: asking for fullscreen while it is a thumbnail, the client
+        /// is told its new size and the window goes on being drawn as the
+        /// thumbnail, rather than gliding out of the grid and landing over
+        /// it while the mode still holds the input. The mode letting go
+        /// brings it to the monitor.
+        #[test]
+        fn a_window_a_mode_presents_stays_where_the_mode_draws_it() {
+            let mut desk = Desk::new(
+                "presented",
+                &format!(
+                    "{SCRIPT}\n\
+                     sol.bind(\"super+o\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.present(window.id, {{ x = 100, y = 100, w = 200, h = 150 }})\n\
+                         end\n\
+                     end)\n\
+                     sol.bind(\"super+p\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.present_clear(window.id)\n\
+                         end\n\
+                     end)\n"
+                ),
+            );
+            let thumbnail = Rectangle::new((100, 100).into(), (200, 150).into()).to_f64();
+            assert!(desk.state.trigger("super+o"));
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "the premise: presented"
+            );
+
+            desk.toplevel.set_fullscreen(None);
+            desk.pump();
+            assert_eq!(
+                last_configured(&desk.client, &desk.toplevel),
+                Some((1920, 1080)),
+                "the client is told its new size all the same"
+            );
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "and the window is still drawn where the mode draws it"
+            );
+
+            assert!(desk.state.trigger("super+p"));
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+            assert!(!desk.transformed());
+        }
+
+        /// **A `sol.present` a listener makes is replaced by the glide**, as
+        /// the compositor's move comes after the listeners' commands: only a
+        /// picture a mode was presenting *before* the change is the mode's.
+        /// A listener presenting the window it is told about does not keep
+        /// it at its old size, transformed for good.
+        #[test]
+        fn a_present_a_listener_makes_is_replaced_by_the_glide() {
+            let mut desk = Desk::new(
+                "listener-presents",
+                r#"
+                sol.on("fullscreen", function(id)
+                    sol.animate({ duration = 260, easing = "linear" })
+                    sol.present(id, { opacity = 0.5 })
+                end)
+                sol.bind("super+f", function() sol.toggle_fullscreen() end)
+                "#,
+            );
+            assert!(desk.state.trigger("super+f"));
+            desk.pump();
+            let midway = desk.state.clock.now() + Duration::from_millis(100);
+            assert!(
+                between(desk.drawn(midway), before(), screen()),
+                "it glides to the monitor: {:?}",
+                desk.drawn(midway)
+            );
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+            assert!(!desk.transformed(), "and at rest it holds no transform");
+        }
+
+        /// **Turning round part of the way out keeps the way back**, for
+        /// fullscreen and maximised alike: pressed again before the client
+        /// has drawn at the size it went back to, what is kept is the
+        /// rectangle it was told, and not the monitor's size it has not
+        /// yet left -- which the next way out configured it with, so the
+        /// window lost its size for good.
+        #[test]
+        fn turning_round_part_of_the_way_out_keeps_the_way_back() {
+            for key in ["super+f", "super+shift+m"] {
+                let mut desk = Desk::new("turned-round", SCRIPT);
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.answer(1920, 1080);
+                desk.land();
+
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.state.clock.advance(Duration::from_millis(100));
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                desk.answer(1920, 1080);
+                desk.land();
+
+                assert!(desk.state.trigger(key));
+                desk.pump();
+                assert_eq!(
+                    last_configured(&desk.client, &desk.toplevel),
+                    Some((400, 300)),
+                    "{key}: the way out is to the size it had"
+                );
+                desk.answer(400, 300);
+                desk.land();
+                assert_eq!(desk.drawn(desk.state.clock.now()), before(), "{key}");
+            }
+        }
+
+        /// **A reload part of the way through leaves no window transformed**:
+        /// the glide goes on under the new scripts and is released when it
+        /// lands, entering and leaving alike.
+        #[test]
+        fn a_reload_mid_glide_leaves_the_window_at_rest() {
+            let mut desk = Desk::new("reloaded", SCRIPT);
+            let directory =
+                std::env::temp_dir().join(format!("solium-glides-reload-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(&entry, SCRIPT).expect("writing the test script");
+
+            for (size, from, to) in [
+                ((1920, 1080), before(), screen()),
+                ((400, 300), screen(), before()),
+            ] {
+                assert!(desk.state.trigger("super+f"));
+                desk.pump();
+                desk.state.clock.advance(Duration::from_millis(100));
+                assert!(
+                    between(desk.drawn(desk.state.clock.now()), from, to),
+                    "the premise: part of the way"
+                );
+                desk.state.reload_from(&entry);
+                desk.answer(size.0, size.1);
+                desk.land();
+                assert!(!desk.transformed(), "at rest once it lands");
+                assert_eq!(desk.drawn(desk.state.clock.now()), to);
+            }
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
     /// **A modal cannot be buried under the window it is waiting on.**
     ///
     /// The regression floating them introduced. Tiled, a dialog took a slot
@@ -6935,6 +7880,119 @@ end)"#,
         );
     }
 
+    /// **#49: a tiled window leaving fullscreen or maximised stays in front
+    /// of its neighbour while it shrinks into its tile**, whichever of the
+    /// two the layout's sweep places last, and one leaving fullscreen stays
+    /// over the bars too. The left tile's window is placed first, and the
+    /// neighbour placed after it was stacked over it: it shrank from behind
+    /// the neighbour and, no longer the front window, was not lifted. A
+    /// sweep part of the way through -- another window opening, a reload --
+    /// leaves it in front as well.
+    #[test]
+    fn a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let output = one_screen(&mut state);
+        let screen = state.space.output_geometry(&output).expect("mapped");
+        let (first, first_toplevel, first_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (second, second_toplevel, second_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        let directory =
+            std::env::temp_dir().join(format!("solium-shrinks-in-front-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\n\
+                 require(\"modes\")\n\
+                 require(\"workspaces\")\n\
+                 require(\"tiling\")\n\
+                 require(\"fullscreen\")\n\
+                 require(\"direction\")\n",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        state.start_scripts(Some(Scripts::load(&entry).expect("loading")));
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        let tile_of = |state: &Solium, window: &Window| {
+            state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("tiled")
+        };
+        assert!(state.trigger("super+t"));
+        round_trip!();
+        for (surface, window) in [(&first_surface, &first), (&second_surface, &second)] {
+            let tile = tile_of(&state, window);
+            commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+        }
+        round_trip!();
+        state.clock.advance(Duration::from_secs(1));
+        a_frame(&mut state);
+        for (key, lifts) in [("super+f", true), ("super+shift+m", false)] {
+            for (window, toplevel, surface, name) in [
+                (&first, &first_toplevel, &first_surface, "first"),
+                (&second, &second_toplevel, &second_surface, "second"),
+            ] {
+                let tile = tile_of(&state, window);
+                let pane = state.panes.id_of(window).expect("pane");
+                state.focus_window(window, SERIAL_COUNTER.next_serial());
+                assert!(state.trigger(key));
+                round_trip!();
+                let (w, h) = last_configured(&client, toplevel).expect("told a size");
+                commit_buffer(&client, &qh, surface, w, h);
+                round_trip!();
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+                assert!(state.trigger(key));
+                round_trip!();
+                let top = |state: &Solium| {
+                    state
+                        .space
+                        .elements()
+                        .last()
+                        .map(|top| state.window_id(top))
+                };
+                state.clock.advance(Duration::from_millis(50));
+                state.sync_panes();
+                assert_eq!(
+                    (top(&state), state.lifted_on(screen)),
+                    (Some(state.window_id(window)), lifts.then_some(pane)),
+                    "{key}, {name}: in front of its neighbour while it shrinks, \
+                     and over the bars if it was fullscreen"
+                );
+                state.trigger_relayout();
+                state.clock.advance(Duration::from_millis(50));
+                state.sync_panes();
+                assert_eq!(
+                    (top(&state), state.lifted_on(screen)),
+                    (Some(state.window_id(window)), lifts.then_some(pane)),
+                    "{key}, {name}: and still, after a sweep part of the way through"
+                );
+                commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+                round_trip!();
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// The shipped `modes`, `workspaces`, `tiling`, `scrolling` and
     /// `direction`, with the shipped configuration, handed to the
     /// compositor: every key the tests below press is the one a user
@@ -7488,6 +8546,29 @@ end)"#,
             at(&state, &client),
             (Some(floated.loc), Some((floated.size.w, floated.size.h))),
             "a window floated while fullscreen did not float where one of its size goes"
+        );
+    }
+
+    /// **A changed `sol.status` with no commands still asks for a frame.**
+    ///
+    /// The shipped `modes.lua`, `overview.lua` and `workspaces.lua` always
+    /// send a command alongside a status change, which already sets
+    /// `redraw`, so this went unnoticed. But `sol.status` is now documented
+    /// as how a configuration tells a hosted shell its mode, and a binding
+    /// that only calls it would otherwise leave `Solium.status` stale until
+    /// some unrelated frame.
+    #[test]
+    fn a_status_change_with_no_commands_still_asks_for_a_frame() {
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state.redraw = false;
+        state.apply(Outcome {
+            status: Some("mode".to_owned()),
+            ..Outcome::default()
+        });
+        assert!(
+            state.redraw,
+            "a status change with no commands left redraw unset"
         );
     }
 
@@ -8420,6 +9501,60 @@ end)"#,
         assert!(
             covered.loc.x + covered.size.w > size.w && covered.loc.y + covered.size.h > size.h,
             "{covered:?} stops at the window"
+        );
+    }
+
+    /// **#232: a captured window ignores the client's window-geometry
+    /// offset**, so a client with client-side shadows (Firefox, GTK apps)
+    /// had its picture shifted away from its frame in every captured draw
+    /// -- warps, genies, close fades, tilted `sol.present` presentations.
+    /// `window_surface_origin` is now the one formula both the flat path
+    /// (`elements`) and the captured one (`flat_window_elements`, by way of
+    /// `client_piece`) draw a surface through, so this pins its contract
+    /// directly, against a window opened over the real protocol: a client
+    /// that sets no window geometry is unchanged, and one that sets an
+    /// offset through `xdg_surface.set_window_geometry` -- the request a
+    /// CSD shadow is declared with -- is shifted back by exactly that much,
+    /// the subtraction the captured path used to leave out.
+    #[test]
+    fn window_surface_origin_matches_a_csd_clients_shadow_offset() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, surface, xdg_surface) =
+            open_xdg(&mut display, &mut state, &conn, &client, &qh);
+        let scale = 1.0;
+        let origin: smithay::utils::Point<i32, smithay::utils::Physical> = (100, 60).into();
+
+        assert_eq!(
+            window.geometry().loc,
+            (0, 0).into(),
+            "this fixture never calls set_window_geometry, so the committed \
+             bounding box starts at the surface's own corner"
+        );
+        assert_eq!(
+            crate::render::window_surface_origin(origin, &window, scale),
+            origin,
+            "no offset: the surface is drawn exactly where its frame reserves for it"
+        );
+
+        // A shadow outside the content: a CSD client's window geometry sits
+        // inside its surface, (10, 15) in from the top-left corner here.
+        xdg_surface.set_window_geometry(10, 15, 44, 49);
+        surface.commit();
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+
+        assert_eq!(window.geometry().loc, (10, 15).into());
+        assert_eq!(
+            crate::render::window_surface_origin(origin, &window, scale),
+            (90, 45).into(),
+            "a window-geometry offset of (10, 15) must shift the drawn surface \
+             back by exactly that much, the same as the flat path always did"
         );
     }
 
@@ -11745,6 +12880,83 @@ end)"#,
             session.assert_unlocks(lock);
         }
 
+        /// **#49: a lock part of the way through a glide leaves no window
+        /// transformed**: the glide lands behind the lock as anywhere
+        /// else, the window is a plain element at the monitor's rectangle
+        /// once it has, and it is still there at rest when the lock lifts.
+        #[test]
+        fn a_lock_mid_glide_leaves_the_window_at_rest() {
+            use super::fullscreen_glides::{SCRIPT, before, between, screen, script_at};
+
+            let mut session = Session::new();
+            session
+                .state
+                .start_scripts(Some(script_at("locked-mid-glide", SCRIPT)));
+            let (window, _toplevel, surface, _xdg) =
+                session.app.open(&mut session.display, &mut session.state);
+            commit_buffer(&session.app.client, &session.app.qh, &surface, 400, 300);
+            session.app.pump(&mut session.display, &mut session.state);
+            session
+                .state
+                .space
+                .map_element(window.clone(), (300, 200), false);
+            session.state.space.refresh();
+            session.state.sync_panes();
+            let pane = session.state.panes.id_of(&window).expect("a pane");
+            session
+                .state
+                .focus_window(&window, SERIAL_COUNTER.next_serial());
+            let land = |session: &mut Session, after: Duration| {
+                session.state.clock.advance(after);
+                let now = session.state.clock.now();
+                session.state.settle(now);
+                session.state.sync_panes();
+            };
+            let drawn = |session: &Session| {
+                let held = session.state.panes.get(pane).expect("the pane");
+                session
+                    .state
+                    .drawn_at(
+                        held,
+                        session.state.pane_outer(held),
+                        session.state.clock.now(),
+                    )
+                    .rect
+            };
+            let transformed = |session: &Session| {
+                session
+                    .state
+                    .panes
+                    .get(pane)
+                    .is_some_and(present::transformed)
+            };
+            land(&mut session, Duration::from_secs(1));
+
+            assert!(session.state.trigger("super+f"));
+            session.app.pump(&mut session.display, &mut session.state);
+            session.state.clock.advance(Duration::from_millis(100));
+            assert!(
+                between(drawn(&session), before(), screen()),
+                "the premise: part of the way into fullscreen"
+            );
+            let lock = session.lock();
+            commit_buffer(&session.app.client, &session.app.qh, &surface, 1920, 1080);
+            session.app.pump(&mut session.display, &mut session.state);
+            land(&mut session, Duration::from_secs(1));
+            assert!(!transformed(&session), "landed behind the lock, at rest");
+            assert_eq!(drawn(&session), screen(), "covering the monitor");
+
+            lock.unlock_and_destroy();
+            session
+                .locker
+                .pump(&mut session.display, &mut session.state);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert!(session.state.lock.is_none(), "the premise: unlocked");
+            land(&mut session, Duration::from_millis(16));
+            assert!(!transformed(&session), "and at rest once the lock lifts");
+            assert_eq!(drawn(&session), screen());
+        }
+
         /// **What is pressed at the lock screen is not told to the
         /// configuration.** A Caps Lock toggled there, with `us,ru` and
         /// Russian live, reaches no `keyboard` listener, so no pill policy
@@ -11991,6 +13203,45 @@ end)"#,
             session.app.pump(&mut session.display, &mut session.state);
 
             session.assert_sealed("focus_window while locked", selections);
+            session.assert_unlocks(lock);
+        }
+
+        /// **`sol.act("windows.focus")` behind the lock is answered
+        /// `locked`**: `focus_window` refuses it, so `done` is not told it
+        /// was done, and the keyboard stays the lock screen's. Tested with
+        /// the Cyrillic group active (#132).
+        #[test]
+        fn sol_act_focus_behind_the_lock_is_answered_locked() {
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let _ = session.app.open(&mut session.display, &mut session.state);
+            let id = session
+                .state
+                .snapshot()
+                .windows
+                .first()
+                .map(|window| window.id)
+                .expect("a window");
+            let lock = session.lock();
+            let selections = session.app.client.selections;
+            let directory =
+                std::env::temp_dir().join(format!("solium-locked-act-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"sol.act("windows.focus", {{ id = {id} }}, function(ok, reason) sol.status(tostring(ok) .. " " .. tostring(reason)) end)"#
+                ),
+            )
+            .expect("writing the entry point");
+            session.state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            let _ = std::fs::remove_dir_all(&directory);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert_eq!(session.state.status, "false locked");
+            session.assert_sealed("sol.act windows.focus while locked", selections);
             session.assert_unlocks(lock);
         }
 
@@ -13738,6 +14989,7 @@ end)"#,
                 fn wait(&mut self, by: Duration) {
                     self.state.clock.advance(by);
                     crate::idle::settle(&mut self.state);
+                    crate::logind::settle(&mut self.state);
                     self.app.pump(&mut self.display, &mut self.state);
                 }
 
@@ -20771,6 +22023,13 @@ end)
                     &working,
                     "a key typed after it went somewhere else",
                 );
+                // Turned down because nobody can see it, as a window on a
+                // hidden desk is, so it wants you just the same (Ruling 18).
+                assert!(
+                    desk.state.urgent.contains(&hidden.pane.get()),
+                    "a window nobody can see asked to be brought forward, gave the keyboard \
+                     back, and is not urgent"
+                );
             }
 
             /// **Any client can mint itself a token, and take the keyboard
@@ -21816,6 +23075,87 @@ end)
                     !heard.split(',').any(|id| id == parked),
                     "the parked window was focused on the way, if only until the keyboard \
                      was handed back. Heard: [{heard}]"
+                );
+            }
+
+            /// **A refused activation is "this window wants you"** (03
+            /// §3.2.17, Ruling 18): the window asking to be brought forward
+            /// from a hidden workspace is urgent until it is focused.
+            #[test]
+            fn a_refused_activation_marks_the_window_urgent_until_it_is_focused() {
+                let (mut desk, _first) = working_in(
+                    &format!(
+                        "local config = require(\"config\")\n\
+                         config.tiling.minimum = {{ w = 900, h = 600 }}\n\
+                         config.tiling.follow_overflow = false\n\
+                         {SHIPPED_HEARING_FOCUS}"
+                    ),
+                    Some("super+t"),
+                );
+                let left = desk.focused();
+                let right = desk.open_surface();
+                desk.answer(&right);
+                let left_window = window_of(&desk, left);
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                assert!(
+                    headed_on_stage(&desk.state, left) && headed_on_stage(&desk.state, right.pane),
+                    "the premise: two tiles on screen"
+                );
+
+                // The pointer on the right tile, the keyboard on the left.
+                let over_right = desk.placed(right.pane);
+                point_at(
+                    &mut desk.state,
+                    (
+                        f64::from(over_right.loc.x + over_right.size.w / 2),
+                        f64::from(over_right.loc.y + over_right.size.h / 2),
+                    ),
+                );
+                desk.state
+                    .focus_window(&left_window, SERIAL_COUNTER.next_serial());
+                typed_into(
+                    &mut desk,
+                    &left_window,
+                    "the premise: typing reaches the left tile",
+                );
+
+                let parked = desk.open_surface();
+                assert_eq!(
+                    workspace_of(&desk, parked.pane),
+                    "2",
+                    "the premise: the third window had no room and went to workspace 2"
+                );
+                assert!(
+                    !headed_on_stage(&desk.state, parked.pane),
+                    "the premise: it is parked a screen away"
+                );
+                assert_eq!(
+                    desk.state.focused_window(),
+                    Some(left_window.clone()),
+                    "the premise: it opened without the keyboard"
+                );
+
+                let token = genuine_token(&mut desk);
+                desk.state.redraw = false;
+                activates(&mut desk, &parked.surface, &token);
+                let id = parked.pane.get();
+                assert!(
+                    desk.state.urgent.contains(&id),
+                    "a refused activation did not mark the window urgent"
+                );
+                assert!(
+                    desk.state.redraw,
+                    "a window going urgent asked for no frame, so the models would not show it \
+                     until something unrelated redrew"
+                );
+                let parked_window = window_of(&desk, parked.pane);
+                desk.state
+                    .focus_window(&parked_window, SERIAL_COUNTER.next_serial());
+                assert!(
+                    !desk.state.urgent.contains(&id),
+                    "focusing it did not clear urgent"
                 );
             }
 
@@ -23153,6 +24493,7 @@ end)
             use super::*;
             use crate::render::{Stacked, Walked};
             use crate::scripted::Layer as Scripted;
+            use smithay::backend::input::ButtonState;
             use zwlr_layer_shell_v1::Layer as Client;
 
             /// Something on the monitor, by a number both ends of the
@@ -23728,6 +25069,71 @@ end)
                 assert_eq!(delivered(&desk, 20.0, 15.0), Some(id(&bar)));
             }
 
+            /// **#49: a window going fullscreen is lifted over the bar as it
+            /// starts to grow, and one leaving goes back under the bar only
+            /// once it has finished shrinking** -- drawn and pressed alike.
+            /// Lifted, it covers the bar only where it is drawn: at the
+            /// start of growing that is the corner it was in.
+            #[test]
+            fn a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk() {
+                let mut desk = Desk::new();
+                desk.install(
+                    r#"sol.on("fullscreen", function() sol.animate({ duration = 260 }) end)"#,
+                );
+                let (strip, _strip) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state.space.map_element(window.clone(), (10, 5), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let pane = Seen::Pane(opened.pane);
+                let bar = Seen::Layer(id(&strip));
+                assert!(
+                    drawn_over(&desk, bar, pane),
+                    "the premise: the bar over the window: {:?}",
+                    drawn(&desk)
+                );
+
+                opened.toplevel.set_fullscreen(None);
+                desk.pump();
+                assert!(
+                    drawn_over(&desk, pane, bar),
+                    "lifted over the bar as it starts to grow: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    (delivered(&desk, 20.0, 15.0), delivered(&desk, 1500.0, 15.0)),
+                    (Some(surface_id(&window)), Some(id(&strip))),
+                    "(a press on the window over the bar, one on the bar where the \
+                     window is not drawn yet)"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 1920, 1080);
+                desk.pump();
+                landed(&mut desk);
+
+                opened.toplevel.unset_fullscreen();
+                desk.pump();
+                assert!(
+                    drawn_over(&desk, pane, bar),
+                    "still over the bar while it shrinks: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(
+                    delivered(&desk, 1500.0, 15.0),
+                    Some(surface_id(&window)),
+                    "and the press where it still covers the bar is the window's"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 64, 64);
+                desk.pump();
+                landed(&mut desk);
+                assert!(
+                    drawn_over(&desk, bar, pane),
+                    "back under the bar once it has shrunk: {:?}",
+                    drawn(&desk)
+                );
+                assert_eq!(delivered(&desk, 20.0, 15.0), Some(id(&strip)));
+            }
+
             /// **A fullscreen window on a workspace that is not shown does
             /// not hide the bar.**
             #[test]
@@ -23908,6 +25314,215 @@ end)
                     (other.pane, under.pane),
                     "(the window with the keyboard with the pointer on the bar, and on the \
                      window below it)"
+                );
+            }
+
+            /// Press the left button at the pointer's current location, and
+            /// release it: a plain click, through the real input path.
+            fn click(desk: &mut Desk, time: u64) {
+                let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Pressed,
+                    time,
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    time + 1,
+                );
+            }
+
+            /// **A click on empty desktop clears keyboard focus** (#219): the
+            /// window that held it before the click no longer does, and
+            /// `sol.windows()`'s `focused` -- which `desk.focused()` reads
+            /// the same way `focused_window` does -- agrees.
+            #[test]
+            fn a_click_on_empty_desktop_clears_keyboard_focus() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let empty = (1700.0, 950.0);
+                assert!(
+                    desk.focused() == opened.pane
+                        && desk.state.window_under(empty.into()).is_none(),
+                    "the premise: the window has the keyboard, and {empty:?} is empty desktop"
+                );
+
+                move_pointer(&mut desk.state, empty, 10);
+                click(&mut desk, 11);
+
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "a click on empty desktop left a window focused"
+                );
+            }
+
+            /// **A click on empty desktop with nothing already focused does
+            /// nothing**: `Solium::clear_focus` declines before it ever asks
+            /// `give_keyboard` for a serial nobody needed, so this is a click
+            /// with no window to lose and no window gained, on a desk that
+            /// never had one.
+            #[test]
+            fn a_click_on_empty_desktop_with_nothing_focused_does_nothing() {
+                let mut desk = Desk::new();
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "the premise: nothing has the keyboard"
+                );
+
+                move_pointer(&mut desk.state, (1700.0, 950.0), 10);
+                click(&mut desk, 11);
+
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "a click on empty desktop focused a window that was never there"
+                );
+            }
+
+            /// **A window with `click_to_focus` off keeps whatever already
+            /// has the keyboard, including on a press over a *different*
+            /// window** -- the fallback that clears focus for an unclaimed
+            /// press (#219) must not fire just because this press was not
+            /// click-to-focus's to answer.
+            #[test]
+            fn a_click_on_a_window_with_click_to_focus_off_leaves_focus_alone() {
+                let mut desk = Desk::new();
+                let under = desk.open_surface();
+                let under_window = window_of(&desk, under.pane);
+                desk.state
+                    .space
+                    .map_element(under_window, (100, 100), false);
+                let other = desk.open_surface();
+                let other_window = window_of(&desk, other.pane);
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (800, 300), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.click_to_focus = false;
+                desk.state.profile.focus_follows_mouse = false;
+                let on_under = (150.0, 150.0);
+                assert!(
+                    desk.focused() == other.pane
+                        && desk.state.window_under(on_under.into()).is_some(),
+                    "the premise: the other window has the keyboard, and {on_under:?} is on \
+                     the first window"
+                );
+
+                move_pointer(&mut desk.state, on_under, 10);
+                click(&mut desk, 11);
+
+                assert_eq!(
+                    desk.focused(),
+                    other.pane,
+                    "a press that click-to-focus declined to answer cleared focus instead of \
+                     leaving it alone"
+                );
+            }
+
+            /// **A click on a real client's bar is none of #219's business**:
+            /// the bar is not empty desktop, so the fallback that clears
+            /// focus for an unclaimed press must not reach past it, however
+            /// the bar's own client answers the press.
+            #[test]
+            fn the_bar_above_the_windows_is_left_alone() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let (_bar, _layered) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let on_the_bar = (960.0, 15.0);
+                assert!(
+                    desk.focused() == opened.pane && desk.state.client_above(on_the_bar.into()),
+                    "the premise: the window has the keyboard, and the bar is over {on_the_bar:?}"
+                );
+
+                move_pointer(&mut desk.state, on_the_bar, 10);
+                click(&mut desk, 11);
+
+                assert_eq!(
+                    desk.focused(),
+                    opened.pane,
+                    "a click on the bar cleared the window's keyboard focus"
+                );
+            }
+
+            /// **A click on a registered wallpaper surface that claims
+            /// nothing still clears keyboard focus** (#219): a wallpaper is
+            /// not empty space the way the plain empty-desktop test above
+            /// has it -- it is a real, interactive scripted surface at the
+            /// background layer, and `surface_claiming` walks it and calls
+            /// its `hit`, which here answers `Hit::Nothing` -- so this walks
+            /// a different path through `surface_pointer`/`surface_claiming`
+            /// than a point with no surface declared at all, and must land
+            /// on the same fallback.
+            #[test]
+            fn a_click_on_the_wallpaper_clears_keyboard_focus() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                desk.state
+                    .declare_surface(crate::scripted::Declaration::for_test(
+                        "wallpaper",
+                        std::path::PathBuf::from("/nonexistent/wallpaper-test.qml"),
+                        Scripted::Background,
+                        crate::scripted::On::Rect(screen()),
+                    ));
+                let wallpaper = desk
+                    .state
+                    .surfaces
+                    .named("wallpaper")
+                    .expect("the surface was declared");
+                desk.state
+                    .surfaces
+                    .get_mut(wallpaper)
+                    .expect("live")
+                    .stand_in(crate::scripted::Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..crate::scripted::Stand::solid()
+                    });
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let empty = (1700.0, 950.0);
+                assert!(
+                    desk.focused() == opened.pane
+                        && desk.state.window_under(empty.into()).is_none()
+                        && !desk.state.surface_pointer(false, empty.into(), None),
+                    "the premise: the window has the keyboard, {empty:?} is over the \
+                     wallpaper, and the wallpaper claims nothing there"
+                );
+
+                move_pointer(&mut desk.state, empty, 10);
+                click(&mut desk, 11);
+
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "a click on a non-claiming wallpaper left a window focused"
                 );
             }
 
@@ -24146,6 +25761,71 @@ end)
                     !scene_events(&desk.state, bar)
                         .iter()
                         .any(|event| matches!(event.kind, PointerKind::Wheel { .. }))
+                );
+            }
+
+            /// **A device whose natural scroll libinput already set is not
+            /// flipped a second time by the software fallback** (#157's own
+            /// central risk): with `profile.natural_scroll` true -- the
+            /// setting that used to flip every device uniformly -- and the
+            /// synthetic device registered as handled, the wheel reaches the
+            /// scene exactly as unflipped, proving `pointer_axis`'s own
+            /// `Registry::handled` check actually gates the flip, not just
+            /// the unit-tested `Registry::handled` in isolation.
+            #[test]
+            fn pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set() {
+                let mut desk = russian_desk();
+                desk.state.profile.natural_scroll = true;
+                desk.state.input.device_seen(
+                    crate::input::devices::DeviceInfo {
+                        id: "synthetic".to_owned(),
+                        name: "synthetic pointer".to_owned(),
+                        kind: crate::input::devices::DeviceKind::Mouse,
+                        vendor: None,
+                        product: None,
+                    },
+                    crate::input::devices::Report::test_applied(&["natural_scroll"]),
+                );
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 2);
+                assert!(
+                    scene_events(&desk.state, bar).iter().any(|event| event.kind
+                        == PointerKind::Wheel {
+                            angle: (0.0, -120.0),
+                            pixels: (0.0, 0.0),
+                        }),
+                    "libinput already flipped this device's raw deltas, so the software \
+                     fallback must leave the direction alone even though the profile asks for \
+                     natural scroll: {:?}",
+                    scene_events(&desk.state, bar)
+                );
+            }
+
+            /// **A device the natural-scroll mechanism never touched still
+            /// gets the old software flip** when the profile asks for it --
+            /// the other half of the same branch: with nothing registered,
+            /// `Registry::handled` answers false, and `pointer_axis` must
+            /// fall back to `profile.natural_scroll` exactly as it did
+            /// before #157.
+            #[test]
+            fn pointer_axis_still_flips_a_device_its_natural_scroll_mechanism_never_touched() {
+                let mut desk = russian_desk();
+                desk.state.profile.natural_scroll = true;
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 2);
+                assert!(
+                    scene_events(&desk.state, bar).iter().any(|event| event.kind
+                        == PointerKind::Wheel {
+                            angle: (0.0, 120.0),
+                            pixels: (0.0, 0.0),
+                        }),
+                    "no device claimed this natural scroll, so the old blanket flip must still \
+                     apply: {:?}",
+                    scene_events(&desk.state, bar)
                 );
             }
 
@@ -25305,6 +26985,67 @@ end)
                     ),
                     "(the pointer's surface while the grab was held, its surface once the \
                      scene let go, the grab's dismissals, the buttons the window was told)"
+                );
+            }
+
+            /// A grab's target over the window at 600,500.
+            fn inside_over_the_window(at: Point<f64, Logical>) -> bool {
+                (600.0..664.0).contains(&at.x) && (500.0..564.0).contains(&at.y)
+            }
+
+            /// **A popup closed during a press inside it gives the pointer
+            /// back at the release** (Ruling 12): with the pointer resting
+            /// over the window, a grab the scene lets go of while it holds a
+            /// press, as a popup closed from its own `onPressed` is, leaves
+            /// the pointer with the scene until the button is up, and then
+            /// gives it to the window, so the next click there, with no motion
+            /// before it, reaches it.
+            #[test]
+            fn a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release() {
+                let (mut desk, opened, menu) = grabbing(crate::scripted::OutsideClick::default());
+                if let Some(stand) = desk
+                    .state
+                    .surfaces
+                    .get_mut(menu)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    stand.inside = inside_over_the_window;
+                }
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                move_pointer(&mut desk.state, (630.0, 530.0), 10);
+                let region = region(&desk);
+                crate::synth::send_button(&mut desk.state, region, 0x110, ButtonState::Pressed, 11);
+                report(&mut desk, menu, crate::qml::hosted::GrabReport::Released);
+                let pressed = pointer_focus(&desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    12,
+                );
+                let released = pointer_focus(&desk);
+                click_here(&mut desk, 13);
+                desk.pump();
+                assert_eq!(
+                    (
+                        presses(&desk, menu),
+                        pressed,
+                        released,
+                        desk.state.hosted_grab.is_none(),
+                        desk.client.buttons.clone()
+                    ),
+                    (
+                        1,
+                        None,
+                        Some(window_id(&opened)),
+                        true,
+                        vec![(0x110, true), (0x110, false)]
+                    ),
+                    "(the presses the scene took, the pointer's surface while its press was \
+                     held, its surface after the release, the grab let go, the buttons the \
+                     window was told)"
                 );
             }
 
@@ -26649,6 +28390,633 @@ end)"#,
                     desk.placed(pane).size.h,
                     whole.size.h - 48,
                     "the window was placed against the reserve the scene had before"
+                );
+            }
+
+            /// Queue `actions`, each with its data as JSON, on the stand-in
+            /// for surface `id`.
+            fn queue(desk: &mut Desk, id: crate::scripted::SurfaceId, actions: &[(&str, &str)]) {
+                if let Some(stand) = desk
+                    .state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(crate::scripted::Surface::stand_mut)
+                {
+                    for (action, data) in actions {
+                        stand.actions.push((
+                            (*action).to_owned(),
+                            crate::json::Json::parse(data).expect("valid JSON"),
+                        ));
+                    }
+                }
+            }
+
+            /// **Two actions from one frame both reach Lua, in order**, at
+            /// the next settle (Ruling 15).
+            #[test]
+            fn two_actions_from_one_frame_both_reach_lua_in_order() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"heard = ""
+sol.on("surface", function(surface, action) heard = heard .. action .. ";"; sol.status(heard) end)"#,
+                );
+                queue(&mut desk, shell, &[("first", "null"), ("second", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(desk.state.status, "first;second;");
+            }
+
+            /// **`windows.focus` from a scene focuses the window**, through
+            /// the shipped `actions.lua` and `sol.act`.
+            #[test]
+            fn windows_focus_from_a_scene_focuses_the_window() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(r#"require("actions")"#);
+                desk.state.give_keyboard(None, SERIAL_COUNTER.next_serial());
+                let id = desk
+                    .state
+                    .snapshot()
+                    .windows
+                    .first()
+                    .map(|window| window.id)
+                    .expect("a window");
+                queue(
+                    &mut desk,
+                    shell,
+                    &[("windows.focus", &format!(r#"{{"id":{id}}}"#))],
+                );
+                desk.state.settle_scenes();
+                assert_eq!(keyboard_on(&desk), Some(window_id(&opened)));
+            }
+
+            /// **An action naming a window that is not there is answered
+            /// `unknown-window`**, one the compositor does not know
+            /// `unknown-action`, and one with no window's id `bad-data`, each
+            /// once its batch is applied, in order.
+            #[test]
+            fn sol_act_answers_why_it_could_not() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(reason) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                queue(
+                    &mut desk,
+                    shell,
+                    &[
+                        ("windows.close", r#"{"id":4242}"#),
+                        ("windows.fly", r#"{"id":1}"#),
+                        ("windows.maximize", r#"{"id":"1"}"#),
+                    ],
+                );
+                desk.state.settle_scenes();
+                assert_eq!(desk.state.status, "unknown-window;unknown-action;bad-data;");
+            }
+
+            /// **`done` hears that an action was done, after it was**: a
+            /// window closed from a scene starts closing, `done(true)` is
+            /// told once after that, and the client is asked once the window
+            /// has faded.
+            #[test]
+            fn sol_act_tells_done_once_the_window_was_asked_to_close() {
+                let (mut desk, opened, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("closing", function(id) answers = answers .. "closing;"; sol.status(answers) end)
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(ok) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                let id = desk
+                    .state
+                    .snapshot()
+                    .windows
+                    .first()
+                    .map(|window| window.id)
+                    .expect("a window");
+                queue(
+                    &mut desk,
+                    shell,
+                    &[("windows.close", &format!(r#"{{"id":{id}}}"#))],
+                );
+                desk.state.settle_scenes();
+                let heard = desk.state.status.clone();
+                let faded =
+                    desk.state.clock.now() + crate::present::CLOSING + Duration::from_millis(10);
+                desk.state.settle_closing(faded);
+                desk.pump();
+                assert_eq!(
+                    (
+                        heard.as_str(),
+                        desk.client
+                            .closes
+                            .contains(&wayland_client::Proxy::id(&opened.toplevel))
+                    ),
+                    ("closing;true;", true),
+                    "(what the listeners heard, in order, whether the client was asked to close)"
+                );
+            }
+
+            /// The first window's id, as `sol.windows()` gives it.
+            fn first_window(desk: &Desk) -> u64 {
+                desk.state
+                    .snapshot()
+                    .windows
+                    .first()
+                    .map(|window| window.id)
+                    .expect("a window")
+            }
+
+            /// **`done` is told once the whole batch that ran its `sol.act`
+            /// is applied** (03 §3.3.2), not part way through it, where a
+            /// later command of the batch runs listeners of its own: both
+            /// focus events come before it.
+            #[test]
+            fn done_is_told_after_every_command_of_the_batch_that_ran_its_act() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                let id = first_window(&desk);
+                desk.install(&format!(
+                    r#"heard = ""
+sol.on("focus", function() heard = heard .. "focus;"; sol.status(heard) end)
+sol.on("surface", function()
+    sol.act("windows.fly", nil, function() heard = heard .. "done;"; sol.status(heard) end)
+    sol.focus({id})
+    sol.focus({id})
+end)"#
+                ));
+                queue(&mut desk, shell, &[("go", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(desk.state.status, "focus;focus;done;");
+            }
+
+            /// **A `sol.act` a hotplug's `monitors` handler runs hears its
+            /// `done` in the hotplug's dispatch**, though the hotplug holds
+            /// its handlers as one dispatch.
+            #[test]
+            fn a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"sol.on("monitors", function()
+    sol.act("windows.fly", nil, function(ok, reason) sol.status("done " .. tostring(reason)) end)
+end)"#,
+                );
+                desk.state.settle_monitors();
+                assert_eq!(desk.state.status, "done unknown-action");
+            }
+
+            /// **A `sol.act` at the top of a reloaded configuration hears
+            /// its `done` in the reload's dispatch**, though the reload holds
+            /// its handlers as one dispatch.
+            #[test]
+            fn a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch() {
+                let (mut desk, _, _) = window_under_a_scene(button_over_the_window);
+                let directory =
+                    std::env::temp_dir().join(format!("solium-reload-act-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(
+                    &entry,
+                    r#"sol.act("windows.fly", nil, function(ok, reason) sol.status("done " .. tostring(reason)) end)"#,
+                )
+                .expect("writing the entry point");
+                desk.state.reload_from(&entry);
+                let _ = std::fs::remove_dir_all(&directory);
+                assert_eq!(desk.state.status, "done unknown-action");
+            }
+
+            /// **A `done` that acts again each time it is told costs rounds,
+            /// not the session**: a retry that never succeeds is told
+            /// `ATTEMPT_ROUNDS` times in the dispatch that started it, the
+            /// attempt left over is told at the next dispatch, and nothing
+            /// runs the stack out.
+            #[test]
+            fn a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"tries = 0
+local function again()
+    tries = tries + 1
+    sol.status(tostring(tries))
+    sol.act("windows.focus", { id = 4242 }, again)
+end
+sol.on("surface", function(surface, action) if action == "go" then again() end end)"#,
+                );
+                let rounds = crate::state::commands::ATTEMPT_ROUNDS;
+                queue(&mut desk, shell, &[("go", "null")]);
+                desk.state.settle_scenes();
+                let first = (desk.state.status.clone(), desk.state.settled_attempts.len());
+                queue(&mut desk, shell, &[("other", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(
+                    (first, desk.state.status.clone()),
+                    (((1 + rounds).to_string(), 1), (1 + 2 * rounds).to_string()),
+                    "((the tries in the first dispatch, the attempts left), the tries after the next)"
+                );
+            }
+
+            /// **A `done` that acts again and then never returns is stopped
+            /// once, not every round**: what it asked for before the stop is
+            /// dropped, so no round follows it and no attempt is left over
+            /// for the next dispatch to wait on.
+            #[test]
+            fn a_done_that_acts_again_and_never_returns_does_not_stall_every_dispatch() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"tries = 0
+local function again()
+    tries = tries + 1
+    sol.status(tostring(tries))
+    sol.act("windows.focus", { id = 4242 }, again)
+    while true do end
+end
+sol.on("surface", function(surface, action)
+    if action == "go" then sol.act("windows.focus", { id = 4242 }, again) end
+end)"#,
+                );
+                queue(&mut desk, shell, &[("go", "null")]);
+                desk.state.settle_scenes();
+                queue(&mut desk, shell, &[("other", "null")]);
+                desk.state.settle_scenes();
+                assert_eq!(
+                    (
+                        desk.state.status.as_str(),
+                        desk.state.settled_attempts.len()
+                    ),
+                    ("1", 0),
+                    "(how many times the done was told, the attempts left)"
+                );
+            }
+
+            /// **A window still loading is not a window to focus, send
+            /// fullscreen or maximise**: those three answer `unknown-window`
+            /// for a pane with no client yet, though `sol.windows()` lists it,
+            /// and `windows.close` closes it.
+            #[test]
+            fn sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(reason) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                let source = crate::pane::loading_source(None);
+                let loading = desk.state.open_loading("app", None, source, None);
+                let data = format!(r#"{{"id":{}}}"#, loading.get());
+                queue(
+                    &mut desk,
+                    shell,
+                    &[
+                        ("windows.focus", &data),
+                        ("windows.fullscreen", &data),
+                        ("windows.maximize", &data),
+                        ("windows.close", &data),
+                    ],
+                );
+                desk.state.settle_scenes();
+                assert_eq!(
+                    (
+                        desk.state.status.as_str(),
+                        desk.state
+                            .panes
+                            .get(loading)
+                            .is_some_and(crate::pane::Pane::leaving)
+                    ),
+                    ("unknown-window;unknown-window;unknown-window;nil;", true),
+                    "(what the dones heard, whether the loading window is closing)"
+                );
+            }
+
+            /// **An action the compositor does not know is warned of the
+            /// first time only**: asked for twice, the log says so once, and
+            /// both `done`s still hear `unknown-action`.
+            #[test]
+            fn an_unknown_action_is_warned_of_the_first_time_only() {
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                desk.install(
+                    r#"answers = ""
+sol.on("surface", function(surface, action, data)
+    sol.act(action, data, function(ok, reason) answers = answers .. tostring(reason) .. ";"; sol.status(answers) end)
+end)"#,
+                );
+                queue(
+                    &mut desk,
+                    shell,
+                    &[("windows.fly", "null"), ("windows.fly", "null")],
+                );
+                let log = crate::script::logged_while(|| desk.state.settle_scenes());
+                assert_eq!(
+                    (
+                        desk.state.status.as_str(),
+                        log.matches("sol.act: no such action").count()
+                    ),
+                    ("unknown-action;unknown-action;", 1),
+                    "(what the dones heard, how many times the log warned of it):\n{log}"
+                );
+            }
+
+            fn window_row(
+                desk: &Desk,
+                id: u64,
+            ) -> std::collections::BTreeMap<&'static str, crate::json::Json> {
+                crate::models::windows::rows(&desk.state)
+                    .into_iter()
+                    .find(|row| row.key == id.to_string())
+                    .map(|row| row.values)
+                    .expect("a row for the window")
+            }
+
+            /// **A window's row is where it lives, its focus and its state**,
+            /// built from its pane.
+            #[test]
+            fn a_window_row_carries_where_it_lives_and_its_focus() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let id = opened.pane.get();
+                let row = window_row(&desk, id);
+                use crate::json::Json;
+                assert_eq!(row.get("state"), Some(&Json::Text("shown".to_owned())));
+                assert_eq!(row.get("focused"), Some(&Json::Bool(true)));
+                assert_eq!(row.get("focusOrder"), Some(&Json::Number(0.0)));
+                assert_eq!(row.get("onStage"), Some(&Json::Bool(true)));
+                assert_eq!(row.get("xwayland"), Some(&Json::Bool(false)));
+                assert!(matches!(row.get("monitor"), Some(Json::Text(name)) if !name.is_empty()));
+                assert_eq!(
+                    row.get("workspace"),
+                    Some(&Json::Text(String::new())),
+                    "no workspaces are declared, so the window is on none"
+                );
+            }
+
+            /// **Workspace rows count their windows and say which is shown**,
+            /// from what Lua declared, joined with the windows; and the
+            /// window's own row says which workspace it is on.
+            #[test]
+            fn workspace_rows_count_their_windows_and_say_which_is_shown() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let monitor = the_monitor(&desk).name();
+                let id = opened.pane.get();
+                desk.install(&format!(
+                    r#"sol.workspaces({{ arrangement = {{ kind = "horizontal", columns = 2, rows = 1 }},
+                        groups = {{ {{ id = "{monitor}", monitors = {{ "{monitor}" }}, showing = {{ "1" }},
+                                     workspaces = {{ {{ id = "1", name = "1", col = 1, row = 1 }}, {{ id = "2", name = "2", col = 2, row = 1 }} }} }} }},
+                        windows = {{ [{id}] = {{ "2" }} }} }})"#
+                ));
+                let outcome = desk
+                    .state
+                    .scripts
+                    .as_mut()
+                    .map(crate::script::Scripts::startup)
+                    .unwrap_or_default();
+                desk.state.apply(outcome);
+                let rows = crate::models::workspaces::rows(&desk.state);
+                let get = |key: &str, role: &str| {
+                    rows.iter()
+                        .find(|row| row.key == key)
+                        .and_then(|row| row.values.get(role).cloned())
+                };
+                use crate::json::Json;
+                assert_eq!(
+                    get(&format!("{monitor}/1"), "active"),
+                    Some(Json::Bool(true))
+                );
+                assert_eq!(
+                    (
+                        get(&format!("{monitor}/1"), "focused"),
+                        get(&format!("{monitor}/2"), "focused")
+                    ),
+                    (Some(Json::Bool(true)), Some(Json::Bool(false))),
+                    "the workspace the monitor in front shows is the focused one"
+                );
+                assert_eq!(
+                    get(&format!("{monitor}/2"), "occupied"),
+                    Some(Json::Number(1.0))
+                );
+                assert_eq!(
+                    get(&format!("{monitor}/1"), "occupied"),
+                    Some(Json::Number(0.0))
+                );
+                assert_eq!(
+                    window_row(&desk, id).get("workspace"),
+                    Some(&Json::Text("2".to_owned()))
+                );
+
+                // Fullscreen and urgent, the window makes its workspace so,
+                // and is in its `windows`; the other is neither.
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::ToggleFullscreen { id }],
+                    ..crate::script::Outcome::default()
+                });
+                desk.state.urgent.insert(id);
+                let rows = crate::models::workspaces::rows(&desk.state);
+                let roles = |key: String| {
+                    let row = rows.iter().find(|row| row.key == key);
+                    ["urgent", "hasFullscreen", "windows"]
+                        .map(|role| row.and_then(|row| row.values.get(role).cloned()))
+                };
+                #[expect(clippy::cast_precision_loss, reason = "a window id, far below 2^53")]
+                let number = id as f64;
+                assert_eq!(
+                    (roles(format!("{monitor}/2")), roles(format!("{monitor}/1"))),
+                    (
+                        [
+                            Some(Json::Bool(true)),
+                            Some(Json::Bool(true)),
+                            Some(Json::List(vec![Json::Number(number)]))
+                        ],
+                        [
+                            Some(Json::Bool(false)),
+                            Some(Json::Bool(false)),
+                            Some(Json::List(Vec::new()))
+                        ]
+                    ),
+                    "(urgent, hasFullscreen, windows) of workspace 2, with the window, and 1"
+                );
+            }
+
+            /// **A reload into a configuration that stops calling
+            /// `sol.workspaces` publishes none**, not what the previous
+            /// session last declared.
+            #[test]
+            fn a_reload_that_stops_declaring_workspaces_publishes_none() {
+                let (mut desk, _opened, _) = window_under_a_scene(button_over_the_window);
+                let monitor = the_monitor(&desk).name();
+                desk.install(&format!(
+                    r#"sol.workspaces({{ arrangement = {{ kind = "horizontal", columns = 1, rows = 1 }},
+                        groups = {{ {{ id = "{monitor}", monitors = {{ "{monitor}" }}, showing = {{ "1" }},
+                                     workspaces = {{ {{ id = "1", name = "1", col = 1, row = 1 }} }} }} }} }})"#
+                ));
+                let outcome = desk
+                    .state
+                    .scripts
+                    .as_mut()
+                    .map(crate::script::Scripts::startup)
+                    .unwrap_or_default();
+                desk.state.apply(outcome);
+                assert!(
+                    desk.state.workspaces.is_some(),
+                    "the premise: a declaration is held"
+                );
+                assert!(
+                    !crate::models::workspaces::rows(&desk.state).is_empty(),
+                    "the premise: it publishes rows"
+                );
+
+                let directory = std::env::temp_dir().join(format!(
+                    "solium-reload-drops-workspaces-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::create_dir_all(&directory);
+                let entry = directory.join("init.lua");
+                std::fs::write(
+                    &entry,
+                    "-- a configuration that never calls sol.workspaces\n",
+                )
+                .expect("writing the entry point");
+                desk.state.reload_from(&entry);
+                let _ = std::fs::remove_dir_all(&directory);
+
+                assert!(
+                    desk.state.workspaces.is_none(),
+                    "the old declaration stayed held after a reload that never declared one"
+                );
+                assert!(
+                    crate::models::workspaces::rows(&desk.state).is_empty(),
+                    "the old rows stayed published after a reload that never declared any"
+                );
+            }
+
+            /// **`focusOrder` is most recent first** (Ruling 18).
+            #[test]
+            fn focus_order_is_most_recent_first() {
+                let (mut desk, first, _) = window_under_a_scene(button_over_the_window);
+                let second = desk.open_surface();
+                let (one, two) = (window(&desk, &first), window(&desk, &second));
+                desk.state.focus_window(&one, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&two, SERIAL_COUNTER.next_serial());
+                use crate::json::Json;
+                assert_eq!(
+                    window_row(&desk, second.pane.get()).get("focusOrder"),
+                    Some(&Json::Number(0.0))
+                );
+                assert_eq!(
+                    window_row(&desk, first.pane.get()).get("focusOrder"),
+                    Some(&Json::Number(1.0))
+                );
+            }
+
+            /// **A window is listed from the moment it is launched**, before
+            /// its application draws: `loading`, titled with the program,
+            /// with no process to name yet, and, never focused, last in
+            /// `focusOrder` (Ruling 18).
+            #[test]
+            fn a_window_still_loading_is_listed_as_loading() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let focused = window(&desk, &opened);
+                desk.state
+                    .focus_window(&focused, SERIAL_COUNTER.next_serial());
+                let source = crate::pane::loading_source(None);
+                let loading = desk.state.open_loading("app", None, source, None);
+                let row = window_row(&desk, loading.get());
+                use crate::json::Json;
+                assert_eq!(
+                    (
+                        row.get("state"),
+                        row.get("title"),
+                        row.get("pid"),
+                        row.get("focusOrder")
+                    ),
+                    (
+                        Some(&Json::Text("loading".to_owned())),
+                        Some(&Json::Text("app".to_owned())),
+                        Some(&Json::Number(-1.0)),
+                        Some(&Json::Number(1.0))
+                    ),
+                    "(state, title, pid, focusOrder)"
+                );
+            }
+
+            /// **A window that closes leaves no gap in `focusOrder`**
+            /// (Ruling 18): the windows left still count up from 0, so the
+            /// one focused before the one in front is still 1; and the next
+            /// focus forgets it, urgent as it was.
+            #[test]
+            fn a_closed_window_leaves_no_gap_in_focus_order() {
+                let (mut desk, first, _) = window_under_a_scene(button_over_the_window);
+                let second = desk.open_surface();
+                let third = desk.open_surface();
+                let (one, two, three) = (
+                    window(&desk, &first),
+                    window(&desk, &second),
+                    window(&desk, &third),
+                );
+                desk.state
+                    .focus_window(&three, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&two, SERIAL_COUNTER.next_serial());
+                desk.state.focus_window(&one, SERIAL_COUNTER.next_serial());
+                desk.state.urgent.insert(second.pane.get());
+                second.toplevel.destroy();
+                desk.pump();
+                use crate::json::Json;
+                assert!(
+                    crate::models::windows::rows(&desk.state)
+                        .iter()
+                        .all(|row| row.key != second.pane.get().to_string()),
+                    "the premise: the closed window is not listed"
+                );
+                assert_eq!(
+                    [&first, &third].map(|opened| window_row(&desk, opened.pane.get())
+                        .get("focusOrder")
+                        .cloned()),
+                    [Some(Json::Number(0.0)), Some(Json::Number(1.0))],
+                    "[the window in front, the one focused before the closed one]"
+                );
+                desk.state
+                    .focus_window(&three, SERIAL_COUNTER.next_serial());
+                assert_eq!(
+                    (desk.state.focus_history.clone(), desk.state.urgent.len()),
+                    (vec![third.pane.get(), first.pane.get()], 0),
+                    "the next focus forgets the window that closed: (the focus history, how \
+                     many windows are urgent)"
+                );
+            }
+
+            /// **A window reads `maximized` the moment the compositor
+            /// maximises it**, before its client has answered, and still
+            /// once it has: nothing waits for a client (Section 2, rule 3;
+            /// Ruling 18).
+            #[test]
+            fn a_maximised_window_reads_maximized_at_once() {
+                let (mut desk, opened, _) = window_under_a_scene(button_over_the_window);
+                let window = window(&desk, &opened);
+                desk.state.toggle_maximize(&window);
+                desk.pump();
+                use crate::json::Json;
+                let asked = window_row(&desk, opened.pane.get())
+                    .get("maximized")
+                    .cloned();
+                let id = wayland_client::Proxy::id(&opened.xdg);
+                let serial = desk
+                    .client
+                    .surface_configures
+                    .iter()
+                    .rev()
+                    .find(|(to, _)| *to == id)
+                    .map(|&(_, serial)| serial)
+                    .expect("the window was configured");
+                opened.xdg.ack_configure(serial);
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 64, 64);
+                desk.pump();
+                let agreed = window_row(&desk, opened.pane.get())
+                    .get("maximized")
+                    .cloned();
+                assert_eq!(
+                    (asked, agreed),
+                    (Some(Json::Bool(true)), Some(Json::Bool(true))),
+                    "(maximized once the compositor maximised it, once the client committed it)"
                 );
             }
         }

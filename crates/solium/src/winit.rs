@@ -19,7 +19,10 @@ use smithay::{
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::EventLoop,
+        calloop::{
+            EventLoop,
+            timer::{TimeoutAction, Timer},
+        },
         wayland_server::Display,
         winit::{
             dpi::LogicalSize,
@@ -125,6 +128,104 @@ pub(crate) fn run() -> Result<()> {
             state.settle_scenes();
         },
     )?;
+
+    // The desktop folder's inotify watch, so a file that appears or
+    // disappears is seen on an otherwise idle desktop instead of waiting for
+    // some unrelated redraw to reach `publish_models`. `None` only when
+    // `folder::Watcher::new` could not prepare it, already warned there.
+    if let Some(folder_watch) = state.folder_watcher.source() {
+        event_loop
+            .handle()
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    folder_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                |_, _, state: &mut Solium| {
+                    // Drained here, not on the next drawn frame: the source is
+                    // level-triggered, so left readable with nothing drawing it
+                    // would wake the loop on every iteration
+                    // (`one_poll_drains_everything_buffered_so_the_source_is_not_left_readable`).
+                    if state.folder_watcher.poll() {
+                        state.folder_changed = true;
+                        state.redraw = true;
+                    }
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("watching the desktop folder: {e}"))?;
+    }
+
+    // Automatic reload (#223): the same epoll-mirrored inotify shape as the
+    // desktop folder watch above, over the configuration directories
+    // `crate::autoreload::watch_roots` names instead. A change there does
+    // not reload at once -- it notes the time and arms a one-shot,
+    // self-rescheduling timer for the configured quiet period, so a burst of
+    // saves still reloads only once (`tty.rs`'s own copy of this has the
+    // fuller comment). Unlike the hardware backend, there is no
+    // `reapply_input_settings` to run after: the nested backend holds no
+    // real libinput devices (`crate::input::devices::Registry`'s own note).
+    if let Some(reload_watch) = state.autoreload_watcher.source() {
+        let timer_handle = loop_handle.clone();
+        loop_handle
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    reload_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                move |_, _, state: &mut Solium| {
+                    if state.autoreload_watcher.poll() {
+                        let now = state.clock.now();
+                        let quiet = Duration::from_millis(state.autoreload_settings.quiet_ms);
+                        state.autoreload_debounce.note(now, quiet);
+                        if !state.autoreload_timer_armed {
+                            state.autoreload_timer_armed = true;
+                            let armed = timer_handle.insert_source(
+                                Timer::from_duration(quiet),
+                                |_, (), state: &mut Solium| {
+                                    let now = state.clock.now();
+                                    // `decide_timer_outcome` re-checks
+                                    // `automatic`, not only the fd callback
+                                    // above that armed this timer: nothing
+                                    // keeps the token to cancel it by, so a
+                                    // change noted just before `automatic`
+                                    // turns off must still be refused here.
+                                    match crate::autoreload::decide_timer_outcome(
+                                        state.autoreload_settings.automatic,
+                                        &mut state.autoreload_debounce,
+                                        now,
+                                    ) {
+                                        crate::autoreload::TimerOutcome::Reload => {
+                                            state.autoreload_timer_armed = false;
+                                            state.reload();
+                                            TimeoutAction::Drop
+                                        }
+                                        crate::autoreload::TimerOutcome::Wait(remaining) => {
+                                            TimeoutAction::ToDuration(remaining)
+                                        }
+                                        crate::autoreload::TimerOutcome::Drop => {
+                                            state.autoreload_timer_armed = false;
+                                            TimeoutAction::Drop
+                                        }
+                                    }
+                                },
+                            );
+                            if armed.is_err() {
+                                state.autoreload_timer_armed = false;
+                                tracing::warn!(
+                                    "could not arm the automatic-reload timer; \
+                                     `super+shift+r` still works"
+                                );
+                            }
+                        }
+                    }
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("watching the configuration for automatic reload: {e}"))?;
+    }
 
     // The app_id is stable and specific so the host compositor can be told
     // where to put this window and to leave the focus alone -- developing a
@@ -319,6 +420,12 @@ pub(crate) fn run() -> Result<()> {
     if !x11_coming {
         state.session.x11(None);
     }
+    // Before the scripts, same as the session: see `tty.rs`.
+    state.logind.begin(
+        crate::session::Place::Nested,
+        dev::logind_bus(),
+        crate::logind::Settings::default(),
+    );
     state.start_scripts(scripts);
     // After the scripts, so that `idle.dbus_inhibit = false` owns nothing even
     // for a moment (`idle_dbus_inhibit_false_owns_nothing`), and by the
@@ -1034,6 +1141,8 @@ pub(crate) fn run() -> Result<()> {
         // a notification that arrives up to one frame late is a notification
         // about somebody having left the room.
         crate::idle::settle(&mut state);
+        // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
+        crate::logind::settle(&mut state);
         // And a key held for the scene holding the keyboard repeats, on the
         // same once-a-loop check (Ruling 14).
         // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.

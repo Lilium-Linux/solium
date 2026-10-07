@@ -10,15 +10,17 @@
 //! here. Compositor key bindings are intercepted before the focused client sees
 //! them; everything else is forwarded.
 
+pub(crate) mod devices;
 pub(crate) mod grab;
 pub(crate) mod profile;
 pub(crate) mod resize;
 
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputBackend, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchDownEvent,
-        TouchMotionEvent as TouchMotionEventTrait, TouchUpEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device as InputDevice, InputBackend,
+        InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        PointerMotionEvent, TouchDownEvent, TouchMotionEvent as TouchMotionEventTrait,
+        TouchUpEvent,
     },
     input::pointer::CursorImageStatus,
     input::{
@@ -413,9 +415,12 @@ fn press(
 ///
 /// Whether it repeats while held is the keymap's, as every Wayland client
 /// asks it: no modifier does, AltGr and Meta among them, nor a group toggle
-/// such as `grp:alt_shift_toggle`'s, whatever Qt calls it.
+/// such as `grp:alt_shift_toggle`'s, whatever Qt calls it; and a group
+/// toggle never does, even on a key that does, as `grp:alt_space_toggle`'s
+/// is.
 /// `tests::a_held_modifier_does_not_repeat_into_the_scene`,
-/// `tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
+/// `tests::a_held_group_toggle_does_not_repeat_into_the_scene`,
+/// `tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`.
 #[expect(
     unsafe_code,
     reason = "asking smithay's xkb keymap whether a key repeats"
@@ -432,11 +437,16 @@ fn scene_key(
         _ => sym,
     };
     let code = handle.raw_code();
-    let repeats = handle.xkb().lock().is_ok_and(|held| {
-        // SAFETY: the keymap is borrowed for this one call, under the lock,
-        // and nothing of it outlives the `Xkb` it belongs to.
-        unsafe { held.keymap() }.key_repeats(code)
-    });
+    // The ISO lock, latch and group keysyms never repeat, whatever key they
+    // are on: `grp:alt_space_toggle` puts `ISO_Next_Group` on space, which
+    // the keymap says repeats.
+    // `tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`.
+    let repeats = !(0xfe01..=0xfe0f).contains(&sym.raw())
+        && handle.xkb().lock().is_ok_and(|held| {
+            // SAFETY: the keymap is borrowed for this one call, under the
+            // lock, and nothing of it outlives the `Xkb` it belongs to.
+            unsafe { held.keymap() }.key_repeats(code)
+        });
     crate::qml::hosted::SceneKey {
         pressed,
         qt_key: crate::qml::keys::qt_key(named, &xkb::keysym_to_utf8(named)),
@@ -559,6 +569,9 @@ fn pointer_motion<B: InputBackend>(
         return;
     };
     let location = absolute_location(region, &event);
+    // What `Solium.cursor.velocity` is measured from:
+    // `models::pointer::tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`.
+    state.pointer.moved(event.time(), location);
 
     // Frames see the pointer before clients do, so buttons light up on hover.
     // Motion is *also* forwarded below, because the pointer leaving a window
@@ -643,6 +656,8 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
     // the shell all answer the question "where is the pointer now", and while
     // it is locked the answer has not changed.
     if !locked {
+        // As in `pointer_motion`, and only for a pointer that moved.
+        state.pointer.moved(event.time(), location);
         // As in `pointer_motion`: over nothing of a client's, the cursor is the
         // compositor's again. This is the path a real mouse takes, so leaving
         // it out is leaving it broken on the hardware and fixed nested -- and
@@ -1322,6 +1337,27 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         return;
     }
 
+    // Reaching here with no window under the pointer is the answer to "was
+    // this press on anything": a scene, a client, chrome and a window each
+    // claim the press above by returning, and a window with `click_to_focus`
+    // off still falls through here *with one under the pointer* -- which
+    // must change nothing, not clear whatever another window already holds.
+    // What is left is empty desktop or the wallpaper, and #219 is the window
+    // that stayed focused forever once a press landed there, so this clears
+    // the keyboard instead, when the profile says to.
+    // `a_click_on_empty_desktop_clears_keyboard_focus`,
+    // `a_click_on_the_wallpaper_clears_keyboard_focus`,
+    // `a_click_on_a_window_with_click_to_focus_off_leaves_focus_alone`,
+    // `the_bar_above_the_windows_is_left_alone`.
+    if pressed
+        && !pointer.is_grabbed()
+        && !on_a_client
+        && state.profile.clear_focus_on_empty_click
+        && state.window_under(location).is_none()
+    {
+        state.clear_focus(serial);
+    }
+
     forward_button(state, &pointer, &forward);
 
     // Outside the grab now: the pointer's lock is released, so a script may
@@ -1373,7 +1409,22 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
         }
     }
 
-    let direction = if state.profile.natural_scroll {
+    // A device whose natural scroll `config.lua`'s `input` section set is
+    // already flipped by libinput itself -- doing it again here would cancel
+    // the setting out rather than apply it twice as hard. Only a device the
+    // new mechanism never touched (not a touchpad, an unsupported device, or
+    // the nested backend, which has no libinput device to touch at all)
+    // falls back to the old blanket flip. `handled` is exactly what
+    // `devices::tests::registry_reports_a_device_as_handled_only_after_natural_scroll_was_actually_set`
+    // covers; see `input::devices`' module doc for why this branch has to
+    // exist at all. This `if` itself, driven end to end through a real
+    // `pointer_axis` call, is
+    // `state::tests::real_client::reflow_on_close::hosted::pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set`
+    // and the case right after it, where nothing is registered and the old
+    // flip still has to run.
+    let direction = if state.input.handled(&event.device().id()) {
+        1.0
+    } else if state.profile.natural_scroll {
         -1.0
     } else {
         1.0
@@ -2799,6 +2850,46 @@ mod tests {
                     (toggle, repeats),
                     (Some((SHIFT, 0x01ff_ffff, String::new())), 0),
                     "((the toggle's keycode, Qt key and text), its repeats)"
+                );
+            },
+        );
+    }
+
+    /// **A group toggle on a key that repeats does not repeat into the
+    /// scene either** (#132): with `grp:alt_space_toggle` on `us,ru` and
+    /// Russian active, space pressed with alt held is `ISO_Next_Group`, and
+    /// the keymap says space repeats, but holding it repeats nothing.
+    #[test]
+    fn a_held_group_toggle_on_space_does_not_repeat_into_the_scene() {
+        const SPACE: u32 = 65;
+        with_keymap(
+            "held-alt-space-toggle",
+            "us,ru",
+            Some("grp:alt_space_toggle"),
+            1,
+            "",
+            |state| {
+                holding(state, &[], KeyPolicy::ExceptClaimed);
+                for code in [ALT_L, SPACE] {
+                    super::keyboard(
+                        state,
+                        Key {
+                            code,
+                            state: KeyState::Pressed,
+                        },
+                    );
+                }
+                let toggle = state
+                    .scene_keys
+                    .last()
+                    .map(|key| (key.code, key.text.clone()));
+                let late = state.clock.now() + std::time::Duration::from_secs(5);
+                state.repeat_scene_key(late);
+                let repeats = state.scene_keys.iter().filter(|key| key.autorepeat).count();
+                assert_eq!(
+                    (toggle, repeats),
+                    (Some((SPACE, String::new())), 0),
+                    "((the toggle's keycode and text), its repeats)"
                 );
             },
         );

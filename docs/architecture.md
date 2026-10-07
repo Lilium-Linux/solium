@@ -468,9 +468,10 @@ changed properties into the live scene instead of rebuilding it (#161).
 its pointer events. `qml/hosted.rs` is the compositor's half of what a scene
 and the compositor say to each other: properties written in place, the
 monitor the instance is on, the models' rows, pointer events, what the
-scene's items claim at a point, its reserve, its grabs, and its keyboard wants
-and the keys it is told. `qml/keys.rs` puts the compositor's buttons,
-modifiers and keys in Qt's terms.
+scene's items claim at a point, its reserve, its grabs, its keyboard wants
+and the keys it is told, and the actions it sends with `Solium.send`, whose
+data `json.rs` reads. `qml/keys.rs` puts the compositor's buttons, modifiers
+and keys in Qt's terms.
 
 `state/hosted.rs` reads what the scenes report, once a pass (`settle_scenes`),
 and applies it. A reserve goes into the work area (`reserved_on`, which
@@ -479,8 +480,11 @@ re-flows the layout once (#162). A `Grab` is held or dismissed
 (`settle_grabs`, `dismiss_hosted_grab`). The keyboard is held for a scene, its
 keys are delivered and repeated at the keymap's rate, and it is given back
 (`settle_keyboard`, `deliver_scene_key`, `repeat_scene_key`,
-`end_keyboard_hold`) (#163). `docs/shell-boundary.md`, "What a hosted shell is
-given", has the behaviour.
+`end_keyboard_hold`) (#163). The actions the scenes sent go to the `surface`
+listeners, each in a dispatch of its own (`settle_actions`), and `sol.act`'s
+verbs become the commands that do them (`act`); `state/commands.rs` tells each
+attempt's `done` once the dispatch that ran it is applied.
+`docs/shell-boundary.md`, "What a hosted shell is given", has the behaviour.
 
 ### Scripting
 
@@ -512,8 +516,8 @@ learns a window is a Wayland surface:
   reused, so a script holding one across frames cannot address a different
   window with it.
 - **The compositor does not know what modes exist.** A script names itself with
-  `sol.status`. Today that name is only kept and logged: nothing draws it, and a
-  shell has no way to read it yet.
+  `sol.status`. The compositor keeps and logs that name and draws nothing
+  with it; a hosted shell reads it as `Solium.status`.
 
 **No compositor config key per mode.** That is how a mode set becomes closed.
 
@@ -523,9 +527,11 @@ The models scenes read are built from the compositor's own state (`models/`),
 so nothing is mirrored. Each model is diffed by key (`models/diff.rs`) and
 sent to Qt as one batch, every row's values written before any row is
 announced (`qml/rows.cpp`), once a frame, in `render.rs` just before
-`qml::tick`. Two exist today: the monitors, read as `Solium.monitor`
-(`models/monitors.rs`), and the keyboard, read as the `Keyboard` singleton
-(`models/keyboard.rs`).
+`qml::tick`. Four exist today: the monitors, read as `Solium.monitor` and
+`Monitors` (`models/monitors.rs`); the windows, read as `Windows`
+(`models/windows.rs`); the workspaces Lua declares with `sol.workspaces`,
+read as `Workspaces` (`models/workspaces.rs`); and the keyboard, read as the
+`Keyboard` singleton (`models/keyboard.rs`).
 
 `text_input.rs` answers `zwp_text_input_v3` itself, not through Smithay's
 module, which discards every request while no input method runs. It keeps only

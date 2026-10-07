@@ -236,7 +236,8 @@ And from Solium's first weeks:
   (`scenario::tests::every_scenario_with_a_client_passes`,
   `every_scenario_on_the_qt_thread_passes`). The steps it can take, and what
   `expect` sees, are listed at the top of `crates/solium/src/scenario.rs`; the
-  `keyboard-*.lua` scenarios are the examples.
+  `keyboard-*.lua` scenarios are the examples, and the `pane-*.lua` ones read
+  what a shipped pane style draws, focused or not and under the pointer.
 
 ### History worth knowing
 

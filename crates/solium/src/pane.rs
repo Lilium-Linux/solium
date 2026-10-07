@@ -539,6 +539,44 @@ pub(crate) struct Pane {
     /// Whether the layout that last placed this pane said its tile is smaller
     /// than the window's own minimum. See `WindowInfo::cramped`.
     cramped: bool,
+    /// A window shrinking back out of fullscreen or maximised, until its
+    /// shrink lands. `None` for every other pane, and cleared once it has
+    /// landed. Written by `Solium::transition`, read by `Solium::lifted_on`
+    /// and `Solium::stays_over_a_layout`, cleared by `Solium::settle`. See
+    /// [`Shrinking`].
+    shrinking: Option<Shrinking>,
+    /// Whether an X11 client's close has already been waited out once and
+    /// come back on its own, with no dialog and no answer -- just silence
+    /// past `Solium::settle_refused`'s `GRACE`. See `Solium::settle_closing`
+    /// and `Solium::settle_refused` (#221).
+    ///
+    /// Set only there, and only on that one route: a close
+    /// `Solium::refused_with_a_dialog` ends is evidence the client is alive
+    /// and asking the user something, and never sets this, however many
+    /// times it happens. A second `super+q` on a pane this is true of kills
+    /// the client instead of asking it again -- asking a second time a
+    /// client that has already demonstrated it will not answer wastes
+    /// another `GRACE` on a question with a known answer, and holds the
+    /// window invisible for it.
+    x11_refused_once: bool,
+}
+
+/// A window going back from fullscreen or maximised, for as long as it is
+/// drawn shrinking there (#49).
+///
+/// It stays in front of the windows a layout's sweep places while it shrinks
+/// -- a neighbour placed after it would otherwise cover it -- and, leaving
+/// fullscreen, over the bars: the bars come back over it once it has finished
+/// shrinking, not while it is still the size of the monitor.
+/// `a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks`,
+/// `a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Shrinking {
+    /// When the shrink lands.
+    pub(crate) until: Duration,
+    /// Whether it is leaving fullscreen, and so stays over the bars until
+    /// then. A maximised window is under them already.
+    pub(crate) lifted: bool,
 }
 
 impl Pane {
@@ -576,6 +614,8 @@ impl Pane {
             captures: crate::keyed::Captures::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            shrinking: None,
+            x11_refused_once: false,
         }
     }
 
@@ -606,6 +646,8 @@ impl Pane {
             captures: crate::keyed::Captures::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            shrinking: None,
+            x11_refused_once: false,
         }
     }
 
@@ -628,6 +670,25 @@ impl Pane {
     /// What the layout placing this pane says about its tile.
     pub(crate) const fn set_cramped(&mut self, cramped: bool) {
         self.cramped = cramped;
+    }
+
+    /// Whether this pane is shrinking back out of fullscreen or maximised.
+    /// See [`Shrinking`].
+    pub(crate) const fn shrinking(&self) -> Option<Shrinking> {
+        self.shrinking
+    }
+
+    /// Until when this pane stays lifted over the bars, having left
+    /// fullscreen. See [`Shrinking::lifted`].
+    pub(crate) fn lifted_until(&self) -> Option<Duration> {
+        self.shrinking
+            .filter(|shrinking| shrinking.lifted)
+            .map(|shrinking| shrinking.until)
+    }
+
+    /// Mark this pane shrinking, or no longer: see [`Shrinking`].
+    pub(crate) const fn set_shrinking(&mut self, shrinking: Option<Shrinking>) {
+        self.shrinking = shrinking;
     }
 
     /// Whether a layout may place this pane and count it as a window.
@@ -880,6 +941,18 @@ impl Pane {
     /// Stop waiting on an answer that was never going to come in words.
     pub(crate) const fn forget_asked(&mut self) {
         self.asked_at = None;
+    }
+
+    /// Whether this pane's X11 client has already been given a close's full
+    /// `GRACE` and answered it with silence. See the field.
+    pub(crate) const fn x11_refused_once(&self) -> bool {
+        self.x11_refused_once
+    }
+
+    /// Record that it has, so the next close kills it instead of asking
+    /// again.
+    pub(crate) const fn mark_x11_refused_once(&mut self) {
+        self.x11_refused_once = true;
     }
 
     /// Whether this close has been answered and the window is owed its place
@@ -1568,6 +1641,41 @@ mod tests {
             "and must do nothing else -- the geometry a pane was mapped \
              with is what the placement guard exists to protect"
         );
+    }
+
+    /// **#221: a second silent refusal is remembered, so `close.rs` can tell
+    /// it apart from the first.** `Solium::settle_closing` cannot be driven
+    /// here -- it needs a live `X11Surface`, which nothing in this crate's
+    /// tests can build, the same ceiling `an_unmanaged_pane_keeps_the_slot_it_was_mapped_with`
+    /// names -- so this pins the one fact that caller depends on: the flag
+    /// starts false, `mark_x11_refused_once` is the only thing that sets it,
+    /// and nothing else -- not `unmanage`, not a close's own ordinary fields
+    /// -- flips it by accident.
+    #[test]
+    fn a_pane_remembers_its_first_silent_x11_refusal() {
+        let mut pane = Pane::loading(
+            "xwaylandvideobridge",
+            None,
+            slot(),
+            PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        assert!(
+            !pane.x11_refused_once(),
+            "a pane that has never been asked to close has not been refused either"
+        );
+
+        pane.mark_asked(Duration::from_millis(100));
+        pane.forget_asked();
+        assert!(
+            !pane.x11_refused_once(),
+            "an ordinary close's own bookkeeping must not set this by itself -- \
+             only close.rs's settle_refused, on the GRACE route, does"
+        );
+
+        pane.mark_x11_refused_once();
+        assert!(pane.x11_refused_once());
     }
 
     #[test]

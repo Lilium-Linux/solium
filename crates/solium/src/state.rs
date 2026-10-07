@@ -125,7 +125,7 @@ use open::Claimed;
 #[cfg(test)]
 use open::{ClientKind, FirstFocus, first_focus};
 pub(crate) use placement::Standing;
-use placement::outer_of;
+use placement::{Change, outer_of};
 #[cfg(test)]
 use snapshot::to_rect;
 pub(crate) use snapshot::{Limits, limits_of};
@@ -265,6 +265,90 @@ pub(crate) struct Solium {
     /// only what changed since: `models::tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
     pub(crate) published: crate::models::Published,
 
+    /// The windows focused, by script id, the most recent first: what
+    /// `Windows`' `focusOrder` counts (Ruling 18). A window that has gone is
+    /// dropped at the next focus.
+    /// `tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+    /// `tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`.
+    pub(crate) focus_history: Vec<u64>,
+
+    /// Windows that asked for attention where nobody could see them, until
+    /// each is focused: `Windows`' `urgent` (Ruling 18).
+    /// `tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
+    pub(crate) urgent: std::collections::HashSet<u64>,
+
+    /// The workspaces Lua last declared with `sol.workspaces`, less what the
+    /// compositor does not have; until then `None`, with no `Workspaces`
+    /// rows, and every window's `workspace` in `Windows` reads `""`.
+    /// `tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
+    /// `tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`.
+    pub(crate) workspaces: Option<crate::models::workspaces::Declared>,
+
+    /// Installed, visible applications: `Apps`' rows and `sol.apps()`
+    /// (03 §3.2.13). Filled by `crate::apps::scan` when
+    /// [`Self::apps_scan_pending`] asks for one; empty until the first scan.
+    pub(crate) apps: Vec<crate::apps::Entry>,
+    /// True from startup, and again after a reload
+    /// (`state/commands.rs::reload_from`), until `publish_models` has
+    /// rescanned. No worker thread and no inotify in this version (see
+    /// `apps.rs`'s module doc): this flag is the only rescan trigger there is.
+    pub(crate) apps_scan_pending: bool,
+
+    /// The desktop folder's entries: `Folder`'s rows (04-ui.md §4.9). Empty
+    /// until the first scan, and whenever [`Self::folder_dir`] is `None`.
+    pub(crate) folder: Vec<crate::folder::Entry>,
+    /// `Solium.dirs.desktop`, resolved once and again on a reload
+    /// (`state/commands.rs::reload_from`); `None` when nothing names a
+    /// desktop directory or it is `$HOME` itself.
+    pub(crate) folder_dir: Option<std::path::PathBuf>,
+    /// True from startup, and again after a reload, until `publish_models`
+    /// has resolved [`Self::folder_dir`] and scanned it once. Unlike
+    /// [`Self::apps_scan_pending`], this is not the only rescan trigger:
+    /// [`Self::folder_watcher`] asks for one too, live.
+    pub(crate) folder_scan_pending: bool,
+    /// The live inotify watch on `folder_dir`. Drained by the event loop's
+    /// own source the moment it is readable (`tty.rs`, `winit.rs`), which
+    /// sets [`Self::folder_changed`]; never left for a drawn frame to drain,
+    /// because with nothing drawing the level-triggered source would wake the
+    /// loop on every iteration.
+    pub(crate) folder_watcher: crate::folder::Watcher,
+    /// The watch saw a change the next `publish_models` has not rescanned.
+    pub(crate) folder_changed: bool,
+    /// Which launchers on the desktop are trusted to run, durable across a
+    /// restart (`folder.rs`'s module doc says why a plain file rather than
+    /// `gio`'s metadata convention).
+    pub(crate) folder_trust: crate::folder::Trust,
+
+    /// Automatic reload (#223): `config.reload`, as `Command::AutoReload`
+    /// last set it (`state/commands.rs`'s `configure_autoreload`). Read again
+    /// every time a change is seen, so a `quiet_ms` edited and reloaded
+    /// applies to the very next burst rather than only the one after.
+    pub(crate) autoreload_settings: crate::autoreload::Settings,
+    /// The live, recursive inotify watch over the configuration directories
+    /// [`crate::autoreload::watch_roots`] names, armed and disarmed by
+    /// `configure_autoreload`. Drained by the event loop's own source the
+    /// moment it is readable (`tty.rs`, `winit.rs`), which notes the change
+    /// in [`Self::autoreload_debounce`] rather than reloading at once --
+    /// unlike [`Self::folder_watcher`], a configuration change is debounced
+    /// before it does anything.
+    pub(crate) autoreload_watcher: crate::autoreload::Watcher,
+    /// The quiet period a seen change is waiting out before the one reload
+    /// it earns. See `crate::autoreload::Debounce`.
+    pub(crate) autoreload_debounce: crate::autoreload::Debounce,
+    /// Whether the one-shot timer that checks [`Self::autoreload_debounce`]
+    /// is already inserted into the event loop, so the fd callback that
+    /// notes a change does not insert a second one on top of it while the
+    /// first is still counting down. `tty.rs` and `winit.rs` both clear it
+    /// the moment that timer fires.
+    pub(crate) autoreload_timer_armed: bool,
+    /// Configured paths `state/commands.rs`'s
+    /// `warn_about_unwatched_configured_paths` has already warned about
+    /// falling outside every directory automatic reload watches -- so the
+    /// warning is said once per path for the life of the process, the same
+    /// shape `scripted::Surface`'s own `missing_logged` keeps a log line from
+    /// repeating every reload.
+    pub(crate) autoreload_unwatched_warned: std::collections::HashSet<std::path::PathBuf>,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -347,13 +431,19 @@ pub(crate) struct Solium {
     /// Per-form-factor input behaviour.
     pub(crate) profile: Profile,
 
+    /// libinput device settings: `config.lua`'s `input` section, and every
+    /// device met since start. See `input::devices` (#157).
+    pub(crate) input: crate::input::devices::Registry,
+
     /// The Lua runtime. Modes live in here, not in the compositor.
     pub(crate) scripts: Option<Scripts>,
 
     /// The active mode's name, as a script last reported it with `sol.status`
     /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
     /// reads it back). The compositor does not know what modes exist; it keeps
-    /// the name and logs it when it changes, and nothing draws it.
+    /// the name and logs it when it changes, draws nothing with it, and hands
+    /// it to hosted scenes as `Solium.status`
+    /// (`crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`).
     pub(crate) status: String,
 
     /// Whether a mode owns input. While it does, keys and clicks belong to the
@@ -395,6 +485,28 @@ pub(crate) struct Solium {
     /// button is up (Ruling 7).
     /// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
     pub(crate) scene_press: Option<ScenePress>,
+    /// What became of the `sol.act`s the dispatch being applied ran, told to
+    /// Lua once all of it is applied (Ruling 15).
+    /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+    pub(crate) settled_attempts: Vec<crate::script::Settled>,
+    /// The actions `sol.act` was asked for that the compositor does not know,
+    /// each logged the first time only.
+    /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
+    pub(crate) unknown_actions: std::collections::HashSet<String>,
+    /// The monitors and windows `sol.workspaces` named that the compositor
+    /// does not have, and the workspaces it declared twice, each logged the
+    /// first time only.
+    /// `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+    /// `crate::models::workspaces::tests::a_workspace_declared_twice_is_one_row`.
+    pub(crate) unknown_in_workspaces: std::collections::HashSet<String>,
+    /// Whether the settled attempts are being told, so what a `done` asks
+    /// for is told by that loop and not from inside it.
+    /// `tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
+    telling_attempts: bool,
+    /// Whether a grab ended while a scene held a press, so the pointer goes
+    /// back to what is under it at that press's release.
+    /// `tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
+    repoint_at_release: bool,
     /// The scene the pointer was last over, and the one this motion found.
     /// `tests::real_client::reflow_on_close::hosted::the_scene_hears_the_pointer_leave_when_it_moves_off_its_items`.
     pub(crate) scene_hovered: Option<(crate::scripted::SurfaceId, Output)>,
@@ -447,9 +559,16 @@ pub(crate) struct Solium {
     pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
     /// The X display number XWayland took, for `DISPLAY` in children.
     pub(crate) x11_display: Option<u32>,
+    /// `config.x11`, handed over by `sol.x11`: the `WM_CLASS` names
+    /// `map_window_request` refuses a tile, decoration or bar entry to
+    /// outright (#221). See `xwayland::Settings`.
+    pub(crate) x11: crate::xwayland::Settings,
     /// What systemd and D-Bus activation have been told about this session,
     /// and the stop and unset it owes them on exit. See `session.rs`.
     pub(crate) session: crate::session::Session,
+    /// logind's `Lock` and sleep signals: the locker to run, and the delay
+    /// inhibitor held for sleep until the session locks. See `logind.rs`.
+    pub(crate) logind: crate::logind::Logind,
     pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
     /// Raw pointer motion, for anything that reads movement rather than
     /// position.
@@ -663,6 +782,13 @@ pub(crate) struct Solium {
     /// run another. See `Solium::apply`.
     retelling_cramped: bool,
 
+    /// Whether a `fullscreen` or `maximize` event is being told now, so that
+    /// a change one of its listeners makes -- a `sol.toggle_fullscreen` in a
+    /// `fullscreen` listener -- is made at once and not told again, which
+    /// would be told again for ever. See `Solium::transition`.
+    /// `a_listener_that_toggles_the_change_back_is_not_told_it_again`.
+    telling_change: bool,
+
     /// Whether a `sol.monitors{}` was applied since the surfaces were last
     /// placed, so they are placed once the dispatch that applied it is done.
     /// `tests::real_client::a_runtime_primary_change_drops_the_old_primarys_scene`.
@@ -718,6 +844,18 @@ pub(crate) struct Solium {
     /// — because `Self::release_resize` is the only thing that ever ends one and
     /// the pointer grab is the only thing that calls it.
     resize_bridge: Option<Bridged>,
+
+    /// The windows a fullscreen or maximise change has told a new size, each
+    /// held at the rectangle the change gave it until its client answers
+    /// (#49): the hold [`Self::resize_hold`] keeps for a drag, made by the
+    /// change rather than by a pointer. Until then the slot is the window's
+    /// rectangle, and the client's last picture is stretched into it, so a
+    /// client slower than the glide is not shown at its old size where the
+    /// glide landed. Ended by the client's answer, or `resizing::PATIENCE`
+    /// after the glide lands, in `Self::settle`. One per pane.
+    /// `a_slow_client_is_drawn_stretched_until_it_answers`,
+    /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+    answering: Vec<crate::resizing::Held>,
 
     /// The edge drag a layout is being asked about right now.
     ///
@@ -1033,6 +1171,11 @@ impl Solium {
             hovered_frame: None,
             pointer_buttons: 0,
             scene_press: None,
+            settled_attempts: Vec::new(),
+            unknown_actions: std::collections::HashSet::new(),
+            unknown_in_workspaces: std::collections::HashSet::new(),
+            telling_attempts: false,
+            repoint_at_release: false,
             scene_hovered: None,
             scene_hover_seen: None,
             settling_scenes: false,
@@ -1048,7 +1191,9 @@ impl Solium {
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
+            x11: crate::xwayland::Settings::default(),
             session: crate::session::Session::off(),
+            logind: crate::logind::Logind::off(),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
                 &display_handle,
             ),
@@ -1080,6 +1225,22 @@ impl Solium {
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),
             published: crate::models::Published::default(),
+            focus_history: Vec::new(),
+            urgent: std::collections::HashSet::new(),
+            workspaces: None,
+            apps: Vec::new(),
+            apps_scan_pending: true,
+            folder: Vec::new(),
+            folder_dir: None,
+            folder_scan_pending: true,
+            folder_watcher: crate::folder::Watcher::new(),
+            folder_changed: false,
+            folder_trust: crate::folder::Trust::load(),
+            autoreload_settings: crate::autoreload::Settings::default(),
+            autoreload_watcher: crate::autoreload::Watcher::new(),
+            autoreload_debounce: crate::autoreload::Debounce::default(),
+            autoreload_timer_armed: false,
+            autoreload_unwatched_warned: std::collections::HashSet::new(),
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),
@@ -1099,6 +1260,7 @@ impl Solium {
             seat,
             clock: Clock::new(),
             profile: Profile::from_env(),
+            input: crate::input::devices::Registry::default(),
             scripts: None,
             status: String::new(),
             script_grab: false,
@@ -1123,12 +1285,14 @@ impl Solium {
             pending_drop: None,
             pending_resize: None,
             retelling_cramped: false,
+            telling_change: false,
             monitors_rearranged: false,
             dispatching: 0,
             #[cfg(test)]
             instances_synced: 0,
             client_sizes: crate::script::ClientSizes::default(),
             resize_hold: None,
+            answering: Vec::new(),
             resize_bridge: None,
             resize_gesture: None,
             resize_ended: None,
@@ -1761,6 +1925,29 @@ impl Solium {
         for pane in self.panes.iter() {
             animating |= present::settle(pane, self.pane_outer(pane), now);
         }
+        // A window shrinking back out of fullscreen or maximised that has
+        // landed is an ordinary window again, with nothing of its shrink kept.
+        // `a_window_glides_into_fullscreen_and_out_again`.
+        let shrunk: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| {
+                pane.shrinking()
+                    .is_some_and(|shrinking| now >= shrinking.until)
+            })
+            .map(Pane::id)
+            .collect();
+        for id in shrunk {
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_shrinking(None);
+            }
+        }
+        // And one a fullscreen or maximise change is holding at its new
+        // rectangle is let go once its client answers, or has had long enough
+        // to. Until then the frames keep coming, or a client that never
+        // answers would be held until something else drew one.
+        // `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
+        animating |= self.settle_answering(now);
         // And the selections, which animate on the same clock and damage
         // nothing either. Not folded into the loop above: a group is not a
         // pane, and one that has landed has to be released exactly once.
@@ -2076,6 +2263,13 @@ impl Solium {
                 }
                 if matches!(event.kind, PointerKind::Release(_)) && event.buttons == 0 {
                     self.scene_press = None;
+                    // A grab let go of during the press gave the pointer to
+                    // no client; with no grab held now, the window under it
+                    // has it back.
+                    // `tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
+                    if std::mem::take(&mut self.repoint_at_release) && self.hosted_grab.is_none() {
+                        self.repoint_clients();
+                    }
                 }
             }
             self.redraw = true;
@@ -2265,30 +2459,6 @@ impl Solium {
             })
             .find(|(surface, area)| surface.hit(output, *area, location).claims(asking))
             .map(|(surface, area)| (surface.id(), area))
-    }
-
-    /// Act on whatever a scripted surface asked for.
-    ///
-    /// The scene sets `action`, this takes it and hands it to whoever is
-    /// listening, by surface name. A panel's buttons therefore live entirely
-    /// in the script that declared it -- which is what turned the Developer
-    /// Tweaks panel from a compositor feature into `lua/tweaks.lua`.
-    pub(crate) fn settle_surfaces(&mut self) {
-        let mut asked: Vec<(String, String)> = Vec::new();
-        for surface in self.surfaces.iter_mut() {
-            if let Some(action) = surface.taken_action() {
-                asked.push((surface.name().to_owned(), action));
-            }
-        }
-        for (name, action) in asked {
-            let snapshot = self.snapshot();
-            let Some(mut scripts) = self.scripts.take() else {
-                return;
-            };
-            let outcome = scripts.surface_action(&name, &action, snapshot);
-            self.scripts = Some(scripts);
-            self.apply(outcome);
-        }
     }
 
     /// Give every surface an instance on each monitor it is on, and no other:

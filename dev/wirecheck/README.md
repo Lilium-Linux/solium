@@ -52,7 +52,8 @@ judged at the very end.
 | 8 | the resize | a rebind keeps the object tree and its running animation, the scene reads as animating, the new size draws right, and freeing the scene takes none of the compositor's GL objects | `the QML tree was rebuilt by a resize`, or `freeing the resized scene destroyed` … |
 | 9 | the compositor's own scenes | `cursor.qml`, `panes/top/Frame.qml` and `delegate.qml` build and draw on a GPU host; the first two read as not animating, and `delegate.qml`, whose one animation is in a `Repeater` delegate, reads as animating | `a GPU host could not build the` …, or `` `solium_qml_scene_animating` says `` … |
 | 10 | the pointer's size | `cursor.qml` at 16, 24, 48 and 96 draws from the corner and fills the same fraction at each | `the pointer fills` … |
-| 11 | the rounded-corner shader | it compiles in all three variants, registered with the uniforms its source declares through the compositor's own `crates/solium/src/pass/uniforms.rs`, included by path (#95), and draws the middle intact, all four corners cut, four radii in the right quadrants and a zero radius square | `the rounded-corner shader did not compile`, or a message naming the variant or corner |
+| 11 | a pointer scene's glow (`glow.qml`) | a scene sized by its own root, as `cursor.scene` is (#213), keeps its root's 48x48 on the 24-pixel buffer it is built on and is rebound onto 48, and its `MultiEffect` draws a glow beside its square | `a scene sized by its root read` …, or `MultiEffect drew no glow beside the square on the GPU path` |
+| 12 | the rounded-corner shader | it compiles in all three variants, registered with the uniforms its source declares through the compositor's own `crates/solium/src/pass/uniforms.rs`, included by path (#95), and draws the middle intact, all four corners cut, four radii in the right quadrants and a zero radius square | `the rounded-corner shader did not compile`, or a message naming the variant or corner |
 | 11b | GPU timestamps (FX0) | `GL_EXT_disjoint_timer_query` is found, both entry points load, and 200 fills of 1024² in one pass resolve within 20 polls of the timer's `idle`, 10 ms apart, to 100 µs ≤ ns < 1 s: the two timestamps bracket the fills, which a region closed before them (about 1 µs) does not. Second half: ten passes stamped as the TTY stamps an output (`open` before a frame, `close` after its `finish`, then the frame's fence waited on as the kernel waits on it before the flip, which flushes nothing) each resolve at the first `idle` 10 ms later, however slow the GPU | `GL_EXT_disjoint_timer_query is not usable here…`, `pass 1's GPU time did not resolve…`, or `passes […] were not resolved at the first idle…` |
 | 11c | a capture sampled with no CPU wait, through smithay (FX0) | 100 rounds of 500 fills into 1024², the fence dropped, sampled at once with `render_texture_from_to`: every pixel is the round's colour | `round N: a capture sampled with no CPU wait read pixels it had not finished` |
 | 11d | the same through raw GL, as the warp samples (FX0) | the same, sampled with the raw texture name in a program of its own, no `glWaitSync` | `round N: a capture sampled through raw GL …` |
@@ -60,6 +61,7 @@ judged at the very end.
 | 11f | a pooled target (FX0) | `pool.rs`'s target is drawn through its own framebuffer object in a frame opened on a 1x1 carrier, and the carrier keeps its blue; painted again with nothing, the target reads back transparent | `the pooled target is not what was drawn into it`, `a pooled target painted with nothing is not transparent`, `the carrier is no longer blue…` |
 | 11g | partial damage on a warp (FX0) | a translucent warp redrawn under one damage rectangle leaves the pixels outside it as they were | `… blended twice` |
 | 11h | the clipped-surface programs (FX0) | both compile in every variant, registered as `pass::Programs::clip` registers them, through the same `pass/uniforms.rs`; a root surface's corners are cut, a subsurface is cut only where its corner is the client's, a single-pixel buffer is cut | a message naming the surface and the pixel |
+| 11i | a captured pane's pixels match its flat draw (FX0) | two opaque solid elements listed `[client, behind]`, `PANE_ORDER`'s own topmost-first shape, `behind` over the whole 64×64 target and `client` over its top-left quarter, painted together through the real `pool::paint`: inside the quarter the composite is byte for byte the client's own flat `paint`, outside it `behind`'s, so the list is painted back to front (#227) | `the composite's pixel inside the client's quarter is …`: the client lost to `behind` (#227), or `the two flat draws read back the same colour` |
 | 12a | a .frag's error at its own line (FX2) | a typo on line 3 of the user's string; the driver's log through `glsl::compile_log`, with the driver's `#line` rule read from its log of `glsl::line_probe` (`glsl::line_shift`, as the compositor's `GlCompiler` reads it), says string 1, line 3. Run on NVIDIA, which calls the line after `#line 0 1` line 0, GLSL ES 3.00's rule where GLSL ES 1.00 says 1 (`1(2) : error C1503: undefined variable …`, shift 1); iris is unverified until the laptop runs `WIRECHECK_ONLY=fx2` | `the log did not map to string 1, line 3` |
 | 12b | the prelude compiles; introspection agrees (FX2) | `glGetActiveUniform` reports float, int, vec4 and sampler2D as the prelude declared | `<name> is …, not GL type …` |
 | 12c | rgba16f renders, or is reported missing (FX2) | `pool::formats` probes a 1×1 half-float target, the probe the compositor's first `prepare` and `--check` run; where it says yes, 0.5 cleared into one through the pool's framebuffer reads back as 0.5 in every channel. Where it says no, the case prints so and passes: effects start at a fallback | `an rgba16f target cleared to 0.5 read back …`, `the probe said yes and no target came` |
@@ -74,11 +76,11 @@ judged at the very end.
 | 12o | a chain feeds each link's result to the next, on the GPU (FX2) | `stage::chain([identity, tint])` over 12d's picture, run as one plan, is byte for byte `tint` run alone, and is not the picture | `the chain drew … where tint alone drew …`, `the chain returned its input: the tint did not run` |
 | 12p | nothing is allocated while a result is drawn (FX2) | a `kawase` run's `Held::output`, drawn by smithay as a `TextureRenderElement` through `pool::paint` into a target taken before, makes no pooled target (`Pool::made`) and draws the result within 1 | `drawing a result made N targets`, `the result drawn differs from the result by N` |
 | 12h | a result cut by its mask (FX2) | `MASKED_TEXTURE` over a padded solid: inside exact, outside and past a corner's arc transparent. The compositor's own `effect/element.rs`, included by path, places a 148×98 green result with the mask `(24, 24, 100, 50)` at radius 10, drawn through `pool::paint`: (74, 49) and (30, 49) green, (10, 10) and (25, 25) transparent; a 74×49 result drawn over the same box is cut at the same pixels, the mask being the placement's; with no mask it is drawn whole | `<point> is …` |
-| 12 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
-| 13 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
-| 14 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
+| 13 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
+| 14 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
+| 15 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |
 
-**C-1** is the name the harness prints for case 14 (`=== C-1: free a scene
+**C-1** is the name the harness prints for case 15 (`=== C-1: free a scene
 with the compositor's context current ===`), and it is the name the controls
 below use.
 
@@ -195,6 +197,18 @@ At 24 alone it passes, which is exactly how this shipped. The bounding box also 
 at every size: `cursor.rs` places the buffer by subtracting `HOTSPOT`, which is
 (0, 0), so the arrow's tip has to be in the corner or the pointer points a few
 pixels away from what it is over.
+
+**And that a pointer scene's glow is drawn.** `cursor.scene` (#213) is a scene
+sized by its own root, and `MultiEffect` is a shader, so it draws on this path
+and nothing on the software one; `cargo test` has no GPU and a nested run has
+no GBM device, so this is the only place it can be seen. `glow.qml` is a 48x48
+root with a white 16-pixel square in the middle and a `MultiEffect` shadow of
+it. It is built on a 24-pixel buffer, as `Cursor::configured` builds a scene at
+`cursor.size`, where its root has to still read 48x48, and then rebound onto a
+48-pixel one, as the first `Gpu::sample` rebinds it. What is read back is the
+alpha inside the square, 255, and four pixels beside it, which only the glow
+can reach: 27 on this machine. Measured with `size_root` in `host.cpp` writing
+every root, as it did before, the root reads 24x24 and the case fails.
 
 **And whether the host can say that a scene is animating — both ways.**
 `solium_qml_scene_animating`, which is what `render::Drawn` gates the next frame

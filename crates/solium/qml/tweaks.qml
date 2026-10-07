@@ -1,7 +1,8 @@
 // Developer Tweaks.
 //
 // A list of whatever `lua/tweaks.lua` declares, and a press sends its id back
-// to the script that declared it. Nothing here knows what a decoration or a
+// to the script that declared it, with `Solium.send`
+// (qml::hosted::tests::a_press_on_a_tweak_sends_its_id). Nothing here knows what a decoration or a
 // genie is: the panel is a menu of strings, and the meaning lives in Lua.
 //
 // Deliberately plain, and deliberately not in the shell: this is a tool for
@@ -17,16 +18,14 @@ Item {
     // change (scripted::tests::a_table_a_list_and_a_dotted_key_reach_the_live_scene).
     required property var entries
 
-    // Read and cleared by the compositor, exactly like a window frame's.
-    property string action: ""
-
     // The panel's own, empty parts too: a press between its entries does not
     // fall through to the window under it
     // (qml::hosted::tests::the_tweaks_panel_keeps_a_press_on_its_empty_part).
+    // Opaque, so what is behind the panel never tints its grey
+    // (qml::hosted::tests::the_tweaks_panel_is_opaque_and_grey).
     Rectangle {
         anchors.fill: parent
         color: Theme.surface
-        opacity: 0.94
         Solium.input: true
 
         Rectangle {
@@ -94,7 +93,7 @@ Item {
                             verticalCenter: parent.verticalCenter
                         }
                         text: modelData.label
-                        color: Theme.text
+                        color: press.pressed ? Theme.accentInk : Theme.text
                         elide: Text.ElideRight
                         width: parent.width - Theme.margin * 2
                         font { pixelSize: Theme.fontSize; family: Theme.fontFamily }
@@ -104,7 +103,7 @@ Item {
                         id: press
                         anchors.fill: parent
                         hoverEnabled: true
-                        onClicked: panel.action = parent.parent.modelData.id
+                        onClicked: Solium.send(parent.parent.modelData.id)
                     }
                 }
             }

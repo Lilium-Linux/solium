@@ -8,7 +8,9 @@
 // that reasoning does not apply to a test binary.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
+mod apps;
 mod assets;
+mod autoreload;
 mod capture;
 mod check;
 mod cli;
@@ -21,8 +23,10 @@ mod decoration;
 mod dev;
 mod effect;
 mod focus;
+mod folder;
 mod gputime;
 mod group;
+mod icon;
 mod idle;
 mod input;
 mod json;
@@ -32,6 +36,7 @@ mod keymap;
 mod launch;
 mod layer;
 mod lock;
+mod logind;
 mod mat4;
 mod models;
 mod monitor;

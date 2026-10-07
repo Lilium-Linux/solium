@@ -55,6 +55,18 @@
 ---@field shown boolean Whether its application has shown its first frame yet.
 ---@field fullscreen boolean Whether the compositor last told it to be fullscreen.
 ---@field style string The pane style it is framed in, or `"none"` when it is drawn bare: fullscreen, drawing its own decorations, or under the style `"none"`.
+---@field x11_type? string Its X11 `_NET_WM_WINDOW_TYPE`, lower case (`"normal"`, `"dialog"`, `"utility"`, `"toolbar"`, `"menu"`, `"dropdown-menu"`, `"popup-menu"`, `"tooltip"`, `"notification"`, `"splash"`); `"normal"` for an X11 window with no type of its own, same as EWMH's own default, and absent for a Wayland window, which has no such property to ask.
+---@field accepts_input boolean Whether the window may ever be given the keyboard: an X11 client's own `WM_HINTS.input`, or `true` for a Wayland window, which has nothing equivalent to decline with. Not what decides whether a window reaches this list at all (#221) -- an ICCCM 'Globally Active' application can set this `false` and still be an ordinary, shown window -- so a row here can read `false`; it exists for a window rule to act on.
+---@field class? string Its X11 `WM_CLASS` class, or absent for a Wayland window, which has no such property. `config.x11.hidden` matches against this and `instance` to decide whether the window was shown at all (#221).
+---@field instance? string Its X11 `WM_CLASS` instance, or absent for a Wayland window. See `class`.
+
+---One row of `sol.apps()`: an installed, visible application.
+---@class sol.App
+---@field id string The desktop file id, such as `"org.mozilla.firefox"`.
+---@field name string Its localised name.
+---@field generic_name string Its localised generic name (`"Web Browser"`); empty when it named none.
+---@field icon string A theme icon name, or an absolute path when `Icon=` gave one.
+---@field categories string[] Its `Categories=`, split on `;`.
 
 ---One row of `sol.monitors()`. `x`, `y`, `w` and `h` are the work area: the
 ---monitor less what layer-shell bars and hosted surfaces reserve.
@@ -141,8 +153,8 @@
 ---@field scene string A file name looked up in `~/.config/solium/qml` and then in the shipped QML, or a path (absolute, or starting with `~/`).
 ---@field layer? sol.Layer Which layer it is drawn in. `"background"` is the default.
 ---@field on? "primary"|"every-monitor"|string|sol.Rect `"every-monitor"` (the default) draws one instance per monitor, filling it; `"primary"` one on the primary monitor; a monitor's name one there; a rect one at that rect.
----@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those. A function, userdata or non-finite number is left out.
----@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing, and one it held when it is declared so is dismissed; nor does such a scene hold the keyboard. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sets its `action` property, and `sol.on("surface", ...)` hears it.
+---@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those, nested at most 64 deep and 65 536 values in all, a table counted once for each place it is in. A function, userdata or non-finite number is left out; a table nested deeper or holding more, or one that contains itself, is an error.
+---@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing, and one it held when it is declared so is dismissed; nor does such a scene hold the keyboard. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sends actions with `Solium.send(action, data)`, and `sol.on("surface", ...)` hears them.
 ---@field reserve? { top?: integer, right?: integer, bottom?: integer, left?: integer } Logical pixels taken out of the work area on those edges of every monitor the surface is on, whatever its size or placement; never negative. A scene's own `Solium.surface.reserve.<edge>` wins for an edge it sets. A change re-flows the windows once.
 ---@field outside_click? "swallow"|"pass"|table<string, "swallow"|"pass"> What a press outside an open `Grab` of the scene does once it has dismissed it: swallowed with its release (the default), or passed on to what is under it. A table names grabs, with `default` for the rest. Any other value fails the load.
 ---@field keyboard? { bindings?: "except_claimed"|"all"|"none" } While an item of the scene holds the keyboard (`Solium.keyboard.wants`): `"except_claimed"` (the default) keeps every binding but the keys the holding item claims (`Solium.keyboard.claims`), `"all"` keeps every binding, and `"none"` gives the scene every key but the Ctrl+Alt escapes. Any other value fails the load.
@@ -235,11 +247,77 @@
 ---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
 ---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
 
+---Automatic reload (#223). A key left out, or one that is not the right
+---kind, keeps the default.
+---@class sol.AutoReloadOptions
+---@field automatic? boolean Reload on its own when a file this configuration loaded changes. Default true; false watches nothing at all.
+---@field quiet_ms? number How long a burst of writes waits to go quiet before the one reload it earns, in milliseconds. Default 300.
+
+---One device's libinput settings: a device-type default in `sol.input`, or
+---one `devices` entry. A key left out keeps libinput's own default (or
+---whatever a previous reload already set) rather than turning it off.
+---@class sol.InputDeviceOptions
+---@field tap? boolean Tapping the pad clicks.
+---@field tap_button_map? "left_right_middle"|"left_middle_right" 1/2/3-finger tap maps to which button.
+---@field drag? boolean A tap-then-move drags, without holding the pad down.
+---@field drag_lock? boolean A drag survives a brief lift of the finger.
+---@field natural_scroll? boolean Scroll direction follows the content, not the surface.
+---@field scroll_method? "two_finger"|"edge"|"button"|"no_scroll"
+---@field accel_profile? "flat"|"adaptive"
+---@field accel_speed? number -1 to 1; 0 is the device's own default speed.
+---@field disable_while_typing? boolean Ignore the pad while the keyboard beside it is in use.
+---@field left_handed? boolean Swap the left and right buttons.
+---@field middle_emulation? boolean Pressing left and right together is a middle click.
+
+---One `sol.input{ devices = { ... } }` entry: a match, plus any of
+---`sol.InputDeviceOptions`. At least one of `name`, `vendor` or `product` is
+---required; an entry naming none of them matches nothing.
+---@class sol.InputDeviceMatch: sol.InputDeviceOptions
+---@field name? string A case-insensitive substring of the device's name.
+---@field vendor? integer
+---@field product? integer
+
+---`config.lua`'s `input` section: a default per device type, and overrides
+---matched by name or by vendor/product, applied to every device already
+---connected and to each one added later -- and reapplied, from whatever this
+---now says, on every reload.
+---@class sol.InputOptions
+---@field touchpad? sol.InputDeviceOptions
+---@field mouse? sol.InputDeviceOptions
+---@field keyboard? sol.InputDeviceOptions
+---@field touchscreen? sol.InputDeviceOptions
+---@field tablet_tool? sol.InputDeviceOptions
+---@field tablet_pad? sol.InputDeviceOptions
+---@field switch? sol.InputDeviceOptions
+---@field devices? sol.InputDeviceMatch[]
+
+---logind's `Lock` and sleep requests (#153). A key left out keeps the
+---default.
+---@class sol.LockOptions
+---@field command? string The locker to run on `Lock`, and before sleep: `"swaylock -f"`, say. Split on whitespace, with no quoting. Unset (the default) runs nothing.
+---@field before_sleep? boolean Hold sleep until the locker above has confirmed the lock, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
+
+---X11 windows refused a tile, decoration or bar entry outright (#221). A key
+---left out, or the whole table left out, keeps the default rather than
+---emptying it.
+---@class sol.X11Options
+---@field hidden? string[] WM_CLASS names to hide, matched case-insensitively against either field a client sets (`class` or `instance` on `sol.Window`). Replaces the whole default list rather than adding to it; default `{ "xwaylandvideobridge" }`.
+
+---The input profile's focus policy (#219). A key left out keeps whatever it
+---already answered -- there is no fixed default here the way `sol.idle` has
+---one, since that would have to know the machine's own form factor
+---(#159) and a mode calling this does not.
+---@class sol.FocusModeOptions
+---@field click? boolean Whether a press focuses the window it lands on.
+---@field follow? boolean Whether moving the pointer over a window focuses it.
+---@field clear_on_empty_click? boolean Whether a press on empty desktop or the wallpaper clears keyboard focus. A press on a client's own shell surface (a bar, say) is not covered yet, even one that declines the keyboard: see #219.
+
 ---The pointer's theme. A key left out, or no table, means the configuration
 ---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
 ---@class sol.CursorOptions
 ---@field theme? string The name of an XCursor theme.
 ---@field size? integer Logical pixels, from 8 to 256.
+---@field scene? string A QML scene to draw the pointer with, for every shape and ahead of the theme: a path, `~` expanded, or a name looked for in `~/.config/solium/qml` and then the shipped QML. `SOLIUM_QML_CURSOR` overrides it for one run.
 
 ---How QML is rendered. Read once, before Qt starts.
 ---@class sol.QmlOptions
@@ -287,11 +365,13 @@
 ---| "closing" # A close was asked for and the window is fading: `(id)`.
 ---| "refused" # Its application declined, and the window is back: `(id)`.
 ---| "close" # The window is gone: `(id)`.
+---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture stretched into it, for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
+---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
 ---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
 ---| "click" # A press while a script holds input: `(x, y)`.
----| "surface" # An interactive surface set its `action`: `(name, action)`.
+---| "surface" # A hosted scene sent an action: `(surface, action, data)`, `data` a table, a value or `nil`. Every action is heard, in the order sent, in a dispatch after the one that sent it; a scene that sets an `action` string property is heard the same way, with `data` `nil`.
 ---| "direction" # `sol.focus_direction` or `sol.move_direction` was called: `(verb, dir)`, `verb` being `"focus"` or `"move"`. The layout in charge answers.
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors changed, or were announced at startup or after a reload: `()`.
@@ -327,6 +407,17 @@ function sol.keep(name, defaults) end
 ---longer exists do nothing.
 ---@return sol.Window[]
 function sol.windows() end
+
+---Every installed, visible application (NoDisplay and Hidden entries are
+---left out at the source), by name.
+---
+---A snapshot taken for this handler, not a live view, and -- unlike
+---`sol.windows()` and `sol.monitors()` -- empty at the top level of a
+---configuration file: it reads before the first real one arrives, and
+---before the index has even scanned once on a first start. A scene reads
+---`Solium.Apps` instead, which is live from the moment it is drawn.
+---@return sol.App[]
+function sol.apps() end
 
 ---Draw a QML scene: a wallpaper, a bar, a dock, a heads-up display.
 ---
@@ -408,6 +499,38 @@ function sol.effects(options) end
 ---@return sol.Monitor[]|nil
 function sol.monitors(rows) end
 
+---What one workspace is, in a `sol.workspaces` declaration.
+---@class sol.DeclaredWorkspace
+---@field id string Unique within its group.
+---@field name? string What a shell shows; the id when left out.
+---@field col? integer Its column in the arrangement, from 1.
+---@field row? integer Its row in the arrangement, from 1.
+---@field hidden? boolean A workspace a shell should not list, such as a scratchpad.
+
+---A group of workspaces that switch together: one per monitor, or one for
+---every monitor.
+---@class sol.WorkspaceGroup
+---@field id string
+---@field monitors string[] The monitors it is on, by connector name.
+---@field showing string[] The ids it shows now.
+---@field workspaces sol.DeclaredWorkspace[]
+
+---@class sol.WorkspaceDeclaration
+---@field arrangement? { kind?: string, columns?: integer, rows?: integer } The shape the workspaces make, for a shell to draw.
+---@field groups sol.WorkspaceGroup[]
+---@field windows? table<integer, string[]> Which workspaces each window is on, by window id.
+
+---Say what the workspaces are. The compositor does not know what a workspace
+---is: `workspaces.lua` is the whole feature, and this is how a hosted shell's
+---`Workspaces` model learns it. Declare again whenever it changes; the same
+---declaration twice costs nothing. Monitors and windows the compositor does
+---not have are left out, with any group left with no monitor, and so is a
+---workspace whose `<group>/<id>` an earlier one in a group that stays already
+---has; each is logged once.
+---@param declared sol.WorkspaceDeclaration
+---@return nil
+function sol.workspaces(declared) end
+
 ---Turn a monitor's display off or on, or every monitor's with `"all"`.
 ---
 ---The monitor keeps its place, its work area and its windows. Any key, click,
@@ -423,6 +546,38 @@ function sol.monitor_power(which, mode) end
 ---@param options? sol.IdleOptions
 ---@return nil
 function sol.idle(options) end
+
+---Automatic reload (#223): `config.reload`, which the shipped `init.lua`
+---hands over. Applied at once -- toggling it from a binding of your own
+---works mid-session, not only from `config.lua`.
+---@param options? sol.AutoReloadOptions
+---@return nil
+function sol.auto_reload(options) end
+
+---Set libinput device settings: `config.input`, which the shipped `init.lua`
+---hands over. Applied to every device already connected and to each one
+---added later, and reapplied on reload.
+---@param options? sol.InputOptions
+---@return nil
+function sol.input(options) end
+
+---logind's `Lock` and sleep requests: `config.lock`, which the shipped
+---`init.lua` hands over.
+---@param options? sol.LockOptions
+---@return nil
+function sol.lock(options) end
+
+---X11 windows refused a tile, decoration or bar entry outright: `config.x11`,
+---which the shipped `init.lua` hands over. See #221.
+---@param options? sol.X11Options
+---@return nil
+function sol.x11(options) end
+
+---Override the focus input policy: `config.focus`, which `lua/modes.lua`
+---hands over on every mode change as well as at load. See #219.
+---@param options? sol.FocusModeOptions
+---@return nil
+function sol.focus_mode(options) end
 
 ---The work area of the monitor a window is on, or of the active monitor when
 ---no window is named or the id is unknown.
@@ -548,8 +703,9 @@ function sol.resize(options) end
 ---@return nil
 function sol.fullscreen(options) end
 
----Set the pointer's XCursor theme and size. Applied at once, so a reload is
----how a theme is tried. Not `sol.cursor`, which says where the pointer is.
+---Set the pointer's XCursor theme, size and scene. Applied at once, so a reload
+---is how a theme or a scene is tried, and a scene whose files changed is built
+---again. Not `sol.cursor`, which says where the pointer is.
 ---@param options? sol.CursorOptions
 ---@return nil
 function sol.cursor_theme(options) end
@@ -607,7 +763,9 @@ function sol.present_group(name, shift, motion) end
 function sol.present_group_clear(name, motion) end
 
 ---Set the timing for every animated command queued after this one in the same
----handler. Left unset, it is 220 ms and `"outCubic"`.
+---handler. Left unset, it is 220 ms and `"outCubic"`. In a `"fullscreen"` or
+---`"maximize"` listener it is also how the window's own move is timed; there,
+---left unset, the move is instant.
 ---@param options sol.Motion
 ---@return nil
 function sol.animate(options) end
@@ -632,7 +790,9 @@ function sol.toggle_maximize(id) end
 
 ---Move the keyboard to the window beside the focused one. Every `direction`
 ---listener is told `("focus", dir)`, and the layout in charge answers
----(`lua/direction.lua`). Anything but the four directions is an error.
+---(`lua/direction.lua`). Anything but the four directions is an error. The
+---listeners' time counts against the handler that called this, so one stopped
+---at the deadline stops that handler too.
 ---@param dir "left"|"right"|"up"|"down"
 ---@return nil
 function sol.focus_direction(dir) end
@@ -641,6 +801,8 @@ function sol.focus_direction(dir) end
 ---`("move", dir)`. Tiling trades it with its neighbour, scrolling moves it
 ---within or between columns, and a fullscreen or maximised window moved to
 ---another monitor stays so there. Anything but the four directions is an error.
+---The listeners' time counts against the handler that called this, so one
+---stopped at the deadline stops that handler too.
 ---@param dir "left"|"right"|"up"|"down"
 ---@return nil
 function sol.move_direction(dir) end
@@ -665,6 +827,34 @@ function sol.unplace(id) end
 ---@param id integer
 ---@return nil
 function sol.close(id) end
+
+---Perform an action of the vocabulary: the same names a scene sends with
+---`Solium.send`, `windows.focus`, `windows.close`, `windows.fullscreen` and
+---`windows.maximize`, each with `{ id = <window id> }`; the last two toggle.
+---`data` is handed over as a surface's `properties` are, so a table nested
+---deeper than 64 or holding more than 65 536 values, or one that contains
+---itself, is an error in the handler.
+---Queued like every other request, and answered by `done(ok, reason)` once
+---the compositor has acted, in a handler of its own; `reason` is
+---`"unknown-action"`, `"unknown-window"`, `"bad-data"`, for a
+---`windows.focus` behind the lock `"locked"`, or, for a `windows.fullscreen`
+---or `windows.maximize` of an X11 window, which the compositor cannot send
+---there, `"unsupported"`. A window still
+---loading is `"unknown-window"` to all but `windows.close`. A `done` that
+---calls `sol.act` again is told again in the same dispatch, 16 rounds at
+---most, and the rest at the next one. Answers the attempt's id, one no
+---earlier `sol.act` answered. A
+---`workspaces.*` action is not the compositor's: the file that keeps the
+---workspaces answers it, with `actions.override` in `lua/actions.lua`. An
+---override is a `surface` listener of its own, under the same deadline, so
+---one stopped three times is taken out alone, and its action goes to
+---`sol.act` again.
+---@overload fun(action: "windows.focus"|"windows.close"|"windows.fullscreen"|"windows.maximize", data: { id: integer }, done?: fun(ok: boolean, reason?: string)): integer
+---@param action string
+---@param data? any
+---@param done? fun(ok: boolean, reason?: string)
+---@return integer attempt
+function sol.act(action, data, done) end
 
 ---Start a program, with its arguments as separate strings:
 ---`sol.spawn("foot", "-e", "htop")`.
@@ -702,7 +892,8 @@ function sol.quit() end
 function sol.grab_input(grabbed) end
 
 ---Say which mode is in charge. The compositor keeps the text and logs a change
----at debug level; nothing on screen shows it.
+---at debug level, and a hosted shell reads it as `Solium.status`; nothing the
+---compositor draws itself shows it.
 ---@param text string
 ---@return nil
 function sol.status(text) end
@@ -746,13 +937,34 @@ function sol.unknown(key, meant) end
 
 ---Listen for an event. Listeners are added, never replaced, and one that fails
 ---is logged while the others still run.
+---
+---A listener runs under a 100 ms deadline: one that takes longer is stopped
+---with an error and logged with the file and line it was written at and the
+---file and line it was stopped at (for an `actions.override`, the listener
+---`actions.lua` writes for it, and the override's own line), the other
+---listeners still run, and one stopped three times is taken out until the
+---configuration is reloaded. The stops are counted by function, so a
+---function listening for two events counts the stops of both, and from its
+---third on is taken out of each event it is stopped in. Bindings, and each
+---`done` of `sol.act`, run under the same deadline, and a stopped binding is
+---logged the same way. A `done` is struck by function too, and one
+---stopped three times is not called again until the configuration is
+---reloaded; a `done` written inline is a new function at each `sol.act`, so
+---it is stopped each time rather than taken out. What a `done` asked for in
+---the run that was stopped is dropped.
+---The compositor starts each one's clock itself, so nothing a handler calls
+---puts it off. `pcall`, `xpcall` and `load` hand the stop on rather than
+---catch it, and `xpcall`'s message handler is not called for it. A `__gc`
+---finalizer, and the `__close` of a to-be-closed variable in the function a
+---stop interrupts, run where no hook does, so the deadline cannot stop a loop
+---in either.
 ---@overload fun(event: "open"|"focus"|"closing"|"refused"|"close", handler: fun(id: integer))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
 ---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))
 ---@overload fun(event: "click", handler: fun(x: number, y: number))
----@overload fun(event: "surface", handler: fun(name: string, action: string))
+---@overload fun(event: "surface", handler: fun(surface: string, action: string, data: any))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore"|"problems", handler: fun())
 ---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))
@@ -778,10 +990,20 @@ sol._bindings = {}
 ---@type table<string, function[]>
 sol._handlers = {}
 
+---Internal: each attempt's `done`, by attempt id. Use `sol.act`.
+---@private
+---@type table<integer, fun(ok: boolean, reason?: string)>
+sol._attempts = {}
+
 ---Internal: what `sol.keep` holds, by name.
 ---@private
 ---@type table<string, table>
 sol._keeps = {}
+
+---Internal: how many times each listener or `done` was stopped, by function.
+---@private
+---@type table<function, integer>
+sol._strikes = {}
 
 ---Internal: the notes `sol.bind` and `sol.unbind` were given, by combination.
 ---@private

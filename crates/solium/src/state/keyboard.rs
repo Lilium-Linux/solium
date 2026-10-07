@@ -268,6 +268,24 @@ impl Solium {
             crate::xwayland::activate(self, surface.as_ref());
         }
 
+        // Most recently focused first, for `Windows`' `focusOrder`, and a
+        // window that wanted attention has it (Ruling 18). A window that has
+        // gone is forgotten here, by both.
+        // `tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+        // `tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`,
+        // `tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
+        let id = self.window_id(window);
+        let panes = &self.panes;
+        let open = |each: &u64| {
+            panes
+                .by_script_id(*each)
+                .is_some_and(|pane| !pane.ghost() && !pane.gone())
+        };
+        self.focus_history.retain(|each| *each != id && open(each));
+        self.focus_history.insert(0, id);
+        self.urgent.remove(&id);
+        self.urgent.retain(open);
+
         // A layout may want to follow: a scroller brings the focused column
         // fully into view, which is the difference between clicking a window
         // half off the edge and being able to use it.
@@ -288,5 +306,30 @@ impl Solium {
         let outcome = scripts.focused(id, snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
+    }
+
+    /// Take the keyboard off whatever window has it, for a press that landed
+    /// on nothing a window, a client or a scene claimed: empty desktop, or
+    /// the wallpaper (#219). `focus.clear_on_empty_click` in `config.lua`;
+    /// the call site is `input::pointer_button`.
+    ///
+    /// Declines quietly rather than asking [`Self::may_focus`]: there is no
+    /// window here for the lock's gate to ask about, and `give_keyboard`'s
+    /// own `None` arm is always allowed -- taking the keyboard off everything
+    /// cannot deliver a key to anyone behind the lock either. What it does
+    /// decline is a scene's hold ([`Self::hosted_keyboard`]) and a seat that
+    /// already has nothing, the same two `settle_focus` declines for its own
+    /// reasons: a click past an overview's search field must not yank the
+    /// keyboard out from under it, and a click on empty desktop with nothing
+    /// focused already has nothing to do.
+    /// `a_click_on_empty_desktop_clears_keyboard_focus`,
+    /// `a_click_on_empty_desktop_with_nothing_focused_does_nothing`.
+    pub(crate) fn clear_focus(&mut self, serial: Serial) {
+        if self.hosted_keyboard.is_some() || self.focused_window().is_none() {
+            return;
+        }
+        self.redraw = true;
+        self.give_keyboard(None, serial);
+        crate::xwayland::activate(self, None);
     }
 }

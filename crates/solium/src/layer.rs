@@ -29,7 +29,7 @@
 //! — disappear rather than get answered. A shell hosted in-process today is the
 //! answer to that question and not the old bar back: it is whatever the
 //! configuration names, and the shipped configuration names none
-//! (`script::tests::the_shipped_configuration_hosts_no_shell`).
+//! (`script::tests::the_shipped_configuration_hosts_no_shell_with_preview_off`).
 //!
 //! ## What the work area is now
 //!

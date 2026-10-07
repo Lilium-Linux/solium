@@ -22,6 +22,34 @@ SoliumRow *make_monitor(QObject *parent)
     return new SoliumMonitor(parent);
 }
 
+SoliumRow *make_window(QObject *parent)
+{
+    return new SoliumWindow(parent);
+}
+
+SoliumRow *make_workspace(QObject *parent)
+{
+    return new SoliumWorkspace(parent);
+}
+
+SoliumRow *make_app(QObject *parent)
+{
+    return new SoliumApp(parent);
+}
+
+SoliumRow *make_folder_entry(QObject *parent)
+{
+    return new SoliumFolderEntry(parent);
+}
+
+SoliumWindow *window_at(const QAbstractItemModel *model, int row)
+{
+    const auto *rows = qobject_cast<const SoliumRows *>(model);
+    return rows != nullptr && row >= 0 && row < rows->rows().size()
+               ? qobject_cast<SoliumWindow *>(rows->rows().at(row))
+               : nullptr;
+}
+
 } // namespace
 
 SoliumRows::SoliumRows(const QMetaObject *row_type, Make make, Retire retire,
@@ -236,9 +264,237 @@ bool SoliumRows::apply(const QJsonArray &ops)
     return whole;
 }
 
+SoliumWindowRows::SoliumWindowRows()
+    : SoliumRows(&SoliumWindow::staticMetaObject, make_window, Retire::AfterGrace, "id")
+{
+    QQmlEngine::setObjectOwnership(&m_focused, QQmlEngine::CppOwnership);
+    QObject::connect(this, &SoliumRows::applied, this, [this]() { follow(); });
+}
+
+void SoliumWindowRows::follow()
+{
+    const SoliumRow *now = nullptr;
+    for (const SoliumRow *row : rows()) {
+        if (row->value("focused").toBool()) {
+            now = row;
+        }
+    }
+    // Taken whole, not merged: with nothing focused the facade is as empty as
+    // the absent row, not the window focused last.
+    // `qml::hosted::tests::the_focused_facade_is_empty_with_nothing_focused`.
+    const bool present = now != nullptr;
+    const QVariantMap next = present ? now->values : QVariantMap();
+    if (next != m_focused.values || present != m_focused.present) {
+        m_focused.values = next;
+        m_focused.present = present;
+        m_focused.announce();
+    }
+}
+
+SoliumWindowList::SoliumWindowList(QObject *parent) : QSortFilterProxyModel(parent)
+{
+    setSourceModel(solium_rows(SOLIUM_QML_ROWS_WINDOWS));
+    setDynamicSortFilter(true);
+    QObject::connect(this, &QAbstractItemModel::rowsInserted, this, &SoliumWindowList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::rowsRemoved, this, &SoliumWindowList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::layoutChanged, this, &SoliumWindowList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::modelReset, this, &SoliumWindowList::countChanged);
+}
+
+template <typename Change>
+void SoliumWindowList::refilterWith(Change &&change)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    beginFilterChange();
+    change();
+    endFilterChange(QSortFilterProxyModel::Direction::Rows);
+#else
+    change();
+    invalidateFilter();
+#endif
+    emit changed();
+    emit countChanged();
+}
+
+void SoliumWindowList::refilter(QString &field, const QString &value)
+{
+    if (field != value) {
+        refilterWith([&field, &value]() { field = value; });
+    }
+}
+
+void SoliumWindowList::setOnStage(const QVariant &value)
+{
+    if (value != m_on_stage) {
+        refilterWith([this, &value]() { m_on_stage = value; });
+    }
+}
+
+void SoliumWindowList::setSortBy(const QString &value)
+{
+    if (value != m_sort) {
+        m_sort = value;
+        sort(value.isEmpty() ? -1 : 0);
+        invalidate();
+        emit changed();
+    }
+}
+
+bool SoliumWindowList::filterAcceptsRow(int source_row, const QModelIndex &) const
+{
+    const SoliumWindow *window = window_at(sourceModel(), source_row);
+    if (window == nullptr) {
+        return false;
+    }
+    return (m_monitor.isEmpty() || window->monitor() == m_monitor)
+           && (m_workspace.isEmpty() || window->workspace() == m_workspace)
+           && (m_app.isEmpty() || window->appId() == m_app)
+           && (!m_on_stage.isValid() || window->onStage() == m_on_stage.toBool());
+}
+
+bool SoliumWindowList::lessThan(const QModelIndex &left, const QModelIndex &right) const
+{
+    const SoliumWindow *a = window_at(sourceModel(), left.row());
+    const SoliumWindow *b = window_at(sourceModel(), right.row());
+    if (a == nullptr || b == nullptr || m_sort != QStringLiteral("mru")) {
+        return left.row() < right.row();
+    }
+    return a->focusOrder() < b->focusOrder();
+}
+
+SoliumWorkspaceRows::SoliumWorkspaceRows()
+    : SoliumRows(&SoliumWorkspace::staticMetaObject, make_workspace, Retire::AfterGrace, "key")
+{
+    QQmlEngine::setObjectOwnership(&m_current, QQmlEngine::CppOwnership);
+    QObject::connect(this, &SoliumRows::applied, this, [this]() { follow(); });
+}
+
+void SoliumWorkspaceRows::copy(SoliumWorkspace &facade, const SoliumRow *row)
+{
+    // Taken whole, not merged: with nothing shown the facade is as empty as
+    // the absent row, not the workspace shown last.
+    // `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`.
+    const bool present = row != nullptr;
+    const QVariantMap next = present ? row->values : QVariantMap();
+    if (next != facade.values || present != facade.present) {
+        facade.values = next;
+        facade.present = present;
+        facade.announce();
+    }
+}
+
+SoliumWorkspace *SoliumWorkspaceRows::showing(const QString &monitor)
+{
+    SoliumWorkspace *&facade = m_showing[monitor];
+    if (facade == nullptr) {
+        facade = new SoliumWorkspace(this);
+        QQmlEngine::setObjectOwnership(facade, QQmlEngine::CppOwnership);
+        follow();
+    }
+    return facade;
+}
+
+void SoliumWorkspaceRows::follow()
+{
+    const SoliumRow *current = nullptr;
+    for (const SoliumRow *row : rows()) {
+        if (row->value("focused").toBool()) {
+            current = row;
+        }
+    }
+    copy(m_current, current);
+    for (auto it = m_showing.begin(); it != m_showing.end(); ++it) {
+        const SoliumRow *shown = nullptr;
+        for (const SoliumRow *row : rows()) {
+            if (row->value("active").toBool()
+                && row->value("monitors").toStringList().contains(it.key())) {
+                shown = row;
+            }
+        }
+        copy(*it.value(), shown);
+    }
+}
+
+void SoliumWorkspaceRows::setArrangement(const QVariantMap &arrangement)
+{
+    if (arrangement != m_arrangement) {
+        m_arrangement = arrangement;
+        emit arrangementChanged();
+    }
+}
+
+/* `Retire::Never`, like `Monitors`: an app that is uninstalled (or has never
+ * been scanned yet) is a ghost, not a hole, so a pinned slot never disappears
+ * from under a dock (03 §3.2.13). */
+SoliumAppRows::SoliumAppRows()
+    : SoliumRows(&SoliumApp::staticMetaObject, make_app, Retire::Never, "id")
+{
+}
+
+void SoliumAppRows::setReady(bool ready)
+{
+    if (ready != m_ready) {
+        m_ready = ready;
+        emit readyChanged();
+    }
+}
+
+/* `Retire::AfterGrace`, like `Windows`: a file that leaves the desktop is
+ * gone, not a ghost -- there is no pin referencing it the way a dock pin
+ * references an `Apps` id. */
+SoliumFolderRows::SoliumFolderRows()
+    : SoliumRows(&SoliumFolderEntry::staticMetaObject, make_folder_entry, Retire::AfterGrace, "uri")
+{
+}
+
+SoliumWorkspaceList::SoliumWorkspaceList(QObject *parent) : QSortFilterProxyModel(parent)
+{
+    setSourceModel(solium_rows(SOLIUM_QML_ROWS_WORKSPACES));
+    setDynamicSortFilter(true);
+    QObject::connect(this, &QAbstractItemModel::rowsInserted, this,
+                     &SoliumWorkspaceList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::rowsRemoved, this,
+                     &SoliumWorkspaceList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::layoutChanged, this,
+                     &SoliumWorkspaceList::countChanged);
+    QObject::connect(this, &QAbstractItemModel::modelReset, this,
+                     &SoliumWorkspaceList::countChanged);
+}
+
+void SoliumWorkspaceList::setMonitor(const QString &monitor)
+{
+    if (monitor == m_monitor) {
+        return;
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    beginFilterChange();
+    m_monitor = monitor;
+    endFilterChange(QSortFilterProxyModel::Direction::Rows);
+#else
+    m_monitor = monitor;
+    invalidateFilter();
+#endif
+    emit changed();
+    emit countChanged();
+}
+
+bool SoliumWorkspaceList::filterAcceptsRow(int source_row, const QModelIndex &) const
+{
+    const auto *rows = qobject_cast<const SoliumRows *>(sourceModel());
+    if (rows == nullptr || source_row < 0 || source_row >= rows->rows().size()) {
+        return false;
+    }
+    return m_monitor.isEmpty()
+           || rows->rows().at(source_row)->value("monitors").toStringList().contains(m_monitor);
+}
+
 SoliumRows *solium_rows(int model)
 {
     static SoliumRows *monitors = nullptr;
+    static SoliumRows *windows = nullptr;
+    static SoliumRows *workspaces = nullptr;
+    static SoliumRows *apps = nullptr;
+    static SoliumRows *folder = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -249,6 +505,26 @@ SoliumRows *solium_rows(int model)
                                       SoliumRows::Retire::Never, "name");
         }
         return monitors;
+    case SOLIUM_QML_ROWS_WINDOWS:
+        if (windows == nullptr) {
+            windows = new SoliumWindowRows();
+        }
+        return windows;
+    case SOLIUM_QML_ROWS_WORKSPACES:
+        if (workspaces == nullptr) {
+            workspaces = new SoliumWorkspaceRows();
+        }
+        return workspaces;
+    case SOLIUM_QML_ROWS_APPS:
+        if (apps == nullptr) {
+            apps = new SoliumAppRows();
+        }
+        return apps;
+    case SOLIUM_QML_ROWS_FOLDER:
+        if (folder == nullptr) {
+            folder = new SoliumFolderRows();
+        }
+        return folder;
     default:
         return nullptr;
     }
@@ -266,4 +542,32 @@ extern "C" int solium_qml_rows_apply(int model, const char *ops_json)
         return 0;
     }
     return rows->apply(document.array()) ? 1 : 0;
+}
+
+/* `Workspaces.arrangement`, from JSON.
+ * `models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`. */
+extern "C" int solium_qml_set_arrangement(const char *json)
+{
+    auto *rows = qobject_cast<SoliumWorkspaceRows *>(solium_rows(SOLIUM_QML_ROWS_WORKSPACES));
+    if (rows == nullptr || json == nullptr) {
+        return 0;
+    }
+    QJsonParseError parsed{};
+    const QJsonDocument document = QJsonDocument::fromJson(QByteArray(json), &parsed);
+    if (parsed.error != QJsonParseError::NoError || !document.isObject()) {
+        return 0;
+    }
+    rows->setArrangement(document.object().toVariantMap());
+    return 1;
+}
+
+/* `Apps.ready`, once the first scan completes. */
+extern "C" int solium_qml_set_apps_ready(int ready)
+{
+    auto *rows = qobject_cast<SoliumAppRows *>(solium_rows(SOLIUM_QML_ROWS_APPS));
+    if (rows == nullptr) {
+        return 0;
+    }
+    rows->setReady(ready != 0);
+    return 1;
 }

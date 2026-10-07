@@ -185,9 +185,10 @@ use crate::state::Solium;
 ///
 /// Not black: a black screen is indistinguishable from a monitor that has gone
 /// to sleep or a compositor that has died, and someone who cannot tell those
-/// apart will reach for the power button. A visible, deliberate colour says
-/// the machine is locked and working.
-pub(crate) const BLANK: [f32; 4] = [0.06, 0.05, 0.11, 1.0];
+/// apart will reach for the power button. A visible, deliberate dark grey says
+/// the machine is locked and working. A grey and not a hue, as every colour
+/// Solium ships is for now (the Theme's rule, `qml/Solium/Theme.qml`).
+pub(crate) const BLANK: [f32; 4] = [0.10, 0.10, 0.10, 1.0];
 
 /// Which lock a frame was built under.
 ///
@@ -386,6 +387,9 @@ impl SessionLockHandler for Solium {
         // keyboard on nothing.
         self.lock = None;
         self.redraw = true;
+        // logind's `LockedHint` follows, and a fresh delay inhibitor for sleep
+        // is asked for if `lock.before_sleep` holds one: see `logind.rs`.
+        self.logind.locked(false);
         // Cleared before it is re-aimed: keyboard focus is still on a lock
         // surface that is about to be destroyed, and the pointer still thinks
         // it is over one. `settle_focus` then gives the keyboard to whatever
@@ -673,6 +677,10 @@ impl Solium {
             lock.shown.clear();
             confirmation.lock();
             tracing::info!("session locked: every monitor is showing the lock");
+            // The presentation-accurate moment `logind.rs` waits for: it
+            // releases the delay inhibitor held for sleep, if any, and sets
+            // `LockedHint`.
+            self.logind.locked(true);
         }
     }
 

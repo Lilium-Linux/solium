@@ -335,17 +335,25 @@ impl Solium {
     /// as it stood.
     /// `a_window_closing_in_front_of_a_fullscreen_one_fades_out_over_it`.
     ///
+    /// **And a window that has left fullscreen counts until it has finished
+    /// shrinking** (#49), `Pane::lifted_until`: the bars come back over it
+    /// once it is the size it went back to, not while it still covers the
+    /// monitor.
+    /// `stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`.
+    ///
     /// Read by the renderer (`render::stacked`) and by the hit tests
     /// ([`Self::topmost_above`], `panes_front_first`), which is what makes the
     /// window drawn over the bars the one that is clicked there.
     pub(crate) fn lifted_on(&self, screen: Rectangle<i32, Logical>) -> Option<crate::pane::PaneId> {
+        let now = self.clock.now();
         crate::stack::lifted(
             self.panes.iter().rev().map(|pane| {
                 let shown = crate::render::drawn_on(self.pane_outer(pane), screen)
                     && !self.carried_by_a_selection(pane.id());
                 let candidate = crate::stack::Candidate {
                     shown,
-                    fullscreen: pane.client().is_some_and(fullscreen),
+                    fullscreen: pane.client().is_some_and(fullscreen)
+                        || pane.lifted_until().is_some_and(|until| now < until),
                 };
                 (pane.id(), candidate)
             }),
@@ -356,7 +364,7 @@ impl Solium {
     /// [`Self::on_stage`] for one pane, asked by id at [`Self::settling`]: for
     /// a caller with a single question rather than a walk to hoist the
     /// screens out of. A pane that is not there is not on stage.
-    pub(super) fn pane_on_stage(&self, pane: crate::pane::PaneId) -> bool {
+    pub(crate) fn pane_on_stage(&self, pane: crate::pane::PaneId) -> bool {
         let landed = self.settling();
         let screens = self.screens();
         self.panes

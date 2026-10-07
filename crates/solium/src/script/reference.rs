@@ -280,7 +280,7 @@ fn sol_lua_documents_exactly_the_api_the_compositor_registers() {
             events.insert(event.to_owned());
         }
     }
-    let marker = "call_listeners(sol, \"";
+    let marker = "call_listeners(lua, \"";
     let dispatched: BTreeSet<String> = production_script()
         .match_indices(marker)
         .filter_map(|(at, _)| {

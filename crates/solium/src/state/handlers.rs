@@ -561,8 +561,15 @@ impl XdgShellHandler for Solium {
         // leaving fullscreen lets the client pick its own size.
         let already = surface
             .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen));
+        // Where it is drawn now, which is where it grows from: read before
+        // anything below moves it or drops its frame.
+        let start = self.drawn_before(id);
+        // The way back is where it stands, and not where the space has it:
+        // turned round part of the way out of fullscreen, the space has the
+        // monitor's size, which its client has not left yet.
+        // `turning_round_part_of_the_way_out_keeps_the_way_back`.
         if !already
-            && let Some(real) = self.real_geometry(&window)
+            && let Some(real) = self.standing(&window)
             && !real.is_empty()
             && let Some(pane) = self.panes.get_mut(id)
             && pane.restore().is_none()
@@ -601,6 +608,13 @@ impl XdgShellHandler for Solium {
             pane.set_slot(screen);
         }
         self.map_stacked(window, screen.loc, true);
+        // And grown there on screen, with the motion the scripts answer
+        // `fullscreen` with. Not for a second request from a window that is
+        // fullscreen already: nothing has changed to tell.
+        // `a_window_glides_into_fullscreen_and_out_again`.
+        if !already {
+            self.transition(id, Change::Fullscreen, true, start);
+        }
         self.redraw = true;
         tracing::debug!(?screen, "a window went fullscreen");
     }
@@ -633,6 +647,9 @@ impl XdgShellHandler for Solium {
         if !fullscreen {
             return;
         }
+        // Where it is drawn now, which is where it shrinks from: read before
+        // its frame comes back and it is moved.
+        let start = self.drawn_before(id);
 
         // The frame comes back unless the client draws its own, which is what
         // `is_bare` cannot tell us on its own -- so the decoration mode is
@@ -696,13 +713,25 @@ impl XdgShellHandler for Solium {
         // centres a floated window at the size it has, which is still the
         // monitor's.
         // `a_floated_window_made_fullscreen_is_left_so_by_a_sweep_and_goes_back_where_it_floated`.
-        if self
+        let tiled = self
             .panes
             .get(id)
-            .is_some_and(|pane| pane.placed().is_some())
-        {
+            .is_some_and(|pane| pane.placed().is_some());
+        if tiled {
             self.trigger_relayout();
         }
+        // And shrunk there on screen, from the monitor it covered, with the
+        // motion the scripts answer `fullscreen` with -- into the tile the
+        // layout has just given it, too. Not with no rectangle to go to, which
+        // its client picks.
+        // `a_window_glides_into_fullscreen_and_out_again`, and
+        // `tests/scenarios/fullscreen-tiled.lua` for the tile.
+        self.transition(
+            id,
+            Change::Fullscreen,
+            false,
+            start.filter(|_| back.is_some() || tiled),
+        );
         self.redraw = true;
         tracing::debug!("a window left fullscreen");
     }
@@ -1126,6 +1155,16 @@ impl XdgActivationHandler for Solium {
                      where it was"
                 );
             } else if pane.is_some_and(|pane| self.carried_by_a_selection(pane)) {
+                // That refusal is this window wanting you: it is urgent until
+                // it is focused (03 §3.2.17). Nothing else about this refusal
+                // damages anything, so without asking for a frame here the
+                // models (published only in `render::prepare`) would not
+                // show it until some unrelated redraw came along.
+                // `state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
+                if let Some(pane) = pane {
+                    self.urgent.insert(pane.get());
+                    self.redraw = true;
+                }
                 tracing::debug!(
                     "a window on a workspace nobody is looking at asked to be brought forward, \
                      and the keyboard stayed where it was"
@@ -1139,6 +1178,12 @@ impl XdgActivationHandler for Solium {
                          keyboard went back on screen"
                     );
                     self.hand_off_keyboard(&window);
+                    // Turned down as well, since nobody can see it, so it is
+                    // urgent as a window on a hidden desk is.
+                    // `state::tests::real_client::reflow_on_close::keyboard_at_open::a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard`.
+                    if let Some(pane) = pane {
+                        self.urgent.insert(pane.get());
+                    }
                 }
             }
             if let Some(pane) = pane {

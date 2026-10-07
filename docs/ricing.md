@@ -91,6 +91,7 @@ Three guides go deeper than the recipes below:
 | one module, replaced | `~/.config/solium/tiling.lua`, `scrolling.lua`, … |
 | your pane styles | `~/.config/solium/qml/panes/<name>/` |
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
+| your pointer | any QML file, named by `cursor.scene` ([below](#your-own-pointer)) |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml`, once [#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed |
 | the shipped files, to copy from | `crates/solium/qml` and `crates/solium/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install: `/usr` for the Fedora package, `~/.local` for `dev/install.sh` |
 | the log | `~/.local/state/solium/session.log`, for a session started with `solium --tty` or from the login screen. A nested run logs to the terminal it was started from |
@@ -411,19 +412,24 @@ Everywhere else the pointer goes to what is under it
 A surface without it holds neither a `Grab` nor the keyboard
 (`state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_grab`,
 `state::tests::real_client::reflow_on_close::hosted::a_surface_the_pointer_does_not_reach_holds_no_keyboard`).
-The scene sets an `action` string, the compositor takes it, and whoever is
-listening is told:
+The scene sends an action, with data if it has any, `Solium.send("pressed",
+{ id: 3 })`, and whoever is listening is told:
 
 ```lua
 sol.surface("panel", { scene = "panel.qml", layer = "overlay",
                        on = area, interactive = true })
 
-sol.on("surface", function(name, action)
-    if name == "panel" then
+sol.on("surface", function(surface, action, data)
+    if surface == "panel" then
         sol.log("pressed " .. action)
     end
 end)
 ```
+
+An action of the compositor's own vocabulary, `windows.focus` with `{ id:
+model.id }` say, is done for you, by `lua/actions.lua` through `sol.act`
+([shell-boundary.md](shell-boundary.md#what-a-hosted-shell-is-given) has the
+list).
 
 That is the whole of how the Developer Tweaks panel works, and it is entirely
 in `lua/tweaks.lua` — the compositor has no idea what a tweak is.
@@ -480,6 +486,34 @@ Item {
 `super+shift+r` reloads it without ending the session. `source` is handed in
 whatever the configuration said, and a scene that ignores it — like the one
 above — is perfectly valid.
+
+### Reloading without pressing anything
+
+Saving a file under `~/.config/solium` — `user.lua`, a module of your own, a
+pane style, a loading scene, your wallpaper or your shell — reloads it on its
+own, the same way `super+shift+r` does: a typo leaves the running
+configuration alone and logs it, same as a manual reload.
+
+```lua
+reload = {
+    automatic = false,  -- back to pressing super+shift+r yourself
+    quiet_ms = 600,      -- wait longer for a slow save to settle
+}
+```
+
+`automatic` defaults to true. A burst of writes from one save — an editor
+that writes a temporary file and renames it over the original fires several —
+is collapsed into the one reload it earns, `quiet_ms` after the last write in
+it, not one reload per write. `automatic = false` watches nothing at all,
+rather than merely never finishing the wait.
+
+Developing a shell, a pane style or a titlebar as its own project — pointed
+at with `SOLIUM_SHELL_SCENE`, `SOLIUM_PANE`, `SOLIUM_QML_TITLEBAR` or
+`SOLIUM_LOADING` — is watched too, wherever that is, even well outside
+`~/.config/solium`. The one case this does not reach is an absolute path
+written directly in `config.lua` with none of those set: saving it reloads
+nothing, and the log says once that it was configured outside everywhere
+automatic reload watches.
 
 ### Your keyboard
 
@@ -547,9 +581,12 @@ told once, where it ended up.
 
 ### The keyboard pill
 
-Switch layout, or press Caps Lock, and a small capsule in the accent colour
-appears just below where you are typing: `⇪` while Caps Lock is on, `EN` or
-`RU` for a moment after a switch, after the one macOS shows.
+Switch layout, or press Caps Lock, and a small capsule appears just below
+where you are typing: `⇪` while Caps Lock is on, `EN` or `RU` for a moment
+after a switch, after the one macOS shows. It is drawn in the theme's `accent`
+with its glyph in `accentInk`, which in the shipped theme is a light grey
+capsule with a dark glyph and a soft shadow: it stands out on a dark window
+and on a light one.
 
 It is not a compositor feature. It is the shipped configuration's example of
 doing something with what the compositor publishes, and it is two ways of
@@ -817,6 +854,89 @@ left waiting.
 Nested, there is no display to power off: a monitor that is "off" is drawn
 black and then not drawn at all, so all of the above can be tried in a window.
 
+### Touchpad, mouse and keyboard settings
+
+A touchpad taps and scrolls naturally out of the box; a mouse does not get
+natural scroll, because a wheel is not a surface your fingers are on. Nothing
+else is decided for you: acceleration, left-handed, disable-while-typing and
+the rest are libinput's own defaults until `input` says otherwise, by device
+type:
+
+```lua
+return {
+    input = {
+        touchpad = { tap = false },        -- you don't want tap-to-click
+        mouse = { accel_profile = "flat" }, -- raw speed, no acceleration curve
+    },
+}
+```
+
+A setting here applies to every device of that type. One device on its own,
+by name (a case-insensitive substring of what `libinput list-devices` calls
+it) or by `vendor`/`product` (the same tool's "Vendor"/"Product", or `lsusb`'s):
+
+```lua
+return {
+    input = {
+        devices = {
+            -- An external touchpad that should act like a mouse.
+            { name = "SynPS/2 Synaptics", tap = false, natural_scroll = false },
+            -- A gaming mouse, slowed down, by usb id.
+            { vendor = 0x046d, product = 0xc52b, accel_speed = -0.3 },
+        },
+    },
+}
+```
+
+Applied when the device is plugged in and again on every reload, so editing
+this and pressing `super+shift+r` is enough -- no replug, no restart. The
+running compositor logs what each device got, name and all. Every option is
+on `sol.InputOptions` in editor completion.
+
+**This replaced `SOLIUM_FORM_FACTOR`'s natural scroll.** The environment
+variable used to guess "a laptop has a touchpad" for the whole machine at
+once; a device's own type now answers that directly, so a desktop with a USB
+touchpad gets natural scroll too. `SOLIUM_FORM_FACTOR` still picks
+focus-follows-mouse and the drag modifier (#159).
+
+Nested, none of this reaches anything: there is no libinput device in a
+window inside another compositor, only the host's own pointer and keyboard.
+
+### Locking and sleep
+
+`loginctl lock-session`, a power menu that locks that way, and a lid switch
+logind handles itself all send the same signal: `Lock`. By default Solium does
+nothing with it — set a locker to run:
+
+```lua
+return { lock = { command = "swaylock -f" } }
+```
+
+Split on whitespace, with no quoting, like an autostart `Exec=` line. It runs
+as a client of this compositor, so it asks for `ext_session_lock_v1` the same
+way any other lock screen would, and a second `Lock` while it is already
+locked runs nothing more — the second locker would only be told `finished`
+and exit.
+
+**Before suspending, Solium holds sleep for the lock.** With `lock.command`
+set, closing the lid or `systemctl suspend`-ing holds a logind delay
+inhibitor until the locker has confirmed the lock on every screen, or five
+seconds pass (`InhibitDelayMaxUSec`, logind's own limit — not Solium's to
+raise), so the machine never shows the desktop again on waking. Turn it off,
+say because `swayidle`'s own `before-sleep` already does this:
+
+```lua
+return { lock = { command = "swaylock -f", before_sleep = false } }
+```
+
+`swayidle` keeps working exactly as before either way — the two only overlap
+in that the lock screen may be asked for twice, and a second ask is refused as
+above.
+
+`loginctl show-session $XDG_SESSION_ID -p LockedHint` reads `yes` or `no`
+following whatever is actually locked, for a greeter or `loginctl` itself to
+read.
+
 ### One workspace per screen, or one for the desk
 
 Each monitor has its own workspace in view by default: `super+2` switches the
@@ -869,7 +989,9 @@ output gets the primary monitor.
 A fullscreen window in front of the workspace its monitor is showing covers
 the top layer -- a client's bar, and one declared with `sol.surface` -- and
 takes the clicks where the bar was, while the overlay layer (notifications, an
-OSD, a launcher) stays over it. To keep the bars over fullscreen windows:
+OSD, a launcher) stays over it. It goes over the bars as it starts to grow and
+back under them once it has finished shrinking. To keep the bars over
+fullscreen windows:
 
 ```lua
 return { fullscreen = { covers = "none" } }
@@ -878,12 +1000,262 @@ return { fullscreen = { covers = "none" } }
 See **[shell-boundary.md](shell-boundary.md)** for why hosting is the design,
 and for both ways a shell attaches.
 
+### The preview shell
+
+A fresh install is not a blank desktop. `shell.scene` above defaults to the
+compositor's own preview shell -- a bar along the bottom, built the same way
+any other shell is, on the public API `shell-boundary.md` describes and
+nothing else. It shows:
+
+- the workspaces of this monitor, as page dots -- the current one an accent
+  pill, an occupied one filled -- and a click switches;
+- the running windows of this monitor's current workspace, as chips -- icon,
+  title or app id, the focused one highlighted -- and a click focuses one;
+- the keyboard layout, once more than one is configured;
+- a clock;
+- a top dock: pinned apps, then a hairline, then running ones that are not
+  pinned, each a theme icon with a dot under a running one. Autohidden by
+  default -- nothing is reserved, and it slides in when the pointer reaches
+  the top edge, out a little after it leaves. A click on an app that is not
+  running launches it (`Solium.Apps`, 03 §3.2.13); on one that is, focuses its
+  most recently used window.
+
+  ```lua
+  return { preview = { dock = {
+      pinned = { "org.mozilla.firefox", "kitty" }, -- desktop ids, left unset
+                                                    -- the dock picks a
+                                                    -- terminal, a file
+                                                    -- manager and a browser
+                                                    -- from what is installed
+      visibility = "always",                       -- or "autohide" (default)
+      icon_size = 48,                               -- default 40
+  } } }
+  ```
+
+- quick search, `super+d`: a centred panel with a field, the live keyboard
+  layout beside it, and results grouped into applications (matched by name
+  and generic name), open windows (title or app id, with the workspace) and
+  a few compositor commands that already exist -- Overview, Tile windows,
+  Fullscreen window, Reload configuration, Quit Solium. Arrow keys move the
+  selection, Return activates it, Escape or a click outside closes.
+
+  ```lua
+  return { preview = { search = {
+      key = "super+alt+space", -- default "super+d"
+  } } }
+  ```
+
+  Cut from this first version (`lua/preview/search.lua` and
+  `qml/preview/Search.qml` both say why, in full): the detail pane, a row's
+  own actions, Alt+digits, Ctrl+Return, the empty-query suggestions (there
+  is no usage history yet to rank by), app keywords (the plain array this
+  searches, `sol.apps()`, does not carry them -- a real gap, not a corner
+  cut), the settings and desktop-file sources, the container transform from
+  the bar's own search button (the bar has no search button yet either),
+  and the "us,ru" layout-correction pass -- it needs the compositor's own
+  keymap, which nothing here exposes yet.
+
+- desktop icons: `Solium.dirs.desktop` (`$XDG_DESKTOP_DIR`, or
+  `user-dirs.dirs`; nothing drawn, and nothing scanned, when it is unset or
+  is `$HOME`), on their own surface -- `layer = "bottom"`, below ordinary
+  windows, the same as a real desktop, and below the bar above -- 96x100
+  cells with 48 px icons, column by column from the top right, folders
+  first then by name. A click selects (Ctrl or Shift adds), a double-click
+  opens: a regular file through its MIME type's default application, a
+  `.desktop` launcher through its own `Exec=` once trusted, asked for once
+  in a small card. Live through inotify: a file that appears or disappears
+  on the desktop updates the icons at once, no reload needed.
+
+  ```lua
+  return { preview = { desktop = {
+      from = "top-left",                   -- or "top-right" (default)
+      cell = { width = 110, height = 112 }, -- default 96x100
+      labels = 1,                          -- label lines, default 2
+      open = "single",                     -- or "double" (default)
+      show_hidden = true,                  -- default false
+  } } }
+  ```
+
+  Cut from this first version (`crates/solium/src/folder.rs` and
+  `qml/preview/Desktop.qml` both say why, in full): dragging and saved
+  positions (there is nowhere durable to keep them yet), the right-click
+  menus, a rubber band, showing the desktop (`super+ctrl+d` needs a
+  window-presenting pass this compositor does not have), Open With and
+  thumbnails, MIME detection by content rather than by extension, and the
+  arrow-key/Return navigation the design note asks for (nothing yet gives
+  the desktop the keyboard on demand, so claiming it unconditionally would
+  only fight the dock and quick search for focus).
+
+Next pieces -- the island, quick settings, a tray, and previews -- need
+services this compositor does not have yet, and are not here. `lua/preview/`
+and `qml/preview/` are where all of it lives, so copying one file still
+changes one behaviour, exactly as **[Your own frame](#your-own-frame)** and
+**[Bars, docks and wallpapers](#bars-docks-and-wallpapers)** above do it.
+
+Two ways to turn it off, or replace it:
+
+```lua
+return { preview = false }
+```
+
+turns the whole preview shell off and leaves a blank desktop, as before it
+existed. Naming your own `shell.scene` -- or `SOLIUM_SHELL_SCENE` for one run
+-- replaces it outright: the preview shell only ever fills in a default
+nothing else set, and never overrides either one.
+
+### Your own pointer
+
+The pointer can be a QML scene of yours, named the way a shell is:
+
+```lua
+return { cursor = { scene = "~/.config/solium/cursor/Cursor.qml", size = 32 } }
+```
+
+A path, `~` expanded, or a bare name looked for in `~/.config/solium/qml/`
+and then in the shipped QML
+(`cursor::theme::tests::a_configured_scene_is_found_as_the_shells_is`).
+`SOLIUM_QML_CURSOR=<file>` is the scene for one run, over the setting
+(`cursor::theme::tests::the_environment_overrides_the_configured_scene`).
+It draws every shape a window or the compositor asks for, ahead of any
+XCursor theme, and is told which one
+(`models::pointer::tests::a_configured_scene_hears_every_named_shape`). A
+window that sets a cursor of its own, or hides the pointer as a game does,
+still does over its own surface
+(`cursor::tests::a_pointer_a_client_hides_stays_hidden_with_a_scene_configured`).
+`super+shift+r` applies a change and builds the scene again when its files
+changed. A scene that does not load leaves the theme, and then Solium's own
+arrow, to draw the pointer, says so in the log, and is tried again at the
+next reload (`cursor::tests::a_reload_swaps_the_scene`).
+
+It reads `Solium.cursor`. `shape` is the shape asked for, by its CSS cursor
+name: `default` over a titlebar, `text` over a text field, `ew-resize` on a
+window's left or right edge, and so on
+(`models::pointer::tests::a_named_shape_reaches_solium_cursor_shape`).
+`pressed` is whether a button is held, `velocity` how fast the pointer
+moved over the last frame in logical pixels a second along `x` and `y`,
+zero once it stops, `scale` the scale of the monitor it is on and `size` the
+configured `cursor.size`
+(`models::pointer::tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`).
+It says one thing back, `Solium.cursor.hotspot` on its root: the point of
+its picture that sits on the pointer, its top-left corner unless it says.
+Its size is its root's own `width` and `height`, up to 256 logical pixels
+a side, so a glow or a shadow can reach past `size` with the hotspot still
+on the point the pointer is at; a root that sets no size is `size` square
+(`cursor::scene::tests::the_scene_is_drawn_at_its_own_size_with_its_hotspot_on_the_pointer`).
+
+An arrow, an I-beam over text, and a glow that breathes:
+
+```qml
+// ~/.config/solium/cursor/Cursor.qml
+import QtQuick
+import QtQuick.Effects
+import QtQuick.Shapes
+import Solium
+
+Item {
+    id: root
+    readonly property int pad: 10        // room for the glow
+    readonly property int size: Solium.cursor.size
+    readonly property bool text: Solium.cursor.shape === "text"
+    width: size + 2 * pad
+    height: size + 2 * pad
+    // The arrow points with its tip, the I-beam with its middle.
+    Solium.cursor.hotspot: text ? Qt.point(pad + size / 2, pad + size / 2)
+                                : Qt.point(pad, pad)
+
+    // One breath, forever: the glow's strength and a tint in the arrow.
+    property real breath: 0.25
+    SequentialAnimation on breath {
+        loops: Animation.Infinite
+        NumberAnimation { to: 1; duration: 800; easing.type: Easing.InOutSine }
+        NumberAnimation { to: 0.25; duration: 800; easing.type: Easing.InOutSine }
+    }
+
+    MultiEffect {                        // the glow, behind the drawing
+        source: drawing
+        anchors.fill: drawing
+        shadowEnabled: true
+        shadowColor: "#7aa2ff"
+        shadowBlur: 1.0
+        shadowOpacity: root.breath
+    }
+
+    Item {
+        id: drawing
+        x: root.pad
+        y: root.pad
+        width: root.size
+        height: root.size
+        readonly property real u: width / 24
+
+        Shape {                          // the arrow
+            anchors.fill: parent
+            visible: !root.text
+            ShapePath {
+                fillColor: Qt.tint("white", Qt.rgba(0.48, 0.64, 1, 0.45 * root.breath))
+                strokeColor: "#1c1c1e"
+                strokeWidth: 1.6 * drawing.u
+                startX: 0.8 * drawing.u; startY: 0.8 * drawing.u
+                PathLine { x: 0.8 * drawing.u;  y: 16.3 * drawing.u }
+                PathLine { x: 5.0 * drawing.u;  y: 12.5 * drawing.u }
+                PathLine { x: 7.9 * drawing.u;  y: 19.1 * drawing.u }
+                PathLine { x: 11.0 * drawing.u; y: 17.7 * drawing.u }
+                PathLine { x: 8.2 * drawing.u;  y: 11.3 * drawing.u }
+                PathLine { x: 13.7 * drawing.u; y: 10.9 * drawing.u }
+                PathLine { x: 0.8 * drawing.u;  y: 0.8 * drawing.u }
+            }
+        }
+
+        Rectangle {                      // the I-beam
+            visible: root.text
+            anchors.centerIn: parent
+            width: 3 * drawing.u
+            height: 16 * drawing.u
+            color: "white"
+            border.color: "#1c1c1e"
+        }
+    }
+}
+```
+
+It animates on the compositor's clock: a running animation asks for the
+next frame, and a scene with nothing running asks for none
+(`cursor::scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`).
+This one breathes forever: while the pointer is shown it is drawn on every
+refresh, and while it is not (a window hiding it or drawing its own, or the
+screens off) the breath is still stepped a frame apart, every 16 ms
+(`qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`).
+To let it rest, bind the animation's `running:` to something the scene can
+see, such as `Solium.cursor.pressed`, the shape, or the velocity.
+
+`MultiEffect` and `ShaderEffect` draw on the GPU path, which a session on the
+hardware uses by default (`dev/wirecheck`'s case 11 draws a pointer scene's
+glow there). On the software path, which a nested session uses and
+`qml.renderer = "software"` chooses, they draw nothing, and the drawing
+under the glow is the whole pointer: that is why the breath is in the
+arrow's tint as well. The picture is offered to the hardware cursor plane,
+as a theme's is
+(`cursor::scene::tests::a_scene_with_no_material_is_a_cursor_plane_element`),
+and goes there when its size in device pixels fits the plane, commonly 64 or
+128 pixels a side; there moving the mouse redraws nothing else. A larger one,
+such as this one at `size = 32` on a 2x monitor (104 pixels a side), is
+drawn with everything else where the plane is smaller.
+`Solium.region` and `Solium.material` are accepted, and materials are off
+until [#199](https://github.com/Lilium-Linux/solium/issues/199):
+`Solium.materialState` reads `"off"`
+(`qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`).
+
 ### Your own colours
 
 `Solium.Theme` (`crates/solium/qml/Solium/Theme.qml`) is what every shipped
-frame and the loading window are drawn with, and a hosted shell that imports
-`Solium` can read it too. The fallback pointer and the default wallpaper do
-not: their colours are fixed. A copy of `Theme.qml` in
+frame, the loading window and the keyboard pill are drawn with, and a hosted
+shell that imports `Solium` can read it too. The shipped one is a dark theme
+of greys only, with no hue in it at all, the maintainer's choice for now:
+near-black bars, light grey text, grey buttons, and an `accent` that is a
+light grey too ([decorations.md](decorations.md#colours-and-fonts) lists every
+name). A shell that reads `Theme.accent` for its highlights gets that grey.
+The fallback pointer and the default wallpaper do not read it: their colours
+are fixed. A copy of `Theme.qml` in
 `~/.config/solium/qml/Solium/` is meant to restyle the frames, the loading
 window and such a shell at once, and does not work yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)). Until then, a
@@ -903,6 +1275,48 @@ return {
 Those are the same four numbers CSS calls `cubic-bezier` and every easing
 generator on the internet hands out, so a feel you found elsewhere transfers
 directly. y may leave 0..1 — that is what overshoot is.
+
+Going fullscreen and maximising are timed the same way, each on its own, and
+both glide by default: the window grows from where it is to cover its monitor,
+or its work area, and shrinks back. `animate = false` makes one instant and
+`animate = true` is the shipped motion again, and `instant` names the
+applications that change at once whatever `animate` says — a game or a video
+player, say:
+
+```lua
+return {
+    fullscreen = {
+        animate = { duration = 200, easing = "inOutCubic" },
+        instant = { app_id = { "mpv", "gamescope" } },
+    },
+    maximize = { animate = false },
+}
+```
+
+The application is told its new size the moment you press the key, and its
+last picture is stretched until it has drawn one at that size — through the
+glide and after it, for a quarter of a second past the landing at most, and
+then the window is shown at whatever size the application has. Once it has
+answered the window is drawn as it is, with nothing in between, so a
+fullscreen game or video can be shown directly. An instant change is just that:
+nothing is stretched or moved, and the window is drawn as it is on the next
+frame. An app id is what `sol.windows()` calls `app_id`.
+
+Desktop mode's snap — the focused window sliding to a half, a quarter or the
+whole of its monitor while no layout is in charge (#222) — has its own
+`floating.snap.motion`, kept apart from `tiling.motion` for the same reason
+`fullscreen.animate` and `maximize.animate` are kept apart from each other:
+
+```lua
+return {
+    floating = { snap = { motion = { duration = 160, easing = "outBack" } } },
+}
+```
+
+The shipped motion is `{ duration = 220, easing = "outCubic" }`. There is no
+instant switch for it the way `fullscreen.animate` and `maximize.animate` have
+one above: a snap is always a glide, since nothing is waiting on an
+application to draw a new size first.
 
 ### Your own bindings
 
@@ -971,7 +1385,9 @@ require("bindings")
 it up -- `super+shift+k` is the keyboard layout. At the edge of a screen both go
 on to the next one. `super+f` is fullscreen, `super+shift+m` maximised and
 `super+shift+space` floats a window over the layout; each key again puts it
-back. Rebind any of them in `bindings`:
+back, and fullscreen and maximised glide there and back
+([Your own animation feel](#your-own-animation-feel) times them). Rebind any
+of them in `bindings`:
 
 ```lua
 return {
@@ -988,6 +1404,41 @@ in a grid the opposite key puts both back; `move = "split"` makes it split the
 neighbour's tile instead, as Hyprland's `movewindow` does. [modes.md](modes.md#focus-and-move-by-direction)
 has what each layout does with a direction.
 
+### Click, hover and an empty desktop
+
+A press on empty desktop or the wallpaper clears keyboard focus, so a window
+you clicked away from stops taking what you type. Turn that off in `focus`:
+
+```lua
+return {
+    focus = { clear_on_empty_click = false },
+}
+```
+
+A press on a client's own shell surface -- a bar or a panel, say -- is not
+covered yet, even one that does not ask for the keyboard itself: it leaves
+focus exactly as it was. [#219](https://github.com/Lilium-Linux/solium/issues/219)
+is still open on that case.
+
+Whether moving the pointer over a window focuses it is a per-mode question,
+not a single on/off switch: floating -- the desktop, with no layout in charge
+and windows free to overlap -- focuses on click only by default, because a
+window you are not using sits under the pointer on the way to the one you
+want. Every other mode keeps this machine's own answer (`SOLIUM_FORM_FACTOR`,
+[#159](https://github.com/Lilium-Linux/solium/issues/159)), which on a
+desktop or a laptop is focus-follows-mouse, the same as every tiling
+compositor people arrive from. Name a mode to change its own answer:
+
+```lua
+return {
+    focus = { modes = { floating = "follow", scrolling = "click" } },
+}
+```
+
+`lua/modes.lua` is what turns this into `sol.focus_mode`, on every mode
+change as well as at load, so a reload keeps whichever model the session was
+already in.
+
 ### Your own mode
 
 A mode is a Lua module that reacts to events — a window opening, closing or
@@ -1000,6 +1451,62 @@ over.
 
 **[modes.md](modes.md)** is the guide, with a whole working mode in forty lines
 and the two mistakes everyone makes first.
+
+### An X11 helper that was never meant to be seen
+
+Some autostart entries exist only so a desktop portal has something to talk
+to — KDE's screen-sharing fallback, `xwaylandvideobridge`, is the one this was
+found against (issue #221), and it is not the only X11 program shaped this
+way. Solium hides a window like it by `config.x11.hidden`, a list of `WM_CLASS`
+names matched case-insensitively against either field a client sets (`xprop
+WM_CLASS` on a nested window shows both). A listed window is not tiled, not
+decorated, and left out of `sol.windows()` — nothing a bar or a window list
+built from that call ever has to filter out by hand — the same treatment
+`xwayland.rs`'s `places_itself` already gives a menu or a tooltip, for a
+different reason. The default names only `xwaylandvideobridge`; add your own
+in `config.lua`'s `x11.hidden` for anything else shaped this way, keeping
+`xwaylandvideobridge` in the list if you still want it hidden, since a
+configured list replaces the default rather than adding to it.
+
+**This used to key off `WM_HINTS.input` instead, and hid more than it meant
+to.** ICCCM reserves `input: false` for a window that never wants the
+keyboard, but it also names an entirely ordinary 'Globally Active' input
+model — ordinary, ICCCM-conforming applications that set `input: false` and
+take the keyboard themselves through `WM_TAKE_FOCUS` — and that old rule hid
+every one of them too. `WM_CLASS` is a much narrower claim: a name on `hidden`
+says "this specific program", not "anything that declines this one hint".
+
+It is still a real client with a real process, but nothing in the shipped
+config can reach it to ask it to go. The shipped `super+q` only walks
+`sol.windows()` looking for a window with `focused == true`, and a window
+hidden this way never gets a row there at all to be found: the snapshot that
+builds `sol.windows()` drops an unmanaged pane before it becomes a
+`WindowInfo` (`state/snapshot.rs`), and the unmanaged path this window takes
+(`state/open.rs`'s `take_unmanaged_pane`) never grants it keyboard focus
+either, so `focused` could not be true for it regardless. A hung window of
+this shape cannot be stopped from inside the compositor today — only from
+outside it, with an ordinary `kill`, or by not letting it start in the first
+place, the way just below.
+
+The kill-after-silence mechanism `state/close.rs` added alongside this one
+(`GRACE`, `x11_refused_once`) is real, and it does help — for an ordinary,
+listed, managed X11 window that stops answering `WM_DELETE_WINDOW`, which is
+exactly what `super+q` can still reach the normal way. It was never reachable
+for this one.
+
+Nothing here stops the autostart entry from starting in the first place —
+that is Fedora's `/etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop`, not
+Solium's to own — so if you would rather it never ran at all, override it per
+session the way any `XDG_CONFIG_DIRS` autostart entry is overridden: a copy
+under `~/.config/autostart/` with `Hidden=true` added.
+
+    mkdir -p ~/.config/autostart
+    cp /etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop ~/.config/autostart/
+    printf 'Hidden=true\n' >> ~/.config/autostart/org.kde.xwaylandvideobridge.desktop
+
+A copy with `Hidden=true` is what every spec-following autostart reader
+treats as "do not start this one" — the original in `/etc/xdg/autostart` is
+untouched, so a package update to it never undoes the override.
 
 ## Worth knowing
 

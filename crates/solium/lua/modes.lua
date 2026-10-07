@@ -30,9 +30,26 @@
 -- the *name* is the only thing here that cannot be recomputed from what is on
 -- screen.
 
+local config = require("config")
 local dialogs = require("dialogs")
 
 local modes = { registered = {} }
+
+-- Who wants to know when the layout in charge changes, including to or from
+-- floating -- which is never itself in `registered`. That absence is the
+-- sentinel the rest of this file, `direction.lua` and `modes.toggle_floating`
+-- read as "no layout is arranging anything", so floating cannot be
+-- registered without changing what all three of those do. `lua/floating.lua`
+-- wants to know the same transitions anyway -- to bind its snap keys only
+-- while it is in charge, the way `overview.lua` binds Escape only while it is
+-- up -- so this is the one small hook that lets it, without pretending to be
+-- a layout. See `tiling_keeps_the_arrows_for_focus_and_desktop_mode_gets_them_back`
+-- in `script.rs`, which switches out of tiling and back into floating and
+-- checks the arrows mean something else each time.
+local watchers = {}
+function modes.watch(fn)
+    watchers[#watchers + 1] = fn
+end
 
 -- Which layout is in charge, held by the host so it outlives the reload.
 local kept = sol.keep("modes", { current = "floating" })
@@ -45,6 +62,39 @@ end
 
 function modes.register(name, layout)
     modes.registered[name] = layout
+end
+
+-- Whether the pointer moving over a window should focus it, in mode `name`
+-- (#219): `config.focus.modes[name]`, or `config.focus.follow` -- which may
+-- itself be `nil`, meaning the input profile's own answer for this machine
+-- -- when the mode says nothing.
+local function follow_for(name)
+    local named = config.focus.modes[name]
+    if named == "click" then
+        return false
+    end
+    if named == "follow" then
+        return true
+    end
+    return config.focus.follow
+end
+
+-- Hand the resolved model to the compositor. Called here whenever the mode
+-- changes, and once more below at this file's own top level -- which is what
+-- makes a reload answer correctly: `modes.use` runs only when a key actually
+-- switches modes, but this file runs fresh on every load, startup and reload
+-- alike, and `kept.current` is what survived the reload (see "Surviving a
+-- reload" above). Without the top-level call a fresh Lua state would only
+-- ever hear about the mode in charge when the user next switched away from
+-- it, so `super+shift+r` while tiling would silently answer floating's
+-- click-only default until the next `super+t`.
+-- `a_reload_keeps_the_focus_model_tiling_was_switched_to`.
+local function apply_focus_mode(name)
+    sol.focus_mode({
+        click = config.focus.click,
+        follow = follow_for(name),
+        clear_on_empty_click = config.focus.clear_on_empty_click,
+    })
 end
 
 function modes.use(name)
@@ -77,6 +127,7 @@ function modes.use(name)
         sol.unplace(window.id)
     end
     kept.current = name
+    apply_focus_mode(name)
     local layout = modes.registered[name]
     if layout then
         layout.active = true
@@ -87,7 +138,16 @@ function modes.use(name)
     else
         sol.status("")
     end
+    -- After the switch has fully landed, so a watcher that asks `modes.current()`
+    -- or looks at `sol.windows()` sees the mode it was just told about.
+    for _, watch in ipairs(watchers) do
+        watch(name)
+    end
 end
+
+-- The model for whatever mode this Lua state opens already in -- "floating"
+-- at a fresh start, or the one a reload carried over.
+apply_focus_mode(kept.current)
 
 -- Put the session back into the layout it was already in.
 --

@@ -81,19 +81,24 @@ impl Solium {
         // across the whole transition however those two writes are arranged.
         //
         // **What this leaves the user with for a wedged client, written down
-        // because it is a gap and not a decision.** There is no force-kill
-        // anywhere in this compositor -- no `xkill`, no "application is not
-        // responding", no binding that destroys a client rather than asking
-        // it. Against a client that has hung, `super+q` therefore does one
-        // thing per close cycle: animate out, ask, wait `GRACE`, come back.
-        // Roughly 1.34s from press to the window standing there again, and
-        // then it can be asked once more, for ever. Before the guard was
-        // widened a user could at least hammer the binding -- which achieved
-        // nothing either, since `send_close` is a request a wedged client is
-        // not reading, but it did not *look* like the compositor ignoring the
-        // keyboard. That is a real regression in what the session feels like,
-        // and the honest fix is a kill path rather than a narrower guard here.
-        // It wants a confirmation of its own and is not part of #127.
+        // because it was a gap and not a decision -- and is now only half a
+        // gap.** There is still no force-kill for a Wayland client: no
+        // `xkill`, no "application is not responding", no binding that
+        // destroys one rather than asking it, because `xdg_toplevel` carries
+        // no pid a close could act on without racing the client's own
+        // connection for it. Against a hung Wayland client, `super+q` still
+        // does one thing per cycle: animate out, ask, wait `GRACE`, come
+        // back, roughly 1.34s from press to the window standing there again,
+        // for ever.
+        //
+        // **An X11 client is not for ever any more (#221).** XWayland already
+        // hands over a pid the moment a window maps
+        // (`crate::xwayland::client_pid`), for free, which is the one thing
+        // that was missing here -- so `settle_closing` kills one instead of
+        // asking again, the second time a close of it reaches that function
+        // with nothing to show for the first `GRACE` (`Pane::x11_refused_once`,
+        // set by `settle_refused`'s own silent route and nowhere a dialog
+        // answered). The first `super+q` is still only ever a request.
         if pane.leaving() {
             return;
         }
@@ -201,12 +206,40 @@ impl Solium {
             // window used to be animated away and then asked *nothing*, so it
             // never closed and never came back, which from the other side of
             // the screen is a window that vanished.
+            //
+            // **Except the second time, for X11 (#221).** A pane
+            // `settle_refused` has already marked `x11_refused_once` asked
+            // once, waited `GRACE`, and heard nothing back -- no
+            // `WM_DELETE_WINDOW` answer, no dialog (`refused_with_a_dialog`
+            // never sets this flag, only `settle_refused`'s silent route
+            // does). Asking such a client again is `crate::xwayland::kill_client`
+            // rather than `X11Surface::close`: a second polite request learns
+            // nothing a second `GRACE` would not already have shown the first
+            // one, and it is the one case this compositor can tell apart from
+            // an honest, slow close (`settle_refused`'s own note on `GRACE`)
+            // without guessing -- the client had its whole `GRACE` and never
+            // even started answering.
             if let Some(toplevel) = window.toplevel() {
                 toplevel.send_close();
-            } else if let Some(x11) = window.x11_surface()
-                && let Err(err) = x11.close()
-            {
-                tracing::warn!(?err, "could not ask an X11 window to close");
+            } else if let Some(x11) = window.x11_surface() {
+                let refused_before = self.panes.get(id).is_some_and(Pane::x11_refused_once);
+                let pid = refused_before
+                    .then(|| crate::xwayland::client_pid(x11))
+                    .flatten();
+                match pid {
+                    Some(pid) => crate::xwayland::kill_client(pid),
+                    None => {
+                        if refused_before {
+                            tracing::warn!(
+                                "an unresponsive X11 window has no pid to kill; \
+                                 asking it to close again instead"
+                            );
+                        }
+                        if let Err(err) = x11.close() {
+                            tracing::warn!(?err, "could not ask an X11 window to close");
+                        }
+                    }
+                }
             }
             // Watched either way. Whether the request went out matters less
             // than whether the window is still here a moment later, and a
@@ -358,6 +391,22 @@ impl Solium {
                 pane = id.get(),
                 "a window refused to close; bringing it back"
             );
+            // **#221: silence past the whole of `GRACE` is what
+            // `settle_closing` tells an X11 close apart from one a dialog is
+            // still answering.** `refused_with_a_dialog` is the other way a
+            // pane comes back from a close and never reaches this loop at
+            // all -- it retires `asked_at` through `give_back` well inside
+            // `CLOSING`'s 190 ms, long before anything here could call it due
+            // -- so marking the flag on this route alone is what keeps a
+            // client that is visibly answering from ever being killed.
+            let x11 = self
+                .panes
+                .get(id)
+                .and_then(Pane::client)
+                .is_some_and(|window| window.x11_surface().is_some());
+            if x11 && let Some(pane) = self.panes.get_mut(id) {
+                pane.mark_x11_refused_once();
+            }
             self.give_back(id, now);
         }
         self.panes.iter().any(|pane| pane.asked_at().is_some())

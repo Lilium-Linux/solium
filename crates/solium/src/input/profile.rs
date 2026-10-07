@@ -88,6 +88,23 @@ pub(crate) struct Profile {
 
     /// Scroll direction follows the content rather than the surface.
     pub(crate) natural_scroll: bool,
+
+    /// A press on empty desktop or the wallpaper clears keyboard focus, so
+    /// nothing keeps the keyboard once you can no longer see what held it
+    /// (#219).
+    ///
+    /// A press on a client's own shell surface -- a bar, say -- is not
+    /// covered by this flag, even one that declines the keyboard itself:
+    /// `on_a_client` in `input::pointer_button` returns well before the
+    /// fallback this guards reads it, which is #219's still-open third case,
+    /// not a reading of this field. Correcting that is tracked on the issue,
+    /// not promised here.
+    ///
+    /// True for every form factor: the bug this guards against -- a window
+    /// that cannot be unfocused -- has nothing to do with what the machine
+    /// is. `sol.focus_mode` can still turn it off from `config.lua`'s
+    /// `focus.clear_on_empty_click`.
+    pub(crate) clear_focus_on_empty_click: bool,
 }
 
 impl Profile {
@@ -101,6 +118,7 @@ impl Profile {
                 focus_follows_mouse: true,
                 drag_modifier: DragModifier::Logo,
                 natural_scroll: false,
+                clear_focus_on_empty_click: true,
             },
             FormFactor::Laptop => Self {
                 form_factor,
@@ -111,6 +129,7 @@ impl Profile {
                 // Trackpads are gesture surfaces, and every other trackpad on
                 // this planet scrolls the content.
                 natural_scroll: true,
+                clear_focus_on_empty_click: true,
             },
             FormFactor::Tablet | FormFactor::Phone => Self {
                 form_factor,
@@ -121,6 +140,7 @@ impl Profile {
                 focus_follows_mouse: false,
                 drag_modifier: DragModifier::Logo,
                 natural_scroll: true,
+                clear_focus_on_empty_click: true,
             },
         }
     }

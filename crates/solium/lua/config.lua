@@ -22,16 +22,18 @@
 -- Not here yet, because nothing reads them from this file
 -- ([#159](https://github.com/Lilium-Linux/solium/issues/159)):
 --
---   * Whether focus follows the pointer, natural scrolling, and the key held
---     to drag a window: SOLIUM_FORM_FACTOR picks all three, and
---     SOLIUM_DRAG_MODIFIER the key alone.
+--   * The key held to drag a window: SOLIUM_DRAG_MODIFIER. Natural
+--     scrolling moved out of this list in #157: it is `input`'s
+--     per-device-type `natural_scroll` below, which is what
+--     SOLIUM_FORM_FACTOR's own guess ("a laptop has a touchpad") was really
+--     standing in for. Whether focus follows the pointer moved into `focus`
+--     below with #219, which needed it per mode.
 --   * The terminal `super+return` opens: SOLIUM_TERMINAL, or bind
 --     `super+return` yourself in `bindings` below.
 --   * The overview's animations, fixed in `lua/overview.lua` at 260 ms in and
 --     200 ms out.
 --   * How long a closing window takes to fade, fixed in the compositor at
 --     190 ms.
---   * Your own fallback pointer: SOLIUM_QML_CURSOR; see `cursor` below.
 
 local defaults = {
     -- Space between windows and around the work area, in logical pixels.
@@ -110,6 +112,11 @@ local defaults = {
     -- See `the_shell_takes_its_outside_click_from_the_configuration` and
     -- `a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`.
     --
+    -- What it asks for, `Solium.send("windows.focus", { id: ... })` in its
+    -- QML, reaches `sol.on("surface", ...)`, and `lua/actions.lua` has the
+    -- compositor do the window actions. See
+    -- `windows_focus_from_a_scene_focuses_the_window`.
+    --
     -- `keyboard.bindings`: while the shell holds the keyboard (a search
     -- field, a password), which compositor bindings still work:
     -- "except_claimed" (the default; every binding but the keys the field
@@ -125,6 +132,43 @@ local defaults = {
         outside_click = "swallow",
         keyboard = { bindings = "except_claimed" },
     },
+
+    -- The compositor's own preview shell: a bar, built as configuration on
+    -- the same public API `shell` above describes (`lua/preview/`,
+    -- `qml/preview/`; see docs/ricing.md). On by default, so a fresh install
+    -- shows live workspaces, windows, the keyboard layout and a clock rather
+    -- than a blank desktop.
+    --
+    --     preview = false,
+    --
+    -- Turns it off. Naming your own `shell.scene` above, or `user.lua`'s own
+    -- shell, always wins over it either way -- this only ever fills in a
+    -- default nothing else set.
+    --
+    -- A table instead of `true` reaches the top dock
+    -- (`lua/preview/dock.lua`, 04-ui.md §4.6): `preview = { dock = {
+    -- pinned = { "org.mozilla.firefox", "kitty" }, visibility = "always",
+    -- icon_size = 48 } }`. `pinned` is a list of desktop ids; left unset,
+    -- the dock picks the first installed terminal, file manager and browser
+    -- itself. `visibility` is `"always"` or `"autohide"` (the default).
+    --
+    -- Quick search (`lua/preview/search.lua`, 04-ui.md §4.7) opens on
+    -- `super+d`: `preview = { search = { key = "super+alt+space" } }` binds
+    -- a different one instead. It searches installed applications, open
+    -- windows and a few compositor commands; see `docs/ricing.md` for what
+    -- is cut from this first version.
+    --
+    -- Desktop icons (`lua/preview/desktop.lua`, 04-ui.md §4.9) show
+    -- `Solium.dirs.desktop` (`$XDG_DESKTOP_DIR`, or `user-dirs.dirs`; empty
+    -- draws nothing): `preview = { desktop = { icons = true, from =
+    -- "top-right", cell = { width = 96, height = 100 }, labels = 2, open =
+    -- "double", show_hidden = false, reveal_on_click = false } }`. `icons =
+    -- false` turns them off; `from` is `"top-right"` (the default) or
+    -- `"top-left"`; `open` is `"double"` (the default) or `"single"`. See
+    -- `docs/ricing.md` for what is cut from this first version (dragging
+    -- and saved positions, right-click menus, showing the desktop, Open
+    -- With, thumbnails).
+    preview = true,
 
     -- The keyboard: its xkb layouts (`layout`, `variant`, `options`, `model`,
     -- `rules`, `active`), the locks (`caps`, `num`), the repeat rate, and the
@@ -329,7 +373,20 @@ local defaults = {
     -- different pointer from everything else.
     --
     --     cursor = { theme = "Adwaita", size = 24 },
+    --     cursor = { scene = "~/.config/solium/cursor/Cursor.qml", size = 32 },
     --
+    --   scene   a QML scene to draw the pointer with, configured the way
+    --           `shell.scene` is: a path (`~` is expanded), or a name looked
+    --           for in ~/.config/solium/qml/ and then the shipped QML. It is
+    --           drawn for every shape, ahead of any theme, and reads
+    --           `Solium.cursor`: the shape asked for (`default`, `text`,
+    --           `pointer`, `ew-resize`...), `pressed`, `velocity`, `scale`
+    --           and `size`. It sets `Solium.cursor.hotspot` on its root, and
+    --           is as big as its root says, so a glow can reach past `size`.
+    --           It may animate. A window that draws its own cursor, or hides
+    --           it as a game does, still does over its own surface.
+    --           `SOLIUM_QML_CURSOR=<file>` is the scene for one run, over this.
+    --           docs/ricing.md has an example.
     --   theme   the name of an XCursor theme -- a directory under ~/.icons,
     --           ~/.local/share/icons or /usr/share/icons. `ls /usr/share/icons`
     --           lists the ones this machine has. Naming one here takes
@@ -348,13 +405,13 @@ local defaults = {
     -- logical pixels and no theme at all.
     --
     -- **No theme is not a missing pointer.** Solium draws its own from
-    -- `qml/cursor.qml`, and that is what you get with nothing set here, with
-    -- nothing in the environment, or with a theme named that turns out not to
-    -- be installed -- the log says which. It is a white arrow with a dark
-    -- outline, in fixed colours rather than the theme's, because a pointer
-    -- has to read over whatever a client drew. A copy of `cursor.qml` in
-    -- ~/.config/solium/qml/ is not read: `SOLIUM_QML_CURSOR=<file>` draws
-    -- the pointer from your own file, and a setting for it waits on #159.
+    -- `qml/cursor.qml`, and that is what you get with no scene and no theme
+    -- set here, nothing in the environment, or a theme named that turns out
+    -- not to be installed -- the log says which. It is a white arrow with a
+    -- dark outline, in fixed colours rather than the theme's, because a
+    -- pointer has to read over whatever a client drew, and it is one arrow
+    -- for every shape. A scene that would not load is drawn as no scene is,
+    -- with a line in the log, and a reload tries it again.
     --
     -- A shape your theme does *not* have is the one case that does not reach
     -- it. Applications name the cursor they want -- an I-beam over text, a
@@ -362,9 +419,10 @@ local defaults = {
     -- of them; the missing ones fall back to that theme's own arrow, so a
     -- themed session stays wholly themed rather than mixing two designs.
     --
-    -- Applied on reload, so trying a theme out is `super+shift+r`. The
-    -- compositor call is `sol.cursor_theme(...)`; `sol.cursor()` is a
-    -- different function that answers with where the pointer is.
+    -- Applied on reload, so trying a theme or a scene out is `super+shift+r`;
+    -- a scene whose files changed is built again then. The compositor call is
+    -- `sol.cursor_theme(...)`; `sol.cursor()` is a different function that
+    -- answers with where the pointer is.
     cursor = {},
 
     -- How QML -- the frames, the pointer, the wallpaper -- is rendered.
@@ -590,6 +648,140 @@ local defaults = {
         dbus_inhibit = true,
     },
 
+    -- libinput device settings: tap-to-click, scrolling, acceleration and the
+    -- rest (#157). Applied to every device already connected and to each one
+    -- added later, and reapplied on reload.
+    --
+    -- Nothing here is read on the nested backend (`solium` inside another
+    -- compositor): there is no libinput device there to apply it to, only a
+    -- host window's own pointer and keyboard.
+    input = {
+        -- Defaults by device type. A touchpad is `Pointer` capability plus
+        -- `Gesture` -- the one libinput reports only for a driver that
+        -- recognises multi-finger gestures, which in practice means
+        -- touchpads and nothing else -- and a plain mouse is `Pointer`
+        -- without it.
+        touchpad = {
+            -- Tapping the pad clicks. libinput leaves this off by default,
+            -- which is why a bare compositor's touchpad does nothing to a
+            -- tap -- #157's whole opening complaint.
+            tap = true,
+            -- Scroll direction follows the content under your fingers,
+            -- rather than the surface. What every other touchpad on the
+            -- market does.
+            --
+            -- This used to come from SOLIUM_FORM_FACTOR, guessing "a laptop
+            -- has a touchpad" for every device at once. A device's own type
+            -- answers the real question directly -- a desktop with a USB
+            -- touchpad now gets this too, which the guess never could.
+            natural_scroll = true,
+        },
+        -- A mouse keeps libinput's own defaults: no tap (it has no pad to
+        -- tap), no natural scroll (a wheel is not a surface).
+        mouse = {},
+        keyboard = {},
+        touchscreen = {},
+        tablet_tool = {},
+        tablet_pad = {},
+        switch = {},
+
+        -- Per-device overrides, matched by name (a case-insensitive
+        -- substring of what `libinput list-devices` or `dmesg` calls it) or
+        -- by `vendor`/`product` (the same tool's "Vendor"/"Product", or
+        -- `lsusb`'s). At least one of the three is required -- an override
+        -- naming none of them matches nothing, on purpose, rather than
+        -- reaching every device on the machine.
+        --
+        -- Entries apply in order, over the type default above and over each
+        -- other: a later one changes only the fields it names, so two
+        -- overrides for the same device can each own a different setting.
+        --
+        --     devices = {
+        --         -- A touchpad that should not act like one.
+        --         { name = "SynPS/2 Synaptics", tap = false, natural_scroll = false },
+        --         -- A mouse, by its usb id, slowed down.
+        --         { vendor = 0x046d, product = 0xc52b, accel_speed = -0.3 },
+        --     },
+        devices = {},
+    },
+
+    -- logind's `Lock` and sleep requests (#153): `loginctl lock-session`, a
+    -- power menu that locks that way, and a lid switch logind handles itself
+    -- all send `Lock`, and this is what runs on it.
+    lock = {
+        -- The locker: nothing by default, so a machine with none installed
+        -- never has Solium try to run one. Split on whitespace, with no
+        -- quoting, like an autostart Exec= line; it runs as a client of this
+        -- compositor, the same as any other lock screen.
+        --
+        --     command = "swaylock -f",
+        command = nil,
+
+        -- Hold sleep until the locker above has confirmed the lock, or
+        -- logind's own InhibitDelayMaxUSec (five seconds) runs out first --
+        -- so the machine never wakes showing the desktop it was left on.
+        -- `swayidle`'s own `before-sleep` keeps working either way; set this
+        -- to false only to stop the two overlapping.
+        before_sleep = true,
+    },
+
+    -- X11 windows that are refused a tile, decoration or bar entry outright
+    -- (#221): some autostart entries, such as KDE's screen-sharing fallback
+    -- `xwaylandvideobridge`, exist only so a portal has something to talk to
+    -- and were never meant to be seen. See docs/ricing.md.
+    x11 = {
+        -- WM_CLASS names to hide, matched case-insensitively against either
+        -- field X11 clients set (`xprop WM_CLASS` on a nested window shows
+        -- both: class first, instance second). A name here replaces this
+        -- whole list rather than adding to it, so keep `xwaylandvideobridge`
+        -- in your own copy unless you want it shown again.
+        --
+        --     hidden = { "xwaylandvideobridge", "my-tray-helper" },
+        hidden = { "xwaylandvideobridge" },
+    },
+
+    -- Who takes the keyboard on a click or a hover, and when nobody does
+    -- (#219). `lua/modes.lua` hands this over on every mode change, so a
+    -- mode's own entry below answers immediately, without waiting for a
+    -- reload.
+    focus = {
+        -- A press on empty desktop, the wallpaper, or a shell surface that
+        -- does not take the keyboard clears keyboard focus, so a window you
+        -- clicked away from stops taking what you type. `false` leaves the
+        -- last focused window holding the keyboard until something else
+        -- takes it.
+        clear_on_empty_click = true,
+
+        -- Per mode (the names `modes.register` uses): `"click"` focuses a
+        -- window only on a press; `"follow"` also focuses it when the
+        -- pointer moves over it, which is what every tiling compositor
+        -- people arrive from does, and the compositor's own default for the
+        -- machine ([#159](https://github.com/Lilium-Linux/solium/issues/159),
+        -- `SOLIUM_FORM_FACTOR`) when a mode says neither.
+        --
+        -- Floating -- the desktop, with no layout in charge and windows free
+        -- to overlap -- defaults to click-only here: a window you are not
+        -- using sits under the pointer on the way to the one you want, and
+        -- hovering it should not steal the keyboard from what you were
+        -- typing into. Every other mode keeps the machine's own default
+        -- unless you name it too:
+        --
+        --     focus = { modes = { floating = "follow", scrolling = "click" } },
+        --
+        modes = {
+            floating = "click",
+        },
+
+        -- `click` and `follow` above, for every mode at once rather than one
+        -- at a time -- not here by default, so that `nil` can mean "whatever
+        -- this machine's form factor already answered" rather than a fixed
+        -- default that cannot know it:
+        --
+        --     focus = { follow = false },   -- never follow the pointer, in any mode
+        --     focus = { click = false },    -- a mode must `sol.focus` its own clicks
+        --
+    },
+
     -- Telling the rest of the session that Solium is its desktop.
     --
     -- Portals, programs D-Bus starts on demand, ~/.config/autostart and user
@@ -715,6 +907,26 @@ local defaults = {
         fade = 180,
     },
 
+    -- Reload automatically when a file this configuration loaded changes
+    -- (#223): the configuration directory itself, every Lua module
+    -- `require` found in it, your pane styles, your loading scenes and your
+    -- shell, if you have one. Saved the same way `super+shift+r` reads it --
+    -- a broken file leaves the running configuration alone and reports it
+    -- the same way a manual reload does.
+    reload = {
+        -- false turns this off entirely: nothing is watched at all, not
+        -- merely "watched but never acted on" -- so a configuration directory
+        -- on a slow network mount, say, costs nothing once this is off.
+        automatic = true,
+
+        -- How long a burst of writes waits to go quiet before the one reload
+        -- it earns, in milliseconds. An editor that saves by writing a
+        -- temporary file and renaming it over the original fires this
+        -- several times a few milliseconds apart; 300 lands all of them in
+        -- one quiet period while still feeling instant for a single save.
+        quiet_ms = 300,
+    },
+
     -- What a window looks like while you are dragging its edge.
     --
     -- A client cannot be resized; it can only be *asked*, and it answers when
@@ -746,19 +958,78 @@ local defaults = {
         fill = "stretch",
     },
 
-    -- What a fullscreen window covers, when it is the one in front on the
-    -- workspace its monitor is showing.
+    -- A fullscreen window: what it covers, and how a window goes fullscreen
+    -- and comes back (super+f, or the application asking).
     fullscreen = {
+        -- What a fullscreen window covers, when it is the one in front on the
+        -- workspace its monitor is showing.
+        --
         -- "top", the default: the top layer, so a bar -- a client's, like
         -- Waybar, or one declared with `sol.surface` -- goes under a
         -- fullscreen video or game, and the video takes the clicks where the
         -- bar was. The overlay layer stays over it: notifications, an OSD, a
-        -- launcher.
+        -- launcher. A window going fullscreen goes over the bars as it starts
+        -- to grow, and one leaving goes back under them once it has finished
+        -- shrinking.
         --
         -- "none": nothing, and the bars stay over fullscreen windows.
         --
         -- Anything else is named in the log, and the default kept.
         covers = "top",
+
+        -- How a window grows to cover its monitor, and shrinks back to where
+        -- it was: from wherever it is drawn, as a window a layout moves
+        -- glides, so pressing the key again half way turns it round where it
+        -- is. The application is told its new size the moment the key is
+        -- pressed, and its last picture is stretched until it has drawn one
+        -- at that size: through the glide and after it, for a quarter of a
+        -- second past the landing at most, and then the window is shown at
+        -- the size the application has. Once it has answered the window is
+        -- drawn as it is, with nothing in between, so a game or a video can
+        -- be shown directly.
+        --
+        -- `duration` is in milliseconds and `easing` is a curve, by name or
+        -- as four numbers, as for every `motion` here (docs/animation.md).
+        -- `false` makes every change instant -- nothing is moved or
+        -- stretched, and the window is drawn as it is on the next frame --
+        -- and `true` is the motion below again:
+        --
+        --     fullscreen = { animate = false },
+        --
+        -- Change this default and `SHIPPED` in `lua/fullscreen.lua` with it:
+        -- that is the motion `animate = true` turns back on.
+        animate = { duration = 260, easing = "outCubic" },
+
+        -- Applications that go fullscreen and back at once whatever `animate`
+        -- says, by their app id: the name `app_id` gives each window in
+        -- `sol.windows()`. A game, or a video player started fullscreen, may
+        -- want to be there at once:
+        --
+        --     fullscreen = { instant = { app_id = { "mpv", "gamescope" } } },
+        --
+        -- Empty as shipped, so every application animates. A list is
+        -- replaced whole, so the list you write is the whole list.
+        instant = { app_id = {} },
+    },
+
+    -- How a window is maximised to fill the work area of its monitor, and
+    -- restored (super+shift+m, or the button on its frame). The same two
+    -- settings as `fullscreen`'s and read the same way, but on their own: a
+    -- maximise can move differently from a fullscreen, or not at all, and
+    -- changing one changes nothing about the other.
+    maximize = {
+        -- How a window grows to fill the work area and shrinks back, as
+        -- `fullscreen.animate` says for going fullscreen: a duration and an
+        -- easing, `false` for instant, or `true` for the motion below.
+        --
+        --     maximize = { animate = false },
+        --
+        -- Change this default and `SHIPPED` in `lua/fullscreen.lua` with it.
+        animate = { duration = 220, easing = "outCubic" },
+
+        -- Applications that are maximised and restored at once whatever
+        -- `animate` says, by app id, as `fullscreen.instant` lists them.
+        instant = { app_id = {} },
     },
 
     floating = {
@@ -774,6 +1045,55 @@ local defaults = {
         -- application in `tiling.client_size_ignore` is not believed here
         -- either. Anything else is read as "respect".
         client_limits = "respect",
+
+        -- Snapping a window like Windows does (#222): `lua/floating.lua`.
+        --
+        -- Bound only while floating is the mode in charge -- toggled the way
+        -- `overview.lua` binds Escape only while it is up -- so tiling and
+        -- scrolling keep the plain arrows for focus by direction (#150) and
+        -- these never clash with them. `false` unbinds one, as a key in
+        -- `bindings` above does; a different combo rebinds it.
+        --
+        --   left, right   snap the focused window to that half of its
+        --                 monitor's work area. Pressed again from that half,
+        --                 the next monitor that way, if there is one.
+        --   maximize      the work area, whole; from a half, that half's top
+        --                 quarter instead.
+        --   restore       the rectangle the window had before its first snap,
+        --                 or, from the work area, un-maximises.
+        snap = {
+            left = "super+left",
+            right = "super+right",
+            maximize = "super+up",
+            restore = "super+down",
+            -- The motion a snap moves with. Not `tiling.snap`: a window
+            -- gliding to half the screen is this file's own question, kept
+            -- apart so the two can be tuned differently, as `fullscreen` and
+            -- `maximize` above are kept apart from each other.
+            motion = { duration = 220, easing = "outCubic" },
+        },
+
+        -- Where a new window goes, and how big, while floating is in charge.
+        -- `lua/floating.lua`; a dialog is never placed by this, since a modal
+        -- is lifted out of any arrangement already (`dialogs.lua`).
+        placement = {
+            -- "center", the default: the middle of the focused monitor's
+            -- work area, offset by `cascade` for every window already there
+            -- it would otherwise sit on top of -- so a second and third
+            -- window land in a row rather than in a stack nobody can
+            -- separate. "cascade": always offset from the last window
+            -- opened, centred or not. "pointer": centred on the pointer
+            -- instead of the monitor. Anything else is read as "center".
+            policy = "center",
+            cascade = { x = 32, y = 32 },
+            -- A new window's share of its monitor's work area on each axis,
+            -- when its application asked for no size of its own -- one that
+            -- has not shown its first frame yet, which is every window
+            -- `sol.spawn` opens (see `open` in docs/modes.md). Capped by the
+            -- work area either way, and by the application's own minimum and
+            -- maximum once it has one (#115, `sizes.lua`).
+            size = 0.6,
+        },
     },
 
     tiling = {
@@ -1127,7 +1447,16 @@ local open_sections = {
         caps = true,
         num = true,
     },
-    cursor = { theme = true, size = true },
+    cursor = { theme = true, size = true, scene = true },
+    -- `click` and `follow` are deliberately absent from `focus` above, so
+    -- that leaving either out of a `user.lua` means "nil", not "zero" --
+    -- the same reason `keyboard` and `cursor` need naming here rather than
+    -- being read off their own defaults.
+    focus = { click = true, follow = true },
+    -- Mode names are open-ended, the same as a key combination: a mode
+    -- outside this file can register any name with `modes.register` and
+    -- give `focus.modes` an entry of its own.
+    ["focus.modes"] = true,
     -- `true` rather than a set of names: everything is accepted.
     bindings = true,
 }
@@ -1282,8 +1611,11 @@ end
 --     `monitors` entry are not checked here. `mode` misspelled as `moed` is
 --     merged as written and the monitor keeps its default mode.
 --   * `keyboard`, `cursor` and `bindings` are the sections above; the first
---     two are checked against a list this file restates, the third against
---     nothing.
+--     two are checked against a list this file restates, the other two
+--     against nothing: `bindings` because any key combination is one, and
+--     `focus.modes` because mode names are open-ended the same way (a mode
+--     outside this file can register any name). `focus.modes.folating`
+--     merges in silently, exactly like a misspelled binding.
 --   * A value of the wrong *type* is not this check's business. `gap = "12"`
 --     is a recognised key and passes.
 for _, entry in ipairs(unrecognised) do

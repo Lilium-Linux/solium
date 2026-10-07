@@ -253,6 +253,8 @@ function workspaces.apply(animation)
             end
         end
     end
+
+    workspaces.declare()
 end
 
 -- Switch the monitor in front of you, or every monitor when workspaces are
@@ -388,11 +390,159 @@ function workspaces.announce()
     end
 end
 
--- A new window belongs to the workspace its own monitor is showing.
+-- What the workspaces are, said to the compositor, which has no idea
+-- (03 §3.2.17): one group per monitor when they are per monitor, one for
+-- every monitor when they are not, what each shows, and which workspace each
+-- window is on. This is how a hosted shell's `Workspaces` knows them. Rust
+-- diffs what it publishes, so saying it again unchanged costs no scene
+-- anything. See `the_shipped_workspaces_declare_what_each_monitor_shows`,
+-- `with_workspaces_together_one_group_has_every_monitor` and
+-- `a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+--
+-- The arrangement is the shape the workspaces really make, which is where
+-- the last one sits: a row of four is four by one, whatever `rows` says.
+-- See `the_declared_arrangement_is_the_shape_of_its_workspaces`.
+--
+-- `moved` is the monitor each window a handler has just moved is going to,
+-- by window id, for the windows `sol.windows()` cannot show there yet: it is
+-- the snapshot from before the handler ran. See `carry` and
+-- `a_window_on_no_workspace_moved_across_is_declared_on_what_that_monitor_shows`.
+function workspaces.declare(moved)
+    local count = workspaces.count()
+    local columns, rows = workspaces.cell(count)
+    local function group(id, names)
+        local list = {}
+        for index = 1, count do
+            local col, row = workspaces.cell(index)
+            list[#list + 1] = { id = tostring(index), name = tostring(index), col = col, row = row }
+        end
+        return { id = id, monitors = names, showing = { tostring(workspaces.on(names[1])) }, workspaces = list }
+    end
+    local groups = {}
+    if workspaces.settings.per_monitor then
+        for _, monitor in ipairs(sol.monitors()) do
+            groups[#groups + 1] = group(monitor.name, { monitor.name })
+        end
+    else
+        local names = {}
+        for _, monitor in ipairs(sol.monitors()) do
+            names[#names + 1] = monitor.name
+        end
+        if #names > 0 then
+            groups[1] = group(TOGETHER, names)
+        end
+    end
+    local windows = {}
+    for _, window in ipairs(sol.windows()) do
+        local monitor = moved and moved[window.id] or window.monitor
+        windows[window.id] = { tostring(workspaces.at(window.id, monitor)) }
+    end
+    sol.workspaces({
+        arrangement = {
+            kind = workspaces.settings.arrangement,
+            columns = columns,
+            rows = rows,
+        },
+        groups = groups,
+        windows = windows,
+    })
+end
+
+-- A window a layout moved onto another monitor goes to the workspace that
+-- monitor shows, if it belonged to one, and the compositor is told at once:
+-- no `layout` follows a move by key. One that belongs to no workspace in
+-- particular is on whatever its new monitor shows, and is declared there
+-- too. See
+-- `a_window_moved_onto_the_other_monitor_is_declared_on_the_workspace_it_shows`
+-- and `a_window_on_no_workspace_moved_across_is_declared_on_what_that_monitor_shows`.
+function workspaces.carry(id, monitor)
+    if workspaces.of[id] ~= nil then
+        workspaces.of[id] = workspaces.on(monitor)
+    end
+    workspaces.declare({ [id] = monitor })
+end
+
+-- Send one window to a workspace on its own monitor: `windows.send` from a
+-- scene, which names the window rather than meaning the focused one. See
+-- `a_windows_send_from_a_scene_moves_the_window_it_names`.
+function workspaces.send_window(id, index)
+    index = math.max(1, math.min(index, workspaces.count()))
+    workspaces.of[id] = index
+    workspaces.apply()
+    workspaces.announce()
+end
+
+-- Whether the compositor has window `id` now: `windows.send` for one it has
+-- not is logged, not kept. See
+-- `a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`.
+local function is_open(id)
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then
+            return true
+        end
+    end
+    return false
+end
+
+-- A scene asks for these by name (`Solium.send("workspaces.go", { id: "2",
+-- monitor: Solium.monitor.name })`), and only this file knows what they
+-- mean. See `a_workspaces_go_from_a_scene_switches_the_monitor_it_names` and
+-- `a_windows_send_from_a_scene_moves_the_window_it_names`.
+--
+-- Answered only where `actions.lua` routes a scene's actions, which
+-- `init.lua` requires before this file: a configuration that took it out
+-- routes them its own way, and requiring it here would route each one a
+-- second time. See `workspaces_lua_does_not_route_a_scenes_actions_by_itself`.
+--
+-- A workspace is a whole number or its digits: `2.5` would slide the desks
+-- half a screen, or put a window on no desk at all, so it is logged like any
+-- other form and does nothing. See
+-- `a_workspaces_go_from_a_scene_switches_the_monitor_it_names` and
+-- `a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`.
+local actions = package.loaded["actions"]
+if actions then
+    actions.override("workspaces.go", function(data)
+        local index = type(data) == "table" and math.tointeger(tonumber(data.id))
+        if index then
+            workspaces.go(index, data.monitor)
+        else
+            sol.log("workspaces.go: answered only as { id, monitor }, the id a workspace's number or its digits")
+        end
+    end)
+    -- `{ id, workspace }`, the id a number or its digits, for a window that
+    -- is open. Anything else, `{ id, monitor }` among it, is logged and does
+    -- nothing. See
+    -- `a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`.
+    actions.override("windows.send", function(data)
+        local id = type(data) == "table" and tonumber(data.id)
+        local index = id and math.tointeger(tonumber(data.workspace))
+        if index and is_open(id) then
+            workspaces.send_window(id, index)
+        else
+            sol.log("windows.send: answered only as { id, workspace } for a window that is open")
+        end
+    end)
+end
+
+-- A new window belongs to the workspace its own monitor is showing, and is
+-- declared there at once.
+--
+-- **`"open"` is the only event some windows ever see.** `"layout"`, which the
+-- handler below also declares from, fires only while a layout is arranging
+-- something -- so a *floating* window (`modes.lua`'s own default, with no
+-- layout registered at all) never gets one. Without the `declare()` here, a
+-- floating window's row never carries a `workspace`, forever rather than for
+-- one frame, because nothing else ever asks: `workspaces.of` (and
+-- `workspaces.at`'s fallback) already had the right answer, live, which is
+-- why `search.lua`'s own query of it was never wrong -- only a hosted shell
+-- reading the *published* `Workspaces`/`WindowList` was, since publishing is
+-- this call's job and nobody else's.
+-- `a_window_that_opens_while_floating_is_declared_with_no_relayout_to_ask_for_it`.
 sol.on("open", function(id)
     if workspaces.settings.follow_new_windows then
         workspaces.of[id] = workspaces.on(monitors.of(id))
     end
+    workspaces.declare()
 end)
 
 -- An application you launched was already running, and answered by bringing
@@ -507,9 +657,11 @@ end)
 -- And membership follows the windows. Only the membership -- no `sol.animate`
 -- and no transform, so this cannot disturb whichever layout is also listening
 -- for this event. A selection whose members have not changed is not a change at
--- all and costs nothing on the other side.
+-- all and costs nothing on the other side. So does what the compositor is told
+-- of each window's workspace: `a_window_that_opens_is_declared_on_the_workspace_its_monitor_shows`.
 sol.on("layout", function()
     workspaces.regroup()
+    workspaces.declare()
 end)
 
 for index = 1, 9 do

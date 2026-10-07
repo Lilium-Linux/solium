@@ -11,9 +11,11 @@ that you change without rebuilding anything.
 ![Two windows on the Solium wallpaper: one in the compositor's own QML titlebar, focused, and one that draws its own](docs/desktop.png)
 
 Captured by the compositor reading back its own framebuffer, in a nested
-session with the shipped configuration and nothing else. The window on the left
-wears the default frame, a QML scene rendered in-process; the one on the right
-asked to draw its own and was let. The wallpaper is a QML file too.
+session with the shipped configuration and nothing else, under the light theme
+Solium shipped until 2026-10-04 and not retaken yet: the shipped theme is now
+dark grey. The window on the left wears the default frame, a QML scene
+rendered in-process; the one on the right asked to draw its own and was let.
+The wallpaper is a QML file too.
 [docs/modes.md](docs/modes.md) has every mode, frame by frame.
 
 ## Status
@@ -28,8 +30,8 @@ It is being readied for daily use, and the daily-driving trial that decides
 whether it is ready has not happened yet. What stands in the way is the
 [`daily-drive` label][daily-drive], and the honest reasons are specific:
 
-- A hosted shell is not yet a whole desktop ([#169]): it sees no windows or
-  workspaces ([#166]).
+- A hosted shell is not yet a whole desktop ([#169]): it has no icons yet,
+  and the preview shell itself is not written.
 - Suspend and resume have never been tested ([#64]), and a session on the
   hardware sometimes starts with no input devices and stops itself ([#48]).
 - Nothing has run unattended for hours on the hardware ([#65]).
@@ -570,7 +572,6 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#162]: https://github.com/Lilium-Linux/solium/issues/162
 [#163]: https://github.com/Lilium-Linux/solium/issues/163
 [#164]: https://github.com/Lilium-Linux/solium/issues/164
-[#166]: https://github.com/Lilium-Linux/solium/issues/166
 [#169]: https://github.com/Lilium-Linux/solium/issues/169
 [#172]: https://github.com/Lilium-Linux/solium/issues/172
 [#173]: https://github.com/Lilium-Linux/solium/issues/173

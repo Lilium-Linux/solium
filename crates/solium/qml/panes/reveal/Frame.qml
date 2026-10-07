@@ -42,9 +42,11 @@ Item {
         radius: 0
 
         // Tucked just above the window when hidden, so it comes out from under
-        // its own edge instead of materialising.
+        // its own edge instead of materialising. Opaque once out, so what is
+        // behind the window never tints its grey
+        // (`tests/scenarios/pane-bars-opaque.lua`).
         y: frame.pointerInside ? 0 : -height
-        opacity: frame.pointerInside ? 0.96 : 0.0
+        opacity: frame.pointerInside ? 1.0 : 0.0
 
         Behavior on y {
             NumberAnimation { duration: 260; easing.type: Easing.OutBack; easing.overshoot: 0.9 }
@@ -81,6 +83,31 @@ Item {
                            ? modelData.tint
                            : (frame.focused ? Theme.control : Theme.controlInactive)
                     Behavior on color { ColorAnimation { duration: Theme.quick } }
+
+                    // Its glyph, under the pointer: `×` to close, `+` to
+                    // maximise, dark on the grey it turns. With no hue to say
+                    // which button is which, the glyph and the shade do
+                    // (`tests/scenarios/pane-buttons-drawn.lua`).
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 7
+                        height: 1.5
+                        radius: 0.75
+                        antialiasing: true
+                        color: Theme.accentInk
+                        rotation: parent.modelData.name === "close" ? 45 : 0
+                        visible: hit.containsMouse
+                    }
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 7
+                        height: 1.5
+                        radius: 0.75
+                        antialiasing: true
+                        color: Theme.accentInk
+                        rotation: parent.modelData.name === "close" ? -45 : 90
+                        visible: hit.containsMouse
+                    }
 
                     MouseArea {
                         id: hit

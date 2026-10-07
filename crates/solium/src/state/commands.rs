@@ -4,6 +4,36 @@
 
 use super::*;
 
+/// How many rounds of `done`s one dispatch tells, each round the attempts the
+/// round before it settled, before it leaves the rest to the next dispatch.
+/// `real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
+pub(super) const ATTEMPT_ROUNDS: usize = 16;
+
+/// The pure decision behind
+/// [`Solium::warn_about_unwatched_configured_paths`]: which of `configured`
+/// is not covered by `roots` *and* has not already been added to `warned` --
+/// inserting into `warned` as it goes, so a path seen on an earlier reload is
+/// not returned again.
+///
+/// Split out the same way [`crate::autoreload::resolve_roots`] is split from
+/// `watch_roots`: a test drives this with plain `PathBuf`s it makes up,
+/// rather than a real pane style or shell scene that would have to resolve
+/// against the filesystem to be worth anything.
+/// `tests::an_unwatched_path_is_returned_once`,
+/// `tests::a_watched_path_is_never_returned`,
+/// `tests::an_already_warned_path_is_not_returned_again`.
+fn newly_unwatched_paths(
+    configured: Vec<std::path::PathBuf>,
+    roots: &[std::path::PathBuf],
+    warned: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    configured
+        .into_iter()
+        .filter(|path| !crate::autoreload::path_is_watched(path, roots))
+        .filter(|path| warned.insert(path.clone()))
+        .collect()
+}
+
 impl Solium {
     /// Turn what a script aimed at into what the compositor holds.
     ///
@@ -139,6 +169,10 @@ impl Solium {
         {
             tracing::debug!(status, "mode changed");
             self.status = status;
+            // `Solium.status` is published only from a frame, same as every
+            // other model; a binding that only calls `sol.status` must still
+            // ask for one, not rely on a command alongside it.
+            self.redraw = true;
         }
 
         let now = self.clock.now();
@@ -314,6 +348,54 @@ impl Solium {
                         self.close_pane(pane);
                     }
                 }
+                // One of the compositor's verbs, done as the command that does
+                // it, and its outcome kept for the attempt's `done` (Ruling 15).
+                // `real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
+                // `real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+                Command::Act {
+                    attempt,
+                    action,
+                    data,
+                } => match self.act(&action, &data) {
+                    Ok(command) => {
+                        self.apply(Outcome {
+                            commands: vec![command],
+                            ..Outcome::default()
+                        });
+                        self.settled_attempts.push(crate::script::Settled {
+                            attempt,
+                            ok: true,
+                            reason: None,
+                        });
+                    }
+                    Err(reason) => self.settled_attempts.push(crate::script::Settled {
+                        attempt,
+                        ok: false,
+                        reason: Some(reason),
+                    }),
+                },
+                // What Lua says the workspaces are, less the monitors and
+                // windows the compositor does not have and any workspace
+                // declared twice, each logged once.
+                // `real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`,
+                // `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+                // `crate::models::workspaces::tests::a_workspace_declared_twice_is_one_row`.
+                Command::Workspaces(declared) => {
+                    let monitors: Vec<String> = self.space.outputs().map(Output::name).collect();
+                    let windows: Vec<u64> = self
+                        .snapshot()
+                        .windows
+                        .iter()
+                        .map(|window| window.id)
+                        .collect();
+                    crate::models::workspaces::log_unknown(
+                        &declared,
+                        &monitors,
+                        &windows,
+                        &mut self.unknown_in_workspaces,
+                    );
+                    self.workspaces = Some(declared.validated(&monitors, &windows));
+                }
                 Command::Loading(loading) => {
                     if self.loading != loading {
                         tracing::debug!(?loading, "loading behaviour set");
@@ -327,6 +409,40 @@ impl Solium {
                     }
                 }
                 Command::Idle(settings) => self.idle.configure(settings),
+                Command::AutoReload(settings) => self.configure_autoreload(settings),
+                // Only the data: applying it to real devices needs a
+                // libinput handle, which only a backend has. `tty.rs` reads
+                // `self.input.config()` on `DeviceAdded` and again on
+                // reload; the nested backend never does, which is correct --
+                // it has no libinput devices to apply anything to.
+                Command::Input(config) => self.input.configure(config),
+                Command::Lock(settings) => {
+                    self.logind.configure(settings, self.lock.is_some());
+                }
+                Command::X11(settings) => {
+                    if self.x11 != settings {
+                        tracing::debug!(?settings, "which WM_CLASS names are hidden set");
+                        self.x11 = settings;
+                    }
+                }
+                Command::FocusMode {
+                    click,
+                    follow,
+                    clear_on_empty_click,
+                } => {
+                    // `None` leaves the profile's current answer alone --
+                    // see `Command::FocusMode`'s own doc for why there is no
+                    // fixed default to fall back to instead.
+                    if let Some(click) = click {
+                        self.profile.click_to_focus = click;
+                    }
+                    if let Some(follow) = follow {
+                        self.profile.focus_follows_mouse = follow;
+                    }
+                    if let Some(clear) = clear_on_empty_click {
+                        self.profile.clear_focus_on_empty_click = clear;
+                    }
+                }
                 Command::Power { monitor, on } => match monitor {
                     None => self.power_all(on),
                     Some(name) => {
@@ -424,6 +540,15 @@ impl Solium {
                     }
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
+                Command::FolderTrust { absolute } => {
+                    self.folder_trust.trust(&absolute);
+                    if let Some(entry) = self.folder.iter_mut().find(|entry| {
+                        crate::folder::path_from_uri(&entry.uri)
+                            .is_some_and(|path| path.display().to_string() == absolute)
+                    }) {
+                        entry.trusted = true;
+                    }
+                }
                 Command::Reload => self.request = Some(Request::Reload),
                 Command::Keyboard(request) => {
                     let keymap = self.keymap.clone();
@@ -537,13 +662,50 @@ impl Solium {
         if self.dispatching == 0 && self.scenes_to_settle {
             self.settle_scenes();
         }
+        self.tell_settled_attempts();
+    }
+
+    /// Tell each `done` what became of its `sol.act`, in a dispatch of their
+    /// own, once the outermost dispatch that settled it is applied whole,
+    /// every command after it in its batch included (03 §3.3.2), and after a
+    /// hotplug's or a reload's held handlers.
+    /// `real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
+    /// `real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+    /// `real_client::reflow_on_close::hosted::done_is_told_after_every_command_of_the_batch_that_ran_its_act`,
+    /// `real_client::reflow_on_close::hosted::a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`,
+    /// `real_client::reflow_on_close::hosted::a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`.
+    ///
+    /// Never from inside itself: what a `done` asks for is told by this
+    /// loop, a round at a time, so a `done` that acts again each time it is
+    /// told cannot run the stack out, and past `ATTEMPT_ROUNDS` rounds the
+    /// rest wait for the next dispatch.
+    /// `real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
+    pub(crate) fn tell_settled_attempts(&mut self) {
+        if self.dispatching > 0 || self.telling_attempts {
+            return;
+        }
+        self.telling_attempts = true;
+        for _ in 0..ATTEMPT_ROUNDS {
+            if self.settled_attempts.is_empty() {
+                break;
+            }
+            let snapshot = self.snapshot();
+            let Some(mut scripts) = self.scripts.take() else {
+                break;
+            };
+            let settled = std::mem::take(&mut self.settled_attempts);
+            let outcome = scripts.attempts_settled(&settled, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
+        self.telling_attempts = false;
     }
 
     /// The window a script means by an id.
     ///
     /// Ids that no longer exist are simply not found — a window closing while a
     /// mode holds its id is ordinary, not an error.
-    fn window_by_id(&self, id: u64) -> Option<Window> {
+    pub(super) fn window_by_id(&self, id: u64) -> Option<Window> {
         self.panes.by_script_id(id).and_then(Pane::client).cloned()
     }
 
@@ -598,6 +760,17 @@ impl Solium {
         match Scripts::load_carrying(path, carried) {
             Ok(scripts) => {
                 crate::qml::clear_cache();
+                // Installed applications can change between one session and
+                // the next edit of a configuration (an install, an update), so
+                // a reload is the one point this version rescans them
+                // (`apps.rs`'s module doc, `models::mod`'s `publish_models`).
+                self.apps_scan_pending = true;
+                // `Solium.dirs.desktop` can change too (a session's
+                // `XDG_DESKTOP_DIR` edited, `user-dirs.dirs` regenerated), so
+                // a reload re-resolves and rescans the desktop folder the
+                // same way (`folder.rs`'s module doc, `models::mod`'s
+                // `publish_models`).
+                self.folder_scan_pending = true;
                 // And with Qt's cache of a scene that would not load gone, the
                 // scene is tried again: a reload is what anybody presses after
                 // mending one (`a_reload_tries_again_a_scene_that_would_not_load`).
@@ -624,6 +797,12 @@ impl Solium {
                 // over is not left on screen
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
                 self.decorations.clear_values();
+                // Likewise: the old declaration is the previous session's,
+                // and a configuration that stops calling `sol.workspaces`
+                // must publish none, not what it last said. `workspaces.lua`
+                // declares again inside this same held dispatch, so nothing
+                // flickers for one that still does.
+                self.workspaces = None;
                 // The effect folders, read again: a changed one is pending
                 // until the next `prepare` compiles it, and a broken one
                 // keeps what ran (`a_reload_reads_the_effect_folders_again`).
@@ -653,6 +832,10 @@ impl Solium {
                 // made another monitor primary may declare nothing differently
                 // (`a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
                 self.sync_instances();
+                // And what the held handlers' `sol.act`s came to, which no
+                // dispatch inside the hold could tell
+                // (`a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`).
+                self.tell_settled_attempts();
                 self.redraw = true;
                 tracing::info!(config = %path.display(), "configuration reloaded");
                 // And then look at what that produced -- at where it *lands*,
@@ -687,6 +870,92 @@ impl Solium {
         }
     }
 
+    /// Automatic reload (#223): store the settings, and arm or disarm the
+    /// watch to match.
+    ///
+    /// `automatic = false` does not merely let the quiet period run out and
+    /// reload nothing -- it tears every watch down, so the loop source that
+    /// would otherwise wake for a change never fires at all. That is what
+    /// makes the setting answer "never", not "eventually, if you wait long
+    /// enough" (`autoreload::tests` and this module's own
+    /// `tests::automatic_false_leaves_nothing_watched`).
+    ///
+    /// **A deadline already armed is cleared too, whichever way `automatic`
+    /// moves.** `tty.rs` and `winit.rs` each hold a one-shot `calloop` timer
+    /// with no token saved anywhere this could cancel it by, so a change
+    /// noted just before `automatic` turns off would otherwise still reach
+    /// its deadline and fire -- the timer callback checks
+    /// [`Self::autoreload_settings`] itself before reloading (both call
+    /// sites), but resetting the deadline here as well means a `quiet_ms`
+    /// edited mid-burst does not inherit a countdown it never started.
+    /// `tests::automatic_false_leaves_nothing_watched`,
+    /// `tests::turning_automatic_off_clears_a_pending_deadline`.
+    ///
+    /// Reached from `Command::AutoReload`, which `self.apply` can run from
+    /// anywhere a script runs -- `start_scripts` (cold start and every
+    /// reload) and a binding of the user's own alike -- so this recomputes
+    /// [`crate::autoreload::watch_roots`] every time rather than only at
+    /// start-up: a directory created since the last reload (a first
+    /// `user.lua`, just written) is picked up the next time anything calls
+    /// `sol.auto_reload`, which the shipped `init.lua` does on every reload.
+    pub(crate) fn configure_autoreload(&mut self, settings: crate::autoreload::Settings) {
+        if self.autoreload_settings != settings {
+            tracing::debug!(?settings, "automatic reload settings set");
+            self.autoreload_settings = settings;
+            self.autoreload_debounce = crate::autoreload::Debounce::default();
+        }
+        let roots = if settings.automatic {
+            crate::autoreload::watch_roots()
+        } else {
+            Vec::new()
+        };
+        self.autoreload_watcher.set_roots(&roots);
+    }
+
+    /// Warn once per path when a shell scene, pane style, or loading scene a
+    /// script configured lives somewhere automatic reload does not watch --
+    /// the gap `autoreload`'s module doc names: a plain absolute path set
+    /// directly in `config.lua`, with none of `SOLIUM_SHELL_SCENE`/
+    /// `SOLIUM_PANE`/`SOLIUM_QML_TITLEBAR`/`SOLIUM_LOADING` naming it instead
+    /// (those are already folded into [`crate::autoreload::watch_roots`] by
+    /// its own `override_roots`, so they never reach this function's warning).
+    ///
+    /// Called from `start_scripts`, after every reload as well as cold start,
+    /// so a path a reload just changed to is checked too. Padded with the
+    /// shipped `qml/` and `lua/` directories before comparing, so the
+    /// ordinary case -- nothing overridden, every scene the one Solium ships
+    /// -- never warns.
+    /// `tests::warns_once_for_a_pane_style_set_outside_every_watched_root`,
+    /// `tests::does_not_warn_for_a_shipped_default_style`,
+    /// `tests::automatic_false_warns_about_nothing`.
+    pub(crate) fn warn_about_unwatched_configured_paths(&mut self) {
+        if !self.autoreload_settings.automatic {
+            return;
+        }
+        let mut roots = crate::autoreload::watch_roots();
+        roots.push(crate::assets::qml());
+        roots.push(crate::assets::lua());
+
+        let mut configured: Vec<std::path::PathBuf> = self
+            .surfaces
+            .iter()
+            .map(|surface| surface.declared.scene.clone())
+            .collect();
+        if let Some(style) = crate::decoration::style_file(self.decorations.style()) {
+            configured.push(style);
+        }
+        configured.push(crate::pane::loading_source(self.loading.scene.as_deref()));
+
+        for path in newly_unwatched_paths(configured, &roots, &mut self.autoreload_unwatched_warned)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                "set outside every directory automatic reload watches (#223); \
+                 editing it will not reload Solium on its own"
+            );
+        }
+    }
+
     /// Take the scripts, and act on whatever they asked for while loading.
     pub(crate) fn start_scripts(&mut self, scripts: Option<Scripts>) {
         // Before the scripts run, so `sol.keyboard()` answers truthfully even
@@ -706,6 +975,7 @@ impl Solium {
         self.keyboard_told.forget();
         self.apply(outcome);
         self.keyboard_changed();
+        self.warn_about_unwatched_configured_paths();
     }
 
     pub(crate) fn trigger_monitors_changed(&mut self) {
@@ -974,5 +1244,45 @@ impl Solium {
         let handled = outcome.handled;
         self.apply(outcome);
         handled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newly_unwatched_paths;
+    use std::{collections::HashSet, path::PathBuf};
+
+    /// A path with no root covering it is reported, once.
+    #[test]
+    fn an_unwatched_path_is_returned_once() {
+        let path = PathBuf::from("/home/me/dev/my-shell/Shell.qml");
+        let mut warned = HashSet::new();
+        assert_eq!(
+            newly_unwatched_paths(vec![path.clone()], &[], &mut warned),
+            vec![path.clone()]
+        );
+        assert!(warned.contains(&path));
+    }
+
+    /// A root covering the path (an exact root, or an ancestor directory)
+    /// means nothing is reported.
+    #[test]
+    fn a_watched_path_is_never_returned() {
+        let root = PathBuf::from("/home/me/.config/solium");
+        let path = root.join("qml").join("panes").join("mine").join("Pane.qml");
+        let mut warned = HashSet::new();
+        assert!(newly_unwatched_paths(vec![path], &[root], &mut warned).is_empty());
+        assert!(warned.is_empty());
+    }
+
+    /// Having warned about a path once, a later call with the same `warned`
+    /// set does not return it again -- the log line it drove is not meant to
+    /// repeat every reload.
+    #[test]
+    fn an_already_warned_path_is_not_returned_again() {
+        let path = PathBuf::from("/home/me/dev/my-shell/Shell.qml");
+        let mut warned = HashSet::new();
+        warned.insert(path.clone());
+        assert!(newly_unwatched_paths(vec![path], &[], &mut warned).is_empty());
     }
 }

@@ -1104,6 +1104,10 @@ mod desk {
             shown: true,
             fullscreen: false,
             style: String::new(),
+            x11_type: None,
+            accepts_input: true,
+            class: None,
+            instance: None,
         }
     }
 

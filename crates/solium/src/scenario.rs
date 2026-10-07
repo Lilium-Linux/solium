@@ -25,7 +25,9 @@
 //!
 //! | step | |
 //! |---|---|
-//! | `open = true` | a window of 200x100, given the keyboard |
+//! | `open = true` | a window of 200x100, given the keyboard; with `app_id = "name"`, of that application |
+//! | `answer = n` | the n-th window opened answers the last size it was configured with, as a client does |
+//! | `wait = ms` | that much time, on the compositor's clock, and the frame at the end of it settled |
 //! | `move = { x, y }` | the last window opened, put there |
 //! | `focus = n` | the n-th window opened, given the keyboard |
 //! | `field = { x, y, w, h }` | the client enables a text field with its caret there, in its surface |
@@ -41,7 +43,8 @@
 //! | step | |
 //! |---|---|
 //! | `pane = "name", client = { w, h }` | a frame built from the shipped style of that name, around a client that size |
-//! | `tell = { caret = { x, y, w, h } or false, values = { ... } }` | what a frame tells it: the caret, and values merged as `sol.pane_values` merges them |
+//! | `tell = { caret = { x, y, w, h } or false, values = { ... } }` | what a frame tells it: the caret, and values merged as `sol.pane_values` merges them; and, kept until told again, `focused` (true until then), `inside` (whether the pointer is over the window, false until then) and `title` (empty until then) |
+//! | `point = { x, y }` | the pointer moved there, in the pane's own space, as the compositor hands it to every layer; `point = false`, gone from the pane, which is also no longer `inside` it |
 //! | `wait = ms` | that much time, on the clock QML's animations and timers run on |
 //! | `scene = "path", size = { w, h }` | a shipped scene, `qml/` and that path, built that size, as a `sol.surface` builds one |
 //! | `set = { ... }` | properties written into that scene, as a redeclared surface writes them |
@@ -51,7 +54,9 @@
 //! `surfaces` (by name: `x`, `y`, `w`, `h` for one placed at a rect, and its
 //! `properties`), `panes` (what `sol.pane_values` handed every pane), `field`
 //! (what `sol.text_input()` answers, `framed` included), `windows` (each
-//! window opened: `id`, `x`, `y`) and `unknown` (each setting `solium --check`
+//! window opened: `id`, `x`, `y`, `drawn` -- the rectangle it is drawn at
+//! now, `x`, `y`, `w`, `h` -- and `transformed`, whether it holds a
+//! presentation transform at all) and `unknown` (each setting `solium --check`
 //! would report: `key`, and the `meant` it suggests); or, on the Qt thread,
 //! `pixel(layer, x, y)`, the frame's layer of that name rendered, answering
 //! `r, g, b, a` -- the scene is the layer `"scene"` -- and `dormant`, `true`
@@ -238,6 +243,18 @@ fn world(lua: &Lua, desk: &Desk, windows: &[Window]) -> mlua::Result<Table> {
             entry.set("x", real.loc.x)?;
             entry.set("y", real.loc.y)?;
         }
+        if let Some(pane) = state.panes.of(window) {
+            let drawn = state
+                .drawn_at(pane, state.pane_outer(pane), state.clock.now())
+                .rect;
+            let rect = lua.create_table()?;
+            rect.set("x", drawn.loc.x)?;
+            rect.set("y", drawn.loc.y)?;
+            rect.set("w", drawn.size.w)?;
+            rect.set("h", drawn.size.h)?;
+            entry.set("drawn", rect)?;
+            entry.set("transformed", crate::present::transformed(pane))?;
+        }
         opened.set(index + 1, entry)?;
     }
     world.set("windows", opened)?;
@@ -273,14 +290,29 @@ fn with_a_client(path: &Path) {
     furnish(&mut desk.state);
     configure(&mut desk.state, path, &scenario);
     let mut windows: Vec<Window> = Vec::new();
+    // Each window's surface and toplevel, in the order opened, for `answer`.
+    let mut clients = Vec::new();
     let mut text_input = None;
     let steps: Vec<Table> = scenario.get("steps").expect("`steps` is a list");
     for (index, step) in steps.iter().enumerate() {
         let index = index + 1;
         if step.get::<Option<bool>>("open").ok().flatten() == Some(true) {
-            let (window, _, _) = desk.window();
+            let app_id: Option<String> = step.get("app_id").expect("`app_id` is text");
+            let (window, surface, _, toplevel) = desk.window_of(app_id.as_deref());
             desk.focus(&window);
             windows.push(window);
+            clients.push((surface, toplevel));
+        } else if let Ok(Some(n)) = step.get::<Option<usize>>("answer") {
+            let (surface, toplevel) = clients
+                .get(n.saturating_sub(1))
+                .cloned()
+                .expect("that window");
+            desk.answer(&surface, &toplevel);
+        } else if let Ok(Some(ms)) = step.get::<Option<u64>>("wait") {
+            desk.state.clock.advance(Duration::from_millis(ms));
+            let now = desk.state.clock.now();
+            desk.state.settle(now);
+            desk.state.sync_panes();
         } else if let Ok(Some(at)) = step.get::<Option<Table>>("move") {
             let (x, y): (i32, i32) = (at.get(1).expect("x"), at.get(2).expect("y"));
             let window = windows.last().cloned().expect("a window to move");
@@ -374,6 +406,9 @@ fn on_the_qt_thread(path: &Path) {
     let mut scene: Option<crate::qml::Scene> = None;
     let mut values = Values::default();
     let mut caret = None;
+    let mut focused = true;
+    let mut inside = false;
+    let mut title = String::new();
     let steps: Vec<Table> = scenario.get("steps").expect("`steps` is a list");
     for (index, step) in steps.iter().enumerate() {
         let index = index + 1;
@@ -397,12 +432,21 @@ fn on_the_qt_thread(path: &Path) {
             if let Ok(Some(handed)) = tell.get::<Option<Table>>("values") {
                 values.merge(Json::object_from_lua(&handed).expect("values"));
             }
+            if let Ok(Some(told)) = tell.get::<Option<bool>>("focused") {
+                focused = told;
+            }
+            if let Ok(Some(told)) = tell.get::<Option<bool>>("inside") {
+                inside = told;
+            }
+            if let Ok(Some(told)) = tell.get::<Option<String>>("title") {
+                title = told;
+            }
             let (built, size) = decoration.as_mut().expect("a `pane` step first");
             built.tell_as_a_frame_would(
                 &Look {
-                    title: "",
-                    focused: true,
-                    pointer_inside: false,
+                    title: &title,
+                    focused,
+                    pointer_inside: inside,
                     caret,
                     values: &values,
                 },
@@ -424,6 +468,21 @@ fn on_the_qt_thread(path: &Path) {
                     "{} step {index}: the scene has no property {key}",
                     path.display()
                 );
+            }
+            tick(Duration::from_millis(16));
+        } else if let Ok(point @ (Value::Table(_) | Value::Boolean(false))) =
+            step.get::<Value>("point")
+        {
+            let (built, _) = decoration.as_mut().expect("a `pane` step first");
+            match point {
+                Value::Table(at) => {
+                    let (x, y): (f64, f64) = (at.get(1).expect("x"), at.get(2).expect("y"));
+                    built.pointer(x, y, None);
+                }
+                _ => {
+                    built.pointer_left();
+                    inside = false;
+                }
             }
             tick(Duration::from_millis(16));
         } else if let Ok(Some(ms)) = step.get::<Option<u64>>("wait") {

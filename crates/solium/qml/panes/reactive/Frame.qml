@@ -106,8 +106,9 @@ Item {
 
         anchors { left: parent.left; right: parent.right; top: parent.top }
         height: frame.insetTop
+        // Opaque, so what is behind the window never tints its grey
+        // (`tests/scenarios/pane-bars-opaque.lua`).
         color: frame.focused ? Theme.surface : Theme.surfaceInactive
-        opacity: 0.92
 
         Text {
             anchors.centerIn: parent
@@ -140,6 +141,31 @@ Item {
                        ? modelData.tint
                        : (frame.focused ? Theme.control : Theme.controlInactive)
                 Behavior on color { ColorAnimation { duration: Theme.quick } }
+
+                // Its glyph, under the pointer: `×` to close, `+` to maximise,
+                // dark on the grey it turns. With no hue to say which button is
+                // which, the glyph and the shade do
+                // (`tests/scenarios/pane-buttons-drawn.lua`).
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 7
+                    height: 1.5
+                    radius: 0.75
+                    antialiasing: true
+                    color: Theme.accentInk
+                    rotation: parent.modelData.name === "close" ? 45 : 0
+                    visible: hit.containsMouse
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 7
+                    height: 1.5
+                    radius: 0.75
+                    antialiasing: true
+                    color: Theme.accentInk
+                    rotation: parent.modelData.name === "close" ? -45 : 90
+                    visible: hit.containsMouse
+                }
 
                 MouseArea {
                     id: hit

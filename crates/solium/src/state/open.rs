@@ -200,7 +200,7 @@ impl Solium {
     ///
     /// The compositor's own view of who is on the other end of the socket, not
     /// anything the client said about itself.
-    fn client_pid(&self, window: &Window) -> Option<u32> {
+    pub(crate) fn client_pid(&self, window: &Window) -> Option<u32> {
         let surface = window.wl_surface()?;
         let client = surface.client()?;
         let credentials = client.get_credentials(&self.display_handle).ok()?;

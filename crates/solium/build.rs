@@ -11,7 +11,12 @@ mod commit;
 
 /// The headers moc runs on: every one that declares a Q_OBJECT type.
 /// `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.
-const MOC_HEADERS: &[&str] = &["qml/attached.h", "qml/rows.h", "qml/keyboard.h"];
+const MOC_HEADERS: &[&str] = &[
+    "qml/attached.h",
+    "qml/rows.h",
+    "qml/keyboard.h",
+    "qml/pointer.h",
+];
 
 fn main() {
     // The datadir a packager bakes in, read by `option_env!` in `assets.rs`.
@@ -29,6 +34,10 @@ fn main() {
     println!("cargo:rerun-if-changed=qml/rows.h");
     println!("cargo:rerun-if-changed=qml/keyboard.cpp");
     println!("cargo:rerun-if-changed=qml/keyboard.h");
+    println!("cargo:rerun-if-changed=qml/pointer.cpp");
+    println!("cargo:rerun-if-changed=qml/pointer.h");
+    println!("cargo:rerun-if-changed=qml/icon.cpp");
+    println!("cargo:rerun-if-changed=qml/icon.h");
 
     // The commit `solium --version` names (#156; `commit::tests`), and empty
     // outside a git checkout, so `env!("BUILD_COMMIT")` is always this build's
@@ -60,6 +69,8 @@ fn main() {
         .file("qml/attached.cpp")
         .file("qml/rows.cpp")
         .file("qml/keyboard.cpp")
+        .file("qml/pointer.cpp")
+        .file("qml/icon.cpp")
         .include("qml");
 
     // Qt6Quick pulls in Core, Gui and Qml transitively.
@@ -95,13 +106,14 @@ fn main() {
         }
     }
 
-    // attached.h, rows.h and keyboard.h declare Q_OBJECT types -- the
-    // attached `Solium` object, the rows it hands out and the store they are
-    // kept in, and the `Keyboard` singleton -- so they need moc, which
-    // host.cpp itself still does not.
+    // attached.h, rows.h, keyboard.h and pointer.h declare Q_OBJECT types --
+    // the attached `Solium` object, the rows it hands out and the store they
+    // are kept in, the `Keyboard` singleton, and `Solium.cursor` -- so they
+    // need moc, which host.cpp itself still does not.
     // `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
     // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`,
-    // `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
+    // `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`,
+    // `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`.
     let out: PathBuf = std::env::var_os("OUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_default();

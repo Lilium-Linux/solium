@@ -12,11 +12,15 @@ the line, and it is not where a Wayland tutorial would put it.
   file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
   The shipped configuration names none.
 - A shell is QML written against Solium's own API: `import Solium` for
-  `Theme`, `Keyboard`, `Grab` and the attached `Solium` object
+  `Theme`, `Keyboard`, `Monitors`, `Windows`, `WindowList`, `Workspaces`,
+  `WorkspaceList`, `Grab` and the attached `Solium` object
   (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
-  `Solium.keyboard`), and an `action` property for what it asks Lua to do
-  ([below](#what-a-hosted-shell-is-given)). Quickshell support was removed
-  (#172); Quickshell itself may add Solium support on its own side.
+  `Solium.keyboard`, `Solium.status`), and `Solium.send` for what it asks Lua
+  to do ([below](#what-a-hosted-shell-is-given)). Quickshell support was
+  removed (#172); Quickshell itself may add Solium support on its own side.
+- The pointer can be a scene of its own the same way, `cursor = { scene =
+  "<its QML file>" }`, given what the pointer is doing as `Solium.cursor`
+  ([below](#what-a-pointer-scene-is-given)).
 - A shell that runs as its own program — Waybar, a Quickshell instance run
   on its own, any `wlr-layer-shell` panel — is supported too, as an ordinary
   client. It needs nothing from the configuration and gets nothing from the
@@ -248,11 +252,13 @@ whatever is under it when `outside_click` says `"pass"`
 (`state::tests::real_client::reflow_on_close::hosted::a_press_outside_a_grab_dismisses_it_and_is_swallowed_by_default`,
 `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`).
 However a grab ends, swallowed, passed, or let go of by its scene, the window
-under the pointer has the pointer back at once, so a click there with no
-motion before it reaches it
+under the pointer has the pointer back at once, or, when the scene holds a
+press as it ends, at that press's release, so a click there with no motion
+before it reaches it
 (`state::tests::real_client::reflow_on_close::hosted::a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it`,
 `state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
-`state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`).
+`state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`).
 `shell.outside_click` in `config.lua` is the hosted shell's, `"swallow"` by
 default, and a table names grabs, `{ default = "swallow", ["tray-menu"] =
 "pass" }`
@@ -295,6 +301,10 @@ keyboard back by taking that focus away. Whatever `wants` is bound to, a
 scene the keyboard was taken back from does not take it again until an item
 asks anew: it comes to want it, is shown again, or takes active focus again
 (`qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`).
+Written on a container around the field, `wants` works too: the field inside
+loses its focus when the keyboard is taken back, and taking it again asks
+anew for the container
+(`qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`).
 Written on a Qt Quick Controls
 `Popup`, which is no item, `Solium.keyboard` is the popup's own, its
 `activeFocus` and its being open, so a search popup is `Popup { focus: true;
@@ -321,7 +331,10 @@ and a key held repeats at the keyboard's own rate
 unless your keymap says it does not, as it says of a modifier, AltGr among
 them, and of a group toggle such as `grp:alt_shift_toggle`
 (`input::tests::a_held_modifier_does_not_repeat_into_the_scene`,
-`input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`).
+`input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`). A group
+toggle never repeats, even on a key that does, as `grp:alt_space_toggle`'s
+is
+(`input::tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`).
 The compositor's bindings keep working, `super+q` on Russian among them,
 except the keys the item claims, which are the field's
 (`input::tests::an_unclaimed_super_binding_still_fires_on_russian_while_the_shell_holds_the_keyboard`,
@@ -374,27 +387,50 @@ same clock, so one beside an animation nothing draws still fires.
 
 **The `Solium` QML module.** `Theme` above all: the colours, fonts and
 metrics the frames are drawn with. Everything `import Solium` brings is
-written unqualified, as `Theme` is: the singletons `Theme` and `Keyboard`
-("The keyboard, live", below); the type `Grab` ("Popups that hold the
-pointer", above); the pane-style types `PaneStyle` and `Layer`, and the
-keyboard pill's `KeyboardPill` and `KeyboardPillLayer` (the
-[panes README](../crates/solium/qml/panes/README.md)); and the attached
-`Solium` object, which any item can read, with exactly four members:
+written unqualified, as `Theme` is: the singletons `Theme`, `Keyboard`
+("The keyboard, live", below), `Monitors` ("Its monitor, live", below),
+`Windows` ("Windows, live", below) and `Workspaces` ("Workspaces, as the
+configuration has them", below); the types `Grab` ("Popups that hold the
+pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
+("Workspaces, as the configuration has them"); the pane-style types
+`PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
+`KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
+`Solium` object, which any item can read, with exactly ten members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
 `Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
-below); and `Solium.keyboard.wants` and `claims` (above)
-(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`).
+below); `Solium.keyboard.wants` and `claims` (above); `Solium.status`,
+the text `sol.status` set ("Workspaces, as the configuration has them",
+below); `Solium.send(action, data)`, what it asks Lua to do
+([below](#what-a-hosted-shell-is-given)); `Solium.cursor`, the pointer, and
+the hotspot a pointer scene sets
+([What a pointer scene is given](#what-a-pointer-scene-is-given));
+and `Solium.region`, `Solium.material` and `Solium.materialState`, which
+every item accepts and nothing reads until materials exist
+([#199](https://github.com/Lilium-Linux/solium/issues/199)), `materialState`
+reading `"off"` till then
+(`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
+`qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`).
 Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
 internal, and the row types have no name, so a shell's own `Monitor.qml` is
 not shadowed
-(`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`).
+(`qml::hosted::tests::a_shell_file_named_like_a_row_is_still_the_shells`),
+and `Window` is still Qt Quick's in a scene that imports both
+(`qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`),
+and a shell's own `Workspace.qml` is its own
+(`qml::hosted::tests::a_shell_file_named_like_a_workspace_is_still_the_shells`).
+A shell's own file named like a type or singleton the compositor registers
+(`Grab`, `Keyboard`, `Monitors`) is hidden by it: a `Monitors.qml` beside a
+scene is the `Monitors` model there, and a scene that creates one does not
+build, so name such a file otherwise
+(`qml::hosted::tests::a_shell_file_named_like_a_singleton_is_hidden_by_it`).
 A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
 override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
 The attached `Solium` object and `Grab` belong to a hosted scene, which
 `sol.surface` builds on a monitor. Elsewhere (a pane's layers, the loading
-window, the fallback pointer) they build and do nothing: `Solium.monitor` is an
+window, the pointer's scene, the fallback pointer) they build and do nothing:
+`Solium.monitor` is an
 absent row with an empty `name` and `present: false`, `Solium.surface.reserve`
 reserves nothing, and `Solium.keyboard` and a `Grab` hold nothing
 (`qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`,
@@ -419,6 +455,200 @@ A scene that wants its own coordinates subtracts `whole.x` and `whole.y`.
 `"_180"`, `"_270"`, `"flipped"`, `"flipped90"`, `"flipped180"` or
 `"flipped270"`, and not `"90"` or `"flipped-90"` as `sol.monitors{ ... }` takes
 it (`models::monitors::tests::a_turned_monitor_row_names_its_transform_as_smithay_does`).
+`Monitors` is every monitor, as a list model with the same roles and a
+`count`, and `Monitors.get(name)` one of them; a changed value is one
+`dataChanged` for that role alone
+(`qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`).
+Rows also say what is `reserved` on each edge (`top`, `right`, `bottom` and
+`left`: what the work area lost there, layer-shell zones and hosted reserves
+together), whether the monitor's `power` is `"on"` or `"off"`, whether the
+`pointer` is on it and whether it is the `active` one, the monitor in front of
+you (`models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`,
+`models::monitors::tests::on_two_monitors_only_the_pointers_is_active_and_each_says_its_own_edges`).
+`Monitors.get(name)` of a monitor that is not there answers a row carrying
+only that name, which becomes the monitor when it is plugged in; one that
+goes leaves the list and keeps its last values, so read `present` before them
+(`qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`).
+In a delegate of `Monitors`, `scale` and `transform` are the delegate item's
+own properties, so read those two as `model.scale` and `model.transform`
+(`qml::hosted::tests::a_monitors_delegate_reads_scale_and_transform_through_model`).
+The rows are published with a frame, so while every monitor is off none is
+published, and `power` reads `"off"` only while another monitor is drawn.
+
+**Windows, live.** `Windows` is every window, a list model built from the
+compositor's own panes and updated in place once per frame: `id`, `title`,
+`appId`, `pid`, `xwayland`, `monitor`, `workspace`, `focused`, `focusOrder`
+(0 is the most recently focused, and a window that closes leaves no gap),
+`urgent` (it asked for attention nobody could see, until it is focused),
+`fullscreen` and `maximized` (as the compositor last set them, without
+waiting for the application), `modal`,
+`parent`, `state` (`loading` from the click, `shown`, `closing`) and
+`onStage`
+(`state::tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
+`state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
+`state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`,
+`state::tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`,
+`state::tests::real_client::reflow_on_close::keyboard_at_open::a_genuine_activation_of_a_window_its_own_frame_hides_does_not_keep_the_keyboard`,
+`state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_at_once`).
+In a delegate they are `model.id`, `model.state` and `model.parent`: `id` is
+QML's own word, and the item's own `state` and `parent` win over the roles
+(`qml::hosted::tests::a_delegate_reads_id_state_and_parent_through_model`).
+A window is listed from the moment it is launched, before its application
+draws, unless `loading.reserves_a_slot` is off; until then it has no `pid`,
+which reads `-1`
+(`state::tests::real_client::reflow_on_close::hosted::a_window_still_loading_is_listed_as_loading`).
+An X11 window's `pid` is the process Xwayland names for the window's own X
+connection, `-1` when it names none, and never Xwayland's own
+(`models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`).
+`workspace` is the first workspace the configuration declared the window on
+(below), and reads `""` until a declaration names it
+(`state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`).
+It is the workspace's `id`, not its `<group>/<id>` key, and a group's ids are
+not unique across monitors ("2" exists in every group), so filtering on it
+without also filtering on `monitor` lists workspace 2 of every monitor.
+`WindowList { monitor: Solium.monitor.name; sort: "mru" }` is a filtered,
+sorted view, never reset: `monitor`, `workspace`, `app` and `onStage` filter,
+an empty one (or `onStage` left unset) keeping every window, and `sort` is
+`""`, the order windows opened, or `"mru"`, the most recently focused first.
+A delegate on a `WorkspaceList` binding `workspace: model.key` matches
+nothing, since `key` is the `<group>/<id>` row key and `workspace` wants the
+`id` alone: `WindowList { monitor: Solium.monitor.name; workspace: model.id }`,
+or read the workspace row's own `windows` list instead.
+`Windows.focused` is never null and follows focus, and with no window focused
+it reads `present: false` and is empty, not the window focused last
+(`qml::hosted::tests::the_focused_facade_is_empty_with_nothing_focused`);
+`Windows.get(id)` is one window's row, which reads `valid: false` once the
+window has gone. It is a lookup with no change signal of its own, so a
+binding reads `Windows.count` beside it, as `{ Windows.count; return
+Windows.get(id) }` does, to be asked again as windows come and go. Rows say
+where a window lives, not where it is drawn this frame
+(`qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`).
+A retired row (`valid: false`) is kept for 10 s after it leaves, then freed,
+and nothing marks `count` changed at that moment — only a window or
+workspace coming or going does. Read it again through `Windows.get(id)` (or
+the workspace equivalent) rather than holding the row itself past that grace
+period, or a reference kept in a `var` can outlive it.
+
+**Workspaces, as the configuration has them.** The compositor does not know
+what a workspace is: Lua declares them with `sol.workspaces`, and the shipped
+`workspaces.lua` does so whenever they change
+(`script::tests::the_shipped_workspaces_declare_what_each_monitor_shows`,
+`script::tests::a_window_that_opens_is_declared_on_the_workspace_its_monitor_shows`).
+`Workspaces` is every workspace declared, joined with the windows: `key`
+(`<group>/<id>`), `id`, `name`, `col`, `row`, `group`, `monitors`, `active`
+(its group shows it), `focused` (shown by the group of the monitor in front
+of you), `occupied` (how many windows are on it), `urgent` and
+`hasFullscreen` (of a window on it), `hidden` and `windows`
+(`state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`).
+`WorkspaceList { monitor: Solium.monitor.name }` is one monitor's group,
+`Workspaces.showing(name)` what that monitor shows, `Workspaces.current` what
+the monitor in front of you shows, each empty, never null, while nothing is
+shown, and `Workspaces.arrangement` the declared shape, `{ kind, columns,
+rows }`. A per-monitor bar binds `showing(Solium.monitor.name)`: a singleton
+cannot know which instance asks. `Solium.status` is the text `sol.status`
+set, the same in every scene
+(`qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`,
+`models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`).
+A workspaces widget switches with `Solium.send("workspaces.go", { id:
+model.id, monitor: Solium.monitor.name })`, and sends a window away with
+`Solium.send("windows.send", { id: window.id, workspace: "2" })`, both
+answered by `workspaces.lua`
+(`script::tests::a_workspaces_go_from_a_scene_switches_the_monitor_it_names`,
+`script::tests::a_windows_send_from_a_scene_moves_the_window_it_names`).
+Each takes that form only, a workspace being a whole number or its digits,
+and `windows.send` only for a window that is open; any other form,
+`{ id, monitor }` or a workspace `2.5` among them, moves nothing and is logged
+(`script::tests::a_workspaces_go_from_a_scene_switches_the_monitor_it_names`,
+`script::tests::a_windows_send_names_its_window_by_number_or_digits_and_logs_any_other_form`).
+A declaration naming a monitor or a window the compositor does not have
+leaves it out, with any group left with no monitor, and so does one
+declaring a workspace twice among the groups that stay, keeping the first;
+the log names each once
+(`models::workspaces::tests::a_declaration_naming_an_unknown_monitor_or_window_drops_them`,
+`models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
+`models::workspaces::tests::a_workspace_declared_twice_is_one_row`,
+`models::workspaces::tests::a_workspace_of_a_group_left_out_is_not_logged_as_declared_twice`).
+
+**Installed applications, and their icons.** `Apps` (03 §3.2.13) is every
+installed, visible application (`NoDisplay` and `Hidden` entries are left out
+at the source, not filtered in a scene), a row model like `Windows` and
+`Workspaces`: `entries` is itself (so `ListView { model: Apps.entries }` and
+`ListView { model: Apps }` are the same list), and `Apps.get(id)` a facade
+that is never null, with `valid` false for an id nothing installed answers --
+so a pinned app that was removed is a ghost, not a hole, the same Ruling 17
+convention `Windows` and `Workspaces` already keep. `Apps.ready` is false
+until the first scan completes. A row: `id` (the desktop file id), `name`,
+`genericName`, `icon` (an `image://solium/icon/...` URL, ready for an
+`Image`), `categories`, `keywords`. A scene launches one with
+`Solium.send("apps.launch", { id })`, routed to the compositor's existing
+spawn path (`launch.rs`) the same way `windows.focus` is; a running app is
+found by joining `Windows`' `appId` to an `Apps` row's `id` in the scene or in
+Lua, not by anything `Apps` itself tracks (no `running`, no `windowCount`
+here yet -- `qml/preview/Dock.qml` is the one place in this tree that does
+that join, and its own file doc says why it is one `WindowList` per app
+rather than a single pass over `Windows`). `sol.apps()` is the same list,
+read from Lua, for config written against what is actually installed
+(`lua/preview/dock.lua`'s first-run pins) -- but, like `sol.windows()` and
+`sol.monitors()`, only meaningfully inside a dispatch: a `.lua` file's top
+level runs before the first real snapshot arrives, so `sol.apps()` there
+reads empty (`lua/preview/dock.lua`'s own module doc works through this).
+`image://solium/icon/<name>?size=48&scale=2` is the one provider behind
+`Apps`' own `icon` and anything else a scene wants a theme icon for, by
+plain name (an absolute path is refused, not resolved -- P1, `icon.rs`'s
+module doc). What is cut from this version of both: inotify (a scan is
+redone wholesale, synchronously, at startup and on a reload, not on every
+directory change); a cache in the icon provider (every request re-walks the
+theme chain); `sol.icons{ theme = ... }` (the theme is always GTK's
+`settings.ini`, then Adwaita, then hicolor); SVG rasterises only where the
+Qt installation has the `imageformats/libqsvg` plugin, which this project's
+own container image does not ship, so a PNG icon resolves everywhere this
+builds and an SVG-only one falls back to the default glyph there.
+
+**The desktop folder, live.** `Folder` (04-ui.md §4.9) is every entry of
+`Solium.dirs.desktop`, a row model like `Apps`: `uri`, `name`, `displayName`
+(a launcher's own `Name=`, else `name`), `mime`, `icon` (ready for
+`image://solium/icon/`, as `Apps`' own is), `isDir`, `isLauncher`, `trusted`,
+`hidden` and `modified`. Unlike `Apps`, a row that leaves the folder is gone
+outright, not a ghost (nothing pins a desktop file the way a dock pins an
+app id), and unlike `Apps`' wholesale rescan on a reload only, `Folder` is
+live: `crate::folder::Watcher` holds one inotify watch on the directory,
+polled every frame, and any change rescans the whole folder, wholesale,
+exactly the way `Apps` already prefers a simple rescan over incremental
+tracking. Empty, and costing nothing to watch or scan, with
+`Solium.dirs.desktop` empty. `Solium.dirs.desktop` is `$XDG_DESKTOP_DIR`, or
+the same key read from `user-dirs.dirs`, empty when neither names one or it
+names `$HOME` itself -- a user whose whole home is "the desktop" gets no
+icons drawn over every file in it (`crate::folder::desktop_dir`).
+
+A scene asks the compositor to do something about one entry the same way it
+asks anything else, `Solium.send(action, data)`, answered by `lua/actions.lua`
+forwarding to `sol.act` (the `folder` service alongside `windows`,
+`workspaces` and `apps`): `folder.open { uri }` runs it -- a regular file
+through the default application for its MIME type (the freedesktop
+`mimeapps.list`/`mimeinfo.cache` convention, `crate::folder::default_app_id`),
+a `.desktop` launcher through its own `Exec=` once trusted -- launched the
+same way `apps.launch` launches, through `crate::apps::launch_argv` and the
+same `Command::Spawn`, so it gets the same clean environment and loading
+window. `folder.trust { uri }` marks a launcher trusted, durably, so it will
+run: tried first, `gio set <file> metadata::trusted true` itself answers
+"not supported" on this machine (GIO's `metadata::` namespace needs the gvfs
+metadata daemon, which nothing here can assume is running), so trust is kept
+the simplest durable way this repo already has instead -- a plain file of
+trusted absolute paths under `$XDG_DATA_HOME/solium/desktop-trust`
+(`crate::folder::Trust`), the same `fs::write` shape `session.rs` and
+`launch.rs` already use for small state. `sol.store` would be the natural
+fit once it exists. `done`'s `reason` here adds `"unknown-file"` (no such
+entry), `"no-handler"` (no default application for the MIME type) and
+`"untrusted"` (an un-trusted launcher) to the vocabulary above -- not yet
+listed there, the same gap `apps.launch`'s own `"unknown-app"` already left.
+
+What is cut from this version: a subdirectory is one `isDir` row, not walked
+(a folder window is a scene's own concern, not here yet); MIME detection is
+`/usr/share/mime/globs2`'s extension table, by hand, with no content
+sniffing; hidden follows only the leading-dot convention, not a `.hidden`
+list; `folder.open_with` (quick search as an app picker) and a durable,
+position-aware store once `sol.store` exists are both `Later`
+(`crates/solium/src/folder.rs`'s own module doc has the rest).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the
 keyboard every scene reads, a window's frame as much as a shell: `layout`
@@ -475,10 +705,145 @@ the scene makes on its own, from a `Timer`, is read after the frame it was
 made in
 (`state::tests::real_client::reflow_on_close::hosted::a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame`).
 
-**A way back to the configuration.** A scene sets a string property named
-`action`, the compositor takes it, and `sol.on("surface", function(name,
-action) ... end)` in Lua is told. Anything Lua can do — `sol.spawn`, switching
-workspaces, any binding — a hosted shell can ask for this way.
+**A way back to the configuration.** `Solium.send("windows.focus", { id:
+model.id })` sends a named action with data, an object, a value or nothing
+(`qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`).
+Lua hears it as `sol.on("surface", function(surface, action, data) ... end)`,
+with the surface's name and the data as a table, a value or `nil`, in a
+dispatch after the one that sent it, every action in the order sent, and
+decides
+(`script::tests::a_surface_action_reaches_lua_with_its_data`,
+`script::tests::an_action_with_no_data_reaches_lua_as_nil`,
+`state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`).
+The shipped `lua/actions.lua` sends the vocabulary on to `sol.act`, the
+compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
+`windows.fullscreen` and `windows.maximize`, each with `{ id = <window id> }`
+(`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
+`sol.act`'s data crosses as JSON, as a surface's `properties` do, nested at
+most 64 deep and 65 536 values in all, a table counted once for each place it
+is in: a table nested deeper or holding more, or one that contains itself, is
+an error in the handler that sent it, not a crash or a stall of the compositor
+(`script::tests::data_that_contains_itself_is_an_error_in_the_handler`,
+`json::tests::a_table_of_more_than_65536_values_is_an_error_not_a_stall`).
+`sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
+hears once whether it was done, after it was; `reason` is `"unknown-action"`,
+`"unknown-window"`, `"bad-data"`, for a `windows.focus` behind the lock
+`"locked"`, or, for a `windows.fullscreen` or `windows.maximize` of an X11
+window, which the compositor cannot send there, `"unsupported"` (no test can
+make an X11 window, so that one is read in `Solium::act`), and a window still
+loading, one `sol.windows()` lists before its application has arrived, is
+`"unknown-window"` to all but `windows.close`
+(`script::tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
+`state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+`state::tests::real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
+`state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
+`state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`).
+It is told once the whole dispatch that ran `sol.act` is applied, a
+hotplug's or a reload's handlers included, and a `done` that acts again is
+told again in that dispatch, 16 rounds at most, the rest at the next one
+(`state::tests::real_client::reflow_on_close::hosted::done_is_told_after_every_command_of_the_batch_that_ran_its_act`,
+`state::tests::real_client::reflow_on_close::hosted::a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`,
+`state::tests::real_client::reflow_on_close::hosted::a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`,
+`state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`).
+Each `done` has the whole 100 ms handler deadline of its own, and one stopped
+at it does not stop the next
+(`script::tests::a_done_that_never_returns_is_stopped_and_the_next_done_still_hears_its_outcome`).
+What a `done` asked for in the run that was stopped is dropped, the attempts it
+started with it, so a retry that acts again and then never returns is stopped
+once, not every round; and its stops are counted by function, as a listener's
+are, so one stopped three times is not called again until a reload, while a
+`done` written inline is a new function at each `sol.act`, and is stopped each
+time rather than taken out
+(`script::tests::what_a_stopped_done_asked_for_is_dropped`,
+`script::tests::a_done_stopped_three_times_is_not_called_again`,
+`script::tests::an_inline_done_is_stopped_each_time_and_never_taken_out`,
+`state::tests::real_client::reflow_on_close::hosted::a_done_that_acts_again_and_never_returns_does_not_stall_every_dispatch`).
+A `workspaces.*` action is the configuration's to answer, since the
+compositor does not know what a workspace is: a file answers one with
+`actions.override(name, function(data, surface) ... end)`, and until one
+does, `sol.act` answers it `"unknown-action"`. An action outside the
+vocabulary goes only to the listeners for its surface, as a tweak's does to
+`tweaks.lua`
+(`script::tests::actions_lua_routes_the_vocabulary_and_leaves_the_rest_alone`).
+An override is a `surface` listener of its own, under the same 100 ms deadline
+as every listener, so one stopped three times is taken out alone: every other
+action is still routed, and its own goes to `sol.act` again; a later override
+of the same name replaces it, and one of `nil` gives it back to `sol.act`
+(`script::tests::an_override_stopped_three_times_is_taken_out_alone`,
+`script::tests::a_later_override_of_the_same_name_replaces_the_earlier_one`,
+`script::tests::an_override_of_nil_gives_its_action_back_to_the_compositor`).
+A scene that sets a string property named `action`, as scenes did before
+`Solium.send`, is heard the same way, after what it sent, with no data
+(`surface::tests::queued_actions_come_first_and_the_old_action_property_last`).
+Anything Lua can do — `sol.spawn`, switching workspaces, any binding — a
+hosted shell can ask for this way.
+
+## What a pointer scene is given
+
+The pointer is a scene too, when the configuration names one:
+`cursor = { scene = "~/.config/solium/cursor/Cursor.qml" }`, found as
+`shell.scene` is, or `SOLIUM_QML_CURSOR` for one run. It is built in the same
+engine as every other scene and is given this
+([ricing.md](ricing.md#your-own-pointer) has an example):
+
+- **Every named shape.** It is drawn for every shape a window names over its
+  surface, through `cursor-shape`, and for every one the compositor asserts
+  over its own chrome: the arrow over a titlebar, the resize arrows on the
+  edges. No theme is asked
+  (`models::pointer::tests::a_configured_scene_hears_every_named_shape`). A
+  window that attaches a cursor surface of its own, or hides the pointer, is
+  still drawn as it asked, over its own surface
+  (`cursor::tests::a_pointer_a_client_hides_stays_hidden_with_a_scene_configured`).
+- **`Solium.cursor`**, published once a frame for as long as a pointer scene
+  is configured, and read the same in every scene: `shape`, the shape by its
+  CSS cursor name (`default`, `text`, `pointer`, `ew-resize`, and so on);
+  `pressed`; `velocity`, a `point` in logical pixels a second over the last
+  frame, zero once the pointer stops; `scale`, the scale of the monitor under
+  the pointer; and `size`, the configured `cursor.size`
+  (`models::pointer::tests::a_named_shape_reaches_solium_cursor_shape`,
+  `models::pointer::tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`).
+  A pointer that moved asks for the frame after, which publishes it standing
+  still, and with no pointer scene nothing is published at all
+  (`models::pointer::tests::a_moving_pointer_asks_for_the_frame_that_says_it_stopped`,
+  `models::pointer::tests::nothing_is_published_with_no_scene`).
+- **A size of its own.** The root's `width` and `height`, up to 256 logical
+  pixels a side, which the compositor reads and never writes, so a binding on
+  them holds; a root that sets neither is `cursor.size` square
+  (`qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`).
+- **A hotspot.** `Solium.cursor.hotspot` on its root is the point of its
+  picture that sits on the pointer, the top-left corner by default. The
+  picture is placed so that point is where every hit test asks, at every
+  scale (`qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`,
+  `cursor::scene::tests::the_scene_is_drawn_at_its_own_size_with_its_hotspot_on_the_pointer`).
+- **The compositor's clock.** An animation in it runs on the clock every
+  other scene's does and asks for the next frame while it runs; at rest it
+  asks for none
+  (`cursor::scene::tests::an_animating_scene_asks_for_the_next_frame_only_while_it_animates`).
+  `ShaderEffect` and `MultiEffect` draw on the GPU path
+  (`dev/wirecheck`'s case 11); on the software path they draw nothing and the
+  scene's plain drawing is what shows.
+- **The cursor plane.** Its picture is a `Kind::Cursor` element on both
+  paths, so it is offered to the hardware cursor plane, and goes there when
+  its size in device pixels fits the plane (commonly 64 or 128 pixels a
+  side); a larger one is composited like any other element. A picture that
+  reads the backdrop would be composited whatever its size; nothing can until
+  materials exist
+  (`cursor::scene::tests::a_scene_with_no_material_is_a_cursor_plane_element`).
+- **Only the monitors it reaches.** It is drawn on each monitor its picture
+  reaches onto, both of two while it crosses the edge between them, and not
+  on the others
+  (`cursor::scene::tests::a_picture_is_drawn_only_on_the_outputs_it_touches`).
+- **A reload that swaps it.** `super+shift+r` builds it again when the file,
+  any QML in its directory or the directories under it, or `cursor.size`
+  changed, as an edit anywhere in a shell does, or when it would not load
+  last time; one that would not load leaves the theme and the shipped arrow
+  to draw the pointer (`cursor::tests::a_reload_swaps_the_scene`).
+
+It is not hosted on a monitor and takes no input: `Solium.monitor` is the
+absent row, and `Solium.send`, `Grab` and `Solium.keyboard` do nothing in it.
+With no scene configured, nothing of this runs: the pointer is the theme, and
+then `qml/cursor.qml`, as before
+(`cursor::tests::with_no_scene_configured_the_pointer_is_drawn_as_before`).
 
 ## What it is not given
 
@@ -489,12 +854,8 @@ Said plainly, because a shell that loads is easy to mistake for one that works:
 - **No clipboard of the session's.** `ctrl+c` and `ctrl+v` in a hosted
   field copy and paste within the compositor's own Qt: what a window copied
   cannot be pasted into it, nor the other way round.
-- **No window list, no workspaces, no other monitors, and no icons.**
-  Nothing tells a hosted scene which windows or workspaces exist, and a scene
-  reads its own monitor as `Solium.monitor` and has no list of the others
-  ([#166](https://github.com/Lilium-Linux/solium/issues/166)). There is no
-  `image://` provider for the icon theme. Driving the compositor goes through
-  `action` and Lua.
+- **No icons.** There is no `image://` provider for the icon theme.
+  Driving the compositor goes through `Solium.send` and Lua.
 - **No touch.** A scene takes no touch: a tap where it takes a press triggers
   nothing there, and neither reaches nor focuses the window under it;
   elsewhere a touch reaches the window under the shell, as the pointer would
@@ -679,7 +1040,8 @@ time it opens.
 |---|---|---|
 | Applications | Clients | `xdg-shell` |
 | Window frames | Compositor's QML engine | directly |
-| Loading windows, the pointer | The same QML engine | directly |
+| Loading windows, the shipped pointer | The same QML engine | directly |
+| A pointer scene | The same QML engine | `cursor.scene`, through `sol.cursor_theme` |
 | The wallpaper, other scripted scenes | The same QML engine | `sol.surface` from Lua |
 | A hosted shell: bar, dock, launcher | The same QML engine | `shell.scene`, through `sol.surface` |
 | A client shell (Waybar and the like), wallpaper programs | Clients | `wlr-layer-shell` |

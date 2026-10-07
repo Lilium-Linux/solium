@@ -100,6 +100,30 @@ int solium_qml_start_gpu(const char *import_path);
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 void solium_qml_host_next_on(const char *monitor);
 
+/* Whether the next scene built says how big it is through its root item: the
+ * host then never writes the root's width or height, and a root that sets
+ * neither takes `width` by `height` logical pixels as its implicit size. 0 for
+ * a scene the host sizes, as every other is. Consumed by the next build,
+ * whether it succeeds or not.
+ * `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`,
+ * `qml::pointer::tests::a_scene_built_after_one_sized_by_its_root_is_sized_by_the_host`. */
+void solium_qml_host_next_sized_by_root(int width, int height);
+
+/* The scene's root item's width and height, in logical pixels. 0 for a scene
+ * with no root. `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`. */
+int solium_qml_scene_root_size(const SoliumQmlScene *scene, double *width, double *height);
+
+/* `Solium.cursor.hotspot` as the scene's root set it, in logical pixels.
+ * Returns 0, writing nothing, when the root set none.
+ * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+int solium_qml_scene_cursor_hotspot(const SoliumQmlScene *scene, double *x, double *y);
+
+/* The pointer as `Solium.cursor` reads it, as one JSON object: `shape`,
+ * `pressed`, `velocity` (`{ x, y }`), `scale` and `size`. Returns 0 when Qt
+ * has not started, so the compositor sends it again.
+ * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`. */
+int solium_qml_pointer_publish(const char *json);
+
 /* A scene that renders into a buffer we allocated.
  *
  * `dmabuf_fd` is borrowed for the call — EGL takes its own reference on the
@@ -485,11 +509,20 @@ void solium_qml_scene_key(SoliumQmlScene *scene, int pressed, int qt_key, unsign
  * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
 void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene);
 
+/* The oldest action the scene queued with `Solium.send`, popped: 1 with its
+ * name and its data as `{"data": ...}` JSON (both valid until the next
+ * call), 0 when none is queued. Ruling 15.
+ * `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
+                                 const char **data_json);
+
 /* The models hosted scenes read, by number.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 #define SOLIUM_QML_ROWS_MONITORS 0
 #define SOLIUM_QML_ROWS_WINDOWS 1
 #define SOLIUM_QML_ROWS_WORKSPACES 2
+#define SOLIUM_QML_ROWS_APPS 3
+#define SOLIUM_QML_ROWS_FOLDER 4
 
 /* Apply one batch of row operations, rendered by `crate::models::diff::render`,
  * to a model: in order, every row's values written before any row is
@@ -501,6 +534,21 @@ void solium_qml_scene_let_go_keyboard(SoliumQmlScene *scene);
  * `qml::hosted::tests::a_batch_that_does_not_match_the_rows_held_is_refused`,
  * `qml::hosted::tests::a_refused_batch_takes_none_of_its_steps`. */
 int solium_qml_rows_apply(int model, const char *ops_json);
+
+/* What `Solium.status` reads: the text `sol.status` set. 1 when Qt took it.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+int solium_qml_set_status(const char *text);
+
+/* `Workspaces.arrangement`, from JSON. 1 when Qt took it.
+ * `models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`. */
+int solium_qml_set_arrangement(const char *json);
+
+/* `Apps.ready`: false until the first scan completes. 1 when Qt took it. */
+int solium_qml_set_apps_ready(int ready);
+
+/* `Solium.dirs.desktop`: `crate::folder::desktop_dir`, "" when nothing names
+ * one. 1 when Qt took it. */
+int solium_qml_set_dirs_desktop(const char *text);
 
 #ifdef __cplusplus
 }

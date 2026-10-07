@@ -20,6 +20,7 @@
 //! have.
 
 use std::{
+    collections::HashMap,
     os::fd::{AsFd, BorrowedFd},
     path::PathBuf,
     time::Duration,
@@ -375,6 +376,16 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     if !x11_coming {
         solium.session.x11(None);
     }
+    // Before the scripts, same as the session: `lock.before_sleep`'s default
+    // (on) takes the inhibitor at once, and a `sol.lock` in the first dispatch
+    // (`start_scripts`, next) reconfigures it through `Command::Lock` like any
+    // reload. `SOLIUM_LOGIND_BUS` names a bus to hear logind on instead of the
+    // system bus, the same override `SOLIUM_SESSION_BUS` is for the session.
+    solium.logind.begin(
+        place,
+        crate::dev::logind_bus(),
+        crate::logind::Settings::default(),
+    );
     solium.start_scripts(scripts);
     // After the scripts, as nested: see `winit.rs` and `screensaver.rs`.
     solium.idle.serve_dbus(place, crate::dev::session_bus());
@@ -388,6 +399,115 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         },
     )?;
 
+    // The desktop folder's inotify watch, so a file that appears or
+    // disappears is seen on an otherwise idle desktop instead of waiting for
+    // some unrelated redraw to reach `publish_models`. `None` only when
+    // `folder::Watcher::new` could not prepare it, already warned there.
+    if let Some(folder_watch) = solium.folder_watcher.source() {
+        loop_handle
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    folder_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                |_, _, state: &mut State| {
+                    // Drained here, not on the next drawn frame: the source is
+                    // level-triggered, so left readable with nothing drawing it
+                    // would wake the loop on every iteration
+                    // (`one_poll_drains_everything_buffered_so_the_source_is_not_left_readable`).
+                    if state.solium.folder_watcher.poll() {
+                        state.solium.folder_changed = true;
+                        state.solium.redraw = true;
+                    }
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|err| anyhow!("watching the desktop folder: {err}"))?;
+    }
+
+    // Automatic reload (#223): the same epoll-mirrored inotify shape as the
+    // desktop folder watch above, over the configuration directories
+    // `crate::autoreload::watch_roots` names instead -- but a change there
+    // does not reload at once. It notes the time in `autoreload_debounce` and
+    // arms a one-shot timer for the configured quiet period, so a burst of
+    // saves still reloads only once. The timer reschedules itself
+    // (`TimeoutAction::ToDuration`) rather than firing on a fixed tick
+    // forever, so an idle session with nothing pending wakes the loop for
+    // this only when a change actually happened.
+    if let Some(reload_watch) = solium.autoreload_watcher.source() {
+        let timer_handle = loop_handle.clone();
+        loop_handle
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    reload_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                move |_, _, state: &mut State| {
+                    // Drained here for the same reason the folder watch is:
+                    // left readable, a level-triggered source wakes the loop
+                    // on every iteration.
+                    if state.solium.autoreload_watcher.poll() {
+                        let now = state.solium.clock.now();
+                        let quiet =
+                            Duration::from_millis(state.solium.autoreload_settings.quiet_ms);
+                        state.solium.autoreload_debounce.note(now, quiet);
+                        if !state.solium.autoreload_timer_armed {
+                            state.solium.autoreload_timer_armed = true;
+                            let armed = timer_handle.insert_source(
+                                Timer::from_duration(quiet),
+                                |_, (), state: &mut State| {
+                                    let now = state.solium.clock.now();
+                                    // `decide_timer_outcome` re-checks
+                                    // `automatic`, not only the fd callback
+                                    // above that armed this timer: nothing
+                                    // keeps the token to cancel it by, so a
+                                    // change noted just before `automatic`
+                                    // turns off must still be refused here.
+                                    match crate::autoreload::decide_timer_outcome(
+                                        state.solium.autoreload_settings.automatic,
+                                        &mut state.solium.autoreload_debounce,
+                                        now,
+                                    ) {
+                                        crate::autoreload::TimerOutcome::Reload => {
+                                            state.solium.autoreload_timer_armed = false;
+                                            // Exactly what `super+shift+r`
+                                            // does, plus the backend half only
+                                            // it can do: see `Request::Reload`
+                                            // below.
+                                            state.solium.reload();
+                                            reapply_input_settings(state);
+                                            TimeoutAction::Drop
+                                        }
+                                        crate::autoreload::TimerOutcome::Wait(remaining) => {
+                                            TimeoutAction::ToDuration(remaining)
+                                        }
+                                        crate::autoreload::TimerOutcome::Drop => {
+                                            state.solium.autoreload_timer_armed = false;
+                                            TimeoutAction::Drop
+                                        }
+                                    }
+                                },
+                            );
+                            // Failing to arm it must not wedge every future
+                            // change behind a flag nothing will ever clear --
+                            // `super+shift+r` is the fallback either way.
+                            if armed.is_err() {
+                                state.solium.autoreload_timer_armed = false;
+                                tracing::warn!(
+                                    "could not arm the automatic-reload timer; \
+                                     `super+shift+r` still works"
+                                );
+                            }
+                        }
+                    }
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|err| anyhow!("watching the configuration for automatic reload: {err}"))?;
+    }
+
     let mut state = State {
         solium,
         qt,
@@ -399,6 +519,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         input: None,
         animating: false,
         input_devices: 0,
+        live_devices: HashMap::new(),
         drm: None,
         signal: event_loop.get_signal(),
         active: true,
@@ -736,6 +857,8 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // a notification that arrives up to one frame late is a notification
             // about somebody having left the room.
             crate::idle::settle(&mut state.solium);
+            // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
+            crate::logind::settle(&mut state.solium);
             // And a key held for the scene holding the keyboard repeats, on
             // the same once-a-loop check (Ruling 14).
             // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
@@ -858,6 +981,11 @@ pub(crate) struct State {
     /// Zero is not a slow start, it is a session nobody can talk to — see the
     /// watchdog in `run`.
     input_devices: usize,
+    /// Every device still plugged in, by `sysname`, kept so a reload can hand
+    /// the new `config.lua` `input` section to devices already connected —
+    /// `Solium` itself only holds what the configuration says (#157), never a
+    /// live libinput handle, which only this backend has.
+    live_devices: HashMap<String, smithay::reexports::input::Device>,
     /// Held for the session's lifetime: dropping it closes the device.
     drm: Option<DrmDevice>,
     /// The buffer allocator and the node it belongs to.
@@ -2033,9 +2161,23 @@ fn route_input(state: &mut State, event: InputEvent<LibinputInputBackend>) {
 
 /// Route a libinput event through the same profile the nested backend uses.
 fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputInputBackend>) {
-    if let InputEvent::DeviceAdded { device } = &event {
-        state.input_devices += 1;
-        tracing::info!(device = device.name(), "input device");
+    match &event {
+        InputEvent::DeviceAdded { device } => {
+            state.input_devices += 1;
+            let info = crate::input::devices::DeviceInfo::of(device);
+            let settings = state.solium.input.config().resolve(&info);
+            let mut handle = device.clone();
+            let report = crate::input::devices::apply(&mut handle, &settings);
+            log_device(&info, &report);
+            state.live_devices.insert(info.id.clone(), handle);
+            state.solium.input.device_seen(info, report);
+        }
+        InputEvent::DeviceRemoved { device } => {
+            let info = crate::input::devices::DeviceInfo::of(device);
+            state.live_devices.remove(&info.id);
+            state.solium.input.device_gone(&info.id);
+        }
+        _ => {}
     }
 
     // The same entry point the nested backend uses: a binding, a profile or a
@@ -2061,12 +2203,60 @@ fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputIn
                 tracing::info!("stopping: asked to by a key");
                 state.signal.stop();
             }
-            Request::Reload => state.solium.reload(),
+            Request::Reload => {
+                state.solium.reload();
+                // The scripted half: `commands.rs` already stored whatever
+                // the new `config.lua` says in `state.solium.input`. This is
+                // the half only a backend can do, since only it holds real
+                // libinput devices to hand the new settings to.
+                reapply_input_settings(state);
+            }
         }
     }
 
     // Input changes what is on screen, and the vblank has no way to know that.
     state.render();
+}
+
+/// What a device got, for the log -- the issue's own "log what each device
+/// got", and the only thing that stands in for `sol.input_devices()` today:
+/// a device's settings are told to the log, not yet to Lua (#157's own
+/// deliberate cut, see the PR this lands in).
+fn log_device(info: &crate::input::devices::DeviceInfo, report: &crate::input::devices::Report) {
+    tracing::info!(
+        device = info.name,
+        kind = info.kind.as_str(),
+        applied = ?report.applied(),
+        unsupported = ?report.unsupported(),
+        "input device configured"
+    );
+}
+
+/// The backend half of a reload: `state.solium.reload()`, just before this
+/// runs, has already read the new `config.lua` and stored its `input`
+/// section (`commands.rs`'s `Command::Input`). What only a backend can do is
+/// hand the result to the libinput devices it is still holding open --
+/// `Solium` itself never sees a real device.
+///
+/// Collected into `seen` rather than told to `state.solium.input` as each
+/// device is reached: `live_devices` is borrowed mutably for the walk, and
+/// `state.solium` is a different field of the same `state`, but a method
+/// call on it while the walk is still open is easy to mis-borrow, and
+/// "every device wrote back to the registry once the walk is done" costs one
+/// small `Vec` to be sure of rather than clever about.
+fn reapply_input_settings(state: &mut State) {
+    let config = state.solium.input.config().clone();
+    let mut seen = Vec::new();
+    for device in state.live_devices.values_mut() {
+        let info = crate::input::devices::DeviceInfo::of(device);
+        let settings = config.resolve(&info);
+        let report = crate::input::devices::apply(device, &settings);
+        log_device(&info, &report);
+        seen.push((info, report));
+    }
+    for (info, report) in seen {
+        state.solium.input.device_seen(info, report);
+    }
 }
 
 /// Bind the Wayland socket and start accepting clients.

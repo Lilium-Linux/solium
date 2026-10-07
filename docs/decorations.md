@@ -3,9 +3,9 @@
 Most of what the compositor draws that is not a client's window is QML, hosted
 in-process: the window frames, the loading window, the wallpaper, a shell you
 name in the configuration, any other scene a script declares, and the pointer
-when no cursor theme is set (see [shell-boundary.md](shell-boundary.md) for the
-shell). There is nothing to compile and no Rust to touch: write a file, name
-it, press `super+shift+r`.
+when a scene of your own is named for it or no cursor theme is set (see
+[shell-boundary.md](shell-boundary.md) for the shell). There is nothing to
+compile and no Rust to touch: write a file, name it, press `super+shift+r`.
 
 Two things on screen are not QML: a pointer from an XCursor theme, which is
 the theme's own picture, and the rounded corners cut into a client, which are
@@ -20,11 +20,14 @@ pieces are, how to write one, and what it costs.
 
 *Three terminals tiled, in the default `top` style over the default wallpaper:
 the focused window's titlebar is white, the other two light grey. Below, the
-same three in overview.* Both halves are the same QML. In overview each frame
-scales with the window it belongs to rather than being redrawn at a new size,
-because a frame is part of the window as far as the transform layer is
-concerned, which is why a mode can scale a window at all without knowing what
-a titlebar is.
+same three in overview. Taken under the light theme Solium shipped until
+2026-10-04 and not retaken yet: the shipped theme is now dark grey, the focused
+titlebar a shade lighter than the others ([Colours and
+fonts](#colours-and-fonts)).* Both halves are the same QML. In overview each
+frame scales with the window it belongs to rather than being redrawn at a new
+size, because a frame is part of the window as far as the transform layer is
+concerned, which is why a mode can scale a window at all without knowing what a
+titlebar is.
 
 ## What is QML, and where it comes from
 
@@ -37,7 +40,8 @@ a titlebar is.
 | the keyboard pill, on a surface of its own | `qml/indicator/keyboard.qml` | `keyboard.indicator` in `config.lua` (`lua/keyboard_indicator.lua` declares it through `sol.surface`) |
 | what is broken in an effect or the configuration, on the primary monitor while anything is | `qml/problems.qml` | `require("problems")` in `init.lua` (`lua/problems.lua` declares it through `sol.surface` from `sol.problems()`) |
 | any other scene | `qml/tweaks.qml`, the Developer Tweaks panel (`--debug-mode` only) | `sol.surface(name, { scene = ... })` |
-| the pointer, with no cursor theme | `qml/cursor.qml` | `SOLIUM_QML_CURSOR`, for one run |
+| the pointer, with no scene and no cursor theme | `qml/cursor.qml` | not replaced; name a scene instead |
+| the pointer's scene | nothing ships | `cursor = { scene = ... }`, or `SOLIUM_QML_CURSOR` for one run |
 
 Your own directory is `~/.config/solium/qml/`, and for everything in that
 table but the pointer it is searched first. A file you write shadows the
@@ -47,8 +51,9 @@ from the shipped set, including its later improvements. A folder under
 replace the shipped style of that name. There is no registry: nothing has to
 be listed anywhere for a style to be found.
 
-The pointer is the exception: `~/.config/solium/qml/cursor.qml` is not looked
-for. [The pointer](#the-pointer) below says what is.
+The shipped pointer is the exception: `~/.config/solium/qml/cursor.qml` does
+not replace it. A pointer of your own is a scene you name, which a bare name
+finds in that directory first. [The pointer](#the-pointer) below says how.
 
 ## Writing a pane style
 
@@ -191,27 +196,49 @@ more blur. Test it with `SOLIUM_OUTPUTS=2` and a scale on one of them; see
 
 ## Colours and fonts
 
-Nothing in a frame should contain a hex code. `Solium.Theme` has eighteen
+Nothing in a frame should contain a hex code. `Solium.Theme` has nineteen
 properties:
 
 - colours: `surface`, `surfaceInactive`, `edge`, `edgeInactive`, `text`,
-  `textDim`, `control`, `controlInactive`, `accent`, `warning`, `danger`;
+  `textDim`, `control`, `controlInactive`, `accent`, `warning`, `danger`,
+  `accentInk` (what is drawn on the last three);
 - metrics: `titlebarHeight`, `gap`, `margin`;
 - type: `fontFamily`, `fontSize`;
 - chrome durations, in milliseconds: `quick`, `normal`.
 
-The frames, the loading window and a hosted shell that imports `Solium` all
-read that one singleton, so a colour changed there changes all of them. The
-fallback pointer and the default wallpaper do not read it; their colours are
-fixed. A copy of `Solium/Theme.qml` in `~/.config/solium/qml/Solium/` is meant
-to be how you change it, and does not work yet: the shipped module is found
-first ([#88](https://github.com/Lilium-Linux/solium/issues/88)). A frame that
-hardcodes a colour is a frame that stops matching the moment anyone changes
-anything.
+The frames, the loading window, the keyboard pill and a hosted shell that
+imports `Solium` all read that one singleton, so a colour changed there changes
+all of them.
+
+**The shipped colours are greys, every one: red, green and blue the same.**
+That is the maintainer's decision for now: a dark theme in black, greys and
+white, with no accent hue and none of the logo's or the wallpaper's colours.
+The bars are near-black, the focused one a shade lighter, with light grey
+titles, dimmer on the windows without the keyboard; `accent` is a light grey,
+which the keyboard pill's capsule is drawn in; and `warning` and `danger`,
+which the maximise and close buttons turn under the pointer, are two greys
+told apart by shade and by the glyph each then shows. A light scheme, or
+colour accents, would be a change of the values only: the names stay.
+`qml::hosting_tests::every_colour_the_theme_publishes_is_a_grey` holds the
+shipped file to it. And a grey drawn see-through over the wallpaper takes the
+wallpaper's colour, so the bars of `top`, `reactive` and `reveal`, `pulse`'s
+breathing line, `proximity`'s border and the Developer Tweaks panel are
+opaque (`tests/scenarios/pane-top-drawn.lua`,
+`tests/scenarios/pane-bars-opaque.lua`, `tests/scenarios/pane-pulse-drawn.lua`,
+`tests/scenarios/pane-proximity-drawn.lua`,
+`qml::hosted::tests::the_tweaks_panel_is_opaque_and_grey`).
+
+The fallback pointer and the default wallpaper do not read it; their colours
+are fixed. A copy of `Solium/Theme.qml` in `~/.config/solium/qml/Solium/` is
+meant to be how you change it, and does not work yet: the shipped module is
+found first ([#88](https://github.com/Lilium-Linux/solium/issues/88)). A frame
+that hardcodes a colour is a frame that stops matching the moment anyone
+changes anything.
 
 ## The pointer
 
-The pointer is the machine's XCursor theme whenever there is one:
+With no scene of your own named for it, the pointer is the machine's XCursor
+theme whenever there is one:
 
 ```lua
 cursor = { theme = "Adwaita", size = 24 },
@@ -230,15 +257,21 @@ on each edge.
 <img src="cursor.png" width="232" alt="Solium's own pointer, magnified eight times, over the dark wallpaper and over a white titlebar">
 
 *Solium's own pointer at 24 pixels, magnified eight times: over the dark part
-of the wallpaper, and over a focused `top` titlebar.* It is what you get with
-no theme set anywhere, or with one named that is not installed, and it is QML:
-`qml/cursor.qml`. Its colours are fixed rather than taken from `Theme`, a
-white body with a dark outline, because the pointer sits on whatever a client
-drew and has to stay legible on black and on white alike.
+of the wallpaper, and over a focused `top` titlebar as it was under the earlier
+light theme.* It is what you get with no scene and no theme set anywhere, or
+with a theme named that is not installed, and it is QML: `qml/cursor.qml`. Its
+colours are fixed rather than taken from `Theme`, a white body with a dark
+outline, because the pointer sits on whatever a client drew and has to stay
+legible on black and on white alike.
 
-To change it, point `SOLIUM_QML_CURSOR` at a file of your own for a run. A copy
-in `~/.config/solium/qml/` is not looked for, and the scene is built once, so
-an edit to it needs a restart rather than a reload.
+It is one arrow for every shape. A pointer of your own is a scene, named the
+way a shell's is, `cursor = { scene = "~/.config/solium/cursor/Cursor.qml" }`,
+or `SOLIUM_QML_CURSOR=<file>` for one run. It draws every shape ahead of any
+theme, is told which one through `Solium.cursor.shape`, can be larger than
+`size` and can animate; a reload builds it again after an edit.
+[ricing.md](ricing.md#your-own-pointer) has an example, and
+[shell-boundary.md](shell-boundary.md#what-a-pointer-scene-is-given) what it
+is given.
 
 ## Which windows get a frame, and what a failure looks like
 

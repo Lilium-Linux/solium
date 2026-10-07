@@ -20,6 +20,9 @@ sol.pane(config.pane)
 -- Which effects go where. See config.lua's `effects`.
 sol.effects(config.effects)
 sol.loading(config.loading)
+-- Reload automatically when a file this configuration loaded changes
+-- (#223). See `config.lua`.
+sol.auto_reload(config.reload)
 -- What fills a window while a resize drag is ahead of its client. An absent
 -- table is not an error: a `config.lua` copied before this setting existed
 -- keeps the default rather than failing the whole configuration.
@@ -33,6 +36,17 @@ sol.monitors(config.monitors)
 -- When the screens go dark on their own. An absent table keeps the default,
 -- for the reason `sol.resize` gives.
 sol.idle(config.idle)
+-- libinput device settings: tap-to-click, scrolling, acceleration and the
+-- rest, by device type and by device, applied now and again on every
+-- reload. See `config.lua`.
+sol.input(config.input)
+
+-- logind's `Lock` and sleep requests: the locker to run, and whether to hold
+-- sleep for it. See `config.lua`.
+sol.lock(config.lock)
+-- WM_CLASS names refused a tile, decoration or bar entry outright (#221).
+-- See `config.lua`.
+sol.x11(config.x11)
 -- The pointer's theme and size. An empty table here is not "reset it": it
 -- means the configuration says nothing, and `XCURSOR_THEME`/`XCURSOR_SIZE`
 -- are what the pointer follows -- which is what the rest of the machine
@@ -45,10 +59,23 @@ sol.cursor_theme(config.cursor)
 -- The wallpaper is a script like any other mode: `sol.surface` and a QML
 -- file, and nothing in the compositor knows what a wallpaper is.
 require("wallpaper")
+-- The preview shell's default: fills in `config.shell.scene` when nothing
+-- else named one. Before `shell`, which reads that setting once, here.
+-- `preview.init`, not `preview` -- `package.path` has no `?/init.lua`
+-- pattern, only `?.lua`, and Lua's own `require` turns the dot into the
+-- directory separator before that template is tried.
+require("preview.init")
 require("shell")
 -- The keyboard pill near the text field: `keyboard.indicator` in config.lua.
 -- Configuration on the data the compositor publishes, like the two above.
 require("keyboard_indicator")
+-- What a hosted scene sends with `Solium.send`: the vocabulary's actions go
+-- to `sol.act`, or to the file that answers them in Lua. See
+-- `windows_focus_from_a_scene_focuses_the_window`. Keep it before
+-- `workspaces`, which answers `workspaces.go` and `windows.send` only when
+-- this file is already loaded. See
+-- `a_workspaces_go_from_a_scene_switches_the_monitor_it_names`.
+require("actions")
 
 require("tweaks")
 -- What is broken in an effect or the configuration, on screen while it is.
@@ -56,6 +83,9 @@ require("problems")
 
 require("modes")
 require("open")
+-- How a window goes fullscreen or maximised, and back: `fullscreen` and
+-- `maximize` in config.lua.
+require("fullscreen")
 require("overview")
 require("workspaces")
 require("tiling")
@@ -64,6 +94,10 @@ require("scrolling")
 -- `every_shipped_binding_is_reachable_on_us` loads this file and asks for its
 -- keys.
 require("direction")
+-- Desktop mode: snapping keys and new-window placement, while no layout is
+-- in charge (#222). After `direction`, whose four arrow bindings this takes
+-- over only while floating is the mode in charge.
+require("floating")
 
 -- Programs. `sol.spawn` starts them as clients of this compositor, whatever
 -- session the compositor itself happens to be nested in.
@@ -149,6 +183,42 @@ end)
 sol.bind("super+shift+q", function()
     sol.quit()
 end)
+
+-- The laptop keys (#151): plain bindings to the usual programs, the way any
+-- compositor's default configuration has them. A key whose program is not
+-- installed does nothing but log; `config.bindings` takes any of them over,
+-- and `false` there unbinds one. Volume through `wpctl` (PipeWire), capped at
+-- 100%, with shift for a 1% step; brightness through `brightnessctl`; media
+-- through `playerctl`; Print through `grim`, shift+Print a region with
+-- `slurp`, into ~/Pictures/Screenshots and onto the clipboard when `wl-copy`
+-- is there. Held keys do not repeat yet: a binding fires once per press.
+-- `script::shipped::every_shipped_binding_is_reachable_on_us`.
+local function run(...)
+    local argv = { ... }
+    return function()
+        sol.spawn(table.unpack(argv))
+    end
+end
+local SINK, SOURCE = "@DEFAULT_AUDIO_SINK@", "@DEFAULT_AUDIO_SOURCE@"
+sol.bind("XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "5%+"), "laptop keys")
+sol.bind("XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "5%-"), "laptop keys")
+sol.bind("shift+XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "1%+"), "laptop keys")
+sol.bind("shift+XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "1%-"), "laptop keys")
+sol.bind("XF86AudioMute", run("wpctl", "set-mute", SINK, "toggle"), "laptop keys")
+sol.bind("XF86AudioMicMute", run("wpctl", "set-mute", SOURCE, "toggle"), "laptop keys")
+sol.bind("XF86MonBrightnessUp", run("brightnessctl", "set", "5%+"), "laptop keys")
+sol.bind("XF86MonBrightnessDown", run("brightnessctl", "set", "5%-"), "laptop keys")
+sol.bind("XF86AudioPlay", run("playerctl", "play-pause"), "laptop keys")
+sol.bind("XF86AudioPause", run("playerctl", "play-pause"), "laptop keys")
+sol.bind("XF86AudioNext", run("playerctl", "next"), "laptop keys")
+sol.bind("XF86AudioPrev", run("playerctl", "previous"), "laptop keys")
+-- One shell line each, so the file name and the clipboard step stay in one
+-- place a user can read and copy; the name sorts by time.
+local SHOT = 'dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"; mkdir -p "$dir"; '
+    .. 'file="$dir/$(date +%Y-%m-%d_%H-%M-%S).png"; '
+local CLIP = ' && { command -v wl-copy >/dev/null && wl-copy < "$file" || true; }'
+sol.bind("Print", run("sh", "-c", SHOT .. 'grim "$file"' .. CLIP), "laptop keys")
+sol.bind("shift+Print", run("sh", "-c", SHOT .. 'area="$(slurp)" && grim -g "$area" "$file"' .. CLIP), "laptop keys")
 
 sol.log("solium configuration loaded")
 

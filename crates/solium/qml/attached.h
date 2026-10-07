@@ -20,11 +20,15 @@
 #include <QtCore/QStringList>
 #include <QtCore/QVariant>
 #include <QtCore/QVariantMap>
+#include <QtCore/QPair>
+#include <QtQml/QJSValue>
 #include <QtQml/QQmlParserStatus>
 #include <QtQml/qqml.h>
 #include <QtQuick/QQuickItem>
 
 #include <utility>
+
+#include "pointer.h"
 
 class QQmlContext;
 
@@ -54,10 +58,14 @@ public:
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 QRectF solium_rect(const QVariant &value);
 
-/* A monitor's row: what `Solium.monitor` is. Its name, its whole and work
- * areas in the global space, its scale, its transform and whether it is the
- * primary monitor, all announced by one `changed` per batch.
- * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
+/* A monitor's row: what `Solium.monitor` is, and one row of `Monitors`. Its
+ * name, its whole and work areas in the global space, its scale, its
+ * transform, whether it is the primary monitor, what is reserved on each
+ * edge, its power, whether the pointer is on it and whether it is the active
+ * one, all announced by one `changed` per batch.
+ * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`,
+ * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`,
+ * `models::monitors::tests::a_monitor_row_says_what_is_reserved_and_where_the_pointer_is`. */
 class SoliumMonitor : public SoliumRow
 {
     Q_OBJECT
@@ -69,6 +77,10 @@ class SoliumMonitor : public SoliumRow
     Q_PROPERTY(double scale READ scale NOTIFY changed)
     Q_PROPERTY(QString transform READ transform NOTIFY changed)
     Q_PROPERTY(bool primary READ primary NOTIFY changed)
+    Q_PROPERTY(QVariantMap reserved READ reserved NOTIFY changed)
+    Q_PROPERTY(QString power READ power NOTIFY changed)
+    Q_PROPERTY(bool pointer READ pointer NOTIFY changed)
+    Q_PROPERTY(bool active READ active NOTIFY changed)
 public:
     using SoliumRow::SoliumRow;
     bool isPresent() const { return present; }
@@ -78,6 +90,10 @@ public:
     double scale() const { return value("scale").toDouble(); }
     QString transform() const { return value("transform").toString(); }
     bool primary() const { return value("primary").toBool(); }
+    QVariantMap reserved() const { return value("reserved").toMap(); }
+    QString power() const { return value("power").toString(); }
+    bool pointer() const { return value("pointer").toBool(); }
+    bool active() const { return value("active").toBool(); }
     void announce() override { emit changed(); }
 signals:
     void changed();
@@ -162,8 +178,8 @@ public:
     QObject *target() const { return m_target; }
     void setTarget(QObject *target);
     /* The item a point is asked of: the target itself, or, for a Qt Quick
-     * Controls `Popup`, which is no item, the item Qt draws it as, its
-     * content item's parent.
+     * Controls `Popup`, which is no item, the item Qt draws it as, as
+     * `Solium.input` and `Solium.keyboard` find it.
      * `qml::hosted::tests::a_controls_popup_is_a_grabs_target`. */
     QQuickItem *target_item() const;
     bool active() const { return m_active; }
@@ -189,11 +205,13 @@ private:
     SoliumHosting *m_hosting = nullptr;
 };
 
-/* `Solium.keyboard`, on one item: whether it wants the keyboard, and the
- * keys it claims while it holds it, as `sol.bind` spells them. The scene
- * holds the keyboard while any visible item wants it. Ruling 14.
+/* `Solium.keyboard`, on one item, or a Qt Quick Controls `Popup` as its
+ * item: whether it wants the keyboard, and the keys it claims while it holds
+ * it, as `sol.bind` spells them. The scene holds the keyboard while any
+ * visible item wants it. Ruling 14.
  * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`,
- * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`. */
+ * `qml::hosted::tests::an_invisible_field_does_not_hold_the_keyboard`,
+ * `qml::hosted::tests::a_field_in_a_popup_that_wants_the_keyboard_takes_the_keys`. */
 class SoliumKeyboard : public QObject
 {
     Q_OBJECT
@@ -216,6 +234,10 @@ public:
      * `qml::hosted::tests::a_scene_let_go_of_takes_the_keyboard_again_only_when_asked_anew`. */
     void letGo();
     bool isLetGo() const { return m_let_go; }
+    /* Its window's active focus moved to its item or into it: asking anew
+     * after a let-go, as its item taking active focus itself is.
+     * `qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`. */
+    void focusEntered();
     /* Its scene's hosting record is going, before it is. */
     void detach() { m_hosting = nullptr; }
 signals:
@@ -258,6 +280,40 @@ struct SoliumHosting
      * the start, so a scene says what it has at its first take.
      * `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     bool keyboard_dirty = true;
+    /* The actions the scene sent and the compositor has not taken yet, in
+     * order, each with its data as `{"data": ...}` JSON. Ruling 15.
+     * `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+    QList<QPair<QString, QByteArray>> actions;
+};
+
+/* What `sol.status` last set, for `Solium.status`: one per process, made on
+ * first use.
+ * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+class SoliumStatus : public QObject
+{
+    Q_OBJECT
+public:
+    static SoliumStatus &instance();
+    QString text;
+signals:
+    void changed();
+};
+
+/* `Solium.dirs`: `crate::folder::desktop_dir`, for `Solium.dirs.desktop`.
+ * One per process, made on first use, the same shape as `SoliumStatus`. */
+class SoliumDirs : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(QString desktop READ desktop NOTIFY desktopChanged)
+public:
+    static SoliumDirs &instance();
+    QString desktop() const { return m_desktop; }
+    void setDesktop(const QString &desktop);
+signals:
+    void desktopChanged();
+
+private:
+    QString m_desktop;
 };
 
 /* What every item reads as `Solium.<name>`.
@@ -276,6 +332,23 @@ class SoliumAttached : public QObject
     /* `Solium.keyboard`: whether this item wants the keyboard, and the keys
      * it claims. `qml::hosted::tests::a_field_that_wants_the_keyboard_reports_its_claims`. */
     Q_PROPERTY(SoliumKeyboard *keyboard READ keyboard CONSTANT)
+    /* `Solium.status`: the text `sol.status` set.
+     * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
+    Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    /* `Solium.dirs.desktop`: `crate::folder::desktop_dir` (04-ui.md §4.9). */
+    Q_PROPERTY(SoliumDirs *dirs READ dirs CONSTANT)
+    /* `Solium.cursor`: the pointer as the compositor publishes it, and the
+     * hotspot the pointer's scene sets on its root.
+     * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`,
+     * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+    Q_PROPERTY(SoliumCursor *cursor READ cursor CONSTANT)
+    /* `Solium.region` and `Solium.material`: accepted on every item and read
+     * by nothing yet; `Solium.materialState` is "off" until materials exist
+     * (#199), so a scene shows its plain drawing.
+     * `qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`. */
+    Q_PROPERTY(QString region READ region WRITE setRegion NOTIFY regionChanged)
+    Q_PROPERTY(QVariant material READ material WRITE setMaterial NOTIFY materialChanged)
+    Q_PROPERTY(QString materialState READ materialState CONSTANT)
 public:
     explicit SoliumAttached(QObject *item);
     SoliumMonitor *monitor() const;
@@ -286,14 +359,36 @@ public:
      * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`. */
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
+    QString status() const;
+    SoliumDirs *dirs() const { return &SoliumDirs::instance(); }
+    SoliumCursor *cursor();
+    /* The object's `Solium.cursor` if anything has made it, else null.
+     * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
+    SoliumCursor *cursorIfMade() const { return m_cursor; }
+    QString region() const { return m_region; }
+    void setRegion(const QString &region);
+    QVariant material() const { return m_material; }
+    void setMaterial(const QVariant &material);
+    QString materialState() const { return QStringLiteral("off"); }
+    /* `Solium.send(action, data)`: a named action with data, an object, a
+     * value or nothing, queued for the compositor, which hands it to Lua at
+     * its next settle, after every one sent before it. Ruling 15.
+     * `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
+    Q_INVOKABLE void send(const QString &action, const QJSValue &data = QJSValue());
 
 signals:
     void inputChanged();
+    void statusChanged();
+    void regionChanged();
+    void materialChanged();
 
 private:
     QObject *m_item;
     int m_input = -1;
     SoliumKeyboard *m_keyboard = nullptr;
+    SoliumCursor *m_cursor = nullptr;
+    QString m_region;
+    QVariant m_material;
 };
 
 /* The name `Solium` in QML. It exists only to carry the attached object.

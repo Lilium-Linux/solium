@@ -174,20 +174,22 @@ instance per monitor, each reading `Solium.monitor`
 where its items take it
 ([#173](https://github.com/Lilium-Linux/solium/issues/173)); every
 button, the wheel, `Grab` popups and the keyboard on demand
-([#163](https://github.com/Lilium-Linux/solium/issues/163)); and edges
+([#163](https://github.com/Lilium-Linux/solium/issues/163)); edges
 reserved whatever the scene's size
-([#162](https://github.com/Lilium-Linux/solium/issues/162)). Separately, a
-hosted shell's timers fire on an idle desktop
+([#162](https://github.com/Lilium-Linux/solium/issues/162)); named
+actions with data, sent with `Solium.send` and done by `sol.act`; and live
+`Windows`, `Workspaces` and `Monitors` models
+([#166](https://github.com/Lilium-Linux/solium/issues/166)), the
+workspaces as `workspaces.lua` declares them with `sol.workspaces`.
+Separately, a hosted shell's timers fire on an idle desktop
 ([#164](https://github.com/Lilium-Linux/solium/issues/164)), and a program
-it starts, through `action`, Lua and `sol.spawn`, gets the environment Solium
+it starts, through `Solium.send`, Lua and `sol.spawn`, gets the environment Solium
 started with ([#175](https://github.com/Lilium-Linux/solium/issues/175)).
 The Quickshell compatibility layer was removed
 ([#172](https://github.com/Lilium-Linux/solium/issues/172)), and
 [#165](https://github.com/Lilium-Linux/solium/issues/165), about the
-programs that layer's `Process` started, was closed as superseded by it. What
-is left for a daily desktop is
-[#166](https://github.com/Lilium-Linux/solium/issues/166): a hosted shell
-has no window list and sees no workspaces. The epic also still holds
+programs that layer's `Process` started, was closed as superseded by it. The
+epic still holds
 [#167](https://github.com/Lilium-Linux/solium/issues/167), the services a
 shell shows (audio, notifications, media, battery, network, Bluetooth, the
 tray and the list of applications), which was written against the layer that
@@ -233,12 +235,11 @@ writing it. The shell is the reason all three matter more here than elsewhere:
 a dock that cannot enumerate windows is a launcher, and a settings panel that
 cannot move a monitor is a text editor with buttons.
 
-**The session.** Two gaps between the compositor and the rest of the user
-session, each a day lost; [gaps.md](gaps.md#the-session) has the detail.
+**The session.** One gap between the compositor and the rest of the user
+session; [gaps.md](gaps.md#the-session) has the detail.
 
 | | why it stops someone |
 |---|---|
-| [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | `loginctl lock-session` does nothing, and nothing locks before sleep unless `swayidle -w` does |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput settings | no tap-to-click, so tapping a touchpad does nothing |
 
 ### 2. Things that have to be true, not built

@@ -39,7 +39,7 @@ function shell.apply()
     if not chosen then
         -- A surface outlives a reload until something removes it by name, so
         -- a shell taken out of the configuration would otherwise stay on
-        -- screen. See `the_shipped_configuration_hosts_no_shell`.
+        -- screen. See `the_shipped_configuration_hosts_no_shell_with_preview_off`.
         sol.surface("shell", false)
         return
     end
@@ -55,6 +55,12 @@ function shell.apply()
         -- And which bindings still work while it holds the keyboard: see
         -- `the_shell_takes_its_keyboard_bindings_from_the_configuration`.
         keyboard = settings.keyboard,
+        -- A generic passthrough: whatever a shell's own Lua put here lands on
+        -- its scene's root item, by name (`Instance::set_properties`), so a
+        -- scene reads its own settings as plain QML properties rather than
+        -- every shell piece needing a model of its own. `preview/dock.lua`
+        -- is the first user: the dock's pins and visibility.
+        properties = settings.properties,
     })
 end
 

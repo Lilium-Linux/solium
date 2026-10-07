@@ -185,6 +185,16 @@ pub(crate) fn session_bus() -> Option<String> {
         .filter(|address| !address.trim().is_empty())
 }
 
+/// The D-Bus address to ask for logind's `Lock` and sleep signals on, instead
+/// of the system bus: this function's own `SOLIUM_LOGIND_BUS`. Read the same
+/// way, for the same reason — a nested run or a manual `--tty` must never
+/// reach the real logind, or a test the real system bus.
+pub(crate) fn logind_bus() -> Option<String> {
+    std::env::var("SOLIUM_LOGIND_BUS")
+        .ok()
+        .filter(|address| !address.trim().is_empty())
+}
+
 fn millis(name: &str) -> Option<Duration> {
     let raw = std::env::var(name).ok()?;
     match raw.trim().parse::<u64>() {

@@ -91,6 +91,14 @@ signal-hook-registry = "1.4"
 # `launch::tests::a_spawned_program_holds_no_descriptor_beyond_stdio`.
 libc = "0.2"
 
+# The desktop folder's live updates (`src/folder.rs`): a thin wrapper over
+# `inotify_init1`/`inotify_add_watch`, ISC. Default features off -- its
+# `stream` feature pulls in tokio and futures-util for an async reader this
+# crate has no use for; `folder::Watcher` only ever does a non-blocking read
+# on the compositor's own clock, the same shape as every other descriptor
+# `qml::wake` already polls.
+inotify = { version = "0.11", default-features = false }
+
 [build-dependencies]
 # Qt Quick is hosted in-process, so a small C++ shim is compiled in. See
 # crates/solium/qml/host.cpp for why in-process rather than over a protocol.

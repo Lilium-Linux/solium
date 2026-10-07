@@ -12,7 +12,9 @@ use smithay::{
 };
 
 use crate::{
+    json::Json,
     qml::hosted::{GrabReport, KeyboardReport, PointerKind, SceneKey, ScenePointer},
+    script::Command,
     scripted::{Edges, KeyPolicy, Outside, SurfaceId},
     state::{ScenePress, Solium},
 };
@@ -83,7 +85,8 @@ impl Solium {
     /// (`state::tests::real_client::reflow_on_close::hosted::a_grab_another_scene_takes_dismisses_the_one_held`),
     /// then keyboard wants
     /// (`state::tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`),
-    /// and then the actions they asked for.
+    /// and then the actions they asked for
+    /// (`state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`).
     /// Called after anything that can run QML code in a dispatch -- the end
     /// of an input dispatch and a frame's settle among them -- once a
     /// declaration has been applied, and once the surfaces are placed on
@@ -119,7 +122,7 @@ impl Solium {
             }
             self.settle_grabs();
             self.settle_keyboard();
-            self.settle_surfaces();
+            self.settle_actions();
             if !self.scenes_to_settle {
                 break;
             }
@@ -277,18 +280,7 @@ impl Solium {
                 }
             });
         }
-        let location = pointer.current_location();
-        let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
-        pointer.motion(
-            self,
-            None,
-            &MotionEvent {
-                location,
-                serial: SERIAL_COUNTER.next_serial(),
-                time,
-            },
-        );
-        pointer.frame(self);
+        self.motion_in_place(None);
     }
 
     /// Give the pointer back once a grab is over, as a motion that does not
@@ -300,16 +292,38 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::with_outside_click_pass_the_dismissing_press_reaches_the_window_under_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_popup_that_closes_by_itself_gives_the_pointer_back_to_the_window_under_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::a_surface_taken_away_gives_the_pointer_back_to_the_window_under_it`.
-    fn repoint_clients(&mut self) {
+    ///
+    /// A grab that ends while its scene holds a press leaves the pointer
+    /// with the scene until that press's release, which gives it back
+    /// then.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_popup_closed_during_a_press_inside_it_gives_the_pointer_back_at_the_release`.
+    pub(crate) fn repoint_clients(&mut self) {
+        let Some(location) = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+        else {
+            return;
+        };
+        if self.scene_press.is_some() {
+            self.repoint_at_release = true;
+        }
+        let under = self.surface_under(location);
+        self.motion_in_place(under);
+    }
+
+    /// A motion that does not move the pointer, giving it to `focus`.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_grab_suspends_a_pointer_lock_and_the_lock_comes_back_after`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_swallowed_outside_press_gives_the_pointer_back_to_the_window_under_it`.
+    fn motion_in_place(&mut self, focus: Option<(WlSurface, Point<f64, Logical>)>) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
         let location = pointer.current_location();
-        let under = self.surface_under(location);
         let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
         pointer.motion(
             self,
-            under,
+            focus,
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -317,6 +331,176 @@ impl Solium {
             },
         );
         pointer.frame(self);
+    }
+
+    /// Hand every action the scenes queued to the `surface` listeners, scene
+    /// by scene and each scene's in order, with the surface's name and the
+    /// action's data, each in a dispatch of its own (Ruling 15).
+    /// `state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`,
+    /// `state::tests::real_client::a_click_on_a_hosted_button_is_acted_on_at_its_release`.
+    pub(crate) fn settle_actions(&mut self) {
+        let mut asked = Vec::new();
+        for surface in self.surfaces.iter_mut() {
+            for (action, data) in surface.take_actions() {
+                asked.push((surface.name().to_owned(), action, data));
+            }
+        }
+        for (name, action, data) in asked {
+            let snapshot = self.snapshot();
+            let Some(mut scripts) = self.scripts.take() else {
+                return;
+            };
+            let outcome = scripts.surface_action(&name, &action, &data, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
+    }
+
+    /// One of the compositor's verbs, as the command that does it, or why it
+    /// cannot be done: an action it does not know, logged once by name, data
+    /// with no window's id, a window that is not there (Ruling 15), a focus
+    /// the lock refuses, or a fullscreen or maximise of an X11 window, which
+    /// has no xdg toplevel to take it. Only `windows.close` reaches a window
+    /// still loading: the others act on its client, which it does not have
+    /// yet.
+    /// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`,
+    /// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`,
+    /// `state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
+    /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`,
+    /// `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
+    pub(crate) fn act(&mut self, action: &str, data: &Json) -> Result<Command, &'static str> {
+        // Not a window action: `apps.launch { id }` names a desktop id, not a
+        // window, and what it starts is `Command::Spawn` -- Solium's existing
+        // spawn path (`launch.rs`, `state/open.rs::spawn`), so a launch from
+        // the dock gets the same clean environment and loading window
+        // `super+return` already does (03 §3.2.13's "what a launch does").
+        if action == "apps.launch" {
+            let id = data.get("id").and_then(Json::as_str).ok_or("bad-data")?;
+            let entry = self
+                .apps
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or("unknown-app")?;
+            let mut argv = crate::apps::launch_argv(entry, &crate::apps::LaunchContext::default())
+                .map_err(|_| "bad-data")?
+                .into_iter();
+            // `launch_argv` never returns `Ok` with an empty list (it is an
+            // `Err` instead: `apps::tests::a_field_with_nothing_to_fill_it_is_dropped`
+            // covers the field-code side of that).
+            let program = argv.next().ok_or("bad-data")?;
+            return Ok(Command::Spawn {
+                program,
+                args: argv.collect(),
+            });
+        }
+        // `folder.trust { uri }`: a desktop launcher may run once trusted.
+        // `uri` is looked up in `self.folder` (what the last scan actually
+        // listed) and resolved to its absolute path there, so an id outside
+        // what is on the desktop, or a non-launcher, is refused rather than
+        // trusting a path the caller merely claims is a launcher.
+        if action == "folder.trust" {
+            let uri = data.get("uri").and_then(Json::as_str).ok_or("bad-data")?;
+            let entry = self
+                .folder
+                .iter()
+                .find(|entry| entry.uri == uri)
+                .ok_or("unknown-file")?;
+            if !entry.is_launcher {
+                return Err("bad-data");
+            }
+            let absolute = crate::folder::path_from_uri(&entry.uri).ok_or("bad-data")?;
+            return Ok(Command::FolderTrust {
+                absolute: absolute.display().to_string(),
+            });
+        }
+        // `folder.open { uri }`: a trusted launcher runs its own `Exec=`;
+        // anything else runs through the default application for its MIME
+        // type -- both launched the same way `apps.launch` launches
+        // (`crate::apps::launch_argv`, `Command::Spawn`), so a file opened
+        // from the desktop gets the same clean environment and loading
+        // window a launch from the dock does.
+        if action == "folder.open" {
+            let uri = data.get("uri").and_then(Json::as_str).ok_or("bad-data")?;
+            let entry = self
+                .folder
+                .iter()
+                .find(|entry| entry.uri == uri)
+                .ok_or("unknown-file")?;
+            if entry.is_dir {
+                // A folder window is `Later` (04-ui.md §4.9): nothing opens
+                // one yet. A hidden entry opens like any other when it is
+                // shown at all (`showHidden`, Desktop.qml) -- `hidden` plays
+                // no part in whether `folder.open` runs it.
+                return Err("unsupported");
+            }
+            let path = crate::folder::path_from_uri(&entry.uri).ok_or("bad-data")?;
+            let launch_entry = if entry.is_launcher {
+                if !entry.trusted {
+                    return Err("untrusted");
+                }
+                crate::folder::launcher_entry(&path).ok_or("unknown-file")?
+            } else {
+                let id = crate::folder::default_app_id(&entry.mime).ok_or("no-handler")?;
+                self.apps
+                    .iter()
+                    .find(|app| app.id == id)
+                    .cloned()
+                    .ok_or("no-handler")?
+            };
+            let ctx = crate::apps::LaunchContext {
+                files: vec![path.display().to_string()],
+                uris: vec![entry.uri.clone()],
+            };
+            let mut argv = crate::apps::launch_argv(&launch_entry, &ctx)
+                .map_err(|_| "bad-data")?
+                .into_iter();
+            let program = argv.next().ok_or("bad-data")?;
+            return Ok(Command::Spawn {
+                program,
+                args: argv.collect(),
+            });
+        }
+        let make: fn(u64) -> Command = match action {
+            "windows.focus" => |id| Command::Focus { id },
+            "windows.close" => |id| Command::Close { id },
+            "windows.fullscreen" => |id| Command::ToggleFullscreen { id },
+            "windows.maximize" => |id| Command::ToggleMaximize { id },
+            _ => {
+                if self.unknown_actions.insert(action.to_owned()) {
+                    tracing::warn!(action, "sol.act: no such action");
+                }
+                return Err("unknown-action");
+            }
+        };
+        let id = data.get("id").and_then(Json::as_u64).ok_or("bad-data")?;
+        let window = self.window_by_id(id);
+        let there = if action == "windows.close" {
+            self.panes.by_script_id(id).is_some()
+        } else {
+            window.is_some()
+        };
+        if !there {
+            return Err("unknown-window");
+        }
+        match (action, window) {
+            // Behind the lock no window may take the keyboard, so
+            // `focus_window` refuses it, and `done` hears that and not that
+            // it was done.
+            // `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
+            ("windows.focus", Some(window)) if !self.may_focus(&window) => Err("locked"),
+            // An X11 window has no xdg toplevel, and `ToggleFullscreen` and
+            // `toggle_maximize` leave a window without one as it is, so
+            // `done` hears `unsupported` and not that it was done. No test
+            // can make an X11 window (an `X11Surface` needs a live XWayland,
+            // as the comment on `first_focus` in `state/open.rs` says), so
+            // this is checked by reading those two.
+            ("windows.fullscreen" | "windows.maximize", Some(window))
+                if window.toplevel().is_none() =>
+            {
+                Err("unsupported")
+            }
+            _ => Ok(make(id)),
+        }
     }
 
     /// Dismiss the hosted grab: its scene hears every active grab of its

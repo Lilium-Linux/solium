@@ -107,9 +107,11 @@ SOLIUM_LOADING=<name or path>
     The scene a window shows before its application arrives, over the
     configuration's `loading.scene`.
 
-SOLIUM_QML_CURSOR=<path>
-    The QML file the compositor's own pointer is drawn from, instead of the
-    shipped `cursor.qml`. Used only when no XCursor theme is in force.
+SOLIUM_QML_CURSOR=<path or name>
+    The pointer's scene for one run, over the configuration's `cursor.scene`:
+    drawn for every shape, ahead of any XCursor theme, and found as
+    `cursor.scene` is. The shipped `cursor.qml` is still what is drawn with
+    no scene and no theme.
 
 SOLIUM_QML_PATH=<paths>
     The whole QML import path, colon separated. Replaces the search rather
@@ -147,6 +149,13 @@ SOLIUM_SESSION_BUS=<address>
     only way either happens. Blank counts as unset. For checking the calls against a
     private bus: `dbus-run-session -- sh -c
     'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS solium'`.
+
+SOLIUM_LOGIND_BUS=<address>
+    The D-Bus address to hear logind's `Lock` and sleep signals on
+    (`lock.command`, `lock.before_sleep`), instead of the system bus. Nested,
+    or `solium --tty` without `--session`, this is the only way either
+    happens, so a nested run or a test never reaches the real logind. Blank
+    counts as unset.
 
 ## Hosting a shell
 

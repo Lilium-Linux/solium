@@ -275,12 +275,18 @@ impl ShellSurface {
         self.scene.set_int(name, value);
     }
 
-    /// Take whatever the scene asked for, clearing it.
-    ///
-    /// The same one-way channel the window frames use: QML sets `action`, the
-    /// compositor takes it and clears it, so a press is acted on once.
-    pub(crate) fn taken_action(&mut self) -> Option<String> {
-        self.scene.take_string("action").filter(|it| !it.is_empty())
+    /// Every action the scene queued with `Solium.send`, in order, and then
+    /// the old `action` property, which is heard with no data and cleared,
+    /// so a press is acted on once (Ruling 15).
+    /// `tests::queued_actions_come_first_and_the_old_action_property_last`,
+    /// `tests::a_cached_hit_follows_published_rows_and_a_taken_action`.
+    pub(crate) fn take_actions(&mut self) -> Vec<(String, Json)> {
+        let mut actions: Vec<(String, Json)> =
+            std::iter::from_fn(|| self.scene.take_action()).collect();
+        if let Some(action) = self.scene.take_string("action").filter(|it| !it.is_empty()) {
+            actions.push((action, Json::Null));
+        }
+        actions
     }
 
     /// Write `changed` into the live scene, and remember `bag`, the whole
@@ -546,6 +552,18 @@ fn build(
 
 /// The newest modification time anywhere the scene's QML lives.
 fn newest_change(source: &Path) -> Option<SystemTime> {
+    // The tree it came from, when one is named: editing a widget three
+    // directories away is still editing the shell.
+    let watched = std::env::var_os("SOLIUM_SHELL_WATCH").map(PathBuf::from);
+    newest_qml(source, watched.as_deref().or_else(|| source.parent()))
+}
+
+/// The newest modification time of `source` and of any QML file under
+/// `tree`, four directories deep: where a scene's QML lives, imported by
+/// relative path. Shared with the pointer's scene, which a reload builds
+/// again on an edit anywhere in it as the shell's does
+/// (`cursor::tests::a_reload_swaps_the_scene`).
+pub(crate) fn newest_qml(source: &Path, tree: Option<&Path>) -> Option<SystemTime> {
     fn newest_in(directory: &Path, best: &mut Option<SystemTime>, depth: usize) {
         if depth > 4 {
             return;
@@ -569,12 +587,8 @@ fn newest_change(source: &Path) -> Option<SystemTime> {
     let mut newest = std::fs::metadata(source)
         .and_then(|data| data.modified())
         .ok();
-    // The tree it came from, when one is named: editing a widget three
-    // directories away is still editing the shell.
-    if let Some(root) = std::env::var_os("SOLIUM_SHELL_WATCH") {
-        newest_in(Path::new(&root), &mut newest, 0);
-    } else if let Some(parent) = source.parent() {
-        newest_in(parent, &mut newest, 0);
+    if let Some(tree) = tree {
+        newest_in(tree, &mut newest, 0);
     }
     newest
 }
@@ -767,21 +781,71 @@ mod tests {
             ));
             let published = surface.hit(area, at(10.0));
             let second = surface.hit(area, at(110.0));
-            let taken = surface.taken_action();
+            let taken = surface.take_actions();
             let after_the_action = surface.hit(area, at(110.0));
             drop(surface);
             let _ = std::fs::remove_dir_all(&directory);
             assert_eq!(
-                (first, published, second, taken.as_deref(), after_the_action),
+                (first, published, second, taken, after_the_action),
                 (
                     Hit::Press,
                     Hit::Nothing,
                     Hit::Press,
-                    Some("go"),
+                    vec![("go".to_owned(), crate::json::Json::Null)],
                     Hit::Nothing
                 ),
                 "(the first button, there again once its monitor was published, the second, \
                  the action taken, the second's place after that)"
+            );
+        });
+    }
+
+    /// **A scene's queued actions are heard first, in order, and then the
+    /// old `action` property, with no data** (Ruling 15).
+    #[test]
+    fn queued_actions_come_first_and_the_old_action_property_last() {
+        on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-surface-take-actions");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    property string action: "old"
+                    Component.onCompleted: {
+                        Solium.send("first", { a: 1 })
+                        Solium.send("second")
+                    }
+                }
+                "#,
+            )
+            .expect("writing the scene");
+            let mut surface =
+                ShellSurface::hosted(path, "{}", "take-actions-1").expect("the scene builds");
+            let taken: Vec<(String, String)> = surface
+                .take_actions()
+                .into_iter()
+                .map(|(action, data)| (action, data.render()))
+                .collect();
+            let again = surface.take_actions();
+            drop(surface);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (taken, again),
+                (
+                    vec![
+                        ("first".to_owned(), r#"{"a":1}"#.to_owned()),
+                        ("second".to_owned(), "null".to_owned()),
+                        ("old".to_owned(), "null".to_owned()),
+                    ],
+                    Vec::new()
+                ),
+                "(what was taken, what a second take finds)"
             );
         });
     }

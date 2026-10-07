@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// The headers moc runs on, in crates/solium/qml: the same list as
 /// `MOC_HEADERS` in crates/solium/build.rs.
-const MOC_HEADERS: &[&str] = &["attached.h", "rows.h", "keyboard.h"];
+const MOC_HEADERS: &[&str] = &["attached.h", "rows.h", "keyboard.h", "pointer.h"];
 
 /// The repository this harness belongs to: two levels up from `dev/wirecheck`.
 ///
@@ -17,7 +17,8 @@ const MOC_HEADERS: &[&str] = &["attached.h", "rows.h", "keyboard.h"];
 /// or somebody else's checkout all compile the host.cpp sitting next to them
 /// rather than one that happens to be on this machine.
 fn repo() -> PathBuf {
-    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
         .and_then(Path::parent)
@@ -28,12 +29,31 @@ fn repo() -> PathBuf {
 fn main() {
     let qml = repo().join("crates/solium/qml");
     println!("cargo:rerun-if-changed={}", qml.join("host.cpp").display());
-    println!("cargo:rerun-if-changed={}", qml.join("attached.cpp").display());
-    println!("cargo:rerun-if-changed={}", qml.join("attached.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        qml.join("attached.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        qml.join("attached.h").display()
+    );
     println!("cargo:rerun-if-changed={}", qml.join("rows.cpp").display());
     println!("cargo:rerun-if-changed={}", qml.join("rows.h").display());
-    println!("cargo:rerun-if-changed={}", qml.join("keyboard.cpp").display());
-    println!("cargo:rerun-if-changed={}", qml.join("keyboard.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        qml.join("keyboard.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        qml.join("keyboard.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        qml.join("pointer.cpp").display()
+    );
+    println!("cargo:rerun-if-changed={}", qml.join("pointer.h").display());
+    println!("cargo:rerun-if-changed={}", qml.join("icon.cpp").display());
+    println!("cargo:rerun-if-changed={}", qml.join("icon.h").display());
     println!("cargo:rerun-if-env-changed=WIRECHECK_HOST_CPP");
     println!("cargo:rerun-if-env-changed=QT_MOC");
     // Our own C++ too. cc-rs does not always emit these, and a stale object
@@ -54,12 +74,14 @@ fn main() {
         // once, from this checkout, unmodified.
         .file("src/host_tu.cpp")
         // host.cpp includes attached.h and calls into attached.cpp, which
-        // calls into rows.cpp and keyboard.cpp, so the real ones are compiled
-        // beside it, with their moc output below: the gate's wirecheck step
-        // links only with all of them.
+        // calls into rows.cpp, keyboard.cpp, pointer.cpp and icon.cpp, so the
+        // real ones are compiled beside it, with their moc output below: the
+        // gate's wirecheck step links only with all of them.
         .file(qml.join("attached.cpp"))
         .file(qml.join("rows.cpp"))
-        .file(qml.join("keyboard.cpp"));
+        .file(qml.join("keyboard.cpp"))
+        .file(qml.join("pointer.cpp"))
+        .file(qml.join("icon.cpp"));
     // Overridable only so a deliberately broken copy can be compiled as a
     // negative control; the default is always the host.cpp beside this crate.
     let host = std::env::var_os("WIRECHECK_HOST_CPP")
@@ -124,11 +146,17 @@ fn main() {
             .arg(&generated)
             .status()
             .expect("moc runs; set QT_MOC to its path");
-        assert!(status.success(), "moc failed ({status}) on {}", header.display());
+        assert!(
+            status.success(),
+            "moc failed ({status}) on {}",
+            header.display()
+        );
         build.file(&generated);
     }
 
-    let egl = pkg_config::Config::new().probe("egl").expect("EGL dev files");
+    let egl = pkg_config::Config::new()
+        .probe("egl")
+        .expect("EGL dev files");
     for path in &egl.include_paths {
         build.include(path);
     }
@@ -145,7 +173,6 @@ fn main() {
     }
     rb.file("src/readback.cpp");
     rb.compile("wirereadback");
-
 
     let _ = pkg_config::Config::new().probe("gbm");
     let _ = pkg_config::Config::new().probe("glesv2");
