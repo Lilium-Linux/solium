@@ -5,8 +5,16 @@
 //! together, and a broken one is refused with its number, its key and, for a
 //! part or a slot, what was probably meant (Ruling 13).
 //! `tests::an_unknown_part_is_refused_with_its_rule_number_and_a_suggestion`.
+//!
+//! [`Rules`] resolves a part's three slots from what a frame knows of it, the
+//! later rule winning across origins (style, material, expansion, user), and
+//! says up front which facts any rule reads; [`tier`] decides from what a
+//! bound plan reads whether this build runs it (Ruling 14).
+//! `tests::a_users_rule_beats_the_styles`,
+//! `tests::tiers_follow_what_the_plan_reads_and_the_source`.
 
 use solium_effects::spec::Value;
+use solium_effects::stage::Reads;
 
 use crate::effect::tree::Tree;
 
@@ -253,6 +261,24 @@ impl Part {
             "surface" => Self::Surface(name.to_owned()),
             _ => Self::LayerShell(glob_word(name)?),
         })
+    }
+
+    /// Whether this rule's part is the one a frame names: the same kind, and
+    /// the same name, or for a layer surface a namespace its glob matches.
+    /// `tests::each_whole_part_reaches_only_itself`,
+    /// `tests::a_layer_rule_reaches_only_layers_of_its_name`,
+    /// `tests::a_surface_or_layer_shell_rule_reaches_only_its_own`.
+    pub(crate) fn is(&self, part: PartRef<'_>) -> bool {
+        match (self, part) {
+            (Self::Pane, PartRef::Pane)
+            | (Self::Client, PartRef::Client)
+            | (Self::Popup, PartRef::Popup) => true,
+            (Self::Layer(name), PartRef::Layer(named))
+            | (Self::Region(name), PartRef::Region(named))
+            | (Self::Surface(name), PartRef::Surface(named)) => name == named,
+            (Self::LayerShell(glob), PartRef::LayerShell(namespace)) => glob.matches(namespace),
+            _ => false,
+        }
     }
 
     /// `tests::every_match_key_is_read_for_its_family`.
@@ -598,6 +624,279 @@ fn read_source(source: &Tree) -> Result<Source, Refused> {
             )),
         },
         _ => Err(("source", "`source` is xray, live, auto or self".to_owned())),
+    }
+}
+
+/// Which rule fills a slot: its origin, its place in that origin's list, and
+/// the generation of the list it was read from, so a key from a list since
+/// replaced finds nothing of the new one by accident.
+/// `tests::a_key_finds_its_rule_in_its_origin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RuleKey {
+    pub(crate) origin: Origin,
+    pub(crate) index: u32,
+    pub(crate) generation: u32,
+}
+
+/// One part of a pane or a surface, as a frame names it to resolve its
+/// slots: [`Part`] borrowed, a layer surface by its namespace.
+/// `tests::a_layer_rule_reaches_only_layers_of_its_name`,
+/// `tests::a_surface_or_layer_shell_rule_reaches_only_its_own`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PartRef<'a> {
+    Pane,
+    Client,
+    Popup,
+    Layer(&'a str),
+    Region(&'a str),
+    Surface(&'a str),
+    LayerShell(&'a str),
+}
+
+/// What a frame knows of a window, a scripted surface or a layer surface,
+/// which a rule's `match` is checked against.
+/// `tests::every_match_key_is_checked_against_its_fact`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Facts<'a> {
+    pub(crate) app_id: &'a str,
+    pub(crate) title: &'a str,
+    pub(crate) focused: bool,
+    pub(crate) fullscreen: bool,
+    pub(crate) monitor: &'a str,
+    pub(crate) style: &'a str,
+    pub(crate) surface: &'a str,
+    pub(crate) layer_shell: &'a str,
+}
+
+/// The facts any rule reads that cost something to gather (a title is a
+/// `String` per pane, a monitor an output scan, an app id a lookup); the
+/// booleans and the style are free, so a frame gathers only these.
+/// `tests::with_no_rules_nothing_resolves_and_no_fact_is_asked`,
+/// `tests::the_facts_asked_are_every_origins_keys`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Keys {
+    pub(crate) app_id: bool,
+    pub(crate) title: bool,
+    pub(crate) monitor: bool,
+}
+
+/// One part's three slots, each the rule that fills it, if any.
+/// `tests::the_later_rule_for_one_part_and_slot_wins`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Resolved {
+    pub(crate) behind: Option<RuleKey>,
+    pub(crate) front: Option<RuleKey>,
+    pub(crate) replace: Option<RuleKey>,
+}
+
+impl Resolved {
+    /// `tests::a_key_finds_its_rule_in_its_origin`.
+    pub(crate) fn get(&self, slot: Slot) -> Option<RuleKey> {
+        match slot {
+            Slot::Behind => self.behind,
+            Slot::Front => self.front,
+            Slot::Replace => self.replace,
+        }
+    }
+
+    /// `tests::with_no_rules_nothing_resolves_and_no_fact_is_asked`.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.behind.is_none() && self.front.is_none() && self.replace.is_none()
+    }
+}
+
+impl Match {
+    /// Every key given matches its fact; a key not given matches anything.
+    /// `tests::every_match_key_is_checked_against_its_fact`.
+    pub(crate) fn accepts(&self, facts: &Facts<'_>) -> bool {
+        let word = |glob: Option<&Glob>, fact: &str| glob.is_none_or(|glob| glob.matches(fact));
+        let flag = |wanted: Option<bool>, fact: bool| wanted.is_none_or(|wanted| wanted == fact);
+        word(self.app_id.as_ref(), facts.app_id)
+            && word(self.title.as_ref(), facts.title)
+            && flag(self.focused, facts.focused)
+            && flag(self.fullscreen, facts.fullscreen)
+            && word(self.monitor.as_ref(), facts.monitor)
+            && word(self.style.as_ref(), facts.style)
+            && word(self.surface.as_ref(), facts.surface)
+            && word(self.layer_shell.as_ref(), facts.layer_shell)
+    }
+}
+
+/// Every origin's rules but the style's, which ride on each pane's
+/// `Decoration` (Task 15) and are passed in.
+/// `tests::a_users_rule_beats_the_styles`.
+#[derive(Debug, Default)]
+pub(crate) struct Rules {
+    /// Material, expansion and user, in that order; the style's ride on the
+    /// pane. `tests::a_key_finds_its_rule_in_its_origin`.
+    lists: [Vec<Rule>; 3],
+    generation: u32,
+}
+
+impl Rules {
+    /// `tests::a_users_rule_beats_the_styles`.
+    pub(crate) fn new(
+        material: Vec<Rule>,
+        expansion: Vec<Rule>,
+        user: Vec<Rule>,
+        generation: u32,
+    ) -> Self {
+        Self {
+            lists: [material, expansion, user],
+            generation,
+        }
+    }
+
+    /// `tests::with_no_rules_nothing_resolves_and_no_fact_is_asked`.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lists.iter().all(Vec::is_empty)
+    }
+
+    /// Each origin's list with its generation, in the order a later rule
+    /// wins: style, material, expansion, user (Ruling 13).
+    /// `tests::a_users_rule_beats_the_styles`.
+    fn origins<'a>(
+        &'a self,
+        style: &'a [Rule],
+        style_generation: u32,
+    ) -> impl Iterator<Item = (Origin, u32, &'a [Rule])> {
+        let [material, expansion, user] = &self.lists;
+        [
+            (Origin::Style, style_generation, style),
+            (Origin::Material, self.generation, material.as_slice()),
+            (Origin::Expansion, self.generation, expansion.as_slice()),
+            (Origin::User, self.generation, user.as_slice()),
+        ]
+        .into_iter()
+    }
+
+    /// The facts any rule reads, so a frame gathers only those.
+    /// `tests::with_no_rules_nothing_resolves_and_no_fact_is_asked`,
+    /// `tests::the_facts_asked_are_every_origins_keys`.
+    pub(crate) fn uses(&self, style: &[Rule]) -> Keys {
+        let mut keys = Keys::default();
+        for (_, _, list) in self.origins(style, 0) {
+            for rule in list {
+                keys.app_id |= rule.matches.app_id.is_some();
+                keys.title |= rule.matches.title.is_some();
+                keys.monitor |= rule.matches.monitor.is_some();
+            }
+        }
+        keys
+    }
+
+    /// The last matching rule per slot, for one part; `effect = false` empties
+    /// the slot it wins. A walk of each origin's list: an index by part kind
+    /// waits until the trace's `prep_us` shows the walk.
+    /// `tests::the_later_rule_for_one_part_and_slot_wins`,
+    /// `tests::effect_false_after_a_chain_empties_the_slot`,
+    /// `tests::a_rule_that_stops_matching_lets_the_earlier_one_back`.
+    pub(crate) fn resolve(
+        &self,
+        style: &[Rule],
+        style_generation: u32,
+        part: PartRef<'_>,
+        facts: &Facts<'_>,
+    ) -> Resolved {
+        let mut resolved = Resolved::default();
+        for (origin, generation, list) in self.origins(style, style_generation) {
+            for (index, rule) in list.iter().enumerate() {
+                if !rule.part.is(part) || !rule.matches.accepts(facts) {
+                    continue;
+                }
+                let key = (rule.fill != Fill::Off).then_some(RuleKey {
+                    origin,
+                    index: u32::try_from(index).unwrap_or(u32::MAX),
+                    generation,
+                });
+                match rule.slot {
+                    Slot::Behind => resolved.behind = key,
+                    Slot::Front => resolved.front = key,
+                    Slot::Replace => resolved.replace = key,
+                }
+            }
+        }
+        resolved
+    }
+
+    /// The rule a key names, the style's from `style`.
+    /// `tests::a_key_finds_its_rule_in_its_origin`.
+    pub(crate) fn rule<'a>(&'a self, style: &'a [Rule], key: RuleKey) -> Option<&'a Rule> {
+        let [material, expansion, user] = &self.lists;
+        let list = match key.origin {
+            Origin::Style => style,
+            Origin::Material => material,
+            Origin::Expansion => expansion,
+            Origin::User => user,
+        };
+        list.get(usize::try_from(key.index).ok()?)
+    }
+
+    /// Every effect any non-style rule names, each once: what the host must
+    /// want. `tests::the_rules_name_the_effects_the_host_must_want`.
+    pub(crate) fn effects(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .lists
+            .iter()
+            .flatten()
+            .filter_map(|rule| match &rule.fill {
+                Fill::Chain(links) => Some(links.iter().map(|link| link.effect.clone())),
+                Fill::Off => None,
+            })
+            .flatten()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
+/// Which tier a bound chain runs in (Ruling 14).
+/// `tests::tiers_follow_what_the_plan_reads_and_the_source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Tier {
+    /// T0 generated: reads nothing of the frame (only `shape` and `state:`).
+    /// Not \[16\]'s T0 *inline*, a per-surface program reading its own pixels
+    /// with no capture, which is X1.4b's (Ruling 14): such an effect is `Own`.
+    /// `tests::tiers_follow_what_the_plan_reads_and_the_source`.
+    Generated,
+    /// T1: a capture of the part.
+    Own,
+    /// T2: the sharp wallpaper and bottom layers, memoised.
+    Xray,
+    /// T3: the frame drawn so far.
+    Live,
+}
+
+/// The tier from what the bound plan reads and the rule's `source`: a
+/// backdrop is read from xray unless `source` rebinds it, the part's own
+/// pixels or the picture from before are a capture of the part, and the
+/// highest read decides. `tests::tiers_follow_what_the_plan_reads_and_the_source`,
+/// `tests::the_old_picture_is_t1_and_the_higher_read_decides`.
+pub(crate) fn tier(reads: Reads, source: Option<Source>) -> Tier {
+    let backdrop = match (reads.backdrop, source) {
+        (false, _) => None,
+        (true, Some(Source::Own)) => Some(Tier::Own),
+        (true, None | Some(Source::Xray)) => Some(Tier::Xray),
+        (true, Some(Source::Live | Source::Auto)) => Some(Tier::Live),
+    };
+    let own = (reads.own || reads.old).then_some(Tier::Own);
+    backdrop
+        .into_iter()
+        .chain(own)
+        .max()
+        .unwrap_or(Tier::Generated)
+}
+
+/// Whether this build runs a tier; the error names what brings it.
+/// `tests::tiers_follow_what_the_plan_reads_and_the_source`.
+pub(crate) fn runnable(tier: Tier) -> Result<(), &'static str> {
+    match tier {
+        Tier::Generated | Tier::Own => Ok(()),
+        Tier::Xray => Err(
+            "reads the backdrop from xray, which arrives with X2.1 (FX3); give `source = \"self\"` to read the part's own pixels",
+        ),
+        Tier::Live => Err("reads the live backdrop, which arrives with X4.1 (FX6)"),
     }
 }
 
@@ -1075,6 +1374,483 @@ mod tests {
             );
             assert!(errors[0].message.contains(says), "{lua}: {:?}", errors[0]);
         }
+    }
+
+    fn user(lua: &str) -> super::Rules {
+        super::Rules::new(
+            Vec::new(),
+            Vec::new(),
+            parse(&rules(lua)).expect("parses"),
+            1,
+        )
+    }
+
+    fn mpv() -> super::Facts<'static> {
+        super::Facts {
+            app_id: "mpv",
+            title: "a film",
+            focused: true,
+            monitor: "DP-1",
+            style: "top",
+            ..super::Facts::default()
+        }
+    }
+
+    #[test]
+    fn the_later_rule_for_one_part_and_slot_wins() {
+        let rules = user(
+            r#"{ { match = "*", part = "client", slot = "behind", effect = "a" },
+                              { match = { app_id = "mpv" }, part = "client", slot = "behind", effect = "b" } }"#,
+        );
+        let resolved = rules.resolve(&[], 0, super::PartRef::Client, &mpv());
+        assert_eq!(resolved.behind.map(|key| key.index), Some(1));
+        assert!(
+            resolved.front.is_none() && resolved.replace.is_none(),
+            "a rule for another slot leaves this one alone"
+        );
+    }
+
+    #[test]
+    fn effect_false_after_a_chain_empties_the_slot() {
+        let rules = user(
+            r#"{ { match = "*", part = "client", slot = "behind", effect = "a" },
+                              { match = { app_id = "mpv" }, part = "client", slot = "behind", effect = false } }"#,
+        );
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Client, &mpv())
+                .behind
+                .is_none()
+        );
+    }
+
+    /// **Your rule beats the style's**: origins in the order style,
+    /// material, expansion, user.
+    #[test]
+    fn a_users_rule_beats_the_styles() {
+        let style = parse(&rules(
+            r#"{ { match = "*", part = "client", slot = "behind", effect = "shadow" } }"#,
+        ))
+        .expect("parses");
+        let rules =
+            user(r#"{ { match = "*", part = "client", slot = "behind", effect = "glow" } }"#);
+        let key = rules
+            .resolve(&style, 7, super::PartRef::Client, &mpv())
+            .behind
+            .expect("resolved");
+        assert_eq!(key.origin, super::Origin::User);
+        let none = super::Rules::default();
+        assert_eq!(
+            none.resolve(&style, 7, super::PartRef::Client, &mpv())
+                .behind
+                .map(|key| (key.origin, key.generation)),
+            Some((super::Origin::Style, 7))
+        );
+    }
+
+    #[test]
+    fn a_rule_that_stops_matching_lets_the_earlier_one_back() {
+        let rules = user(
+            r#"{ { match = "*", part = "client", slot = "behind", effect = "a" },
+                              { match = { focused = true }, part = "client", slot = "behind", effect = "b" } }"#,
+        );
+        assert_eq!(
+            rules
+                .resolve(&[], 0, super::PartRef::Client, &mpv())
+                .behind
+                .map(|key| key.index),
+            Some(1)
+        );
+        let blurred = super::Facts {
+            focused: false,
+            ..mpv()
+        };
+        assert_eq!(
+            rules
+                .resolve(&[], 0, super::PartRef::Client, &blurred)
+                .behind
+                .map(|key| key.index),
+            Some(0)
+        );
+    }
+
+    /// **With no rules nothing resolves and no fact is asked.**
+    #[test]
+    fn with_no_rules_nothing_resolves_and_no_fact_is_asked() {
+        let rules = super::Rules::default();
+        assert!(rules.is_empty());
+        assert_eq!(rules.uses(&[]), super::Keys::default());
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Client, &mpv())
+                .is_empty()
+        );
+        let titled = user(
+            r#"{ { match = { title = "x*" }, part = "client", slot = "front", effect = false } }"#,
+        );
+        assert!(titled.uses(&[]).title && !titled.uses(&[]).app_id);
+    }
+
+    #[test]
+    fn a_layer_rule_reaches_only_layers_of_its_name() {
+        let rules = user(
+            r#"{ { match = "*", part = "layer:shadow", slot = "replace", effect = "soft" } }"#,
+        );
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Layer("shadow"), &mpv())
+                .replace
+                .is_some()
+        );
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Layer("bar"), &mpv())
+                .replace
+                .is_none()
+        );
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Client, &mpv())
+                .replace
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tiers_follow_what_the_plan_reads_and_the_source() {
+        use super::{Source, Tier, runnable, tier};
+        use solium_effects::stage::Reads;
+        let backdrop = Reads {
+            backdrop: true,
+            ..Reads::default()
+        };
+        assert_eq!(
+            tier(backdrop, Some(Source::Own)),
+            Tier::Own,
+            "a backdrop rebound to self is T1"
+        );
+        assert_eq!(
+            tier(backdrop, None),
+            Tier::Xray,
+            "the default source is xray"
+        );
+        assert_eq!(tier(backdrop, Some(Source::Live)), Tier::Live);
+        assert_eq!(tier(backdrop, Some(Source::Auto)), Tier::Live);
+        assert_eq!(
+            tier(
+                Reads {
+                    shape: true,
+                    ..Reads::default()
+                },
+                None
+            ),
+            Tier::Generated,
+            "reading nothing of the frame is T0 generated"
+        );
+        assert_eq!(
+            tier(
+                Reads {
+                    own: true,
+                    ..Reads::default()
+                },
+                None
+            ),
+            Tier::Own,
+            "reading its own pixels is T1 until X1.4b's inline tier"
+        );
+        assert!(runnable(Tier::Generated).is_ok() && runnable(Tier::Own).is_ok());
+        assert!(runnable(Tier::Xray).expect_err("refused").contains("X2.1"));
+        assert!(runnable(Tier::Live).expect_err("refused").contains("X4.1"));
+    }
+
+    /// The picture from before a resize (`old`) is the part's own too, and a
+    /// backdrop read beside it keeps the higher tier.
+    #[test]
+    fn the_old_picture_is_t1_and_the_higher_read_decides() {
+        use super::{Source, Tier, tier};
+        use solium_effects::stage::Reads;
+        let old = Reads {
+            old: true,
+            ..Reads::default()
+        };
+        assert_eq!(tier(old, None), Tier::Own);
+        assert_eq!(
+            tier(old, Some(Source::Xray)),
+            Tier::Own,
+            "nothing reads the backdrop"
+        );
+        let both = Reads {
+            own: true,
+            backdrop: true,
+            ..Reads::default()
+        };
+        assert_eq!(tier(both, None), Tier::Xray);
+        assert_eq!(tier(both, Some(Source::Own)), Tier::Own);
+        assert_eq!(tier(both, Some(Source::Xray)), Tier::Xray);
+        assert_eq!(tier(Reads::default(), Some(Source::Live)), Tier::Generated);
+    }
+
+    /// `pane`, `client` and `popup` each reach their own part alone, and the
+    /// titlebar only the titlebar.
+    #[test]
+    fn each_whole_part_reaches_only_itself() {
+        use super::PartRef;
+        let rules = user(
+            r#"{ { match = "*", part = "pane", slot = "behind", effect = "a" },
+                 { match = "*", part = "client", slot = "front", effect = "b" },
+                 { match = "*", part = "popup", slot = "replace", effect = "c" },
+                 { match = "*", part = "region:titlebar", slot = "front", effect = "d" } }"#,
+        );
+        let slots = |part| {
+            let resolved = rules.resolve(&[], 0, part, &mpv());
+            [resolved.behind, resolved.front, resolved.replace].map(|key| key.map(|key| key.index))
+        };
+        assert_eq!(slots(PartRef::Pane), [Some(0), None, None]);
+        assert_eq!(slots(PartRef::Client), [None, Some(1), None]);
+        assert_eq!(slots(PartRef::Popup), [None, None, Some(2)]);
+        assert_eq!(slots(PartRef::Region("titlebar")), [None, Some(3), None]);
+        assert_eq!(slots(PartRef::Layer("titlebar")), [None, None, None]);
+    }
+
+    /// A scripted surface's rule reaches that surface alone, and a layer
+    /// surface's rule every namespace its glob matches; neither reaches a
+    /// window's part.
+    #[test]
+    fn a_surface_or_layer_shell_rule_reaches_only_its_own() {
+        let rules = user(
+            r#"{ { match = "*", part = "surface:bar", slot = "behind", effect = "glow" },
+                 { match = "*", part = "layer_shell:waybar*", slot = "front", effect = "glow" } }"#,
+        );
+        let bar = super::Facts {
+            surface: "bar",
+            ..super::Facts::default()
+        };
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Surface("bar"), &bar)
+                .behind
+                .is_some()
+        );
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Surface("dock"), &bar)
+                .is_empty()
+        );
+        for (namespace, reached) in [("waybar", true), ("waybar-top", true), ("mako", false)] {
+            let facts = super::Facts {
+                layer_shell: namespace,
+                ..super::Facts::default()
+            };
+            assert_eq!(
+                rules
+                    .resolve(&[], 0, super::PartRef::LayerShell(namespace), &facts)
+                    .front
+                    .is_some(),
+                reached,
+                "{namespace}"
+            );
+        }
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Pane, &mpv())
+                .is_empty()
+        );
+        assert!(
+            rules
+                .resolve(&[], 0, super::PartRef::Region("titlebar"), &mpv())
+                .is_empty()
+        );
+    }
+
+    /// Every match key is checked against its own fact; a key not given
+    /// matches anything.
+    #[test]
+    fn every_match_key_is_checked_against_its_fact() {
+        use super::{Facts, PartRef};
+        let surface = |name| Facts {
+            surface: name,
+            ..Facts::default()
+        };
+        let namespace = |name| Facts {
+            layer_shell: name,
+            ..Facts::default()
+        };
+        for (matched, part, part_ref, refused, accepted) in [
+            (
+                r#"{ app_id = "mpv" }"#,
+                "client",
+                PartRef::Client,
+                Facts {
+                    app_id: "vlc",
+                    ..mpv()
+                },
+                mpv(),
+            ),
+            (
+                r#"{ title = "a f*" }"#,
+                "client",
+                PartRef::Client,
+                Facts {
+                    title: "a book",
+                    ..mpv()
+                },
+                mpv(),
+            ),
+            (
+                r#"{ focused = true }"#,
+                "client",
+                PartRef::Client,
+                Facts {
+                    focused: false,
+                    ..mpv()
+                },
+                mpv(),
+            ),
+            (
+                r#"{ fullscreen = false }"#,
+                "client",
+                PartRef::Client,
+                Facts {
+                    fullscreen: true,
+                    ..mpv()
+                },
+                mpv(),
+            ),
+            (
+                r#"{ monitor = "DP-*" }"#,
+                "client",
+                PartRef::Client,
+                Facts {
+                    monitor: "HDMI-A-1",
+                    ..mpv()
+                },
+                mpv(),
+            ),
+            (
+                r#"{ style = "top" }"#,
+                "client",
+                PartRef::Client,
+                Facts {
+                    style: "none",
+                    ..mpv()
+                },
+                mpv(),
+            ),
+            (
+                r#"{ surface = "bar" }"#,
+                "surface:bar",
+                PartRef::Surface("bar"),
+                surface("dock"),
+                surface("bar"),
+            ),
+            (
+                r#"{ layer_shell = "waybar" }"#,
+                "layer_shell:*",
+                PartRef::LayerShell("waybar"),
+                namespace("mako"),
+                namespace("waybar"),
+            ),
+        ] {
+            let rules = user(&format!(
+                r#"{{ {{ match = {matched}, part = "{part}", slot = "behind", effect = "a" }} }}"#
+            ));
+            assert!(
+                rules.resolve(&[], 0, part_ref, &refused).is_empty(),
+                "{matched} refuses {refused:?}"
+            );
+            assert!(
+                rules.resolve(&[], 0, part_ref, &accepted).behind.is_some(),
+                "{matched} accepts {accepted:?}"
+            );
+        }
+    }
+
+    /// A key finds its rule in its origin's list, the style's passed in;
+    /// `get` reads a slot by name.
+    #[test]
+    fn a_key_finds_its_rule_in_its_origin() {
+        let style = parse(&rules(
+            r#"{ { match = "*", part = "client", slot = "front", effect = "shadow" } }"#,
+        ))
+        .expect("parses");
+        let rules = user(
+            r#"{ { match = "*", part = "pane", slot = "behind", effect = "a" },
+                 { match = "*", part = "client", slot = "behind", effect = "glow" } }"#,
+        );
+        let resolved = rules.resolve(&style, 3, super::PartRef::Client, &mpv());
+        let front = resolved.get(Slot::Front).expect("the style's");
+        let behind = resolved.get(Slot::Behind).expect("yours");
+        assert_eq!(resolved.get(Slot::Replace), None);
+        let named = |key| match &rules.rule(&style, key).expect("found").fill {
+            Fill::Chain(links) => links[0].effect.clone(),
+            Fill::Off => String::new(),
+        };
+        assert_eq!(
+            (named(front), named(behind)),
+            ("shadow".to_owned(), "glow".to_owned())
+        );
+        assert_eq!(
+            (front.origin, front.index, front.generation),
+            (super::Origin::Style, 0, 3)
+        );
+        assert_eq!(
+            (behind.origin, behind.index, behind.generation),
+            (super::Origin::User, 1, 1)
+        );
+        let gone = super::RuleKey { index: 9, ..behind };
+        assert!(rules.rule(&style, gone).is_none());
+        let material = super::RuleKey {
+            origin: super::Origin::Material,
+            index: 0,
+            generation: 1,
+        };
+        assert!(
+            rules.rule(&style, material).is_none(),
+            "material is empty in FX2"
+        );
+    }
+
+    /// The effects the host must want: every link of every non-style rule,
+    /// each once; an emptied slot names none, and the style's ride on the
+    /// pane and are wanted when it is applied (Ruling 15).
+    #[test]
+    fn the_rules_name_the_effects_the_host_must_want() {
+        let rules = user(
+            r#"{ { match = "*", part = "client", slot = "behind", effect = { { "kawase", source = "self" }, { "tint" } } },
+                 { match = "*", part = "pane", slot = "front", effect = "tint" },
+                 { match = "*", part = "popup", slot = "front", effect = false },
+                 { match = "*", part = "layer:bar", slot = "replace", effect = "frost" } }"#,
+        );
+        assert_eq!(rules.effects(), ["frost", "kawase", "tint"]);
+        assert!(super::Rules::default().effects().is_empty());
+    }
+
+    /// The facts a style's rules read are asked too, each key on its own.
+    #[test]
+    fn the_facts_asked_are_every_origins_keys() {
+        let style = parse(&rules(
+            r#"{ { match = { monitor = "DP-*" }, part = "client", slot = "front", effect = false } }"#,
+        ))
+        .expect("parses");
+        assert_eq!(
+            super::Rules::default().uses(&style),
+            super::Keys {
+                monitor: true,
+                ..super::Keys::default()
+            }
+        );
+        let rules = user(
+            r#"{ { match = { app_id = "mpv", focused = true, fullscreen = false, style = "top" }, part = "client", slot = "front", effect = false } }"#,
+        );
+        assert_eq!(
+            rules.uses(&[]),
+            super::Keys {
+                app_id: true,
+                ..super::Keys::default()
+            },
+            "the booleans and the style are free"
+        );
+        assert!(!rules.is_empty());
     }
 
     #[test]
