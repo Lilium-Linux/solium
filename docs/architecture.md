@@ -380,6 +380,30 @@ texture (`pool::Pool::blank`), its input never counts as redrawn
 its params or its padded box's size change, and it runs in the first phase
 whatever its part. `dev/effects-check.sh t0` shows one behind a window.
 
+So two tiers run: T0 and T1 (`Tier::Own`, a capture of the part), the tier
+read from the bound chain's flattened plan when the rules are applied
+(`effect::rules::tier`); the backdrop from xray (T2) and the live backdrop
+(T3) are refused at bind by `rules::runnable`, naming X2.1 and X4.1, so a
+rule that cannot run yet is a problem and not a slot drawn empty.
+`dev/effects-check.sh blur` blurs a video player's own pixels through a rule
+and shows a still window's chain run only on the passes that captured it.
+
+Every way an effect fails leaves its part drawn: a Lua error or a lint keeps
+the set out at load, and a program that will not compile, a run that fails
+on the GPU and a self input never captured leave the slot wanted and never
+ready, which the walk draws as no slot
+(`state::tests::real_client::every_failure_leaves_the_part_drawn`, and
+`every_failure_leaves_layer_and_scripted_surfaces_drawn` for the surfaces;
+`dev/effects-check.sh fail` on screen). With no rules none of this runs:
+`build_slots` gathers no fact and wants no slot, no self input is captured,
+no chain runs and nothing is compiled, and a window takes the path it took
+before effects existed. A fullscreen window with no rule is not warped
+(`render::warp_of`, `prepare`'s warp condition), wants no capture and walks
+`PANE_ORDER`, so `panes` builds the surface elements smithay's DRM compositor
+assigns planes from, and direct scanout stays
+(`state::tests::real_client::a_fullscreen_window_with_no_rule_takes_todays_path`;
+`dev/effects-check.sh none`, whose trace has no capture and no run).
+
 ### The arrangements are a crate too
 
 `crates/layout` is the third engine crate with nothing in `[dependencies]`:

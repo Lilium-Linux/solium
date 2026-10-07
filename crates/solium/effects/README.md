@@ -84,12 +84,33 @@ titlebar, a `region:titlebar` rule whose chain reads the band's own pixels
 (`self`), `part = "output"`, `keep`, a `surface` match naming a plane, and an
 alpha mask without `source = "self"` likewise. This build reads, checks and
 binds rules, names a broken one on the overlay, and draws an effect in its
-slot. One that reads the part's own pixels runs again only when the part
-commits or the effect's params or the part's size change. One that reads
-nothing of the frame, only `shape` and its states (a border, a glow, a
-gradient), needs no capture: it runs once, and again only when its params or
-the part's size change, whatever the window draws under it; its `sol_tex`
-reads a transparent texel.
+slot, as far as its tier allows, below.
+
+## Tiers
+
+What a rule's chain reads decides what it costs, and which tier it is in. The
+tier is fixed when the rules are applied: a reload is what changes it.
+
+| Tier | What the chain reads | What it costs | In this build |
+|---|---|---|---|
+| T0 | nothing of the frame: only `shape` and its own states (a border, a glow, a gradient) | no capture. It runs once, and again only when its params or the part's size change, whatever the window draws under it; its `sol_tex` reads a transparent texel | runs |
+| T1 | the part's own pixels: `self`, or its first input given `source = "self"` | a capture of the part, padded by the chain's `reach`, drawn again only when the part commits. The chain runs again only then, or when its params or the part's size change; otherwise its last result is placed as it was | runs |
+| T2 | the `backdrop`, what is behind the part, from xray | | refused, naming X2.1 |
+| T3 | the live backdrop, with `source = "live"` or `"auto"` | | refused, naming X4.1 |
+
+A rule in a tier this build cannot run is an error, not an effect that draws
+nothing: the rules that ran stay, the overlay names it, and `solium --check`
+fails on it, so a rule that cannot work yet says so. The shipped `blur` reads
+the backdrop, so here it draws only as `{ "blur", source = "self" }`, a T1
+effect. An effect that reads its part's own pixels always captures the part
+for now, a tint or a dim included; drawing one inline, with no capture, comes
+later.
+
+Whatever the tier, an effect that fails, in its Lua, its checks, its compile
+or on the GPU, leaves its part drawn as if no rule named it: a `replace` draws
+the part and a `behind` or `front` draws nothing. With no rules, nothing is
+resolved, captured or run, and a window is drawn exactly as it would be
+without effects at all, a fullscreen one straight from its own buffers.
 
 ## When it is read, and when it compiles
 

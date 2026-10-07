@@ -298,13 +298,20 @@ fails on it too. With no rules nothing changes, and nothing costs anything.
 An effect that reads the part's own pixels (`self`, or `source = "self"`, as
 the rule above gives the blur) is drawn in its slot, and runs again only when
 the window draws something new, changes size, or the rule's params change:
-a still window's effect runs once and is then placed as it was. An effect
-that reads nothing of the window, only its shape (a border, a glow behind
-it), is drawn too, with no capture of the window at all: it runs once, and
-again only when the window changes size or the rule's params change, however
-much the window draws.
-[The effects reference](../crates/solium/effects/README.md#rules) has every
-key a rule takes, and how to write an effect of your own.
+a still window's effect runs once and is then placed as it was. So the rule
+above costs a capture of mpv's window and the blur's six small passes (three
+halvings and three doublings back, at its default `passes = 3`) each time mpv
+draws a frame, and nothing while it is paused. A window the rule does not
+match is untouched, drawn exactly as with no rule; `match = { title = … }`
+works too, for a player whose `app_id` you do not know. If the blur fails,
+on a GPU that refuses its shaders or anywhere else, mpv is drawn as if no
+rule named it. An effect that reads nothing of the window, only its shape (a
+border, a glow behind it), is drawn too, with no capture of the window at
+all: it runs once, and again only when the window changes size or the rule's
+params change, however much the window draws.
+[The effects reference](../crates/solium/effects/README.md#tiers) says what
+each kind of effect costs, and [its rules](../crates/solium/effects/README.md#rules)
+every key a rule takes and how to write an effect of your own.
 
 ### What a window shows before its application exists
 
