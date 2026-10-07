@@ -8778,6 +8778,60 @@ end)"#,
         );
     }
 
+    /// **#232: a captured window ignores the client's window-geometry
+    /// offset**, so a client with client-side shadows (Firefox, GTK apps)
+    /// had its picture shifted away from its frame in every captured draw
+    /// -- warps, genies, close fades, tilted `sol.present` presentations.
+    /// `window_surface_origin` is now the one formula both the flat path
+    /// (`elements`) and the captured one (`flat_window_elements`, by way of
+    /// `client_piece`) draw a surface through, so this pins its contract
+    /// directly, against a window opened over the real protocol: a client
+    /// that sets no window geometry is unchanged, and one that sets an
+    /// offset through `xdg_surface.set_window_geometry` -- the request a
+    /// CSD shadow is declared with -- is shifted back by exactly that much,
+    /// the subtraction the captured path used to leave out.
+    #[test]
+    fn window_surface_origin_matches_a_csd_clients_shadow_offset() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, surface, xdg_surface) =
+            open_xdg(&mut display, &mut state, &conn, &client, &qh);
+        let scale = 1.0;
+        let origin: smithay::utils::Point<i32, smithay::utils::Physical> = (100, 60).into();
+
+        assert_eq!(
+            window.geometry().loc,
+            (0, 0).into(),
+            "this fixture never calls set_window_geometry, so the committed \
+             bounding box starts at the surface's own corner"
+        );
+        assert_eq!(
+            crate::render::window_surface_origin(origin, &window, scale),
+            origin,
+            "no offset: the surface is drawn exactly where its frame reserves for it"
+        );
+
+        // A shadow outside the content: a CSD client's window geometry sits
+        // inside its surface, (10, 15) in from the top-left corner here.
+        xdg_surface.set_window_geometry(10, 15, 44, 49);
+        surface.commit();
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+
+        assert_eq!(window.geometry().loc, (10, 15).into());
+        assert_eq!(
+            crate::render::window_surface_origin(origin, &window, scale),
+            (90, 45).into(),
+            "a window-geometry offset of (10, 15) must shift the drawn surface \
+             back by exactly that much, the same as the flat path always did"
+        );
+    }
+
     /// **A genie aimed at a surface aims at its instance on the window's own
     /// monitor**, not on the monitor the pointer is on (#143). A missing scene
     /// file builds no scene (`scripted.rs`, `Surface::sync`), so no Qt is
