@@ -563,12 +563,30 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             // moves when this does, as well as when its capture is redrawn.
             // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
             let shape = Shape::of(&frame, aimed, scale);
+            let job = crate::offscreen::pane_job(state, renderer, pane, &window, scale);
+            // Its popups the same way, in a capture of their own that `panes`
+            // draws in front of the pane's warp
+            // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept until
+            // they commit:
+            // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
+            let over = if job.is_some() {
+                crate::offscreen::over_job(state, renderer, pane, &window, scale)
+            } else {
+                None
+            };
+            // Holding only what it captures this pass: popups that closed give
+            // their capture back while the pane goes on warping.
+            // `keyed::tests::a_warped_pane_whose_popups_close_gives_their_capture_back`.
+            let kinds: &[crate::keyed::Kind] = if over.is_some() {
+                &[crate::keyed::Kind::Pane, crate::keyed::Kind::Over]
+            } else {
+                &[crate::keyed::Kind::Pane]
+            };
             let (panes, pool) = (&mut state.panes, &mut state.pool);
             if let Some(held) = panes.get_mut(pane) {
-                held.captures_mut()
-                    .keep_only(Some(crate::keyed::Kind::Pane), pool);
+                held.captures_mut().keep_only(kinds, pool);
             }
-            if let Some(job) = crate::offscreen::pane_job(state, renderer, pane, &window, scale) {
+            if let Some(job) = job {
                 // Already drawn from exactly this: no frame (`offscreen::kept`,
                 // `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`).
                 if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
@@ -577,21 +595,13 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
                 } else {
                     jobs.push((job, Then::Warp(window.clone(), program, pane, shape)));
                 }
-                // Its popups the same way, in a capture of their own that
-                // `panes` draws in front of the pane's warp
-                // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept
-                // until they commit:
-                // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
-                if let Some((job, part)) =
-                    crate::offscreen::over_job(state, renderer, pane, &window, scale)
-                {
-                    if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
-                        let commit =
-                            warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
-                        overs.push((window, texture, program, id, commit, part));
-                    } else {
-                        jobs.push((job, Then::Over(window, program, pane, shape, part)));
-                    }
+            }
+            if let Some((job, part)) = over {
+                if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
+                    let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
+                    overs.push((window, texture, program, id, commit, part));
+                } else {
+                    jobs.push((job, Then::Over(window, program, pane, shape, part)));
                 }
             }
             continue;
@@ -736,7 +746,7 @@ fn client_job_for(
     let (panes, pool) = (&mut state.panes, &mut state.pool);
     if let Some(held) = panes.get_mut(pane) {
         held.captures_mut()
-            .keep_only(Some(crate::keyed::Kind::Client), pool);
+            .keep_only(&[crate::keyed::Kind::Client], pool);
     }
     let pending = crate::pass::Pending::new(job.size, effect, scale, opaque, program);
     Some((job, Then::Pass(window.clone(), pending)))

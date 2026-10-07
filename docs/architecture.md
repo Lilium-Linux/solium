@@ -234,7 +234,8 @@ own, at the rectangle they cover, which may reach past the window, and are
 drawn as a second warp in front of the window's: the same matrix, pivot and
 deform, meshed over their part of the window's rectangle, with an id and a
 commit of their own. So a menu stays whole and on top of its window's frame
-during a tilt or a genie, and is captured again when it commits.
+during a tilt or a genie, is captured again when it commits, and gives its
+texture back when it closes, though the window goes on warping.
 
 The texture is the cost. Every visible rounded window keeps one, which is why
 `render::prepare` captures no pane that no monitor shows. What is
