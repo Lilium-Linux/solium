@@ -1396,7 +1396,11 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
     // falls back to the old blanket flip. `handled` is exactly what
     // `devices::tests::registry_reports_a_device_as_handled_only_after_natural_scroll_was_actually_set`
     // covers; see `input::devices`' module doc for why this branch has to
-    // exist at all.
+    // exist at all. This `if` itself, driven end to end through a real
+    // `pointer_axis` call, is
+    // `state::tests::real_client::reflow_on_close::hosted::pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set`
+    // and the case right after it, where nothing is registered and the old
+    // flip still has to run.
     let direction = if state.input.handled(&event.device().id()) {
         1.0
     } else if state.profile.natural_scroll {

@@ -164,7 +164,9 @@ impl DeviceInfo {
 /// alone" -- never "turn this off". There is no libinput call that means
 /// "forget what I set", so a field a reload stops mentioning is left as it
 /// was rather than reset to a hardware default nothing here could even name.
-/// `a_reload_that_stops_mentioning_a_field_leaves_the_device_as_it_was`.
+/// `a_reload_that_changes_an_override_reapplies_it_to_the_same_device` makes
+/// exactly this assertion, alongside the override-merge case it shares a test
+/// with.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Settings {
     pub(crate) tap: Option<bool>,
@@ -327,6 +329,17 @@ impl Report {
             .map(|(field, _)| *field)
             .collect()
     }
+
+    /// A report as if every field named in `fields` reached the device and
+    /// nothing else did -- for a test that needs `Registry::handled` to
+    /// answer true without a fake `ApplySettings` and a real `apply()` call,
+    /// because it is driving `pointer_axis` from a different module
+    /// entirely and has no device to hand `apply` in the first place.
+    /// `state::tests::real_client::reflow_on_close::hosted::pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set`.
+    #[cfg(test)]
+    pub(crate) fn test_applied(fields: &[&'static str]) -> Self {
+        Self(fields.iter().map(|field| (*field, Applied::Set)).collect())
+    }
 }
 
 /// What [`apply`] needs from a device: one setter per option the issue
@@ -484,7 +497,9 @@ impl Registry {
     /// module doc's "Folding in `SOLIUM_FORM_FACTOR`"). Not *what* was set:
     /// libinput already inverted the raw deltas we go on to read, so the
     /// right answer here is always "leave it alone", never a second flip.
-    /// `pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set`.
+    /// `state::tests::real_client::reflow_on_close::hosted::pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set`
+    /// drives `pointer_axis` itself through this; it cannot live here, since
+    /// this module's tests have no `Solium` or pointer seat to drive it with.
     pub(crate) fn handled(&self, id: &str) -> bool {
         self.known
             .iter()
