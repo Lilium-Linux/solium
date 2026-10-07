@@ -64,7 +64,8 @@ solium --check ~/.config/solium/effects/<name>
 
 checks one effect folder and starts nothing: its `effect.lua` in a Lua of its
 own, every key in it, the checks of its shaders below, and the effects it
-names in turn (`pixels`, a `fallback` naming an effect), looked for beside it
+names in turn (`pixels`, a `fallback` naming an effect, a `use` stage),
+looked for beside it
 first and then among the shipped folders, as when it runs, so a copy of a
 shipped effect that names another shipped one passes. Errors are printed at
 their file and line and exit 1; warnings are printed and pass. `solium
@@ -95,7 +96,7 @@ never quietly means a default.
 | `inputs` | what the effect reads: `self`, `backdrop`, `shape`, `old`, or `state:<name>` of its own |
 | `params` | its knobs, below |
 | `frag` | a one-pass effect's shader, a file in the folder |
-| `stages` | a many-pass effect's passes: a list, or a function of the params |
+| `stages` | a many-pass effect's passes: a list, or a function of the params, below |
 | `pixels` | another effect's name, whose `frag` draws this one's pixels |
 | `mesh` | a geometry effect's `function(t, cols, rows, out)` |
 | `grid` | a geometry effect's grid: `{ along = 48, across = 8 }`, which turns with the direction the window moves in, or a fixed `{ cols, rows }` |
@@ -128,6 +129,42 @@ the one you probably meant; a value of another kind is refused; a whole
 number is a fine value for a fractional param; and a value outside `min` and
 `max` is clamped, with a warning. A function of the params, such as `reach`,
 is called with the params as they were bound.
+
+### Stages
+
+A many-pass effect lists its passes in `stages`, each a table that begins
+with its kind:
+
+```lua
+stages = function(p)
+  local s = {}
+  for i = 1, p.passes do s[#s + 1] = { "pass", "down.frag", scale = 0.5 } end
+  for i = 1, p.passes do s[#s + 1] = { "pass", "up.frag", scale = 2 } end
+  return s
+end,
+```
+
+`stages` is a list, or a function of the params that returns one. The
+function is called when the effect is loaded and where it is used with other
+params, never once a frame, so a loop over `p.passes` costs nothing while the
+effect draws.
+
+| Stage | What it does |
+|---|---|
+| `{ "pass", "<file>.frag" }` | draws one shader into a texture of its own. `sol_tex` reads the last result, or the effect's first input in the first pass. `scale =` sizes it against what it reads, 1 when not given; `format =` is `"rgba8"`, the default, or `"rgba16f"`; `uses = { … }` lists the other textures it reads, by name; `input =` names what `sol_tex` reads in place of the last result |
+| `{ "repeat", over = { 64, 32, … }, as = "<name>", <stages> }` | runs the stages after its kind once for each number in `over`, with `p_<name>` set to that number. The name is a new one, not one of the effect's params |
+| `{ "save", "<name>" }`, `{ "get", "<name>" }` | names the last result; makes a named result the last one again |
+| `{ "use", "<effect>", <param> = <value>, … }` | runs another effect's stages here, on the last result, with those params. The names it saves are its own, and where it reads its first input by name it reads what it was given. It is put in place when the effect is loaded, so it costs nothing while the effect draws |
+| `{ "state", "<name>", depends = "…", stages = { … } }` | a texture kept from one run to the next, made by its own `stages` from the effect's inputs and the states before it, and made again only when what it `depends` on changes: `"shape"`, `"params"`, or `"self"`, a commit of the part's own surface. Later stages read it by its name. `format =` and `scale =` as for a pass |
+
+A pass with a `scale` above 1 after passes below 1 is the size of what the
+matching smaller pass read, so a blur that halves a window three times and
+doubles it three times comes back to its exact size, odd or not. Every stage
+is checked as `effect.lua`'s own keys are, and a key a stage does not take is
+refused with the one you probably meant. An effect may not use itself,
+directly or through others, and one effect runs at most 256 passes, its
+states' included. `depends = "region"`, an outline a region publishes, waits
+for regions, and is refused.
 
 ## What an effect's Lua can reach
 
@@ -171,7 +208,7 @@ error at its line.
 | `sol_tex(uv)` | the pass's input: the previous pass's result, or the effect's first input in the first pass, clamped at its edge |
 | `sol_texel`, `sol_size` | one texel of that input, in `uv`; the size of what the pass draws, in pixels |
 | `p_<param>` | each of the effect's params, declared from `params`: a number is a `float` (an `int` with `int = true`), a boolean an `int` 0 or 1, four numbers a `vec4`; a word has none |
-| `sol_<name>(uv)`, `SOL_HAS_<name>` | another texture the effect reads, by name: `sol_self`, `sol_backdrop`, or `sol_<n>` for `state:<n>`. One the pass does not list in its `uses` reads transparent and its `SOL_HAS_<name>` is 0, so one file can be written for both cases |
+| `sol_<name>(uv)`, `SOL_HAS_<name>` | another texture the effect reads, by name: `sol_self`, `sol_backdrop`, a name it saved, or a state's. One the pass does not list in its `uses` reads transparent and its `SOL_HAS_<name>` is 0, so one file can be written for both cases |
 | `sol_shape(uv)`, `sol_sdf(px)` | the part's shape: its coverage, and its signed distance in pixels, negative inside, exact for a rounded box |
 | `sol_content`, `sol_to_content(uv)`, `sol_to_uv(px)`, `sol_sdf_rrect(px, size, radii)` | the part's rectangle inside the box the pass draws, the maps between `uv` and the part's pixels, and the rounded-box distance itself |
 | `sol_progress`, `sol_clamped`, `sol_direction`, `sol_seed`, `sol_time` | in a transition: its progress, which a spring may carry past 1; the same clamped to 0..1; +1 arriving, −1 leaving, 0 resizing; a random number fixed for the transition; seconds |
