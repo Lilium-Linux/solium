@@ -117,7 +117,13 @@ local function snap(side)
     if not window then
         return
     end
-    if maximized[window.id] then
+    -- Whether this window was already maximised when the key was pressed,
+    -- kept past the un-maximise below: `window` is the snapshot read at the
+    -- top of this call, before `sol.toggle_maximize`'s effect has landed, so
+    -- while it was maximised, `window.x/y/w/h` is still the maximised
+    -- rectangle -- the whole work area -- not whatever it was before that.
+    local was_maximized = maximized[window.id]
+    if was_maximized then
         -- Un-maximise first: the compositor holds a maximised window at its
         -- own rect regardless of what a script places it at, the same reason
         -- `modes.use` lets every window out of its tile before a new layout
@@ -133,9 +139,28 @@ local function snap(side)
             return
         end
         place(window.id, half(monitors.named(next.name), side))
+        -- The window a layout moved onto another monitor goes to the
+        -- workspace that monitor shows (`workspaces.carry`'s own comment) --
+        -- the same call `direction.lua`'s own cross-monitor `floating.move`
+        -- makes right after its `put`, for the same reason: nothing else
+        -- follows a move by key with a `layout` event.
+        -- `desktop_mode_a_cross_monitor_snap_carries_the_window_to_the_workspace_its_new_monitor_shows`.
+        workspaces.carry(window.id, next.name)
         return
     end
-    if not before_snap[window.id] then
+    -- `was_maximized` is skipped rather than captured here: maximised
+    -- through one of this file's *other* two doors -- the frame's button, or
+    -- `super+shift+m` -- `window` is still the stale, maximised snapshot
+    -- from the top of this call, since the un-maximise above has not landed
+    -- within this same handler. The compositor is the only thing that still
+    -- remembers this window's true pre-maximise rectangle, and placing it at
+    -- `here` is about to throw that away regardless; recording the stale
+    -- rectangle would only make a later `restore` place the window at
+    -- something close to the whole work area it was just maximised to, not
+    -- back where it truly was. Left unset, `restore` does nothing instead,
+    -- which is honest about there being nothing left here worth restoring.
+    -- `desktop_mode_snap_after_an_external_maximize_does_not_capture_a_bogus_before_snap_rect`.
+    if not was_maximized and not before_snap[window.id] then
         before_snap[window.id] = { x = window.x, y = window.y, w = window.w, h = window.h }
     end
     place(window.id, here)

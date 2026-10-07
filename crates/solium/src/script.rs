@@ -16219,4 +16219,110 @@ mod directions {
              back to anything"
         );
     }
+
+    /// **Desktop mode: crossing to the next monitor on a snap carries the
+    /// window's explicit workspace with it**, exactly as `direction.lua`'s own
+    /// cross-monitor `floating.move` does (`super+shift+left`), so a window
+    /// sent to the workspace its monitor happens to show does not end up
+    /// grouped onto a desk the monitor it lands on is not showing (#222's
+    /// review).
+    #[test]
+    fn desktop_mode_a_cross_monitor_snap_carries_the_window_to_the_workspace_its_new_monitor_shows()
+    {
+        let mut desk = Desk::new("", two_screens());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+
+        // Explicitly assigned to workspace 1 -- which is also what DP-1,
+        // unconfigured, already shows -- so the assignment changes nothing
+        // visible yet, only `workspaces.of[1]`.
+        desk.press("super+shift+1");
+        assert_eq!(
+            desk.workspace_of(1),
+            "1",
+            "the premise: window 1 has an explicit workspace"
+        );
+
+        // DP-2 shows workspace 2, the same fakery
+        // `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`
+        // uses, since nothing in this harness switches a real workspace.
+        assert_eq!(
+            desk.scripts
+                .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 2 return \"\""),
+            ""
+        );
+
+        desk.press("super+right");
+        assert!(
+            desk.monitor(1) == "DP-1",
+            "the premise: one super+right only reaches DP-1's right half: {:?}",
+            desk.rects()
+        );
+        desk.press("super+right");
+        assert_eq!(
+            desk.monitor(1),
+            "DP-2",
+            "a second super+right did not cross to DP-2: {:?}",
+            desk.rects()
+        );
+        assert_eq!(
+            desk.workspace_of(1),
+            "2",
+            "window 1 crossed to DP-2 but was not carried to the workspace it shows -- the \
+             next `layout` would group it onto a desk DP-2 is not showing"
+        );
+    }
+
+    /// **Desktop mode: snapping a window maximised through another door --
+    /// `super+shift+m`, or the frame's button -- does not capture a bogus
+    /// `before_snap` rectangle.** Lua reads `sol.windows()` before the
+    /// un-maximise this same key asks for has landed, so a window maximised
+    /// outside `floating.lua` has no valid pre-maximise rectangle this file
+    /// can capture at that point -- only the compositor remembers it, and a
+    /// snap straight after throws that memory away by placing the window
+    /// somewhere else. Restoring afterwards must not place the stale,
+    /// still-maximised-looking rectangle it would otherwise have recorded
+    /// (#222's review).
+    #[test]
+    fn desktop_mode_snap_after_an_external_maximize_does_not_capture_a_bogus_before_snap_rect() {
+        let mut desk = Desk::new("", one_screen());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+
+        let commands = desk.press("super+shift+m");
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::ToggleMaximize { id: 1 })),
+            "the premise: super+shift+m asks to maximise: {commands:?}"
+        );
+        let _ = desk.scripts.maximize(1, true, desk.snapshot());
+        // What the compositor would have done to the window's own rectangle,
+        // in production -- the harness does not simulate it, the same reason
+        // `desktop_mode_maximize_asks_the_compositor_and_a_half_goes_to_its_quarter`
+        // gives.
+        for each in &mut desk.windows {
+            if each.id == 1 {
+                each.rect = WIDE;
+            }
+        }
+
+        let commands = desk.press("super+left");
+        assert_eq!(
+            places(&commands),
+            vec![1],
+            "super+left did not un-maximise and snap: {commands:?}"
+        );
+        let left = desk.rect(1);
+
+        let commands = desk.press("super+down");
+        assert!(
+            places(&commands).is_empty(),
+            "restore after an externally-maximised window's first snap placed a bogus \
+             rectangle rather than doing nothing: {commands:?}"
+        );
+        assert!(
+            same(desk.rect(1), left),
+            "restore moved the window with nothing valid to put it back to: {:?}",
+            desk.rects()
+        );
+    }
 }
