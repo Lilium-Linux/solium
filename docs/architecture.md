@@ -373,7 +373,12 @@ A chain that fails is latched and said once, and its part is drawn as if no
 rule named it; one whose program has not compiled yet is drawn the same for
 that pass and latches nothing. A whole pane's self chain runs in a phase of
 its own after the rest. `effect_runs` in the trace counts the runs. A chain
-that reads nothing of the frame does not run yet.
+that reads nothing of the frame (T0, `Tier::Generated`: only `shape` and its
+states) captures nothing: its first input is the pool's one 1x1 transparent
+texture (`pool::Pool::blank`), its input never counts as redrawn
+(`render::input_redrawn`), so it runs on its first pass and again only when
+its params or its padded box's size change, and it runs in the first phase
+whatever its part. `dev/effects-check.sh t0` shows one behind a window.
 
 ### The arrangements are a crate too
 

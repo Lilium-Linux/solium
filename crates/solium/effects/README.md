@@ -83,10 +83,13 @@ the window (blur's own input) needs xray, which arrives with X2.1, so give
 titlebar, a `region:titlebar` rule whose chain reads the band's own pixels
 (`self`), `part = "output"`, `keep`, a `surface` match naming a plane, and an
 alpha mask without `source = "self"` likewise. This build reads, checks and
-binds rules, names a broken one on the overlay, and draws an effect that
-reads the part's own pixels in its slot, run again only when the part
-commits or the effect's params or the part's size change; an effect that
-reads nothing of the frame, only `shape` and its states, is not drawn yet.
+binds rules, names a broken one on the overlay, and draws an effect in its
+slot. One that reads the part's own pixels runs again only when the part
+commits or the effect's params or the part's size change. One that reads
+nothing of the frame, only `shape` and its states (a border, a glow, a
+gradient), needs no capture: it runs once, and again only when its params or
+the part's size change, whatever the window draws under it; its `sol_tex`
+reads a transparent texel.
 
 ## When it is read, and when it compiles
 

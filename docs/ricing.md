@@ -296,7 +296,10 @@ fails on it too. With no rules nothing changes, and nothing costs anything.
 pixels (`self`, or `source = "self"`) is drawn in its slot, and runs again
 only when the window draws something new, changes size, or the rule's params
 change: a still window's effect runs once and is then placed as it was. An
-effect that reads nothing of the window, only its shape, is not drawn yet.
+effect that reads nothing of the window, only its shape (a border, a glow
+behind it), is drawn too, with no capture of the window at all: it runs once,
+and again only when the window changes size or the rule's params change,
+however much the window draws.
 [The effects reference](../crates/solium/effects/README.md#rules) has every
 key a rule takes, and how to write an effect of your own.
 
