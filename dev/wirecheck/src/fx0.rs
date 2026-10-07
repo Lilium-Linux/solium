@@ -33,6 +33,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     pooled_target_through_the_carrier(renderer)?;
     a_warp_redrawn_under_partial_damage_blends_once(renderer)?;
     clipped_programs_cut_the_clients_corners(renderer)?;
+    a_captured_panes_pixels_match_its_flat_draw(renderer)?;
     Ok(())
 }
 
@@ -850,6 +851,143 @@ fn clipped_programs_cut_the_clients_corners(renderer: &mut GlesRenderer) -> Resu
     println!(
         "  both compiled; a root surface (ARGB and XRGB), a subsurface and a single-pixel \
          buffer are cut at the client's corners, and the subsurface not at its own"
+    );
+    Ok(())
+}
+
+/// **Case 11i: `pool::paint` draws a captured pane's elements back to front,
+/// so a smaller opaque client wins where it overlaps a larger opaque layer
+/// behind it** -- issue #227's own request, a test that a captured pane's
+/// pixels match its flat draw, on the GPU-backed path the old element-order
+/// fallback left unchecked. Two solid elements, listed `[client, behind]`
+/// exactly as `PANE_ORDER` lists them (`Piece::Client` before
+/// `Piece::Layers(Depth::Behind)`, both topmost-first): `behind` covers the
+/// whole target, `client` a quarter of it, each its own opaque colour.
+/// Painted together through the real `pool::paint` -- not a bare array, as
+/// `tests::a_topmost_first_list_is_painted_back_to_front` in `pool.rs`
+/// already covers -- the composite's pixel inside the client's quarter must
+/// match a flat, one-element `paint` of the client alone at that point, and
+/// its pixel outside the quarter must match a flat `paint` of `behind`
+/// alone. Compared against those flat draws rather than a literal colour
+/// constant, because the renderer's own channel order is not this test's to
+/// assume (case 11d already treats it as unknown).
+fn a_captured_panes_pixels_match_its_flat_draw(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::element::{Id, Kind, solid::SolidColorRenderElement};
+    use smithay::backend::renderer::utils::CommitCounter;
+    println!("\n=== FX0: a captured pane's pixels match its flat draw ===");
+    let side = 64;
+    let inside = (8_i32, 8_i32);
+    let outside = (48_i32, 48_i32);
+    let pixel_at = |pixels: &[u8], (x, y): (i32, i32)| -> [u8; 4] {
+        let at = ((y * side + x) * 4) as usize;
+        [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+    };
+
+    let behind = SolidColorRenderElement::new(
+        Id::new(),
+        Rectangle::from_size((side, side).into()),
+        CommitCounter::default(),
+        Color32F::new(0.0, 1.0, 0.0, 1.0),
+        Kind::Unspecified,
+    );
+    let client = SolidColorRenderElement::new(
+        Id::new(),
+        Rectangle::new((0, 0).into(), (side / 2, side / 2).into()),
+        CommitCounter::default(),
+        Color32F::new(1.0, 0.0, 0.0, 1.0),
+        Kind::Unspecified,
+    );
+
+    let mut pool = pool::Pool::new(64 << 20);
+    let target = pool
+        .target(&mut pool::Gl(renderer), (side, side).into())
+        .ok_or_else(|| anyhow!("no pooled target"))?;
+    let mut carrier = pool.carrier(renderer).ok_or_else(|| anyhow!("no carrier"))?;
+
+    {
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame =
+            pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+        pool::paint(
+            &mut frame,
+            (side, side).into(),
+            std::slice::from_ref(&client),
+            1.0,
+        )
+        .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let mut drawn = target.texture().clone();
+    let client_alone = read(renderer, &mut drawn, side)?;
+
+    {
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame =
+            pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+        pool::paint(
+            &mut frame,
+            (side, side).into(),
+            std::slice::from_ref(&behind),
+            1.0,
+        )
+        .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let behind_alone = read(renderer, &mut drawn, side)?;
+
+    let client_colour = pixel_at(&client_alone, inside);
+    let behind_colour = pixel_at(&behind_alone, outside);
+    if client_colour == behind_colour {
+        return Err(anyhow!(
+            "the two flat draws read back the same colour ({client_colour:?}): this renderer \
+             cannot distinguish the two elements, so the comparison below would be vacuous"
+        ));
+    }
+
+    {
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame =
+            pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+        // `client` first, `behind` last: `PANE_ORDER`'s own topmost-first
+        // shape, the same list order a captured pane's own elements arrive in.
+        pool::paint(&mut frame, (side, side).into(), &[client, behind], 1.0)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let composite = read(renderer, &mut drawn, side)?;
+
+    let overlap = pixel_at(&composite, inside);
+    if overlap != client_colour {
+        return Err(anyhow!(
+            "the composite's pixel inside the client's quarter is {overlap:?}, not the \
+             client's own flat colour {client_colour:?}: the client lost to `behind` where \
+             they overlap (#227)"
+        ));
+    }
+    let clear = pixel_at(&composite, outside);
+    if clear != behind_colour {
+        return Err(anyhow!(
+            "the composite's pixel outside the client's quarter is {clear:?}, not `behind`'s \
+             own flat colour {behind_colour:?}"
+        ));
+    }
+    drop(target);
+    pool.sweep(renderer);
+    println!(
+        "  the composite's pixels match each element's own flat draw: the client wins inside \
+         its quarter, `behind` outside it"
     );
     Ok(())
 }
