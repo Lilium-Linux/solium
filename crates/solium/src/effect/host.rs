@@ -482,11 +482,19 @@ impl<P: Clone> Host<P> {
     }
 
     /// `origin` now wants exactly `names`. A name newly wanted is loaded now,
-    /// GPU-free; one nobody wants any more is dropped with its problems.
-    /// `tests::a_program_is_compiled_once_per_content`.
+    /// GPU-free; one nobody wants any more is dropped with its problems,
+    /// loaded or not, so a name a rule set named and the next one does not
+    /// is not left on the overlay.
+    /// `tests::a_program_is_compiled_once_per_content`,
+    /// `tests::a_name_no_longer_wanted_takes_its_problems_with_it`.
     pub(crate) fn want(&mut self, origin: &'static str, names: impl IntoIterator<Item = String>) {
+        let before = self.all_wanted();
         self.wanted.insert(origin, names.into_iter().collect());
         self.settle_wanted(false);
+        let now = self.all_wanted();
+        for name in before.difference(&now) {
+            self.clear_problems_of(name);
+        }
     }
 
     /// `origin` wants `names` as well as what it wanted: `sol.present`'s, so
@@ -703,6 +711,17 @@ impl<P: Clone> Host<P> {
         name: &str,
         overrides: &[(String, Value)],
     ) -> Result<Bound, Problem> {
+        // An effect that did not load is refused with why it did not, at its
+        // own file and line, so a rule naming it says where to look
+        // (`tests::binding_an_effect_that_did_not_load_gives_its_own_problem`).
+        if self.latest(name).is_none()
+            && let Some(problem) = self
+                .problems
+                .iter()
+                .find(|each| each.effect == name && each.severity == Severity::Error)
+        {
+            return Err(problem.clone());
+        }
         let (bound, keys) = self.bind_plans(name, overrides).map_err(|problems| {
             problems.into_iter().next().unwrap_or_else(|| {
                 Problem::error(name, Path::new(name), None, "it did not bind".to_owned())
@@ -1731,6 +1750,66 @@ pub(crate) mod tests {
             &first,
             &host.effect("a").expect("still v1")
         ));
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A name no longer wanted takes its problems with it**, loaded or
+    /// not: a name nobody ships, or one whose checks refused it on a cold
+    /// start, is listed while it is wanted and not after.
+    #[test]
+    fn a_name_no_longer_wanted_takes_its_problems_with_it() {
+        let place = scratch("unwanted-problems");
+        folder(
+            &place,
+            "lint",
+            ONE_PASS,
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv) * p_nothing;\n}\n",
+            )],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["nowhere".to_owned(), "lint".to_owned()]);
+        let named: std::collections::BTreeSet<String> = host
+            .problems()
+            .iter()
+            .map(|each| each.effect.clone())
+            .collect();
+        assert_eq!(
+            named,
+            std::collections::BTreeSet::from(["lint".to_owned(), "nowhere".to_owned()]),
+            "the premise"
+        );
+        host.want("rules", []);
+        assert_eq!(host.problems(), &[], "a name nobody wants is still listed");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **Binding an effect that did not load is refused with why it did
+    /// not**, at its own file and line, rather than as "not loaded".
+    #[test]
+    fn binding_an_effect_that_did_not_load_gives_its_own_problem() {
+        let place = scratch("bind-unloaded");
+        let dir = folder(
+            &place,
+            "lint",
+            ONE_PASS,
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv) * p_nothing;\n}\n",
+            )],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["lint".to_owned(), "nowhere".to_owned()]);
+        let refused = host.bind("lint", &[]).expect_err("refused");
+        assert_eq!(
+            (refused.file, refused.line),
+            (dir.join("effect.frag"), Some(2)),
+            "{}",
+            refused.message
+        );
+        let refused = host.bind("nowhere", &[]).expect_err("refused");
+        assert!(refused.message.contains("looked in"), "{}", refused.message);
         let _ = std::fs::remove_dir_all(place);
     }
 
