@@ -610,7 +610,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             };
             let (panes, pool) = (&mut state.panes, &mut state.pool);
             if let Some(held) = panes.get_mut(pane) {
-                held.captures_mut().keep_only(kinds, pool);
+                held.captures_mut().keep(kinds, pool);
             }
             if let Some(job) = job {
                 // Already drawn from exactly this: no frame (`offscreen::kept`,

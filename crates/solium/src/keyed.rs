@@ -234,10 +234,11 @@ impl<T: Clone> Captures<T> {
     /// Give back every capture but those of `kinds`, the ones it captures this
     /// pass: a pane that captures nothing holds nothing, and a warped pane
     /// keeps its popups' capture only while it has popups open.
+    /// `tests::keep_holds_every_kind_it_is_given_and_gives_back_the_rest`,
     /// `tests::a_pane_that_stops_warping_gives_the_texture_back`,
     /// `tests::a_warped_pane_keeps_its_popups_capture`,
     /// `tests::a_warped_pane_whose_popups_close_gives_their_capture_back`.
-    pub(crate) fn keep_only(&mut self, kinds: &[Kind], pool: &mut Pool<T>) {
+    pub(crate) fn keep(&mut self, kinds: &[Kind], pool: &mut Pool<T>) {
         for each in [Kind::Pane, Kind::Over] {
             if !kinds.contains(&each) {
                 self.get_mut(each).release(pool);
@@ -473,9 +474,31 @@ mod tests {
         captures
             .get_mut(Kind::Pane)
             .drawn(target, nothing(Kind::Pane));
-        captures.keep_only(&[], &mut pool);
+        captures.keep(&[], &mut pool);
         assert_eq!(alloc.freed.get(), 1);
         assert!(captures.get_mut(Kind::Pane).target().is_none());
+    }
+
+    /// **A window both warped and self-ruled keeps both captures**: `keep`
+    /// with a set, every kind in it held and the rest given back.
+    #[test]
+    fn keep_holds_every_kind_it_is_given_and_gives_back_the_rest() {
+        let (mut captures, mut pool, mut alloc) = (
+            Captures::<Handle>::default(),
+            Pool::new(64 << 20),
+            counting(),
+        );
+        for kind in [Kind::Pane, Kind::Over] {
+            let target = captures
+                .get_mut(kind)
+                .target_for(&mut pool, &mut alloc, size(8, 8))
+                .expect("a target");
+            captures.get_mut(kind).drawn(target, nothing(kind));
+        }
+        captures.keep(&[Kind::Pane, Kind::Over], &mut pool);
+        assert!(captures.pane.target().is_some() && captures.over.target().is_some());
+        captures.keep(&[Kind::Pane], &mut pool);
+        assert!(captures.pane.target().is_some() && captures.over.target().is_none());
     }
 
     /// A warped pane with popups open keeps their capture with its own, and
@@ -491,12 +514,12 @@ mod tests {
                 .expect("a target");
             captures.get_mut(kind).drawn(target, nothing(kind));
         }
-        captures.keep_only(&[Kind::Pane, Kind::Over], &mut pool);
+        captures.keep(&[Kind::Pane, Kind::Over], &mut pool);
         assert!(
             captures.get_mut(Kind::Over).target().is_some(),
             "a warped pane let its popups' capture go"
         );
-        captures.keep_only(&[], &mut pool);
+        captures.keep(&[], &mut pool);
         assert!(captures.get_mut(Kind::Over).target().is_none());
         assert_eq!(alloc.freed.get(), 2);
     }
@@ -515,7 +538,7 @@ mod tests {
                 .expect("a target");
             captures.get_mut(kind).drawn(target, nothing(kind));
         }
-        captures.keep_only(&[Kind::Pane], &mut pool);
+        captures.keep(&[Kind::Pane], &mut pool);
         assert!(
             captures.get_mut(Kind::Over).target().is_none(),
             "the menu closed and the pane kept its capture"

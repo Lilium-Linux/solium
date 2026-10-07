@@ -314,7 +314,7 @@ pub(crate) fn kept(state: &mut Solium, job: &Job) -> Option<(GlesTexture, Id, Co
 pub(crate) fn release(state: &mut Solium, pane: PaneId) {
     let (panes, pool) = (&mut state.panes, &mut state.pool);
     if let Some(held) = panes.get_mut(pane) {
-        held.captures_mut().keep_only(&[], pool);
+        held.captures_mut().keep(&[], pool);
     }
 }
 
