@@ -6506,6 +6506,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// **The shipped configuration's `lock` table matches `logind::Settings`'s
+    /// own default**, the same parity
+    /// `the_shipped_configuration_turns_the_screens_off_after_ten_minutes`
+    /// holds for `idle`: a future edit to `config.lua`'s `lock.before_sleep`
+    /// or `command` without a matching change to `logind::Settings::default`,
+    /// or the other way around, must fail a test rather than ship a mismatch.
+    /// See `crate::logind::Settings`.
+    #[test]
+    fn the_shipped_configuration_s_lock_table_matches_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-lock-default", "return {}")
+        else {
+            return;
+        };
+        let lock: Vec<crate::logind::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Lock(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            lock,
+            [crate::logind::Settings::default()],
+            "the shipped init.lua did not hand config.lock over as it says"
+        );
+    }
+
     /// The shipped `config.lua` and `init.lua` tell the session and start
     /// autostart, and `--check` knows both keys. Shipped files only: the
     /// entry points `package.path` at them, past the developer's own
