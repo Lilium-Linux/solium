@@ -8,6 +8,7 @@
 // that reasoning does not apply to a test binary.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
+mod ages;
 mod apps;
 mod assets;
 mod autoreload;
