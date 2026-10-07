@@ -237,9 +237,22 @@ pub(crate) fn frame_for<'frame, 'buffer, T>(
     Ok(frame)
 }
 
-/// Clear a frame of `size` to transparent and draw `elements` over all of it;
-/// the first failure is returned once every element has been tried.
-/// Wirecheck's case 11f.
+/// Back to front, for a list that is topmost-first: the same convention
+/// every other walk of such a list already follows. Smithay's own damage
+/// tracker reverses `render::elements`'s list internally
+/// (`damage/mod.rs:379`), and `offscreen::Screens::draw` reverses it by hand
+/// for the nested backend's software path. `paint` used to draw the list as
+/// given, so a capture's last piece — a pane style's `behind` layer, in
+/// `PANE_ORDER` — landed on top of its client instead of under it, during
+/// every genie, warp and close fade (#227).
+/// `tests::a_topmost_first_list_is_painted_back_to_front`.
+fn draw_order<T>(elements: &[T]) -> impl Iterator<Item = &T> {
+    elements.iter().rev()
+}
+
+/// Clear a frame of `size` to transparent and draw `elements` over all of it,
+/// back to front; the first failure is returned once every element has been
+/// tried. Wirecheck's case 11f.
 pub(crate) fn paint<E: RenderElement<GlesRenderer>>(
     frame: &mut GlesFrame<'_, '_>,
     size: Size<i32, Physical>,
@@ -252,7 +265,7 @@ pub(crate) fn paint<E: RenderElement<GlesRenderer>>(
     // a target painted with nothing back as transparent.
     frame.clear(Color32F::TRANSPARENT, &whole)?;
     let mut first = Ok(());
-    for element in elements {
+    for element in draw_order(elements) {
         let (source, destination) = (element.src(), element.geometry(Scale::from(scale)));
         if let Err(err) = element.draw(frame, source, destination, &whole, &[])
             && first.is_ok()
@@ -287,7 +300,31 @@ pub(crate) fn chain_sizes(
 mod tests {
     use smithay::utils::{Physical, Size};
 
-    use super::{Alloc, Pool, chain_sizes};
+    use super::{Alloc, Pool, chain_sizes, draw_order};
+
+    /// **A capture draws its topmost-first list back to front**, exactly as
+    /// the monitor's own flat path does. Pinned directly on `draw_order`
+    /// because `paint` itself needs a real `GlesFrame`, which needs a GPU
+    /// `cargo test` does not have (`render.rs:3505`); this is the part of the
+    /// fix a GPU-free test can hold, and the wirecheck pattern in
+    /// `dev/wirecheck` is where the pixels themselves are proven (#227).
+    ///
+    /// Four pieces, named as `PANE_ORDER` names them, so a reader sees which
+    /// end is the client's: given topmost-first (`above`, `frame`, `client`,
+    /// `behind`), painting in that order would leave `behind` drawn last and
+    /// therefore on top of the client — the bug — so the list must come back
+    /// reversed, `behind` first and `above` last.
+    #[test]
+    fn a_topmost_first_list_is_painted_back_to_front() {
+        let topmost_first = ["above", "frame", "client", "behind"];
+        let painted: Vec<&str> = draw_order(&topmost_first).copied().collect();
+        assert_eq!(
+            painted,
+            ["behind", "client", "frame", "above"],
+            "the first element painted must be the last one in the list, so \
+             the list's own topmost member is painted last and ends up on top"
+        );
+    }
 
     /// Textures and framebuffer objects a test can count.
     #[derive(Debug, Default)]
