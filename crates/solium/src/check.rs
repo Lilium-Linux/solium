@@ -307,10 +307,12 @@ pub(crate) fn scenes(scripts: &mut crate::script::Scripts, report: &mut Report) 
     }
 }
 
-/// Your own pane-style bundles, every layer included. The shipped ones are
-/// `cargo test`'s, which builds them
+/// Your own pane-style bundles, every layer included, and the rules of each
+/// one's `effects.lua`, read as the compositor reads them. The shipped ones
+/// are `cargo test`'s, which builds them
 /// (`decoration::tests::a_narrow_tile_hides_the_titlebars_pieces_in_every_shipped_style`).
-/// `tests::a_broken_style_of_your_own_fails`.
+/// `tests::a_broken_style_of_your_own_fails`,
+/// `tests::a_broken_effects_lua_of_your_own_fails`.
 pub(crate) fn styles(report: &mut Report) {
     styles_in(
         &crate::style::directories(),
@@ -343,6 +345,22 @@ fn styles_in(directories: &[std::path::PathBuf], shipped: &Path, report: &mut Re
         ));
         for manifest in manifests {
             qml_file(&manifest, report);
+            let Some(dir) = manifest.parent() else {
+                continue;
+            };
+            let file = dir.join("effects.lua");
+            if !file.is_file() {
+                continue;
+            }
+            let read = crate::style::rules_of(dir);
+            if read.problems.is_empty() {
+                report.line(&format!(
+                    "    ok {}: {} rule(s)",
+                    file.display(),
+                    read.rules.len()
+                ));
+            }
+            say(report, &read.problems);
         }
     }
 }
@@ -999,6 +1017,38 @@ mod tests {
             });
             assert!(!passed, "{text}");
             assert!(text.contains("Ring.qml"), "{text}");
+        });
+    }
+
+    /// **A style of your own whose `effects.lua` is broken fails**, at its
+    /// file and line, as the overlay names it, though every layer builds.
+    #[test]
+    fn a_broken_effects_lua_of_your_own_fails() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            software_qt();
+            let own = std::env::temp_dir().join(format!(
+                "solium-check-test-{}-style-rules",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&own);
+            let style = own.join("mine");
+            std::fs::create_dir_all(&style).expect("a style folder");
+            std::fs::write(
+                style.join("Pane.qml"),
+                "import Solium\nPaneStyle { Layer { depth: \"frame\"; name: \"bar\" } }\n",
+            )
+            .expect("writing the manifest");
+            std::fs::write(
+                style.join("effects.lua"),
+                "return {\n  { part = = 'client' } }\n",
+            )
+            .expect("writing effects.lua");
+            let (passed, text) = reported(|report| {
+                styles_in(std::slice::from_ref(&own), &crate::style::shipped(), report);
+            });
+            let _ = std::fs::remove_dir_all(&own);
+            assert!(!passed, "{text}");
+            assert!(text.contains("effects.lua:2: "), "{text}");
         });
     }
 

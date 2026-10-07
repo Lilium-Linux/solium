@@ -511,6 +511,14 @@ pub(crate) struct Decoration {
     /// style declares nothing here is drawn exactly as it was before any of
     /// this existed, and every window on an unstyled machine is that window.
     effects: Vec<solium_effects::fragment::Effect>,
+    /// The effect rules the style's `effects.lua` gives this pane, and the
+    /// generation they were read at, copied from the `Style` for the reason
+    /// `effects` is: a frame resolves the pane's slots from here. Shared,
+    /// not copied, between the panes of one style
+    /// (`style::tests::effects_lua_is_read_once_per_content`); empty for a
+    /// single-file decoration. `tests::a_decoration_carries_the_styles_rules`.
+    rules: std::sync::Arc<[crate::effect::rules::Rule]>,
+    rules_generation: u32,
     /// The device-pixel size the frame was last drawn at.
     ///
     /// Kept on both paths, because `client_size` is asked for it while a style
@@ -617,6 +625,8 @@ impl Decoration {
             // declared on `PaneStyle`. So a decoration that is one file runs
             // no effects and costs no pass, which is what it has always cost.
             effects: Vec::new(),
+            rules: std::sync::Arc::from(Vec::new()),
+            rules_generation: 0,
             buffer_size: (0, 0),
             shown: Shown::default(),
         })
@@ -659,6 +669,8 @@ impl Decoration {
             // is declared on `PaneStyle` once, and every layer is *told* it
             // rather than asked for it. See `LayerScene::build`.
             effects: style.effects.clone(),
+            rules: std::sync::Arc::clone(&style.rules),
+            rules_generation: style.rules_generation,
             buffer_size: (0, 0),
             shown: Shown::default(),
         })
@@ -684,6 +696,18 @@ impl Decoration {
     /// `Option<Effect>`, and answering costs a pointer and a length.
     pub(crate) fn effects(&self) -> &[solium_effects::fragment::Effect] {
         &self.effects
+    }
+
+    /// The effect rules this pane's style gives it, every one for this
+    /// style's panes only (Ruling 15). `tests::a_decoration_carries_the_styles_rules`.
+    pub(crate) fn rules(&self) -> &[crate::effect::rules::Rule] {
+        &self.rules
+    }
+
+    /// The generation [`Self::rules`] were read at, which their keys carry.
+    /// `tests::a_decoration_carries_the_styles_rules`.
+    pub(crate) fn rules_generation(&self) -> u32 {
+        self.rules_generation
     }
 
     /// The layers of this style at one depth, drawn into `into`, topmost first.
@@ -3811,6 +3835,32 @@ mod tests {
             );
 
             let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A pane carries its style's effect rules**, read once with the style
+    /// (`style::tests::a_styles_effects_lua_is_read_with_it`), because a
+    /// frame resolves a pane's slots from its decoration and nothing else
+    /// keeps the `Style`; `render::style_rules` reads them back off the
+    /// pane's frame.
+    #[test]
+    fn a_decoration_carries_the_styles_rules() {
+        on_the_qt_thread(|| {
+            let dir = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/panes/frosted"
+            ));
+            let style = crate::style::load(dir).expect("the fixture loads");
+            let decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            assert_eq!(decoration.rules(), &style.rules[..]);
+            assert_eq!(decoration.rules_generation(), style.rules_generation);
+            let frame = crate::pane::Frame::Styled(decoration);
+            let (rules, generation) = crate::render::style_rules(&frame);
+            assert_eq!(
+                (rules.len(), generation),
+                (1, style.rules_generation),
+                "the rules did not reach the renderer"
+            );
         });
     }
 

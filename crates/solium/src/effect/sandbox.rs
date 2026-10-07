@@ -312,6 +312,19 @@ impl Sandbox {
             _ => Err(problem(format!("`{key}` is not a number or a function"))),
         }
     }
+
+    /// Run a Lua file in this sandbox, under the load budget, and return its
+    /// value: a pane style's `effects.lua`, which says rules, not an effect.
+    /// `style::tests::effects_lua_cannot_reach_sol`.
+    pub(crate) fn eval_file(&self, path: &Path) -> Result<LuaValue, Problem> {
+        let text = std::fs::read_to_string(path).map_err(|err| {
+            Problem::error(&self.effect, path, None, format!("cannot read it: {err}"))
+        })?;
+        let name = format!("@{}", path.display());
+        self.budgeted(Budget::LOAD.time, |lua| {
+            lua.load(text.as_str()).set_name(name).eval::<LuaValue>()
+        })
+    }
 }
 
 /// Take out of the base library what reaches files or catches the stop, make

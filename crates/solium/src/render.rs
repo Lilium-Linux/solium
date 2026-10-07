@@ -688,6 +688,25 @@ fn declared_effects(
         .to_vec()
 }
 
+/// A pane's style rules and the generation they were read at: its
+/// decoration's for a framed pane, and none for a bare one (fullscreen, CSD,
+/// `pane = "none"`), so a style's rules never reach a pane it does not frame
+/// (Ruling 15). The one place `prepare` reads them from.
+/// `tests::a_bare_pane_gets_no_style_rules`,
+/// `decoration::tests::a_decoration_carries_the_styles_rules`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task 18's slot plan reads a pane's style rules")
+)]
+pub(crate) fn style_rules(frame: &crate::pane::Frame) -> (&[crate::effect::rules::Rule], u32) {
+    match frame {
+        crate::pane::Frame::Styled(decoration) => {
+            (decoration.rules(), decoration.rules_generation())
+        }
+        crate::pane::Frame::Pending | crate::pane::Frame::None => (&[], 0),
+    }
+}
+
 /// The rounding a pane's style declares, if any: the one inline effect today.
 /// `tests::a_style_with_no_radius_wraps_nothing`, `tests::a_style_with_a_radius_is_drawn_inline`,
 /// `tests::a_none_effect_does_not_hide_the_rounding_behind_it`, `tests::of_two_roundings_the_first_wins`.
@@ -2735,6 +2754,16 @@ mod tests {
         assert_eq!(route(true, true), Route::Warp);
         assert_eq!(route(true, false), Route::Flat, "no program, no warp");
         assert_eq!(route(false, true), Route::Flat, "nothing to warp");
+    }
+
+    /// **A bare pane gets no style rules**: fullscreen, CSD and `pane =
+    /// "none"` panes have no `Decoration`, so a style's rules never reach them
+    /// (Ruling 15).
+    #[test]
+    fn a_bare_pane_gets_no_style_rules() {
+        let frame = crate::pane::Frame::None;
+        assert!(super::style_rules(&frame).0.is_empty());
+        assert_eq!(super::style_rules(&crate::pane::Frame::Pending).1, 0);
     }
 
     /// **The guard (spec §8.4): a pane neither warped nor styled wants no

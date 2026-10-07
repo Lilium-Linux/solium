@@ -192,7 +192,150 @@ pub(crate) struct Style {
     /// so a border can match the curve the compositor is about to cut rather
     /// than squaring it off around it.
     pub(crate) effects: Vec<solium_effects::fragment::Effect>,
+    /// The effect rules this style's `effects.lua` gives its panes, read
+    /// once per folder and content by [`rules_of`]; empty for a style with no
+    /// such file. Copied onto each pane's `Decoration`, as `effects` is.
+    /// `tests::a_styles_effects_lua_is_read_with_it`.
+    pub(crate) rules: std::sync::Arc<[crate::effect::rules::Rule]>,
+    /// Which read of `effects.lua` `rules` came from: what a rule's key
+    /// carries, so a slot finds the chain bound for this list and not for
+    /// one since replaced. `tests::effects_lua_is_read_once_per_content`.
+    pub(crate) rules_generation: u32,
     pub(crate) dir: PathBuf,
+}
+
+/// A style's `effects.lua`, read: the rules that run, their generation, and
+/// what is wrong with the file as it is now (nothing when it read).
+/// `tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`.
+#[derive(Clone, Debug)]
+pub(crate) struct StyleRules {
+    pub(crate) rules: std::sync::Arc<[crate::effect::rules::Rule]>,
+    pub(crate) generation: u32,
+    pub(crate) problems: Vec<crate::effect::host::Problem>,
+}
+
+impl StyleRules {
+    /// No rules, generation 0: a style with no `effects.lua`, a bare pane.
+    /// `tests::a_style_without_effects_lua_declares_no_rules`.
+    pub(crate) fn none() -> Self {
+        Self {
+            rules: std::sync::Arc::from(Vec::new()),
+            generation: 0,
+            problems: Vec::new(),
+        }
+    }
+}
+
+/// Per style folder: the hash of the `effects.lua` last read, and what
+/// reading it gave. One for the process, not one per thread, so a pane's
+/// rules and the chains bound for them agree on a generation wherever each
+/// was read. `tests::effects_lua_is_read_once_per_content`.
+static READ: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (u64, StyleRules)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The generation the last new list of rules was given.
+static GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A style folder's `effects.lua`, read once per folder and content, as
+/// rules every one of which applies to this style's panes only (Ruling 15).
+/// A file that will not read keeps the rules that ran for this folder, with
+/// its problems at its file and line (\[16\] §5 row 1).
+/// `tests::effects_lua_is_read_once_per_content`,
+/// `tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`.
+pub(crate) fn rules_of(dir: &Path) -> StyleRules {
+    use crate::effect::host::Problem;
+    let file = dir.join("effects.lua");
+    if !file.is_file() {
+        return StyleRules::none();
+    }
+    let effect = format!(
+        "style:{}",
+        dir.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    );
+    let mut read = READ
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The rules that ran for this folder, whatever content they came from
+    // (`tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`).
+    let ran = read
+        .get(dir)
+        .map_or_else(StyleRules::none, |(_, read)| StyleRules {
+            problems: Vec::new(),
+            ..read.clone()
+        });
+    let bytes = match std::fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return StyleRules {
+                problems: vec![Problem::error(
+                    &effect,
+                    &file,
+                    None,
+                    format!("cannot read it: {err}"),
+                )],
+                ..ran
+            };
+        }
+    };
+    let hash = solium_effects::glsl::content_hash(&[&bytes]);
+    if let Some((_, found)) = read.get(dir).filter(|(seen, _)| *seen == hash) {
+        return found.clone();
+    }
+    let rules = match read_rules(&effect, &file) {
+        Ok(rules) => StyleRules {
+            rules: std::sync::Arc::from(rules),
+            generation: GENERATION
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .wrapping_add(1),
+            problems: Vec::new(),
+        },
+        Err(problems) => StyleRules { problems, ..ran },
+    };
+    read.insert(dir.to_owned(), (hash, rules.clone()));
+    rules
+}
+
+/// `effects.lua` in an effect sandbox, parsed: the rules, or every problem
+/// at its file (a Lua error with its line; a rule error by its number).
+/// `tests::effects_lua_cannot_reach_sol`,
+/// `tests::an_effects_lua_that_returns_no_list_is_a_problem`.
+fn read_rules(
+    effect: &str,
+    file: &Path,
+) -> Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::host::Problem>> {
+    use crate::effect::host::Problem;
+    use crate::effect::tree::Tree;
+    let sandbox =
+        crate::effect::sandbox::Sandbox::new(effect, file).map_err(|problem| vec![problem])?;
+    let value = sandbox.eval_file(file).map_err(|problem| vec![problem])?;
+    let problem = |message: String| vec![Problem::error(effect, file, None, message)];
+    let tree = match Tree::from_lua(&value).map_err(|err| problem(err.to_string()))? {
+        // Nothing returned is no rules: a file written and not filled yet
+        // (`tests::an_effects_lua_that_returns_no_list_is_a_problem`).
+        None if value.is_nil() => return Ok(Vec::new()),
+        Some(tree @ Tree::Table { .. }) => tree,
+        _ => {
+            return Err(problem(
+                "effects.lua returns a list of rules: return { { match = …, part = …, slot = …, effect = … }, … }"
+                    .to_owned(),
+            ));
+        }
+    };
+    crate::effect::rules::parse(&tree).map_err(|errors| {
+        errors
+            .iter()
+            .map(|error| {
+                Problem::error(
+                    effect,
+                    file,
+                    None,
+                    format!("rule {}, `{}`: {}", error.rule, error.key, error.message),
+                )
+            })
+            .collect()
+    })
 }
 
 /// The bundles that ship with the compositor.
@@ -503,6 +646,12 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
     if !rounded.is_none_effect() {
         effects.push(rounded);
     }
+    // The rules of its `effects.lua` (`tests::a_styles_effects_lua_is_read_with_it`),
+    // its problems left to whoever applies the style
+    // (`Solium::apply_style_rules`, which lists them): a typo there costs its
+    // new rules, never the frame or the rules that ran
+    // (`state::tests::a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overlay`).
+    let read = rules_of(dir);
 
     Ok(Style {
         // Dotted paths, which is the whole of what `host.cpp` had to learn:
@@ -520,6 +669,8 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
         },
         layers,
         effects,
+        rules: read.rules,
+        rules_generation: read.generation,
         dir: dir.to_path_buf(),
     })
 }
@@ -1609,5 +1760,136 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&dir);
         });
+    }
+
+    /// **A style's `effects.lua` is read with it**, parsed as rules.
+    #[test]
+    fn a_styles_effects_lua_is_read_with_it() {
+        on_the_qt_thread(|| {
+            let dir = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/panes/frosted"
+            ));
+            let style = load(dir).expect("the fixture loads");
+            assert_eq!(style.rules.len(), 1);
+            assert_eq!(
+                style.rules[0].part,
+                crate::effect::rules::Part::Region("titlebar".to_owned())
+            );
+            assert_eq!(style.rules_generation, super::rules_of(dir).generation);
+        });
+    }
+
+    #[test]
+    fn a_style_without_effects_lua_declares_no_rules() {
+        on_the_qt_thread(|| {
+            let dir = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/panes/example"
+            ));
+            assert!(load(dir).expect("loads").rules.is_empty());
+        });
+    }
+
+    /// **`effects.lua` cannot reach `sol`**: it runs in an effect sandbox.
+    #[test]
+    fn effects_lua_cannot_reach_sol() {
+        let dir = fixture("reaches-sol", "import Solium\nPaneStyle {}\n");
+        std::fs::write(dir.join("effects.lua"), "sol.spawn('x') return {}").expect("writing");
+        let read = super::rules_of(&dir);
+        assert!(
+            read.problems
+                .iter()
+                .any(|problem| problem.message.contains("sol")),
+            "{:?}",
+            read.problems
+        );
+        assert!(read.rules.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **`effects.lua` returns a list of rules**: anything else is said, not
+    /// read as none, so a file that forgot its `return { … }` braces is on
+    /// the overlay; nothing returned at all is no rules.
+    #[test]
+    fn an_effects_lua_that_returns_no_list_is_a_problem() {
+        let dir = fixture("returns-no-list", "import Solium\nPaneStyle {}\n");
+        std::fs::write(dir.join("effects.lua"), "return 'blur'").expect("writing");
+        let read = super::rules_of(&dir);
+        assert!(
+            read.problems
+                .iter()
+                .any(|problem| problem.message.contains("a list of rules")),
+            "{:?}",
+            read.problems
+        );
+        std::fs::write(dir.join("effects.lua"), "-- nothing yet\n").expect("emptying it");
+        let read = super::rules_of(&dir);
+        assert_eq!(
+            (read.rules.len(), read.problems.len()),
+            (0, 0),
+            "{:?}",
+            read.problems
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Read once per folder and content: two panes of one style share one
+    /// list, and an edited file is read again.
+    #[test]
+    fn effects_lua_is_read_once_per_content() {
+        let dir = fixture("once", "import Solium\nPaneStyle {}\n");
+        std::fs::write(dir.join("effects.lua"), "return {}").expect("writing");
+        let a = super::rules_of(&dir);
+        let b = super::rules_of(&dir);
+        assert!(std::sync::Arc::ptr_eq(&a.rules, &b.rules) && a.generation == b.generation);
+        std::fs::write(
+            dir.join("effects.lua"),
+            "return { { match = '*', part = 'client', slot = 'front', effect = false } }",
+        )
+        .expect("editing");
+        let c = super::rules_of(&dir);
+        assert_eq!(c.rules.len(), 1);
+        assert_ne!(a.generation, c.generation);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **A broken `effects.lua` is a problem at its line and keeps the rules
+    /// that ran** ([16] §5 row 1): an edit that breaks it costs nothing that
+    /// worked, and the overlay can name where.
+    #[test]
+    fn a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran() {
+        let dir = fixture("broken-edit", "import Solium\nPaneStyle {}\n");
+        std::fs::write(
+            dir.join("effects.lua"),
+            "return { { match = '*', part = 'client', slot = 'front', effect = false } }",
+        )
+        .expect("writing");
+        let ran = super::rules_of(&dir);
+        assert_eq!((ran.rules.len(), ran.problems.len()), (1, 0));
+        std::fs::write(
+            dir.join("effects.lua"),
+            "return {\n  { match = '*',\n    part = = 'client' } }",
+        )
+        .expect("breaking it");
+        let broken = super::rules_of(&dir);
+        assert!(
+            std::sync::Arc::ptr_eq(&ran.rules, &broken.rules)
+                && ran.generation == broken.generation,
+            "the rules that ran were dropped"
+        );
+        let problem = broken.problems.first().expect("a problem");
+        assert!(
+            problem.effect.starts_with("style:") && problem.file.ends_with("effects.lua"),
+            "{problem:?}"
+        );
+        assert_eq!(problem.line, Some(3), "{problem:?}");
+        let again = super::rules_of(&dir);
+        assert_eq!(
+            again.problems.len(),
+            1,
+            "the same broken content is not read again, and still says so"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
