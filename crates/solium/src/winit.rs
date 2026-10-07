@@ -347,6 +347,12 @@ pub(crate) fn run() -> Result<()> {
     if !x11_coming {
         state.session.x11(None);
     }
+    // Before the scripts, same as the session: see `tty.rs`.
+    state.logind.begin(
+        crate::session::Place::Nested,
+        dev::logind_bus(),
+        crate::logind::Settings::default(),
+    );
     state.start_scripts(scripts);
     // After the scripts, so that `idle.dbus_inhibit = false` owns nothing even
     // for a moment (`idle_dbus_inhibit_false_owns_nothing`), and by the
@@ -1062,6 +1068,8 @@ pub(crate) fn run() -> Result<()> {
         // a notification that arrives up to one frame late is a notification
         // about somebody having left the room.
         crate::idle::settle(&mut state);
+        // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
+        crate::logind::settle(&mut state);
         // And a key held for the scene holding the keyboard repeats, on the
         // same once-a-loop check (Ruling 14).
         // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.

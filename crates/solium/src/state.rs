@@ -528,6 +528,9 @@ pub(crate) struct Solium {
     /// What systemd and D-Bus activation have been told about this session,
     /// and the stop and unset it owes them on exit. See `session.rs`.
     pub(crate) session: crate::session::Session,
+    /// logind's `Lock` and sleep signals: the locker to run, and the delay
+    /// inhibitor held for sleep until the session locks. See `logind.rs`.
+    pub(crate) logind: crate::logind::Logind,
     pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
     /// Raw pointer motion, for anything that reads movement rather than
     /// position.
@@ -1098,6 +1101,7 @@ impl Solium {
             xwm: None,
             x11_display: None,
             session: crate::session::Session::off(),
+            logind: crate::logind::Logind::off(),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
                 &display_handle,
             ),

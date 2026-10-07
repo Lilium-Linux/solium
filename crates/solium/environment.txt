@@ -146,6 +146,13 @@ SOLIUM_SESSION_BUS=<address>
     private bus: `dbus-run-session -- sh -c
     'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS solium'`.
 
+SOLIUM_LOGIND_BUS=<address>
+    The D-Bus address to hear logind's `Lock` and sleep signals on
+    (`lock.command`, `lock.before_sleep`), instead of the system bus. Nested,
+    or `solium --tty` without `--session`, this is the only way either
+    happens, so a nested run or a test never reaches the real logind. Blank
+    counts as unset.
+
 ## Hosting a shell
 
 A shell is loaded as configuration, with `shell = { scene = ... }`; see

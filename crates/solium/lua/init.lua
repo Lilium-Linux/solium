@@ -31,6 +31,9 @@ sol.monitors(config.monitors)
 -- When the screens go dark on their own. An absent table keeps the default,
 -- for the reason `sol.resize` gives.
 sol.idle(config.idle)
+-- logind's `Lock` and sleep requests: the locker to run, and whether to hold
+-- sleep for it. See `config.lua`.
+sol.lock(config.lock)
 -- The pointer's theme and size. An empty table here is not "reset it": it
 -- means the configuration says nothing, and `XCURSOR_THEME`/`XCURSOR_SIZE`
 -- are what the pointer follows -- which is what the rest of the machine

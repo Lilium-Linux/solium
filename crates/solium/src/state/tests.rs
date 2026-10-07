@@ -13425,6 +13425,7 @@ end)"#,
                 fn wait(&mut self, by: Duration) {
                     self.state.clock.advance(by);
                     crate::idle::settle(&mut self.state);
+                    crate::logind::settle(&mut self.state);
                     self.app.pump(&mut self.display, &mut self.state);
                 }
 

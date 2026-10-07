@@ -235,12 +235,11 @@ writing it. The shell is the reason all three matter more here than elsewhere:
 a dock that cannot enumerate windows is a launcher, and a settings panel that
 cannot move a monitor is a text editor with buttons.
 
-**The session.** Two gaps between the compositor and the rest of the user
-session, each a day lost; [gaps.md](gaps.md#the-session) has the detail.
+**The session.** One gap between the compositor and the rest of the user
+session; [gaps.md](gaps.md#the-session) has the detail.
 
 | | why it stops someone |
 |---|---|
-| [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | `loginctl lock-session` does nothing, and nothing locks before sleep unless `swayidle -w` does |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput settings | no tap-to-click, so tapping a touchpad does nothing |
 
 ### 2. Things that have to be true, not built

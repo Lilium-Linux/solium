@@ -499,6 +499,9 @@ pub(crate) enum Command {
     /// The idle blank, and what a window on a screen that is off is told.
     /// See `crate::idle::Settings`.
     Idle(crate::idle::Settings),
+    /// logind's `Lock` and sleep signals: the locker to run, and whether to
+    /// hold sleep for it. See `crate::logind::Settings`.
+    Lock(crate::logind::Settings),
     /// Turn one monitor, by name, or every one, on or off. See `power.rs`.
     Power {
         monitor: Option<String>,
@@ -2955,6 +2958,45 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Idle(idle));
+            })
+        })?,
+    )?;
+
+    // logind's `Lock` and sleep signals (#153): `config.lock`, handed over by
+    // `init.lua`. `command` is a program and its arguments, split on
+    // whitespace with no quoting, like an autostart `Exec=` line; absent or
+    // not a string, nothing runs on `Lock` or before sleep, which is the
+    // default — see `logind.rs` for why. `before_sleep` is true or false,
+    // default true; anything else is named in the log and the default kept.
+    sol.set(
+        "lock",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut settings = crate::logind::Settings::default();
+            if let Some(options) = options {
+                match options.get::<Value>("command") {
+                    Ok(Value::String(command)) => match command.to_str() {
+                        Ok(command) => settings.command = Some(command.to_owned()),
+                        Err(_) => {
+                            tracing::warn!("lock.command is not valid UTF-8; keeping it unset")
+                        }
+                    },
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "lock.command is a string, like \"swaylock -f\"; keeping it unset"
+                    ),
+                }
+                match options.get::<Value>("before_sleep") {
+                    Ok(Value::Boolean(on)) => settings.before_sleep = on,
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "lock.before_sleep is true or false; keeping the default, true"
+                    ),
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Lock(settings));
             })
         })?,
     )?;
@@ -6405,6 +6447,60 @@ mod tests {
             r#"sol.session({ stop_timeout = "soon" })"#,
         ] {
             assert_eq!(configured(source), settings(true, true), "{source:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `sol.lock`'s own parsing: a string `command`, a boolean
+    /// `before_sleep`, an absent table keeping both defaults, and a value of
+    /// the wrong kind named in the log with the default kept. See
+    /// `crate::logind::Settings`.
+    #[test]
+    fn sol_lock_parses_command_and_before_sleep() {
+        let directory = std::env::temp_dir().join("solium-script-test-lock");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::Lock(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::Lock")
+        };
+
+        assert_eq!(
+            configured(r#"sol.lock({ command = "swaylock -f" })"#),
+            crate::logind::Settings {
+                command: Some("swaylock -f".to_owned()),
+                before_sleep: true,
+            }
+        );
+        assert_eq!(
+            configured("sol.lock({ before_sleep = false })"),
+            crate::logind::Settings {
+                command: None,
+                before_sleep: false,
+            }
+        );
+        // Said nothing, two ways, and said something of the wrong kind.
+        for source in [
+            "sol.lock()",
+            "sol.lock({})",
+            "sol.lock({ command = 5, before_sleep = \"no\" })",
+        ] {
+            assert_eq!(
+                configured(source),
+                crate::logind::Settings::default(),
+                "{source:?}"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&directory);

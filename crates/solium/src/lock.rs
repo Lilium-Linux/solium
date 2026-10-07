@@ -387,6 +387,9 @@ impl SessionLockHandler for Solium {
         // keyboard on nothing.
         self.lock = None;
         self.redraw = true;
+        // logind's `LockedHint` follows, and a fresh delay inhibitor for sleep
+        // is asked for if `lock.before_sleep` holds one: see `logind.rs`.
+        self.logind.locked(false);
         // Cleared before it is re-aimed: keyboard focus is still on a lock
         // surface that is about to be destroyed, and the pointer still thinks
         // it is over one. `settle_focus` then gives the keyboard to whatever
@@ -674,6 +677,10 @@ impl Solium {
             lock.shown.clear();
             confirmation.lock();
             tracing::info!("session locked: every monitor is showing the lock");
+            // The presentation-accurate moment `logind.rs` waits for: it
+            // releases the delay inhibitor held for sleep, if any, and sets
+            // `LockedHint`.
+            self.logind.locked(true);
         }
     }
 

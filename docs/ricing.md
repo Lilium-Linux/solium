@@ -787,6 +787,41 @@ left waiting.
 Nested, there is no display to power off: a monitor that is "off" is drawn
 black and then not drawn at all, so all of the above can be tried in a window.
 
+### Locking and sleep
+
+`loginctl lock-session`, a power menu that locks that way, and a lid switch
+logind handles itself all send the same signal: `Lock`. By default Solium does
+nothing with it — set a locker to run:
+
+```lua
+return { lock = { command = "swaylock -f" } }
+```
+
+Split on whitespace, with no quoting, like an autostart `Exec=` line. It runs
+as a client of this compositor, so it asks for `ext_session_lock_v1` the same
+way any other lock screen would, and a second `Lock` while it is already
+locked runs nothing more — the second locker would only be told `finished`
+and exit.
+
+**Before suspending, Solium holds sleep for the lock.** With `lock.command`
+set, closing the lid or `systemctl suspend`-ing holds a logind delay
+inhibitor until the locker has confirmed the lock on every screen, or five
+seconds pass (`InhibitDelayMaxUSec`, logind's own limit — not Solium's to
+raise), so the machine never shows the desktop again on waking. Turn it off,
+say because `swayidle`'s own `before-sleep` already does this:
+
+```lua
+return { lock = { command = "swaylock -f", before_sleep = false } }
+```
+
+`swayidle` keeps working exactly as before either way — the two only overlap
+in that the lock screen may be asked for twice, and a second ask is refused as
+above.
+
+`loginctl show-session $XDG_SESSION_ID -p LockedHint` reads `yes` or `no`
+following whatever is actually locked, for a greeter or `loginctl` itself to
+read.
+
 ### One workspace per screen, or one for the desk
 
 Each monitor has its own workspace in view by default: `super+2` switches the

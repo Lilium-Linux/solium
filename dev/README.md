@@ -259,6 +259,7 @@ reads one that file does not list.
 | `SOLIUM_TRACE=<path>` | One JSON line per pass and per flip, and `SOLIUM_PACING` on. See *Measuring frame pacing on a TTY*. | |
 | `SOLIUM_QML=<mode>` | `auto`, `gpu` or `software`; see *QML on the GPU*. | |
 | `SOLIUM_SESSION_BUS=<address>` | The D-Bus bus to tell about the session and to own `org.freedesktop.ScreenSaver` on, instead of the session bus. A nested run, or `solium --tty` without `--session`, tells nobody anything without it. To check the calls against a private bus: `dbus-run-session -- sh -c 'SOLIUM_SESSION_BUS=$DBUS_SESSION_BUS_ADDRESS ./target/debug/solium'`. | |
+| `SOLIUM_LOGIND_BUS=<address>` | The D-Bus bus to hear logind's `Lock` and sleep signals on (`lock.command`, `lock.before_sleep`), instead of the system bus. A nested run, or `solium --tty` without `--session`, hears neither without it. | |
 | `RUST_LOG=<filter>` | Log levels, `info` by default. `solium::qml` carries Qt's own messages. | |
 
 On the hardware there is no `SOLIUM_CAPTURE`. A screenshot there is a
