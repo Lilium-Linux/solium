@@ -252,7 +252,12 @@ fn draw_order<T>(elements: &[T]) -> impl Iterator<Item = &T> {
 
 /// Clear a frame of `size` to transparent and draw `elements` over all of it,
 /// back to front; the first failure is returned once every element has been
-/// tried. Wirecheck's case 11f.
+/// tried. "First" means first in paint order -- the bottommost element,
+/// since `draw_order` now visits `behind` before `above` -- not first in the
+/// caller's topmost-first list; the only caller logs it in a
+/// `tracing::warn!` (`offscreen::draw`), where it only reads differently
+/// from the old order if more than one element fails in the same frame.
+/// Wirecheck's case 11f.
 pub(crate) fn paint<E: RenderElement<GlesRenderer>>(
     frame: &mut GlesFrame<'_, '_>,
     size: Size<i32, Physical>,
