@@ -54,7 +54,9 @@
 ---@field cramped boolean Whether the layout last placed it with `cramped = true`.
 ---@field shown boolean Whether its application has shown its first frame yet.
 ---@field x11_type? string Its X11 `_NET_WM_WINDOW_TYPE`, lower case (`"normal"`, `"dialog"`, `"utility"`, `"toolbar"`, `"menu"`, `"dropdown-menu"`, `"popup-menu"`, `"tooltip"`, `"notification"`, `"splash"`); `"normal"` for an X11 window with no type of its own, same as EWMH's own default, and absent for a Wayland window, which has no such property to ask.
----@field accepts_input boolean Whether the window may ever be given the keyboard: an X11 client's own `WM_HINTS.input`, or `true` for a Wayland window, which has nothing equivalent to decline with. `false` is what hides a window from this list and from tiling and decoration in the first place (#221), so a row here never reads `false` today; it exists for a window rule to act on.
+---@field accepts_input boolean Whether the window may ever be given the keyboard: an X11 client's own `WM_HINTS.input`, or `true` for a Wayland window, which has nothing equivalent to decline with. Not what decides whether a window reaches this list at all (#221) -- an ICCCM 'Globally Active' application can set this `false` and still be an ordinary, shown window -- so a row here can read `false`; it exists for a window rule to act on.
+---@field class? string Its X11 `WM_CLASS` class, or absent for a Wayland window, which has no such property. `config.x11.hidden` matches against this and `instance` to decide whether the window was shown at all (#221).
+---@field instance? string Its X11 `WM_CLASS` instance, or absent for a Wayland window. See `class`.
 
 ---One row of `sol.apps()`: an installed, visible application.
 ---@class sol.App
@@ -276,6 +278,12 @@
 ---@class sol.LockOptions
 ---@field command? string The locker to run on `Lock`, and before sleep: `"swaylock -f"`, say. Split on whitespace, with no quoting. Unset (the default) runs nothing.
 ---@field before_sleep? boolean Hold sleep until the locker above has confirmed the lock, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
+
+---X11 windows refused a tile, decoration or bar entry outright (#221). A key
+---left out, or the whole table left out, keeps the default rather than
+---emptying it.
+---@class sol.X11Options
+---@field hidden? string[] WM_CLASS names to hide, matched case-insensitively against either field a client sets (`class` or `instance` on `sol.Window`). Replaces the whole default list rather than adding to it; default `{ "xwaylandvideobridge" }`.
 
 ---The input profile's focus policy (#219). A key left out keeps whatever it
 ---already answered -- there is no fixed default here the way `sol.idle` has
@@ -505,6 +513,12 @@ function sol.input(options) end
 ---@param options? sol.LockOptions
 ---@return nil
 function sol.lock(options) end
+
+---X11 windows refused a tile, decoration or bar entry outright: `config.x11`,
+---which the shipped `init.lua` hands over. See #221.
+---@param options? sol.X11Options
+---@return nil
+function sol.x11(options) end
 
 ---Override the focus input policy: `config.focus`, which `lua/modes.lua`
 ---hands over on every mode change as well as at load. See #219.

@@ -1374,12 +1374,24 @@ and the two mistakes everyone makes first.
 Some autostart entries exist only so a desktop portal has something to talk
 to — KDE's screen-sharing fallback, `xwaylandvideobridge`, is the one this was
 found against (issue #221), and it is not the only X11 program shaped this
-way. Its window says, through `WM_HINTS.input`, that it never wants the
-keyboard; Solium reads that the same way it already reads a menu's or a
-tooltip's own way of saying "do not manage me" (`xwayland.rs`'s
-`places_itself`), so such a window is not tiled, not decorated, and left out
-of `sol.windows()` — nothing a bar or a window list built from that call ever
-has to filter out by hand.
+way. Solium hides a window like it by `config.x11.hidden`, a list of `WM_CLASS`
+names matched case-insensitively against either field a client sets (`xprop
+WM_CLASS` on a nested window shows both). A listed window is not tiled, not
+decorated, and left out of `sol.windows()` — nothing a bar or a window list
+built from that call ever has to filter out by hand — the same treatment
+`xwayland.rs`'s `places_itself` already gives a menu or a tooltip, for a
+different reason. The default names only `xwaylandvideobridge`; add your own
+in `config.lua`'s `x11.hidden` for anything else shaped this way, keeping
+`xwaylandvideobridge` in the list if you still want it hidden, since a
+configured list replaces the default rather than adding to it.
+
+**This used to key off `WM_HINTS.input` instead, and hid more than it meant
+to.** ICCCM reserves `input: false` for a window that never wants the
+keyboard, but it also names an entirely ordinary 'Globally Active' input
+model — ordinary, ICCCM-conforming applications that set `input: false` and
+take the keyboard themselves through `WM_TAKE_FOCUS` — and that old rule hid
+every one of them too. `WM_CLASS` is a much narrower claim: a name on `hidden`
+says "this specific program", not "anything that declines this one hint".
 
 It is still a real client with a real process, but nothing in the shipped
 config can reach it to ask it to go. The shipped `super+q` only walks
