@@ -508,6 +508,42 @@ pub(crate) fn wanted_by(rules: &[crate::effect::rules::Rule]) -> Vec<String> {
     crate::effect::rules::Rules::new(Vec::new(), Vec::new(), rules.to_vec(), 0).effects()
 }
 
+/// The rules bound as at load, GPU-free: a rule the compositor would refuse
+/// fails, a tier this build cannot run included (Ruling 14), at the
+/// effect's own file and line where it has one.
+/// `tests::a_rule_reading_xray_fails_the_check`.
+pub(crate) fn rules(
+    report: &mut Report,
+    library: &crate::effect::host::Library,
+    rules: &[crate::effect::rules::Rule],
+    formats: Option<crate::pool::Formats>,
+) {
+    report.line("  effects.rules:");
+    let mut host = crate::effect::host::Host::new(library.clone());
+    if let Some(formats) = formats {
+        host.set_formats(formats);
+    }
+    host.want("check", wanted_by(rules));
+    let config = crate::script::Scripts::config_path();
+    let mut refused = Vec::new();
+    for (index, rule) in rules.iter().enumerate() {
+        if rule.fill == crate::effect::rules::Fill::Off {
+            continue;
+        }
+        if let Err(problem) = crate::effect::plan::Chains::bind(&mut host, rule) {
+            refused.push(crate::effect::plan::rule_problem(
+                index + 1,
+                problem,
+                &config,
+            ));
+        }
+    }
+    say(report, &refused);
+    if refused.is_empty() {
+        report.line(&format!("    {} rule(s): ok", rules.len()));
+    }
+}
+
 /// Problems as lines: an error fails the report, a warning is said.
 /// `tests::a_name_missing_from_uses_is_a_warning_not_a_failure`.
 fn say(report: &mut Report, problems: &[crate::effect::host::Problem]) {
@@ -629,6 +665,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                             &wanted_by(&configured),
                             compiler.as_mut().zip(formats),
                         );
+                        rules(&mut report, &library, &configured, formats);
                         let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
                             .into_iter()
                             .find_map(|name| std::env::var(name).ok());
@@ -1350,5 +1387,36 @@ mod tests {
             out.contains("identity: ok") && out.contains("down.frag:2"),
             "{out}"
         );
+    }
+
+    /// **A rule reading xray fails the check** (Ruling 14), naming X2.1, as
+    /// it is refused at load; with `source = "self"` it passes.
+    #[test]
+    fn a_rule_reading_xray_fails_the_check() {
+        let place = crate::effect::host::tests::scratch("check-xray");
+        let effects = place.join("effects");
+        crate::effect::host::tests::folder(
+            &effects,
+            "soft",
+            "return { api = 1, inputs = { 'backdrop' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let library = crate::effect::host::Library::with(Some(effects.clone()), place.join("none"));
+        let check = |rules: &str| {
+            let rules = rules_from(&place, rules);
+            reported(|report| super::rules(report, &library, &rules, None))
+        };
+        let (passed, out) =
+            check(r#"{ { match = "*", part = "client", slot = "behind", effect = "soft" } }"#);
+        assert!(!passed, "{out}");
+        assert!(out.contains("rule 1") && out.contains("X2.1"), "{out}");
+        let (passed, out) = check(
+            r#"{ { match = "*", part = "client", slot = "behind", effect = { "soft", source = "self" } } }"#,
+        );
+        let _ = std::fs::remove_dir_all(place);
+        assert!(passed, "{out}");
     }
 }

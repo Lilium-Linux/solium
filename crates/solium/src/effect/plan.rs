@@ -144,7 +144,8 @@ impl Chains {
 /// A rule's problem as the overlay lists it: under `"rules"`, numbered as
 /// Lua counts, at its effect's own file and line when it has one and at the
 /// configuration otherwise.
-/// `state::tests::a_rule_whose_effect_is_broken_is_named_at_the_frags_line_until_mended`.
+/// `state::tests::a_rule_whose_effect_is_broken_is_named_at_the_frags_line_until_mended`,
+/// `check::tests::a_rule_reading_xray_fails_the_check`.
 pub(crate) fn rule_problem(number: usize, problem: Problem, config: &Path) -> Problem {
     Problem {
         effect: "rules".to_owned(),
