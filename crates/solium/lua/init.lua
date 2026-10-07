@@ -84,6 +84,10 @@ require("scrolling")
 -- `every_shipped_binding_is_reachable_on_us` loads this file and asks for its
 -- keys.
 require("direction")
+-- Desktop mode: snapping keys and new-window placement, while no layout is
+-- in charge (#222). After `direction`, whose four arrow bindings this takes
+-- over only while floating is the mode in charge.
+require("floating")
 
 -- Programs. `sol.spawn` starts them as clients of this compositor, whatever
 -- session the compositor itself happens to be nested in.
