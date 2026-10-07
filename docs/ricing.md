@@ -1235,6 +1235,22 @@ fullscreen game or video can be shown directly. An instant change is just that:
 nothing is stretched or moved, and the window is drawn as it is on the next
 frame. An app id is what `sol.windows()` calls `app_id`.
 
+Desktop mode's snap — the focused window sliding to a half, a quarter or the
+whole of its monitor while no layout is in charge (#222) — has its own
+`floating.snap.motion`, kept apart from `tiling.motion` for the same reason
+`fullscreen.animate` and `maximize.animate` are kept apart from each other:
+
+```lua
+return {
+    floating = { snap = { motion = { duration = 160, easing = "outBack" } } },
+}
+```
+
+The shipped motion is `{ duration = 220, easing = "outCubic" }`. There is no
+instant switch for it the way `fullscreen.animate` and `maximize.animate` have
+one above: a snap is always a glide, since nothing is waiting on an
+application to draw a new size first.
+
 ### Your own bindings
 
 A `bindings` section in `user.lua`, merged like every other section:
