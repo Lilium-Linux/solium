@@ -726,18 +726,27 @@ pub(crate) fn drawn_clip(
     }
 }
 
-/// A client's clip inside a warp's capture, which draws it at real size with
-/// its tree at `origin`: its `geometry` (relative to the tree) there, cut to
-/// the `hole` the frame leaves it from `origin`, which is what the capture
-/// holds of it. `tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`.
+/// A client's clip inside a warp's capture: the frame leaves it `hole` from
+/// `origin` (`room`), and its surface tree is drawn at `tree_origin`, so its
+/// `geometry` (relative to the tree) lands at `tree_origin + geometry.loc`
+/// (`client`) -- cut to `room`, which is what the capture holds of it.
+///
+/// **Two origins, not one.** `tree_origin` differs from `origin` exactly when
+/// `window_surface_origin` has shifted the tree off the frame's own origin to
+/// re-place a CSD client's content (#232): `room` has to stay anchored at the
+/// frame's real origin regardless, or it shrinks by that same shift and crops
+/// the content short on top of repositioning it, which is not what either fix
+/// is for. `tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`,
+/// `tests::a_shifted_tree_does_not_shrink_the_room_its_client_is_cut_to`.
 pub(crate) fn capture_clip(
     origin: Point<i32, Physical>,
     hole: Size<i32, Physical>,
+    tree_origin: Point<i32, Physical>,
     geometry: Rectangle<i32, Physical>,
     radii: solium_effects::fragment::Corners,
 ) -> crate::clip::Clip {
     let room = Rectangle::new(origin, hole);
-    let client = Rectangle::new(origin + geometry.loc, geometry.size);
+    let client = Rectangle::new(tree_origin + geometry.loc, geometry.size);
     crate::clip::Clip {
         rect: client.intersection(room).unwrap_or(room).to_f64(),
         radii,
@@ -2175,17 +2184,19 @@ pub(crate) fn flat_window_elements(
             let surfaces = client_piece(renderer, window, surface_origin, output_scale);
             match &rounded {
                 Some((effect, programs)) => {
-                    // `surface_origin`, not `origin`: `capture_clip` adds
-                    // `geometry.loc` back on to find the content rectangle,
-                    // which only lands on `origin` again if the surface
-                    // itself was drawn at `origin` minus that same offset.
+                    // `origin` for the room, `surface_origin` for the tree:
+                    // the frame's content area does not move when the tree
+                    // is shifted to re-place a CSD client's shadow, so the
+                    // two anchors `capture_clip` takes must not be collapsed
+                    // into one (`tests::a_shifted_tree_does_not_shrink_the_room_its_client_is_cut_to`).
                     let clip = capture_clip(
-                        surface_origin,
+                        origin,
                         Size::<i32, Logical>::from((
                             outer.w - insets.horizontal(),
                             outer.h - insets.vertical(),
                         ))
                         .to_physical_precise_round(scale),
+                        surface_origin,
                         window.geometry().to_physical_precise_round(scale),
                         crate::pass::physical_radii(*effect, scale),
                     );
@@ -2875,6 +2886,7 @@ mod tests {
         let wide = super::capture_clip(
             (10, 30).into(),
             (300, 200).into(),
+            (10, 30).into(),
             Rectangle::<i32, Physical>::from_size((400, 260).into()),
             radii,
         );
@@ -2885,6 +2897,7 @@ mod tests {
         let small = super::capture_clip(
             (10, 30).into(),
             (300, 200).into(),
+            (10, 30).into(),
             Rectangle::<i32, Physical>::from_size((250, 150).into()),
             radii,
         );
@@ -2896,6 +2909,34 @@ mod tests {
             (small.origin, small.factor),
             ((10, 30).into(), smithay::utils::Scale::from(1.0)),
             "drawn at real size"
+        );
+    }
+
+    /// **A shifted tree does not shrink the room its client is cut to.**
+    /// #232 moves a CSD client's tree off the frame's own origin so its
+    /// shadow lands where its geometry says, but the frame's content area
+    /// does not move with it: a frame at (0, 0), a shadow offset of (10, 15)
+    /// (so the tree is drawn at (-10, -15)) and 44x49 of real content, with
+    /// no tile overflow (`hole` exactly the content's size), must clip to the
+    /// whole 44x49, not a (10, 15)-smaller rectangle reproducing the shadow
+    /// offset -- the regression the two separate origins above guard against.
+    #[test]
+    fn a_shifted_tree_does_not_shrink_the_room_its_client_is_cut_to() {
+        use smithay::utils::{Physical, Rectangle};
+        use solium_effects::fragment::Corners;
+        let radii = Corners::all(12.0);
+        let shadow = (10, 15);
+        let content = (44, 49);
+        let clip = super::capture_clip(
+            (0, 0).into(),
+            content.into(),
+            (-shadow.0, -shadow.1).into(),
+            Rectangle::<i32, Physical>::new(shadow.into(), content.into()),
+            radii,
+        );
+        assert_eq!(
+            clip.rect,
+            Rectangle::new((0.0, 0.0).into(), (44.0, 49.0).into())
         );
     }
 
