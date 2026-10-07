@@ -186,7 +186,7 @@ pub(crate) fn session_bus() -> Option<String> {
 }
 
 /// The D-Bus address to ask for logind's `Lock` and sleep signals on, instead
-/// of the system bus: `logind.rs`'s own `SOLIUM_SESSION_BUS`. Read the same
+/// of the system bus: this function's own `SOLIUM_LOGIND_BUS`. Read the same
 /// way, for the same reason — a nested run or a manual `--tty` must never
 /// reach the real logind, or a test the real system bus.
 pub(crate) fn logind_bus() -> Option<String> {
