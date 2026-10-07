@@ -207,6 +207,23 @@ pub(crate) const fn asks_not_to_be_shown(accepts_input: Option<bool>) -> bool {
     matches!(accepts_input, Some(false))
 }
 
+/// [`asks_not_to_be_shown`], except a `Dialog` is never hidden by it.
+///
+/// `places_itself` already keeps `Dialog` out of its own list for a reason
+/// written down there (#72): `refused_with_a_dialog` is watching for exactly
+/// this window type, because a dialog appearing where a close was pending is
+/// the evidence the close was answered. ICCCM does not forbid a dialog
+/// answered entirely by mouse from also setting `WM_HINTS.input: false` — a
+/// "Save changes?" box with nothing to type into has no real use for the
+/// keyboard — and `asks_not_to_be_shown` alone cannot tell that one apart from
+/// `xwaylandvideobridge`. Routing it to the hidden, unmanaged branch instead
+/// would make `refused_with_a_dialog` blind to the one close it exists to
+/// answer, for a saving that only ever mattered for #221's own window, which
+/// is never a `Dialog` in the first place.
+pub(crate) const fn is_hidden(kind: Option<WmWindowType>, accepts_input: Option<bool>) -> bool {
+    !matches!(kind, Some(WmWindowType::Dialog)) && asks_not_to_be_shown(accepts_input)
+}
+
 /// The name a script is given for an X11 window's `_NET_WM_WINDOW_TYPE`, for
 /// `sol.windows()`'s `x11_type` — the raw material a window rule (#56) needs
 /// to act on a case this file's own policy does not cover, such as a `Dialog`
@@ -398,14 +415,21 @@ impl XwmHandler for Solium {
             tracing::warn!(?err, "could not map an X11 window");
             return;
         }
-        // Both reads happen before the surface is moved into the element.
+        // Read before the surface is moved into the element: this, `hidden`
+        // below, `asked_for`, and the client pid `remember_client_pid` looks
+        // up just before the move.
         let self_placing = places_itself(window.window_type());
         // Asked only when the window is not already self-placing: a menu
         // never carries meaningful `WM_HINTS` for this question, and
         // `asks_not_to_be_shown`'s own doc is about the window that *is*
-        // otherwise an ordinary one.
-        let hidden =
-            !self_placing && asks_not_to_be_shown(window.hints().and_then(|hints| hints.input));
+        // otherwise an ordinary one. `is_hidden` keeps a `Dialog` out of this
+        // question the same way `places_itself` already does (its own doc
+        // says why; #221 review).
+        let hidden = !self_placing
+            && is_hidden(
+                window.window_type(),
+                window.hints().and_then(|hints| hints.input),
+            );
         // Where the client put it. A menu positions itself with a
         // ConfigureRequest before it maps -- `configure_request` below grants
         // those, and smithay records the result as the surface's geometry --
@@ -1003,7 +1027,8 @@ impl XwmHandler for crate::tty::State {
 #[cfg(test)]
 mod tests {
     use super::{
-        asks_not_to_be_shown, floats_over_its_parent, kill_client, places_itself, window_type_name,
+        asks_not_to_be_shown, floats_over_its_parent, is_hidden, kill_client, places_itself,
+        window_type_name,
     };
     use smithay::xwayland::xwm::WmWindowType;
 
@@ -1030,6 +1055,38 @@ mod tests {
             !asks_not_to_be_shown(None),
             "a client that set no WM_HINTS at all has asked for nothing special"
         );
+    }
+
+    /// **#221 review.** `asks_not_to_be_shown` alone cannot tell
+    /// `xwaylandvideobridge` apart from a confirmation dialog answered by
+    /// mouse, which can legitimately decline the keyboard too. `is_hidden` is
+    /// the line that keeps the second one reaching `refused_with_a_dialog`.
+    #[test]
+    fn a_dialog_that_declines_input_is_still_not_hidden() {
+        assert!(
+            !is_hidden(Some(WmWindowType::Dialog), Some(false)),
+            "a Dialog stays on the managed path the same way places_itself \
+             already keeps it there (#72), even when it declines input"
+        );
+    }
+
+    #[test]
+    fn everything_else_is_hidden_the_way_asks_not_to_be_shown_already_said() {
+        for kind in [
+            None,
+            Some(WmWindowType::Normal),
+            Some(WmWindowType::Utility),
+        ] {
+            assert_eq!(
+                is_hidden(kind, Some(false)),
+                asks_not_to_be_shown(Some(false)),
+                "{kind:?} has no reason to differ from the plain ICCCM reading"
+            );
+            assert!(
+                !is_hidden(kind, Some(true)),
+                "{kind:?} that accepts input is never hidden"
+            );
+        }
     }
 
     /// `sol.windows()`'s `x11_type` is `None` reaching `script.rs` for a
