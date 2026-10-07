@@ -104,6 +104,9 @@ pub(crate) struct Pool<T = GlesTexture> {
     budget: usize,
     /// The 1x1 target a capture's frame is opened on: wirecheck's case 11f.
     carrier: Option<T>,
+    /// Targets made, not taken from the free list, since the pool was.
+    /// `tests::the_pool_counts_the_targets_it_made`.
+    made: usize,
 }
 
 /// What a target costs the budget: four bytes a pixel, eight in `rgba16f`.
@@ -123,7 +126,23 @@ impl<T: Clone> Pool<T> {
             doomed: Rc::new(RefCell::new(Vec::new())),
             budget,
             carrier: None,
+            made: 0,
         }
+    }
+
+    /// How many targets the pool has made, not counting those it handed out
+    /// again from its free list: wirecheck's cases 12l and 12p see a second
+    /// run, and a result drawn, make none.
+    /// `tests::the_pool_counts_the_targets_it_made`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "wirecheck's cases 12l and 12p count what a run makes"
+        )
+    )]
+    pub(crate) fn made(&self) -> usize {
+        self.made
     }
 
     pub(crate) fn set_budget(&mut self, budget: usize) {
@@ -150,6 +169,7 @@ impl<T: Clone> Pool<T> {
         }
         let texture = alloc.make(size, format)?;
         let name = alloc.fbo(&texture)?;
+        self.made += 1;
         Some(Target {
             texture,
             fbo: Rc::new(Fbo {
@@ -399,6 +419,29 @@ mod tests {
             .expect("a target");
         assert_eq!((alloc.textures, alloc.fbos), (1, 1));
         assert_eq!(again.fbo(), 101);
+    }
+
+    /// **The pool counts the targets it made**: one taken from the free list
+    /// is not counted, one made is. What wirecheck's cases 12l and 12p read
+    /// to see a second run, and a result drawn, make nothing.
+    #[test]
+    fn the_pool_counts_the_targets_it_made() {
+        let (mut pool, mut alloc) = (Pool::<u32>::new(64 << 20), Counted::default());
+        assert_eq!(pool.made(), 0);
+        let first = pool
+            .target(&mut alloc, size(64, 64), Format::Rgba8)
+            .expect("a target");
+        assert_eq!(pool.made(), 1);
+        pool.give_back(first);
+        let _again = pool
+            .target(&mut alloc, size(64, 64), Format::Rgba8)
+            .expect("a target");
+        assert_eq!(pool.made(), 1, "from the free list");
+        let _other = pool
+            .target(&mut alloc, size(64, 65), Format::Rgba8)
+            .expect("a target");
+        assert_eq!(pool.made(), 2);
+        assert_eq!(pool.made(), usize::try_from(alloc.textures).expect("small"));
     }
 
     /// Another size is another target.

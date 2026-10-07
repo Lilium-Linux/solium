@@ -20,7 +20,11 @@ mod gputime;
 mod warp_gl;
 
 #[path = "../../../crates/solium/src/pool.rs"]
-#[allow(dead_code, reason = "the compositor's pool, of which these cases need part")]
+#[allow(
+    dead_code,
+    unfulfilled_lint_expectations,
+    reason = "the compositor's pool, of which these cases need part, and which expects some of it read only here"
+)]
 pub(crate) mod pool;
 
 /// Every FX0 case, in order.
