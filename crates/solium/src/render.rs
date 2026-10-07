@@ -1246,6 +1246,11 @@ pub(crate) trait Runner {
     ) -> crate::effect::run::Outcome;
     /// After a phase's last run: closes the region.
     fn end(&mut self);
+    /// What a generated (T0) chain's first input reads, which names no frame
+    /// texture: `GlRunner`'s is the pool's 1x1 transparent texture
+    /// (`pool::Pool::blank`), `tests::NoGpu`'s none.
+    /// `tests::twenty_runs_in_a_phase_open_one_region`, `dev/effects-check.sh t0`.
+    fn blank(&mut self, pool: &mut crate::pool::Pool) -> Option<GlesTexture>;
 }
 
 /// The GPU's runner: `run::run` on the carrier [`with_carrier`] bound, the
@@ -1319,6 +1324,10 @@ impl Runner for GlRunner<'_, '_> {
             timer.close(self.renderer, stamp);
         }
     }
+
+    fn blank(&mut self, pool: &mut crate::pool::Pool) -> Option<GlesTexture> {
+        pool.blank(self.renderer)
+    }
 }
 
 /// Bind the pool's carrier once and hand it, the renderer and the pool to
@@ -1388,13 +1397,25 @@ impl Nest {
     }
 }
 
+/// Whether a slot's first input counts as redrawn this pass: only a self
+/// (T1) input that was captured anew. A generated (T0) chain reads nothing
+/// of the frame, so nothing committing under it re-runs it; only its params
+/// or its padded size do (`SlotState::needs_run`).
+/// `tests::a_t0_slot_never_counts_as_redrawn`,
+/// `effect::store::tests::a_generated_effect_runs_once_and_not_again_until_its_size_or_params_change`.
+pub(crate) fn input_redrawn(tier: crate::effect::rules::Tier, captured: bool) -> bool {
+    tier == crate::effect::rules::Tier::Own && captured
+}
+
 /// Run every wanted slot of `nest` whose tier runs here, each only when
 /// `needs_run` says so, else its last result placed again with the same id
 /// and commit (Ruling 16). A T1 slot reads its self input from `drawn`
 /// (redrawn this pass, or kept); with neither there is nothing to run and
-/// the part is drawn plain. One `begin` before the phase's first run and
-/// one `end` after its last (Ruling 10).
+/// the part is drawn plain. A T0 slot reads the runner's blank and is never
+/// redrawn. One `begin` before the phase's first run and one `end` after its
+/// last (Ruling 10).
 /// `tests::a_self_slot_with_no_input_runs_nothing_and_opens_no_region`,
+/// `tests::twenty_runs_in_a_phase_open_one_region`,
 /// `effect::store::tests::a_self_chain_runs_once_until_its_part_commits`.
 pub(crate) fn run_slots(
     cx: &mut RunCx<'_>,
@@ -1424,11 +1445,19 @@ pub(crate) fn run_slots(
         }
         let (first, redrawn) = match chain.tier {
             Tier::Own => match drawn.get(&owner, slot) {
-                Some((texture, redrawn)) => (Some(texture.clone()), redrawn),
+                Some((texture, captured)) => {
+                    (Some(texture.clone()), input_redrawn(chain.tier, captured))
+                }
                 None => continue,
             },
-            // Task 22 runs T0 here; T2 and T3 were refused at load (Ruling 14).
-            Tier::Generated | Tier::Xray | Tier::Live => continue,
+            // A generated chain reads nothing of the frame: no capture, never
+            // redrawn, its first input the pool's blank, so it runs on its
+            // first pass and again only when its params or its padded size
+            // change (`tests::twenty_runs_in_a_phase_open_one_region`,
+            // `effect::store::tests::a_generated_effect_runs_once_and_not_again_until_its_size_or_params_change`).
+            Tier::Generated => (runner.blank(pool), input_redrawn(chain.tier, false)),
+            // T2 and T3 were refused at load (Ruling 14).
+            Tier::Xray | Tier::Live => continue,
         };
         let size = part.size();
         let params = chain.params_hash;
@@ -4414,7 +4443,8 @@ pub(crate) mod tests {
 
     /// A machine whose every draw fails: it counts the phase's `begin`, its
     /// runs and its `end`, and answers each run with `run::preflight`'s
-    /// outcome, else `Outcome::Failed` (Tasks 22 and 24 drive it).
+    /// outcome, else `Outcome::Failed`; it has no blank, so a T0 chain runs
+    /// on it with no texture (Tasks 22 and 24 drive it).
     #[derive(Debug, Default)]
     pub(crate) struct NoGpu {
         pub(crate) begins: u32,
@@ -4442,6 +4472,12 @@ pub(crate) mod tests {
         }
         fn end(&mut self) {
             self.ends += 1;
+        }
+        fn blank(
+            &mut self,
+            _pool: &mut crate::pool::Pool,
+        ) -> Option<smithay::backend::renderer::gles::GlesTexture> {
+            None
         }
     }
 
@@ -4551,6 +4587,93 @@ pub(crate) mod tests {
         }
         assert_eq!((runner.begins, runner.runs, runner.ends), (0, 0, 0));
         assert!(!slots.is_ready(&owner, Slot::Behind));
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// A T0 slot never counts its input as redrawn, so a client committing
+    /// under a generated effect does not re-run it.
+    #[test]
+    fn a_t0_slot_never_counts_as_redrawn() {
+        use crate::effect::rules::Tier;
+        assert!(!super::input_redrawn(Tier::Generated, true));
+        assert!(super::input_redrawn(Tier::Own, true));
+        assert!(!super::input_redrawn(Tier::Own, false));
+    }
+
+    /// **Twenty runs in a phase open one GPU region** (Ruling 10): \[fx0\]
+    /// Task 3's ring times sixteen regions a pass and counts the rest as
+    /// `refused`, so one region per run would read low with a dozen slots.
+    /// The twenty are generated (T0) chains, which read nothing of the frame
+    /// and so run with no self input drawn.
+    #[test]
+    fn twenty_runs_in_a_phase_open_one_region() {
+        use crate::effect::plan::{Chains, Owner, PaneSlot, PartBox, Slots};
+        use crate::effect::rules::{Origin, RuleKey, Slot};
+        let place = crate::effect::host::tests::scratch("twenty-runs");
+        crate::effect::host::tests::folder(
+            &place,
+            "glow",
+            "return { api = 1, inputs = { 'shape' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",
+            )],
+        );
+        let mut host = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(place.clone()),
+            place.join("none"),
+        ));
+        host.want("rules", ["glow".to_owned()]);
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua
+            .load(r#"{ { match = "*", part = "client", slot = "behind", effect = "glow" } }"#)
+            .eval()
+            .expect("the test's Lua");
+        let tree = crate::effect::tree::Tree::from_lua(&value)
+            .expect("readable")
+            .expect("a value");
+        let rule = crate::effect::rules::parse(&tree)
+            .expect("parses")
+            .remove(0);
+        let (mut chains, mut slots) = (Chains::default(), Slots::default());
+        let part = PartBox::around((120, 80).into(), 12, [0.0; 4]);
+        for index in 1..=20_u32 {
+            let key = RuleKey {
+                origin: Origin::User,
+                index,
+                generation: 1,
+            };
+            chains.insert(key, Chains::bind(&mut host, &rule).expect("binds"));
+            let owner = Owner::Pane(
+                crate::pane::PaneId::from_raw(u64::from(index)),
+                PaneSlot::Client,
+            );
+            slots.want(owner.clone(), Slot::Behind, key);
+            slots.set_box(owner, Slot::Behind, part);
+        }
+        let mut store = crate::effect::store::Store::default();
+        let mut cx = super::RunCx {
+            store: &mut store,
+            effects: &host,
+            chains: &mut chains,
+            masked: None,
+            now: 0.0,
+            pass: 1,
+        };
+        let mut runner = NoGpu::default();
+        super::run_slots(
+            &mut cx,
+            &mut crate::pool::Pool::new(0),
+            &mut runner,
+            &mut slots,
+            &crate::effect::store::Drawn::default(),
+            super::Nest::Inner,
+        );
+        assert_eq!(
+            (runner.begins, runner.runs, runner.ends),
+            (1, 20, 1),
+            "one region a phase, not one a run"
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 

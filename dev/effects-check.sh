@@ -15,6 +15,10 @@
 #             corner, and nothing else on screen changes; and a rule naming
 #             an effect whose .frag has a typo: the overlay names the .frag
 #             at its line
+#   t0        a generated ring behind a window (the `ring` fixture, no
+#             capture): the band just outside the window changes, the window
+#             itself does not, and the ring runs once or twice, never once the
+#             window is at rest
 #
 # QML is software nested (#148). Only what this script started is ever
 # killed: a developer may have a nested Solium of their own running.
@@ -143,7 +147,39 @@ section_overlay() {
         || fail "overlay-effect: the bottom half changed too, so the corner is not what was judged"
 }
 
-all=(overlay)
+# t0   a generated ring behind a window (the `ring` fixture, no capture):
+#      the band just outside the window changes, the window itself does not.
+section_t0() {
+    local name
+    for name in t0-off t0-on; do
+        local ring=()
+        [[ "$name" = t0-on ]] && ring=(T0_RING=1)
+        SECTION_EFFECTS="$root/crates/solium/tests/fixtures/effects/ring" \
+            run_scene "$name" t0.lua "${ring[@]}" SOLIUM_TRACE="$out/$name/trace.jsonl" \
+            SOLIUM_CAPTURE_AT=6000 SOLIUM_CAPTURE_FRAMES=2 SOLIUM_CAPTURE_INTERVAL=100 || return
+        kitty_window 3a6ea5
+        wait_frames 2 || return
+        stop
+    done
+    # A burst of two, because a single frame is written to the bare path and
+    # not beside it, where `wait_frames` counts; the first is judged.
+    local off on
+    off="$(ls "$out/t0-off"/f-* | head -1)"
+    on="$(ls "$out/t0-on"/f-* | head -1)"
+    judge differs "$off" "$on" 408px 178px 12px 384px >/dev/null && pass "t0: the ring is drawn left of the window" || fail "t0: nothing was drawn around the window"
+    judge same "$off" "$on" 440px 210px 480px 320px >/dev/null && pass "t0: the window itself is untouched" || fail "t0: the window changed under a behind effect"
+    # The ring re-runs when its padded size changes, and kitty's first buffer
+    # may be another size than the one it commits after sol.place: so once or
+    # twice, and never once the window has settled (the last 2 s before the
+    # capture at 6 s).
+    local runs total
+    read -r runs total < <(judge trace "$out/t0-on/trace.jsonl" effect_runs)
+    runs="${runs:-0}" total="${total:-0}"
+    (( total >= 1 && total <= 2 )) && pass "t0: the ring ran $total time(s), in $runs pass(es)" || fail "t0: the ring ran $total times"
+    judge quiet "$out/t0-on/trace.jsonl" effect_runs 2000 >/dev/null && pass "t0: no run once the window was at rest" || fail "t0: the ring kept running with nothing changing"
+}
+
+all=(overlay t0)
 sections=("$@")
 [[ ${#sections[@]} -gt 0 ]] || sections=("${all[@]}")
 

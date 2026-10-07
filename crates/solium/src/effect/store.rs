@@ -304,6 +304,28 @@ mod tests {
         assert!(slot.needs_run(false, 7, (101, 80)));
     }
 
+    /// **A generated effect runs once, and not again until its size or its
+    /// params change**: a T0 slot is asked with `redrawn = false`, whatever
+    /// commits under it.
+    #[test]
+    fn a_generated_effect_runs_once_and_not_again_until_its_size_or_params_change() {
+        let mut slot = slot();
+        assert!(slot.needs_run(false, 4, (548, 388)));
+        slot.ran(4, (548, 388));
+        assert!(
+            !slot.needs_run(false, 4, (548, 388)),
+            "re-ran with nothing of its own changed"
+        );
+        assert!(
+            slot.needs_run(false, 6, (548, 388)),
+            "new params did not re-run it"
+        );
+        assert!(
+            slot.needs_run(false, 4, (560, 388)),
+            "a new size did not re-run it"
+        );
+    }
+
     /// **An unchanged chain keeps its output's id and commit.**
     #[test]
     fn an_unchanged_chain_keeps_its_outputs_id_and_commit() {

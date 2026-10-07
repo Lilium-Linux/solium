@@ -1418,6 +1418,7 @@ pub(crate) mod tests {
             "three",
             "jump",
             "state-count",
+            "ring",
         ] {
             let dir = fixtures.join(name);
             let loaded = super::Loaded::<u32>::load(name, &dir)

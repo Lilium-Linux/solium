@@ -29,7 +29,7 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            Color32F, Frame as _, Offscreen as _, Renderer as _,
+            Color32F, Frame as _, ImportMem as _, Offscreen as _, Renderer as _,
             element::RenderElement,
             gles::{GlesError, GlesFrame, GlesRenderer, GlesTarget, GlesTexture, ffi},
         },
@@ -104,6 +104,9 @@ pub(crate) struct Pool<T = GlesTexture> {
     budget: usize,
     /// The 1x1 target a capture's frame is opened on: wirecheck's case 11f.
     carrier: Option<T>,
+    /// The 1x1 transparent texture a generated (T0) chain's first input
+    /// reads, made once (`Pool::blank`; `dev/effects-check.sh t0`).
+    blank: Option<T>,
     /// Targets made, not taken from the free list, since the pool was.
     /// `tests::the_pool_counts_the_targets_it_made`.
     made: usize,
@@ -126,6 +129,7 @@ impl<T: Clone> Pool<T> {
             doomed: Rc::new(RefCell::new(Vec::new())),
             budget,
             carrier: None,
+            blank: None,
             made: 0,
         }
     }
@@ -213,6 +217,18 @@ impl Pool<GlesTexture> {
             self.carrier = renderer.create_buffer(Fourcc::Abgr8888, (1, 1).into()).ok();
         }
         self.carrier.clone()
+    }
+
+    /// A 1x1 transparent texture, made once: what an input that names no
+    /// frame texture reads (a T0 chain's `shape`), so its first step has a
+    /// `sol_tex` to bind. `dev/effects-check.sh t0`.
+    pub(crate) fn blank(&mut self, renderer: &mut GlesRenderer) -> Option<GlesTexture> {
+        if self.blank.is_none() {
+            self.blank = renderer
+                .import_memory(&[0, 0, 0, 0], Fourcc::Abgr8888, (1, 1).into(), false)
+                .ok();
+        }
+        self.blank.clone()
     }
 
     /// Delete the framebuffer objects of targets dropped since the last
