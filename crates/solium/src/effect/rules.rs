@@ -76,8 +76,10 @@ pub(crate) enum Source {
     Own,
 }
 
-/// How the result is cut: the part's shape, or a self capture's alpha.
-/// `tests::the_rest_of_a_rule_is_read_as_written`.
+/// How the result is cut: the part's shape, or the alpha of the self capture
+/// `source = "self"` makes; an alpha without one waits for X4.3.
+/// `tests::the_rest_of_a_rule_is_read_as_written`,
+/// `tests::what_waits_for_a_later_item_is_refused_by_name`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum MaskKind {
     #[default]
@@ -389,6 +391,17 @@ fn rule(each: &Tree) -> Result<Rule, Refused> {
         }
         Some(_) => return Err(("mask", "`mask` is shape or alpha".to_owned())),
     };
+    // The alpha is the self capture's (Ruling 15), and only `source = "self"`
+    // says at parse that one exists: what an effect reads is not known until
+    // it is bound (Ruling 14), so an alpha without it waits for X4.3
+    // (Ruling 13). `tests::what_waits_for_a_later_item_is_refused_by_name`.
+    if mask == MaskKind::Alpha && source != Some(Source::Own) {
+        return Err((
+            "mask",
+            "`mask = \"alpha\"` is the self capture's alpha: give `source = \"self\"`; an alpha mask without a self capture arrives with X4.3"
+                .to_owned(),
+        ));
+    }
     Ok(Rule {
         matches,
         part,
@@ -759,6 +772,14 @@ mod tests {
                 r#"{ { match = "*", part = "client", slot = "behind", effect = "blur", keep = true } }"#,
                 "X2.7",
             ),
+            (
+                r#"{ { match = "*", part = "client", slot = "behind", effect = "blur", source = "live", mask = "alpha" } }"#,
+                "X4.3",
+            ),
+            (
+                r#"{ { match = "*", part = "client", slot = "behind", effect = "glow", mask = "alpha" } }"#,
+                "X4.3",
+            ),
         ] {
             let errors = parse(&rules(lua)).expect_err(lua);
             assert!(errors[0].message.contains(names), "{lua}: {:?}", errors[0]);
@@ -824,18 +845,21 @@ mod tests {
     }
 
     /// `source` and `mask` on the rule, a bare name in a chain, and a
-    /// `reach` of 0 with no `bleed`.
+    /// `reach` of 0 with no `bleed`; an alpha mask over a self capture
+    /// named on the rule or in the first link.
     #[test]
     fn the_rest_of_a_rule_is_read_as_written() {
         let read = parse(&rules(
-            r#"{ { match = "*", part = "popup", slot = "front", effect = { { "glow", reach = 0 }, "tint" }, source = "live", mask = "alpha" },
+            r#"{ { match = "*", part = "popup", slot = "front", effect = { { "glow", reach = 0 }, "tint" }, source = "self", mask = "alpha" },
                  { match = "*", part = "client", slot = "behind", effect = "glow", source = "xray" },
-                 { match = "*", part = "client", slot = "front", effect = "glow", source = "auto", mask = "shape" } }"#,
+                 { match = "*", part = "client", slot = "front", effect = "glow", source = "auto", mask = "shape" },
+                 { match = "*", part = "client", slot = "replace", effect = "glow", source = "live" },
+                 { match = "*", part = "client", slot = "front", effect = { "blur", source = "self" }, mask = "alpha" } }"#,
         ))
         .expect("parses");
         assert_eq!(
             (read[0].source, read[0].mask),
-            (Some(Source::Live), MaskKind::Alpha)
+            (Some(Source::Own), MaskKind::Alpha)
         );
         let Fill::Chain(links) = &read[0].fill else {
             panic!("a chain")
@@ -859,6 +883,14 @@ mod tests {
         assert_eq!(
             (read[2].source, read[2].mask),
             (Some(Source::Auto), MaskKind::Shape)
+        );
+        assert_eq!(
+            (read[3].source, read[3].mask),
+            (Some(Source::Live), MaskKind::Shape)
+        );
+        assert_eq!(
+            (read[4].source, read[4].mask),
+            (Some(Source::Own), MaskKind::Alpha)
         );
     }
 
