@@ -1,4 +1,4 @@
-//! The stage model ([14], \[16\] §2): an effect's stages, and every effect
+//! The stage model (\[14\], \[16\] §2): an effect's stages, and every effect
 //! they `use`, flattened at load into one linear plan, so nothing is decided
 //! per frame. Saved names are local to the effect that saved them
 //! (`tests::a_saved_name_inside_a_use_does_not_leak`), a cycle of `use`s is
