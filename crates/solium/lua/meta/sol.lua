@@ -238,7 +238,7 @@
 ---@class sol.FocusModeOptions
 ---@field click? boolean Whether a press focuses the window it lands on.
 ---@field follow? boolean Whether moving the pointer over a window focuses it.
----@field clear_on_empty_click? boolean Whether a press on empty desktop, the wallpaper, or a shell surface that does not take the keyboard clears keyboard focus.
+---@field clear_on_empty_click? boolean Whether a press on empty desktop or the wallpaper clears keyboard focus. A press on a client's own shell surface (a bar, say) is not covered yet, even one that declines the keyboard: see #219.
 
 ---The pointer's theme. A key left out, or no table, means the configuration
 ---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.

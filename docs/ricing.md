@@ -1240,15 +1240,19 @@ has what each layout does with a direction.
 
 ### Click, hover and an empty desktop
 
-A press on empty desktop, the wallpaper, or a shell surface that does not take
-the keyboard clears keyboard focus, so a window you clicked away from stops
-taking what you type. Turn that off in `focus`:
+A press on empty desktop or the wallpaper clears keyboard focus, so a window
+you clicked away from stops taking what you type. Turn that off in `focus`:
 
 ```lua
 return {
     focus = { clear_on_empty_click = false },
 }
 ```
+
+A press on a client's own shell surface -- a bar or a panel, say -- is not
+covered yet, even one that does not ask for the keyboard itself: it leaves
+focus exactly as it was. [#219](https://github.com/Lilium-Linux/solium/issues/219)
+is still open on that case.
 
 Whether moving the pointer over a window focuses it is a per-mode question,
 not a single on/off switch: floating -- the desktop, with no layout in charge
