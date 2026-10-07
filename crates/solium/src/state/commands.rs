@@ -390,6 +390,9 @@ impl Solium {
                 // reload; the nested backend never does, which is correct --
                 // it has no libinput devices to apply anything to.
                 Command::Input(config) => self.input.configure(config),
+                Command::Lock(settings) => {
+                    self.logind.configure(settings, self.lock.is_some());
+                }
                 Command::Power { monitor, on } => match monitor {
                     None => self.power_all(on),
                     Some(name) => {

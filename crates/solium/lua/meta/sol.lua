@@ -269,6 +269,12 @@
 ---@field switch? sol.InputDeviceOptions
 ---@field devices? sol.InputDeviceMatch[]
 
+---logind's `Lock` and sleep requests (#153). A key left out keeps the
+---default.
+---@class sol.LockOptions
+---@field command? string The locker to run on `Lock`, and before sleep: `"swaylock -f"`, say. Split on whitespace, with no quoting. Unset (the default) runs nothing.
+---@field before_sleep? boolean Hold sleep until the locker above has confirmed the lock, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
+
 ---The pointer's theme. A key left out, or no table, means the configuration
 ---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
 ---@class sol.CursorOptions
@@ -482,6 +488,12 @@ function sol.idle(options) end
 ---@param options? sol.InputOptions
 ---@return nil
 function sol.input(options) end
+
+---logind's `Lock` and sleep requests: `config.lock`, which the shipped
+---`init.lua` hands over.
+---@param options? sol.LockOptions
+---@return nil
+function sol.lock(options) end
 
 ---The work area of the monitor a window is on, or of the active monitor when
 ---no window is named or the id is unknown.

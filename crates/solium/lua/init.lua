@@ -35,6 +35,10 @@ sol.idle(config.idle)
 -- rest, by device type and by device, applied now and again on every
 -- reload. See `config.lua`.
 sol.input(config.input)
+
+-- logind's `Lock` and sleep requests: the locker to run, and whether to hold
+-- sleep for it. See `config.lua`.
+sol.lock(config.lock)
 -- The pointer's theme and size. An empty table here is not "reset it": it
 -- means the configuration says nothing, and `XCURSOR_THEME`/`XCURSOR_SIZE`
 -- are what the pointer follows -- which is what the rest of the machine

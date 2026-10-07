@@ -706,6 +706,26 @@ local defaults = {
         devices = {},
     },
 
+    -- logind's `Lock` and sleep requests (#153): `loginctl lock-session`, a
+    -- power menu that locks that way, and a lid switch logind handles itself
+    -- all send `Lock`, and this is what runs on it.
+    lock = {
+        -- The locker: nothing by default, so a machine with none installed
+        -- never has Solium try to run one. Split on whitespace, with no
+        -- quoting, like an autostart Exec= line; it runs as a client of this
+        -- compositor, the same as any other lock screen.
+        --
+        --     command = "swaylock -f",
+        command = nil,
+
+        -- Hold sleep until the locker above has confirmed the lock, or
+        -- logind's own InhibitDelayMaxUSec (five seconds) runs out first --
+        -- so the machine never wakes showing the desktop it was left on.
+        -- `swayidle`'s own `before-sleep` keeps working either way; set this
+        -- to false only to stop the two overlapping.
+        before_sleep = true,
+    },
+
     -- Telling the rest of the session that Solium is its desktop.
     --
     -- Portals, programs D-Bus starts on demand, ~/.config/autostart and user

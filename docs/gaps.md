@@ -91,7 +91,6 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 
 | | |
 |---|---|
-| [#153](https://github.com/Lilium-Linux/solium/issues/153) logind | the `Lock` and `PrepareForSleep` signals are ignored, so `loginctl lock-session` and whatever locks that way do nothing, and locking before suspend is up to `swayidle -w` |
 | [#151](https://github.com/Lilium-Linux/solium/issues/151) media keys | no volume, brightness, media, screenshot or lock keys are bound by default |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput device settings | none are set: no tap-to-click, which libinput leaves off, so tapping a touchpad does nothing; no acceleration profile or speed, disable-while-typing, left-handed mode or middle-button emulation; and natural scrolling comes only from the form factor, for every device at once |
 
@@ -134,7 +133,7 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 ## What this list is not
 
 It is not a plan, and length is not weight: `wp_alpha_modifier_v1` is close to
-free, since the render path already carries an opacity, while #153 is the
-difference between a laptop that locks before it sleeps and one that wakes
-up unlocked. The label orders these and the roadmap says why; this only
-makes sure none of them is forgotten.
+free, since the render path already carries an opacity, while #157 is the
+difference between a touchpad where tapping works and one where every click
+has to be physical. The label orders these and the roadmap says why; this
+only makes sure none of them is forgotten.

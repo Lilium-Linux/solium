@@ -376,6 +376,16 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     if !x11_coming {
         solium.session.x11(None);
     }
+    // Before the scripts, same as the session: `lock.before_sleep`'s default
+    // (on) takes the inhibitor at once, and a `sol.lock` in the first dispatch
+    // (`start_scripts`, next) reconfigures it through `Command::Lock` like any
+    // reload. `SOLIUM_LOGIND_BUS` names a bus to hear logind on instead of the
+    // system bus, the same override `SOLIUM_SESSION_BUS` is for the session.
+    solium.logind.begin(
+        place,
+        crate::dev::logind_bus(),
+        crate::logind::Settings::default(),
+    );
     solium.start_scripts(scripts);
     // After the scripts, as nested: see `winit.rs` and `screensaver.rs`.
     solium.idle.serve_dbus(place, crate::dev::session_bus());
@@ -765,6 +775,8 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // a notification that arrives up to one frame late is a notification
             // about somebody having left the room.
             crate::idle::settle(&mut state.solium);
+            // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
+            crate::logind::settle(&mut state.solium);
             // And a key held for the scene holding the keyboard repeats, on
             // the same once-a-loop check (Ruling 14).
             // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.

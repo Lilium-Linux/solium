@@ -34,6 +34,7 @@ mod keymap;
 mod launch;
 mod layer;
 mod lock;
+mod logind;
 mod mat4;
 mod models;
 mod monitor;
