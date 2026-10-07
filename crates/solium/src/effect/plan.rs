@@ -9,7 +9,7 @@ use solium_effects::stage::Plan;
 
 use super::element::EffectElement;
 use super::host::{Host, Problem};
-use super::rules::{Fill, Origin, Rule, RuleKey, Slot, Tier, runnable, tier};
+use super::rules::{Fill, Origin, Part, Rule, RuleKey, Slot, Tier, runnable, tier};
 use crate::pane::PaneId;
 
 /// One rule's chain, bound and checked.
@@ -85,6 +85,14 @@ impl Chains {
         }
         let plan = solium_effects::stage::chain(plans);
         let tier = tier(plan.reads, rule.source);
+        // A region's own pixels are a crop of the layer that draws it, which
+        // waits for P15's published regions.
+        // `tests::a_region_self_rule_is_refused_until_p15`.
+        if matches!(rule.part, Part::Region(_)) && tier == Tier::Own {
+            return Err(plain(
+                "a region's own pixels arrive with P15's Solium.region".to_owned(),
+            ));
+        }
         runnable(tier).map_err(|why| {
             plain(format!(
                 "`{}` {why}",
@@ -403,6 +411,61 @@ mod tests {
         };
         assert_eq!(hash(&mut host, "2"), hash(&mut host, "2"));
         assert_ne!(hash(&mut host, "2"), hash(&mut host, "3"));
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A region's own pixels wait for P15**: a titlebar rule whose chain
+    /// reads `self` is refused at bind, naming it; one reading nothing of the
+    /// frame binds.
+    #[test]
+    fn a_region_self_rule_is_refused_until_p15() {
+        let place = scratch("plan-region-self");
+        folder(
+            &place,
+            "tint",
+            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        folder(
+            &place,
+            "ring",
+            "return { api = 1, inputs = { 'shape' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",
+            )],
+        );
+        let mut host = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(place.clone()),
+            place.join("none"),
+        ));
+        host.want("rules", ["tint".to_owned(), "ring".to_owned()]);
+        let refused = Chains::bind(
+            &mut host,
+            &rules(r#"{ { match = "*", part = "region:titlebar", slot = "behind", effect = "tint" } }"#)[0],
+        )
+        .expect_err("a region's self rule bound");
+        assert!(refused.message.contains("P15"), "{}", refused.message);
+        assert!(
+            Chains::bind(
+                &mut host,
+                &rules(r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" } }"#)
+                    [0],
+            )
+            .is_ok(),
+            "a client's self rule was refused"
+        );
+        assert!(
+            Chains::bind(
+                &mut host,
+                &rules(r#"{ { match = "*", part = "region:titlebar", slot = "behind", effect = "ring" } }"#)[0],
+            )
+            .is_ok(),
+            "a titlebar rule reading nothing of the frame was refused"
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 

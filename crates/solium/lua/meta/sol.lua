@@ -384,7 +384,7 @@ function sol.problems() end
 ---and slot wins over an earlier one, and yours over a pane style's.
 ---@class sol.Rule
 ---@field match "*"|table `"*"`, or the keys a part's kind matches on, each a word that is exact, `"*"`, or a prefix ending in `*`: `app_id`, `title`, `monitor`, `style` (`"none"` for a bare window), and `focused` and `fullscreen` as booleans, for a window's parts; `surface` for a scripted surface's (a plane such as `shell/dock` waits for planes); `layer_shell` for a layer surface's. No Lua patterns.
----@field part string `pane`, `client`, `popup`, `layer:<name>`, `region:titlebar`, `surface:<name>` or `layer_shell:<namespace>`. Other regions wait for `Solium.region`, and `output` for X4.2.
+---@field part string `pane`, `client`, `popup`, `layer:<name>`, `region:titlebar`, `surface:<name>` or `layer_shell:<namespace>`. Other regions, and the titlebar's own pixels as a chain's input, wait for `Solium.region`, and `output` for X4.2.
 ---@field slot "behind"|"front"|"replace" Below the part, above it, or in its place. The part itself is always drawn: a `replace` whose effect fails draws the part.
 ---@field effect string|table|false An effect's name; a link, `{ "blur", passes = 3 }`, its params beside the name, with `reach` and `bleed` overriding the effect's own; a chain of links in order, `{ { "blur" }, { "tint" } }`; or `false`, which empties the slot.
 ---@field source? "self"|"xray"|"live"|"auto" What the chain's first input reads in place of its own: `"self"`, the part's own pixels. On the rule or in its first link. Reading the backdrop from xray waits for X2.1 and the live backdrop for X4.1, both refused when the rules are applied.

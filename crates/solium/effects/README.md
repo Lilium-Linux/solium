@@ -80,7 +80,8 @@ until then, by name: an effect that reads the `backdrop` from what is behind
 the window (blur's own input) needs xray, which arrives with X2.1, so give
 `source = "self"` to blur the part's own pixels; the live backdrop
 (`source = "live"` or `"auto"`) arrives with X4.1; regions other than the
-titlebar, `part = "output"`, `keep`, a `surface` match naming a plane, and an
+titlebar, a `region:titlebar` rule whose chain reads the band's own pixels
+(`self`), `part = "output"`, `keep`, a `surface` match naming a plane, and an
 alpha mask without `source = "self"` likewise. This build reads, checks and
 binds rules, and names a broken one on the overlay; drawing an effect in its
 slot lands later.
