@@ -319,6 +319,29 @@ pub(crate) struct Solium {
     /// `gio`'s metadata convention).
     pub(crate) folder_trust: crate::folder::Trust,
 
+    /// Automatic reload (#223): `config.reload`, as `Command::AutoReload`
+    /// last set it (`state/commands.rs`'s `configure_autoreload`). Read again
+    /// every time a change is seen, so a `quiet_ms` edited and reloaded
+    /// applies to the very next burst rather than only the one after.
+    pub(crate) autoreload_settings: crate::autoreload::Settings,
+    /// The live, recursive inotify watch over the configuration directories
+    /// [`crate::autoreload::watch_roots`] names, armed and disarmed by
+    /// `configure_autoreload`. Drained by the event loop's own source the
+    /// moment it is readable (`tty.rs`, `winit.rs`), which notes the change
+    /// in [`Self::autoreload_debounce`] rather than reloading at once --
+    /// unlike [`Self::folder_watcher`], a configuration change is debounced
+    /// before it does anything.
+    pub(crate) autoreload_watcher: crate::autoreload::Watcher,
+    /// The quiet period a seen change is waiting out before the one reload
+    /// it earns. See `crate::autoreload::Debounce`.
+    pub(crate) autoreload_debounce: crate::autoreload::Debounce,
+    /// Whether the one-shot timer that checks [`Self::autoreload_debounce`]
+    /// is already inserted into the event loop, so the fd callback that
+    /// notes a change does not insert a second one on top of it while the
+    /// first is still counting down. `tty.rs` and `winit.rs` both clear it
+    /// the moment that timer fires.
+    pub(crate) autoreload_timer_armed: bool,
+
     /// Every selection a script has named, and where each is being carried.
     ///
     /// **Not a sixth table keyed by `PaneId`.** A group holds its own members
@@ -1148,6 +1171,10 @@ impl Solium {
             folder_watcher: crate::folder::Watcher::new(),
             folder_changed: false,
             folder_trust: crate::folder::Trust::load(),
+            autoreload_settings: crate::autoreload::Settings::default(),
+            autoreload_watcher: crate::autoreload::Watcher::new(),
+            autoreload_debounce: crate::autoreload::Debounce::default(),
+            autoreload_timer_armed: false,
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),

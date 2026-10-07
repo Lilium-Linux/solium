@@ -426,6 +426,75 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             .map_err(|err| anyhow!("watching the desktop folder: {err}"))?;
     }
 
+    // Automatic reload (#223): the same epoll-mirrored inotify shape as the
+    // desktop folder watch above, over the configuration directories
+    // `crate::autoreload::watch_roots` names instead -- but a change there
+    // does not reload at once. It notes the time in `autoreload_debounce` and
+    // arms a one-shot timer for the configured quiet period, so a burst of
+    // saves still reloads only once. The timer reschedules itself
+    // (`TimeoutAction::ToDuration`) rather than firing on a fixed tick
+    // forever, so an idle session with nothing pending wakes the loop for
+    // this only when a change actually happened.
+    if let Some(reload_watch) = solium.autoreload_watcher.source() {
+        let timer_handle = loop_handle.clone();
+        loop_handle
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    reload_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                move |_, _, state: &mut State| {
+                    // Drained here for the same reason the folder watch is:
+                    // left readable, a level-triggered source wakes the loop
+                    // on every iteration.
+                    if state.solium.autoreload_watcher.poll() {
+                        let now = state.solium.clock.now();
+                        let quiet =
+                            Duration::from_millis(state.solium.autoreload_settings.quiet_ms);
+                        state.solium.autoreload_debounce.note(now, quiet);
+                        if !state.solium.autoreload_timer_armed {
+                            state.solium.autoreload_timer_armed = true;
+                            let armed = timer_handle.insert_source(
+                                Timer::from_duration(quiet),
+                                |_, (), state: &mut State| {
+                                    let now = state.solium.clock.now();
+                                    if state.solium.autoreload_debounce.due(now) {
+                                        state.solium.autoreload_timer_armed = false;
+                                        // Exactly what `super+shift+r` does,
+                                        // plus the backend half only it can
+                                        // do: see `Request::Reload` below.
+                                        state.solium.reload();
+                                        reapply_input_settings(state);
+                                        return TimeoutAction::Drop;
+                                    }
+                                    // A later note in the same burst moved the
+                                    // deadline out from under this timer;
+                                    // wait exactly the time left rather than
+                                    // inserting a second one.
+                                    TimeoutAction::ToDuration(
+                                        state.solium.autoreload_debounce.remaining(now),
+                                    )
+                                },
+                            );
+                            // Failing to arm it must not wedge every future
+                            // change behind a flag nothing will ever clear --
+                            // `super+shift+r` is the fallback either way.
+                            if armed.is_err() {
+                                state.solium.autoreload_timer_armed = false;
+                                tracing::warn!(
+                                    "could not arm the automatic-reload timer; \
+                                     `super+shift+r` still works"
+                                );
+                            }
+                        }
+                    }
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|err| anyhow!("watching the configuration for automatic reload: {err}"))?;
+    }
+
     let mut state = State {
         solium,
         qt,

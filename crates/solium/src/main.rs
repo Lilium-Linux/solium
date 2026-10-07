@@ -10,6 +10,7 @@
 
 mod apps;
 mod assets;
+mod autoreload;
 mod capture;
 mod check;
 mod cli;

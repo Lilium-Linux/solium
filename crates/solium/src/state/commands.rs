@@ -384,6 +384,7 @@ impl Solium {
                     }
                 }
                 Command::Idle(settings) => self.idle.configure(settings),
+                Command::AutoReload(settings) => self.configure_autoreload(settings),
                 // Only the data: applying it to real devices needs a
                 // libinput handle, which only a backend has. `tty.rs` reads
                 // `self.input.config()` on `DeviceAdded` and again on
@@ -790,6 +791,36 @@ impl Solium {
                 tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
             }
         }
+    }
+
+    /// Automatic reload (#223): store the settings, and arm or disarm the
+    /// watch to match.
+    ///
+    /// `automatic = false` does not merely let the quiet period run out and
+    /// reload nothing -- it tears every watch down, so the loop source that
+    /// would otherwise wake for a change never fires at all. That is what
+    /// makes the setting answer "never", not "eventually, if you wait long
+    /// enough" (`autoreload::tests` and this module's own
+    /// `tests::automatic_false_leaves_nothing_watched`).
+    ///
+    /// Reached from `Command::AutoReload`, which `self.apply` can run from
+    /// anywhere a script runs -- `start_scripts` (cold start and every
+    /// reload) and a binding of the user's own alike -- so this recomputes
+    /// [`crate::autoreload::watch_roots`] every time rather than only at
+    /// start-up: a directory created since the last reload (a first
+    /// `user.lua`, just written) is picked up the next time anything calls
+    /// `sol.auto_reload`, which the shipped `init.lua` does on every reload.
+    pub(crate) fn configure_autoreload(&mut self, settings: crate::autoreload::Settings) {
+        if self.autoreload_settings != settings {
+            tracing::debug!(?settings, "automatic reload settings set");
+            self.autoreload_settings = settings;
+        }
+        let roots = if settings.automatic {
+            crate::autoreload::watch_roots()
+        } else {
+            Vec::new()
+        };
+        self.autoreload_watcher.set_roots(&roots);
     }
 
     /// Take the scripts, and act on whatever they asked for while loading.

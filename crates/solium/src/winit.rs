@@ -19,7 +19,10 @@ use smithay::{
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::EventLoop,
+        calloop::{
+            EventLoop,
+            timer::{TimeoutAction, Timer},
+        },
         wayland_server::Display,
         winit::{
             dpi::LogicalSize,
@@ -152,6 +155,60 @@ pub(crate) fn run() -> Result<()> {
                 },
             )
             .map_err(|e| anyhow::anyhow!("watching the desktop folder: {e}"))?;
+    }
+
+    // Automatic reload (#223): the same epoll-mirrored inotify shape as the
+    // desktop folder watch above, over the configuration directories
+    // `crate::autoreload::watch_roots` names instead. A change there does
+    // not reload at once -- it notes the time and arms a one-shot,
+    // self-rescheduling timer for the configured quiet period, so a burst of
+    // saves still reloads only once (`tty.rs`'s own copy of this has the
+    // fuller comment). Unlike the hardware backend, there is no
+    // `reapply_input_settings` to run after: the nested backend holds no
+    // real libinput devices (`crate::input::devices::Registry`'s own note).
+    if let Some(reload_watch) = state.autoreload_watcher.source() {
+        let timer_handle = loop_handle.clone();
+        loop_handle
+            .insert_source(
+                smithay::reexports::calloop::generic::Generic::new(
+                    reload_watch,
+                    smithay::reexports::calloop::Interest::READ,
+                    smithay::reexports::calloop::Mode::Level,
+                ),
+                move |_, _, state: &mut Solium| {
+                    if state.autoreload_watcher.poll() {
+                        let now = state.clock.now();
+                        let quiet = Duration::from_millis(state.autoreload_settings.quiet_ms);
+                        state.autoreload_debounce.note(now, quiet);
+                        if !state.autoreload_timer_armed {
+                            state.autoreload_timer_armed = true;
+                            let armed = timer_handle.insert_source(
+                                Timer::from_duration(quiet),
+                                |_, (), state: &mut Solium| {
+                                    let now = state.clock.now();
+                                    if state.autoreload_debounce.due(now) {
+                                        state.autoreload_timer_armed = false;
+                                        state.reload();
+                                        return TimeoutAction::Drop;
+                                    }
+                                    TimeoutAction::ToDuration(
+                                        state.autoreload_debounce.remaining(now),
+                                    )
+                                },
+                            );
+                            if armed.is_err() {
+                                state.autoreload_timer_armed = false;
+                                tracing::warn!(
+                                    "could not arm the automatic-reload timer; \
+                                     `super+shift+r` still works"
+                                );
+                            }
+                        }
+                    }
+                    Ok(smithay::reexports::calloop::PostAction::Continue)
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("watching the configuration for automatic reload: {e}"))?;
     }
 
     // The app_id is stable and specific so the host compositor can be told

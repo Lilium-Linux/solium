@@ -105,6 +105,29 @@ fn a_deform_at_rest_is_aimed_at_nothing() {
     );
 }
 
+/// **`automatic = false` leaves nothing watched** (#223): the enforcement
+/// point for "never reloads" is that the loop source which would otherwise
+/// wake for a change is never armed in the first place, not merely that the
+/// quiet period never elapses. No Qt thread needed: `configure_autoreload`
+/// touches only the watch and the stored settings. See
+/// `crate::autoreload::tests` for the directory-resolution and debounce
+/// logic this builds on.
+#[test]
+fn automatic_false_leaves_nothing_watched() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+
+    state.configure_autoreload(crate::autoreload::Settings {
+        automatic: false,
+        quiet_ms: 300,
+    });
+    assert!(
+        !state.autoreload_watcher.is_watching(),
+        "automatic = false must not watch anything, whatever directories exist on this machine"
+    );
+}
+
 /// **What the notice at the end of a reload is looking at.**
 ///
 /// The recovery half of #116 shipped with no test at all, which is how the
