@@ -157,6 +157,74 @@ pub struct Plan {
     pub first_input: String,
 }
 
+impl Plan {
+    /// Every step's size in pixels from the padded box, the main steps' and
+    /// each state's, states first because a step may read one: a `Scaled`
+    /// step is its feed's size times its scale, rounded up; a `Like` step is
+    /// its feed's size, so an up pass returns to its level (Ruling 11); a
+    /// state's steps start from the box times the state's scale, and a step
+    /// reading a state is the size of the state's last step.
+    /// `tests::a_three_pass_blur_returns_to_its_odd_size`,
+    /// `tests::a_states_steps_start_from_its_scaled_box`.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the main steps' sizes and each state's, written out where they are made"
+    )]
+    pub fn sizes(&self, padded: (u32, u32)) -> (Vec<(u32, u32)>, Vec<Vec<(u32, u32)>>) {
+        fn scaled(size: (u32, u32), scale: f64) -> (u32, u32) {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a texture side, positive and far below u32::MAX"
+            )]
+            let side = |n: u32| ((f64::from(n) * scale).ceil() as u32).max(1);
+            (side(size.0), side(size.1))
+        }
+        fn walk(steps: &[Step], padded: (u32, u32), states: &[(u32, u32)]) -> Vec<(u32, u32)> {
+            let mut sizes: Vec<(u32, u32)> = Vec::with_capacity(steps.len());
+            for step in steps {
+                let of = |feed: &Feed, sizes: &[(u32, u32)]| match feed {
+                    Feed::Input(_) => padded,
+                    Feed::Step(k) => sizes.get(*k).copied().unwrap_or(padded),
+                    Feed::State(k) => states.get(*k).copied().unwrap_or(padded),
+                };
+                let size = match &step.size {
+                    Size::Scaled { of: feed, scale } => scaled(of(feed, &sizes), *scale),
+                    Size::Like(feed) => of(feed, &sizes),
+                };
+                sizes.push(size);
+            }
+            sizes
+        }
+        let mut state_sizes = Vec::with_capacity(self.states.len());
+        let mut state_last = Vec::with_capacity(self.states.len());
+        for state in &self.states {
+            let start = scaled(padded, state.scale);
+            let sizes = walk(&state.steps, start, &state_last);
+            state_last.push(sizes.last().copied().unwrap_or(start));
+            state_sizes.push(sizes);
+        }
+        (walk(&self.steps, padded, &state_last), state_sizes)
+    }
+
+    /// Every format the plan draws into, once each, `rgba8` first: its
+    /// steps', its states' steps' and its states' own. What a GPU must
+    /// render into for the plan to run (Ruling 11).
+    /// `tests::a_plan_lists_every_format_it_draws_into_once`.
+    pub fn formats(&self) -> Vec<Format> {
+        let mut formats: Vec<Format> = self
+            .steps
+            .iter()
+            .chain(self.states.iter().flat_map(|state| state.steps.iter()))
+            .map(|step| step.format)
+            .chain(self.states.iter().map(|state| state.format))
+            .collect();
+        formats.sort_by_key(|format| *format as u8);
+        formats.dedup();
+        formats
+    }
+}
+
 /// One effect bound by name: its stages for the bound params, the inputs it
 /// declares and the params as bound.
 #[derive(Clone, Debug, PartialEq)]
@@ -1283,5 +1351,65 @@ mod tests {
         );
         let refused = flatten("more", &[], &mut lib).expect_err("257");
         assert!(refused.contains("256"), "{refused}");
+    }
+
+    /// **A three-pass blur returns to its odd size**: 1151×101 goes down to
+    /// 144×13 and comes back to 1151×101, not 1152×104.
+    #[test]
+    fn a_three_pass_blur_returns_to_its_odd_size() {
+        let plan = flatten("blur", &[], &mut library).expect("flattens");
+        let (sizes, _) = plan.sizes((1151, 101));
+        assert_eq!(
+            sizes,
+            [
+                (576, 51),
+                (288, 26),
+                (144, 13),
+                (288, 26),
+                (576, 51),
+                (1151, 101)
+            ]
+        );
+    }
+
+    /// A half-scale `rgba16f` state with a down pass of its own, read by a
+    /// later pass's `uses` and, after a `get`, as a pass's first input.
+    fn a_shrunk_state(_: &str, _: &[(String, Value)]) -> Result<Binding, String> {
+        Ok(binding(
+            &["self"],
+            vec![
+                Stage::State {
+                    name: "field".to_owned(),
+                    format: Format::Rgba16f,
+                    scale: 0.5,
+                    depends: Depends::Shape,
+                    body: vec![pass("seed.frag", 1.0), pass("shrink.frag", 0.5)],
+                },
+                pass_using("use.frag", &["field"]),
+                Stage::Get("field".to_owned()),
+                pass("read.frag", 1.0),
+            ],
+        ))
+    }
+
+    /// **A state's steps start from its own scaled box**, and a step reading
+    /// a state is sized from what the state's last step drew: a half-scale
+    /// state of a 101×51 box starts at 51×26 and shrinks to 26×13.
+    #[test]
+    fn a_states_steps_start_from_its_scaled_box() {
+        let plan = flatten("x", &[], &mut a_shrunk_state).expect("flattens");
+        let (steps, states) = plan.sizes((101, 51));
+        assert_eq!(states, [vec![(51, 26), (26, 13)]]);
+        assert_eq!(steps, [(101, 51), (26, 13)]);
+    }
+
+    /// **A plan lists every format it draws into, once**: its steps', its
+    /// states' steps' and its states' own.
+    #[test]
+    fn a_plan_lists_every_format_it_draws_into_once() {
+        let blur = flatten("blur", &[], &mut library).expect("flattens");
+        assert_eq!(blur.formats(), [Format::Rgba8]);
+        let state = flatten("x", &[], &mut a_shrunk_state).expect("flattens");
+        assert_eq!(state.formats(), [Format::Rgba8, Format::Rgba16f]);
     }
 }
