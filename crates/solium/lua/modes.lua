@@ -35,6 +35,22 @@ local dialogs = require("dialogs")
 
 local modes = { registered = {} }
 
+-- Who wants to know when the layout in charge changes, including to or from
+-- floating -- which is never itself in `registered`. That absence is the
+-- sentinel the rest of this file, `direction.lua` and `modes.toggle_floating`
+-- read as "no layout is arranging anything", so floating cannot be
+-- registered without changing what all three of those do. `lua/floating.lua`
+-- wants to know the same transitions anyway -- to bind its snap keys only
+-- while it is in charge, the way `overview.lua` binds Escape only while it is
+-- up -- so this is the one small hook that lets it, without pretending to be
+-- a layout. See `tiling_keeps_the_arrows_for_focus_and_desktop_mode_gets_them_back`
+-- in `script.rs`, which switches out of tiling and back into floating and
+-- checks the arrows mean something else each time.
+local watchers = {}
+function modes.watch(fn)
+    watchers[#watchers + 1] = fn
+end
+
 -- Which layout is in charge, held by the host so it outlives the reload.
 local kept = sol.keep("modes", { current = "floating" })
 
@@ -121,6 +137,11 @@ function modes.use(name)
         sol.status(name)
     else
         sol.status("")
+    end
+    -- After the switch has fully landed, so a watcher that asks `modes.current()`
+    -- or looks at `sol.windows()` sees the mode it was just told about.
+    for _, watch in ipairs(watchers) do
+        watch(name)
     end
 end
 

@@ -756,7 +756,8 @@ them replaceable in `config.bindings`:
 
 | keys | |
 |---|---|
-| `super+arrows`, `super+h` `j` `k` `l` | focus that way |
+| `super+h` `j` `k` `l` | focus that way |
+| `super+arrows` | focus that way, except with no layout in charge, where `lua/floating.lua`'s snap takes them over instead (#222, "Modes that are not layouts" below) |
 | `super+shift+arrows`, `super+shift+h` `j` `l`, `super+alt+k` | move that way |
 | `super+f` | fullscreen, and back |
 | `super+shift+m` | maximised, and back |
@@ -1302,6 +1303,21 @@ switcher is that with a row instead of a grid, peek is it with one window at the
 cursor, and the icon-to-window genie is it with a dock icon named as the thing
 the window comes out of. If any of those ever needs new Rust, the transform
 layer is missing something.
+
+`lua/floating.lua` (#222) is a third shape: a script about the desktop you get
+with *no* layout in charge, which is `modes.lua`'s own `"floating"` — not a
+mode you switch to, but the absence every mode's own toggle falls back to.
+Registering a layout under that name would change what that absence means
+everywhere else it is read (`direction.lua`'s fallback, and
+`modes.toggle_floating`'s guard among them), so this file never calls
+`modes.register`. It asks `modes.watch(fn)` instead, which calls `fn(name)`
+after every `modes.use` switch, including into and out of floating — the one
+thing it needs to bind its own snap keys only while floating is in charge, the
+way `overview.lua` binds Escape only while it is up. A cold start, and a
+reload, are not a call to `modes.use`, so a script using `modes.watch` for its
+only way of knowing what is current should also check `modes.current()` once
+at its own top level, exactly as `overview.lua` checks its own `kept.active`
+there.
 
 ## Worth knowing
 

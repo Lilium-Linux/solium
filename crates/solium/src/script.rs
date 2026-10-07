@@ -14653,6 +14653,16 @@ mod directions {
         /// `package.path` is the entry's own and the directory is one per call,
         /// for the reasons `dialogs::scripts` gives.
         fn new(before: &str, monitors: Vec<MonitorInfo>) -> Self {
+            Self::new_with(before, "", monitors)
+        }
+
+        /// As `new`, with `after` run once every layout script this harness
+        /// loads has been required -- the one hook a test needing
+        /// `require("bindings")` has, since the real `init.lua` requires it
+        /// *last* (`bindings.lua`'s own comment) and this harness otherwise
+        /// has no module after `floating` at all.
+        /// `a_config_bindings_override_on_an_arrow_survives_leaving_and_returning_to_floating`.
+        fn new_with(before: &str, after: &str, monitors: Vec<MonitorInfo>) -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let directory = std::env::temp_dir()
@@ -14668,7 +14678,9 @@ mod directions {
                      require(\"workspaces\")\n\
                      require(\"tiling\")\n\
                      require(\"scrolling\")\n\
-                     require(\"direction\")\n",
+                     require(\"direction\")\n\
+                     require(\"floating\")\n\
+                     {after}\n",
                     shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
                 ),
             )
@@ -15123,11 +15135,14 @@ mod directions {
                 (5, "DP-1", at(950.0, 1000.0, 600.0, 300.0)),
             ],
         );
+        // h, j, k and l rather than the plain arrows: floating is #222's
+        // desktop mode, and the arrows snap there now (`floating.lua`). h, j,
+        // k and l still focus by direction, exactly as before.
         for (from, key, to) in [
-            (1, "super+left", 2),
-            (1, "super+right", 3),
-            (1, "super+up", 4),
-            (1, "super+down", 5),
+            (1, "super+h", 2),
+            (1, "super+l", 3),
+            (1, "super+k", 4),
+            (1, "super+j", 5),
             (4, "super+h", 2),
             (2, "super+l", 1),
             (5, "super+k", 1),
@@ -15183,7 +15198,7 @@ mod directions {
         }
         desk.focus(1);
         assert!(
-            focuses(&desk.press("super+left")).is_empty(),
+            focuses(&desk.press("super+h")).is_empty(),
             "focus went to a window being closed"
         );
         for window in &mut desk.windows {
@@ -15191,7 +15206,7 @@ mod directions {
         }
 
         desk.focus(3);
-        let commands = desk.press("super+right");
+        let commands = desk.press("super+l");
         assert!(
             focuses(&commands).is_empty(),
             "nothing is right of window 3"
@@ -15219,9 +15234,13 @@ mod directions {
                 (2, "DP-2", at(2800.0, 300.0, 600.0, 500.0)),
             ],
         );
+        // l and h, not the plain arrows: floating is #222's desktop mode, and
+        // the arrows snap there now (`floating.lua`). l and h still focus by
+        // direction, and `super+shift+right` below is still a move, which
+        // the arrows keep meaning everywhere.
         desk.focus(1);
-        assert_eq!(focuses(&desk.press("super+right")), [2]);
-        assert_eq!(focuses(&desk.press("super+left")), [1]);
+        assert_eq!(focuses(&desk.press("super+l")), [2]);
+        assert_eq!(focuses(&desk.press("super+h")), [1]);
 
         desk.press("super+shift+right");
         assert_eq!(
@@ -15320,9 +15339,13 @@ mod directions {
                 (2, "DP-2", at(3000.0, 300.0, 600.0, 400.0)),
             ],
         );
+        // k, j, l and h, not the plain arrows: floating is #222's desktop
+        // mode, and the arrows snap there now (`floating.lua`). k, j, l and h
+        // still focus by direction, and the shift combos below are still a
+        // move, which the arrows keep meaning everywhere.
         desk.focus(1);
         assert!(
-            focuses(&desk.press("super+up")).is_empty(),
+            focuses(&desk.press("super+k")).is_empty(),
             "up from the big screen reached the small one beside it"
         );
         assert!(
@@ -15331,7 +15354,7 @@ mod directions {
         );
         desk.focus(2);
         assert!(
-            focuses(&desk.press("super+down")).is_empty(),
+            focuses(&desk.press("super+j")).is_empty(),
             "down from the small screen reached the big one beside it"
         );
         assert!(
@@ -15339,8 +15362,8 @@ mod directions {
             "a move down from the small screen went onto the big one beside it"
         );
         desk.focus(1);
-        assert_eq!(focuses(&desk.press("super+right")), [2]);
-        assert_eq!(focuses(&desk.press("super+left")), [1]);
+        assert_eq!(focuses(&desk.press("super+l")), [2]);
+        assert_eq!(focuses(&desk.press("super+h")), [1]);
 
         let mut desk = Desk::floating(
             vec![screen("DP-1", WIDE), screen("DP-3", CORNER)],
@@ -15350,10 +15373,10 @@ mod directions {
             ],
         );
         for (from, key, to) in [
-            (1, "super+down", 3),
-            (1, "super+right", 3),
-            (3, "super+up", 1),
-            (3, "super+left", 1),
+            (1, "super+j", 3),
+            (1, "super+l", 3),
+            (3, "super+k", 1),
+            (3, "super+h", 1),
         ] {
             desk.focus(from);
             assert_eq!(
@@ -16096,5 +16119,402 @@ mod directions {
         );
         assert!(scripts.key("super+a", desk(false)).commands.is_empty());
         assert!(scripts.key("super+b", desk(false)).commands.is_empty());
+    }
+
+    /// **Desktop mode: the arrows snap the focused window to each half, and a
+    /// second press toward the edge it is already at crosses to the next
+    /// monitor that way.** #222.
+    #[test]
+    fn desktop_mode_the_arrows_snap_to_each_half_and_cross_at_the_edge() {
+        let mut desk = Desk::new("", two_screens());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+
+        desk.press("super+left");
+        let left = desk.rect(1);
+        assert!(
+            about(left.x, WIDE.x)
+                && about(left.w, WIDE.w / 2.0)
+                && about(left.h, WIDE.h)
+                && about(left.y, WIDE.y),
+            "super+left did not snap to the left half of DP-1: {left:?}"
+        );
+
+        // Already as far left as it goes: DP-1 has no monitor to its left.
+        let commands = desk.press("super+left");
+        assert!(
+            places(&commands).is_empty(),
+            "a second super+left with no monitor further left placed something: {commands:?}"
+        );
+        assert!(
+            same(desk.rect(1), left),
+            "the window moved with nowhere to go: {:?}",
+            desk.rect(1)
+        );
+
+        desk.press("super+right");
+        let right = desk.rect(1);
+        assert!(
+            about(right.x + right.w, WIDE.x + WIDE.w) && about(right.w, WIDE.w / 2.0),
+            "super+right did not snap to the right half of DP-1: {right:?}"
+        );
+
+        // Already at DP-1's right half: a second press crosses to DP-2.
+        desk.press("super+right");
+        assert_eq!(
+            desk.monitor(1),
+            "DP-2",
+            "a second super+right did not cross to DP-2: {:?}",
+            desk.rects()
+        );
+        let crossed = desk.rect(1);
+        assert!(
+            about(crossed.x + crossed.w, TALL.x + TALL.w) && about(crossed.w, TALL.w / 2.0),
+            "window 1 is not the right half of DP-2: {crossed:?}"
+        );
+    }
+
+    /// **Desktop mode: restoring puts a snapped window back exactly where it
+    /// was, and does nothing once there is nothing to restore.** #222.
+    #[test]
+    fn desktop_mode_restore_puts_a_snapped_window_back_where_it_was() {
+        let mut desk = Desk::new("", one_screen());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        let original = desk.rect(1);
+
+        desk.press("super+left");
+        assert!(
+            !same(desk.rect(1), original),
+            "the premise: super+left actually moved the window"
+        );
+        desk.press("super+down");
+        assert!(
+            same(desk.rect(1), original),
+            "super+down did not restore the pre-snap rectangle: {:?}",
+            desk.rects()
+        );
+
+        let commands = desk.press("super+down");
+        assert!(
+            places(&commands).is_empty(),
+            "super+down with nothing to restore placed something: {commands:?}"
+        );
+    }
+
+    /// **Desktop mode: maximise asks the compositor rather than placing the
+    /// window itself, restore un-maximises a maximised window, and maximise
+    /// from a half goes to that half's top quarter instead.** #222.
+    ///
+    /// The harness does not simulate what `sol.toggle_maximize` does to a
+    /// window's rectangle -- that is the compositor's, in production -- so
+    /// this asks only that the right command is sent, and stands in for the
+    /// compositor's own answer with `scripts.maximize`, exactly as
+    /// `sol_toggles_name_the_focused_window_when_given_none` does.
+    #[test]
+    fn desktop_mode_maximize_asks_the_compositor_and_a_half_goes_to_its_quarter() {
+        let mut desk = Desk::new("", one_screen());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        let original = desk.rect(1);
+
+        let commands = desk.press("super+up");
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::ToggleMaximize { id: 1 })),
+            "super+up did not ask to maximise: {commands:?}"
+        );
+        let _ = desk.scripts.maximize(1, true, desk.snapshot());
+
+        let commands = desk.press("super+down");
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::ToggleMaximize { id: 1 })),
+            "super+down did not un-maximise a maximised window: {commands:?}"
+        );
+        let _ = desk.scripts.maximize(1, false, desk.snapshot());
+        assert!(
+            same(desk.rect(1), original),
+            "the window did not keep its pre-maximise rectangle: {:?}",
+            desk.rects()
+        );
+
+        desk.press("super+left");
+        let left = desk.rect(1);
+        let commands = desk.press("super+up");
+        assert_eq!(
+            places(&commands),
+            vec![1],
+            "super+up from a half did not place the window: {commands:?}"
+        );
+        let quarter = desk.rect(1);
+        assert!(
+            about(quarter.x, left.x)
+                && about(quarter.w, left.w)
+                && about(quarter.y, left.y)
+                && about(quarter.h, left.h / 2.0),
+            "super+up from the left half is not its top quarter: half {left:?} quarter {quarter:?}"
+        );
+
+        let commands = desk.press("super+up");
+        assert!(
+            places(&commands).is_empty(),
+            "a second super+up from the quarter placed something: {commands:?}"
+        );
+    }
+
+    /// **Desktop mode: a new window with no size of its own gets a share of
+    /// the work area, smaller than it on both axes.** #222.
+    #[test]
+    fn desktop_mode_a_window_with_no_size_of_its_own_gets_a_share_of_the_work_area() {
+        let mut desk = Desk::new("", one_screen());
+        let mut unshown = window(
+            1,
+            "DP-1",
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+        );
+        unshown.shown = false;
+        desk.windows.push(unshown);
+        let outcome = desk.scripts.opened(1, desk.snapshot());
+        desk.apply(&outcome.commands);
+        let rect = desk.rect(1);
+        assert!(
+            rect.w > 0.0 && rect.w < WIDE.w && rect.h > 0.0 && rect.h < WIDE.h,
+            "a window that has shown no frame of its own did not get a share of the work \
+             area smaller than it: {rect:?}"
+        );
+    }
+
+    /// **Desktop mode: three windows opened in a row land at different
+    /// spots, not stacked on top of each other.** #222.
+    #[test]
+    fn desktop_mode_places_three_new_windows_without_stacking_them() {
+        let mut desk = Desk::new("", one_screen());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (1280.0, 720.0));
+        desk.open(3, "DP-1", (1280.0, 720.0));
+        let rects = [desk.rect(1), desk.rect(2), desk.rect(3)];
+        assert!(
+            !same(rects[0], rects[1]) && !same(rects[1], rects[2]) && !same(rects[0], rects[2]),
+            "three new windows landed on top of each other: {rects:?}"
+        );
+    }
+
+    /// **Tiling keeps the plain arrows for focus by direction, and desktop
+    /// mode gets them back the moment nothing else is in charge.** #222's
+    /// whole reason for going through `modes.watch` rather than binding the
+    /// four keys for good.
+    #[test]
+    fn tiling_keeps_the_arrows_for_focus_and_desktop_mode_gets_them_back() {
+        let mut desk = grid("", one_screen());
+        desk.focus(2);
+        assert_eq!(
+            focuses(&desk.press("super+left")),
+            [1],
+            "tiling: super+left still focuses the neighbouring tile"
+        );
+
+        // Self-toggle: tiling off is floating, #222's desktop mode.
+        desk.press("super+t");
+        desk.focus(1);
+        let tiled = desk.rect(1);
+        desk.press("super+left");
+        let snapped = desk.rect(1);
+        assert!(
+            about(snapped.h, WIDE.h) && snapped.h > tiled.h + 100.0,
+            "super+left did not snap once floating took over: tiled {tiled:?} snapped {snapped:?}"
+        );
+    }
+
+    /// **A `config.bindings` override on a plain arrow survives leaving and
+    /// returning to desktop mode**: it must win once, at load (the premise
+    /// below), and go on winning every time `super+t`/`super+s` hands the
+    /// arrows back, not just until the first one (#222's review).
+    ///
+    /// `require("bindings")` runs as `new_with`'s `after`, exactly where the
+    /// real `init.lua` has it -- last -- so `super+left`'s override wins the
+    /// same way it would in production, with no help from this file's own
+    /// fix: that part was never broken. What was broken is the *second*
+    /// assertion, once a mode switch has run `unbind_keys` at least once.
+    #[test]
+    fn a_config_bindings_override_on_an_arrow_survives_leaving_and_returning_to_floating() {
+        let mut desk = Desk::new_with(
+            "local config = require(\"config\")\n\
+             config.bindings[\"super+left\"] = function() sol.status(\"custom-left\") end\n",
+            "require(\"bindings\")\n",
+            one_screen(),
+        );
+
+        let status = |desk: &mut Desk, combo: &str| {
+            desk.scripts
+                .key(combo, desk.snapshot())
+                .status
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            status(&mut desk, "super+left"),
+            "custom-left",
+            "the premise: the override wins while floating is in charge"
+        );
+
+        // Leave floating (tiling) and come back (self-toggle): both are
+        // `unbind_keys`, the first into tiling and the second out of it.
+        desk.press("super+t");
+        assert_eq!(
+            status(&mut desk, "super+left"),
+            "custom-left",
+            "leaving floating silently reverted super+left to the shipped default"
+        );
+        desk.press("super+t");
+        assert_eq!(
+            status(&mut desk, "super+left"),
+            "custom-left",
+            "returning to floating silently reverted super+left to the shipped default"
+        );
+    }
+
+    /// **A snap key `config.floating.snap` has moved off its plain arrow is
+    /// not left bound once floating lets go.** `config.floating.snap.left =
+    /// "super+z"` moves what `super+left` used to mean off the arrow
+    /// entirely; leaving floating must give `super+z` back to nothing, not
+    /// leave it calling `snap("left")` in tiling for the rest of the session
+    /// (#222's review).
+    #[test]
+    fn a_snap_key_moved_off_the_plain_arrows_is_not_left_bound_once_floating_lets_go() {
+        let mut desk = Desk::new(
+            "local config = require(\"config\")\n\
+             config.floating.snap.left = \"super+z\"\n",
+            one_screen(),
+        );
+        desk.open(1, "DP-1", (1280.0, 720.0));
+
+        assert!(
+            desk.scripts.has_binding("super+z"),
+            "the premise: super+z is bound while floating is in charge"
+        );
+        let commands = desk.press("super+z");
+        assert_eq!(
+            places(&commands),
+            vec![1],
+            "the premise: super+z snaps the focused window"
+        );
+
+        desk.press("super+t");
+        assert!(
+            !desk.scripts.has_binding("super+z"),
+            "super+z is still bound after floating let go of it, to whatever it last did \
+             with it -- it is not one of the four plain arrows, so nothing ever gives it \
+             back to anything"
+        );
+    }
+
+    /// **Desktop mode: crossing to the next monitor on a snap carries the
+    /// window's explicit workspace with it**, exactly as `direction.lua`'s own
+    /// cross-monitor `floating.move` does (`super+shift+left`), so a window
+    /// sent to the workspace its monitor happens to show does not end up
+    /// grouped onto a desk the monitor it lands on is not showing (#222's
+    /// review).
+    #[test]
+    fn desktop_mode_a_cross_monitor_snap_carries_the_window_to_the_workspace_its_new_monitor_shows()
+    {
+        let mut desk = Desk::new("", two_screens());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+
+        // Explicitly assigned to workspace 1 -- which is also what DP-1,
+        // unconfigured, already shows -- so the assignment changes nothing
+        // visible yet, only `workspaces.of[1]`.
+        desk.press("super+shift+1");
+        assert_eq!(
+            desk.workspace_of(1),
+            "1",
+            "the premise: window 1 has an explicit workspace"
+        );
+
+        // DP-2 shows workspace 2, the same fakery
+        // `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`
+        // uses, since nothing in this harness switches a real workspace.
+        assert_eq!(
+            desk.scripts
+                .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 2 return \"\""),
+            ""
+        );
+
+        desk.press("super+right");
+        assert!(
+            desk.monitor(1) == "DP-1",
+            "the premise: one super+right only reaches DP-1's right half: {:?}",
+            desk.rects()
+        );
+        desk.press("super+right");
+        assert_eq!(
+            desk.monitor(1),
+            "DP-2",
+            "a second super+right did not cross to DP-2: {:?}",
+            desk.rects()
+        );
+        assert_eq!(
+            desk.workspace_of(1),
+            "2",
+            "window 1 crossed to DP-2 but was not carried to the workspace it shows -- the \
+             next `layout` would group it onto a desk DP-2 is not showing"
+        );
+    }
+
+    /// **Desktop mode: snapping a window maximised through another door --
+    /// `super+shift+m`, or the frame's button -- does not capture a bogus
+    /// `before_snap` rectangle.** Lua reads `sol.windows()` before the
+    /// un-maximise this same key asks for has landed, so a window maximised
+    /// outside `floating.lua` has no valid pre-maximise rectangle this file
+    /// can capture at that point -- only the compositor remembers it, and a
+    /// snap straight after throws that memory away by placing the window
+    /// somewhere else. Restoring afterwards must not place the stale,
+    /// still-maximised-looking rectangle it would otherwise have recorded
+    /// (#222's review).
+    #[test]
+    fn desktop_mode_snap_after_an_external_maximize_does_not_capture_a_bogus_before_snap_rect() {
+        let mut desk = Desk::new("", one_screen());
+        desk.open(1, "DP-1", (1280.0, 720.0));
+
+        let commands = desk.press("super+shift+m");
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::ToggleMaximize { id: 1 })),
+            "the premise: super+shift+m asks to maximise: {commands:?}"
+        );
+        let _ = desk.scripts.maximize(1, true, desk.snapshot());
+        // What the compositor would have done to the window's own rectangle,
+        // in production -- the harness does not simulate it, the same reason
+        // `desktop_mode_maximize_asks_the_compositor_and_a_half_goes_to_its_quarter`
+        // gives.
+        for each in &mut desk.windows {
+            if each.id == 1 {
+                each.rect = WIDE;
+            }
+        }
+
+        let commands = desk.press("super+left");
+        assert_eq!(
+            places(&commands),
+            vec![1],
+            "super+left did not un-maximise and snap: {commands:?}"
+        );
+        let left = desk.rect(1);
+
+        let commands = desk.press("super+down");
+        assert!(
+            places(&commands).is_empty(),
+            "restore after an externally-maximised window's first snap placed a bogus \
+             rectangle rather than doing nothing: {commands:?}"
+        );
+        assert!(
+            same(desk.rect(1), left),
+            "restore moved the window with nothing valid to put it back to: {:?}",
+            desk.rects()
+        );
     }
 }

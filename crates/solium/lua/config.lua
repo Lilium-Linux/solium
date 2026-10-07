@@ -1008,6 +1008,55 @@ local defaults = {
         -- application in `tiling.client_size_ignore` is not believed here
         -- either. Anything else is read as "respect".
         client_limits = "respect",
+
+        -- Snapping a window like Windows does (#222): `lua/floating.lua`.
+        --
+        -- Bound only while floating is the mode in charge -- toggled the way
+        -- `overview.lua` binds Escape only while it is up -- so tiling and
+        -- scrolling keep the plain arrows for focus by direction (#150) and
+        -- these never clash with them. `false` unbinds one, as a key in
+        -- `bindings` above does; a different combo rebinds it.
+        --
+        --   left, right   snap the focused window to that half of its
+        --                 monitor's work area. Pressed again from that half,
+        --                 the next monitor that way, if there is one.
+        --   maximize      the work area, whole; from a half, that half's top
+        --                 quarter instead.
+        --   restore       the rectangle the window had before its first snap,
+        --                 or, from the work area, un-maximises.
+        snap = {
+            left = "super+left",
+            right = "super+right",
+            maximize = "super+up",
+            restore = "super+down",
+            -- The motion a snap moves with. Not `tiling.snap`: a window
+            -- gliding to half the screen is this file's own question, kept
+            -- apart so the two can be tuned differently, as `fullscreen` and
+            -- `maximize` above are kept apart from each other.
+            motion = { duration = 220, easing = "outCubic" },
+        },
+
+        -- Where a new window goes, and how big, while floating is in charge.
+        -- `lua/floating.lua`; a dialog is never placed by this, since a modal
+        -- is lifted out of any arrangement already (`dialogs.lua`).
+        placement = {
+            -- "center", the default: the middle of the focused monitor's
+            -- work area, offset by `cascade` for every window already there
+            -- it would otherwise sit on top of -- so a second and third
+            -- window land in a row rather than in a stack nobody can
+            -- separate. "cascade": always offset from the last window
+            -- opened, centred or not. "pointer": centred on the pointer
+            -- instead of the monitor. Anything else is read as "center".
+            policy = "center",
+            cascade = { x = 32, y = 32 },
+            -- A new window's share of its monitor's work area on each axis,
+            -- when its application asked for no size of its own -- one that
+            -- has not shown its first frame yet, which is every window
+            -- `sol.spawn` opens (see `open` in docs/modes.md). Capped by the
+            -- work area either way, and by the application's own minimum and
+            -- maximum once it has one (#115, `sizes.lua`).
+            size = 0.6,
+        },
     },
 
     tiling = {
