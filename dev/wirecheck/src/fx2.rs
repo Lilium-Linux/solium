@@ -44,6 +44,11 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_pass_reading_three_textures_samples_each(renderer)?;
     smithay_draws_as_before_after_a_run(renderer)?;
     a_withheld_program_is_pending(renderer)?;
+    an_instance_keeps_its_targets_between_runs(renderer)?;
+    a_state_is_rebuilt_only_when_its_depends_changes(renderer)?;
+    a_held_instance_dropped_gives_its_targets_back(renderer)?;
+    a_chain_feeds_each_links_result_to_the_next(renderer)?;
+    nothing_is_allocated_while_a_result_is_drawn(renderer)?;
     Ok(())
 }
 
@@ -297,6 +302,48 @@ fn three() -> Fixture {
     }
 }
 
+/// `state-count/`: a state `n`, made again only when the params move, whose
+/// pass writes `fract(sol_time)` into red, and a pass returning the state.
+fn state_count() -> Fixture {
+    Fixture {
+        inputs: &["self"],
+        stages: vec![
+            Stage::State {
+                name: "n".to_owned(),
+                format: Format::Rgba8,
+                scale: 1.0,
+                depends: Depends::Params,
+                body: vec![pass("count.frag", 1.0, &[])],
+            },
+            pass("read.frag", 1.0, &["n"]),
+        ],
+        params: vec![("n".to_owned(), Value::Number(1.0))],
+        frags: &[
+            (
+                "count.frag",
+                include_str!("../../../crates/solium/tests/fixtures/effects/state-count/count.frag"),
+            ),
+            (
+                "read.frag",
+                include_str!("../../../crates/solium/tests/fixtures/effects/state-count/read.frag"),
+            ),
+        ],
+    }
+}
+
+/// `tint/` at `amount`: one pass mixing the colour toward its alpha.
+fn tint(amount: f64) -> Fixture {
+    Fixture {
+        inputs: &["self"],
+        stages: vec![pass("effect.frag", 1.0, &[])],
+        params: vec![("amount".to_owned(), Value::Number(amount))],
+        frags: &[(
+            "effect.frag",
+            include_str!("../../../crates/solium/tests/fixtures/effects/tint/effect.frag"),
+        )],
+    }
+}
+
 /// A fixture flattened as the host flattens it, each step's key set as the
 /// host sets it, and every program compiled through `gl::Program::compile`.
 fn build(renderer: &mut GlesRenderer, fixture: Fixture) -> Result<(Plan, HashMap<u64, gl::Program>)> {
@@ -378,7 +425,7 @@ fn whole<'a>(
 }
 
 /// One run on a carrier bound for it, as `prepare` binds one, its result
-/// waited for so it can be read back.
+/// waited for so it can be read back; its states keyed on nothing moving.
 fn run_once<'p>(
     renderer: &mut GlesRenderer,
     pool: &mut pool::Pool,
@@ -387,11 +434,24 @@ fn run_once<'p>(
     held: &mut run::Held,
     inputs: &run::Inputs<'_>,
 ) -> Result<run::Outcome> {
+    run_keyed(renderer, pool, programs, plan, held, inputs, &run::Keys::default())
+}
+
+/// [`run_once`] with the keys its states are kept on.
+fn run_keyed<'p>(
+    renderer: &mut GlesRenderer,
+    pool: &mut pool::Pool,
+    programs: &dyn Fn(u64) -> run::Lookup<'p>,
+    plan: &Plan,
+    held: &mut run::Held,
+    inputs: &run::Inputs<'_>,
+    keys: &run::Keys,
+) -> Result<run::Outcome> {
     let formats = Some(pool::probe_formats(renderer));
     let mut carrier = pool.carrier(renderer).ok_or_else(|| anyhow!("no carrier"))?;
     let outcome = {
         let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
-        run::run(renderer, &mut bound, pool, programs, formats, plan, held, inputs)
+        run::run(renderer, &mut bound, pool, programs, formats, plan, held, inputs, keys)
     };
     if let run::Outcome::Done(_, sync) = &outcome {
         sync.wait().map_err(|err| anyhow!("{err:?}"))?;
@@ -965,5 +1025,292 @@ fn a_withheld_program_is_pending(renderer: &mut GlesRenderer) -> Result<()> {
     pool.sweep(renderer);
     free(renderer, programs)?;
     println!("  pending: nothing drawn, nothing latched; then drawn twice; a failure latched");
+    Ok(())
+}
+
+/// 12l's to 12p's input: a 257×129 checkerboard of 8-pixel squares, red and
+/// blue, the size 12e blurs.
+fn checker(renderer: &mut GlesRenderer) -> Result<(GlesTexture, Vec<u8>, (usize, usize))> {
+    let size = (257, 129);
+    let (texture, bytes) =
+        upload(renderer, size, |x, y| if (x / 8 + y / 8) % 2 == 0 { RED } else { BLUE })?;
+    Ok((texture, bytes, size))
+}
+
+/// **Case 12l: an instance keeps its targets between runs.** The `kawase`
+/// plan at `passes = 2` over 257×129 draws 129×65, 65×33, 129×65 and
+/// 257×129: its first run makes three targets, not four, since the second
+/// 129×65 step draws into the first's once nothing reads it, and a second
+/// run with the same keys makes none.
+fn an_instance_keeps_its_targets_between_runs(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX2: an instance keeps its targets between runs ===");
+    let (input, _, size) = checker(renderer)?;
+    let (plan, programs) = build(renderer, kawase(2, 2.0))?;
+    let (sizes, _) = plan.sizes((257, 129));
+    let (_, slots) = Plan::slots(&plan.steps, &sizes);
+    let mut pool = pool::Pool::new(0);
+    let mut held = run::Held::default();
+    let textures = [("self", input, run::BoxMap::WHOLE)];
+    let inputs = whole(size, &textures);
+    let mut made = Vec::new();
+    for round in 1..=2 {
+        let outcome = run_once(
+            renderer,
+            &mut pool,
+            &|key| lookup(&programs, key),
+            &plan,
+            &mut held,
+            &inputs,
+        )?;
+        if !matches!(outcome, run::Outcome::Done(..)) {
+            return Err(anyhow!("run {round} of the kawase plan came to {outcome:?}"));
+        }
+        made.push(pool.made());
+    }
+    held.release(&mut pool);
+    pool.sweep(renderer);
+    free(renderer, programs)?;
+    if made != [slots, slots] || slots != 3 {
+        return Err(anyhow!(
+            "the pool had made {made:?} targets after each run, not {slots} and none more ({} steps)",
+            plan.steps.len()
+        ));
+    }
+    println!("  four steps drawn into three targets, and a second run made none");
+    Ok(())
+}
+
+/// The red of a 16×16 result's centre, 0 to 1.
+fn centre_red(renderer: &mut GlesRenderer, texture: &GlesTexture) -> Result<f64> {
+    let read = read_rgba(renderer, texture)?;
+    let size = texture.size();
+    let width = usize::try_from(size.w).unwrap_or(1);
+    let height = usize::try_from(size.h).unwrap_or(1);
+    let at = ((height / 2) * width + width / 2) * 4;
+    read.get(at)
+        .map(|red| f64::from(*red) / 255.0)
+        .ok_or_else(|| anyhow!("no centre in {} bytes", read.len()))
+}
+
+/// **Case 12m: a state is rebuilt only when its depends changes.** The
+/// `state-count` fixture, whose state `n` (`depends = "params"`) writes
+/// `fract(sol_time)` into red: run at `time` 0.1 and 0.2 with `params` 1,
+/// then 0.3 with `params` 2, its red is 0.1, 0.1 and 0.3; then at 0.4 with
+/// `params` 2 over a box of another size, where the state it held no longer
+/// fits, 0.4.
+fn a_state_is_rebuilt_only_when_its_depends_changes(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX2: a state is made again only when what it depends on changes ===");
+    let (plan, programs) = build(renderer, state_count())?;
+    let mut pool = pool::Pool::new(0);
+    let mut held = run::Held::default();
+    let mut reds = Vec::new();
+    for (time, params, side) in [(0.1, 1, 16), (0.2, 1, 16), (0.3, 2, 16), (0.4, 2, 24)] {
+        let (input, _) = upload(renderer, (side, side), |_, _| RED)?;
+        let textures = [("self", input, run::BoxMap::WHOLE)];
+        let mut inputs = whole((side, side), &textures);
+        inputs.time = time;
+        let keys = run::Keys {
+            params,
+            ..run::Keys::default()
+        };
+        let outcome = run_keyed(
+            renderer,
+            &mut pool,
+            &|key| lookup(&programs, key),
+            &plan,
+            &mut held,
+            &inputs,
+            &keys,
+        )?;
+        let run::Outcome::Done(result, _) = outcome else {
+            return Err(anyhow!("the state-count run at {time} came to {outcome:?}"));
+        };
+        reds.push(centre_red(renderer, &result)?);
+    }
+    held.release(&mut pool);
+    pool.sweep(renderer);
+    free(renderer, programs)?;
+    let want = [0.1, 0.1, 0.3, 0.4];
+    if reds.iter().zip(want).any(|(got, want)| (got - want).abs() > 1.0 / 255.0) {
+        return Err(anyhow!("the state's red over four runs was {reds:?}, not {want:?}"));
+    }
+    println!("  red {reds:.3?}: kept while the params held, made when they moved and when the box did");
+    Ok(())
+}
+
+/// **Case 12n: a held instance dropped gives its targets back.** After a
+/// run of the `kawase` plan, `Held::release` leaves the pool's free list
+/// holding exactly the plan's slots: asked for each slot's size and format
+/// the pool makes nothing, and asked for one more, it makes one.
+fn a_held_instance_dropped_gives_its_targets_back(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX2: a held instance dropped gives its targets back ===");
+    let (input, _, size) = checker(renderer)?;
+    let (plan, programs) = build(renderer, kawase(2, 2.0))?;
+    let (sizes, _) = plan.sizes((257, 129));
+    let (slots, count) = Plan::slots(&plan.steps, &sizes);
+    let mut pool = pool::Pool::new(64 << 20);
+    let mut held = run::Held::default();
+    let textures = [("self", input, run::BoxMap::WHOLE)];
+    let outcome = run_once(
+        renderer,
+        &mut pool,
+        &|key| lookup(&programs, key),
+        &plan,
+        &mut held,
+        &whole(size, &textures),
+    )?;
+    if !matches!(outcome, run::Outcome::Done(..)) {
+        return Err(anyhow!("the kawase run came to {outcome:?}"));
+    }
+    drop(outcome);
+    held.release(&mut pool);
+    let before = pool.made();
+    let mut taken = Vec::new();
+    for slot in 0..count {
+        let step = slots
+            .iter()
+            .position(|each| *each == slot)
+            .ok_or_else(|| anyhow!("slot {slot} has no step"))?;
+        let (w, h) = sizes[step];
+        let size = (i32::try_from(w)?, i32::try_from(h)?).into();
+        taken.push(
+            pool.target(&mut pool::Gl(renderer), size, plan.steps[step].format)
+                .ok_or_else(|| anyhow!("no target for slot {slot}"))?,
+        );
+    }
+    let from_the_free_list = pool.made() - before;
+    taken.push(
+        pool.target(&mut pool::Gl(renderer), (129, 65).into(), pool::Format::Rgba8)
+            .ok_or_else(|| anyhow!("no target past the slots"))?,
+    );
+    let past = pool.made() - before;
+    drop(taken);
+    pool.sweep(renderer);
+    free(renderer, programs)?;
+    if from_the_free_list != 0 || past != 1 {
+        return Err(anyhow!(
+            "after the release the pool made {from_the_free_list} of the {count} slots' targets and {past} with one more"
+        ));
+    }
+    println!("  {count} targets given back for {count} slots, and none more");
+    Ok(())
+}
+
+/// **Case 12o: a chain feeds each link's result to the next one's first
+/// input, on the GPU.** `chain([identity, tint])` over 12d's picture is
+/// byte for byte `tint` run on it alone, and is not the picture.
+fn a_chain_feeds_each_links_result_to_the_next(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX2: a chain feeds each link's result to the next, on the GPU ===");
+    let (input, bytes, size) = quadrant(renderer)?;
+    let (first, mut programs) = build(renderer, identity())?;
+    let (second, tint_programs) = build(renderer, tint(0.5))?;
+    programs.extend(tint_programs);
+    let alone = second.clone();
+    let chained = stage::chain(vec![first, second]);
+    let mut pool = pool::Pool::new(0);
+    let textures = [("self", input, run::BoxMap::WHOLE)];
+    let inputs = whole(size, &textures);
+    let mut reads = Vec::new();
+    for plan in [&chained, &alone] {
+        let mut held = run::Held::default();
+        let outcome = run_once(
+            renderer,
+            &mut pool,
+            &|key| lookup(&programs, key),
+            plan,
+            &mut held,
+            &inputs,
+        )?;
+        let run::Outcome::Done(result, _) = outcome else {
+            return Err(anyhow!("a run of {} steps came to {outcome:?}", plan.steps.len()));
+        };
+        reads.push(read_rgba(renderer, &result)?);
+        drop(result);
+        held.release(&mut pool);
+    }
+    pool.sweep(renderer);
+    free(renderer, programs)?;
+    let [chain, tint] = reads.as_slice() else {
+        return Err(anyhow!("two runs, not {}", reads.len()));
+    };
+    if let Some(((x, y), got, want)) = first_difference(chain, tint, size.0) {
+        return Err(anyhow!(
+            "the chain drew {got:?} at ({x}, {y}) where tint alone drew {want:?}"
+        ));
+    }
+    if first_difference(chain, &bytes, size.0).is_none() {
+        return Err(anyhow!("the chain returned its input: the tint did not run"));
+    }
+    println!("  identity then tint, as one plan, is tint alone");
+    Ok(())
+}
+
+/// **Case 12p: nothing is allocated while a result is drawn.** After a run
+/// of the `kawase` plan, its result, `Held::output`, drawn by smithay as a
+/// `TextureRenderElement` through `pool::paint` into a target taken before,
+/// makes no target, and what is drawn is the result.
+fn nothing_is_allocated_while_a_result_is_drawn(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX2: nothing is allocated while a result is drawn ===");
+    let (input, _, size) = checker(renderer)?;
+    let (plan, programs) = build(renderer, kawase(2, 2.0))?;
+    let mut pool = pool::Pool::new(0);
+    let mut held = run::Held::default();
+    let textures = [("self", input, run::BoxMap::WHOLE)];
+    let outcome = run_once(
+        renderer,
+        &mut pool,
+        &|key| lookup(&programs, key),
+        &plan,
+        &mut held,
+        &whole(size, &textures),
+    )?;
+    if !matches!(outcome, run::Outcome::Done(..)) {
+        return Err(anyhow!("the kawase run came to {outcome:?}"));
+    }
+    drop(outcome);
+    let result = held
+        .output()
+        .cloned()
+        .ok_or_else(|| anyhow!("a run that drew holds no output"))?;
+    let side = (i32::try_from(size.0)?, i32::try_from(size.1)?);
+    let target = pool
+        .target(&mut pool::Gl(renderer), side.into(), pool::Format::Rgba8)
+        .ok_or_else(|| anyhow!("no pooled target"))?;
+    let before = pool.made();
+    let mut carrier = pool.carrier(renderer).ok_or_else(|| anyhow!("no carrier"))?;
+    {
+        use smithay::backend::renderer::Frame as _;
+        let element = crate::element_for(renderer, result.clone(), side, side, 1.0);
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame =
+            pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+        pool::paint(&mut frame, side.into(), &[element], 1.0).map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let made = pool.made() - before;
+    let drawn = read_rgba(renderer, target.texture())?;
+    let want = read_rgba(renderer, &result)?;
+    drop(target);
+    drop(result);
+    held.release(&mut pool);
+    pool.sweep(renderer);
+    free(renderer, programs)?;
+    if made != 0 {
+        return Err(anyhow!("drawing a result made {made} targets"));
+    }
+    let off = drawn
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    if drawn.len() != want.len() || off > 1 {
+        return Err(anyhow!("the result drawn differs from the result by {off}"));
+    }
+    println!("  the result drawn by smithay, with no target made");
     Ok(())
 }

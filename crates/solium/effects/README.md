@@ -174,7 +174,7 @@ effect draws.
 | `{ "repeat", over = { 64, 32, … }, as = "<name>", <stages> }` | runs the stages after its kind once for each number in `over`, with `p_<name>` set to that number. The name is a new one, not one of the effect's params |
 | `{ "save", "<name>" }`, `{ "get", "<name>" }` | names the last result; makes a named result the last one again |
 | `{ "use", "<effect>", <param> = <value>, … }` | runs another effect's stages here, on the last result, with those params. The names it saves are its own, and where it reads its first input by name it reads what it was given. It is put in place when the effect is loaded, so it costs nothing while the effect draws |
-| `{ "state", "<name>", depends = "…", stages = { … } }` | a texture kept from one run to the next, made by its own `stages` from the effect's inputs and the states before it, and made again only when what it `depends` on changes: `"shape"`, `"params"`, or `"self"`, a commit of the part's own surface. Later stages read it by its name. `format =` and `scale =` as for a pass |
+| `{ "state", "<name>", depends = "…", stages = { … } }` | a texture kept from one run to the next, made by its own `stages` from the effect's inputs and the states before it, and made again only when what it `depends` on changes: `"shape"`, `"params"`, or `"self"`, a commit of the part's own surface; and when its size changes with the part's, or a state it reads is made again. Later stages read it by its name. `format =` and `scale =` as for a pass |
 
 A pass with a `scale` above 1 after passes below 1 is the size of what the
 matching smaller pass read, so a blur that halves a window three times and

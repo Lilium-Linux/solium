@@ -289,10 +289,16 @@ and nothing waits on the CPU between steps, since one context's reads come
 after its writes; only the last step's fence goes back to the caller. Before
 it draws, a run asks the host for every program: one not compiled yet leaves
 the part as if no effect were configured that pass and latches nothing, and
-one that failed, or a GL error after the run, fails the chain for good. The
-effects' GPU time is one region a run phase, `gpu_effects_us` in the trace.
-Nothing runs a plan on screen yet; wirecheck runs them (cases 12d to 12g and
-12q).
+one that failed, or a GL error after the run, fails the chain for good. A
+chain's targets are held from one run to the next: a step draws into a target
+an earlier step of its size and format drew into, once no later step reads
+what that one holds (`stage::Plan::slots`), so a jump flood of eight passes
+holds two and a second run of the same size makes nothing; and a state is
+made again only when what it `depends` on moves (`run::Keys`: the params'
+hash, the self capture's commit, the shape), when its size does, or when a
+state it reads was made again. The effects' GPU time is one region a run
+phase, `gpu_effects_us` in the trace. Nothing runs a plan on screen yet;
+wirecheck runs them (cases 12d to 12g and 12l to 12q).
 
 ### The arrangements are a crate too
 

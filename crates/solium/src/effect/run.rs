@@ -4,7 +4,7 @@
 )]
 #![expect(
     dead_code,
-    reason = "Task 21's runner runs plans; until then wirecheck runs them (cases 12d to 12g and 12q)"
+    reason = "Task 21's runner runs plans; until then wirecheck runs them (cases 12d to 12g and 12l to 12q)"
 )]
 
 //! The executor: a plan's steps, each drawn into a pooled target in a frame
@@ -15,16 +15,22 @@
 //! (\[fx0\] Task 9's cases 11c and 11d), so each step's sync point is dropped
 //! and only the run's last comes back for the caller to settle.
 //!
+//! A chain's targets are held between runs (`Held`): a step draws into a slot
+//! an earlier step of its size and format held once nothing after reads it,
+//! so a second run makes nothing (wirecheck 12l), and a state is made again
+//! only when what it depends on moves (`Keys`, wirecheck 12m).
+//!
 //! Smithay, std, `solium_effects` and `super::{gl, pool}` only, so
-//! `dev/wirecheck` includes it (cases 12d to 12g and 12q).
+//! `dev/wirecheck` includes it (cases 12d to 12g and 12l to 12q).
 
 use smithay::backend::renderer::{
     Frame as _, Texture as _,
     gles::{GlesRenderer, GlesTarget, GlesTexture, ffi},
     sync::SyncPoint,
+    utils::CommitCounter,
 };
 use solium_effects::spec::Value;
-use solium_effects::stage::{Feed, Plan, Step};
+use solium_effects::stage::{Depends, Feed, Plan, StatePlan, Step};
 
 use super::{gl, pool};
 
@@ -78,28 +84,103 @@ pub(crate) struct Inputs<'a> {
     pub(crate) clamp_first: bool,
 }
 
-/// One chain's targets, held across runs: one a step, one a state's step,
-/// the last output, and whether the chain failed, which is latched
-/// (wirecheck 12q).
+/// What a run's states are kept on, one number for each thing a state may
+/// `depend` on: a state is made again only when its own moves.
+/// `tests::a_state_is_made_again_only_when_what_it_depends_on_changes`,
+/// wirecheck 12m.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Keys {
+    /// The bound params' hash: `depends = "params"`.
+    pub(crate) params: u64,
+    /// The self capture's commit, numbered by [`Keys::commit`]:
+    /// `depends = "self"`. `None` with no self capture, and then such a
+    /// state is made on every run.
+    pub(crate) own: Option<u64>,
+    /// A hash of the content size and radii: `depends = "shape"`.
+    pub(crate) shape: u64,
+}
+
+impl Keys {
+    /// A capture's commit (`keyed::Capture::commit()`) as the number `own`
+    /// holds: how many times the capture has been drawn.
+    /// `tests::a_commit_is_keyed_by_its_count`.
+    pub(crate) fn commit(commit: CommitCounter) -> u64 {
+        commit
+            .distance(Some(CommitCounter::default()))
+            .and_then(|count| u64::try_from(count).ok())
+            .unwrap_or(u64::MAX)
+    }
+
+    /// The key a state depending on `depends` is kept on; `None` when there
+    /// is nothing to keep it by, so it is made on every run.
+    /// `tests::a_state_is_made_again_only_when_what_it_depends_on_changes`.
+    fn of(&self, depends: Depends) -> Option<u64> {
+        match depends {
+            Depends::Params => Some(self.params),
+            Depends::Shape => Some(self.shape),
+            Depends::SelfCommit => self.own,
+            // Refused when the plan is flattened, until P15.
+            Depends::Region => None,
+        }
+    }
+}
+
+/// Which of `plan`'s states a run makes, in order: one never made (its held
+/// key `None`), one whose held result no longer `fits` its size or format,
+/// one whose key moved or that has none, and one reading a state this run
+/// makes. Every other is kept as it was.
+/// `tests::a_state_is_made_again_only_when_what_it_depends_on_changes`.
+fn states_to_make(plan: &Plan, keys: &Keys, held: &[Option<u64>], fits: &[bool]) -> Vec<bool> {
+    let mut make: Vec<bool> = Vec::with_capacity(plan.states.len());
+    for (index, state) in plan.states.iter().enumerate() {
+        let key = keys.of(state.depends);
+        let reads_one_made = state.steps.iter().any(|step| {
+            std::iter::once(&step.first)
+                .chain(step.uses.iter().map(|(_, feed)| feed))
+                .any(|feed| matches!(feed, Feed::State(k) if make.get(*k).copied().unwrap_or(true)))
+        });
+        make.push(
+            key.is_none()
+                || held.get(index).copied().flatten() != key
+                || !fits.get(index).copied().unwrap_or(false)
+                || reads_one_made,
+        );
+    }
+    make
+}
+
+/// One chain's targets, held across runs: one a slot of its steps
+/// (`Plan::slots`, so a jump flood's eight steps hold two), one a slot of
+/// each state's steps, each state's result and the key it was made at, the
+/// last output, and whether the chain failed, which is latched
+/// (wirecheck 12l to 12q).
 #[derive(Debug, Default)]
 pub(crate) struct Held {
-    steps: Vec<Option<pool::Target>>,
+    slots: Vec<Option<pool::Target>>,
     states: Vec<Vec<Option<pool::Target>>>,
+    /// Each state's key when it was last made; `None` until it is made, and
+    /// for a state that has no key.
+    state_keys: Vec<Option<u64>>,
+    /// Each state's result while it stands, inside one of its targets.
+    state_results: Vec<Option<GlesTexture>>,
     output: Option<GlesTexture>,
     failed: bool,
 }
 
 impl Held {
-    /// Give every target back to the pool: wirecheck 12q.
+    /// Give every target back to the pool, so the next run makes every state
+    /// again: wirecheck 12n and 12q.
     pub(crate) fn release(&mut self, pool: &mut pool::Pool) {
         for target in self
-            .steps
+            .slots
             .drain(..)
             .chain(self.states.drain(..).flatten())
             .flatten()
         {
             pool.give_back(target);
         }
+        self.state_keys.clear();
+        self.state_results.clear();
         self.output = None;
     }
 
@@ -160,8 +241,8 @@ pub(crate) fn clamp_rect(map: BoxMap, clamp: [f32; 4], size: (u32, u32)) -> [f32
     out
 }
 
-/// Keep `slots` at `len`, giving back any target past it. Wirecheck 12q
-/// runs one `Held` twice.
+/// Keep `slots` at `len`, giving back any target past it. Wirecheck 12l and
+/// 12q run one `Held` twice.
 fn fit(slots: &mut Vec<Option<pool::Target>>, len: usize, pool: &mut pool::Pool) {
     let keep = len.min(slots.len());
     for target in slots.drain(keep..).flatten() {
@@ -170,9 +251,9 @@ fn fit(slots: &mut Vec<Option<pool::Target>>, len: usize, pool: &mut pool::Pool)
     slots.resize_with(len, || None);
 }
 
-/// The target a step draws into: the one it held, if it is still the size
-/// and format the step needs, else one from the pool. Wirecheck 12e's
-/// passes, each of its own size.
+/// The target a step draws into: the one its slot held, if it is still the
+/// size and format the step needs, else one from the pool. Wirecheck 12e's
+/// passes, each of its own size, and 12l's second run, which makes none.
 fn take(
     slot: &mut Option<pool::Target>,
     pool: &mut pool::Pool,
@@ -246,8 +327,9 @@ pub(crate) fn preflight<'p, P>(
 /// compiled yet; `Failed` when a program failed, a target is missing or GL
 /// reported an error, which is checked once a run rather than a step, since
 /// `glGetError` can stall; a failure is latched in `held`. Either way the
-/// caller draws the part as if no effect were configured (\[16\] §5).
-/// Wirecheck cases 12d to 12g and 12q.
+/// caller draws the part as if no effect were configured (\[16\] §5). A
+/// state is made only when `keys` moved what it depends on.
+/// Wirecheck cases 12d to 12g and 12l to 12q.
 #[expect(
     clippy::too_many_arguments,
     reason = "one run's whole context, passed down once"
@@ -261,6 +343,7 @@ pub(crate) fn run<'p>(
     plan: &Plan,
     held: &mut Held,
     inputs: &Inputs<'_>,
+    keys: &Keys,
 ) -> Outcome {
     if held.failed {
         return Outcome::Failed;
@@ -278,7 +361,7 @@ pub(crate) fn run<'p>(
         Lookup::Ready(program) => Some(program),
         Lookup::Pending | Lookup::Failed => None,
     };
-    let drawn = draw_plan(renderer, carrier, pool, &ready, plan, held, inputs);
+    let drawn = draw_plan(renderer, carrier, pool, &ready, plan, held, inputs, keys);
     // SAFETY: `with_context` makes the renderer's context current.
     let error = renderer
         .with_context(|context| unsafe { context.GetError() })
@@ -296,8 +379,31 @@ pub(crate) fn run<'p>(
     }
 }
 
-/// Every state, then the steps: the last step's texture and sync point, or
-/// `None` at the first thing missing. Wirecheck 12f.
+/// Whether a state's held result still stands for `sizes`, its steps'
+/// sizes this run: it is in one of the state's own targets, of the size and
+/// format its last step draws. Wirecheck 12m's run at another size.
+fn fits(
+    result: Option<&GlesTexture>,
+    state: &StatePlan,
+    sizes: &[(u32, u32)],
+    held: &[Option<pool::Target>],
+) -> bool {
+    let (Some(result), Some(size)) = (result, sizes.last()) else {
+        return false;
+    };
+    let format = state.steps.last().map(|step| step.format);
+    held.iter().flatten().any(|target| {
+        target.texture().tex_id() == result.tex_id() && Some(target.format()) == format
+    }) && size_of(result) == *size
+}
+
+/// Every state that must be made, then the steps: the last step's texture
+/// and sync point, or `None` at the first thing missing. Wirecheck 12f and
+/// 12m.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one run's whole context, passed down once"
+)]
 fn draw_plan<'p>(
     renderer: &mut GlesRenderer,
     carrier: &mut GlesTarget<'_>,
@@ -306,9 +412,11 @@ fn draw_plan<'p>(
     plan: &Plan,
     held: &mut Held,
     inputs: &Inputs<'_>,
+    keys: &Keys,
 ) -> Option<(GlesTexture, SyncPoint)> {
     let (sizes, state_sizes) = plan.sizes(inputs.padded);
-    fit(&mut held.steps, plan.steps.len(), pool);
+    let (assignment, count) = Plan::slots(&plan.steps, &sizes);
+    fit(&mut held.slots, count, pool);
     for extra in held
         .states
         .drain(plan.states.len().min(held.states.len())..)
@@ -318,12 +426,37 @@ fn draw_plan<'p>(
         }
     }
     held.states.resize_with(plan.states.len(), Vec::new);
-    // States first, because a step may read one (wirecheck 12f).
+    held.state_keys.resize(plan.states.len(), None);
+    held.state_results.resize(plan.states.len(), None);
+    let standing: Vec<bool> = plan
+        .states
+        .iter()
+        .enumerate()
+        .map(|(index, state)| {
+            fits(
+                held.state_results.get(index).and_then(Option::as_ref),
+                state,
+                state_sizes.get(index).map_or(&[], Vec::as_slice),
+                held.states.get(index).map_or(&[], Vec::as_slice),
+            )
+        })
+        .collect();
+    let make = states_to_make(plan, keys, &held.state_keys, &standing);
+    // States first, because a step may read one (wirecheck 12f); each kept
+    // unless what it depends on moved (wirecheck 12m).
     let mut states: Vec<GlesTexture> = Vec::with_capacity(plan.states.len());
     for (index, state) in plan.states.iter().enumerate() {
-        let slots = held.states.get_mut(index)?;
-        fit(slots, state.steps.len(), pool);
+        if !make.get(index).copied().unwrap_or(true) {
+            states.push(held.state_results.get(index)?.clone()?);
+            continue;
+        }
+        // Unkept until it is drawn, so one that fails part way is made again.
+        *held.state_keys.get_mut(index)? = None;
+        *held.state_results.get_mut(index)? = None;
         let sizes = state_sizes.get(index)?;
+        let (assignment, count) = Plan::slots(&state.steps, sizes);
+        let slots = held.states.get_mut(index)?;
+        fit(slots, count, pool);
         let (texture, _) = steps(
             renderer,
             carrier,
@@ -331,11 +464,14 @@ fn draw_plan<'p>(
             programs,
             &state.steps,
             sizes,
+            &assignment,
             slots,
             &states,
             inputs,
             false,
         )?;
+        *held.state_keys.get_mut(index)? = keys.of(state.depends);
+        *held.state_results.get_mut(index)? = Some(texture.clone());
         states.push(texture);
     }
     steps(
@@ -345,7 +481,8 @@ fn draw_plan<'p>(
         programs,
         &plan.steps,
         &sizes,
-        &mut held.steps,
+        &assignment,
+        &mut held.slots,
         &states,
         inputs,
         inputs.clamp_first,
@@ -373,16 +510,22 @@ fn steps<'p>(
     programs: &dyn Fn(u64) -> Option<&'p gl::Program>,
     steps: &[Step],
     sizes: &[(u32, u32)],
+    assignment: &[usize],
     slots: &mut [Option<pool::Target>],
     states: &[GlesTexture],
     inputs: &Inputs<'_>,
     clamp_first: bool,
 ) -> Option<(GlesTexture, SyncPoint)> {
+    // A step's result stays in `drawn` after its slot is drawn into again,
+    // and is never read then: `Plan::slots` frees a slot only once nothing
+    // after reads what it holds (`stage::tests::a_saved_result_keeps_its_slot_until_its_last_reader`,
+    // wirecheck 12l to 12o).
     let mut drawn: Vec<GlesTexture> = Vec::with_capacity(steps.len());
     let mut last = None;
     for (index, step) in steps.iter().enumerate() {
         let size = *sizes.get(index)?;
-        let target = take(slots.get_mut(index)?, pool, renderer, size, step.format)?;
+        let slot = slots.get_mut(*assignment.get(index)?)?;
+        let target = take(slot, pool, renderer, size, step.format)?;
         let program = programs(step.key)?;
         let source = |feed: &Feed| -> Option<(GlesTexture, BoxMap)> {
             match feed {
@@ -697,6 +840,123 @@ mod tests {
         assert!(
             preflight(&plan, &|_| Lookup::Ready(&program), None).is_none(),
             "unknown formats are not missing"
+        );
+    }
+
+    /// **A capture's commit is keyed by its count**: `keyed::Capture::commit()`
+    /// as the number `Keys::own` holds, which moves each time the capture is
+    /// drawn again.
+    #[test]
+    fn a_commit_is_keyed_by_its_count() {
+        use super::Keys;
+        use smithay::backend::renderer::utils::CommitCounter;
+        let mut commit = CommitCounter::default();
+        assert_eq!(Keys::commit(commit), 0);
+        let before = Keys::commit(commit);
+        commit.increment();
+        commit.increment();
+        commit.increment();
+        assert_eq!(Keys::commit(commit), 3);
+        assert_ne!(Keys::commit(commit), before);
+    }
+
+    /// **A state is made again only when what it depends on changes**: on
+    /// its first run; when its key moves (`params`, `shape`, or the self
+    /// capture's commit, by its `depends`); when its held texture no longer
+    /// fits; when a state it reads is made again; and on every run when it
+    /// depends on a self capture there is none of. Otherwise it is kept.
+    #[test]
+    fn a_state_is_made_again_only_when_what_it_depends_on_changes() {
+        use super::{Keys, states_to_make};
+        use solium_effects::spec::Value;
+        use solium_effects::stage::{Binding, Depends, Format, Stage, flatten};
+        let state = |name: &str, depends: Depends, uses: &[&str]| Stage::State {
+            name: name.to_owned(),
+            format: Format::Rgba8,
+            scale: 1.0,
+            depends,
+            body: vec![Stage::Pass {
+                frag: format!("{name}.frag"),
+                scale: 1.0,
+                format: Format::Rgba8,
+                uses: uses.iter().map(|each| (*each).to_owned()).collect(),
+                input: None,
+            }],
+        };
+        let mut lib = |_: &str, _: &[(String, Value)]| -> Result<Binding, String> {
+            Ok(Binding {
+                stages: vec![
+                    state("p", Depends::Params, &[]),
+                    state("s", Depends::Shape, &[]),
+                    state("o", Depends::SelfCommit, &[]),
+                    // Keyed on the params, but reading `s`.
+                    state("q", Depends::Params, &["s"]),
+                    Stage::Pass {
+                        frag: "read.frag".to_owned(),
+                        scale: 1.0,
+                        format: Format::Rgba8,
+                        uses: vec!["p".to_owned(), "q".to_owned(), "o".to_owned()],
+                        input: None,
+                    },
+                ],
+                inputs: vec!["self".to_owned()],
+                params: Vec::new(),
+            })
+        };
+        let plan = flatten("x", &[], &mut lib).expect("flattens");
+        let keys = Keys {
+            params: 1,
+            own: Some(7),
+            shape: 40,
+        };
+        let made = |keys: &Keys| {
+            vec![
+                Some(keys.params),
+                Some(keys.shape),
+                keys.own,
+                Some(keys.params),
+            ]
+        };
+        let fits = [true; 4];
+        assert_eq!(
+            states_to_make(&plan, &keys, &[None; 4], &fits),
+            [true; 4],
+            "never made"
+        );
+        assert_eq!(
+            states_to_make(&plan, &keys, &made(&keys), &fits),
+            [false; 4],
+            "nothing moved"
+        );
+        let params = Keys { params: 2, ..keys };
+        assert_eq!(
+            states_to_make(&plan, &params, &made(&keys), &fits),
+            [true, false, false, true]
+        );
+        let shape = Keys { shape: 41, ..keys };
+        assert_eq!(
+            states_to_make(&plan, &shape, &made(&keys), &fits),
+            [false, true, false, true],
+            "q reads s, made again"
+        );
+        let own = Keys {
+            own: Some(8),
+            ..keys
+        };
+        assert_eq!(
+            states_to_make(&plan, &own, &made(&keys), &fits),
+            [false, false, true, false]
+        );
+        let none = Keys { own: None, ..keys };
+        assert_eq!(
+            states_to_make(&plan, &none, &made(&none), &fits),
+            [false, false, true, false],
+            "no self capture to key it on: made every run"
+        );
+        assert_eq!(
+            states_to_make(&plan, &keys, &made(&keys), &[false, true, true, true]),
+            [true, false, false, false],
+            "p's texture no longer fits its size"
         );
     }
 }
