@@ -203,6 +203,21 @@ unsafe fn active_uniforms(gl: &ffi::Gles2, id: ffi::types::GLuint) -> Vec<(Strin
     }
 }
 
+/// Why a program reads more textures than this GPU samples at once, if it
+/// does, counting its active samplers: what `GlCompiler::compile` refuses
+/// (Ruling 10). A GPU samples at least 8, the most a pass may read
+/// (`stage::MOST_TEXTURES`), so this guards a driver below GLES 2's minimum.
+/// `tests::a_program_reading_more_textures_than_the_gpu_samples_is_refused`.
+pub(crate) fn too_many_textures(uniforms: &[(String, i32, u32)], units: i32) -> Option<String> {
+    let samplers = uniforms
+        .iter()
+        .filter(|(_, _, kind)| *kind == ffi::SAMPLER_2D)
+        .count();
+    (i32::try_from(samplers).unwrap_or(i32::MAX) > units).then(|| {
+        format!("the pass reads {samplers} textures, and this GPU samples at most {units} at once")
+    })
+}
+
 /// `GL_MAX_TEXTURE_IMAGE_UNITS`: how many textures one pass may read.
 ///
 /// # Safety
@@ -213,5 +228,28 @@ pub(crate) unsafe fn max_texture_units(gl: &ffi::Gles2) -> i32 {
         let mut units = 0;
         gl.GetIntegerv(ffi::MAX_TEXTURE_IMAGE_UNITS, &raw mut units);
         units
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::too_many_textures;
+    use smithay::backend::renderer::gles::ffi;
+
+    /// **A program reading more textures than this GPU samples is refused**
+    /// at compile (Ruling 10), counting its active samplers and nothing
+    /// else; at the GLES 2 minimum of 8, a pass at the load-time limit runs.
+    #[test]
+    fn a_program_reading_more_textures_than_the_gpu_samples_is_refused() {
+        let program = |samplers: usize| -> Vec<(String, i32, u32)> {
+            let mut uniforms: Vec<(String, i32, u32)> = (0..samplers)
+                .map(|at| (format!("s{at}"), 0, ffi::SAMPLER_2D))
+                .collect();
+            uniforms.push(("p_amount".to_owned(), 0, ffi::FLOAT));
+            uniforms
+        };
+        assert_eq!(too_many_textures(&program(8), 8), None);
+        let refused = too_many_textures(&program(9), 8).expect("refused");
+        assert!(refused.contains('9') && refused.contains('8'), "{refused}");
     }
 }

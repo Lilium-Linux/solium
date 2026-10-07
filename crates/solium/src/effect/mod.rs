@@ -1,4 +1,4 @@
-#![expect(unsafe_code, reason = "the three calls into effect::gl")]
+#![expect(unsafe_code, reason = "the calls into effect::gl")]
 
 //! Effects as user folders: the host, the sandbox, the programs, the
 //! executor, the rules and the transitions. \[16\] §2; the spec §6.
@@ -34,11 +34,22 @@ impl host::Compiler for GlCompiler<'_> {
         // SAFETY: `with_context` makes the renderer's context current.
         let compiled = self.0.with_context(|context| unsafe {
             gl::Program::compile(context, vertex, sources.strings())
+                .map(|program| (program, gl::max_texture_units(context)))
         });
-        match compiled {
-            Err(err) => Err(format!("{err}")),
-            Ok(Err(log)) => Err(log.text),
-            Ok(Ok(program)) => Ok(program),
+        let (program, units) = match compiled {
+            Err(err) => return Err(format!("{err}")),
+            Ok(Err(log)) => return Err(log.text),
+            Ok(Ok(compiled)) => compiled,
+        };
+        // A pass the executor could not bind every texture of is refused
+        // here, not failed at its first run (Ruling 10).
+        // `gl::tests::a_program_reading_more_textures_than_the_gpu_samples_is_refused`.
+        match gl::too_many_textures(program.uniforms(), units) {
+            Some(refused) => {
+                self.delete(program);
+                Err(refused)
+            }
+            None => Ok(program),
         }
     }
 
