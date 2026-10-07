@@ -286,14 +286,27 @@ sol.on("direction", function(verb, dir)
     floating[verb](dir)
 end)
 
--- The arrows and vim's h, j, k and l, as sway and Hyprland ship them: super to
--- focus, super+shift to move. Up on k moves with super+alt, because
--- super+shift+k cycles the keyboard layout (`init.lua`).
+-- The plain arrows: super to focus, as `direction.beside` below. A separate
+-- function and not four bare `sol.bind` calls, because `lua/floating.lua`
+-- takes these four over while it is the mode in charge, for snapping a
+-- window like Windows (#222) -- the way `overview.lua` binds Escape only
+-- while it is up -- and has to be able to give them back unchanged when it
+-- lets go, rather than leaving them bound to whatever it last did with them.
+-- `floating.lua` is the only caller; this file always calls it once itself,
+-- below, so a configuration that never loads `floating` sees no difference.
+function direction.bind_arrows()
+    sol.bind("super+left", function() sol.focus_direction("left") end)
+    sol.bind("super+right", function() sol.focus_direction("right") end)
+    sol.bind("super+up", function() sol.focus_direction("up") end)
+    sol.bind("super+down", function() sol.focus_direction("down") end)
+end
+direction.bind_arrows()
+
+-- Vim's h, j, k and l, as sway and Hyprland ship them: super to focus,
+-- super+shift to move. Up on k moves with super+alt, because super+shift+k
+-- cycles the keyboard layout (`init.lua`). Never taken over by floating's
+-- snap -- Windows has no such keys, and these are left exactly as they are.
 -- `the_direction_and_window_keys_fire_while_russian_is_active`.
-sol.bind("super+left", function() sol.focus_direction("left") end)
-sol.bind("super+right", function() sol.focus_direction("right") end)
-sol.bind("super+up", function() sol.focus_direction("up") end)
-sol.bind("super+down", function() sol.focus_direction("down") end)
 sol.bind("super+h", function() sol.focus_direction("left") end)
 sol.bind("super+l", function() sol.focus_direction("right") end)
 sol.bind("super+k", function() sol.focus_direction("up") end)
