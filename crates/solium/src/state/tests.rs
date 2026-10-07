@@ -23936,6 +23936,71 @@ end)
                 );
             }
 
+            /// **A device whose natural scroll libinput already set is not
+            /// flipped a second time by the software fallback** (#157's own
+            /// central risk): with `profile.natural_scroll` true -- the
+            /// setting that used to flip every device uniformly -- and the
+            /// synthetic device registered as handled, the wheel reaches the
+            /// scene exactly as unflipped, proving `pointer_axis`'s own
+            /// `Registry::handled` check actually gates the flip, not just
+            /// the unit-tested `Registry::handled` in isolation.
+            #[test]
+            fn pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set() {
+                let mut desk = russian_desk();
+                desk.state.profile.natural_scroll = true;
+                desk.state.input.device_seen(
+                    crate::input::devices::DeviceInfo {
+                        id: "synthetic".to_owned(),
+                        name: "synthetic pointer".to_owned(),
+                        kind: crate::input::devices::DeviceKind::Mouse,
+                        vendor: None,
+                        product: None,
+                    },
+                    crate::input::devices::Report::test_applied(&["natural_scroll"]),
+                );
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 2);
+                assert!(
+                    scene_events(&desk.state, bar).iter().any(|event| event.kind
+                        == PointerKind::Wheel {
+                            angle: (0.0, -120.0),
+                            pixels: (0.0, 0.0),
+                        }),
+                    "libinput already flipped this device's raw deltas, so the software \
+                     fallback must leave the direction alone even though the profile asks for \
+                     natural scroll: {:?}",
+                    scene_events(&desk.state, bar)
+                );
+            }
+
+            /// **A device the natural-scroll mechanism never touched still
+            /// gets the old software flip** when the profile asks for it --
+            /// the other half of the same branch: with nothing registered,
+            /// `Registry::handled` answers false, and `pointer_axis` must
+            /// fall back to `profile.natural_scroll` exactly as it did
+            /// before #157.
+            #[test]
+            fn pointer_axis_still_flips_a_device_its_natural_scroll_mechanism_never_touched() {
+                let mut desk = russian_desk();
+                desk.state.profile.natural_scroll = true;
+                let bar = stand_in(&mut desk.state, "bar", Scripted::Top, bar(), Stand::solid());
+                move_pointer(&mut desk.state, (100.0, 15.0), 1);
+                let region = region(&desk);
+                crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 2);
+                assert!(
+                    scene_events(&desk.state, bar).iter().any(|event| event.kind
+                        == PointerKind::Wheel {
+                            angle: (0.0, 120.0),
+                            pixels: (0.0, 0.0),
+                        }),
+                    "no device claimed this natural scroll, so the old blanket flip must still \
+                     apply: {:?}",
+                    scene_events(&desk.state, bar)
+                );
+            }
+
             /// A button over 600..664 x 500..540 of the screen, nothing elsewhere.
             fn button_over_the_window(at: Point<f64, Logical>) -> crate::qml::hosted::Hit {
                 if (600.0..664.0).contains(&at.x) && (500.0..540.0).contains(&at.y) {

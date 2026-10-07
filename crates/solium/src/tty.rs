@@ -20,6 +20,7 @@
 //! have.
 
 use std::{
+    collections::HashMap,
     os::fd::{AsFd, BorrowedFd},
     path::PathBuf,
     time::Duration,
@@ -426,6 +427,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         input: None,
         animating: false,
         input_devices: 0,
+        live_devices: HashMap::new(),
         drm: None,
         signal: event_loop.get_signal(),
         active: true,
@@ -885,6 +887,11 @@ pub(crate) struct State {
     /// Zero is not a slow start, it is a session nobody can talk to — see the
     /// watchdog in `run`.
     input_devices: usize,
+    /// Every device still plugged in, by `sysname`, kept so a reload can hand
+    /// the new `config.lua` `input` section to devices already connected —
+    /// `Solium` itself only holds what the configuration says (#157), never a
+    /// live libinput handle, which only this backend has.
+    live_devices: HashMap<String, smithay::reexports::input::Device>,
     /// Held for the session's lifetime: dropping it closes the device.
     drm: Option<DrmDevice>,
     /// The buffer allocator and the node it belongs to.
@@ -2060,9 +2067,23 @@ fn route_input(state: &mut State, event: InputEvent<LibinputInputBackend>) {
 
 /// Route a libinput event through the same profile the nested backend uses.
 fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputInputBackend>) {
-    if let InputEvent::DeviceAdded { device } = &event {
-        state.input_devices += 1;
-        tracing::info!(device = device.name(), "input device");
+    match &event {
+        InputEvent::DeviceAdded { device } => {
+            state.input_devices += 1;
+            let info = crate::input::devices::DeviceInfo::of(device);
+            let settings = state.solium.input.config().resolve(&info);
+            let mut handle = device.clone();
+            let report = crate::input::devices::apply(&mut handle, &settings);
+            log_device(&info, &report);
+            state.live_devices.insert(info.id.clone(), handle);
+            state.solium.input.device_seen(info, report);
+        }
+        InputEvent::DeviceRemoved { device } => {
+            let info = crate::input::devices::DeviceInfo::of(device);
+            state.live_devices.remove(&info.id);
+            state.solium.input.device_gone(&info.id);
+        }
+        _ => {}
     }
 
     // The same entry point the nested backend uses: a binding, a profile or a
@@ -2088,12 +2109,60 @@ fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputIn
                 tracing::info!("stopping: asked to by a key");
                 state.signal.stop();
             }
-            Request::Reload => state.solium.reload(),
+            Request::Reload => {
+                state.solium.reload();
+                // The scripted half: `commands.rs` already stored whatever
+                // the new `config.lua` says in `state.solium.input`. This is
+                // the half only a backend can do, since only it holds real
+                // libinput devices to hand the new settings to.
+                reapply_input_settings(state);
+            }
         }
     }
 
     // Input changes what is on screen, and the vblank has no way to know that.
     state.render();
+}
+
+/// What a device got, for the log -- the issue's own "log what each device
+/// got", and the only thing that stands in for `sol.input_devices()` today:
+/// a device's settings are told to the log, not yet to Lua (#157's own
+/// deliberate cut, see the PR this lands in).
+fn log_device(info: &crate::input::devices::DeviceInfo, report: &crate::input::devices::Report) {
+    tracing::info!(
+        device = info.name,
+        kind = info.kind.as_str(),
+        applied = ?report.applied(),
+        unsupported = ?report.unsupported(),
+        "input device configured"
+    );
+}
+
+/// The backend half of a reload: `state.solium.reload()`, just before this
+/// runs, has already read the new `config.lua` and stored its `input`
+/// section (`commands.rs`'s `Command::Input`). What only a backend can do is
+/// hand the result to the libinput devices it is still holding open --
+/// `Solium` itself never sees a real device.
+///
+/// Collected into `seen` rather than told to `state.solium.input` as each
+/// device is reached: `live_devices` is borrowed mutably for the walk, and
+/// `state.solium` is a different field of the same `state`, but a method
+/// call on it while the walk is still open is easy to mis-borrow, and
+/// "every device wrote back to the registry once the walk is done" costs one
+/// small `Vec` to be sure of rather than clever about.
+fn reapply_input_settings(state: &mut State) {
+    let config = state.solium.input.config().clone();
+    let mut seen = Vec::new();
+    for device in state.live_devices.values_mut() {
+        let info = crate::input::devices::DeviceInfo::of(device);
+        let settings = config.resolve(&info);
+        let report = crate::input::devices::apply(device, &settings);
+        log_device(&info, &report);
+        seen.push((info, report));
+    }
+    for (info, report) in seen {
+        state.solium.input.device_seen(info, report);
+    }
 }
 
 /// Bind the Wayland socket and start accepting clients.

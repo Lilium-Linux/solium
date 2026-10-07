@@ -22,9 +22,13 @@
 -- Not here yet, because nothing reads them from this file
 -- ([#159](https://github.com/Lilium-Linux/solium/issues/159)):
 --
---   * Whether focus follows the pointer, natural scrolling, and the key held
---     to drag a window: SOLIUM_FORM_FACTOR picks all three, and
---     SOLIUM_DRAG_MODIFIER the key alone.
+--   * Whether focus follows the pointer, and the key held to drag a window:
+--     SOLIUM_FORM_FACTOR picks the first, SOLIUM_DRAG_MODIFIER the second.
+--     Natural scrolling moved out of this list in #157: it is `input`'s
+--     per-device-type `natural_scroll` below, which is what
+--     SOLIUM_FORM_FACTOR's own guess ("a laptop has a touchpad") was really
+--     standing in for -- a device's own type now decides it directly, which
+--     a form factor could only ever approximate.
 --   * The terminal `super+return` opens: SOLIUM_TERMINAL, or bind
 --     `super+return` yourself in `bindings` below.
 --   * The overview's animations, fixed in `lua/overview.lua` at 260 ms in and
@@ -643,6 +647,63 @@ local defaults = {
         -- behind the lock screen. false leaves the name to whoever else wants
         -- it. Nested, it is owned only on the bus SOLIUM_SESSION_BUS names.
         dbus_inhibit = true,
+    },
+
+    -- libinput device settings: tap-to-click, scrolling, acceleration and the
+    -- rest (#157). Applied to every device already connected and to each one
+    -- added later, and reapplied on reload.
+    --
+    -- Nothing here is read on the nested backend (`solium` inside another
+    -- compositor): there is no libinput device there to apply it to, only a
+    -- host window's own pointer and keyboard.
+    input = {
+        -- Defaults by device type. A touchpad is `Pointer` capability plus
+        -- `Gesture` -- the one libinput reports only for a driver that
+        -- recognises multi-finger gestures, which in practice means
+        -- touchpads and nothing else -- and a plain mouse is `Pointer`
+        -- without it.
+        touchpad = {
+            -- Tapping the pad clicks. libinput leaves this off by default,
+            -- which is why a bare compositor's touchpad does nothing to a
+            -- tap -- #157's whole opening complaint.
+            tap = true,
+            -- Scroll direction follows the content under your fingers,
+            -- rather than the surface. What every other touchpad on the
+            -- market does.
+            --
+            -- This used to come from SOLIUM_FORM_FACTOR, guessing "a laptop
+            -- has a touchpad" for every device at once. A device's own type
+            -- answers the real question directly -- a desktop with a USB
+            -- touchpad now gets this too, which the guess never could.
+            natural_scroll = true,
+        },
+        -- A mouse keeps libinput's own defaults: no tap (it has no pad to
+        -- tap), no natural scroll (a wheel is not a surface).
+        mouse = {},
+        keyboard = {},
+        touchscreen = {},
+        tablet_tool = {},
+        tablet_pad = {},
+        switch = {},
+
+        -- Per-device overrides, matched by name (a case-insensitive
+        -- substring of what `libinput list-devices` or `dmesg` calls it) or
+        -- by `vendor`/`product` (the same tool's "Vendor"/"Product", or
+        -- `lsusb`'s). At least one of the three is required -- an override
+        -- naming none of them matches nothing, on purpose, rather than
+        -- reaching every device on the machine.
+        --
+        -- Entries apply in order, over the type default above and over each
+        -- other: a later one changes only the fields it names, so two
+        -- overrides for the same device can each own a different setting.
+        --
+        --     devices = {
+        --         -- A touchpad that should not act like one.
+        --         { name = "SynPS/2 Synaptics", tap = false, natural_scroll = false },
+        --         -- A mouse, by its usb id, slowed down.
+        --         { vendor = 0x046d, product = 0xc52b, accel_speed = -0.3 },
+        --     },
+        devices = {},
     },
 
     -- Telling the rest of the session that Solium is its desktop.

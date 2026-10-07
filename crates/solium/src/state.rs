@@ -401,6 +401,10 @@ pub(crate) struct Solium {
     /// Per-form-factor input behaviour.
     pub(crate) profile: Profile,
 
+    /// libinput device settings: `config.lua`'s `input` section, and every
+    /// device met since start. See `input::devices` (#157).
+    pub(crate) input: crate::input::devices::Registry,
+
     /// The Lua runtime. Modes live in here, not in the compositor.
     pub(crate) scripts: Option<Scripts>,
 
@@ -1159,6 +1163,7 @@ impl Solium {
             seat,
             clock: Clock::new(),
             profile: Profile::from_env(),
+            input: crate::input::devices::Registry::default(),
             scripts: None,
             status: String::new(),
             script_grab: false,

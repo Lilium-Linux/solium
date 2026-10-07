@@ -10,15 +10,17 @@
 //! here. Compositor key bindings are intercepted before the focused client sees
 //! them; everything else is forwarded.
 
+pub(crate) mod devices;
 pub(crate) mod grab;
 pub(crate) mod profile;
 pub(crate) mod resize;
 
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputBackend, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchDownEvent,
-        TouchMotionEvent as TouchMotionEventTrait, TouchUpEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device as InputDevice, InputBackend,
+        InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        PointerMotionEvent, TouchDownEvent, TouchMotionEvent as TouchMotionEventTrait,
+        TouchUpEvent,
     },
     input::pointer::CursorImageStatus,
     input::{
@@ -1386,7 +1388,22 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
         }
     }
 
-    let direction = if state.profile.natural_scroll {
+    // A device whose natural scroll `config.lua`'s `input` section set is
+    // already flipped by libinput itself -- doing it again here would cancel
+    // the setting out rather than apply it twice as hard. Only a device the
+    // new mechanism never touched (not a touchpad, an unsupported device, or
+    // the nested backend, which has no libinput device to touch at all)
+    // falls back to the old blanket flip. `handled` is exactly what
+    // `devices::tests::registry_reports_a_device_as_handled_only_after_natural_scroll_was_actually_set`
+    // covers; see `input::devices`' module doc for why this branch has to
+    // exist at all. This `if` itself, driven end to end through a real
+    // `pointer_axis` call, is
+    // `state::tests::real_client::reflow_on_close::hosted::pointer_axis_does_not_flip_a_device_whose_natural_scroll_libinput_already_set`
+    // and the case right after it, where nothing is registered and the old
+    // flip still has to run.
+    let direction = if state.input.handled(&event.device().id()) {
+        1.0
+    } else if state.profile.natural_scroll {
         -1.0
     } else {
         1.0

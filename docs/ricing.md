@@ -787,6 +787,54 @@ left waiting.
 Nested, there is no display to power off: a monitor that is "off" is drawn
 black and then not drawn at all, so all of the above can be tried in a window.
 
+### Touchpad, mouse and keyboard settings
+
+A touchpad taps and scrolls naturally out of the box; a mouse does not get
+natural scroll, because a wheel is not a surface your fingers are on. Nothing
+else is decided for you: acceleration, left-handed, disable-while-typing and
+the rest are libinput's own defaults until `input` says otherwise, by device
+type:
+
+```lua
+return {
+    input = {
+        touchpad = { tap = false },        -- you don't want tap-to-click
+        mouse = { accel_profile = "flat" }, -- raw speed, no acceleration curve
+    },
+}
+```
+
+A setting here applies to every device of that type. One device on its own,
+by name (a case-insensitive substring of what `libinput list-devices` calls
+it) or by `vendor`/`product` (the same tool's "Vendor"/"Product", or `lsusb`'s):
+
+```lua
+return {
+    input = {
+        devices = {
+            -- An external touchpad that should act like a mouse.
+            { name = "SynPS/2 Synaptics", tap = false, natural_scroll = false },
+            -- A gaming mouse, slowed down, by usb id.
+            { vendor = 0x046d, product = 0xc52b, accel_speed = -0.3 },
+        },
+    },
+}
+```
+
+Applied when the device is plugged in and again on every reload, so editing
+this and pressing `super+shift+r` is enough -- no replug, no restart. The
+running compositor logs what each device got, name and all. Every option is
+on `sol.InputOptions` in editor completion.
+
+**This replaced `SOLIUM_FORM_FACTOR`'s natural scroll.** The environment
+variable used to guess "a laptop has a touchpad" for the whole machine at
+once; a device's own type now answers that directly, so a desktop with a USB
+touchpad gets natural scroll too. `SOLIUM_FORM_FACTOR` still picks
+focus-follows-mouse and the drag modifier (#159).
+
+Nested, none of this reaches anything: there is no libinput device in a
+window inside another compositor, only the host's own pointer and keyboard.
+
 ### One workspace per screen, or one for the desk
 
 Each monitor has its own workspace in view by default: `super+2` switches the
