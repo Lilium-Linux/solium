@@ -9,6 +9,31 @@ use super::*;
 /// `real_client::reflow_on_close::hosted::a_done_that_acts_again_each_time_it_is_told_costs_rounds_not_the_session`.
 pub(super) const ATTEMPT_ROUNDS: usize = 16;
 
+/// The pure decision behind
+/// [`Solium::warn_about_unwatched_configured_paths`]: which of `configured`
+/// is not covered by `roots` *and* has not already been added to `warned` --
+/// inserting into `warned` as it goes, so a path seen on an earlier reload is
+/// not returned again.
+///
+/// Split out the same way [`crate::autoreload::resolve_roots`] is split from
+/// `watch_roots`: a test drives this with plain `PathBuf`s it makes up,
+/// rather than a real pane style or shell scene that would have to resolve
+/// against the filesystem to be worth anything.
+/// `tests::an_unwatched_path_is_returned_once`,
+/// `tests::a_watched_path_is_never_returned`,
+/// `tests::an_already_warned_path_is_not_returned_again`.
+fn newly_unwatched_paths(
+    configured: Vec<std::path::PathBuf>,
+    roots: &[std::path::PathBuf],
+    warned: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    configured
+        .into_iter()
+        .filter(|path| !crate::autoreload::path_is_watched(path, roots))
+        .filter(|path| warned.insert(path.clone()))
+        .collect()
+}
+
 impl Solium {
     /// Turn what a script aimed at into what the compositor holds.
     ///
@@ -823,6 +848,50 @@ impl Solium {
         self.autoreload_watcher.set_roots(&roots);
     }
 
+    /// Warn once per path when a shell scene, pane style, or loading scene a
+    /// script configured lives somewhere automatic reload does not watch --
+    /// the gap `autoreload`'s module doc names: a plain absolute path set
+    /// directly in `config.lua`, with none of `SOLIUM_SHELL_SCENE`/
+    /// `SOLIUM_PANE`/`SOLIUM_QML_TITLEBAR`/`SOLIUM_LOADING` naming it instead
+    /// (those are already folded into [`crate::autoreload::watch_roots`] by
+    /// its own `override_roots`, so they never reach this function's warning).
+    ///
+    /// Called from `start_scripts`, after every reload as well as cold start,
+    /// so a path a reload just changed to is checked too. Padded with the
+    /// shipped `qml/` and `lua/` directories before comparing, so the
+    /// ordinary case -- nothing overridden, every scene the one Solium ships
+    /// -- never warns.
+    /// `tests::warns_once_for_a_pane_style_set_outside_every_watched_root`,
+    /// `tests::does_not_warn_for_a_shipped_default_style`,
+    /// `tests::automatic_false_warns_about_nothing`.
+    pub(crate) fn warn_about_unwatched_configured_paths(&mut self) {
+        if !self.autoreload_settings.automatic {
+            return;
+        }
+        let mut roots = crate::autoreload::watch_roots();
+        roots.push(crate::assets::qml());
+        roots.push(crate::assets::lua());
+
+        let mut configured: Vec<std::path::PathBuf> = self
+            .surfaces
+            .iter()
+            .map(|surface| surface.declared.scene.clone())
+            .collect();
+        if let Some(style) = crate::decoration::style_file(self.decorations.style()) {
+            configured.push(style);
+        }
+        configured.push(crate::pane::loading_source(self.loading.scene.as_deref()));
+
+        for path in newly_unwatched_paths(configured, &roots, &mut self.autoreload_unwatched_warned)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                "set outside every directory automatic reload watches (#223); \
+                 editing it will not reload Solium on its own"
+            );
+        }
+    }
+
     /// Take the scripts, and act on whatever they asked for while loading.
     pub(crate) fn start_scripts(&mut self, scripts: Option<Scripts>) {
         // Before the scripts run, so `sol.keyboard()` answers truthfully even
@@ -842,6 +911,7 @@ impl Solium {
         self.keyboard_told.forget();
         self.apply(outcome);
         self.keyboard_changed();
+        self.warn_about_unwatched_configured_paths();
     }
 
     pub(crate) fn trigger_monitors_changed(&mut self) {
@@ -906,5 +976,45 @@ impl Solium {
         let handled = outcome.handled;
         self.apply(outcome);
         handled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newly_unwatched_paths;
+    use std::{collections::HashSet, path::PathBuf};
+
+    /// A path with no root covering it is reported, once.
+    #[test]
+    fn an_unwatched_path_is_returned_once() {
+        let path = PathBuf::from("/home/me/dev/my-shell/Shell.qml");
+        let mut warned = HashSet::new();
+        assert_eq!(
+            newly_unwatched_paths(vec![path.clone()], &[], &mut warned),
+            vec![path.clone()]
+        );
+        assert!(warned.contains(&path));
+    }
+
+    /// A root covering the path (an exact root, or an ancestor directory)
+    /// means nothing is reported.
+    #[test]
+    fn a_watched_path_is_never_returned() {
+        let root = PathBuf::from("/home/me/.config/solium");
+        let path = root.join("qml").join("panes").join("mine").join("Pane.qml");
+        let mut warned = HashSet::new();
+        assert!(newly_unwatched_paths(vec![path], &[root], &mut warned).is_empty());
+        assert!(warned.is_empty());
+    }
+
+    /// Having warned about a path once, a later call with the same `warned`
+    /// set does not return it again -- the log line it drove is not meant to
+    /// repeat every reload.
+    #[test]
+    fn an_already_warned_path_is_not_returned_again() {
+        let path = PathBuf::from("/home/me/dev/my-shell/Shell.qml");
+        let mut warned = HashSet::new();
+        warned.insert(path.clone());
+        assert!(newly_unwatched_paths(vec![path], &[], &mut warned).is_empty());
     }
 }

@@ -341,6 +341,13 @@ pub(crate) struct Solium {
     /// first is still counting down. `tty.rs` and `winit.rs` both clear it
     /// the moment that timer fires.
     pub(crate) autoreload_timer_armed: bool,
+    /// Configured paths `state/commands.rs`'s
+    /// `warn_about_unwatched_configured_paths` has already warned about
+    /// falling outside every directory automatic reload watches -- so the
+    /// warning is said once per path for the life of the process, the same
+    /// shape `scripted::Surface`'s own `missing_logged` keeps a log line from
+    /// repeating every reload.
+    pub(crate) autoreload_unwatched_warned: std::collections::HashSet<std::path::PathBuf>,
 
     /// Every selection a script has named, and where each is being carried.
     ///
@@ -1175,6 +1182,7 @@ impl Solium {
             autoreload_watcher: crate::autoreload::Watcher::new(),
             autoreload_debounce: crate::autoreload::Debounce::default(),
             autoreload_timer_armed: false,
+            autoreload_unwatched_warned: std::collections::HashSet::new(),
             groups: crate::group::Groups::default(),
             keymap: None,
             keyboard: crate::keymap::State::initial(),

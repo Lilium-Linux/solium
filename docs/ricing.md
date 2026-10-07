@@ -468,6 +468,14 @@ is collapsed into the one reload it earns, `quiet_ms` after the last write in
 it, not one reload per write. `automatic = false` watches nothing at all,
 rather than merely never finishing the wait.
 
+Developing a shell, a pane style or a titlebar as its own project — pointed
+at with `SOLIUM_SHELL_SCENE`, `SOLIUM_PANE`, `SOLIUM_QML_TITLEBAR` or
+`SOLIUM_LOADING` — is watched too, wherever that is, even well outside
+`~/.config/solium`. The one case this does not reach is an absolute path
+written directly in `config.lua` with none of those set: saving it reloads
+nothing, and the log says once that it was configured outside everywhere
+automatic reload watches.
+
 ### Your keyboard
 
 ```lua

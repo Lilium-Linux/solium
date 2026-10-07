@@ -18,6 +18,17 @@
 //!    loading scenes, a wallpaper, a shell) plus, when `SOLIUM_LUA_INIT`
 //!    names somewhere else, that file's own directory too. See
 //!    [`resolve_roots`].
+//!  * *The officially supported overrides are roots too, wherever they
+//!    point.* `SOLIUM_SHELL_SCENE`, `SOLIUM_PANE`, `SOLIUM_QML_TITLEBAR` and
+//!    `SOLIUM_LOADING` are how a shell, a pane style or titlebar, or a
+//!    loading scene is developed as its own project for one run (#223's own
+//!    report), so the directory each one names is folded in too, even well
+//!    outside `~/.config/solium`. See [`override_root_for`]. The same
+//!    absolute path named in `config.lua` directly, with none of these set,
+//!    is a gap this does not close -- `state/commands.rs`'s
+//!    `warn_about_unwatched_configured_paths` says so instead of leaving it
+//!    silent, and `docs/ricing.md`'s "Reloading without pressing anything"
+//!    carries the same caveat.
 //!  * *Recursive.* inotify has no flag for that, so [`watch_tree`] walks each
 //!    root once, when [`Watcher::set_roots`] is called (startup, and again
 //!    after every reload -- `state/commands.rs`'s `configure_autoreload`),
@@ -151,16 +162,29 @@ impl Debounce {
 /// is watched too, unless it already *is* the user's.
 /// `tests::the_configs_own_directory_is_added_when_it_differs`,
 /// `tests::the_configs_own_directory_is_not_duplicated_when_it_is_the_users`.
-fn resolve_roots(user_dir: Option<&Path>, config: &Path) -> Vec<PathBuf> {
-    let Some(user_dir) = user_dir.filter(|dir| dir.is_dir()) else {
-        return Vec::new();
-    };
-    let mut roots = vec![user_dir.to_path_buf()];
-    if let Some(parent) = config.parent()
-        && parent != user_dir
-        && parent.is_dir()
-    {
-        roots.push(parent.to_path_buf());
+///
+/// **`overrides` are added unconditionally, even with no user directory at
+/// all.** Unlike the shipped `lua/`, a directory named by
+/// `SOLIUM_SHELL_SCENE`/`SOLIUM_PANE`/`SOLIUM_QML_TITLEBAR`/`SOLIUM_LOADING`
+/// is not a system directory -- it is wherever this run was explicitly told
+/// to look, and the whole point of the override is that nothing else need be
+/// set up first. `tests::overrides_are_watched_even_with_no_user_directory`,
+/// `tests::overrides_already_covered_by_a_root_are_not_duplicated`.
+fn resolve_roots(user_dir: Option<&Path>, config: &Path, overrides: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(user_dir) = user_dir.filter(|dir| dir.is_dir()) {
+        roots.push(user_dir.to_path_buf());
+        if let Some(parent) = config.parent()
+            && parent != user_dir
+            && parent.is_dir()
+        {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    for over in overrides {
+        if !roots.contains(over) {
+            roots.push(over.clone());
+        }
     }
     roots
 }
@@ -174,7 +198,90 @@ pub(crate) fn watch_roots() -> Vec<PathBuf> {
     resolve_roots(
         crate::script::Scripts::user_config_dir().as_deref(),
         &crate::script::Scripts::config_path(),
+        &override_roots(),
     )
+}
+
+/// The environment variables a shell, a pane style or titlebar, or a loading
+/// scene can be pointed at for one run, in the order each is tried against
+/// its own setting (`lua/shell.lua`'s `scene`, `decoration::chosen`,
+/// `pane::loading_source`) -- not that it matters here, since every one of
+/// them is folded in the same way.
+const OVERRIDE_VARS: [&str; 4] = [
+    "SOLIUM_SHELL_SCENE",
+    "SOLIUM_PANE",
+    "SOLIUM_QML_TITLEBAR",
+    "SOLIUM_LOADING",
+];
+
+/// What directory [`resolve_roots`] should watch for one override's raw
+/// value, or `None` for a bare style name -- already somewhere
+/// `resolve_roots` watches on its own, the same as a bare `SOLIUM_PANE=mine`
+/// resolving under `~/.config/solium/qml/panes/` -- or a value that names
+/// nowhere on this machine.
+///
+/// Parameterised on the value rather than reading the variable itself, the
+/// same split `decoration::named_by` makes and for the same reason: a test
+/// that exported one of these would decide every other test sharing the
+/// process. `tests::override_root_for_a_bare_name_is_none`,
+/// `tests::override_root_for_a_path_is_its_directory`,
+/// `tests::override_root_for_a_directory_is_itself`,
+/// `tests::override_root_for_a_path_nowhere_on_this_machine_is_none`.
+fn override_root_for(value: &str) -> Option<PathBuf> {
+    if value.is_empty() {
+        return None;
+    }
+    // The same "a separator or `.qml` makes it a path" rule `style::resolve`
+    // and `decoration::qml_path` already use for exactly these settings --
+    // a bare name is a search under places already watched, not a location
+    // of its own.
+    if !value.contains('/') && !value.ends_with(".qml") {
+        return None;
+    }
+    let expanded = expand_home(value);
+    let path = PathBuf::from(&expanded);
+    let dir = if path.is_dir() {
+        path
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    dir.is_dir().then_some(dir)
+}
+
+/// [`override_root_for`], over every variable in [`OVERRIDE_VARS`] set in
+/// this process's real environment -- called from [`watch_roots`] only, so a
+/// test drives the pure half above instead.
+fn override_roots() -> Vec<PathBuf> {
+    OVERRIDE_VARS
+        .iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .filter_map(|value| override_root_for(&value))
+        .collect()
+}
+
+/// Expand a leading `~`, mirroring `decoration::shellexpand` and
+/// `pane::expand`: read from an environment variable, nothing between here
+/// and the filesystem would have done it.
+fn expand_home(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => {
+            std::env::var("HOME").map_or_else(|_| path.to_owned(), |home| format!("{home}/{rest}"))
+        }
+        None => path.to_owned(),
+    }
+}
+
+/// Whether `path` is already somewhere automatic reload watches -- `path`
+/// itself, or any directory under one of `roots`.
+///
+/// Used both ways: a hit means `watch_roots` already covers a configured
+/// scene (nothing to warn about); a miss, checked by
+/// `state/commands.rs`'s `warn_about_unwatched_configured_paths` against
+/// `roots` padded with the shipped asset directories, means it is worth
+/// saying so. `tests::a_path_under_a_root_is_watched`,
+/// `tests::a_path_beside_a_root_is_not`.
+pub(crate) fn path_is_watched(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 const MASK: inotify::WatchMask = inotify::WatchMask::CREATE
@@ -391,7 +498,11 @@ mod tests {
     #[test]
     fn no_user_directory_watches_nothing() {
         assert_eq!(
-            resolve_roots(None, Path::new("/opt/solium/share/solium/lua/init.lua")),
+            resolve_roots(
+                None,
+                Path::new("/opt/solium/share/solium/lua/init.lua"),
+                &[]
+            ),
             Vec::<PathBuf>::new()
         );
     }
@@ -402,6 +513,7 @@ mod tests {
         let roots = resolve_roots(
             Some(&user_dir),
             Path::new("/opt/solium/share/solium/lua/init.lua"),
+            &[],
         );
         assert_eq!(roots, vec![user_dir.clone()]);
         let _ = fs::remove_dir_all(&user_dir);
@@ -413,7 +525,7 @@ mod tests {
         // Stands in for `SOLIUM_LUA_INIT` naming a file outside the user's
         // own directory.
         let config_dir = tmp("config-dir-plus-config");
-        let roots = resolve_roots(Some(&user_dir), &config_dir.join("init.lua"));
+        let roots = resolve_roots(Some(&user_dir), &config_dir.join("init.lua"), &[]);
         assert_eq!(
             roots.len(),
             2,
@@ -428,9 +540,110 @@ mod tests {
     #[test]
     fn the_configs_own_directory_is_not_duplicated_when_it_is_the_users() {
         let user_dir = tmp("user-dir-dup");
-        let roots = resolve_roots(Some(&user_dir), &user_dir.join("init.lua"));
+        let roots = resolve_roots(Some(&user_dir), &user_dir.join("init.lua"), &[]);
         assert_eq!(roots, vec![user_dir.clone()]);
         let _ = fs::remove_dir_all(&user_dir);
+    }
+
+    /// The concrete failure scenario the review reported: a shell developed
+    /// as its own project, named by `SOLIUM_SHELL_SCENE`, with no
+    /// `~/.config/solium` in the picture at all.
+    #[test]
+    fn overrides_are_watched_even_with_no_user_directory() {
+        let shell_dir = tmp("override-no-user-dir");
+        let roots = resolve_roots(
+            None,
+            Path::new("/opt/solium/share/solium/lua/init.lua"),
+            std::slice::from_ref(&shell_dir),
+        );
+        assert_eq!(
+            roots,
+            vec![shell_dir.clone()],
+            "an override names somewhere real; the lack of a user directory must not drop it"
+        );
+        let _ = fs::remove_dir_all(&shell_dir);
+    }
+
+    #[test]
+    fn overrides_already_covered_by_a_root_are_not_duplicated() {
+        let user_dir = tmp("override-already-covered");
+        let roots = resolve_roots(
+            Some(&user_dir),
+            &user_dir.join("init.lua"),
+            std::slice::from_ref(&user_dir),
+        );
+        assert_eq!(
+            roots,
+            vec![user_dir.clone()],
+            "the override names exactly the directory already watched"
+        );
+        let _ = fs::remove_dir_all(&user_dir);
+    }
+
+    #[test]
+    fn override_root_for_a_bare_name_is_none() {
+        assert_eq!(
+            override_root_for("mine"),
+            None,
+            "a bare SOLIUM_PANE=mine resolves under the user's own tree, already watched"
+        );
+    }
+
+    #[test]
+    fn override_root_for_an_empty_value_is_none() {
+        assert_eq!(override_root_for(""), None);
+    }
+
+    #[test]
+    fn override_root_for_a_path_is_its_directory() {
+        let dir = tmp("override-root-path");
+        let scene = write(&dir, "shell.qml", "");
+        assert_eq!(
+            override_root_for(scene.to_str().expect("utf-8 temp path")),
+            Some(dir.clone()),
+            "a file is watched by watching the directory holding it"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn override_root_for_a_directory_is_itself() {
+        let dir = tmp("override-root-dir");
+        assert_eq!(
+            override_root_for(&format!("{}/", dir.display())),
+            Some(dir.clone()),
+            "a bundle directory named outright is watched directly"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn override_root_for_a_path_nowhere_on_this_machine_is_none() {
+        assert_eq!(
+            override_root_for("/does/not/exist/anywhere/shell.qml"),
+            None,
+            "nothing to watch for a directory that is not there"
+        );
+    }
+
+    #[test]
+    fn a_path_under_a_root_is_watched() {
+        let root = PathBuf::from("/home/me/dev/my-shell");
+        assert!(path_is_watched(
+            &root.join("qml").join("Shell.qml"),
+            std::slice::from_ref(&root)
+        ));
+        assert!(
+            path_is_watched(&root, std::slice::from_ref(&root)),
+            "the root itself counts"
+        );
+    }
+
+    #[test]
+    fn a_path_beside_a_root_is_not() {
+        let root = PathBuf::from("/home/me/dev/my-shell");
+        let sibling = PathBuf::from("/home/me/dev/my-shell-notes/Shell.qml");
+        assert!(!path_is_watched(&sibling, std::slice::from_ref(&root)));
     }
 
     #[test]

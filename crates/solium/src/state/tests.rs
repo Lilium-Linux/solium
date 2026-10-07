@@ -128,6 +128,86 @@ fn automatic_false_leaves_nothing_watched() {
     );
 }
 
+/// **A loading scene set outside every watched root is warned about, once**
+/// (#223 review): the gap `autoreload`'s module doc names -- a plain
+/// absolute path, with no `SOLIUM_LOADING` naming it instead to fold its
+/// directory into `watch_roots` through `override_roots`.
+#[test]
+fn warns_once_for_a_loading_scene_set_outside_every_watched_root() {
+    if std::env::var_os("SOLIUM_LOADING").is_some() {
+        // The environment has already chosen a loading scene for this
+        // process; this test is not the one to say anything about that.
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "solium-state-test-unwatched-loading-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let scene = dir.join("Loading.qml");
+    std::fs::write(&scene, "").expect("writing a throwaway scene file");
+
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.autoreload_settings.automatic = true;
+    state.loading.scene = Some(scene.to_str().expect("utf-8 temp path").to_string());
+
+    state.warn_about_unwatched_configured_paths();
+    assert!(
+        state.autoreload_unwatched_warned.contains(&scene),
+        "a loading scene outside the watched roots and the shipped assets must be warned about"
+    );
+
+    state.warn_about_unwatched_configured_paths();
+    assert_eq!(
+        state.autoreload_unwatched_warned.len(),
+        1,
+        "checking again must not warn about the same path twice"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The shipped default loading scene never warns**: with nothing
+/// configured, `pane::loading_source` resolves under the shipped `qml/`
+/// directory, which [`Solium::warn_about_unwatched_configured_paths`] pads
+/// the watched roots with for exactly this reason.
+#[test]
+fn does_not_warn_for_the_shipped_default_loading_scene() {
+    if std::env::var_os("SOLIUM_LOADING").is_some() {
+        return;
+    }
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.autoreload_settings.automatic = true;
+
+    state.warn_about_unwatched_configured_paths();
+
+    assert!(
+        state.autoreload_unwatched_warned.is_empty(),
+        "the shipped default must not be reported as unwatched: {:?}",
+        state.autoreload_unwatched_warned
+    );
+}
+
+/// **`automatic = false` warns about nothing**, however configured: the
+/// warning is about what automatic reload does not cover, so it has nothing
+/// to say while automatic reload is off altogether.
+#[test]
+fn automatic_false_warns_about_nothing() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.autoreload_settings.automatic = false;
+    state.loading.scene = Some("/does/not/exist/anywhere/Loading.qml".to_string());
+
+    state.warn_about_unwatched_configured_paths();
+
+    assert!(state.autoreload_unwatched_warned.is_empty());
+}
+
 /// **What the notice at the end of a reload is looking at.**
 ///
 /// The recovery half of #116 shipped with no test at all, which is how the
