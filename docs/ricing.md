@@ -1238,6 +1238,37 @@ in a grid the opposite key puts both back; `move = "split"` makes it split the
 neighbour's tile instead, as Hyprland's `movewindow` does. [modes.md](modes.md#focus-and-move-by-direction)
 has what each layout does with a direction.
 
+### Click, hover and an empty desktop
+
+A press on empty desktop, the wallpaper, or a shell surface that does not take
+the keyboard clears keyboard focus, so a window you clicked away from stops
+taking what you type. Turn that off in `focus`:
+
+```lua
+return {
+    focus = { clear_on_empty_click = false },
+}
+```
+
+Whether moving the pointer over a window focuses it is a per-mode question,
+not a single on/off switch: floating -- the desktop, with no layout in charge
+and windows free to overlap -- focuses on click only by default, because a
+window you are not using sits under the pointer on the way to the one you
+want. Every other mode keeps this machine's own answer (`SOLIUM_FORM_FACTOR`,
+[#159](https://github.com/Lilium-Linux/solium/issues/159)), which on a
+desktop or a laptop is focus-follows-mouse, the same as every tiling
+compositor people arrive from. Name a mode to change its own answer:
+
+```lua
+return {
+    focus = { modes = { floating = "follow", scrolling = "click" } },
+}
+```
+
+`lua/modes.lua` is what turns this into `sol.focus_mode`, on every mode
+change as well as at load, so a reload keeps whichever model the session was
+already in.
+
 ### Your own mode
 
 A mode is a Lua module that reacts to events — a window opening, closing or
