@@ -92,6 +92,13 @@ render_elements! {
     /// beside it, which is the other element written here for the same kind of
     /// reason.
     Rounded = crate::pass::Rounded,
+    /// A client surface drawn through its client's rounded rectangle, in its
+    /// own place: rounding with no capture. See `crate::clip`.
+    ClippedWindow = RescaleRenderElement<crate::clip::Clipped>,
+    /// The same, cut to its tile.
+    ClippedTiled = CropRenderElement<RescaleRenderElement<crate::clip::Clipped>>,
+    /// The same inside a warp's capture, drawn at real size as `Window2` is.
+    Clipped2 = crate::clip::Clipped,
 }
 
 /// The two questions that together mean "will a later frame differ from this
@@ -328,7 +335,8 @@ pub(crate) fn over_part(
 pub(crate) enum Route {
     /// Captured, and drawn through the warp.
     Warp,
-    /// The flat path, through its style's client pass if it has one.
+    /// The flat path, its client rounded where it is if its style says so
+    /// (`tests::a_style_with_a_radius_is_drawn_inline`).
     Flat,
 }
 
@@ -396,8 +404,9 @@ impl Prepared {
 }
 
 /// Capture a texture for every window that cannot be drawn from its surfaces
-/// where they are: one whose transform is not a rectangle, and one whose style
-/// masks its client.
+/// where they are: one whose transform is not a rectangle. A rounded window is
+/// drawn from its surfaces, each through the clipped programs this compiles
+/// (`tests::a_style_with_a_radius_is_drawn_inline`).
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
 /// Note on the clock: this walk calls [`Solium::drawn`], which samples the
@@ -472,6 +481,15 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             release(state);
             continue;
         };
+        // A rounded client's programs, compiled here, between frames, so the
+        // first frame that draws it has them: `elements` never compiles
+        // (`clipped`). Before the cull and the guard below, where a rounded
+        // pane now stops, wanting no capture
+        // (`tests::a_pane_neither_warped_nor_styled_wants_no_capture`); the
+        // rounded shot of `dev/pacing-nested.sh` draws through them.
+        if declared_rounding(state, pane).is_some() {
+            let _ = state.programs.clip(renderer);
+        }
         // **A pane no monitor shows is not captured**, and this is the same
         // question `elements` asks one screen at a time before it draws
         // anything: `!global.overlaps(screen)`, the containment rule that
@@ -497,13 +515,12 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // `frame_insets` gives an undecorated window none. So the question is
         // asked of the rectangle `elements` will ask it of.
         //
-        // Being wrong in that direction is *not* a blank corner, which is what
-        // this comment used to say: `Prepared::pass` answering `None` falls
-        // through to the ordinary surface path below, so a wrongly culled pane
-        // is a SQUARE-CORNERED window for one frame. Worth knowing, because it
-        // sets how hard to lean -- the failure is cosmetic and self-correcting,
-        // while being wrong the other way is a capture per window per frame
-        // for the life of the session.
+        // Being wrong in that direction is *not* a blank window: a pane with
+        // no capture is drawn from its surfaces by the flat path, rounded or
+        // not, so a wrongly culled warp is a FLAT window for one frame. Worth
+        // knowing, because it sets how hard to lean -- the failure is cosmetic
+        // and self-correcting, while being wrong the other way is a capture
+        // per window per frame for the life of the session.
         //
         // Costed honestly: `pane_outer_of` is two linear `Panes::get` scans
         // (one through `insets_of`) plus an `element_location`, so this is
@@ -607,11 +624,10 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             continue;
         }
 
-        // Flat, so its style may still want its client masked. Asked *after*
-        // the warp branch and never as well as it, because the two want
-        // different sizes -- and because a deformed window loses its effects
-        // for the length of the deform, the same recorded limit its bleed
-        // already has. See `flat_window_elements`.
+        // Flat, so its style may want a client pass: reached by nothing now
+        // that rounding is drawn inline, which the guard above lets go with no
+        // capture (`tests::a_pane_neither_warped_nor_styled_wants_no_capture`).
+        // The next commit deletes it.
         if let Some((job, then)) = client_job_for(state, renderer, pane, &window, outer, &declared)
         {
             match (crate::offscreen::kept(state, &job), then) {
@@ -648,8 +664,8 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     }
 }
 
-/// What a capture becomes once drawn: `dev/fence-check.sh` has a warp and a
-/// pass, `dev/present-check.sh`'s menu case a warp and its popups. A warp
+/// What a capture becomes once drawn: `dev/fence-check.sh` has two warps,
+/// `dev/present-check.sh`'s menu case a warp and its popups. A warp
 /// carries its pane and the [`Shape`] its commit is moved by; its popups' warp
 /// the part of the pane they cover as well.
 #[derive(Debug)]
@@ -698,6 +714,89 @@ fn declared_effects(
         .map(crate::decoration::Decoration::effects)
         .unwrap_or_default()
         .to_vec()
+}
+
+/// The rounding a pane's style declares, if any: the one inline effect today.
+/// `tests::a_style_with_no_radius_wraps_nothing`, `tests::a_style_with_a_radius_is_drawn_inline`,
+/// `tests::a_none_effect_does_not_hide_the_rounding_behind_it`, `tests::of_two_roundings_the_first_wins`.
+pub(crate) fn rounding(
+    effects: &[solium_effects::fragment::Effect],
+) -> Option<solium_effects::fragment::Effect> {
+    effects.iter().copied().find(|effect| {
+        effect.inputs() == solium_effects::fragment::Inputs::Inline && !effect.is_none_effect()
+    })
+}
+
+/// The rounding a pane's style declares, read without borrowing the state.
+/// A fullscreen pane has no frame, so none: `decoration::tests::a_fullscreen_window_is_drawn_square`.
+fn declared_rounding(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+) -> Option<solium_effects::fragment::Effect> {
+    rounding(&declared_effects(state, pane))
+}
+
+/// What a pane's client is clipped with this frame: its rounding and the
+/// programs `prepare` compiled, or `None` (the path every unstyled window
+/// takes, untouched). **Never compiles**: `elements` may run with an output
+/// bound, where a compile's `make_current` is the frozen-compositor failure
+/// `Prepared`'s doc describes; `prepare` compiles them, between frames.
+fn clipped(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+) -> Option<(solium_effects::fragment::Effect, crate::pass::ClipPrograms)> {
+    let effect = declared_rounding(state, pane)?;
+    Some((effect, state.programs.clip_compiled()?.clone()))
+}
+
+/// A client's clip on the flat path: the client's rectangle as drawn,
+/// `drawn`, taken back through the rescale by `factor` about `origin` into
+/// the surfaces' own pixels, where `clip::input_to_geo` measures. At 1:1 it
+/// is `drawn` itself. `tests::a_zoomed_clients_clip_is_the_whole_client`.
+pub(crate) fn drawn_clip(
+    drawn: Rectangle<i32, Physical>,
+    origin: Point<i32, Physical>,
+    factor: Scale<f64>,
+    radii: solium_effects::fragment::Corners,
+) -> crate::clip::Clip {
+    let back = |at: i32, about: i32, by: f64| f64::from(about) + f64::from(at - about) / by;
+    crate::clip::Clip {
+        rect: Rectangle::new(
+            (
+                back(drawn.loc.x, origin.x, factor.x),
+                back(drawn.loc.y, origin.y, factor.y),
+            )
+                .into(),
+            (
+                f64::from(drawn.size.w) / factor.x,
+                f64::from(drawn.size.h) / factor.y,
+            )
+                .into(),
+        ),
+        radii,
+        origin,
+        factor,
+    }
+}
+
+/// A client's clip inside a warp's capture, which draws it at real size with
+/// its tree at `origin`: its `geometry` (relative to the tree) there, cut to
+/// the `hole` the frame leaves it from `origin`, which is what the capture
+/// holds of it. `tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`.
+pub(crate) fn capture_clip(
+    origin: Point<i32, Physical>,
+    hole: Size<i32, Physical>,
+    geometry: Rectangle<i32, Physical>,
+    radii: solium_effects::fragment::Corners,
+) -> crate::clip::Clip {
+    let room = Rectangle::new(origin, hole);
+    let client = Rectangle::new(origin + geometry.loc, geometry.size);
+    crate::clip::Clip {
+        rect: client.intersection(room).unwrap_or(room).to_f64(),
+        radii,
+        origin,
+        factor: Scale::from(1.0),
+    }
 }
 
 /// Which capture a pane wants this pass: its warp's, its style's client
@@ -1728,6 +1827,10 @@ fn panes(
         // space: a frame that takes nothing and floats over the window -- a bar
         // that appears on hover, a border that does not push the client around
         // -- is a decoration too.
+        //
+        // A style's rounding and its programs, asked once here, outside the
+        // walk, which holds the state: `None` for every unstyled window.
+        let rounded = clipped(state, pane);
         pane_pieces(elements, |elements, piece| match piece {
             Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
             Piece::Client => {
@@ -1818,6 +1921,31 @@ fn panes(
                         output_scale,
                         frame.opacity,
                     );
+                // A style's rounding: each surface wrapped, in its own place,
+                // and cut to the client's rectangle as drawn, taken back
+                // through the zoom into the surfaces' own pixels
+                // (`clip::tests::input_to_geo_maps_each_corner_of_a_surface_onto_the_client`,
+                // `tests::a_zoomed_clients_clip_is_the_whole_client`). `None`
+                // for every unstyled window, which takes the lines after this
+                // unchanged.
+                if let Some((effect, programs)) = &rounded {
+                    let clip = drawn_clip(
+                        Rectangle::new(corner, client.size.to_physical_precise_round(scale)),
+                        origin,
+                        fitting.factor,
+                        crate::pass::physical_radii(*effect, scale),
+                    );
+                    elements.extend(window_elements.into_iter().filter_map(|element| {
+                        fitted(
+                            crate::clip::Clipped::new(element, clip, programs.clone()),
+                            origin,
+                            fitting,
+                            output_scale,
+                        )
+                        .map(Fitted::into_clipped)
+                    }));
+                    return;
+                }
                 // Cut to the tile when there is anything to cut, and a surface
                 // the cut leaves nothing of -- a subsurface wholly past the
                 // tile's edge -- is dropped: `CropRenderElement` has no empty
@@ -2163,6 +2291,9 @@ pub(crate) fn flat_window_elements(
     let origin =
         Point::<i32, Logical>::from((insets.left, insets.top)).to_physical_precise_round(scale);
 
+    // Asked before the walk, which holds the state.
+    let rounded = pane.and_then(|pane| clipped(state, pane));
+
     // The same `PANE_ORDER` a flat window goes through, so a tilted window
     // carries its layers in the order it would have had standing still. A
     // second sequence of calls here is how a deformed window would come to have
@@ -2173,26 +2304,35 @@ pub(crate) fn flat_window_elements(
                 chrome(state, renderer, elements, pane, depth, drawing);
             }
         }
-        // **A deformed window loses its client effects too, for the same
-        // reason and with the same shape as the bleed above.** No pass is run
-        // here, so a window with a `client.radius` has square corners for the
-        // length of a genie and rounded ones the moment it lands.
-        //
-        // It is not an oversight and it is not one line. A pass needs a
-        // texture of the client alone, and the texture it would be drawn into
-        // is the one this function is filling -- so the pane would need two
-        // captures in one pass, where `render::wanted_capture` deliberately
-        // picks one. The honest fix is the same fix the bleed needs: capture
-        // at the decoration's widest canvas and map the mesh over it, which is
-        // `pane_job`'s change and not this one's.
-        //
-        // What it costs meanwhile is visible but is not wrong pixels, which is
-        // the same trade the bleed already makes.
-        Piece::Client => elements.extend(
-            client_piece(renderer, window, origin, output_scale)
-                .into_iter()
-                .map(Element::Window2),
-        ),
+        // A style's rounding, drawn here as on the flat path, so a deformed
+        // window keeps its corners: each surface through the clipped
+        // programs, at real size, cut to what the capture holds of the client
+        // (`tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`).
+        Piece::Client => {
+            let surfaces = client_piece(renderer, window, origin, output_scale);
+            match &rounded {
+                Some((effect, programs)) => {
+                    let clip = capture_clip(
+                        origin,
+                        Size::<i32, Logical>::from((
+                            outer.w - insets.horizontal(),
+                            outer.h - insets.vertical(),
+                        ))
+                        .to_physical_precise_round(scale),
+                        window.geometry().to_physical_precise_round(scale),
+                        crate::pass::physical_radii(*effect, scale),
+                    );
+                    elements.extend(surfaces.into_iter().map(|surface| {
+                        Element::Clipped2(crate::clip::Clipped::new(
+                            surface,
+                            clip,
+                            programs.clone(),
+                        ))
+                    }));
+                }
+                None => elements.extend(surfaces.into_iter().map(Element::Window2)),
+            }
+        }
     });
     elements
 }
@@ -2512,6 +2652,16 @@ impl Fitted<WaylandSurfaceRenderElement<GlesRenderer>> {
     }
 }
 
+impl Fitted<crate::clip::Clipped> {
+    /// Into the frame's element list: a rounded client's surface.
+    fn into_clipped(self) -> Element {
+        match self {
+            Self::Whole(each) => Element::ClippedWindow(each),
+            Self::Cut(each) => Element::ClippedTiled(each),
+        }
+    }
+}
+
 impl Fitted<crate::remains::Surface> {
     /// Into the frame's element list. Not `into_element`, which the path
     /// `Fitted::into_element` above has to name without a type.
@@ -2539,18 +2689,19 @@ impl Fitted<crate::remains::Surface> {
 /// fill, where that surface was (`remains::Picture::elements`).
 ///
 /// **Two things the live path does are not done here**, both read and neither
-/// tested, since no test has a GPU. A style's client pass (`Prepared::pass`:
-/// the `client.radius` mask of `rounded` and `flush`) is not applied, so under
-/// those styles the corners of what fades are square from its first frame.
-/// And a matrix or a deform (`Prepared::texture`: a tilt, a genie) is not
-/// either: what fades is flat at `frame.rect`, so a tilted window snaps flat
-/// on its first frame and one pulled into the dock by a genie pops back to
-/// full size before it fades. Both are keyed by the client's `Window`, which a
-/// window that has gone no longer has, and [`prepare`] releases the pane's
-/// captures (`keyed::Captures`) on the first frame it has none -- where the last
-/// capture of it was, which either could have been drawn from. The default
-/// style, `top`, has no client pass, and the tilt and the genie are what
-/// `init.lua`'s dev bindings and `tweaks.lua`'s effects ask for.
+/// tested, since no test has a GPU. A style's rounding (the `client.radius`
+/// of `rounded` and `flush`) is not applied: `clip::Clipped` wraps a live
+/// client's surface, which this is not, so under those styles the corners of
+/// what fades are square from its first frame. And a matrix or a deform
+/// (`Prepared::warp`: a tilt, a genie) is not either: what fades is flat at
+/// `frame.rect`, so a tilted window snaps flat on its first frame and one
+/// pulled into the dock by a genie pops back to full size before it fades. A
+/// warp is keyed by the client's `Window`, which a window that has gone no
+/// longer has, and [`prepare`] releases the pane's captures
+/// (`keyed::Captures`) on the first frame it has none -- where the last
+/// capture of it was, which it could have been drawn from. The default style,
+/// `top`, has no rounding, and the tilt and the genie are what `init.lua`'s
+/// dev bindings and `tweaks.lua`'s effects ask for.
 pub(crate) fn remains_elements(
     state: &Solium,
     pane: crate::pane::PaneId,
@@ -2770,8 +2921,8 @@ mod tests {
     /// **The guard (spec §8.4): a pane neither warped nor styled wants no
     /// capture**, so it builds no job, and a pass of such panes binds no
     /// carrier: `offscreen::draw` returns at once on an empty list. A warp
-    /// wants its pane's capture, and a rounded style its client pass (until
-    /// Task 23a draws rounding inline).
+    /// wants its pane's capture, and a rounded style none: rounding is drawn
+    /// inline.
     #[test]
     fn a_pane_neither_warped_nor_styled_wants_no_capture() {
         use solium_effects::fragment::{Corners, Effect};
@@ -2782,7 +2933,127 @@ mod tests {
         );
         assert_eq!(
             super::wanted_capture(super::Route::Flat, &[Effect::rounded(Corners::all(12.0))]),
-            Some(crate::keyed::Kind::Client)
+            None
+        );
+    }
+
+    /// The guard: a style with no radius draws its client as before, with no
+    /// clip and no program: the unstyled path is untouched (spec §8.4).
+    #[test]
+    fn a_style_with_no_radius_wraps_nothing() {
+        assert!(super::rounding(&[]).is_none());
+        let none =
+            solium_effects::fragment::Effect::rounded(solium_effects::fragment::Corners::all(0.0));
+        assert!(
+            super::rounding(&[none]).is_none(),
+            "a zero radius is no effect"
+        );
+    }
+
+    /// And a style with a radius is drawn inline, never captured.
+    #[test]
+    fn a_style_with_a_radius_is_drawn_inline() {
+        let rounded =
+            solium_effects::fragment::Effect::rounded(solium_effects::fragment::Corners::all(12.0));
+        assert_eq!(super::rounding(&[rounded]), Some(rounded));
+        assert_eq!(rounded.inputs(), solium_effects::fragment::Inputs::Inline);
+    }
+
+    /// The rounding is the first one *with a radius*, not the first in the
+    /// list: a style that declared a zero radius and then a real one would
+    /// otherwise round nothing, and a one-element list cannot tell "skipped
+    /// it" from "stopped at it".
+    #[test]
+    fn a_none_effect_does_not_hide_the_rounding_behind_it() {
+        use solium_effects::fragment::{Corners, Effect};
+        let rounded = Effect::rounded(Corners::all(8.0));
+        assert_eq!(
+            super::rounding(&[Effect::rounded(Corners::all(0.0)), rounded]),
+            Some(rounded)
+        );
+    }
+
+    /// And of two, the first wins, as `pass::needs_pass`'s first did.
+    #[test]
+    fn of_two_roundings_the_first_wins() {
+        use solium_effects::fragment::{Corners, Effect};
+        let first = Effect::rounded(Corners::all(4.0));
+        let second = Effect::rounded(Corners::all(12.0));
+        assert_eq!(super::rounding(&[first, second]), Some(first));
+    }
+
+    /// **A zoomed client is clipped to the whole of itself.** The clip is
+    /// measured in the surfaces' own pixels, before the rescale
+    /// (`clip::input_to_geo`), so the client's rectangle as drawn is taken
+    /// back through it: a 300x200 client drawn at half size, 150x100, is
+    /// clipped to 300x200. Clipped to the 150x100 it is drawn at, the
+    /// window in an overview or opening would lose all but its top-left
+    /// quarter. At 1:1 it is the drawn rectangle itself, a held picture's
+    /// slack included.
+    #[test]
+    fn a_zoomed_clients_clip_is_the_whole_client() {
+        use smithay::utils::{Physical, Rectangle, Scale};
+        use solium_effects::fragment::Corners;
+        let radii = Corners::all(12.0);
+        let half = super::drawn_clip(
+            Rectangle::<i32, Physical>::new((110, 220).into(), (150, 100).into()),
+            (110, 220).into(),
+            Scale::from(0.5),
+            radii,
+        );
+        assert_eq!(
+            half.rect,
+            Rectangle::new((110.0, 220.0).into(), (300.0, 200.0).into())
+        );
+        assert_eq!(
+            (half.origin, half.factor, half.radii),
+            ((110, 220).into(), Scale::from(0.5), radii)
+        );
+        let held = super::drawn_clip(
+            Rectangle::<i32, Physical>::new((100, 200).into(), (150, 100).into()),
+            (110, 220).into(),
+            Scale::from(1.0),
+            radii,
+        );
+        assert_eq!(
+            held.rect,
+            Rectangle::new((100.0, 200.0).into(), (150.0, 100.0).into())
+        );
+    }
+
+    /// **In a warp's capture a client is clipped to what the capture holds of
+    /// it**: its geometry where the capture draws its tree, cut to the room
+    /// the frame leaves it, so a tiled client that committed more than its
+    /// tile is rounded at the tile's corners, where the capture's edge cuts it.
+    #[test]
+    fn in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it() {
+        use smithay::utils::{Physical, Rectangle};
+        use solium_effects::fragment::Corners;
+        let radii = Corners::all(12.0);
+        let wide = super::capture_clip(
+            (10, 30).into(),
+            (300, 200).into(),
+            Rectangle::<i32, Physical>::from_size((400, 260).into()),
+            radii,
+        );
+        assert_eq!(
+            wide.rect,
+            Rectangle::new((10.0, 30.0).into(), (300.0, 200.0).into())
+        );
+        let small = super::capture_clip(
+            (10, 30).into(),
+            (300, 200).into(),
+            Rectangle::<i32, Physical>::from_size((250, 150).into()),
+            radii,
+        );
+        assert_eq!(
+            small.rect,
+            Rectangle::new((10.0, 30.0).into(), (250.0, 150.0).into())
+        );
+        assert_eq!(
+            (small.origin, small.factor),
+            ((10, 30).into(), smithay::utils::Scale::from(1.0)),
+            "drawn at real size"
         );
     }
 

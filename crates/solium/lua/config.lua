@@ -660,9 +660,8 @@ local defaults = {
     --                or a tiling layout whose own bar makes a titlebar
     --                redundant.
     --
-    -- "rounded" and "flush" cost one extra pass per window on every frame it
-    -- is drawn: the client is drawn into a texture first and back through a
-    -- fragment program that cuts its corners. The panes README,
+    -- "rounded" and "flush" cut the client's corners as it is drawn, at no
+    -- extra cost: no pass and no copy of the window. The panes README,
     -- `qml/panes/README.md`, has what each style is made of and costs.
     -- SOLIUM_PANE overrides this, for one run.
     --

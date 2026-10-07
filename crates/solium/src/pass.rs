@@ -6,6 +6,10 @@
 //! surfaces are rendered into a texture of their own, and *that* is drawn,
 //! through a fragment program, in the client's place.
 //!
+//! Rounding, the one effect this build makes, declares `Inputs::Inline` and
+//! is drawn by `crate::clip` with no pass (`tests::rounding_needs_no_pass`), so
+//! the client pass below is reached by nothing; the next commit deletes it.
+//!
 //! The capture is [`crate::offscreen::client_job`], a sibling of the one
 //! the genie already uses, and it keeps its texture on the pane rather than
 //! allocating one a frame. That was made a prerequisite of this work rather
@@ -110,7 +114,7 @@ const fn runnable(inputs: Inputs) -> bool {
 /// walks a one-element list here on the branch below.
 ///
 /// **Nothing can construct an effect this returns today**, because `Effect` has
-/// one variant and it reads `SelfTexture`. That is why the guarantee is
+/// one variant and it reads `Inline`. That is why the guarantee is
 /// [`runnable`]'s exhaustive match and not this walk: a fourth `Inputs` variant
 /// is `error[E0004]` there, whether or not anybody remembers this function.
 pub(crate) fn refused(effects: &[Effect]) -> Option<Effect> {
@@ -458,7 +462,6 @@ fn once<'a, T>(
 /// type: a user's inline effect (a tint, a dim) is the same element with
 /// another pair (X1.4). Wirecheck's case 11h draws through both.
 #[derive(Clone, Debug)]
-#[expect(dead_code, reason = "Task 23a draws rounded clients through these")]
 pub(crate) struct ClipPrograms {
     pub(crate) texture: GlesTexProgram,
     pub(crate) solid: GlesPixelProgram,
@@ -577,7 +580,6 @@ impl Programs {
     /// latched (`tests::a_program_that_will_not_compile_is_tried_once`).
     /// `None` leaves a rounded window square rather than undrawn. Wirecheck's
     /// case 11h compiles the same two sources with the same uniforms.
-    #[expect(dead_code, reason = "Task 23a draws rounded clients through these")]
     pub(crate) fn clip(&mut self, renderer: &mut GlesRenderer) -> Option<&ClipPrograms> {
         once(&mut self.clip, &mut self.clip_failed, || {
             let shared = [
@@ -602,6 +604,14 @@ impl Programs {
                 }
             }
         })
+    }
+
+    /// The clipped-surface programs if [`Programs::clip`] has compiled them,
+    /// for `render::elements`, which may run with an output bound and so must
+    /// never compile: `render::prepare` does, between frames, for every pane
+    /// whose style declares a rounding.
+    pub(crate) fn clip_compiled(&self) -> Option<&ClipPrograms> {
+        self.clip.as_ref()
     }
 
     /// Say, once, that a style declares an effect this renderer cannot run.
@@ -965,10 +975,15 @@ mod tests {
         assert_eq!(needs_pass(&[]), None);
     }
 
+    /// **Rounding needs no pass**: it reads `Inline` and is drawn surface by
+    /// surface (`crate::clip`), so a rounded window is never captured for its
+    /// corners. Nothing in this build reads `SelfTexture` any more, so which
+    /// effect wins when two want a pass is `render::rounding`'s question now:
+    /// `render::tests::a_none_effect_does_not_hide_the_rounding_behind_it`,
+    /// `render::tests::of_two_roundings_the_first_wins`.
     #[test]
-    fn an_effect_reading_self_needs_a_pass() {
-        let rounded = Effect::rounded(Corners::all(10.0));
-        assert_eq!(needs_pass(&[rounded]), Some(rounded));
+    fn rounding_needs_no_pass() {
+        assert_eq!(needs_pass(&[Effect::rounded(Corners::all(10.0))]), None);
     }
 
     /// A zero radius reaches here only if `style::load` let it through, and
@@ -977,38 +992,6 @@ mod tests {
     #[test]
     fn a_none_effect_needs_no_pass() {
         assert_eq!(needs_pass(&[Effect::rounded(Corners::all(0.0))]), None);
-    }
-
-    /// The first effect wins, and it is the first one that *needs a pass* --
-    /// not the first one in the list.
-    ///
-    /// Without this, `a_none_effect_needs_no_pass` is satisfied by a
-    /// `needs_pass` that stops at the first element and reports whatever it
-    /// finds there, because a one-element list cannot tell "skipped it" from
-    /// "stopped at it". A style that declared a none-effect and a real one
-    /// would then round nothing.
-    #[test]
-    fn a_none_effect_does_not_hide_the_one_behind_it() {
-        let rounded = Effect::rounded(Corners::all(8.0));
-        assert_eq!(
-            needs_pass(&[Effect::rounded(Corners::all(0.0)), rounded]),
-            Some(rounded)
-        );
-    }
-
-    /// And of two that both want one, the FIRST wins -- which the doc on
-    /// `needs_pass` claims and nothing pinned.
-    ///
-    /// `.rev().find(..)` -- last-effect-wins -- passes every other test in this
-    /// module, so without this the doc was a promise the code was free to
-    /// break. It cannot be reached from `style::load` today, which pushes at
-    /// most one effect; it is pinned because the doc says it, and a claim
-    /// nothing can violate is the defect this plan has already removed twice.
-    #[test]
-    fn of_two_effects_that_both_want_a_pass_the_first_wins() {
-        let first = Effect::rounded(Corners::all(4.0));
-        let second = Effect::rounded(Corners::all(12.0));
-        assert_eq!(needs_pass(&[first, second]), Some(first));
     }
 
     /// **The logical-to-physical seam, which is the one defect in this file a
@@ -1081,7 +1064,7 @@ mod tests {
     }
 
     /// Nothing in this build can construct an effect that reads a backdrop --
-    /// `Effect` has one variant and it reads `SelfTexture` -- so this is the
+    /// `Effect` has one variant and it reads `Inline` -- so this is the
     /// only half of [`refused`] a test can reach, and it is asserted because
     /// the expensive way to be wrong is the other direction: a `refused` that
     /// answered `Some` for the rounded corners a styled window declares would

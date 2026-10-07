@@ -483,7 +483,9 @@ client to open, and a gate that cannot run headless is a gate that gets skipped.
 `dev/fence-check.sh` captures the same two windows with the capture's fence
 wait on twice, off once, and tilted a degree more once, and fails unless the
 first three are byte-identical and the fourth is not. Both windows are rounded
-and the first is tilted, so a capture runs for each on every frame. Every run
+and both are tilted, so a warp's capture runs for each on every frame: a
+rounded window is no longer captured for its corners, so only a warp still
+captures. Every run
 sets `SOLIUM_RECAPTURE=always`: the windows' content is fixed, so a kept capture
 would be drawn once at startup and the fence wait would have nothing to skip on
 the frames compared. Forced, every capture is drawn, and waited for or not, on

@@ -54,7 +54,7 @@ PaneStyle {
 |---|---|
 | `insets.top`, `.right`, `.bottom`, `.left` | what the style reserves from the client, **once, for the whole style** |
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today: the software scene graph does not implement `ShaderEffect`, and `Canvas` does not appear to paint on it, so a style using either says so. A style whose terms this session cannot meet, or that names one this build has never heard of, is refused rather than drawn wrong: its windows are left bare, and the log names the term. A nested session renders in software under the default `qml.renderer = "auto"` |
-| `client.radius` | rounds the client's own surface, in logical pixels. A non-zero one is an offscreen pass per window per frame. `0` is no effect at all, and so is leaving the key out — which is what nine of the eleven bundles that ship do. The example fixture writes `0`, to show the key exists and costs nothing; `rounded/` and `flush/` are the two that ask for the pass |
+| `client.radius` | rounds the client's own surfaces, in logical pixels. The compositor cuts the corners as it draws the client, at no extra cost: no pass and no copy of the window (see "What it costs"). `0` is no effect at all, and so is leaving the key out — which is what nine of the eleven bundles that ship do. The example fixture writes `0`, to show the key exists and costs nothing; `rounded/` and `flush/` are the two that round |
 | `client.radiusTopLeft`, `.radiusTopRight`, `.radiusBottomLeft`, `.radiusBottomRight` | one corner each, in logical pixels. Every one of them defaults to `client.radius`, so a style that wants four the same writes one key and these never come up. **A `0` has to be written out**: squaring a corner is half of what these are for, so an absent corner follows `radius` rather than being square. `flush/` is the shipped example |
 | `client.shadow` | reserved for the shadow cast by the client's silhouette; declared, and read by nobody yet |
 | the `Layer` children | the layers, in declaration order |
@@ -230,6 +230,15 @@ pixel. It is a general mechanism -- any layer may bind it, and nothing in
 the compositor knows what a layer is for -- and the keyboard pill below is
 the shipped user. Wake it from something it is told (`values`, `caret`,
 `focused`): a dormant layer's own animations ask for no frames.
+
+**A rounded client costs no pass.** `client.radius` is drawn as the client is:
+each of its surfaces goes through a fragment program where it already is, so
+`rounded/` and `flush/` cut the client's corners at no extra cost, with no pass
+and no copy of the window, and keep them while the window is tilted or pulled
+by a genie. A rounded window that fades in or out is faded surface by surface,
+with no picture of it taken: where a subsurface overlaps its parent (a
+player's video over its window, say) the two show through each other while the
+window is translucent. An opaque window looks as it always did.
 
 Animations need nothing declared. Qt is asked each frame whether the scene has
 anything new to draw, and the compositor draws only then -- so an idle layer

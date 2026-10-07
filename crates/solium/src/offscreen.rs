@@ -330,8 +330,8 @@ pub(crate) fn client_job(
 /// its texture and the capture's id and commit, the commit moved by this draw;
 /// a job that could not be drawn is left out, and its window is drawn the way
 /// it would be with no capture at all. `dev/fence-check.sh`
-/// checks the pictures, a warp and a client pass on one carrier, byte for byte
-/// with the fence wait on and off.
+/// checks the pictures, two warps on one carrier, byte for byte with the
+/// fence wait on and off.
 pub(crate) fn draw<T>(
     state: &mut Solium,
     renderer: &mut GlesRenderer,

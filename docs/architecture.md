@@ -117,7 +117,7 @@ Every window carries a target rect, an opacity, a 4×4 matrix turned about a
 pivot, an optional deformation and a depth, which the renderer uses **instead
 of** its real geometry, plus an animation driving the current value toward the
 target. Rounded corners are not part of it: they belong to the pane style, and
-are drawn by a fragment pass (below).
+are drawn by a fragment program (below).
 
 Rules:
 
@@ -198,28 +198,41 @@ is what keeps it testable without a session.
 `Deform::from_name` is what scripts bind to, exactly as `Curve::from_name` is,
 and `script::shipped` checks the shipped Lua against both.
 
-### Fragment passes
+### Fragment programs and captures
 
 A pane style can round the client itself, with `client.radius` in its
 `Pane.qml`. That is neither a transform nor QML: the client's pixels are the
 application's, so the compositor draws them through a fragment program of its
-own. `crates/effects/src/fragment.rs` says what an effect reads — nothing, the
-node's own pixels, or what is beneath it — and keeps the rounded-corner shader
-as source text. `pass.rs` compiles it, renders the client's surfaces into a
-texture kept on the pane, and draws that through the program in the client's
-place. An effect that reads nothing needs no pass at all.
+own. `crates/effects/src/fragment.rs` says what an effect reads — nothing, each
+surface where it is, the node's own pixels, or what is beneath it — and keeps
+the shaders as source text. Rounding reads each surface where it is: `clip.rs`
+wraps every surface of the client, in its own place, and draws it through a
+program (compiled in `pass.rs`, between frames) that takes the surface's own
+coordinates into the client's rectangle and cuts the corners there. So a
+rounded window costs no extra pass and no copy of the window; a subsurface is
+cut only where its corner is the client's; the edge is one screen pixel wide at
+any zoom; and a window that is tilted or pulled by a genie keeps its corners,
+because its capture draws its client the same way.
 
-The texture is a target from the renderer's pool (`pool.rs`), made once with its
-own framebuffer object and kept by the pane (`keyed.rs`) for as long as the
-window keeps its size. `render::prepare` builds every capture's elements first,
-then binds a 1x1 carrier once and draws each capture into its target, a frame
-each, so nothing that draws a capture can run Qt.
+A rounded window that fades in or out is faded surface by surface, with no
+picture of it taken: where a subsurface overlaps its parent (a player's video
+over its window, say) the two show through each other while the window is
+translucent. An opaque window looks as it always did. A fullscreen window has
+no frame, so it is drawn square and its surfaces stay candidates for direct
+scanout; a maximised one keeps its corners.
+
+A capture is what a warp draws: a target from the renderer's pool (`pool.rs`),
+made once with its own framebuffer object and kept by the pane (`keyed.rs`) for
+as long as the window keeps its size. `render::prepare` builds every capture's
+elements first, then binds a 1x1 carrier once and draws each capture into its
+target, a frame each, so nothing that draws a capture can run Qt.
 
 A capture records what it was drawn from (each element's id, commit, geometry,
 source, alpha and transform) and is drawn again only when that changes, keeping
-one id for life and moving its commit only when redrawn. So a still rounded
-window costs no pass and no damage, and one whose client is painting pays a pass
-a commit. `SOLIUM_RECAPTURE=always` draws every capture on every pass, as before.
+one id for life and moving its commit only when redrawn. So a still window's
+capture costs no pass and no damage, and one whose client is painting pays a
+pass a commit. `SOLIUM_RECAPTURE=always` draws every capture on every pass, as
+before.
 
 A warp, a pane's capture drawn through a mesh, carries that capture's id and a
 commit of its own, which moves when the capture is redrawn or the mesh's shape
@@ -237,10 +250,11 @@ commit of their own. So a menu stays whole and on top of its window's frame
 during a tilt or a genie, is captured again when it commits, and gives its
 texture back when it closes, though the window goes on warping.
 
-The texture is the cost. Every visible rounded window keeps one, which is why
-`render::prepare` captures no pane that no monitor shows. What is
-beneath a node, the input a blur would need, is named in `fragment.rs` and
-nothing constructs it yet; rounded corners are the one effect there is.
+The texture is the cost. Every visible warped window keeps one, which is why
+`render::prepare` captures no pane that no monitor shows; a rounded window
+keeps none. What is beneath a node, the input a blur would need, is named in
+`fragment.rs` and nothing constructs it yet; rounded corners are the one effect
+there is.
 
 ### The arrangements are a crate too
 
@@ -318,8 +332,9 @@ renderer to choose instead. Drawing does not stay behind Smithay's generic
   genie (`warp.rs`, with its program and draw in raw GL in `warp/gl.rs`; the
   program is compiled once, between frames, in `pass.rs`, and if it does not
   compile a deformed window is drawn flat rather than not at all);
-- a fragment program of Solium's own, for rounded corners (`pass.rs`, which
-  compiles the GLSL ES source kept in `crates/effects`);
+- fragment programs of Solium's own, for rounded corners (`clip.rs`, drawing
+  each surface through the programs `pass.rs` compiles from the GLSL ES source
+  kept in `crates/effects`);
 - the EGL context and fence that QML on the GPU shares with Qt (`qml/paint.rs`,
   `surface.rs`).
 

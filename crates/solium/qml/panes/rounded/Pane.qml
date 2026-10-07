@@ -1,12 +1,12 @@
-// A window whose own corners are cut. The style that turns the client pass on.
+// A window whose own corners are cut.
 //
 //     SOLIUM_PANE=rounded
 //
 // Every other bundle here decorates *around* the client. This one changes the
 // client's own pixels, and `client.radius` is the only property that does:
-// a pane declaring a non-zero one is rendered into a texture of its own and
-// drawn back through a fragment program, one extra pass per frame, for that
-// window only. `crates/solium/src/pass.rs` is that pass and
+// a pane declaring a non-zero one has each of its client's surfaces drawn
+// through a fragment program where it is, which cuts the corners at no extra
+// pass. `crates/solium/src/clip.rs` draws them and
 // `crates/effects/src/fragment.rs` is the program.
 //
 // **It ships because the feature could not otherwise be looked at.** The other

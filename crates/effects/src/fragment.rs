@@ -2,10 +2,13 @@
 //!
 //! Most effects draw over what is already there and need nothing: a wavy
 //! border, a glow, spikes. They are ordinary elements and this module has
-//! nothing to say about them. An effect that needs the node's own pixels --
-//! rounded corners masks them, a shadow is derived from their silhouette --
-//! cannot be one element in a flat list, because a flat list has nowhere to
-//! say "after the things below me, before the things above me".
+//! nothing to say about them. Rounded corners need the node's own pixels, but
+//! only where each of its surfaces already is, so they are drawn inline: each
+//! surface through a program of its own ([`CLIPPED_SURFACE`]), with no capture
+//! (`tests::rounding_needs_no_capture`). An effect that needs the node's
+//! pixels all at once -- a shadow derived from their silhouette -- cannot be
+//! one element in a flat list, because a flat list has nowhere to say "after
+//! the things below me, before the things above me".
 //!
 //! So `inputs` is the declaration, and the renderer reads it. This crate holds
 //! the declaration and the shader text; `crates/solium/src/pass.rs` is what
@@ -382,7 +385,8 @@ impl Corners {
     /// existed: `!(r > 0.0)` says the same thing in fewer characters, but
     /// clippy rejects a negated comparison on a partially ordered type -- and
     /// its objection is the point: NaN is incomparable, so `r <= 0.0` on its
-    /// own would call it rounded and buy an offscreen pass to draw nothing.
+    /// own would call it rounded and draw every surface through a program to
+    /// cut nothing.
     #[must_use]
     pub const fn is_none(&self) -> bool {
         (self.top_left <= 0.0 || self.top_left.is_nan())
@@ -442,7 +446,7 @@ impl Effect {
     #[must_use]
     pub const fn inputs(&self) -> Inputs {
         match self {
-            Self::Rounded { .. } => Inputs::SelfTexture,
+            Self::Rounded { .. } => Inputs::Inline,
         }
     }
 
@@ -466,7 +470,7 @@ impl Effect {
     /// Whether this is an effect that should not be run at all.
     ///
     /// No corner rounded is not "rounded by nothing", it is *no effect*, and
-    /// the difference is a whole offscreen pass per window per frame. Every
+    /// the difference is a program on every surface of every window. Every
     /// window on a machine with no styling declares one, so this is the arm
     /// that keeps the ordinary case ordinary. See [`Corners::is_none`] for the
     /// per-corner rule this now delegates to, NaN included.
@@ -589,13 +593,15 @@ mod tests {
         assert!((Effect::rounded(corners).largest() - 20.0).abs() < f64::EPSILON);
     }
 
-    /// An effect that reads nothing draws inline; one that reads `self` needs
-    /// the node rendered to a texture first. That distinction is the whole
-    /// mechanism, so it is a value and not a comment.
+    /// **Rounding needs no capture**: it is drawn surface by surface through
+    /// [`CLIPPED_SURFACE`] and [`CLIPPED_SOLID`], where each surface is, so it
+    /// reads `Inline` and never `SelfTexture`. That distinction is what
+    /// decides whether a window is captured, so it is a value and not a
+    /// comment.
     #[test]
-    fn rounded_corners_reads_the_node_itself() {
+    fn rounding_needs_no_capture() {
         let effect = Effect::rounded(Corners::all(12.0));
-        assert_eq!(effect.inputs(), Inputs::SelfTexture);
+        assert_eq!(effect.inputs(), Inputs::Inline);
         assert_eq!(effect.radii(), Corners::all(12.0));
     }
 
