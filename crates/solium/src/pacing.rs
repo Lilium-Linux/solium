@@ -191,6 +191,8 @@ struct Slow {
     rebound: u32,
     gpu: Option<crate::gputime::Gpu>,
     captures: u32,
+    /// Effect chains run: `tests::effect_runs_are_counted_and_written`.
+    effect_runs: u32,
     /// The GPU's clocks as it ended, so a line made long after its pass
     /// shows that pass's clocks:
     /// `tests::a_line_made_long_after_its_pass_carries_that_passes_clocks`.
@@ -287,6 +289,9 @@ struct Counters {
     parked_at: Cell<u64>,
     /// Captures drawn in this pass. `tests::a_capture_is_counted_only_inside_a_measured_pass`.
     captures: Cell<u32>,
+    /// Effect chains run in this pass, a self effect's only when its part
+    /// committed. `tests::effect_runs_are_counted_and_written`.
+    effect_runs: Cell<u32>,
     /// This pass's GPU time, when it came before the pass ended, as a timer
     /// with no extension answers.
     /// `tests::a_gpu_time_in_before_its_pass_ends_goes_out_with_it`.
@@ -347,6 +352,7 @@ thread_local! {
             parked: RefCell::new(None),
             parked_at: Cell::new(0),
             captures: Cell::new(0),
+            effect_runs: Cell::new(0),
             early: Cell::new(None),
             clocks: Cell::new(None),
             labels: RefCell::new(Vec::new()),
@@ -509,6 +515,7 @@ impl Counters {
                 rebound: self.rebound.get(),
                 gpu: early,
                 captures: self.captures.get(),
+                effect_runs: self.effect_runs.get(),
                 clocks: self.clocks.get(),
                 qml_top: self.top(),
             });
@@ -617,6 +624,15 @@ impl Counters {
     fn capture(&self) {
         if self.live.get() {
             self.captures.set(self.captures.get().saturating_add(1));
+        }
+    }
+
+    /// One effect chain ran, inside a measured pass only, as a capture is
+    /// counted. `tests::effect_runs_are_counted_and_written`.
+    fn effect_ran(&self) {
+        if self.live.get() {
+            self.effect_runs
+                .set(self.effect_runs.get().saturating_add(1));
         }
     }
 
@@ -842,7 +858,8 @@ impl Counters {
             concat!(
                 r#"{{"pass":{},"t_ns":{},"total_us":{},"deadline_us":{},"monitor":{},"missed":{},"#,
                 r#""tick_us":{},"prep_us":{},"census_us":{},"qml_us":{},"elements_us":{},"gles_us":{},"#,
-                r#""commit_us":{},"settle_us":{},"loose_us":{},"captures":{},"panes":{},"drew":{},"#,
+                r#""commit_us":{},"settle_us":{},"loose_us":{},"captures":{},"effect_runs":{},"#,
+                r#""panes":{},"drew":{},"#,
                 r#""scenes":{},"animating":{},"rendered":{},"built":{},"rebound":{},"qml":{},"#,
                 r#""clocks":"{}","gpu_mhz":{},"mem_mhz":{},"pstate":{}"#
             ),
@@ -862,6 +879,7 @@ impl Counters {
             phase(Phase::Settle),
             phase(Phase::Loose),
             self.captures.get(),
+            self.effect_runs.get(),
             self.panes_seen.get(),
             self.drew.get(),
             self.scenes.get(),
@@ -913,6 +931,7 @@ pub(crate) fn frame() -> Frame {
         counters.rebound.set(0);
         counters.drew.set(0);
         counters.captures.set(0);
+        counters.effect_runs.set(0);
         for slot in &counters.scene_spent {
             slot.set((0, 0));
         }
@@ -1301,6 +1320,12 @@ pub(crate) fn captured() {
     COUNTERS.with(Counters::capture);
 }
 
+/// An effect's chain ran in this pass (`render::run_slots`).
+/// `tests::effect_runs_are_counted_and_written`.
+pub(crate) fn effect_ran() {
+    COUNTERS.with(Counters::effect_ran);
+}
+
 /// A pass's GPU time, from the backend's timer.
 pub(crate) fn gpu_resolved(pass: u64, gpu: crate::gputime::Gpu) {
     COUNTERS.with(|counters| {
@@ -1350,6 +1375,9 @@ pub(crate) struct Line {
     pub(crate) rebound: u32,
     pub(crate) gpu: Option<crate::gputime::Gpu>,
     pub(crate) captures: u32,
+    /// Effect chains run in the pass:
+    /// `tests::every_pacing_line_carries_its_gpu_time_and_captures`.
+    pub(crate) effect_runs: u32,
     pub(crate) clocks: Option<crate::clocks::Clocks>,
     pub(crate) source: crate::clocks::Source,
     /// The pass's three costliest scenes, as `bar@DP-1=2140,rounded/Frame=410`:
@@ -1381,6 +1409,7 @@ impl Line {
             rebound: worst.rebound,
             gpu: worst.gpu,
             captures: worst.captures,
+            effect_runs: worst.effect_runs,
             clocks: worst.clocks,
             source: crate::clocks::source(),
             qml_top: worst.qml_top.clone(),
@@ -1506,6 +1535,7 @@ fn emit(line: &Line) {
         gpu_us = line.gpu_us(),
         gpu_prep_us = line.gpu_prep_us(),
         captures = line.captures,
+        effect_runs = (line.effect_runs > 0).then_some(line.effect_runs),
         clocks = line.source.name(),
         gpu_mhz = line.clocks.map_or(0, |clocks| clocks.gpu_mhz),
         mem_mhz = line.clocks.map_or(0, |clocks| clocks.mem_mhz),
@@ -2001,8 +2031,9 @@ mod tests {
         assert_eq!(next.gpu, None);
     }
 
-    /// **Every PACING line carries its GPU time, its status, its captures and
-    /// its clocks**, and a status that is not `ok` reads as zero microseconds.
+    /// **Every PACING line carries its GPU time, its status, its captures,
+    /// its effect runs and its clocks**, and a status that is not `ok` reads
+    /// as zero microseconds.
     #[test]
     fn every_pacing_line_carries_its_gpu_time_and_captures() {
         let line = |gpu: Option<Gpu>| Line {
@@ -2024,6 +2055,7 @@ mod tests {
             rebound: 0,
             gpu,
             captures: 5,
+            effect_runs: 3,
             clocks: Some(crate::clocks::Clocks {
                 gpu_mhz: 1080,
                 mem_mhz: 5001,
@@ -2049,9 +2081,10 @@ mod tests {
             (
                 disjoint.gpu_us(),
                 disjoint.gpu_prep_us(),
-                line(None).captures
+                line(None).captures,
+                line(None).effect_runs
             ),
-            (0, 0, 5)
+            (0, 0, 5, 3)
         );
         let held = line(None);
         assert_eq!(
@@ -2343,6 +2376,24 @@ mod tests {
         counters.live.set(true);
         counters.capture();
         assert_eq!(counters.captures.get(), 1);
+    }
+
+    /// **Effect runs are counted and written**: two chains run in a pass give
+    /// `effect_runs: 2` in its record, and one run outside a measured pass
+    /// counts nothing, as a capture does.
+    #[test]
+    fn effect_runs_are_counted_and_written() {
+        let counters = counters();
+        counters.live.set(false);
+        counters.effect_ran();
+        counters.live.set(true);
+        counters.effect_ran();
+        counters.effect_ran();
+        let record = counters.pass_record(1, ms(5), false);
+        assert!(
+            record.contains(r#""effect_runs":2,"#),
+            "two runs are not in {record}"
+        );
     }
 
     /// **Phases are exclusive: a nested one does not also count in its
@@ -2678,6 +2729,7 @@ mod tests {
         "settle_us",
         "loose_us",
         "captures",
+        "effect_runs",
         "panes",
         "drew",
         "scenes",
@@ -2940,6 +2992,7 @@ mod tests {
             parked: std::cell::RefCell::new(None),
             parked_at: std::cell::Cell::new(0),
             captures: std::cell::Cell::new(0),
+            effect_runs: std::cell::Cell::new(0),
             early: std::cell::Cell::new(None),
             clocks: std::cell::Cell::new(None),
             labels: std::cell::RefCell::new(Vec::new()),

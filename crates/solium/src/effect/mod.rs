@@ -6,10 +6,6 @@
 //! Singular, apart from the `solium_effects` crate, which holds what is data
 //! and text; this module holds Lua, GL and everything per frame (Ruling 2).
 
-#[expect(
-    dead_code,
-    reason = "Task 21 places a ready slot's result through the element"
-)]
 pub(crate) mod element;
 pub(crate) mod gl;
 pub(crate) mod host;

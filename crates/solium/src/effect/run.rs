@@ -2,10 +2,6 @@
     unsafe_code,
     reason = "effect passes in raw GL: several textures per program, which smithay's texture program cannot sample"
 )]
-#![expect(
-    dead_code,
-    reason = "Task 21's runner runs plans; until then wirecheck runs them (cases 12d to 12g and 12l to 12q)"
-)]
 
 //! The executor: a plan's steps, each drawn into a pooled target in a frame
 //! opened on the bound carrier (\[fx0\] Task 15's `frame_for`), each reading
@@ -189,6 +185,12 @@ impl Held {
         self.output.as_ref()
     }
 
+    /// Whether the chain failed, latched: wirecheck 12q. The compositor
+    /// reads a run's `Outcome` instead.
+    #[expect(
+        dead_code,
+        reason = "read by wirecheck's case 12q, which includes this file"
+    )]
     pub(crate) fn failed(&self) -> bool {
         self.failed
     }

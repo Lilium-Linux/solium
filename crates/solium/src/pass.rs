@@ -244,10 +244,6 @@ impl Programs {
     /// (`tests::the_masked_programs_registration_is_its_declared_uniforms`);
     /// wirecheck's case 12h compiles the same through the same
     /// [`registration`].
-    #[expect(
-        dead_code,
-        reason = "Task 21's prepare compiles it while a slot is wanted"
-    )]
     pub(crate) fn masked(&mut self, renderer: &mut GlesRenderer) -> Option<&GlesTexProgram> {
         once(&mut self.masked, &mut self.masked_failed, || {
             renderer
@@ -261,7 +257,6 @@ impl Programs {
 
     /// The masked program if [`Programs::masked`] has compiled it, for
     /// `render::elements`, which must never compile (this module's doc).
-    #[expect(dead_code, reason = "Task 21 places a ready slot's result through it")]
     pub(crate) fn masked_compiled(&self) -> Option<&GlesTexProgram> {
         self.masked.as_ref()
     }

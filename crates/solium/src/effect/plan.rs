@@ -1,7 +1,7 @@
 //! What a frame draws for effects: the rules' chains, bound at config load,
 //! and the slots resolved once a pass ([`Slots`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use smithay::utils::{Physical, Rectangle, Size};
@@ -27,10 +27,9 @@ pub(crate) struct BoundChain {
     )]
     pub(crate) bleed: f64,
     pub(crate) tier: Tier,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21 re-runs a chain whose params changed")
-    )]
+    /// A hash of every link's name and bound params: a chain whose params
+    /// changed runs again (`store::SlotState::needs_run`).
+    /// `tests::a_chain_reaches_as_its_first_link_and_bleeds_as_all_of_them`.
     pub(crate) params_hash: u64,
 }
 
@@ -39,6 +38,9 @@ pub(crate) struct BoundChain {
 #[derive(Debug, Default)]
 pub(crate) struct Chains {
     by_key: HashMap<RuleKey, BoundChain>,
+    /// The rules whose chain failed on the GPU, each said once.
+    /// `tests::a_failed_chain_is_said_once_per_rule`.
+    refused: HashSet<RuleKey>,
 }
 
 impl Chains {
@@ -108,6 +110,20 @@ impl Chains {
     /// slot empty. `state::tests::the_formats_probe_rebinds_the_styles_rules_too`.
     pub(crate) fn remove(&mut self, key: RuleKey) {
         self.by_key.remove(&key);
+        self.refused.remove(&key);
+    }
+
+    /// Say `why` a rule's chain is not drawn, once per rule, as
+    /// `pass::Programs::refuse` latches: a chain that failed on the GPU is
+    /// latched failed in its slot's `Held`, and would otherwise be said at
+    /// the refresh rate. Whether it was said now.
+    /// `tests::a_failed_chain_is_said_once_per_rule`.
+    pub(crate) fn refuse_once(&mut self, key: RuleKey, why: &str) -> bool {
+        if !self.refused.insert(key) {
+            return false;
+        }
+        tracing::warn!(?key, "{why}");
+        true
     }
 
     /// A slot's chain: a resolved key with none bound wants no slot
@@ -121,6 +137,8 @@ impl Chains {
     pub(crate) fn retain_generation(&mut self, origin: Origin, generation: u32) {
         self.by_key
             .retain(|key, _| key.origin != origin || key.generation == generation);
+        self.refused
+            .retain(|key| key.origin != origin || key.generation == generation);
     }
 
     /// The program of every step every chain runs, its states' included: what
@@ -181,8 +199,8 @@ pub(crate) enum Owner {
 }
 
 /// A slot's result, ready to place: the element, and the padded box it covers
-/// in the part's own physical pixels. Filled by Tasks 21 and 22; with no GPU
-/// a test marks a slot ready with none
+/// in the part's own physical pixels. Filled by `render::run_slots`; with no
+/// GPU a test marks a slot ready with none
 /// (`tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`).
 #[derive(Clone, Debug)]
 pub(crate) struct Ready {
@@ -224,10 +242,6 @@ impl PartBox {
 
     /// The padded box's size, as a run takes it.
     /// `tests::a_part_box_is_its_part_padded_by_its_reach_on_every_side`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21 runs a chain over its slot's box")
-    )]
     pub(crate) fn size(&self) -> (u32, u32) {
         (
             u32::try_from(self.padded.size.w).unwrap_or(0),
@@ -284,10 +298,6 @@ impl Slots {
     }
 
     /// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21 runs a chain over its slot's box")
-    )]
     pub(crate) fn boxed(&self, owner: &Owner, slot: Slot) -> Option<PartBox> {
         self.boxes.get(&(owner.clone(), slot)).copied()
     }
@@ -310,10 +320,6 @@ impl Slots {
 
     /// A slot's result, its pane reaching as far as it does
     /// (`tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`).
-    #[expect(
-        dead_code,
-        reason = "Tasks 21 and 22 make a slot ready from its chain's result"
-    )]
     pub(crate) fn set_ready(&mut self, owner: Owner, slot: Slot, ready: Ready) {
         self.reached(&owner, ready.reach);
         self.ready.insert((owner, slot), Some(ready));
@@ -322,10 +328,6 @@ impl Slots {
     /// A pane reaches as far as the furthest of its slots' results; a
     /// surface's reach no pane.
     /// `tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Tasks 21 and 22 make a slot ready")
-    )]
     fn reached(&mut self, owner: &Owner, reach: i32) {
         if let Owner::Pane(pane, _) = owner {
             let furthest = self.reach.entry(*pane).or_insert(0);
@@ -456,8 +458,8 @@ mod tests {
         );
         assert_eq!((chain.reach, chain.bleed), (4.0, 5.0));
         assert_eq!(chain.tier, crate::effect::rules::Tier::Generated);
-        // And a chain's params are its key's: Task 21 re-runs a chain whose
-        // params changed.
+        // And a chain's params are its key's: a chain whose params changed
+        // runs again (`store::tests::a_param_or_size_change_reruns_the_chain`).
         let hash = |host: &mut crate::effect::host::Host, amount: &str| {
             bound(
                 host,
@@ -470,6 +472,26 @@ mod tests {
         assert_eq!(hash(&mut host, "2"), hash(&mut host, "2"));
         assert_ne!(hash(&mut host, "2"), hash(&mut host, "3"));
         let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A failed chain is said once per rule**: again for the same rule is
+    /// silent, another rule is said, and a rule set replaced (a reload) says
+    /// its own failures afresh.
+    #[test]
+    fn a_failed_chain_is_said_once_per_rule() {
+        use crate::effect::rules::{Origin, RuleKey};
+        let mut chains = Chains::default();
+        let key = |index, generation| RuleKey {
+            origin: Origin::User,
+            index,
+            generation,
+        };
+        assert!(chains.refuse_once(key(0, 1), "failed"));
+        assert!(!chains.refuse_once(key(0, 1), "failed"), "said twice");
+        assert!(chains.refuse_once(key(1, 1), "failed"), "another rule");
+        chains.retain_generation(Origin::User, 2);
+        assert!(chains.refuse_once(key(0, 2), "failed"), "a new rule set");
+        assert_eq!(chains.refused.len(), 1, "the old set's latches stayed");
     }
 
     /// **A region's own pixels wait for P15**: a titlebar rule whose chain

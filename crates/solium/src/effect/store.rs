@@ -22,24 +22,20 @@ pub(crate) struct SlotState {
     pub(crate) input: crate::keyed::Capture,
     /// The chain's targets, held across runs.
     pub(crate) held: super::run::Held,
-    #[expect(dead_code, reason = "Task 21 draws a slot's result with its own id")]
+    /// The id its result is drawn with, the same for as long as the slot
+    /// keeps this state. `tests::an_unchanged_chain_keeps_its_outputs_id_and_commit`.
     pub(crate) id: Id,
-    #[expect(
-        dead_code,
-        reason = "Task 21 moves a result's commit when its chain re-ran or it moved"
-    )]
-    pub(crate) commit: CommitCounter,
-    #[expect(
-        dead_code,
-        reason = "Task 21 compares a result's placement with the last one"
-    )]
-    pub(crate) placed: Option<super::element::Placement>,
+    /// Its result's commit, moved when the chain re-ran or the result's box
+    /// moved. `tests::an_unchanged_chain_keeps_its_outputs_id_and_commit`.
+    commit: CommitCounter,
+    /// Where its result was last placed.
+    placed: Option<super::element::Placement>,
     /// The params' hash the chain last ran at.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21 re-runs a chain whose params changed")
-    )]
+    /// `tests::a_param_or_size_change_reruns_the_chain`.
     pub(crate) params: u64,
+    /// The padded box's size the chain last ran at; `None` until it has run.
+    /// `tests::a_self_chain_runs_once_until_its_part_commits`.
+    size: Option<(u32, u32)>,
     /// The pass this slot was last wanted in.
     pub(crate) seen: u64,
 }
@@ -56,8 +52,40 @@ impl SlotState {
             commit: CommitCounter::default(),
             placed: None,
             params: 0,
+            size: None,
             seen: 0,
         }
+    }
+
+    /// Whether the chain must run this pass: it never has, its self input
+    /// was `redrawn`, or its `params` or its padded box's `size` differ from
+    /// the last run's (Ruling 16). Otherwise its last result is placed again.
+    /// `tests::a_self_chain_runs_once_until_its_part_commits`,
+    /// `tests::a_param_or_size_change_reruns_the_chain`,
+    /// `tests::a_redrawn_input_reruns_the_chain_every_pass`.
+    pub(crate) fn needs_run(&self, redrawn: bool, params: u64, size: (u32, u32)) -> bool {
+        redrawn || self.size != Some(size) || self.params != params
+    }
+
+    /// The chain ran at `params` over a box of `size`.
+    /// `tests::a_self_chain_runs_once_until_its_part_commits`.
+    pub(crate) fn ran(&mut self, params: u64, size: (u32, u32)) {
+        self.params = params;
+        self.size = Some(size);
+    }
+
+    /// The commit its result carries at `placement`: moved when the chain
+    /// re-ran or the placement differs from the last, so a result placed
+    /// again unchanged damages nothing under it (`element::commit_for`).
+    /// `tests::an_unchanged_chain_keeps_its_outputs_id_and_commit`.
+    pub(crate) fn commit_for(
+        &mut self,
+        placement: super::element::Placement,
+        rerun: bool,
+    ) -> CommitCounter {
+        let commit = super::element::commit_for(&mut self.commit, self.placed, placement, rerun);
+        self.placed = Some(placement);
+        commit
     }
 
     /// Give the capture's target and the chain's back.
@@ -144,8 +172,8 @@ impl Store {
 }
 
 /// Each self input this pass: its texture, whether it was drawn this pass or
-/// kept from an earlier one, and its capture's commit. What Task 21's runs
-/// read: a chain re-runs only when its input was redrawn.
+/// kept from an earlier one, and its capture's commit. What the runs read
+/// (`render::run_slots`): a chain re-runs only when its input was redrawn.
 /// `tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`.
 #[derive(Debug)]
 pub(crate) struct Drawn<T = GlesTexture> {
@@ -176,10 +204,6 @@ impl<T> Drawn<T> {
 
     /// The input's texture, and whether it was redrawn this pass.
     /// `tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21's runs read a slot's self input")
-    )]
     pub(crate) fn get(&self, owner: &Owner, slot: Slot) -> Option<(&T, bool)> {
         self.inputs
             .get(&(owner.clone(), slot))
@@ -189,10 +213,6 @@ impl<T> Drawn<T> {
     /// The input's commit, as the number a state depending on `self` is kept
     /// on (`run::Keys::commit`).
     /// `tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21 keys a state on the self input's commit")
-    )]
     pub(crate) fn commit(&self, owner: &Owner, slot: Slot) -> Option<u64> {
         self.inputs
             .get(&(owner.clone(), slot))
@@ -255,6 +275,61 @@ mod tests {
         let mut store = Store::default();
         let first = store.next_pass();
         assert!(store.next_pass() > first);
+    }
+
+    fn slot() -> super::SlotState {
+        super::SlotState::fresh(rule())
+    }
+
+    /// **A self chain runs once until its part commits.**
+    #[test]
+    fn a_self_chain_runs_once_until_its_part_commits() {
+        let mut slot = slot();
+        assert!(slot.needs_run(false, 7, (100, 80)), "never run");
+        slot.ran(7, (100, 80));
+        assert!(!slot.needs_run(false, 7, (100, 80)), "nothing changed");
+        assert!(
+            slot.needs_run(true, 7, (100, 80)),
+            "the part was recaptured"
+        );
+    }
+
+    /// **A param change re-runs the chain without a recapture**, and a size
+    /// change re-runs it too.
+    #[test]
+    fn a_param_or_size_change_reruns_the_chain() {
+        let mut slot = slot();
+        slot.ran(7, (100, 80));
+        assert!(slot.needs_run(false, 8, (100, 80)));
+        assert!(slot.needs_run(false, 7, (101, 80)));
+    }
+
+    /// **An unchanged chain keeps its output's id and commit.**
+    #[test]
+    fn an_unchanged_chain_keeps_its_outputs_id_and_commit() {
+        let mut slot = slot();
+        let id = slot.id.clone();
+        let at = crate::effect::element::Placement::of(
+            smithay::utils::Rectangle::new((0, 0).into(), (100, 80).into()),
+            None,
+            1.0,
+        );
+        let first = slot.commit_for(at, true);
+        assert_eq!(slot.commit_for(at, false), first);
+        assert_eq!(slot.id, id);
+    }
+
+    /// **With `SOLIUM_RECAPTURE=always` the chain runs every pass**: a
+    /// redrawn input re-runs it each time, and [fx0] Task 17's
+    /// `recapture_always` makes every capture stale, so every pass is one
+    /// whose input was redrawn (`recapture_always_is_asked_for_by_name`).
+    #[test]
+    fn a_redrawn_input_reruns_the_chain_every_pass() {
+        let mut slot = slot();
+        for _ in 0..3 {
+            assert!(slot.needs_run(true, 7, (100, 80)));
+            slot.ran(7, (100, 80));
+        }
     }
 
     /// **Drawn tells an input redrawn this pass from one kept**, and gives

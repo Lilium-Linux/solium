@@ -22,7 +22,7 @@ use smithay::{
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             utils::{CropRenderElement, RescaleRenderElement},
         },
-        gles::{GlesRenderer, GlesTexture},
+        gles::{GlesRenderer, GlesTexProgram, GlesTexture},
         utils::CommitCounter,
     },
     desktop::{LayerSurface, PopupManager, Window, layer_map_for_output},
@@ -483,6 +483,13 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     for (owner, slot, key) in slots.wants() {
         state.store.slot_mut(owner, slot, key).seen = pass;
     }
+    // What a slot's result is drawn through, compiled here, between frames,
+    // while a slot is wanted, since `elements` never compiles; nothing with
+    // none (spec §8.4,
+    // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
+    if !slots.is_empty() {
+        let _ = state.programs.masked(renderer);
+    }
 
     let mut warps = Vec::new();
     let mut overs = Vec::new();
@@ -689,6 +696,39 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
                 drawn.insert(owner, slot, texture, true, commit);
             }
         }
+    }
+    // The chains, once their inputs are drawn or kept, on one bound carrier
+    // (Ruling 10): a self chain runs only when its part committed or its
+    // params or size changed, and is otherwise placed again as it was
+    // (`effect::store::tests::a_self_chain_runs_once_until_its_part_commits`).
+    // Task 25 moves the two phases between its draws (Ruling 17). Nothing
+    // runs and no carrier is bound with no slot wanted (spec §8.4,
+    // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
+    if !slots.is_empty() {
+        let Solium {
+            store,
+            pool,
+            effects,
+            chains,
+            programs,
+            timer,
+            clock,
+            ..
+        } = &mut *state;
+        let mut cx = RunCx {
+            store,
+            effects: &*effects,
+            chains,
+            masked: programs.masked_compiled().cloned(),
+            now: clock.now().as_secs_f32(),
+            pass,
+        };
+        let _ = with_carrier(pool, renderer, |renderer, carrier, pool| {
+            let mut runner = GlRunner::new(renderer, carrier, timer.as_mut());
+            for nest in [Nest::Inner, Nest::Whole] {
+                run_slots(&mut cx, pool, &mut runner, &mut slots, &drawn, nest);
+            }
+        });
     }
     // A slot no rule wanted this pass gives its targets back.
     // `effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`.
@@ -1157,6 +1197,348 @@ pub(crate) fn self_inputs(state: &Solium, slots: &Slots) -> Vec<SelfInput> {
             })
         })
         .collect()
+}
+
+/// The fields of `Solium` a pass's chain runs touch, borrowed apart so the
+/// pool can be lent to [`with_carrier`] beside them.
+/// `tests::a_self_slot_with_no_input_runs_nothing_and_opens_no_region`.
+pub(crate) struct RunCx<'a> {
+    pub(crate) store: &'a mut crate::effect::store::Store,
+    pub(crate) effects: &'a crate::effect::host::Host,
+    pub(crate) chains: &'a mut crate::effect::plan::Chains,
+    /// What a result is drawn through (`pass::Programs::masked`, compiled at
+    /// the top of `prepare` while a slot is wanted); with none, no slot is
+    /// ready and the walk draws as if every chain had failed.
+    pub(crate) masked: Option<GlesTexProgram>,
+    /// Seconds, from the one clock (#164).
+    pub(crate) now: f32,
+    /// The store's pass, which a slot run in it is marked with.
+    pub(crate) pass: u64,
+}
+
+impl std::fmt::Debug for RunCx<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunCx")
+            .field("now", &self.now)
+            .field("pass", &self.pass)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What runs a chain: the GPU in `prepare`, `tests::NoGpu` in the tests.
+pub(crate) trait Runner {
+    /// Before a phase's first run: `GlRunner` opens the phase's one
+    /// `Region::Effect` (Ruling 10).
+    fn begin(&mut self);
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "run::run's own, less the renderer and carrier the runner holds"
+    )]
+    fn run<'p>(
+        &mut self,
+        pool: &mut crate::pool::Pool,
+        programs: &dyn Fn(u64) -> crate::effect::run::Lookup<'p>,
+        formats: Option<crate::pool::Formats>,
+        plan: &solium_effects::stage::Plan,
+        held: &mut crate::effect::run::Held,
+        inputs: &crate::effect::run::Inputs<'_>,
+        keys: &crate::effect::run::Keys,
+    ) -> crate::effect::run::Outcome;
+    /// After a phase's last run: closes the region.
+    fn end(&mut self);
+}
+
+/// The GPU's runner: `run::run` on the carrier [`with_carrier`] bound, the
+/// phase timed as one region.
+pub(crate) struct GlRunner<'r, 'c> {
+    renderer: &'r mut GlesRenderer,
+    carrier: &'r mut smithay::backend::renderer::gles::GlesTarget<'c>,
+    timer: Option<&'r mut crate::gputime::Timer>,
+    open: Option<crate::gputime::Stamp>,
+}
+
+impl std::fmt::Debug for GlRunner<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlRunner")
+            .field("timed", &self.timer.is_some())
+            .field("open", &self.open.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'r, 'c> GlRunner<'r, 'c> {
+    pub(crate) fn new(
+        renderer: &'r mut GlesRenderer,
+        carrier: &'r mut smithay::backend::renderer::gles::GlesTarget<'c>,
+        timer: Option<&'r mut crate::gputime::Timer>,
+    ) -> Self {
+        Self {
+            renderer,
+            carrier,
+            timer,
+            open: None,
+        }
+    }
+}
+
+impl Runner for GlRunner<'_, '_> {
+    fn begin(&mut self) {
+        if self.open.is_none() {
+            self.open = self
+                .timer
+                .as_deref_mut()
+                .map(|timer| timer.open(self.renderer, crate::gputime::Region::Effect));
+        }
+    }
+
+    fn run<'p>(
+        &mut self,
+        pool: &mut crate::pool::Pool,
+        programs: &dyn Fn(u64) -> crate::effect::run::Lookup<'p>,
+        formats: Option<crate::pool::Formats>,
+        plan: &solium_effects::stage::Plan,
+        held: &mut crate::effect::run::Held,
+        inputs: &crate::effect::run::Inputs<'_>,
+        keys: &crate::effect::run::Keys,
+    ) -> crate::effect::run::Outcome {
+        crate::effect::run::run(
+            self.renderer,
+            self.carrier,
+            pool,
+            programs,
+            formats,
+            plan,
+            held,
+            inputs,
+            keys,
+        )
+    }
+
+    fn end(&mut self) {
+        if let (Some(timer), Some(stamp)) = (self.timer.as_deref_mut(), self.open.take()) {
+            timer.close(self.renderer, stamp);
+        }
+    }
+}
+
+/// Bind the pool's carrier once and hand it, the renderer and the pool to
+/// `f`, as `offscreen::draw` binds it for its jobs, then put framebuffer 0
+/// back as it does (`warp::release_framebuffer`). `None` with no carrier or
+/// one that would not bind. Nothing in `f` may touch a QML scene.
+pub(crate) fn with_carrier<R>(
+    pool: &mut crate::pool::Pool,
+    renderer: &mut GlesRenderer,
+    f: impl FnOnce(
+        &mut GlesRenderer,
+        &mut smithay::backend::renderer::gles::GlesTarget<'_>,
+        &mut crate::pool::Pool,
+    ) -> R,
+) -> Option<R> {
+    use smithay::backend::renderer::Bind as _;
+    let Some(mut carrier) = pool.carrier(renderer) else {
+        tracing::warn!("no carrier to run this pass's effects on");
+        return None;
+    };
+    let done = match renderer.bind(&mut carrier) {
+        Err(err) => {
+            tracing::warn!(?err, "could not bind the effects' carrier");
+            None
+        }
+        Ok(mut bound) => {
+            let _frame = crate::qml::frame_in_flight();
+            Some(f(renderer, &mut bound, pool))
+        }
+    };
+    crate::warp::release_framebuffer(renderer);
+    done
+}
+
+/// The key a `depends = "shape"` state is rebuilt on: the part's box in the
+/// padded box and its radii, by their bits.
+/// `tests::the_shape_key_moves_with_the_box_and_the_radii`.
+pub(crate) fn shape_hash(content: [f32; 4], radii: [f32; 4]) -> u64 {
+    let bytes: Vec<u8> = content
+        .iter()
+        .chain(radii.iter())
+        .flat_map(|each| each.to_bits().to_le_bytes())
+        .collect();
+    solium_effects::glsl::content_hash(&[&bytes])
+}
+
+/// Which of `prepare`'s two run phases a slot's chain runs in (Ruling 17):
+/// a whole pane's self chain in the later one, since its capture is to walk
+/// what the inner phase made (Task 25), and every other in the first.
+/// `tests::only_a_whole_panes_self_chain_runs_in_the_later_phase`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Nest {
+    Inner,
+    Whole,
+}
+
+impl Nest {
+    /// `tests::only_a_whole_panes_self_chain_runs_in_the_later_phase`.
+    pub(crate) fn of(owner: &crate::effect::plan::Owner, tier: crate::effect::rules::Tier) -> Self {
+        match (owner, tier) {
+            (
+                crate::effect::plan::Owner::Pane(_, PaneSlot::Pane),
+                crate::effect::rules::Tier::Own,
+            ) => Self::Whole,
+            _ => Self::Inner,
+        }
+    }
+}
+
+/// Run every wanted slot of `nest` whose tier runs here, each only when
+/// `needs_run` says so, else its last result placed again with the same id
+/// and commit (Ruling 16). A T1 slot reads its self input from `drawn`
+/// (redrawn this pass, or kept); with neither there is nothing to run and
+/// the part is drawn plain. One `begin` before the phase's first run and
+/// one `end` after its last (Ruling 10).
+/// `tests::a_self_slot_with_no_input_runs_nothing_and_opens_no_region`,
+/// `effect::store::tests::a_self_chain_runs_once_until_its_part_commits`.
+pub(crate) fn run_slots(
+    cx: &mut RunCx<'_>,
+    pool: &mut crate::pool::Pool,
+    runner: &mut dyn Runner,
+    slots: &mut Slots,
+    drawn: &crate::effect::store::Drawn,
+    nest: Nest,
+) {
+    use crate::effect::rules::Tier;
+    use crate::effect::run::{BoxMap, Inputs, Keys, Outcome};
+    let wanted: Vec<(
+        crate::effect::plan::Owner,
+        Slot,
+        crate::effect::rules::RuleKey,
+    )> = slots
+        .wants()
+        .map(|(owner, slot, key)| (owner.clone(), slot, key))
+        .collect();
+    let mut began = false;
+    for (owner, slot, key) in wanted {
+        let (Some(chain), Some(part)) = (cx.chains.get(key), slots.boxed(&owner, slot)) else {
+            continue;
+        };
+        if Nest::of(&owner, chain.tier) != nest {
+            continue;
+        }
+        let (first, redrawn) = match chain.tier {
+            Tier::Own => match drawn.get(&owner, slot) {
+                Some((texture, redrawn)) => (Some(texture.clone()), redrawn),
+                None => continue,
+            },
+            // Task 22 runs T0 here; T2 and T3 were refused at load (Ruling 14).
+            Tier::Generated | Tier::Xray | Tier::Live => continue,
+        };
+        let size = part.size();
+        let params = chain.params_hash;
+        let keys = Keys {
+            params,
+            own: drawn.commit(&owner, slot),
+            shape: shape_hash(part.content, part.radii),
+        };
+        let state = cx.store.slot_mut(&owner, slot, key);
+        state.seen = cx.pass;
+        if !state.needs_run(redrawn, params, size) {
+            if let Some(texture) = state.held.output().cloned()
+                && let Some(ready) = ready_from(state, cx.masked.as_ref(), texture, false, part)
+            {
+                slots.set_ready(owner, slot, ready);
+            }
+            continue;
+        }
+        let textures: Vec<(&str, GlesTexture, BoxMap)> = first
+            .into_iter()
+            .map(|texture| (chain.plan.first_input.as_str(), texture, BoxMap::WHOLE))
+            .collect();
+        let inputs = Inputs {
+            padded: size,
+            content: part.content,
+            textures: &textures,
+            radii: part.radii,
+            time: cx.now,
+            transition: crate::effect::run::Transition::default(),
+            // Ruling 6's edge rule: a self chain in `replace` reads the
+            // part's own edge beyond it, in `behind` and `front` transparent
+            // (`effect::run::tests::the_first_input_is_clamped_to_its_edge_texels`).
+            clamp_first: slot == Slot::Replace && chain.tier == Tier::Own,
+        };
+        if !began {
+            runner.begin();
+            began = true;
+        }
+        let effects = cx.effects;
+        let outcome = runner.run(
+            pool,
+            &|key| effects.lookup(key),
+            effects.formats(),
+            &chain.plan,
+            &mut state.held,
+            &inputs,
+            &keys,
+        );
+        match outcome {
+            Outcome::Done(texture, sync) => {
+                let _ = crate::offscreen::settle(
+                    Ok::<_, std::convert::Infallible>(sync),
+                    crate::dev::fence_wait(),
+                    "an effect",
+                );
+                crate::pacing::effect_ran();
+                state.ran(params, size);
+                if let Some(ready) = ready_from(state, cx.masked.as_ref(), texture, true, part) {
+                    slots.set_ready(owner, slot, ready);
+                }
+            }
+            // Its program is not compiled yet, or its format waits for the
+            // rebind: the part is drawn plain this pass, and nothing is
+            // latched or said (Ruling 10,
+            // `effect::run::tests::a_program_not_compiled_yet_is_pending_not_failed`).
+            Outcome::Pending => {}
+            // Latched in `Held`, said once per rule, and no `Ready`: the walk
+            // draws the part (`replace`) or nothing (`behind`, `front`), [16]
+            // §5 (`tests::a_wanted_slot_with_nothing_ready_draws_what_no_slot_draws`,
+            // `effect::plan::tests::a_failed_chain_is_said_once_per_rule`).
+            Outcome::Failed => {
+                let _ = cx.chains.refuse_once(
+                    key,
+                    "an effect's chain failed; its part is drawn without it",
+                );
+            }
+        }
+    }
+    if began {
+        runner.end();
+    }
+}
+
+/// A slot's result as the walk places it: its texture in an
+/// `EffectElement` with the slot's own id, its commit moved only when the
+/// chain re-ran or its box changed, drawn through the masked program; `None`
+/// with no program, and then the walk draws as if the chain had failed.
+/// `effect::store::tests::an_unchanged_chain_keeps_its_outputs_id_and_commit`.
+fn ready_from(
+    state: &mut crate::effect::store::SlotState,
+    masked: Option<&GlesTexProgram>,
+    texture: GlesTexture,
+    rerun: bool,
+    part: crate::effect::plan::PartBox,
+) -> Option<crate::effect::plan::Ready> {
+    let program = masked?.clone();
+    let commit = state.commit_for(
+        crate::effect::element::Placement::of(part.padded, None, 1.0),
+        rerun,
+    );
+    Some(crate::effect::plan::Ready {
+        element: crate::effect::element::EffectElement::new(
+            state.id.clone(),
+            commit,
+            texture,
+            program,
+        ),
+        padded: part.padded,
+        reach: part.reach,
+    })
 }
 
 /// The rounding a pane's style declares, if any: the one inline effect today.
@@ -4007,9 +4389,170 @@ pub(crate) fn ratio(drawn: f64, real: i32) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{Drawn, Fit, Fitted, Painted, by_depth, fit, fitted, origin_at, ratio};
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// **The shape key moves with the part's box and its radii**, and only
+    /// with them: what a `depends = "shape"` state is rebuilt on.
+    #[test]
+    fn the_shape_key_moves_with_the_box_and_the_radii() {
+        let content = [0.1, 0.1, 0.8, 0.8];
+        assert_eq!(
+            super::shape_hash(content, [6.0; 4]),
+            super::shape_hash(content, [6.0; 4])
+        );
+        assert_ne!(
+            super::shape_hash(content, [6.0; 4]),
+            super::shape_hash(content, [8.0; 4])
+        );
+        assert_ne!(
+            super::shape_hash(content, [6.0; 4]),
+            super::shape_hash([0.1, 0.1, 0.8, 0.79], [6.0; 4])
+        );
+    }
+
+    /// A machine whose every draw fails: it counts the phase's `begin`, its
+    /// runs and its `end`, and answers each run with `run::preflight`'s
+    /// outcome, else `Outcome::Failed` (Tasks 22 and 24 drive it).
+    #[derive(Debug, Default)]
+    pub(crate) struct NoGpu {
+        pub(crate) begins: u32,
+        pub(crate) runs: u32,
+        pub(crate) ends: u32,
+    }
+
+    impl super::Runner for NoGpu {
+        fn begin(&mut self) {
+            self.begins += 1;
+        }
+        fn run<'p>(
+            &mut self,
+            _pool: &mut crate::pool::Pool,
+            programs: &dyn Fn(u64) -> crate::effect::run::Lookup<'p>,
+            formats: Option<crate::pool::Formats>,
+            plan: &solium_effects::stage::Plan,
+            _held: &mut crate::effect::run::Held,
+            _inputs: &crate::effect::run::Inputs<'_>,
+            _keys: &crate::effect::run::Keys,
+        ) -> crate::effect::run::Outcome {
+            self.runs += 1;
+            crate::effect::run::preflight(plan, programs, formats)
+                .unwrap_or(crate::effect::run::Outcome::Failed)
+        }
+        fn end(&mut self) {
+            self.ends += 1;
+        }
+    }
+
+    /// **Only a whole pane's self chain runs in the later phase**: its
+    /// capture walks what the inner slots made (Task 25), so it is `Whole`;
+    /// every other slot, and a whole pane's chain that reads nothing of the
+    /// frame, is `Inner`.
+    #[test]
+    fn only_a_whole_panes_self_chain_runs_in_the_later_phase() {
+        use super::Nest;
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Tier;
+        let pane = crate::pane::PaneId::from_raw(1);
+        assert_eq!(
+            Nest::of(&Owner::Pane(pane, PaneSlot::Pane), Tier::Own),
+            Nest::Whole
+        );
+        for part in [
+            PaneSlot::Client,
+            PaneSlot::Popups,
+            PaneSlot::Layer(0),
+            PaneSlot::Titlebar,
+        ] {
+            assert_eq!(Nest::of(&Owner::Pane(pane, part), Tier::Own), Nest::Inner);
+        }
+        assert_eq!(
+            Nest::of(&Owner::Pane(pane, PaneSlot::Pane), Tier::Generated),
+            Nest::Inner
+        );
+        assert_eq!(
+            Nest::of(
+                &Owner::Surface(crate::scripted::SurfaceId::from_raw(1), "DP-1".to_owned()),
+                Tier::Own
+            ),
+            Nest::Inner
+        );
+    }
+
+    /// **A self slot with no input this pass runs nothing**: its capture was
+    /// neither drawn nor kept (its owner gone, or no target for it), so its
+    /// slot is not ready and the walk draws the part as with no rule; and a
+    /// phase that runs nothing opens no GPU region (Ruling 10).
+    #[test]
+    fn a_self_slot_with_no_input_runs_nothing_and_opens_no_region() {
+        use crate::effect::plan::{Chains, Owner, PaneSlot, PartBox, Slots};
+        use crate::effect::rules::{Origin, RuleKey, Slot};
+        let place = crate::effect::host::tests::scratch("render-no-input");
+        crate::effect::host::tests::folder(
+            &place,
+            "tint",
+            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let mut host = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(place.clone()),
+            place.join("none"),
+        ));
+        host.want("rules", ["tint".to_owned()]);
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua
+            .load(r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" } }"#)
+            .eval()
+            .expect("the test's Lua");
+        let tree = crate::effect::tree::Tree::from_lua(&value)
+            .expect("readable")
+            .expect("a value");
+        let rule = crate::effect::rules::parse(&tree)
+            .expect("parses")
+            .remove(0);
+        let key = RuleKey {
+            origin: Origin::User,
+            index: 0,
+            generation: 1,
+        };
+        let mut chains = Chains::default();
+        chains.insert(key, Chains::bind(&mut host, &rule).expect("binds"));
+        let owner = Owner::Pane(crate::pane::PaneId::from_raw(1), PaneSlot::Client);
+        let mut slots = Slots::default();
+        slots.want(owner.clone(), Slot::Behind, key);
+        slots.set_box(
+            owner.clone(),
+            Slot::Behind,
+            PartBox::around((100, 80).into(), 0, [0.0; 4]),
+        );
+        let mut store = crate::effect::store::Store::default();
+        let mut cx = super::RunCx {
+            store: &mut store,
+            effects: &host,
+            chains: &mut chains,
+            masked: None,
+            now: 0.0,
+            pass: 1,
+        };
+        let (mut runner, mut pool) = (NoGpu::default(), crate::pool::Pool::new(0));
+        for nest in [super::Nest::Inner, super::Nest::Whole] {
+            super::run_slots(
+                &mut cx,
+                &mut pool,
+                &mut runner,
+                &mut slots,
+                &crate::effect::store::Drawn::default(),
+                nest,
+            );
+        }
+        assert_eq!((runner.begins, runner.runs, runner.ends), (0, 0, 0));
+        assert!(!slots.is_ready(&owner, Slot::Behind));
+        let _ = std::fs::remove_dir_all(place);
+    }
 
     /// **A window whose warp has no program is not captured**, and goes the
     /// flat way, rounded corners included, rather than being drawn as nothing.

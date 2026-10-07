@@ -26,7 +26,7 @@ mod gl;
 #[allow(
     dead_code,
     unfulfilled_lint_expectations,
-    reason = "the compositor's executor, which expects to be unread until its runner lands"
+    reason = "the compositor's executor, of which these cases read what the compositor does not"
 )]
 mod run;
 

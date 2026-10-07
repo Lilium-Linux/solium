@@ -46,10 +46,6 @@ pub(crate) enum Region {
     /// phase, not one a run, so a dozen effect slots do not use up
     /// [`REGIONS`] (Ruling 10): `gpu_effects_us`.
     /// `tests::effects_are_summed_apart_from_captures`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21's runner opens it around a run phase")
-    )]
     Effect,
 }
 

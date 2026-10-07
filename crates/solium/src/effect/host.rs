@@ -921,10 +921,6 @@ impl<P: Clone> Host<P> {
 
     /// What this GPU renders into, once probed.
     /// `tests::the_formats_are_probed_once_and_only_while_something_is_wanted`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21's runner hands it to run::preflight")
-    )]
     pub(crate) fn formats(&self) -> Option<crate::pool::Formats> {
         self.formats
     }
@@ -1133,10 +1129,6 @@ impl<P: Clone> Host<P> {
     /// asked for and not compiled yet. A key nothing asked for is no program
     /// a later compile would bring, so it is a failure, not pending for ever.
     /// `tests::a_programs_lookup_tells_pending_from_failed`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 21's runner looks programs up through it")
-    )]
     pub(crate) fn lookup(&self, key: u64) -> super::run::Lookup<'_, P> {
         use super::run::Lookup;
         match self.programs.get(&key) {
