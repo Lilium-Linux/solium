@@ -1,7 +1,7 @@
 #![expect(dead_code, reason = "Task 23a draws rounded clients through this")]
 
 //! One client surface drawn through its client's rounded rectangle, in its
-//! own place: rounding with no capture ([16] 0.5).
+//! own place: rounding with no capture (\[16\] 0.5).
 //!
 //! The element is the surface's own, wrapped: same id, same commit, same
 //! damage, so a still client is not redrawn. Its program maps the surface's
