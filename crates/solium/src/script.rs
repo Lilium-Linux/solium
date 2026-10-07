@@ -6447,8 +6447,10 @@ mod tests {
     }
 
     /// **`config.focus.modes` overrides a mode's own default** from
-    /// `user.lua`, the same as every other section: `nearest` still catches
-    /// a typo (`focus.modes.folating`), but the spelling that exists works.
+    /// `user.lua`: the spelling that exists works. `nearest` does *not*
+    /// catch a typo here (`focus.modes.folating` merges in silently) --
+    /// `open_sections["focus.modes"] = true` accepts any name, the same as
+    /// `bindings`, because mode names are open-ended too.
     #[test]
     fn a_user_lua_can_turn_floatings_focus_back_to_follow() {
         let Some((directory, mut scripts)) = shipped_init_with_user(

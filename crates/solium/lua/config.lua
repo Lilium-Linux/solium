@@ -1433,8 +1433,11 @@ end
 --     `monitors` entry are not checked here. `mode` misspelled as `moed` is
 --     merged as written and the monitor keeps its default mode.
 --   * `keyboard`, `cursor` and `bindings` are the sections above; the first
---     two are checked against a list this file restates, the third against
---     nothing.
+--     two are checked against a list this file restates, the other two
+--     against nothing: `bindings` because any key combination is one, and
+--     `focus.modes` because mode names are open-ended the same way (a mode
+--     outside this file can register any name). `focus.modes.folating`
+--     merges in silently, exactly like a misspelled binding.
 --   * A value of the wrong *type* is not this check's business. `gap = "12"`
 --     is a recognised key and passes.
 for _, entry in ipairs(unrecognised) do
