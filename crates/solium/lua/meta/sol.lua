@@ -231,6 +231,44 @@
 ---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
 ---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
 
+---One device's libinput settings: a device-type default in `sol.input`, or
+---one `devices` entry. A key left out keeps libinput's own default (or
+---whatever a previous reload already set) rather than turning it off.
+---@class sol.InputDeviceOptions
+---@field tap? boolean Tapping the pad clicks.
+---@field tap_button_map? "left_right_middle"|"left_middle_right" 1/2/3-finger tap maps to which button.
+---@field drag? boolean A tap-then-move drags, without holding the pad down.
+---@field drag_lock? boolean A drag survives a brief lift of the finger.
+---@field natural_scroll? boolean Scroll direction follows the content, not the surface.
+---@field scroll_method? "two_finger"|"edge"|"button"|"no_scroll"
+---@field accel_profile? "flat"|"adaptive"
+---@field accel_speed? number -1 to 1; 0 is the device's own default speed.
+---@field disable_while_typing? boolean Ignore the pad while the keyboard beside it is in use.
+---@field left_handed? boolean Swap the left and right buttons.
+---@field middle_emulation? boolean Pressing left and right together is a middle click.
+
+---One `sol.input{ devices = { ... } }` entry: a match, plus any of
+---`sol.InputDeviceOptions`. At least one of `name`, `vendor` or `product` is
+---required; an entry naming none of them matches nothing.
+---@class sol.InputDeviceMatch: sol.InputDeviceOptions
+---@field name? string A case-insensitive substring of the device's name.
+---@field vendor? integer
+---@field product? integer
+
+---`config.lua`'s `input` section: a default per device type, and overrides
+---matched by name or by vendor/product, applied to every device already
+---connected and to each one added later -- and reapplied, from whatever this
+---now says, on every reload.
+---@class sol.InputOptions
+---@field touchpad? sol.InputDeviceOptions
+---@field mouse? sol.InputDeviceOptions
+---@field keyboard? sol.InputDeviceOptions
+---@field touchscreen? sol.InputDeviceOptions
+---@field tablet_tool? sol.InputDeviceOptions
+---@field tablet_pad? sol.InputDeviceOptions
+---@field switch? sol.InputDeviceOptions
+---@field devices? sol.InputDeviceMatch[]
+
 ---The pointer's theme. A key left out, or no table, means the configuration
 ---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
 ---@class sol.CursorOptions
@@ -437,6 +475,13 @@ function sol.monitor_power(which, mode) end
 ---@param options? sol.IdleOptions
 ---@return nil
 function sol.idle(options) end
+
+---Set libinput device settings: `config.input`, which the shipped `init.lua`
+---hands over. Applied to every device already connected and to each one
+---added later, and reapplied on reload.
+---@param options? sol.InputOptions
+---@return nil
+function sol.input(options) end
 
 ---The work area of the monitor a window is on, or of the active monitor when
 ---no window is named or the id is unknown.

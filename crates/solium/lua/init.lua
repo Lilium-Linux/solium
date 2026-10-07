@@ -31,6 +31,10 @@ sol.monitors(config.monitors)
 -- When the screens go dark on their own. An absent table keeps the default,
 -- for the reason `sol.resize` gives.
 sol.idle(config.idle)
+-- libinput device settings: tap-to-click, scrolling, acceleration and the
+-- rest, by device type and by device, applied now and again on every
+-- reload. See `config.lua`.
+sol.input(config.input)
 -- The pointer's theme and size. An empty table here is not "reset it": it
 -- means the configuration says nothing, and `XCURSOR_THEME`/`XCURSOR_SIZE`
 -- are what the pointer follows -- which is what the rest of the machine
