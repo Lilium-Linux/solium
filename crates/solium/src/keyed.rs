@@ -163,7 +163,8 @@ impl<T: Clone> Capture<Target<T>> {
         if let Some(old) = self.target.take() {
             pool.give_back(old);
         }
-        pool.target(alloc, size)
+        // A capture is the window's own pixels: always 8 bits a channel.
+        pool.target(alloc, size, crate::pool::Format::Rgba8)
     }
 
     /// Give the target back. `tests::a_pane_that_stops_warping_gives_the_texture_back`.
@@ -364,7 +365,11 @@ mod tests {
     }
     impl Alloc for Counting {
         type Tex = Handle;
-        fn make(&mut self, _size: Size<i32, Physical>) -> Option<Handle> {
+        fn make(
+            &mut self,
+            _size: Size<i32, Physical>,
+            _format: crate::pool::Format,
+        ) -> Option<Handle> {
             self.made += 1;
             Some(Handle(Rc::new(Buffer(Rc::clone(&self.freed)))))
         }

@@ -567,7 +567,11 @@ mod tests {
         struct Made(u32);
         impl crate::pool::Alloc for Made {
             type Tex = u32;
-            fn make(&mut self, _size: Size<i32, Physical>) -> Option<u32> {
+            fn make(
+                &mut self,
+                _size: Size<i32, Physical>,
+                _format: crate::pool::Format,
+            ) -> Option<u32> {
                 self.0 += 1;
                 Some(self.0)
             }
