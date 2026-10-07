@@ -377,6 +377,15 @@ impl Prepared {
     }
 }
 
+/// The probe's answer: set on the host, and a rebind after the frame when it
+/// changed what was known, since rules bound before it kept every rung
+/// (Ruling 11). `state::tests::the_formats_probe_rebinds_the_rules_after_the_frame`.
+pub(crate) fn note_formats(state: &mut Solium, found: crate::pool::Formats) {
+    if state.effects.set_formats(found) {
+        state.rebind = true;
+    }
+}
+
 /// Capture a texture for every window that cannot be drawn from its surfaces
 /// where they are: one whose transform is not a rectangle. A rounded window is
 /// drawn from its surfaces, each through the clipped programs this compiles
@@ -401,12 +410,12 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // `effect::host::tests::an_empty_host_touches_no_gl`). The formats a
     // plan may draw into are probed first, once, and only once something is
     // wanted (`effect::host::tests::the_formats_are_probed_once_and_only_while_something_is_wanted`;
-    // the probe itself is wirecheck case 12c's). Task 14 turns a changed
-    // answer into a rebind after the frame.
+    // the probe itself is wirecheck case 12c's). A changed answer rebinds
+    // the rules after the frame (`note_formats`).
     if !state.effects.is_idle() {
         if state.effects.wants_formats() {
             let found = crate::pool::probe_formats(renderer);
-            let _ = state.effects.set_formats(found);
+            note_formats(state, found);
         }
         state
             .effects

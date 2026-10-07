@@ -498,6 +498,12 @@ pub(crate) enum Command {
     /// resolved in `cursor::theme::Settings::resolve`, not here, so that it is
     /// in one place and testable without Lua.
     Cursor(crate::cursor::theme::Configured),
+    /// `sol.effects{ rules = … }`: the user's rules, parsed, or every error
+    /// in them, applied whole or not at all
+    /// (`state::tests::a_broken_rule_keeps_the_rules_that_ran`).
+    Effects {
+        rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
+    },
 }
 
 /// What the compositor does with a window whose application has not connected.
@@ -893,6 +899,25 @@ impl Scripts {
             .collect();
         found.sort_by(|left, right| left.key.cmp(&right.key));
         found
+    }
+
+    /// The effect rules the configuration handed over as it loaded, the last
+    /// `sol.effects` winning, read without taking them, so `--check` sees
+    /// them and [`Self::startup`] still hands them over.
+    /// `check::tests::the_effects_a_rule_names_are_checked`.
+    pub(crate) fn effects_at_load(
+        &self,
+    ) -> Option<Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>> {
+        self.lua.app_data_ref::<Pending>().and_then(|pending| {
+            pending
+                .commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Effects { rules } => Some(rules.clone()),
+                    _ => None,
+                })
+        })
     }
 
     /// What the configuration said through `sol.qml`, if anything.
@@ -1879,6 +1904,28 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 rows.set(index + 1, row)?;
             }
             Ok(rows)
+        })?,
+    )?;
+
+    // Effects on parts of windows: `sol.effects{ rules = { … } }`, parsed
+    // here and applied whole, or not at all
+    // (`state::tests::a_broken_rule_keeps_the_rules_that_ran`).
+    sol.set(
+        "effects",
+        lua.create_function(|lua, options: Option<Table>| {
+            let rules = match options
+                .map(|table| table.get::<mlua::Value>("rules"))
+                .transpose()?
+            {
+                None | Some(mlua::Value::Nil) => Ok(Vec::new()),
+                Some(value) => match crate::effect::tree::Tree::from_lua(&value)? {
+                    Some(tree) => crate::effect::rules::parse(&tree),
+                    None => Ok(Vec::new()),
+                },
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Effects { rules });
+            })
         })?,
     )?;
 
@@ -7208,6 +7255,96 @@ mod tests {
                 .collect();
             assert_eq!(handed, vec![wanted], "{user}");
             let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
+    /// **`sol.effects` reaches the compositor as rules**, parsed.
+    #[test]
+    fn sol_effects_reaches_the_compositor_as_rules() {
+        let directory =
+            std::env::temp_dir().join(format!("solium-effects-rules-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.effects({ rules = { { match = { app_id = "mpv" }, part = "client", slot = "replace", effect = { "blur", source = "self" } } } })"#,
+        )
+        .expect("writing");
+        let mut scripts = Scripts::load(&config).expect("loading");
+        let commands = scripts.startup().commands;
+        let _ = std::fs::remove_dir_all(&directory);
+        let rules = commands.iter().find_map(|command| match command {
+            Command::Effects { rules } => Some(rules.clone()),
+            _ => None,
+        });
+        assert_eq!(rules.expect("sent").expect("parsed").len(), 1);
+    }
+
+    /// **A broken rule reaches the compositor as its errors**, so the
+    /// compositor can keep the rules that ran and list them; and
+    /// `sol.effects{}` with no `rules` is an empty set, not an error.
+    #[test]
+    fn a_broken_rule_reaches_the_compositor_as_its_errors() {
+        let directory =
+            std::env::temp_dir().join(format!("solium-effects-broken-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            "sol.effects({ rules = { { match = '*', part = 'cleint', slot = 'behind', effect = false } } })\nsol.effects({})\n",
+        )
+        .expect("writing");
+        let mut scripts = Scripts::load(&config).expect("loading");
+        let commands = scripts.startup().commands;
+        let _ = std::fs::remove_dir_all(&directory);
+        let sets: Vec<_> = commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Effects { rules } => Some(rules),
+                _ => None,
+            })
+            .collect();
+        let [broken, empty] = sets.as_slice() else {
+            panic!("two sets: {sets:?}");
+        };
+        let errors = broken.as_ref().expect_err("refused");
+        assert_eq!((errors[0].rule, errors[0].key), (1, "part"));
+        assert_eq!(empty, &Ok(Vec::new()));
+    }
+
+    /// **The shipped configuration declares no rules**, and hands that over,
+    /// so a reload that removes a user's rules takes them away; a `user.lua`'s
+    /// rules replace the empty list whole.
+    #[test]
+    fn the_shipped_configuration_declares_no_rules() {
+        for (user, wanted) in [
+            ("return {}", 0),
+            (
+                "return { effects = { rules = { { match = '*', part = 'client', slot = 'behind', effect = 'glow' } } } }",
+                1,
+            ),
+        ] {
+            let Some((directory, mut scripts)) =
+                shipped_init_with_user("solium-effects-none", user)
+            else {
+                return;
+            };
+            let unknown = scripts.unknown_settings().len();
+            let rules = scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::Effects { rules } => Some(rules),
+                    _ => None,
+                });
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                rules.expect("sent").expect("parsed").len(),
+                wanted,
+                "{user}"
+            );
+            assert_eq!(unknown, 0, "{user}: `effects` is a setting");
         }
     }
 

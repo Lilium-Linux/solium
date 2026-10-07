@@ -281,6 +281,17 @@ format the GPU lacks is dropped at bind, so the effect starts at its first
 rung that runs, and until then every rung is kept. With no effect wanted,
 `prepare` asks the host one question and touches no GL.
 
+Rules (`sol.effects`) are bound at config load the same way, GPU-free:
+`Solium::apply_effects` wants every effect they name, binds every link with
+its params into one chained plan per rule (`effect::plan::Chains`), and
+refuses a tier this build cannot run; one rule that fails keeps the whole set
+out and the rules that ran stay, with the problem on the overlay. The host
+holds the programs the bound rules run, and gives them back when a set
+replaces them. A reload reads the folders before the scripts run, so the
+rules bind against the folders as they now are, and the probe's first answer
+binds them again after the frame (`Solium::settle`), since rules bound before
+it kept every rung.
+
 A plan is run by `effect/run.rs`, in raw GL like the programs: each step is
 drawn into a pooled target in a frame opened on the carrier, reading
 `sol_tex` on texture unit 0 and the textures it `uses` on the next, at most

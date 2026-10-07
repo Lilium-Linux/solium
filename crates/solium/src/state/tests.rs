@@ -191,6 +191,265 @@ fn settle_tells_the_scripts_once_per_change_of_the_problems() {
     assert_eq!(told, ["", "1", "1", "2"]);
 }
 
+/// Rules from Lua source, read the way `sol.effects` reads them (as
+/// `effect::rules::tests::rules` does).
+fn tree(lua: &str) -> crate::effect::tree::Tree {
+    let state = mlua::Lua::new();
+    let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
+    crate::effect::tree::Tree::from_lua(&value)
+        .expect("readable")
+        .expect("a value")
+}
+
+type TestDisplay = smithay::reexports::wayland_server::Display<Solium>;
+
+/// A display, and a state whose effects are looked for in `place` alone.
+fn state_with_effects_in(place: &std::path::Path) -> (TestDisplay, Solium) {
+    let display = TestDisplay::new().expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.effects = crate::effect::host::Host::new(crate::effect::host::Library::with(
+        Some(place.to_path_buf()),
+        place.join("none"),
+    ));
+    (display, state)
+}
+
+const TINT: &str =
+    "return { api = 1, inputs = { 'self' }, params = { amount = { 0.1 } }, frag = 'effect.frag' }";
+const TINT_FRAG: &str = "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * p_amount; }\n";
+
+/// The user's newest bound plan's first step, as a test reads it.
+fn first_step(state: &Solium) -> Option<&solium_effects::stage::Step> {
+    state
+        .chains
+        .first_plan_for_test(crate::effect::rules::Origin::User)
+        .and_then(|plan| plan.steps.first())
+}
+
+/// **A broken rule keeps the rules that ran**, and the error is a problem;
+/// **a rule naming an effect nobody ships is refused** the same way.
+#[test]
+fn a_broken_rule_keeps_the_rules_that_ran() {
+    let place = crate::effect::host::tests::scratch("state-rules");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    let good = crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = { "tint", amount = 0.2 } } }"#,
+    ))
+    .expect("parses");
+    state.apply_effects(Ok(good));
+    assert!(!state.rules.is_empty());
+    let nobody = crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = "nobody" } }"#,
+    ))
+    .expect("parses");
+    state.apply_effects(Ok(nobody));
+    assert_eq!(
+        state.rules.effects(),
+        vec!["tint".to_owned()],
+        "the rules that ran were replaced by a broken set"
+    );
+    assert!(
+        state
+            .effects
+            .problems()
+            .iter()
+            .any(|each| each.effect == "rules" && each.message.contains("nobody")),
+        "{:?}",
+        state.effects.problems()
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **A rule whose effect fails its checks is named at the effect's own file
+/// and line**, once, and **a set that mends it leaves nothing on the
+/// overlay**: the problem of an effect no longer wanted goes with it.
+#[test]
+fn a_rule_whose_effect_is_broken_is_named_at_the_frags_line_until_mended() {
+    let place = crate::effect::host::tests::scratch("state-rules-typo");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    crate::effect::host::tests::folder(
+        &place,
+        "typo",
+        "return { api = 1, inputs = { 'self' }, params = { offset = { 1 } }, frag = 'down.frag' }",
+        &[(
+            "down.frag",
+            "vec4 sol_effect(vec2 uv) {\n    return sol_tex(uv) * p_ofset;\n}\n",
+        )],
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "behind", effect = "typo" } }"#,
+    ))
+    .expect("parses")));
+    assert!(state.rules.is_empty());
+    let problems = state.effects.problems().to_vec();
+    let [problem] = problems.as_slice() else {
+        panic!("one problem: {problems:?}");
+    };
+    assert_eq!(
+        (problem.effect.as_str(), problem.file.clone(), problem.line),
+        ("rules", place.join("typo/down.frag"), Some(2)),
+        "{problem:?}"
+    );
+    assert!(problem.message.contains("rule 1"), "{problem:?}");
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" } }"#,
+    ))
+    .expect("parses")));
+    assert!(!state.rules.is_empty());
+    assert_eq!(
+        state.effects.problems(),
+        &[],
+        "a mended set left a problem behind"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **A rule reading xray is refused at load**, naming X2.1, and the blur
+/// rule with `source = "self"` is not.
+#[test]
+fn a_blur_rule_without_source_is_refused_until_xray() {
+    let place = crate::effect::host::tests::scratch("state-xray");
+    crate::effect::host::tests::folder(
+        &place,
+        "soft",
+        "return { api = 1, inputs = { 'backdrop' }, frag = 'effect.frag' }",
+        &[(
+            "effect.frag",
+            "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+        )],
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "behind", effect = "soft" } }"#,
+    ))
+    .expect("parses")));
+    assert!(state.rules.is_empty());
+    assert!(
+        state
+            .effects
+            .problems()
+            .iter()
+            .any(|each| each.message.contains("X2.1")),
+        "{:?}",
+        state.effects.problems()
+    );
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "behind", effect = { "soft", source = "self" } } }"#,
+    ))
+    .expect("parses")));
+    assert!(!state.rules.is_empty());
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **The probe's first answer rebinds the rules after the frame** (Ruling
+/// 11): a rule bound at config load, before any probe, keeps its `rgba16f`
+/// rung; the probe says no; the next settle rebinds, and the rung is gone.
+#[test]
+fn the_formats_probe_rebinds_the_rules_after_the_frame() {
+    let place = crate::effect::host::tests::scratch("state-formats");
+    let frag = "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n";
+    crate::effect::host::tests::folder(
+        &place,
+        "fine",
+        "return { api = 1, inputs = { 'self' }, params = { field = { 1, int = true } }, fallback = { { field = 0 } },
+        stages = function(p) if p.field == 1 then return { { 'pass', 'a.frag', format = 'rgba16f' } } end return { { 'pass', 'a.frag' } } end }",
+        &[("a.frag", frag)],
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = { "fine", source = "self" } } }"#,
+    ))
+    .expect("parses")));
+    let format = |state: &Solium| first_step(state).map(|step| step.format);
+    assert_eq!(
+        format(&state),
+        Some(solium_effects::stage::Format::Rgba16f),
+        "the premise: unknown formats keep the configured rung"
+    );
+    crate::render::note_formats(&mut state, crate::pool::Formats { rgba16f: false });
+    assert!(state.rebind);
+    let _ = state.settle(state.clock.now());
+    assert_eq!(
+        format(&state),
+        Some(solium_effects::stage::Format::Rgba8),
+        "the rule was not rebound after the probe"
+    );
+    assert!(!state.rebind);
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **A reload binds the rules against the folders it read**, so an effect
+/// changed on disk is the version its rule runs: here a param's default.
+#[test]
+fn a_reload_binds_the_rules_against_the_folders_it_read() {
+    let directory = crate::effect::host::tests::scratch("state-reload-rules");
+    let entry = directory.join("init.lua");
+    std::fs::write(
+        &entry,
+        "sol.pane('none')\nsol.effects({ rules = { { match = '*', part = 'client', slot = 'replace', effect = 'tint' } } })\n",
+    )
+    .expect("writing the test script");
+    let effects = directory.join("effects");
+    let dir =
+        crate::effect::host::tests::folder(&effects, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&effects);
+    let uniforms = |state: &Solium| first_step(state).map(|step| step.uniforms.clone());
+    state.reload_from(&entry);
+    let before = uniforms(&state).expect("the premise: the rule is bound");
+    std::fs::write(dir.join("effect.lua"), TINT.replace("0.1", "0.3")).expect("v2");
+    state.reload_from(&entry);
+    assert_ne!(
+        uniforms(&state),
+        Some(before),
+        "the rule was bound against the folder as it was before the reload"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// **A rule set holds the programs it runs, and a set replacing it gives
+/// them back**: what one set bound is not held for the rest of the session.
+#[test]
+fn a_replaced_rule_set_holds_only_its_own_programs() {
+    let place = crate::effect::host::tests::scratch("state-rules-held");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    crate::effect::host::tests::folder(
+        &place,
+        "plain",
+        "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+        &[(
+            "effect.frag",
+            "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+        )],
+    );
+    let (_display, mut state) = state_with_effects_in(&place);
+    let key = |state: &Solium| first_step(state).map(|step| step.key).expect("bound");
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = "tint" } }"#,
+    ))
+    .expect("parses")));
+    let tint = key(&state);
+    assert!(state.effects.held_for_test().contains(&tint));
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = "plain" } }"#,
+    ))
+    .expect("parses")));
+    let plain = key(&state);
+    assert_ne!(tint, plain);
+    assert_eq!(
+        state
+            .effects
+            .held_for_test()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![plain],
+        "the replaced set's program is still held"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
 /// **A deform at rest is aimed at nothing**, so a window brought back from a
 /// genie with `sol.present(id, {})` is not captured and warped on every frame
 /// for good (#140).

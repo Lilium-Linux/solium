@@ -387,6 +387,7 @@ impl Solium {
                         self.redraw = true;
                     }
                 }
+                Command::Effects { rules } => self.apply_effects(rules),
                 Command::Decoration { name } => {
                     // The slots windows occupy are kept; what changes is how
                     // much of each slot the frame takes, so every client is
@@ -618,14 +619,17 @@ impl Solium {
                 // over is not left on screen
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
                 self.decorations.clear_values();
+                // The effect folders, read again: a changed one is pending
+                // until the next `prepare` compiles it, and a broken one
+                // keeps what ran (`a_reload_reads_the_effect_folders_again`).
+                // Before the scripts start, so the rules their `sol.effects`
+                // hands over bind against the folders as they now are
+                // (`a_reload_binds_the_rules_against_the_folders_it_read`).
+                self.effects.reload();
                 self.start_scripts(Some(scripts));
                 // A configuration that loads mends the one that did not
                 // (`a_failed_reload_is_a_problem_until_one_succeeds`).
                 self.effects.clear_problems_of("config");
-                // The effect folders, read again: a changed one is pending
-                // until the next `prepare` compiles it, and a broken one
-                // keeps what ran (`a_reload_reads_the_effect_folders_again`).
-                self.effects.reload();
                 // The re-announcement, in the order the doc comment states.
                 // Three dispatches and not one, each with its own snapshot,
                 // because what `monitors` does changes what `layout` is
@@ -715,6 +719,91 @@ impl Solium {
         let outcome = scripts.problems_changed(snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
+    }
+
+    /// Rules from `sol.effects`: all of them bound and runnable, or none
+    /// taken and the errors on the overlay, so a broken set keeps the rules
+    /// that ran (`tests::a_broken_rule_keeps_the_rules_that_ran`,
+    /// `tests::a_blur_rule_without_source_is_refused_until_xray`). The rules
+    /// taken hold their programs and a set replaced gives its back
+    /// (`tests::a_replaced_rule_set_holds_only_its_own_programs`). A reload
+    /// replays `sol.effects`, so rules are bound again at every config load
+    /// (`tests::a_reload_binds_the_rules_against_the_folders_it_read`).
+    pub(crate) fn apply_effects(
+        &mut self,
+        rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
+    ) {
+        use crate::effect::host::Problem;
+        use crate::effect::plan::{Chains, rule_problem};
+        use crate::effect::rules::{Fill, Origin, RuleKey};
+        let file = Scripts::config_path();
+        let rules = match rules {
+            Ok(rules) => rules,
+            Err(errors) => {
+                self.effects.clear_problems_of("rules");
+                for error in errors {
+                    self.effects.push_problem(Problem::error(
+                        "rules",
+                        &file,
+                        None,
+                        format!(
+                            "effects.rules, rule {}, `{}`: {}",
+                            error.rule, error.key, error.message
+                        ),
+                    ));
+                }
+                return;
+            }
+        };
+        let generation = self.rules_generation.wrapping_add(1);
+        let taken = crate::effect::rules::Rules::new(Vec::new(), Vec::new(), rules, generation);
+        let before = self.rules.effects();
+        self.effects.want("rules", taken.effects());
+        let mut bound = Vec::new();
+        let mut problems = Vec::new();
+        for (index, rule) in taken.user().iter().enumerate() {
+            if rule.fill == Fill::Off {
+                continue;
+            }
+            match Chains::bind(&mut self.effects, rule) {
+                Ok(chain) => bound.push((
+                    RuleKey {
+                        origin: Origin::User,
+                        index: u32::try_from(index).unwrap_or(u32::MAX),
+                        generation,
+                    },
+                    chain,
+                )),
+                Err(problem) => problems.push(rule_problem(index + 1, problem, &file)),
+            }
+        }
+        self.effects.clear_problems_of("rules");
+        if !problems.is_empty() {
+            for problem in problems {
+                self.effects.push_problem(problem);
+            }
+            self.effects.want("rules", before);
+            self.effects.hold(self.chains.programs());
+            return;
+        }
+        self.rules_generation = generation;
+        for (key, chain) in bound {
+            self.chains.insert(key, chain);
+        }
+        self.chains.retain_generation(Origin::User, generation);
+        self.effects.hold(self.chains.programs());
+        self.rules = taken;
+        self.redraw = true;
+    }
+
+    /// Bind every rule again, after the formats probe changed what is known
+    /// (Ruling 11): the user's rules through `apply_effects`, a new
+    /// generation, so every slot starts afresh. Task 15 adds the style's.
+    /// `tests::the_formats_probe_rebinds_the_rules_after_the_frame`.
+    pub(crate) fn rebind_effects(&mut self) {
+        self.rebind = false;
+        let user = self.rules.user().to_vec();
+        self.apply_effects(Ok(user));
     }
 
     /// Tell the scripts they have replaced a running session's, not started one.

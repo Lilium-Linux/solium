@@ -597,6 +597,18 @@ pub(crate) struct Solium {
     /// fires `problems` once per change:
     /// `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.
     pub(crate) problems_told: u64,
+    /// The rules `sol.effects` gave, taken whole once every one bound
+    /// (`tests::a_broken_rule_keeps_the_rules_that_ran`).
+    pub(crate) rules: crate::effect::rules::Rules,
+    /// Every rule's chain, bound at config load, by its key.
+    pub(crate) chains: crate::effect::plan::Chains,
+    /// The user's rules' generation: a set taken is a new one, so a key of
+    /// the set it replaced finds nothing.
+    pub(crate) rules_generation: u32,
+    /// The formats probe changed what is known, so the rules are bound again
+    /// after the frame (Ruling 11,
+    /// `tests::the_formats_probe_rebinds_the_rules_after_the_frame`).
+    pub(crate) rebind: bool,
 
     /// GPU time per pass, only while pacing is on: `gputime.rs`. On the state
     /// rather than the backend so a capture can time itself (Ruling 5).
@@ -1066,6 +1078,10 @@ impl Solium {
             programs: crate::pass::Programs::default(),
             effects: crate::effect::host::Host::new(crate::effect::host::Library::new()),
             problems_told: 0,
+            rules: crate::effect::rules::Rules::default(),
+            chains: crate::effect::plan::Chains::default(),
+            rules_generation: 0,
+            rebind: false,
             timer: None,
             pool: crate::pool::Pool::new(0),
             textures: None,
@@ -1685,6 +1701,12 @@ impl Solium {
         // (Ruling 11):
         // `tests::real_client::reflow_on_close::hosted::a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame`.
         self.settle_scenes();
+        // The rules bound before the formats probe kept every rung; its first
+        // answer binds them again, after the frame and never in `prepare`
+        // (Ruling 11): `tests::the_formats_probe_rebinds_the_rules_after_the_frame`.
+        if self.rebind {
+            self.rebind_effects();
+        }
         // The overlay hears about a changed problem once, after the frame
         // that found it:
         // `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.

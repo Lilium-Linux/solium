@@ -8,17 +8,17 @@
 
 pub(crate) mod gl;
 pub(crate) mod host;
+pub(crate) mod plan;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "sol.effects reads rules from Task 14")
+    expect(
+        dead_code,
+        reason = "Task 18's slot plan resolves the rules once a pass"
+    )
 )]
 pub(crate) mod rules;
 pub(crate) mod run;
 pub(crate) mod sandbox;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "sol.effects reads rules from Task 14")
-)]
 pub(crate) mod tree;
 
 /// So `super::pool` resolves the same in `effect/run.rs` here and in

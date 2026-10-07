@@ -28,6 +28,61 @@ your configuration names, in a rule, in `effects.on` or in a binding, and the
 effects those name in turn. Every other folder is left alone, yours and the
 shipped ones alike.
 
+## Rules
+
+A rule puts an effect in a slot of a part of a window, or of a surface. Rules
+go in your configuration, in `effects.rules` (in `user.lua`, a list that
+replaces the shipped empty one whole), and `init.lua` hands them over with
+`sol.effects`:
+
+```lua
+return {
+    effects = {
+        rules = {
+            { match = { app_id = "mpv" }, part = "client", slot = "replace",
+              effect = { "blur", source = "self", passes = 2 } },
+        },
+    },
+}
+```
+
+| Key | What it takes |
+|---|---|
+| `match` | `"*"`, or a table of what to match: `app_id`, `title`, `monitor`, `style` (a bare window's is `"none"`), and `focused` and `fullscreen` as `true` or `false`, for a window's parts; `surface` for a scripted surface's; `layer_shell` for a layer surface's. A word is exact, `"*"`, or a prefix ending in `*` (`"org.gnome.*"`); there are no Lua patterns. A key of another kind of part's is refused |
+| `part` | `pane` (the window's frame and client, not its popups), `client`, `popup` (all of a window's popups at once), `layer:<name>` (a pane style's layer), `region:titlebar`, `surface:<name>` (one scripted surface on one monitor) or `layer_shell:<namespace>` |
+| `slot` | `behind` the part, in `front` of it, or `replace` it |
+| `effect` | an effect's name; a link, `{ "blur", passes = 3 }`, with the effect's params beside its name; a chain of links, run in order, each reading the last one's result, `{ { "blur", source = "self" }, { "tint", amount = 0.1 } }`; or `false`, which empties the slot |
+| `source` | what the chain's first input reads in place of its own: `"self"`, the part's own pixels. On the rule or in its first link, never a later one |
+| `mask` | how the result is cut: `"shape"`, the part's own shape (the default), or `"alpha"`, the alpha of the part's own pixels, which needs `source = "self"` |
+
+A link may also give `reach` and `bleed`, in pixels, in place of the
+effect's own. A chain reads as far around its part as its first link
+reaches, and draws as far beyond it as all its links bleed together.
+
+For one part and one slot the later rule wins: a pane style's rules first,
+then yours, so yours win over a style's, and a later one of yours over an
+earlier one. `effect = false` in a later rule empties the slot an earlier one
+filled. The part itself is always drawn: `behind` and `front` only add, and a
+`replace` whose effect fails draws the part as if no rule named it.
+
+Rules are applied whole. When your configuration loads, every effect a rule
+names is loaded and every link bound with its params, and one rule that
+cannot be (a key misspelled, a part or a slot that does not exist, an effect
+nobody ships, a param it does not have, a shader that fails its checks) keeps
+the whole set out: the rules that ran before stay, and what is wrong is on
+the overlay, by the rule's number and key, or at the effect's own file and
+line when the effect is what failed. `solium --check` fails on it too.
+
+Some of what a rule can say waits for a later part of Solium, and is refused
+until then, by name: an effect that reads the `backdrop` from what is behind
+the window (blur's own input) needs xray, which arrives with X2.1, so give
+`source = "self"` to blur the part's own pixels; the live backdrop
+(`source = "live"` or `"auto"`) arrives with X4.1; regions other than the
+titlebar, `part = "output"`, `keep`, a `surface` match naming a plane, and an
+alpha mask without `source = "self"` likewise. This build reads, checks and
+binds rules, and names a broken one on the overlay; drawing an effect in its
+slot lands later.
+
 ## When it is read, and when it compiles
 
 An effect's folder is read when your configuration loads, and again at every
@@ -44,7 +99,8 @@ its file changes, or until a reload, which tries every failure once more.
 
 What is broken is named with its file and line in the top-right corner of
 your primary monitor, for as long as it is broken: a Lua error in an
-`effect.lua`, a check of a shader that fails, a compile the GPU refused. A
+`effect.lua`, a check of a shader that fails, a compile the GPU refused, a
+rule that cannot be applied (above). A
 configuration that fails to reload is listed there too, at its own line, and
 the configuration that was running before it keeps running. The list goes
 when a reload leaves nothing broken. A version of an effect that fails keeps
@@ -82,9 +138,10 @@ render node` and `formats not checked: no render node`, keeps every version,
 and that is not a failure.
 
 Plain `solium --check` checks every folder in your `effects/` this way,
-named or not, and every effect your configuration names. There a folder with
-no `effect.lua` fails, and so does one whose name cannot name an effect, such
-as `Blur`, since nothing could use it.
+named or not, and every effect your configuration's rules name, and a rule
+that does not parse fails it. A folder with no `effect.lua` fails, and so
+does one whose name cannot name an effect, such as `Blur`, since nothing
+could use it.
 
 ## What `effect.lua` returns
 

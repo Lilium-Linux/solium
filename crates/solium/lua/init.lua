@@ -17,6 +17,8 @@ sol.session(config.session)
 -- Settings the compositor itself holds, applied from the same file as
 -- everything else. All of them take effect immediately when reloaded.
 sol.pane(config.pane)
+-- Which effects go where. See config.lua's `effects`.
+sol.effects(config.effects)
 sol.loading(config.loading)
 -- What fills a window while a resize drag is ahead of its client. An absent
 -- table is not an error: a `config.lua` copied before this setting existed

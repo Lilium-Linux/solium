@@ -258,6 +258,43 @@ wallpaper — so its bar is `clientRadius` taller than its band and sits at
 over the client the same rectangle would eat the client's top `clientRadius`
 rows, which in a terminal is the top half of the first line.
 
+### Effects
+
+An effect is a folder of Lua and GLSL, yours in `~/.config/solium/effects/`
+or one Solium ships, and a rule puts it in a slot of a part of a window. To
+blur what mpv itself draws, in its own place:
+
+```lua
+return {
+    effects = {
+        rules = {
+            { match = { app_id = "mpv" }, part = "client", slot = "replace",
+              effect = { "blur", source = "self" } },
+        },
+    },
+}
+```
+
+`part` is the window's `client`, its whole `pane`, its `popup`s, a layer of
+its pane style, its `region:titlebar`, or a scripted or layer surface; `slot`
+is `behind` it, in `front` of it, or `replace` it; `effect` is a name, a name
+with params (`{ "blur", passes = 3 }`), a chain of them, or `false` to empty
+the slot. A later rule for the same part and slot wins, and yours win over a
+pane style's. `source = "self"` is what makes this blur read mpv's own
+pixels: blurring what is behind a window needs xray, which has not arrived,
+and a rule asking for it is refused, by name.
+
+The rules are applied whole: one that cannot be, a typo in a key or an
+effect with a broken shader, keeps the whole set out, leaves the rules that
+were running, and is named in the top-right corner of your primary monitor,
+at its rule number or at the effect's own file and line. `solium --check`
+fails on it too. With no rules nothing changes, and nothing costs anything.
+
+`blur` is not shipped yet, and an effect is not drawn in its slot yet: this
+build reads, checks and binds rules and names a broken one, and that is all.
+[The effects reference](../crates/solium/effects/README.md#rules) has every
+key a rule takes, and how to write an effect of your own.
+
 ### What a window shows before its application exists
 
 A window's life starts when you ask for the application, not when the program

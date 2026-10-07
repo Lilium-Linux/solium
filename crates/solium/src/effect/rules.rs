@@ -752,6 +752,14 @@ impl Rules {
         self.lists.iter().all(Vec::is_empty)
     }
 
+    /// The user's rules, as `sol.effects` gave them: what a rebind after the
+    /// formats probe binds again.
+    /// `state::tests::the_formats_probe_rebinds_the_rules_after_the_frame`.
+    pub(crate) fn user(&self) -> &[Rule] {
+        let [_, _, user] = &self.lists;
+        user
+    }
+
     /// Each origin's list with its generation, in the order a later rule
     /// wins: style, material, expansion, user (Ruling 13).
     /// `tests::a_users_rule_beats_the_styles`.

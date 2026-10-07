@@ -91,7 +91,9 @@ pub(crate) fn is_name(name: &str) -> bool {
 /// Something wrong with an effect, where it is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Problem {
-    /// The effect's name, or `"config"` for the configuration itself.
+    /// The effect's name, `"config"` for the configuration itself, or
+    /// `"rules"` for a rule `sol.effects` gave
+    /// (`state::tests::a_broken_rule_keeps_the_rules_that_ran`).
     pub(crate) effect: String,
     pub(crate) file: PathBuf,
     pub(crate) line: Option<u32>,
@@ -414,18 +416,22 @@ impl<P: Clone> Host<P> {
         }
     }
 
-    /// The programs a bound plan holds, from now until the next config load,
-    /// which rebinds every rule and calls this again.
-    #[expect(
-        dead_code,
-        reason = "Task 14's binder holds every rule's programs through it"
-    )]
+    /// The programs the bound rules hold, from now until the rules are bound
+    /// again, which calls this again: what one set bound is given back when
+    /// another replaces it
+    /// (`state::tests::a_replaced_rule_set_holds_only_its_own_programs`).
     pub(crate) fn hold(&mut self, keys: impl IntoIterator<Item = u64>) {
         let keys: BTreeSet<u64> = keys.into_iter().collect();
         if keys != self.held {
             self.held = keys;
             self.sweep = true;
         }
+    }
+
+    /// What [`Self::hold`] holds, for a test to read.
+    #[cfg(test)]
+    pub(crate) fn held_for_test(&self) -> &BTreeSet<u64> {
+        &self.held
     }
 
     #[expect(
@@ -698,14 +704,10 @@ impl<P: Clone> Host<P> {
 
     /// Bind `name` with `overrides` into its configured plan and one plan
     /// per fallback rung, dropping any that needs a format this GPU lacks;
-    /// every step's program is asked for, and held until the next config
-    /// load's [`Self::hold`]. A cold effect binds against its pending
+    /// every step's program is asked for, and held until the rules' next
+    /// [`Self::hold`]. A cold effect binds against its pending
     /// version. `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`,
     /// `tests::a_fallback_naming_another_effect_binds_it_at_load`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 14's rules bind through it")
-    )]
     pub(crate) fn bind(
         &mut self,
         name: &str,
@@ -898,9 +900,10 @@ impl<P: Clone> Host<P> {
     }
 
     /// Record what the probe found: whether that changed what was known
-    /// (`None` to `Some`, or another answer), which Task 14 turns into a
-    /// rebind after the frame.
-    /// `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`.
+    /// (`None` to `Some`, or another answer), which `render::note_formats`
+    /// turns into a rebind after the frame.
+    /// `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`,
+    /// `state::tests::the_formats_probe_rebinds_the_rules_after_the_frame`.
     pub(crate) fn set_formats(&mut self, formats: crate::pool::Formats) -> bool {
         let changed = self.formats != Some(formats);
         self.formats = Some(formats);

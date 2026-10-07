@@ -12,7 +12,9 @@
 #   dev/effects-check.sh [section]...       every section when none is named
 #
 #   overlay   a broken init.lua reloaded: the overlay appears in the top-right
-#             corner, and nothing else on screen changes
+#             corner, and nothing else on screen changes; and a rule naming
+#             an effect whose .frag has a typo: the overlay names the .frag
+#             at its line
 #
 # QML is software nested (#148). Only what this script started is ever
 # killed: a developer may have a nested Solium of their own running.
@@ -115,6 +117,30 @@ section_overlay() {
     fi
     judge same "${frames[0]}" "${frames[1]}" 0 0.5 1 0.5 >/dev/null \
         || fail "overlay: the bottom half changed too, so the corner is not what was judged"
+
+    # A rule naming the `typo` fixture, whose down.frag reads `p_ofset` on
+    # line 2: the rule is refused, and the overlay names the .frag at that
+    # line from the first frames. Judged against the working configuration's
+    # frame above, which has no overlay.
+    local working="${frames[0]}"
+    stop
+    SECTION_EFFECTS="$root/crates/solium/tests/fixtures/effects/typo" \
+        run_scene overlay-effect overlay.lua BROKEN_EFFECT=1 \
+        SOLIUM_CAPTURE_AT=2500 SOLIUM_CAPTURE_FRAMES=2 SOLIUM_CAPTURE_INTERVAL=1000 || return
+    wait_frames 2 || return
+    if grep -qE 'problem .*/typo/down\.frag:2: ' "$dir/log"; then
+        pass "overlay-effect: the rule's effect is named at down.frag:2"
+    else
+        fail "overlay-effect: no problem at typo/down.frag:2 in $dir/log"
+    fi
+    frames=("$dir"/f-*)
+    if judge differs "$working" "${frames[1]}" 0.5 0 0.5 0.25 >/dev/null; then
+        pass "overlay-effect: the top-right corner shows the overlay"
+    else
+        fail "overlay-effect: nothing appeared in the top-right corner"
+    fi
+    judge same "$working" "${frames[1]}" 0 0.5 1 0.5 >/dev/null \
+        || fail "overlay-effect: the bottom half changed too, so the corner is not what was judged"
 }
 
 all=(overlay)

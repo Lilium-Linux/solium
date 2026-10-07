@@ -112,6 +112,22 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
                 }
             }
 
+            // A rule that does not parse is refused at load, so it fails
+            // here too, by its number and its key
+            // (`tests::a_broken_rule_fails_the_check`).
+            if let Some(Err(errors)) = scripts.effects_at_load() {
+                report.fail(&format!(
+                    "  {} effect rule error(s) -- the rules as written are refused:",
+                    errors.len()
+                ));
+                for error in errors {
+                    report.line(&format!(
+                        "    effects.rules, rule {}, `{}`: {}",
+                        error.rule, error.key, error.message
+                    ));
+                }
+            }
+
             let unknown = scripts.unknown_settings();
             if !unknown.is_empty() {
                 report.fail(&format!(
@@ -474,6 +490,24 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
     }
 }
 
+/// The rules the configuration handed over as it loaded, when they parsed;
+/// none when they did not, which [`config`] has failed.
+/// `tests::the_effects_a_rule_names_are_checked`.
+pub(crate) fn configured_rules(
+    scripts: &crate::script::Scripts,
+) -> Vec<crate::effect::rules::Rule> {
+    match scripts.effects_at_load() {
+        Some(Ok(rules)) => rules,
+        Some(Err(_)) | None => Vec::new(),
+    }
+}
+
+/// Every effect the rules name, each once: what [`effects`] checks beside
+/// the user's folders. `tests::the_effects_a_rule_names_are_checked`.
+pub(crate) fn wanted_by(rules: &[crate::effect::rules::Rule]) -> Vec<String> {
+    crate::effect::rules::Rules::new(Vec::new(), Vec::new(), rules.to_vec(), 0).effects()
+}
+
 /// Problems as lines: an error fails the report, a warning is said.
 /// `tests::a_name_missing_from_uses_is_a_warning_not_a_failure`.
 fn say(report: &mut Report, problems: &[crate::effect::host::Problem]) {
@@ -572,6 +606,9 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
         }
         None => {
             if let Some(mut scripts) = config(&crate::script::Scripts::config_path(), &mut report) {
+                // Read before `scenes` takes what the configuration handed
+                // over as it loaded.
+                let configured = configured_rules(&scripts);
                 // Software, as for one file: what is checked is whether each
                 // scene builds, not what it looks like on this machine.
                 crate::qml::renderer::decide(
@@ -586,7 +623,12 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                         let formats = gpu.as_mut().map(crate::pool::probe_formats);
                         let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
                         let library = crate::effect::host::Library::new();
-                        effects(&mut report, &library, &[], compiler.as_mut().zip(formats));
+                        effects(
+                            &mut report,
+                            &library,
+                            &wanted_by(&configured),
+                            compiler.as_mut().zip(formats),
+                        );
                         let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
                             .into_iter()
                             .find_map(|name| std::env::var(name).ok());
@@ -1256,5 +1298,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(place);
         assert!(!passed, "{out}");
         assert!(out.contains("`nowhere`"), "{out}");
+    }
+
+    /// **A broken rule fails the check**, by its number and its key, with
+    /// the part it probably meant.
+    #[test]
+    fn a_broken_rule_fails_the_check() {
+        let directory = crate::effect::host::tests::scratch("check-rule");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.effects({ rules = { { match = "*", part = "regoin:titlebar", slot = "behind", effect = false } } })"#,
+        )
+        .expect("writing");
+        let (passed, out) = reported(|report| {
+            let _ = super::config(&config, report);
+        });
+        let _ = std::fs::remove_dir_all(directory);
+        assert!(!passed, "{out}");
+        assert!(
+            out.contains("rule 1") && out.contains("region:titlebar"),
+            "{out}"
+        );
+    }
+
+    /// The rules an `init.lua` calling `sol.effects{ rules = <rules> }`
+    /// hands over, as `--check` reads them.
+    fn rules_from(directory: &Path, rules: &str) -> Vec<crate::effect::rules::Rule> {
+        let config = directory.join("init.lua");
+        std::fs::write(&config, format!("sol.effects({{ rules = {rules} }})")).expect("writing");
+        let scripts = crate::script::Scripts::load(&config).expect("loading");
+        super::configured_rules(&scripts)
+    }
+
+    /// **The effects a rule names are checked**, as `--check` checks the
+    /// folders it is handed: a rule naming `typo` fails at its `.frag`'s line.
+    #[test]
+    fn the_effects_a_rule_names_are_checked() {
+        let directory = crate::effect::host::tests::scratch("check-rule-effects");
+        let rules = rules_from(
+            &directory,
+            r#"{ { match = "*", part = "client", slot = "behind", effect = { { "identity" }, { "typo" } } } }"#,
+        );
+        let _ = std::fs::remove_dir_all(directory);
+        let wanted = super::wanted_by(&rules);
+        assert_eq!(wanted, ["identity".to_owned(), "typo".to_owned()]);
+        let library = crate::effect::host::Library::with(None, effect_fixtures());
+        let (passed, out) = reported(|report| effects::<Counting>(report, &library, &wanted, None));
+        assert!(!passed, "{out}");
+        assert!(
+            out.contains("identity: ok") && out.contains("down.frag:2"),
+            "{out}"
+        );
     }
 }

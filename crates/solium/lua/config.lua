@@ -1041,6 +1041,19 @@ local defaults = {
         scale = 0.88,
     },
 
+    -- Effects: folders of Lua and GLSL in ~/.config/solium/effects/ (yours)
+    -- or shipped with Solium, put in a slot of a part of a window by a rule.
+    -- See crates/solium/effects/README.md for the folders and docs/ricing.md
+    -- for rules. With no rules nothing changes, and costs nothing.
+    effects = {
+        -- { match = { app_id = "mpv" }, part = "client", slot = "replace",
+        --   effect = { "blur", source = "self" } }
+        --
+        -- A list, so yours replaces this one whole. A set with a broken rule
+        -- is refused whole, named on the overlay, and the rules that ran stay.
+        rules = {},
+    },
+
     -- How much of a window trails behind it in the genie, for the Developer
     -- Tweaks panel's version of that effect (`--debug-mode` only).
     --

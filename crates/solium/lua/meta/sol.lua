@@ -111,7 +111,7 @@
 ---One row of `sol.problems()`: something broken in an effect, a rule or the
 ---configuration, and where.
 ---@class sol.Problem
----@field effect string The effect's name, or `"config"` for the configuration.
+---@field effect string The effect's name, `"config"` for the configuration, or `"rules"` for a rule of `sol.effects`, at its effect's file and line when the effect is what failed.
 ---@field file string The file the problem is in.
 ---@field line? integer Its line in that file, where one is known.
 ---@field column? integer Its column, where the compiler gave one.
@@ -376,6 +376,26 @@ function sol.text_input() end
 ---reload succeeds.
 ---@return sol.Problem[]
 function sol.problems() end
+
+---One rule of `sol.effects{ rules = … }`: which effect goes in which slot of
+---which part, for which windows or surfaces. A later rule for the same part
+---and slot wins over an earlier one, and yours over a pane style's.
+---@class sol.Rule
+---@field match "*"|table `"*"`, or the keys a part's kind matches on, each a word that is exact, `"*"`, or a prefix ending in `*`: `app_id`, `title`, `monitor`, `style` (`"none"` for a bare window), and `focused` and `fullscreen` as booleans, for a window's parts; `surface` for a scripted surface's (a plane such as `shell/dock` waits for planes); `layer_shell` for a layer surface's. No Lua patterns.
+---@field part string `pane`, `client`, `popup`, `layer:<name>`, `region:titlebar`, `surface:<name>` or `layer_shell:<namespace>`. Other regions wait for `Solium.region`, and `output` for X4.2.
+---@field slot "behind"|"front"|"replace" Below the part, above it, or in its place. The part itself is always drawn: a `replace` whose effect fails draws the part.
+---@field effect string|table|false An effect's name; a link, `{ "blur", passes = 3 }`, its params beside the name, with `reach` and `bleed` overriding the effect's own; a chain of links in order, `{ { "blur" }, { "tint" } }`; or `false`, which empties the slot.
+---@field source? "self"|"xray"|"live"|"auto" What the chain's first input reads in place of its own: `"self"`, the part's own pixels. On the rule or in its first link. Reading the backdrop from xray waits for X2.1 and the live backdrop for X4.1, both refused when the rules are applied.
+---@field mask? "shape"|"alpha" How the result is cut: the part's shape (the default), or the alpha of the part's own pixels, which needs `source = "self"`.
+
+---Which effects go where, all at once: a set with a broken rule is refused
+---whole, its errors listed by `sol.problems()`, and the rules that ran stay.
+---Every effect a rule names is loaded and every link bound with its params
+---when this is called, at load and at every reload; `rules` left out is no
+---rules.
+---@param options? { rules?: sol.Rule[] }
+---@return nil
+function sol.effects(options) end
 
 ---Read the monitors, or arrange them.
 ---
