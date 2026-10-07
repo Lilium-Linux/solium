@@ -118,7 +118,7 @@ pub(crate) fn help() -> String {
     let mut out = String::from(
         "solium: the Wayland compositor of Lilium DE\n\n\
          Usage: solium [--tty [--session]] [--debug-mode] [--qml <mode>]\n       \
-         solium --check [<file.qml>] | --probe | --help | --version\n\n\
+         solium --check [<file.qml> | <effect folder>] | --probe | --help | --version\n\n\
          Nested when WAYLAND_DISPLAY or DISPLAY is set, on the hardware otherwise.\n",
     );
     let mut wanted = false;

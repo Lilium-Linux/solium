@@ -2,11 +2,13 @@
 //! writes to a [`Report`] and fails it rather than exiting, so every one is
 //! tested; [`run`] turns the report into the exit status (spec §6.5, C7).
 //! `--check` checks the configuration, then the scenes it declares at load,
-//! your own pane styles and the scenes this run's environment names.
+//! your own pane styles, your own effect folders and the effects the
+//! configuration names, and the scenes this run's environment names.
 //! `tests::a_config_that_does_not_load_still_fails`,
 //! `tests::a_file_that_does_not_load_fails`,
 //! `tests::a_surface_whose_scene_does_not_load_fails`,
-//! `tests::a_broken_style_of_your_own_fails`.
+//! `tests::a_broken_style_of_your_own_fails`,
+//! `tests::every_user_folder_and_every_named_effect_is_checked`.
 
 use std::{io::Write, path::Path};
 
@@ -349,12 +351,187 @@ fn knobs(pane: Option<&str>, loading: Option<&str>, report: &mut Report) {
     }
 }
 
-/// `solium --check [<file>]`: the configuration, or one QML file; the exit
-/// status is the report's. `tests/cli.rs`'s `check_qml_on_a_broken_file_exits_one`.
+/// One effect folder: the sandbox, the schema, the lints, and the compile
+/// when `gpu` is given (Ruling 9). What it names (`pixels`, a `fallback`
+/// naming an effect) is looked for beside it first and then in `shipped`, as
+/// at run time.
+/// `tests::a_broken_effect_folder_fails_check`,
+/// `tests::a_frag_reading_an_undeclared_param_fails_check_at_its_line`,
+/// `tests::a_name_missing_from_uses_is_a_warning_not_a_failure`,
+/// `tests::with_no_render_node_shaders_are_said_not_compiled`,
+/// `tests::a_program_that_does_not_compile_fails_the_check`.
+pub(crate) fn effect_folder<C: crate::effect::host::Compiler>(
+    report: &mut Report,
+    dir: &Path,
+    shipped: &Path,
+    gpu: Option<&mut C>,
+) {
+    use crate::effect::host::{Host, Library};
+    // `solium --check .` inside a folder: a path ending in `.` or `..` has no
+    // name of its own to look the effect up by
+    // (`tests::a_folder_named_through_dot_dot_is_checked_by_its_own_name`).
+    let dir = if dir.file_name().is_some() {
+        dir.to_path_buf()
+    } else {
+        dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+    };
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // Said as it is: the folder is there, and nothing can name it
+    // (`tests::a_folder_whose_name_cannot_name_an_effect_fails_saying_so`).
+    if !crate::effect::host::is_name(&name) {
+        report.fail(&format!(
+            "    {}: `{name}` cannot name an effect: a name is lower-case letters, digits, `-` and `_`",
+            dir.display()
+        ));
+        return;
+    }
+    let parent = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+    // The folder's own place first, then the shipped folders: a user's copy of
+    // `zoom` names the shipped `fade` (`tests::a_user_folder_naming_a_shipped_effect_passes`).
+    let mut host: Host<C::Program> = Host::new(Library::with(Some(parent), shipped.to_path_buf()));
+    host.want("check", [name.clone()]);
+    let compiled = gpu.is_some();
+    if let Some(compiler) = gpu {
+        host.compile_pending(compiler);
+    }
+    say(report, host.problems());
+    if host
+        .problems()
+        .iter()
+        .all(|each| each.severity != solium_effects::spec::Severity::Error)
+    {
+        report.line(&format!(
+            "    {name}: ok{}",
+            if compiled {
+                ""
+            } else {
+                " (shaders not compiled: no render node)"
+            }
+        ));
+    }
+}
+
+/// Every folder in the user's `effects/` and every effect the configuration
+/// names, each with what it names in turn (Ruling 9). The shipped folders
+/// are `cargo test`'s, as the shipped styles are.
+/// `tests::every_user_folder_and_every_named_effect_is_checked`,
+/// `cli::check_exits_1_on_a_broken_user_effect_folder`.
+pub(crate) fn effects<C: crate::effect::host::Compiler>(
+    report: &mut Report,
+    library: &crate::effect::host::Library,
+    wanted: &[String],
+    mut gpu: Option<&mut C>,
+) {
+    report.line("  effects:");
+    if gpu.is_none() {
+        report.line("    shaders not compiled: no render node");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for dir in library.user_folders() {
+        if !dir.join("effect.lua").is_file() {
+            report.fail(&format!("    {}: has no effect.lua", dir.display()));
+            continue;
+        }
+        seen.insert(
+            dir.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        );
+        effect_folder(report, &dir, library.shipped(), gpu.as_deref_mut());
+    }
+    for name in wanted.iter().filter(|name| !seen.contains(*name)) {
+        match library.resolve(name) {
+            Some(dir) => effect_folder(report, &dir, library.shipped(), gpu.as_deref_mut()),
+            None => report.fail(&format!(
+                "    `{name}`: the configuration names an effect nobody ships"
+            )),
+        }
+    }
+}
+
+/// Problems as lines: an error fails the report, a warning is said.
+/// `tests::a_name_missing_from_uses_is_a_warning_not_a_failure`.
+fn say(report: &mut Report, problems: &[crate::effect::host::Problem]) {
+    for problem in problems {
+        let at = match problem.line {
+            Some(line) => format!("{}:{line}", problem.file.display()),
+            None => problem.file.display().to_string(),
+        };
+        match problem.severity {
+            solium_effects::spec::Severity::Error => {
+                report.fail(&format!("    {at}: {}", problem.message));
+            }
+            solium_effects::spec::Severity::Warning => {
+                report.line(&format!("    warning: {at}: {}", problem.message));
+            }
+        }
+    }
+}
+
+/// A headless renderer on the first render node, opened as wirecheck opens
+/// one (`dev/wirecheck/src/main.rs`'s `open_gbm` and `make_renderer`), never
+/// the card. `None` where there is none, as in the gate's container and in
+/// COPR.
+#[expect(
+    unsafe_code,
+    reason = "opening a headless renderer on a render node for --check"
+)]
+fn render_node() -> Option<smithay::backend::renderer::gles::GlesRenderer> {
+    use smithay::backend::{
+        allocator::gbm::GbmDevice,
+        drm::DrmDeviceFd,
+        egl::{EGLContext, EGLDisplay},
+        renderer::gles::GlesRenderer,
+    };
+    use smithay::utils::DeviceFd;
+    let node = std::fs::read_dir("/dev/dri")
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("renderD"))
+        })
+        .min()?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(node)
+        .ok()?;
+    let gbm = GbmDevice::new(DrmDeviceFd::new(DeviceFd::from(
+        std::os::fd::OwnedFd::from(file),
+    )))
+    .ok()?;
+    // SAFETY: the display is made from a GBM device this function owns, and
+    // lives as long as the renderer that holds its context.
+    let display = unsafe { EGLDisplay::new(gbm) }.ok()?;
+    let context = EGLContext::new(&display).ok()?;
+    // SAFETY: the context is fresh and is current on no other thread.
+    unsafe { GlesRenderer::new(context) }.ok()
+}
+
+/// `solium --check [<file>]`: the configuration, one QML file, or one effect
+/// folder; the exit status is the report's.
+/// `tests/cli.rs`'s `check_qml_on_a_broken_file_exits_one`,
+/// `check_exits_1_on_a_broken_effect_folder`.
 pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
     let mut out = std::io::stdout();
     let mut report = Report::new(&mut out);
     match single {
+        // An effect folder: checked alone, with no Qt
+        // (`cli::check_exits_0_on_a_good_effect_folder`).
+        Some(dir) if dir.is_dir() && dir.join("effect.lua").is_file() => {
+            let mut gpu = render_node();
+            effect_folder(
+                &mut report,
+                dir,
+                &crate::assets::effects(),
+                gpu.as_mut().map(crate::effect::GlCompiler).as_mut(),
+            );
+        }
         Some(file) => {
             // Software in every mode, so the scene is a software scene by
             // construction rather than by preference -- the one caller in the
@@ -381,6 +558,14 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                     Ok(()) => {
                         scenes(&mut scripts, &mut report);
                         styles(&mut report);
+                        let mut gpu = render_node();
+                        let library = crate::effect::host::Library::new();
+                        effects(
+                            &mut report,
+                            &library,
+                            &[],
+                            gpu.as_mut().map(crate::effect::GlCompiler).as_mut(),
+                        );
                         let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
                             .into_iter()
                             .find_map(|name| std::env::var(name).ok());
@@ -403,7 +588,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Report, config, knobs, qml_file, styles_in};
+    use super::{Report, config, effect_folder, effects, knobs, qml_file, styles_in};
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -750,5 +935,218 @@ mod tests {
             assert!(!passed, "{text}");
             assert!(text.contains("solium-loading.qml"), "{text}");
         });
+    }
+
+    /// The test effect folders (`tests/fixtures/effects/`).
+    fn effect_fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/effects")
+    }
+
+    fn effect_fixture(name: &str) -> PathBuf {
+        effect_fixtures().join(name)
+    }
+
+    /// The real shipped folders, as `--check` resolves a closure through them.
+    fn shipped() -> PathBuf {
+        crate::assets::effects()
+    }
+
+    type Counting = crate::effect::host::tests::Counting;
+
+    /// **A broken effect folder fails the check**, naming the file.
+    #[test]
+    fn a_broken_effect_folder_fails_check() {
+        let (passed, out) = reported(|report| {
+            effect_folder::<Counting>(report, &effect_fixture("api2"), &shipped(), None);
+        });
+        assert!(!passed, "{out}");
+        assert!(
+            out.contains("api2/effect.lua") && out.contains("api"),
+            "{out}"
+        );
+    }
+
+    /// **A `.frag` reading an undeclared param fails the check at its line**,
+    /// with no GPU at all.
+    #[test]
+    fn a_frag_reading_an_undeclared_param_fails_check_at_its_line() {
+        let (passed, out) = reported(|report| {
+            effect_folder::<Counting>(report, &effect_fixture("typo"), &shipped(), None);
+        });
+        assert!(!passed);
+        assert!(out.contains("down.frag:2"), "{out}");
+    }
+
+    /// **A name missing from `uses` is a warning, not a failure.**
+    #[test]
+    fn a_name_missing_from_uses_is_a_warning_not_a_failure() {
+        let place = crate::effect::host::tests::scratch("check-warning");
+        let dir = crate::effect::host::tests::folder(
+            &place,
+            "soft",
+            "return { api = 1, inputs = { 'self', 'backdrop' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_backdrop(uv); }\n",
+            )],
+        );
+        let (passed, out) =
+            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), None));
+        let _ = std::fs::remove_dir_all(place);
+        assert!(passed, "{out}");
+        assert!(
+            out.contains("warning:") && out.contains("sol_backdrop"),
+            "{out}"
+        );
+    }
+
+    /// **A user's folder that names a shipped effect passes**: its closure
+    /// (here a `fallback`; `pixels = "fade"` in a copy of `zoom` is the same
+    /// path) resolves through the shipped folders, as at run time, and not
+    /// only beside the folder checked.
+    #[test]
+    fn a_user_folder_naming_a_shipped_effect_passes() {
+        let place = crate::effect::host::tests::scratch("check-closure");
+        let dir = crate::effect::host::tests::folder(
+            &place,
+            "mine",
+            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag', fallback = { 'identity' } }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let (passed, out) =
+            reported(|report| effect_folder::<Counting>(report, &dir, &effect_fixtures(), None));
+        let _ = std::fs::remove_dir_all(place);
+        assert!(
+            passed,
+            "the closure did not resolve through the shipped folders: {out}"
+        );
+    }
+
+    /// **With no render node, shaders are said not compiled**, and that is
+    /// not a failure: `rpm %check` in COPR has none.
+    #[test]
+    fn with_no_render_node_shaders_are_said_not_compiled() {
+        let (passed, out) = reported(|report| {
+            effect_folder::<Counting>(report, &effect_fixture("identity"), &shipped(), None);
+        });
+        assert!(passed, "{out}");
+        assert!(
+            out.contains("shaders not compiled: no render node"),
+            "{out}"
+        );
+    }
+
+    /// With a compiler, a program that does not compile fails the check at
+    /// the user's line (here the counting compiler's `FAIL`).
+    #[test]
+    fn a_program_that_does_not_compile_fails_the_check() {
+        let place = crate::effect::host::tests::scratch("check-compile");
+        let dir = crate::effect::host::tests::folder(
+            &place,
+            "bad",
+            "return { api = 1, frag = 'effect.frag' }",
+            &[("effect.frag", "vec4 sol_effect(vec2 uv) {\n  FAIL\n}\n")],
+        );
+        let mut compiler = Counting::default();
+        let (passed, out) =
+            reported(|report| effect_folder(report, &dir, &shipped(), Some(&mut compiler)));
+        let _ = std::fs::remove_dir_all(place);
+        assert!(!passed);
+        assert!(out.contains("effect.frag:2"), "{out}");
+    }
+
+    /// **A folder named through `..` is checked by its own name**, as
+    /// `solium --check .` inside one is: a path whose last part is `.` or
+    /// `..` has no name of its own to look the effect up by.
+    #[test]
+    fn a_folder_named_through_dot_dot_is_checked_by_its_own_name() {
+        let place = crate::effect::host::tests::scratch("check-dot-dot");
+        let dir = crate::effect::host::tests::folder(
+            &place,
+            "plain",
+            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        std::fs::create_dir_all(dir.join("inner")).expect("a folder inside");
+        let (passed, out) = reported(|report| {
+            effect_folder::<Counting>(report, &dir.join("inner/.."), &shipped(), None);
+        });
+        let _ = std::fs::remove_dir_all(place);
+        assert!(passed, "{out}");
+        assert!(out.contains("plain: ok"), "{out}");
+    }
+
+    /// **A folder whose name cannot name an effect fails, saying so**, rather
+    /// than that no effect of that name exists: it is there, and nothing can
+    /// use it under that name.
+    #[test]
+    fn a_folder_whose_name_cannot_name_an_effect_fails_saying_so() {
+        let place = crate::effect::host::tests::scratch("check-bad-name");
+        let dir = crate::effect::host::tests::folder(
+            &place,
+            "Glow",
+            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let (passed, out) =
+            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), None));
+        let _ = std::fs::remove_dir_all(place);
+        assert!(!passed, "{out}");
+        assert!(
+            out.contains("`Glow` cannot name an effect") && !out.contains("no effect called"),
+            "{out}"
+        );
+    }
+
+    /// **Every folder of the user's is checked, and every effect the
+    /// configuration names**: a broken one of either fails, a folder with no
+    /// `effect.lua` fails, and a name nobody ships fails.
+    #[test]
+    fn every_user_folder_and_every_named_effect_is_checked() {
+        let place = crate::effect::host::tests::scratch("check-effects");
+        let user = place.join("user");
+        crate::effect::host::tests::folder(
+            &user,
+            "good",
+            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        std::fs::create_dir_all(user.join("empty")).expect("a folder with nothing in it");
+        let library = crate::effect::host::Library::with(Some(user), effect_fixtures());
+        let check = |wanted: &[String]| {
+            reported(|report| effects::<Counting>(report, &library, wanted, None))
+        };
+        let (passed, out) = check(&[]);
+        assert!(!passed, "{out}");
+        assert!(
+            out.contains("empty: has no effect.lua") && out.contains("good: ok"),
+            "{out}"
+        );
+        std::fs::remove_dir(place.join("user/empty")).expect("the empty folder goes");
+        let (passed, out) = check(&["identity".to_owned()]);
+        assert!(passed, "{out}");
+        assert!(
+            out.contains("identity: ok"),
+            "a named effect was not checked: {out}"
+        );
+        let (passed, out) = check(&["typo".to_owned()]);
+        assert!(!passed, "{out}");
+        assert!(out.contains("down.frag:2"), "{out}");
+        let (passed, out) = check(&["nowhere".to_owned()]);
+        let _ = std::fs::remove_dir_all(place);
+        assert!(!passed, "{out}");
+        assert!(out.contains("`nowhere`"), "{out}");
     }
 }

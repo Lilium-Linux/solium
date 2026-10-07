@@ -52,12 +52,15 @@ impl Library {
             .find(|folder| folder.join("effect.lua").is_file())
     }
 
+    /// Where a folder's closure (`pixels`, `fallback`) is looked for when the
+    /// user's folders lack it: the shipped folders, everywhere but in tests.
+    /// `check::tests::a_user_folder_naming_a_shipped_effect_passes`.
+    pub(crate) fn shipped(&self) -> &Path {
+        &self.shipped
+    }
+
     /// Every folder in the user's place, sorted: what `--check` reads.
     /// `tests::the_users_folders_are_listed_sorted`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 6's --check is its reader")
-    )]
     pub(crate) fn user_folders(&self) -> Vec<PathBuf> {
         let Some(user) = &self.user else {
             return Vec::new();
@@ -363,7 +366,10 @@ impl<P: Clone> Host<P> {
         }
     }
 
-    #[expect(dead_code, reason = "Task 6's --check reads the folders through it")]
+    #[expect(
+        dead_code,
+        reason = "nothing reads the folders through the host yet: --check makes its own Library"
+    )]
     pub(crate) fn library(&self) -> &Library {
         &self.library
     }
@@ -397,13 +403,6 @@ impl<P: Clone> Host<P> {
     /// `origin` now wants exactly `names`. A name newly wanted is loaded now,
     /// GPU-free; one nobody wants any more is dropped with its problems.
     /// `tests::a_program_is_compiled_once_per_content`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task 6's --check and Task 14's rules want effects"
-        )
-    )]
     pub(crate) fn want(&mut self, origin: &'static str, names: impl IntoIterator<Item = String>) {
         self.wanted.insert(origin, names.into_iter().collect());
         self.settle_wanted(false);
@@ -682,10 +681,7 @@ impl<P: Clone> Host<P> {
     /// `tests::a_broken_effect_on_a_cold_start_is_absent_not_fatal`.
     #[cfg_attr(
         not(test),
-        expect(
-            dead_code,
-            reason = "Task 6's --check and Task 10's executor look effects up"
-        )
+        expect(dead_code, reason = "Task 10's executor looks effects up")
     )]
     pub(crate) fn effect(&self, name: &str) -> Option<Rc<Loaded<P>>> {
         self.slots.get(name).and_then(|slot| slot.current.clone())
@@ -693,7 +689,10 @@ impl<P: Clone> Host<P> {
 
     /// Whether a version of `name` waits for the next compile.
     /// `tests::present_wants_accumulate_until_a_reload`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 6's --check reads it"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests read it: --check reads the problems")
+    )]
     pub(crate) fn has_pending(&self, name: &str) -> bool {
         self.slots
             .get(name)

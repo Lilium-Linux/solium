@@ -56,6 +56,33 @@ as `sol.problems()` and tells a `problems` listener when they change;
 `lua/problems.lua` and `qml/problems.qml` draw them, and a configuration that
 leaves out `require("problems")` has no overlay.
 
+## Checking a folder
+
+```sh
+solium --check ~/.config/solium/effects/<name>
+```
+
+checks one effect folder and starts nothing: its `effect.lua` in a Lua of its
+own, every key in it, the checks of its shaders below, and the effects it
+names in turn (`pixels`, a `fallback` naming an effect), looked for beside it
+first and then among the shipped folders, as when it runs, so a copy of a
+shipped effect that names another shipped one passes. Errors are printed at
+their file and line and exit 1; warnings are printed and pass. `solium
+--check .` inside the folder does the same.
+
+Its shaders are compiled on this machine's GPU, on the first render node, and
+only there: a compile says what this machine's driver accepts and nothing
+more. NVIDIA's accepts GLSL that Mesa's refuses, such as a loop bound that is
+not a constant, or an `int` where a `float` is wanted, so an effect meant for
+other machines is worth checking on one with Mesa as well. With no render
+node it says `shaders not compiled: no render node`, and that is not a
+failure.
+
+Plain `solium --check` checks every folder in your `effects/` this way,
+named or not, and every effect your configuration names. There a folder with
+no `effect.lua` fails, and so does one whose name cannot name an effect, such
+as `Blur`, since nothing could use it.
+
 ## What `effect.lua` returns
 
 `effect.lua` returns one table. Every key in it is checked, and a key Solium
