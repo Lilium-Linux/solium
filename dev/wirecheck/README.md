@@ -59,6 +59,7 @@ judged at the very end.
 | 11e | the warp program (FX0) | `warp/gl.rs`'s program compiles and draws a texture through a full-target mesh | `the warp drew … at the centre, not the texture` |
 | 11f | a pooled target (FX0) | `pool.rs`'s target is drawn through its own framebuffer object in a frame opened on a 1x1 carrier, and the carrier keeps its blue; painted again with nothing, the target reads back transparent | `the pooled target is not what was drawn into it`, `a pooled target painted with nothing is not transparent`, `the carrier is no longer blue…` |
 | 11g | partial damage on a warp (FX0) | a translucent warp redrawn under one damage rectangle leaves the pixels outside it as they were | `… blended twice` |
+| 11h | the clipped-surface programs (FX0) | both compile in every variant; a root surface's corners are cut, a subsurface is cut only where its corner is the client's, a single-pixel buffer is cut | a message naming the surface and the pixel |
 | 12 | the first rebind | a scene built at 1x1 and never rendered rebinds and draws its new buffer right | `a scene rebound before it had ever rendered does not draw its new buffer` |
 | 13 | build and free | a scene built and freed without rendering takes none of the compositor's GL objects | `building and freeing a scene without rendering destroyed` … |
 | 14 | C-1 | a scene freed with the compositor's context current takes none of the compositor's GL objects, by a census of GL names | `Qt's teardown destroyed` … |

@@ -30,15 +30,16 @@ use smithay::{
     backend::renderer::{
         element::{Element, Id, Kind, RenderElement, UnderlyingStorage},
         gles::{
-            GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
-            UniformType,
+            GlesError, GlesFrame, GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture,
+            Uniform, UniformName, UniformType,
         },
         utils::{CommitCounter, OpaqueRegions},
     },
     utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform},
 };
 use solium_effects::fragment::{
-    Corners, Effect, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS, SIZE_UNIFORM,
+    CLIPPED_SOLID, CLIPPED_SURFACE, COLOUR_UNIFORM, Corners, Effect, GEO_PX_UNIFORM,
+    GEO_SIZE_UNIFORM, INPUT_TO_GEO_UNIFORM, Inputs, RADIUS_UNIFORM, ROUNDED_CORNERS, SIZE_UNIFORM,
 };
 
 /// Whether this node's effects need the node rendered to a texture first, and
@@ -71,7 +72,7 @@ pub(crate) fn needs_pass(effects: &[Effect]) -> Option<Effect> {
                 // all, and a new `Inputs` variant stops the build at both.
                 && match effect.inputs() {
                     Inputs::SelfTexture => true,
-                    Inputs::Nothing | Inputs::Backdrop => false,
+                    Inputs::Nothing | Inputs::Inline | Inputs::Backdrop => false,
                 }
     })
 }
@@ -84,7 +85,7 @@ pub(crate) fn needs_pass(effects: &[Effect]) -> Option<Effect> {
 /// *and* wants no pass: it is an ordinary element drawn over what is there.
 const fn runnable(inputs: Inputs) -> bool {
     match inputs {
-        Inputs::Nothing | Inputs::SelfTexture => true,
+        Inputs::Nothing | Inputs::Inline | Inputs::SelfTexture => true,
         // Nothing composites what is beneath a node into anything this file
         // could sample. Answering `true` here would be the exact failure
         // `fragment::Inputs::Backdrop` names: a blur that renders as no blur,
@@ -452,6 +453,17 @@ fn once<'a, T>(
     slot.as_ref()
 }
 
+/// The two programs a clipped client surface is drawn through: one for
+/// textures and one for single-pixel buffers. A pair rather than a rounding
+/// type: a user's inline effect (a tint, a dim) is the same element with
+/// another pair (X1.4). Wirecheck's case 11h draws through both.
+#[derive(Clone, Debug)]
+#[expect(dead_code, reason = "Task 23a draws rounded clients through these")]
+pub(crate) struct ClipPrograms {
+    pub(crate) texture: GlesTexProgram,
+    pub(crate) solid: GlesPixelProgram,
+}
+
 /// The compiled fragment programs, one of each, for the life of the renderer.
 ///
 /// Compiling a shader is not a per-frame cost anybody should pay, and
@@ -491,6 +503,10 @@ pub(crate) struct Programs {
     warp: Option<crate::warp::Program>,
     /// As `rounded_failed`, for the warp.
     warp_failed: bool,
+    /// The clipped-surface programs, on the same terms as `rounded`.
+    clip: Option<ClipPrograms>,
+    /// As `rounded_failed`, for the clipped-surface programs.
+    clip_failed: bool,
     /// Set once an effect this renderer cannot run has been named, for the
     /// same reason and on the same terms. See [`Programs::refuse`].
     refused: bool,
@@ -555,6 +571,37 @@ impl Programs {
             }
         })
         .copied()
+    }
+
+    /// The clipped-surface programs, compiled on first use between frames and
+    /// latched (`tests::a_program_that_will_not_compile_is_tried_once`).
+    /// `None` leaves a rounded window square rather than undrawn. Wirecheck's
+    /// case 11h compiles the same two sources with the same uniforms.
+    #[expect(dead_code, reason = "Task 23a draws rounded clients through these")]
+    pub(crate) fn clip(&mut self, renderer: &mut GlesRenderer) -> Option<&ClipPrograms> {
+        once(&mut self.clip, &mut self.clip_failed, || {
+            let shared = [
+                UniformName::new(INPUT_TO_GEO_UNIFORM, UniformType::Matrix3x3),
+                UniformName::new(GEO_SIZE_UNIFORM, UniformType::_2f),
+                UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
+                UniformName::new(GEO_PX_UNIFORM, UniformType::_1f),
+            ];
+            let texture = renderer.compile_custom_texture_shader(CLIPPED_SURFACE, &shared);
+            let mut solid_uniforms = shared.to_vec();
+            solid_uniforms.push(UniformName::new(COLOUR_UNIFORM, UniformType::_4f));
+            let solid = renderer.compile_custom_pixel_shader(CLIPPED_SOLID, &solid_uniforms);
+            match (texture, solid) {
+                (Ok(texture), Ok(solid)) => Some(ClipPrograms { texture, solid }),
+                (texture, solid) => {
+                    tracing::warn!(
+                        texture = ?texture.err(),
+                        solid = ?solid.err(),
+                        "the clipped-surface shaders did not compile; rounded windows will be drawn square"
+                    );
+                    None
+                }
+            }
+        })
     }
 
     /// Say, once, that a style declares an effect this renderer cannot run.
@@ -1023,6 +1070,14 @@ mod tests {
             runnable(Inputs::Nothing),
             "an effect that reads nothing is an ordinary element, not a refusal"
         );
+    }
+
+    /// An effect drawn inline, surface by surface through a program of its
+    /// own (`fragment::CLIPPED_SURFACE`), is one this renderer runs: refused,
+    /// it would be named as unrunnable and the window drawn without it.
+    #[test]
+    fn an_effect_drawn_inline_can_be_run() {
+        assert!(runnable(Inputs::Inline));
     }
 
     /// Nothing in this build can construct an effect that reads a backdrop --

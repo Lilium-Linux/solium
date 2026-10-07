@@ -16,6 +16,11 @@
 pub enum Inputs {
     /// Draws over what is there. No pass, no capture, no cost.
     Nothing,
+    /// Drawn through a program surface by surface, in each surface's own
+    /// place: no capture. [`CLIPPED_SURFACE`] and [`CLIPPED_SOLID`] are such
+    /// programs, for rounding. A renderer can run it: `solium::pass`'s
+    /// `an_effect_drawn_inline_can_be_run`.
+    Inline,
     /// The node's own pixels, rendered to a texture first.
     SelfTexture,
     /// What is already composited *beneath* the node.
@@ -219,6 +224,126 @@ void main() {
     // GL_OES_standard_derivatives; until that extension is requested, this
     // buys a soft edge at native scale and a wrong-width one everywhere else.
     gl_FragColor = colour * (1.0 - smoothstep(-0.5, 0.5, away));
+}
+";
+
+/// The 3x3 matrix taking a surface's texture coordinate to the client's own
+/// physical pixels, column-major. Computed per draw by whoever draws the
+/// surface; wirecheck's case 11h sets it by hand.
+pub const INPUT_TO_GEO_UNIFORM: &str = "input_to_geo";
+/// The client's size in its own physical pixels.
+pub const GEO_SIZE_UNIFORM: &str = "geo_size";
+/// How many screen pixels one of the client's own is: the antialias band is
+/// one screen pixel wide at any zoom.
+pub const GEO_PX_UNIFORM: &str = "geo_px";
+/// A single-pixel buffer's colour, premultiplied.
+pub const COLOUR_UNIFORM: &str = "colour";
+
+/// Rounded corners for one client surface, drawn where it is: the surface's
+/// texture coordinate is taken into the client's rectangle through
+/// `input_to_geo`, and the distance field is `ROUNDED_CORNERS`' own, measured
+/// there. So a subsurface's corner that coincides with the client's is cut and
+/// its others are not, and the band is one screen pixel at any zoom
+/// (`geo_px`), which the old shader's own comment could not promise.
+/// `tests::the_clipped_program_is_shaped_the_way_smithay_requires`, and
+/// wirecheck's case 11h, which draws a root surface and a subsurface through it.
+pub const CLIPPED_SURFACE: &str = r"#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+uniform mat3 input_to_geo;
+uniform vec2 geo_size;
+uniform vec4 corner_radius;
+uniform float geo_px;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+void main() {
+    vec4 colour = texture2D(tex, v_coords);
+#if defined(NO_ALPHA)
+    colour = vec4(colour.rgb, 1.0) * alpha;
+#else
+    colour = colour * alpha;
+#endif
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        colour = vec4(0.0, 0.2, 0.0, 0.2) + colour * 0.8;
+#endif
+    // Into the client's own pixels, then ROUNDED_CORNERS' field, unchanged.
+    vec2 geo = (input_to_geo * vec3(v_coords, 1.0)).xy;
+    vec2 half_size = geo_size * 0.5;
+    float picked = (geo.x < half_size.x)
+        ? ((geo.y < half_size.y) ? corner_radius.x : corner_radius.z)
+        : ((geo.y < half_size.y) ? corner_radius.y : corner_radius.w);
+    float r = min(picked, min(half_size.x, half_size.y));
+    vec2 p = abs(geo - half_size) - (half_size - vec2(r));
+    float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;
+    float band = 0.5 / max(geo_px, 0.0001);
+    gl_FragColor = colour * (1.0 - smoothstep(-band, band, away));
+}
+";
+
+/// The same, for a single-pixel buffer: smithay draws one as a solid colour,
+/// which no texture program reaches, so it is a pixel program over the
+/// surface's rectangle with the colour as a uniform. `v_coords` runs 0..1
+/// across that rectangle. Smithay prepends `#version 100` itself.
+/// `tests::the_solid_program_is_a_pixel_program`, and wirecheck's case 11h,
+/// which draws one.
+pub const CLIPPED_SOLID: &str = r"
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+uniform float alpha;
+uniform vec2 size;
+uniform mat3 input_to_geo;
+uniform vec2 geo_size;
+uniform vec4 corner_radius;
+uniform float geo_px;
+uniform vec4 colour;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+void main() {
+    vec4 painted = colour * alpha;
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        painted = vec4(0.0, 0.2, 0.0, 0.2) + painted * 0.8;
+#endif
+    vec2 geo = (input_to_geo * vec3(v_coords, 1.0)).xy;
+    vec2 half_size = geo_size * 0.5;
+    float picked = (geo.x < half_size.x)
+        ? ((geo.y < half_size.y) ? corner_radius.x : corner_radius.z)
+        : ((geo.y < half_size.y) ? corner_radius.y : corner_radius.w);
+    float r = min(picked, min(half_size.x, half_size.y));
+    vec2 p = abs(geo - half_size) - (half_size - vec2(r));
+    float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;
+    float band = 0.5 / max(geo_px, 0.0001);
+    gl_FragColor = painted * (1.0 - smoothstep(-band, band, away));
 }
 ";
 
@@ -657,5 +782,54 @@ mod tests {
             "the antialias band is one texel wide and centred on the edge; \
              widening it makes the whole window translucent at small radii"
         );
+    }
+
+    /// The clipped program is a texture program, shaped as smithay requires:
+    /// its own `#version 100`, the `//_DEFINES_` line, and every variant.
+    #[test]
+    fn the_clipped_program_is_shaped_the_way_smithay_requires() {
+        assert!(CLIPPED_SURFACE.starts_with("#version 100\n"));
+        assert!(CLIPPED_SURFACE.lines().any(|line| line == "//_DEFINES_"));
+        for define in ["EXTERNAL", "NO_ALPHA", "DEBUG_FLAGS"] {
+            assert!(
+                CLIPPED_SURFACE.contains(&format!("defined({define})")),
+                "{define} is not handled"
+            );
+        }
+        for uniform in [
+            INPUT_TO_GEO_UNIFORM,
+            GEO_SIZE_UNIFORM,
+            GEO_PX_UNIFORM,
+            RADIUS_UNIFORM,
+        ] {
+            assert!(CLIPPED_SURFACE.contains(uniform), "{uniform} is not read");
+        }
+    }
+
+    /// The solid program is a pixel program: smithay adds `#version 100`
+    /// itself and refuses a second, and it reads the colour it is given.
+    #[test]
+    fn the_solid_program_is_a_pixel_program() {
+        assert!(!CLIPPED_SOLID.contains("#version"));
+        assert!(CLIPPED_SOLID.contains("defined(DEBUG_FLAGS)"));
+        for uniform in [
+            INPUT_TO_GEO_UNIFORM,
+            GEO_SIZE_UNIFORM,
+            GEO_PX_UNIFORM,
+            RADIUS_UNIFORM,
+            COLOUR_UNIFORM,
+        ] {
+            assert!(CLIPPED_SOLID.contains(uniform), "{uniform} is not read");
+        }
+    }
+
+    /// Both keep the interior term the rounding shader's own history earned
+    /// (`ROUNDED_CORNERS`' comment on `min(max(p.x, p.y), 0.0)`) and its clamp.
+    #[test]
+    fn the_clipped_programs_keep_the_interior_term_and_the_clamp() {
+        for source in [CLIPPED_SURFACE, CLIPPED_SOLID] {
+            assert!(source.contains("min(max(p.x, p.y), 0.0)"));
+            assert!(source.contains("min(picked, min(half_size.x, half_size.y))"));
+        }
     }
 }
