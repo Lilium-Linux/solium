@@ -211,8 +211,8 @@ void main() {
     // It also settles where the shape's own boundary lands. A fragment centre
     // sits half a pixel inside the edge, so the outermost row now reports
     // exactly -0.5 for any `r` -- the smoothstep's near end, fully opaque --
-    // which is what lets `pass::opaque_inside` claim an uncut side with an
-    // inset of zero.
+    // which is what lets `clip::cut_corners` claim a square corner's pixels
+    // and every row of an uncut side.
     float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;
 
     // The mask goes last, after the tint. The tint ADDS a constant, so a

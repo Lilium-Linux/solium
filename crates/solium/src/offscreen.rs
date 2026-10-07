@@ -18,8 +18,7 @@
 //! `keyed::tests::a_genie_costs_one_texture_and_not_one_a_frame`.
 //!
 //! **Built first, drawn after.** `render::prepare` builds every capture's
-//! element list first ([`pane_job`], [`over_job`], [`client_job`]), which can
-//! run Qt, and
+//! element list first ([`pane_job`], [`over_job`]), which can run Qt, and
 //! then [`draw`] binds a 1x1 carrier once and draws each capture into its own
 //! target, a frame each, which must not run Qt.
 //! `render::tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
@@ -62,43 +61,12 @@ fn pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
         .into()
 }
 
-/// The same, rounded the way the **surfaces** round.
-///
-/// [`pixels`] ceils, which never leaves the warp short of a row, and the warp
-/// keeps it. [`client_job`] cannot, and the reason has nothing to do with
-/// rows: it is that a third party measures the same window and has to agree.
-///
-/// `WaylandSurfaceRenderElement::opaque_regions` sizes a surface's opaque
-/// region with `to_i32_round` (`element/surface.rs:353-356`), and
-/// `render::elements` places the drawn rect with `to_physical_precise_round`.
-/// A capture sized with `ceil` is, at a fractional scale, one pixel wider than
-/// both — 1149 logical at 1.25 is 1437 against 1436 — and that last column is a
-/// column no surface ever claims and no surface ever draws into. `covers` then
-/// answers false, `opaque_of` answers `None`, and **every rounded window on
-/// that output silently gives up its opaque region for good**: it claims no
-/// opacity at all, as rounded windows did before they claimed everything but
-/// their corners, on exactly the machines a fractional scale is ordinary on,
-/// with nothing on screen to say so.
-///
-/// Rounding here makes all three `round(logical * scale)` — the same function
-/// of the same numbers, so they agree by construction rather than by luck. It
-/// also removes the sub-pixel squeeze `render::elements` recorded when the
-/// texture was the wider of the two, rather than documenting it a second time.
-///
-/// `.max(1)` for [`pixels`]' reason: a driver refuses a zero-sized allocation,
-/// and `round` reaches zero half a pixel sooner than `ceil` does.
-fn client_pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
-    let rounded: Size<i32, Physical> = outer.to_physical_precise_round(scale);
-    (rounded.w.max(1), rounded.h.max(1)).into()
-}
-
 /// One capture to draw: what, into which of a pane's captures, how big.
 ///
-/// Built by [`pane_job`], [`over_job`] or [`client_job`] while
-/// `render::prepare` walks the panes, which can run Qt, and drawn by [`draw`]
-/// once every job is built, which must not. `dev/fence-check.sh` draws a warp
-/// and a client pass in one pass, and `dev/present-check.sh` every warp it
-/// measures, a menu's among them.
+/// Built by [`pane_job`] or [`over_job`] while `render::prepare` walks the
+/// panes, which can run Qt, and drawn by [`draw`] once every job is built,
+/// which must not. `dev/fence-check.sh` draws two warps in one pass, and
+/// `dev/present-check.sh` every warp it measures, a menu's among them.
 pub(crate) struct Job {
     pub(crate) pane: PaneId,
     pub(crate) kind: crate::keyed::Kind,
@@ -212,114 +180,6 @@ pub(crate) fn over_job(
             inputs,
         },
         part,
-    ))
-}
-
-/// `window`'s **client and nothing else**, at the size its pane shows it — its
-/// real size, cut to its tile when it is tiled and committed more than the
-/// tile has (#133), and to the rectangle a layout's glide has reached on the
-/// way to that tile.
-///
-/// The sibling of [`pane_job`], and the difference is the whole reason there
-/// are two. That one draws the window as it appears — frame and layers, not
-/// its popups (`state::tests::a_warped_panes_capture_holds_no_popups`) —
-/// because a warp bends the whole thing as one object. This one draws only the
-/// application's own surface tree, because what a `client.radius` masks is the
-/// *client*: its frame is Qt's and rounds itself from `clientRadius` (see
-/// `LayerScene::build`), and its popups are separate windows that must not be
-/// clipped to it.
-///
-/// Which means this must not be called for a window that is also being warped:
-/// the two want different sizes, and `render::prepare` picks between them
-/// rather than doing both (`render::wanted_capture`).
-///
-/// The surface tree is drawn at `-window.geometry().loc`, so the texture is
-/// exactly the window's geometry rectangle — or as much of it, from its
-/// top-left corner, as fits the tile. A client that draws its own shadow
-/// outside that rectangle — `set_window_geometry` is how it says so — has the
-/// shadow clipped off by this, which is a real limit and the right one: the
-/// rectangle being masked is the one the client called its window.
-///
-/// The `bool` is whether the client covered the whole capture with opaque
-/// regions of its own, and it exists because the texture is **cleared to
-/// transparent** before anything is drawn into it. Nothing else about the
-/// result says whether its pixels are opaque: a terminal at 80% background, a
-/// GTK app rounding its own corners, a client that has not painted all of its
-/// geometry yet all produce a capture with holes in it. `pass::opaque_of` will
-/// not claim any of the texture opaque unless this is true, which keeps the
-/// rounded path's claim a subset of what the same client's surfaces claimed on
-/// the ordinary one.
-pub(crate) fn client_job(
-    state: &mut Solium,
-    renderer: &mut GlesRenderer,
-    pane: PaneId,
-    window: &Window,
-    scale: f64,
-) -> Option<(Job, bool)> {
-    let real = state.real_geometry(window)?;
-    // **At the size the pane shows the client, which for a tiled client that
-    // committed more than its tile is the tile's share (#133).** The surfaces
-    // are drawn at the origin into a texture this big, so whatever reaches
-    // past it is simply not in the picture -- the cut `render::elements` makes
-    // with a crop on the ordinary path, made here by the framebuffer's edge.
-    // Captured at the committed size instead, the whole buffer would be
-    // pressed into the tile-sized rectangle it is drawn at, and cutting the
-    // element afterwards would cut the mask's far corners off with it: the
-    // radius is in the texture's own space, at its corners.
-    //
-    // Asked of the frame being drawn, through the same `place_client` that
-    // draws it: on a frame of a layout's glide the picture is the buffer 1:1
-    // cut to the rectangle the glide has reached, not the new tile's share
-    // stretched over it. This frame is sampled a moment before `elements`
-    // samples its own, which is a fraction of a pixel of glide.
-    let shown = state.panes.get(pane).map_or(real.size, |held| {
-        let outer = state.pane_outer(held);
-        let frame = state.drawn_at(held, outer, state.clock.now());
-        crate::render::place_client(state, held, &frame, outer.size, real.size)
-            .fit
-            .shown
-    });
-    // Rounded and not ceiled, and it is the `opaque` below that needs it: see
-    // [`client_pixels`], where the one-pixel disagreement it avoids is spelled
-    // out.
-    let size = client_pixels(shown, scale);
-
-    let elements = crate::render::client_elements(renderer, window, scale);
-    if elements.is_empty() {
-        // Debug and not warn: a client with nothing mapped yet is ordinary and
-        // reaches here on the frames between its window appearing and its
-        // first buffer. `render::elements` draws it as it always did.
-        tracing::debug!("a client with an effect had nothing to draw offscreen");
-        return None;
-    }
-    // Asked before the draw, and of the elements rather than of the texture: a
-    // texture cannot be asked what it contains without reading it back.
-    //
-    // `pass::placed` is the sum, and it is a named function rather than a
-    // closure so that the direction of it is pinned by a test: this diff calls
-    // the same sum fatal one file over.
-    let output_scale = Scale::from(scale);
-    let opaque = crate::pass::covers(
-        size,
-        elements.iter().flat_map(|element| {
-            crate::pass::placed(
-                element.geometry(output_scale).loc,
-                element.opaque_regions(output_scale),
-            )
-        }),
-    );
-    let kind = crate::keyed::Kind::Client;
-    let inputs = crate::keyed::Inputs::of(kind, size, scale, &elements);
-    Some((
-        Job {
-            pane,
-            kind,
-            size,
-            scale,
-            elements,
-            inputs,
-        },
-        opaque,
     ))
 }
 
@@ -661,8 +521,8 @@ mod tests {
 
     use smithay::utils::{Logical, Physical, Size};
 
+    use super::pixels;
     use super::{Finished, settle};
-    use super::{client_pixels, pixels};
 
     /// An ordinary window, the same one `qml::paint`'s tests measure and the
     /// one the pool's budget is argued from: 1150 x 850 x 4 = 3.9 MB.
@@ -741,59 +601,6 @@ mod tests {
     fn a_window_with_no_size_still_asks_for_a_pixel() {
         assert_eq!(pixels((0, 0).into(), 1.0), Size::from((1, 1)));
         assert_eq!(pixels((1, 1).into(), 0.1), Size::from((1, 1)));
-        // `round` reaches zero half a pixel sooner than `ceil` does, so the
-        // client capture needs the same floor and needs it more often.
-        assert_eq!(client_pixels((0, 0).into(), 1.0), Size::from((1, 1)));
-        assert_eq!(client_pixels((1, 1).into(), 0.4), Size::from((1, 1)));
-    }
-
-    /// **The client capture rounds, and the warp still ceils.**
-    ///
-    /// Not a preference between two roundings: `pass::covers` asks whether the
-    /// client's surfaces covered the capture, and a surface's opaque region is
-    /// sized with `to_i32_round` (`element/surface.rs:353-356`). A capture one
-    /// pixel wider than that has a column no surface claims and no surface
-    /// draws into, so `covers` is false, `opaque_of` is `None`, and every
-    /// rounded window on a fractional-scale output gives up its opaque region
-    /// permanently -- back to claiming none of it, with nothing on screen to
-    /// say so.
-    ///
-    /// 1149 at 1.25 is the case `render::elements` records: 1436.25, which
-    /// ceils to 1437 and rounds to 1436. Both are asserted, in one test,
-    /// because the bug is the *difference* between them and a test of either
-    /// alone would not have caught it.
-    ///
-    /// What this cannot check is the thing that matters: whether a real
-    /// client's real opaque regions then cover a real capture. Nothing here
-    /// can build one. It pins that the two functions agree on the number, which
-    /// is the half that was wrong.
-    #[test]
-    fn the_client_capture_is_measured_the_way_a_surface_measures_itself() {
-        let width: Size<i32, Logical> = (1149, 850).into();
-        assert_eq!(pixels(width, 1.25).w, 1437, "the warp still ceils");
-        assert_eq!(
-            client_pixels(width, 1.25).w,
-            1436,
-            "and the client capture rounds, as `render::elements` and \
-             `WaylandSurfaceRenderElement::opaque_regions` both do"
-        );
-        // And a fraction on the OTHER side of a half, because 1149 x 1.25 is
-        // 1436.25 and truncating gives 1436 too -- so the case above cannot
-        // tell rounding from flooring, and a later "simplification" to
-        // `to_i32_floor` would pass it while re-opening the one-pixel
-        // disagreement in the other direction.
-        let over: Size<i32, Logical> = (1151, 850).into();
-        assert_eq!(
-            client_pixels(over, 1.25).w,
-            1439,
-            "1151 x 1.25 is 1438.75, which rounds up -- flooring gives 1438 \
-             and puts the capture a pixel inside `dst` again"
-        );
-
-        // Where there is nothing to disagree about, they agree.
-        for scale in [1.0, 2.0] {
-            assert_eq!(pixels(width, scale), client_pixels(width, scale));
-        }
     }
 
     /// A fence that counts how often it is waited on, and answers as told.

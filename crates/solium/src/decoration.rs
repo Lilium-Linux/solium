@@ -1134,8 +1134,8 @@ fn client_radii(style: &Style) -> Corners {
 /// one, and `Corners::is_none` refuses only the case where *all* of them are.
 /// On the compositor's side it means something — the shader's `p` is pushed
 /// further negative on both axes, so a negative radius *inflates* the shape
-/// rather than cutting it, and `pass::side_inset` keeps the sign and clamps
-/// only the inset it derives from it.
+/// rather than cutting it, and `clip::cut_corners` keeps the sign and clamps
+/// only the square it cuts from it.
 ///
 /// QML has no such reading. `Rectangle.radius` is undefined for a negative,
 /// and a layer doing arithmetic on one — `clientRadius + 2`, the outward hug —
@@ -3792,10 +3792,10 @@ mod tests {
     /// drawn by before any of this existed -- no capture, no bind, no program,
     /// no extra element.
     ///
-    /// `needs_pass` and `render::rounding` answering `None` are the whole of
-    /// what keeps it there, so that is what is asserted rather than the empty
-    /// list alone: a list that is empty and a question that is never asked of
-    /// it look identical from here and are not.
+    /// `render::rounding` answering `None` is the whole of what keeps it
+    /// there, so that is what is asserted rather than the empty list alone: a
+    /// list that is empty and a question that is never asked of it look
+    /// identical from here and are not.
     #[test]
     fn a_decoration_with_no_declared_radius_runs_no_pass() {
         on_the_qt_thread(|| {
@@ -3805,14 +3805,9 @@ mod tests {
 
             assert!(decoration.effects().is_empty());
             assert_eq!(
-                crate::pass::needs_pass(decoration.effects()),
-                None,
-                "an unstyled window must not buy an offscreen pass per frame"
-            );
-            assert_eq!(
                 crate::render::rounding(decoration.effects()),
                 None,
-                "nor a program per surface"
+                "an unstyled window must not be drawn through a program per surface"
             );
 
             let _ = std::fs::remove_dir_all(&dir);

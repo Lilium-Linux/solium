@@ -512,7 +512,10 @@ mod tests {
     }
 
     /// A radius past the window, or one that is not a number, claims nothing
-    /// rather than overflowing or claiming a corner it cuts.
+    /// rather than overflowing or claiming a corner it cuts. One broken corner
+    /// is enough, as the deleted client pass's own test had it: `f64::max`
+    /// ignores a NaN, so a guard that asked the largest radius would let one
+    /// through.
     #[test]
     fn an_absurd_radius_claims_nothing_wrongly() {
         let whole = [Rectangle::<i32, Physical>::from_size((300, 200).into())];
@@ -521,7 +524,24 @@ mod tests {
                 .iter()
                 .all(|rect| !rect.contains((0, 0)))
         );
-        assert!(cut_corners(&whole, &clip(Corners::all(f64::NAN))).is_empty());
+        for broken in [f64::NAN, f64::INFINITY] {
+            for radii in [
+                Corners::all(broken),
+                Corners {
+                    top_left: broken,
+                    ..Corners::all(12.0)
+                },
+                Corners {
+                    bottom_right: broken,
+                    ..Corners::all(12.0)
+                },
+            ] {
+                assert!(
+                    cut_corners(&whole, &clip(radii)).is_empty(),
+                    "{radii:?} claimed a corner the program cuts"
+                );
+            }
+        }
     }
 
     /// A surface that reaches past its client's rectangle claims only what is

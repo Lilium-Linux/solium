@@ -7057,8 +7057,7 @@ end)"#,
     ///
     /// Driven through the real placement and the real transform, and read
     /// through `render::place_client`, which is what `elements` draws the
-    /// surfaces with and what `offscreen::client_job` sizes a masked
-    /// client from. Three frames: the first, one a little way in, and one
+    /// surfaces with. Three frames: the first, one a little way in, and one
     /// most of the way.
     #[test]
     fn a_glide_that_narrows_a_tiled_window_is_drawn_1_to_1_on_its_first_frame() {
@@ -7762,7 +7761,7 @@ end)"#,
         let key = |renderer: &mut DummyRenderer| {
             let elements =
                 crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
-            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+            crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, 1.0, &elements)
         };
         let mut capture = crate::keyed::Capture::<u32>::default();
         capture.drawn(1, key(&mut renderer));
@@ -7805,7 +7804,7 @@ end)"#,
         let key = |renderer: &mut DummyRenderer| {
             let elements =
                 crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
-            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+            crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, 1.0, &elements)
         };
         let mut capture = crate::keyed::Capture::<u32>::default();
         capture.drawn(1, key(&mut renderer));

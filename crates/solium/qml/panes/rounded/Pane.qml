@@ -70,7 +70,7 @@ PaneStyle {
     //
     // Lowering it under the client keeps both halves. The overhang still fills
     // the notches, because a rounded client is no longer opaque there and
-    // `pass::opaque_of` gives those sides up — so what the shader cut away is
+    // `clip::cut_corners` gives those corners up — so what the shader cut away is
     // exactly what the bar shows through. And it no longer covers anything,
     // because every pixel the client does draw is drawn on top of it.
     //
