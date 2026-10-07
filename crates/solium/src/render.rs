@@ -39,6 +39,7 @@ use crate::{
         rules::{MaskKind, Slot},
     },
     layer,
+    offscreen::PartSource,
     pane::Pane,
     present,
     stack::{Band, Owner},
@@ -473,11 +474,49 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // Every rule resolved once, after the effects compiled and before any
     // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
     // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
-    let slots = build_slots(state);
+    let mut slots = build_slots(state);
+    // Every wanted slot's box, and its state in the store, kept while it is
+    // wanted and given back by the sweep below once it is not
+    // (`effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`).
+    record_boxes(state, &mut slots);
+    let pass = state.store.next_pass();
+    for (owner, slot, key) in slots.wants() {
+        state.store.slot_mut(owner, slot, key).seen = pass;
+    }
 
     let mut warps = Vec::new();
     let mut overs = Vec::new();
     let mut jobs = Vec::new();
+    // Each self input this pass, kept or drawn: what the chains read
+    // (`effect::store::tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`).
+    let mut drawn = crate::effect::store::Drawn::default();
+
+    // A part's self input, padded by its chain's reach and drawn only when
+    // what it is drawn from differs (`offscreen::kept`,
+    // `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`).
+    // None with no slot wanted (spec §8.4).
+    for input in self_inputs(state, &slots) {
+        let Some(source) = input.found.source() else {
+            continue;
+        };
+        let Some(job) = crate::offscreen::part_job(
+            state,
+            renderer,
+            input.owner.clone(),
+            input.slot,
+            source,
+            input.scale,
+            input.pad,
+        ) else {
+            continue;
+        };
+        match crate::offscreen::kept(state, &job) {
+            Some((texture, _id, commit)) => {
+                drawn.insert(input.owner, input.slot, texture, false, commit);
+            }
+            None => jobs.push((job, Then::Slot(input.owner, input.slot))),
+        }
+    }
 
     for (pane, window) in state.on_screen() {
         // Nothing captured means nothing to keep. A pane holds the targets it
@@ -636,7 +675,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     }
 
     // Every list is built: draw them all, on one carrier.
-    for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
+    for (then, texture, id, commit) in crate::offscreen::draw(state, renderer, jobs) {
         match then {
             Then::Warp(window, program, pane, shape) => {
                 let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
@@ -646,8 +685,14 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
                 let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
                 overs.push((window, texture, program, id, commit, part));
             }
+            Then::Slot(owner, slot) => {
+                drawn.insert(owner, slot, texture, true, commit);
+            }
         }
     }
+    // A slot no rule wanted this pass gives its targets back.
+    // `effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`.
+    state.store.sweep(pass, &mut state.pool);
     Prepared {
         warps,
         overs,
@@ -679,6 +724,8 @@ enum Then {
         Shape,
         crate::warp::UnitRect,
     ),
+    /// A slot's self input, for its chain to read (Ruling 16).
+    Slot(crate::effect::plan::Owner, Slot),
 }
 
 /// The commit `pane`'s `kind` of warp carries this pass, its own or its
@@ -868,6 +915,248 @@ fn want_resolved(
             slots.want(owner.clone(), slot, key);
         }
     }
+}
+
+/// What a slot's owner is captured from, owned so the state is free while
+/// its job is built: [`PartSource`]'s parts, and the titlebar, whose own
+/// pixels wait for P15 and which has a box but no capture.
+/// `state::tests::real_client::only_a_chain_reading_its_part_asks_for_a_capture`.
+#[derive(Clone, Debug)]
+pub(crate) enum Found {
+    Client(Window),
+    Popups(Window),
+    Layer(crate::pane::PaneId, usize),
+    Pane(Window),
+    Surface(crate::scripted::SurfaceId, smithay::output::Output),
+    LayerShell(LayerSurface),
+    Titlebar(crate::pane::PaneId),
+}
+
+impl Found {
+    /// What it is captured from; `None` for the titlebar.
+    pub(crate) fn source(&self) -> Option<PartSource<'_>> {
+        Some(match self {
+            Self::Client(window) => PartSource::Client(window),
+            Self::Popups(window) => PartSource::Popups(window),
+            Self::Layer(pane, index) => PartSource::Layer(*pane, *index),
+            Self::Pane(window) => PartSource::Pane(window),
+            Self::Surface(id, output) => PartSource::Surface(*id, output),
+            Self::LayerShell(surface) => PartSource::LayerShell(surface),
+            Self::Titlebar(_) => return None,
+        })
+    }
+}
+
+/// What a slot's owner is captured from, and its monitor's scale, which a
+/// self input is captured at (Ruling 16): a pane's, a scripted surface's
+/// output's, a layer surface's output's. `None` for an owner that has gone,
+/// and for a pane's client part while it shows its scene (Ruling 15).
+/// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+fn part_of(state: &Solium, owner: &crate::effect::plan::Owner) -> Option<(Found, f64)> {
+    use crate::effect::plan::Owner;
+    use smithay::reexports::wayland_server::Resource as _;
+    let scale_of = |output: &smithay::output::Output| output.current_scale().fractional_scale();
+    match owner {
+        Owner::Pane(pane, part) => {
+            let held = state.panes.get(*pane)?;
+            let scale = state.scale_of(state.pane_outer(held));
+            let client = || held.client().cloned();
+            let found = match part {
+                PaneSlot::Client => Found::Client(client()?),
+                PaneSlot::Popups => Found::Popups(client()?),
+                PaneSlot::Pane => Found::Pane(client()?),
+                PaneSlot::Layer(index) => Found::Layer(*pane, *index),
+                PaneSlot::Titlebar => Found::Titlebar(*pane),
+            };
+            Some((found, scale))
+        }
+        Owner::Surface(id, name) => {
+            let output = state
+                .space
+                .outputs()
+                .find(|output| output.name() == *name)?;
+            Some((Found::Surface(*id, output.clone()), scale_of(output)))
+        }
+        Owner::LayerShell(object) => state.space.outputs().find_map(|output| {
+            let layer = layer_map_for_output(output)
+                .layers()
+                .find(|layer| layer.wl_surface().id() == *object)
+                .cloned()?;
+            Some((Found::LayerShell(layer), scale_of(output)))
+        }),
+    }
+}
+
+/// How far a part's self capture is padded: its chain's reach on its
+/// monitor, rounded up to a whole physical pixel (Ruling 16).
+/// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+fn padding(reach: f64, scale: f64) -> i32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a reach in pixels, far below 2^31"
+    )]
+    let pad = (reach * scale).ceil().max(0.0) as i32;
+    pad
+}
+
+/// A part's mask radii in physical pixels at `scale`, top-left, top-right,
+/// bottom-left, bottom-right ([`mask_radii`]): the client's own rounding,
+/// the pane's largest at every corner, none for the rest.
+/// `tests::a_parts_radii_are_its_masks_at_its_scale`.
+pub(crate) fn part_radii(state: &Solium, source: &PartSource<'_>, scale: f64) -> [f32; 4] {
+    let rounding = |window: &Window| {
+        state
+            .panes
+            .id_of(window)
+            .and_then(|pane| declared_rounding(state, pane))
+            .map(|effect| effect.radii())
+    };
+    match source {
+        PartSource::Client(window) => mask_radii(rounding(window), false, scale),
+        PartSource::Pane(window) => mask_radii(rounding(window), true, scale),
+        PartSource::Popups(_)
+        | PartSource::Layer(..)
+        | PartSource::Surface(..)
+        | PartSource::LayerShell(_) => [0.0; 4],
+    }
+}
+
+/// A rounded part's mask radii at `scale`, as a run reads them (top-left,
+/// top-right, bottom-left, bottom-right): its own corners, or for a whole
+/// pane its largest at every corner, as `effect::mask::client_mask` and
+/// `pane_mask` cut; square with no rounding.
+/// `tests::a_parts_radii_are_its_masks_at_its_scale`.
+pub(crate) fn mask_radii(rounding: Option<Corners>, whole_pane: bool, scale: f64) -> [f32; 4] {
+    let corners = match rounding {
+        None => Corners::all(0.0),
+        Some(radii) if whole_pane => Corners::all(radii.largest()),
+        Some(radii) => radii,
+    };
+    radii_of(corners_times(corners, scale))
+}
+
+/// Corners as a run reads them, top-left, top-right, bottom-left,
+/// bottom-right. `tests::a_parts_radii_are_its_masks_at_its_scale`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a radius in pixels, given to GL as a float"
+)]
+fn radii_of(radii: Corners) -> [f32; 4] {
+    [
+        radii.top_left as f32,
+        radii.top_right as f32,
+        radii.bottom_left as f32,
+        radii.bottom_right as f32,
+    ]
+}
+
+/// The titlebar's box ([`region_box`] over the insets' regions): it has no
+/// capture until P15, but a chain reading nothing of the frame still runs
+/// over its box.
+fn titlebar_box(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+    scale: f64,
+    pad: i32,
+) -> Option<crate::effect::plan::PartBox> {
+    let held = state.panes.get(pane)?;
+    let regions = crate::effect::mask::FromInsets {
+        insets: held.decoration()?.insets(),
+        outer: state.pane_outer(held).size,
+        radii: declared_rounding(state, pane).map_or(Corners::all(0.0), |effect| effect.radii()),
+    };
+    region_box(&regions, "titlebar", scale, pad)
+}
+
+/// A named region's box: its band at `scale`, padded by `pad`, its corners
+/// as the region gives them. `None` for a region the source does not have.
+/// `tests::the_titlebars_box_is_its_band_padded_with_its_outer_corners`.
+pub(crate) fn region_box(
+    regions: &dyn crate::effect::mask::RegionSource,
+    name: &str,
+    scale: f64,
+    pad: i32,
+) -> Option<crate::effect::plan::PartBox> {
+    let (band, radii) = regions.region(name)?;
+    Some(crate::effect::plan::PartBox::around(
+        crate::offscreen::client_pixels(band.size, scale),
+        pad,
+        radii_of(corners_times(radii, scale)),
+    ))
+}
+
+/// Record every wanted slot's padded box, whatever its tier: the part's own
+/// pixels on its monitor, padded by its chain's reach, the part inside it,
+/// its radii. GPU-free; what the runs read whether or not a capture was
+/// drawn this pass. Nothing with no slot wanted.
+/// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+pub(crate) fn record_boxes(state: &Solium, slots: &mut Slots) {
+    if slots.is_empty() {
+        return;
+    }
+    let wanted: Vec<(
+        crate::effect::plan::Owner,
+        Slot,
+        crate::effect::rules::RuleKey,
+    )> = slots
+        .wants()
+        .map(|(owner, slot, key)| (owner.clone(), slot, key))
+        .collect();
+    for (owner, slot, key) in wanted {
+        let Some(chain) = state.chains.get(key) else {
+            continue;
+        };
+        let Some((found, scale)) = part_of(state, &owner) else {
+            continue;
+        };
+        let pad = padding(chain.reach, scale);
+        let part = match (&found, found.source()) {
+            (_, Some(source)) => crate::offscreen::part_box(state, &source, scale, pad),
+            (Found::Titlebar(pane), None) => titlebar_box(state, *pane, scale, pad),
+            (_, None) => None,
+        };
+        if let Some(part) = part {
+            slots.set_box(owner, slot, part);
+        }
+    }
+}
+
+/// One slot's self input to capture this pass.
+/// `state::tests::real_client::only_a_chain_reading_its_part_asks_for_a_capture`.
+#[derive(Debug)]
+pub(crate) struct SelfInput {
+    pub(crate) owner: crate::effect::plan::Owner,
+    pub(crate) slot: Slot,
+    found: Found,
+    scale: f64,
+    pad: i32,
+}
+
+/// The wanted slots whose chain reads its part's own pixels (T1,
+/// `Tier::Own`), each with what its part is captured from, at its monitor's
+/// scale, padded by its chain's reach: what `prepare` captures. A chain
+/// reading nothing of the frame (T0) asks for no capture, and nor does the
+/// titlebar, whose self rules are refused until P15.
+/// `state::tests::real_client::only_a_chain_reading_its_part_asks_for_a_capture`.
+pub(crate) fn self_inputs(state: &Solium, slots: &Slots) -> Vec<SelfInput> {
+    slots
+        .wants()
+        .filter_map(|(owner, slot, key)| {
+            let chain = state.chains.get(key)?;
+            if chain.tier != crate::effect::rules::Tier::Own {
+                return None;
+            }
+            let (found, scale) = part_of(state, owner)?;
+            found.source()?;
+            Some(SelfInput {
+                owner: owner.clone(),
+                slot,
+                found,
+                scale,
+                pad: padding(chain.reach, scale),
+            })
+        })
+        .collect()
 }
 
 /// The rounding a pane's style declares, if any: the one inline effect today.
@@ -1399,6 +1688,120 @@ fn chrome(
     if animating {
         state.redraw = true;
     }
+}
+
+/// The rectangle the layer at `index` of a pane's style is rasterised into,
+/// at rest: the pane grown by that layer's bleed (`decoration::canvas`), its
+/// corner as far above and left of the pane's as the bleed reaches. What a
+/// layer's self capture holds, its corner at the pad
+/// (`tests::a_layers_capture_puts_its_canvas_corner_at_the_pad`).
+pub(crate) fn layer_canvas(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+    index: usize,
+) -> Option<Rectangle<i32, Logical>> {
+    let held = state.panes.get(pane)?;
+    let outer = state.pane_outer(held).size;
+    let drawing = crate::decoration::Drawing {
+        rect: present::logical((0.0, 0.0), (f64::from(outer.w), f64::from(outer.h))),
+        outer,
+        alpha: 1.0,
+        scale: 1.0,
+    };
+    held.decoration()?
+        .layer_canvas(index, drawing)
+        .map(|canvas| canvas.to_i32_round())
+}
+
+/// The one layer at `index` of a pane's style, its canvas's corner at `at`
+/// in the target's physical pixels ([`layer_drawing_at`]):
+/// `Decoration::layer_elements` at that layer's depth, keeping only what its
+/// hook saw pushed for that layer ([`only_layer`]). A layer's self capture
+/// (`offscreen::part_job`); `None` for a dormant layer, or one the pane's
+/// style does not have. `tests::a_layers_capture_puts_its_canvas_corner_at_the_pad`,
+/// `tests::one_layer_keeps_only_the_layer_it_names`.
+pub(crate) fn one_layer(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: crate::pane::PaneId,
+    index: usize,
+    at: Point<i32, Physical>,
+    scale: f64,
+) -> Option<Element> {
+    let canvas = layer_canvas(state, pane, index)?;
+    let held = state.panes.get(pane)?;
+    let outer = state.pane_outer(held).size;
+    let (_, depth, _) = held
+        .decoration()?
+        .layer_places()
+        .find(|(each, ..)| *each == index)?;
+    let drawing = layer_drawing_at(canvas, outer, at, scale);
+    let title = state.pane_title(pane);
+    let look = crate::decoration::Look {
+        title: &title,
+        focused: state.looks_focused(pane),
+        pointer_inside: state.pointer_over(pane),
+        caret: state.caret_in(pane),
+        values: state.decorations.values(),
+    };
+    let decoration = state.panes.get_mut(pane)?.decoration_mut()?;
+    let mut animating = false;
+    let element = only_layer(index, |into, hook| {
+        animating = decoration.layer_elements(renderer, depth, &look, drawing, into, hook);
+    });
+    // As `chrome` asks: the decoration has damaged nothing, so a frame not
+    // asked for here never comes and its animation stops where it stood.
+    if animating {
+        state.redraw = true;
+    }
+    element
+}
+
+/// The drawing that puts a layer's `canvas` (its rectangle at rest, from
+/// [`layer_canvas`]) with its corner at `at`, in physical pixels at `scale`:
+/// the pane's own corner the layer's bleed inside it.
+/// `tests::a_layers_capture_puts_its_canvas_corner_at_the_pad`.
+pub(crate) fn layer_drawing_at(
+    canvas: Rectangle<i32, Logical>,
+    outer: Size<i32, Logical>,
+    at: Point<i32, Physical>,
+    scale: f64,
+) -> crate::decoration::Drawing {
+    let corner = at.to_f64().to_logical(scale);
+    crate::decoration::Drawing {
+        rect: present::logical(
+            (
+                corner.x - f64::from(canvas.loc.x),
+                corner.y - f64::from(canvas.loc.y),
+            ),
+            (f64::from(outer.w), f64::from(outer.h)),
+        ),
+        outer,
+        alpha: 1.0,
+        scale,
+    }
+}
+
+/// What `draw` pushes for the layer at `index` and nothing else: `draw` is
+/// handed the list and `Decoration::layer_elements`' hook, which is called
+/// before and after each layer it draws. `None` when that layer pushed
+/// nothing or was not drawn. `tests::one_layer_keeps_only_the_layer_it_names`.
+pub(crate) fn only_layer<T>(
+    index: usize,
+    draw: impl FnOnce(&mut Vec<T>, &mut dyn FnMut(&mut Vec<T>, usize, bool)),
+) -> Option<T> {
+    let mut list = Vec::new();
+    let (mut start, mut kept) = (0, None);
+    draw(&mut list, &mut |into: &mut Vec<T>, each, before| {
+        if each == index {
+            if before {
+                start = into.len();
+            } else {
+                kept = Some(start..into.len());
+            }
+        }
+    });
+    list.drain(kept?).next()
 }
 
 /// The compositor's own scene for a pane, across the whole window.
@@ -2618,6 +3021,64 @@ fn scripted(
     painted.element.into_iter().collect()
 }
 
+/// Where a scripted surface's instance on `output` goes, if it goes there.
+/// What its self capture holds.
+/// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+pub(crate) fn instance_area(
+    state: &Solium,
+    id: crate::scripted::SurfaceId,
+    output: &smithay::output::Output,
+) -> Option<Rectangle<i32, Logical>> {
+    let geometry = state.space.output_geometry(output)?;
+    let primary = state.primary_output();
+    state
+        .surfaces
+        .get(id)?
+        .area_on(output, geometry, primary.as_ref())
+}
+
+/// A scripted surface's instance on `output`, its corner at `at` in the
+/// target's physical pixels, rounded to the logical pixel a scene is placed
+/// on: its self capture (`offscreen::part_job`). `None` with no instance
+/// there or nothing drawn.
+pub(crate) fn scripted_instance(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    id: crate::scripted::SurfaceId,
+    output: &smithay::output::Output,
+    at: Point<i32, Physical>,
+    scale: f64,
+) -> Option<Element> {
+    let area = instance_area(state, id, output)?;
+    let now = state.clock.now();
+    let corner = at.to_f64().to_logical(scale).to_i32_round();
+    let painted = state.surfaces.get_mut(id)?.instance_mut(output)?.element(
+        renderer,
+        Rectangle::new(corner, area.size),
+        now,
+        1.0,
+        scale,
+    );
+    // Still moving: the next frame is asked for, as `scripted` asks.
+    if painted.animating {
+        state.redraw = true;
+    }
+    painted.element
+}
+
+/// A client layer surface's rectangle on the output whose layer map holds
+/// it, in that output's coordinates. What its self capture holds.
+/// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+pub(crate) fn layer_shell_geometry(
+    state: &Solium,
+    surface: &LayerSurface,
+) -> Option<Rectangle<i32, Logical>> {
+    state
+        .space
+        .outputs()
+        .find_map(|output| layer_map_for_output(output).layer_geometry(surface))
+}
+
 /// Where *in the image* the pointer actually points, as the client set it.
 ///
 /// Zero for a surface no client ever passed to `wl_pointer.set_cursor`, which
@@ -2833,8 +3294,22 @@ pub(crate) fn flat_window_elements(
     window: &Window,
     scale: f64,
 ) -> Vec<Element> {
+    flat_window_elements_at(state, renderer, window, scale, (0, 0).into())
+}
+
+/// [`flat_window_elements`] with the pane's corner at `at`, in the target's
+/// physical pixels ([`pane_drawing_at`]): a whole pane's self capture,
+/// padded by its chain's reach (`offscreen::part_job`).
+/// `tests::a_pane_drawn_at_the_pad_has_its_client_inside_it`.
+pub(crate) fn flat_window_elements_at(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    scale: f64,
+    at: Point<i32, Physical>,
+) -> Vec<Element> {
     let mut elements = Vec::new();
-    let Some(Flat { outer, insets }) = flat(state, window) else {
+    let Some(Flat { outer, insets, .. }) = flat(state, window) else {
         return elements;
     };
     let output_scale = Scale::from(scale);
@@ -2848,17 +3323,8 @@ pub(crate) fn flat_window_elements(
     // Fully opaque, and over the whole texture: this pass draws the window flat
     // at its real size and the warp applies the transform's opacity to the
     // whole texture afterwards, so applying it here as well would fade the
-    // frame squared.
-    let drawing = crate::decoration::Drawing {
-        rect: present::logical((0.0, 0.0), (f64::from(outer.w), f64::from(outer.h))),
-        outer,
-        alpha: 1.0,
-        scale,
-    };
-
-    // The client within it.
-    let origin =
-        Point::<i32, Logical>::from((insets.left, insets.top)).to_physical_precise_round(scale);
+    // frame squared. The client within it.
+    let (drawing, origin) = pane_drawing_at(outer, insets, at, scale);
 
     // Asked before the walk, which holds the state.
     let rounded = pane.and_then(|pane| clipped(state, pane));
@@ -2907,6 +3373,31 @@ pub(crate) fn flat_window_elements(
     elements
 }
 
+/// A pane drawn flat at its own size with its corner at `at`, in a target's
+/// physical pixels at `scale`: the drawing its layers are drawn with, and
+/// where its client's corner goes, the insets inside it. At `(0, 0)`, a
+/// warp's capture. `tests::a_pane_drawn_at_the_pad_has_its_client_inside_it`.
+pub(crate) fn pane_drawing_at(
+    outer: Size<i32, Logical>,
+    insets: crate::decoration::Insets,
+    at: Point<i32, Physical>,
+    scale: f64,
+) -> (crate::decoration::Drawing, Point<i32, Physical>) {
+    let corner = at.to_f64().to_logical(scale);
+    let drawing = crate::decoration::Drawing {
+        rect: present::logical(
+            (corner.x, corner.y),
+            (f64::from(outer.w), f64::from(outer.h)),
+        ),
+        outer,
+        alpha: 1.0,
+        scale,
+    };
+    let client = at
+        + Point::<i32, Logical>::from((insets.left, insets.top)).to_physical_precise_round(scale);
+    (drawing, client)
+}
+
 /// The rectangle a warped window is captured at, and where its client sits in
 /// it. See [`flat`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2915,6 +3406,10 @@ pub(crate) struct Flat {
     pub(crate) outer: Size<i32, Logical>,
     /// The frame's share of it, which puts the client's corner.
     pub(crate) insets: crate::decoration::Insets,
+    /// The client's hole in it: `outer` less the insets, at their corner.
+    /// What a client's self capture holds
+    /// (`state::tests::real_client::the_self_capture_is_padded_by_the_effects_reach`).
+    pub(crate) client: Rectangle<i32, Logical>,
 }
 
 /// What `offscreen::pane_job` and [`flat_window_elements`] draw a warped window
@@ -2929,16 +3424,26 @@ pub(crate) struct Flat {
 /// half is read from the two functions and is not tested. A window with no
 /// pane, which only smithay can put in the space, keeps `outer_geometry`.
 pub(crate) fn flat(state: &Solium, window: &Window) -> Option<Flat> {
-    match state.panes.of(window) {
-        Some(pane) => Some(Flat {
-            outer: state.pane_outer(pane).size,
-            insets: state.insets_of(pane.id()),
-        }),
-        None => Some(Flat {
-            outer: state.outer_geometry(window)?.size,
-            insets: state.frame_insets(window),
-        }),
-    }
+    let (outer, insets) = match state.panes.of(window) {
+        Some(pane) => (state.pane_outer(pane).size, state.insets_of(pane.id())),
+        None => (
+            state.outer_geometry(window)?.size,
+            state.frame_insets(window),
+        ),
+    };
+    let client = Rectangle::new(
+        (insets.left, insets.top).into(),
+        (
+            (outer.w - insets.horizontal()).max(1),
+            (outer.h - insets.vertical()).max(1),
+        )
+            .into(),
+    );
+    Some(Flat {
+        outer,
+        insets,
+        client,
+    })
 }
 
 /// Where a pane's client is drawn inside a frame, and how its buffer is put
@@ -3366,12 +3871,11 @@ where
     R::TextureId: Clone + 'static,
 {
     let mut elements = Vec::new();
-    let mut covered: Option<Rectangle<i32, Logical>> = None;
     let Some(surface) = window
         .toplevel()
         .map(|toplevel| toplevel.wl_surface().clone())
     else {
-        return (elements, covered);
+        return (elements, None);
     };
     for (popup, offset) in PopupManager::popups_for_surface(&surface) {
         let at = origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
@@ -3383,17 +3887,26 @@ where
             alpha,
             Kind::Unspecified,
         ));
-        // The tree where it is drawn, not the popup's window geometry: a popup
-        // that sets none has a zero-sized one, and what a capture of it must
-        // hold is everything drawn above.
-        // `state::tests::a_warped_panes_capture_holds_no_popups`.
-        let rect = smithay::desktop::utils::bbox_from_surface_tree(
-            popup.wl_surface(),
-            offset - popup.geometry().loc,
-        );
-        covered = Some(covered.map_or(rect, |held| held.merge(rect)));
     }
-    (elements, covered)
+    (elements, popups_covered(window))
+}
+
+/// The rectangle a toplevel's popups cover, relative to its client's corner,
+/// which may reach past the window; `None` with none open. The tree where it
+/// is drawn, not each popup's window geometry: a popup that sets none has a
+/// zero-sized one, and what a capture of it must hold is everything drawn.
+/// `state::tests::a_warped_panes_capture_holds_no_popups`,
+/// `state::tests::a_popup_past_the_window_is_captured_whole`.
+pub(crate) fn popups_covered(window: &Window) -> Option<Rectangle<i32, Logical>> {
+    let surface = window.toplevel()?.wl_surface().clone();
+    PopupManager::popups_for_surface(&surface)
+        .map(|(popup, offset)| {
+            smithay::desktop::utils::bbox_from_surface_tree(
+                popup.wl_surface(),
+                offset - popup.geometry().loc,
+            )
+        })
+        .reduce(|held, rect| held.merge(rect))
 }
 
 /// What a pane's capture draws of its client: its own surface tree, no
@@ -4770,6 +5283,127 @@ mod tests {
             "no `bar`: the first frame layer"
         );
         assert_eq!(super::titlebar_layer(&[(0, Depth::Behind, "shadow")]), None);
+    }
+
+    /// **A part's radii are its mask's, at its scale**: a client's own
+    /// corners, a whole pane's largest at every corner, none unrounded.
+    #[test]
+    fn a_parts_radii_are_its_masks_at_its_scale() {
+        use solium_effects::fragment::Corners;
+        let top = Corners {
+            top_left: 8.0,
+            top_right: 8.0,
+            bottom_left: 2.0,
+            bottom_right: 0.0,
+        };
+        assert_eq!(
+            super::mask_radii(Some(top), false, 2.0),
+            [16.0, 16.0, 4.0, 0.0]
+        );
+        assert_eq!(super::mask_radii(Some(top), true, 2.0), [16.0; 4]);
+        assert_eq!(super::mask_radii(None, true, 2.0), [0.0; 4]);
+    }
+
+    /// **The titlebar's box is its band, padded, with its outer corners**:
+    /// `top`'s 32 pixels across the window, rounded at the top only.
+    #[test]
+    fn the_titlebars_box_is_its_band_padded_with_its_outer_corners() {
+        use solium_effects::fragment::Corners;
+        let regions = crate::effect::mask::FromInsets {
+            insets: crate::decoration::Insets {
+                top: 32,
+                ..crate::decoration::Insets::default()
+            },
+            outer: (400, 300).into(),
+            radii: Corners::all(10.0),
+        };
+        assert_eq!(
+            super::region_box(&regions, "titlebar", 2.0, 4),
+            Some(crate::effect::plan::PartBox::around(
+                (800, 64).into(),
+                4,
+                [20.0, 20.0, 0.0, 0.0]
+            ))
+        );
+        assert_eq!(super::region_box(&regions, "shelf", 2.0, 4), None);
+    }
+
+    /// **A pane drawn at the pad has its client inside it**: its frame's
+    /// drawing at the pad in logical pixels, its client's corner the insets
+    /// further in; at `(0, 0)`, as a warp's capture has always drawn it.
+    #[test]
+    fn a_pane_drawn_at_the_pad_has_its_client_inside_it() {
+        let insets = crate::decoration::Insets {
+            top: 32,
+            left: 2,
+            ..crate::decoration::Insets::default()
+        };
+        let outer: smithay::utils::Size<i32, smithay::utils::Logical> = (400, 300).into();
+        for (at, scale, client) in [
+            ((0, 0), 1.0, (2, 32)),
+            ((6, 6), 1.0, (8, 38)),
+            ((12, 12), 2.0, (16, 76)),
+        ] {
+            let (drawing, origin) = super::pane_drawing_at(outer, insets, at.into(), scale);
+            let corner = drawing.rect.loc.to_physical(scale);
+            assert_eq!(
+                (corner.x, corner.y),
+                (f64::from(at.0), f64::from(at.1)),
+                "the frame's corner at {scale}"
+            );
+            assert_eq!(drawing.rect.size, outer.to_f64());
+            assert_eq!(origin, client.into(), "the client's corner at {scale}");
+        }
+    }
+
+    /// **A layer's self capture keeps only that layer**: of every layer its
+    /// depth draws, what the hook saw pushed between its own before and
+    /// after; nothing for a layer that pushed nothing or was not drawn.
+    #[test]
+    fn one_layer_keeps_only_the_layer_it_names() {
+        // Three layers drawn, 0, 2 and 3, the last pushing nothing; 1 dormant.
+        fn draw(into: &mut Vec<char>, hook: &mut dyn FnMut(&mut Vec<char>, usize, bool)) {
+            for (index, name) in [(0, Some('s')), (2, Some('b')), (3, None)] {
+                hook(into, index, true);
+                into.extend(name);
+                hook(into, index, false);
+            }
+        }
+        assert_eq!(super::only_layer(2, draw), Some('b'));
+        assert_eq!(super::only_layer(0, draw), Some('s'));
+        assert_eq!(super::only_layer(3, draw), None, "it pushed nothing");
+        assert_eq!(super::only_layer(1, draw), None, "it was not drawn");
+    }
+
+    /// **A layer's capture puts its canvas's corner at the pad**, its bleed
+    /// and all, at a fractional scale too: where `Decoration::layer_elements`
+    /// places the layer drawn with [`super::layer_drawing_at`].
+    #[test]
+    fn a_layers_capture_puts_its_canvas_corner_at_the_pad() {
+        let outer: smithay::utils::Size<i32, smithay::utils::Logical> = (300, 200).into();
+        let bleed = crate::style::Bleed {
+            top: 12,
+            right: 0,
+            bottom: 4,
+            left: 20,
+        };
+        let canvas = crate::decoration::canvas(smithay::utils::Rectangle::from_size(outer), bleed);
+        for (scale, pad) in [(1.0, 6), (2.0, 12), (1.25, 8)] {
+            let drawing = super::layer_drawing_at(canvas, outer, (pad, pad).into(), scale);
+            let spread = crate::decoration::spread(drawing, bleed);
+            assert_eq!(spread.canvas, canvas);
+            let corner = spread.drawn.loc.to_physical(scale);
+            assert!(
+                (corner.x - f64::from(pad)).abs() < 1e-9
+                    && (corner.y - f64::from(pad)).abs() < 1e-9,
+                "at {scale} the canvas's corner is at {corner:?}, not at the pad {pad}"
+            );
+            assert_eq!(
+                spread.drawn.size,
+                canvas.size.to_f64(),
+                "drawn at its own size"
+            );
+        }
     }
 
     /// **Around a layer its own slots are outermost**, the titlebar's inside

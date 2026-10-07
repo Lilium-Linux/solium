@@ -27,8 +27,11 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            Bind, Color32F, Frame as _, Offscreen, Renderer,
-            element::{Element as _, Id, RenderElement},
+            Bind, Color32F, Frame as _, ImportAll, Offscreen, Renderer,
+            element::{
+                AsRenderElements, Element as _, Id, RenderElement,
+                surface::WaylandSurfaceRenderElement,
+            },
             gles::{GlesRenderer, GlesTexture},
             utils::CommitCounter,
         },
@@ -61,15 +64,218 @@ fn pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
         .into()
 }
 
-/// One capture to draw: what, into which of a pane's captures, how big.
+/// The pixel size a client's self capture holds, at `scale`: rounded, as a
+/// surface measures itself, and at least one pixel.
 ///
-/// Built by [`pane_job`] or [`over_job`] while `render::prepare` walks the
-/// panes, which can run Qt, and drawn by [`draw`] once every job is built,
-/// which must not. `dev/fence-check.sh` draws two warps in one pass, and
-/// `dev/present-check.sh` every warp it measures, a menu's among them.
+/// A capture sized with `ceil` is, at a fractional scale, one pixel wider than
+/// the surfaces drawn into it -- 1149 logical at 1.25 is 1437 against 1436 --
+/// and that last column is one no surface ever claims and no surface ever
+/// draws into: `WaylandSurfaceRenderElement::opaque_regions` and
+/// `render::elements` both round. Rounding here makes all of them
+/// `round(logical * scale)`, the same function of the same numbers.
+/// `.max(1)` for [`pixels`]' reason: a driver refuses a zero-sized
+/// allocation, and `round` reaches zero half a pixel sooner than `ceil` does.
+/// `tests::the_client_capture_is_measured_the_way_a_surface_measures_itself`.
+pub(crate) fn client_pixels(outer: Size<i32, Logical>, scale: f64) -> Size<i32, Physical> {
+    let rounded: Size<i32, Physical> = outer.to_physical_precise_round(scale);
+    (rounded.w.max(1), rounded.h.max(1)).into()
+}
+
+/// What a slot's self input is a capture of. `Region` is not here: a
+/// region's own pixels are a crop of the layer that draws it, which waits
+/// for P15 (`effect::plan::tests::a_region_self_rule_is_refused_until_p15`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PartSource<'a> {
+    /// The client's own surface tree, no popups, no frame.
+    Client(&'a Window),
+    /// A window's popups, at the rectangle they cover.
+    Popups(&'a Window),
+    /// One of a pane style's layers, at its canvas: the pane grown by its
+    /// bleed.
+    Layer(PaneId, usize),
+    /// The whole pane, frame and client, no popups.
+    Pane(&'a Window),
+    /// A scripted surface's instance on one monitor.
+    Surface(crate::scripted::SurfaceId, &'a smithay::output::Output),
+    /// A client's layer surface.
+    LayerShell(&'a smithay::desktop::LayerSurface),
+}
+
+/// Where a job's target is held: a pane's capture of a kind, or a slot's
+/// self input in the effect store (Ruling 16).
+/// `tests::a_slots_capture_is_held_in_the_store`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HeldIn {
+    Pane(PaneId, crate::keyed::Kind),
+    Slot(crate::effect::plan::Owner, crate::effect::rules::Slot),
+}
+
+/// One part, padded by `pad` physical pixels on every side, for a slot's
+/// self input: drawn from the elements its part is drawn from, moved so the
+/// part's corner is at `(pad, pad)`, and keyed on them, so it is drawn again
+/// only when the part commits (Ruling 16). `None` when the part has nothing
+/// to draw, as a client with no buffer yet.
+/// `state::tests::real_client::the_self_capture_is_padded_by_the_effects_reach`,
+/// `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`.
+pub(crate) fn part_job(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    owner: crate::effect::plan::Owner,
+    slot: crate::effect::rules::Slot,
+    source: PartSource<'_>,
+    scale: f64,
+    pad: i32,
+) -> Option<Job> {
+    let size = part_size(state, &source, scale, pad)?;
+    let corner: Point<i32, Physical> = (pad, pad).into();
+    let elements: Vec<crate::render::Element> = match source {
+        PartSource::Client(_) | PartSource::Popups(_) | PartSource::LayerShell(_) => {
+            part_elements(renderer, &source, pad, scale)
+                .into_iter()
+                .map(crate::render::Element::Window2)
+                .collect()
+        }
+        PartSource::Layer(pane, index) => {
+            vec![crate::render::one_layer(
+                state, renderer, pane, index, corner, scale,
+            )?]
+        }
+        PartSource::Pane(window) => {
+            crate::render::flat_window_elements_at(state, renderer, window, scale, corner)
+        }
+        PartSource::Surface(id, output) => {
+            vec![crate::render::scripted_instance(
+                state, renderer, id, output, corner, scale,
+            )?]
+        }
+    };
+    if elements.is_empty() {
+        // Debug and not warn: a client with nothing mapped yet is ordinary.
+        tracing::debug!(?source, "a part with a self effect had nothing to capture");
+        return None;
+    }
+    let inputs = crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, scale, &elements);
+    Some(Job {
+        into: HeldIn::Slot(owner, slot),
+        size,
+        scale,
+        elements,
+        inputs,
+    })
+}
+
+/// The padded target's size: the part's own pixels plus `pad` each side.
+/// `state::tests::real_client::the_self_capture_is_padded_by_the_effects_reach`.
+pub(crate) fn part_size(
+    state: &Solium,
+    source: &PartSource<'_>,
+    scale: f64,
+    pad: i32,
+) -> Option<Size<i32, Physical>> {
+    let own = part_pixels(state, source, scale)?;
+    Some((own.w + 2 * pad, own.h + 2 * pad).into())
+}
+
+/// The part's own pixels, unpadded: the client's hole in its pane (its
+/// tile's share for a client that committed more, #133), the popups'
+/// rectangle, a layer's canvas, the pane's outer rectangle as a warp's
+/// capture measures it, a scripted surface's area, a layer surface's
+/// geometry. `state::tests::real_client::the_self_capture_is_padded_by_the_effects_reach`.
+fn part_pixels(state: &Solium, source: &PartSource<'_>, scale: f64) -> Option<Size<i32, Physical>> {
+    Some(match source {
+        PartSource::Client(window) => {
+            client_pixels(crate::render::flat(state, window)?.client.size, scale)
+        }
+        PartSource::Popups(window) => {
+            client_pixels(crate::render::popups_covered(window)?.size, scale)
+        }
+        PartSource::Pane(window) => pixels(crate::render::flat(state, window)?.outer, scale),
+        PartSource::Layer(pane, index) => client_pixels(
+            crate::render::layer_canvas(state, *pane, *index)?.size,
+            scale,
+        ),
+        PartSource::Surface(id, output) => client_pixels(
+            crate::render::instance_area(state, *id, output)?.size,
+            scale,
+        ),
+        PartSource::LayerShell(surface) => client_pixels(
+            crate::render::layer_shell_geometry(state, surface)?.size,
+            scale,
+        ),
+    })
+}
+
+/// The padded box a slot's run reads: [`part_size`]'s, the part inside it,
+/// its mask's radii, and the reach that padded it. GPU-free, so the runs
+/// have it whether or not a capture was drawn this pass.
+/// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+pub(crate) fn part_box(
+    state: &Solium,
+    source: &PartSource<'_>,
+    scale: f64,
+    pad: i32,
+) -> Option<crate::effect::plan::PartBox> {
+    let own = part_pixels(state, source, scale)?;
+    Some(crate::effect::plan::PartBox::around(
+        own,
+        pad,
+        crate::render::part_radii(state, source, scale),
+    ))
+}
+
+/// The surface-backed parts' elements, their part's corner at `(pad, pad)`,
+/// generic over the renderer so a key can be built on smithay's
+/// `DummyRenderer` in a test: the client's own tree through
+/// `render::client_piece`, its window geometry's corner at the pad, so a
+/// client that draws its own shadow has it cut off, as the capture before
+/// Phase 0's Task 23b did, and not rounded (`Clipped`: the mask rounds the
+/// result, Ruling 16); the popups through `render::popup_elements`, the
+/// corner of the rectangle they cover at the pad; a layer surface through its
+/// own `render_elements`. Empty for the others.
+/// `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`,
+/// `state::tests::real_client::a_subsurface_commit_recaptures_its_client`.
+pub(crate) fn part_elements<R>(
+    renderer: &mut R,
+    source: &PartSource<'_>,
+    pad: i32,
+    scale: f64,
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let corner: Point<i32, Physical> = (pad, pad).into();
+    let output_scale = Scale::from(scale);
+    match source {
+        PartSource::Client(window) => {
+            let origin = corner - window.geometry().loc.to_physical_precise_round(scale);
+            crate::render::client_piece(renderer, window, origin, output_scale)
+        }
+        PartSource::Popups(window) => {
+            let Some(covered) = crate::render::popups_covered(window) else {
+                return Vec::new();
+            };
+            let origin = corner - covered.loc.to_physical_precise_round(scale);
+            crate::render::popup_elements(renderer, window, origin, output_scale, 1.0).0
+        }
+        PartSource::LayerShell(surface) => {
+            AsRenderElements::render_elements(*surface, renderer, corner, output_scale, 1.0)
+        }
+        PartSource::Layer(..) | PartSource::Pane(_) | PartSource::Surface(..) => Vec::new(),
+    }
+}
+
+/// One capture to draw: what, into which capture, how big.
+///
+/// Built by [`pane_job`], [`over_job`] or [`part_job`] while `render::prepare`
+/// walks the panes and the slots, which can run Qt, and drawn by [`draw`] once
+/// every job is built, which must not. `dev/fence-check.sh` draws two warps in
+/// one pass, and `dev/present-check.sh` every warp it measures, a menu's among
+/// them.
 pub(crate) struct Job {
-    pub(crate) pane: PaneId,
-    pub(crate) kind: crate::keyed::Kind,
+    /// Where the capture's target is held: on a pane, or in a slot's state in
+    /// the effect store (Ruling 16).
+    pub(crate) into: HeldIn,
     pub(crate) size: Size<i32, Physical>,
     pub(crate) scale: f64,
     pub(crate) elements: Vec<crate::render::Element>,
@@ -81,8 +287,7 @@ pub(crate) struct Job {
 impl std::fmt::Debug for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Job")
-            .field("pane", &self.pane)
-            .field("kind", &self.kind)
+            .field("into", &self.into)
             .field("size", &self.size)
             .field("scale", &self.scale)
             .field("elements", &self.elements.len())
@@ -123,8 +328,7 @@ pub(crate) fn pane_job(
     let (kind, size) = (crate::keyed::Kind::Pane, pixels(outer, scale));
     let inputs = crate::keyed::Inputs::of(kind, size, scale, &elements);
     Some(Job {
-        pane,
-        kind,
+        into: HeldIn::Pane(pane, kind),
         size,
         scale,
         elements,
@@ -172,8 +376,7 @@ pub(crate) fn over_job(
     let part = crate::render::over_part(flat.outer, corner, covered);
     Some((
         Job {
-            pane,
-            kind,
+            into: HeldIn::Pane(pane, kind),
             size,
             scale,
             elements,
@@ -219,13 +422,10 @@ pub(crate) fn draw<T>(
                     let _frame = crate::qml::frame_in_flight();
                     for (job, then) in jobs {
                         let target = {
-                            let (panes, pool) = (&mut state.panes, &mut state.pool);
-                            panes.get_mut(job.pane).and_then(|held| {
-                                held.captures_mut().get_mut(job.kind).target_for(
-                                    pool,
-                                    &mut crate::pool::Gl(renderer),
-                                    job.size,
-                                )
+                            let (panes, store, pool) =
+                                (&mut state.panes, &mut state.store, &mut state.pool);
+                            capture_in(panes, store, &job.into).and_then(|capture| {
+                                capture.target_for(pool, &mut crate::pool::Gl(renderer), job.size)
                             })
                         };
                         let Some(target) = target else {
@@ -260,8 +460,9 @@ pub(crate) fn draw<T>(
                         };
                         if drawn {
                             crate::pacing::captured();
-                            if let Some(held) = state.panes.get_mut(job.pane) {
-                                let capture = held.captures_mut().get_mut(job.kind);
+                            if let Some(capture) =
+                                capture_in(&mut state.panes, &mut state.store, &job.into)
+                            {
                                 capture.drawn(target.clone(), job.inputs);
                                 done.push((
                                     then,
@@ -294,11 +495,7 @@ pub(crate) fn kept(state: &mut Solium, job: &Job) -> Option<(GlesTexture, Id, Co
     if crate::dev::recapture_always() {
         return None;
     }
-    let capture = state
-        .panes
-        .get_mut(job.pane)?
-        .captures_mut()
-        .get_mut(job.kind);
+    let capture = capture_in(&mut state.panes, &mut state.store, &job.into)?;
     if capture.stale(&job.inputs) {
         return None;
     }
@@ -315,6 +512,23 @@ pub(crate) fn release(state: &mut Solium, pane: PaneId) {
     let (panes, pool) = (&mut state.panes, &mut state.pool);
     if let Some(held) = panes.get_mut(pane) {
         held.captures_mut().keep(&[], pool);
+    }
+}
+
+/// The capture a job is held in: a pane's of its kind, or a slot's self input
+/// in the effect store, made by `Store::slot_mut` before its job was built.
+/// `None` for a pane that has gone or a slot no longer in the store.
+/// `tests::a_slots_capture_is_held_in_the_store`.
+fn capture_in<'s>(
+    panes: &'s mut crate::pane::Panes,
+    store: &'s mut crate::effect::store::Store,
+    into: &HeldIn,
+) -> Option<&'s mut crate::keyed::Capture> {
+    match into {
+        HeldIn::Pane(pane, kind) => panes
+            .get_mut(*pane)
+            .map(|held| held.captures_mut().get_mut(*kind)),
+        HeldIn::Slot(owner, slot) => store.get_mut(owner, *slot).map(|state| &mut state.input),
     }
 }
 
@@ -521,8 +735,8 @@ mod tests {
 
     use smithay::utils::{Logical, Physical, Size};
 
-    use super::pixels;
     use super::{Finished, settle};
+    use super::{client_pixels, pixels};
 
     /// An ordinary window, the same one `qml::paint`'s tests measure and the
     /// one the pool's budget is argued from: 1150 x 850 x 4 = 3.9 MB.
@@ -605,6 +819,85 @@ mod tests {
     fn a_window_with_no_size_still_asks_for_a_pixel() {
         assert_eq!(pixels((0, 0).into(), 1.0), Size::from((1, 1)));
         assert_eq!(pixels((1, 1).into(), 0.1), Size::from((1, 1)));
+    }
+
+    /// **The client capture rounds, and the warp still ceils.**
+    ///
+    /// Not a preference between two roundings: `pass::covers` asks whether the
+    /// client's surfaces covered the capture, and a surface's opaque region is
+    /// sized with `to_i32_round` (`element/surface.rs:353-356`). A capture one
+    /// pixel wider than that has a column no surface claims and no surface
+    /// draws into, so `covers` is false, `opaque_of` is `None`, and every
+    /// rounded window on a fractional-scale output gives up its opaque region
+    /// permanently -- back to claiming none of it, with nothing on screen to
+    /// say so.
+    ///
+    /// 1149 at 1.25 is the case `render::elements` records: 1436.25, which
+    /// ceils to 1437 and rounds to 1436. Both are asserted, in one test,
+    /// because the bug is the *difference* between them and a test of either
+    /// alone would not have caught it.
+    ///
+    /// What this cannot check is the thing that matters: whether a real
+    /// client's real opaque regions then cover a real capture. Nothing here
+    /// can build one. It pins that the two functions agree on the number, which
+    /// is the half that was wrong.
+    #[test]
+    fn the_client_capture_is_measured_the_way_a_surface_measures_itself() {
+        let width: Size<i32, Logical> = (1149, 850).into();
+        assert_eq!(pixels(width, 1.25).w, 1437, "the warp still ceils");
+        assert_eq!(
+            client_pixels(width, 1.25).w,
+            1436,
+            "and the client capture rounds, as `render::elements` and \
+             `WaylandSurfaceRenderElement::opaque_regions` both do"
+        );
+        // And a fraction on the OTHER side of a half, because 1149 x 1.25 is
+        // 1436.25 and truncating gives 1436 too -- so the case above cannot
+        // tell rounding from flooring, and a later "simplification" to
+        // `to_i32_floor` would pass it while re-opening the one-pixel
+        // disagreement in the other direction.
+        let over: Size<i32, Logical> = (1151, 850).into();
+        assert_eq!(
+            client_pixels(over, 1.25).w,
+            1439,
+            "1151 x 1.25 is 1438.75, which rounds up -- flooring gives 1438 \
+             and puts the capture a pixel inside `dst` again"
+        );
+
+        // Where there is nothing to disagree about, they agree.
+        for scale in [1.0, 2.0] {
+            assert_eq!(pixels(width, scale), client_pixels(width, scale));
+        }
+    }
+
+    /// **A slot's capture is held in the store**, in the state its slot
+    /// was given this pass; a slot not in the store, or a pane that has
+    /// gone, holds none.
+    #[test]
+    fn a_slots_capture_is_held_in_the_store() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::{Origin, RuleKey, Slot};
+        use crate::effect::store::Store;
+        let owner = Owner::Pane(crate::pane::PaneId::from_raw(3), PaneSlot::Client);
+        let rule = RuleKey {
+            origin: Origin::User,
+            index: 0,
+            generation: 1,
+        };
+        let (mut panes, mut store) = (crate::pane::Panes::default(), Store::default());
+        let into = super::HeldIn::Slot(owner.clone(), Slot::Replace);
+        assert!(super::capture_in(&mut panes, &mut store, &into).is_none());
+        let id = store
+            .slot_mut(&owner, Slot::Replace, rule)
+            .input
+            .id()
+            .clone();
+        assert_eq!(
+            super::capture_in(&mut panes, &mut store, &into).map(|capture| capture.id().clone()),
+            Some(id)
+        );
+        let pane = super::HeldIn::Pane(crate::pane::PaneId::from_raw(3), crate::keyed::Kind::Pane);
+        assert!(super::capture_in(&mut panes, &mut store, &pane).is_none());
     }
 
     /// A fence that counts how often it is waited on, and answers as told.

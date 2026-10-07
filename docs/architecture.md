@@ -326,6 +326,22 @@ mask, unless its rule asks for the alpha or its chain reads `shape`; the
 off-screen cull grows a pane by the furthest its results reach. Nothing makes
 a slot ready yet.
 
+A slot whose chain reads its part's own pixels (T1) captures the part each
+pass (`render::self_inputs`, `offscreen::part_job`): the client's own surface
+tree, unrounded, since the mask rounds the result; the popups; one of the
+style's layers at its canvas; the whole pane; a scripted surface's instance;
+or a layer surface. The part's corner sits at the chain's reach, rounded up
+to a whole pixel on the part's monitor, so the capture holds what the chain
+reads around it, and the capture is keyed as a warp's is, so a still part is
+captured once and again only when it commits. Every wanted slot's padded box,
+the part inside it and its radii, is recorded whatever its tier
+(`render::record_boxes`), for the runs. A slot's capture and its chain's
+targets live in `effect::store::Store` on `Solium`: made when a slot is first
+wanted, made afresh when another rule fills it, and given back by the sweep
+at the end of `prepare` once no rule wants it. A titlebar rule whose chain
+reads `self` is refused when it binds: a region's own pixels are a crop of
+the layer that draws it, which waits for P15.
+
 A plan is run by `effect/run.rs`, in raw GL like the programs: each step is
 drawn into a pooled target in a frame opened on the carrier, reading
 `sol_tex` on texture unit 0 and the textures it `uses` on the next, at most

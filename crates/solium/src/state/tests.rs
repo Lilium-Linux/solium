@@ -8726,10 +8726,6 @@ end)"#,
     }
 
     /// A fresh buffer at the window's size, committed by its client.
-    #[expect(
-        dead_code,
-        reason = "Task 21's self tier commits a window again to see its chain re-run"
-    )]
     fn commit_again(fixture: &mut Fixture, window: &Window) {
         let size = window.geometry().size;
         let (_, surface) = kept(fixture, window);
@@ -8983,6 +8979,236 @@ end)"#,
             generation: fixture.state.rules_generation,
         });
         assert!(!crate::render::build_slots(&mut fixture.state).wanted(&client, Slot::Behind));
+    }
+
+    /// The self input's key for a client, as `prepare` builds it.
+    fn self_key(fixture: &mut Fixture, window: &Window, pad: i32) -> crate::keyed::Inputs {
+        use smithay::backend::renderer::test::DummyRenderer;
+        let source = crate::offscreen::PartSource::Client(window);
+        let size = crate::offscreen::part_size(&fixture.state, &source, 1.0, pad).expect("a size");
+        let elements = crate::offscreen::part_elements(&mut DummyRenderer, &source, pad, 1.0);
+        crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, 1.0, &elements)
+    }
+
+    /// A desynchronised subsurface of `window`'s surface with a `w` x `h`
+    /// buffer of its own, placed by a commit of its parent, as [fx0] Task
+    /// 17's subsurface steps make one.
+    fn subsurface_of(
+        fixture: &mut Fixture,
+        window: &Window,
+        w: i32,
+        h: i32,
+    ) -> wl_surface::WlSurface {
+        let (_, surface) = kept(fixture, window);
+        let compositor = fixture
+            .client
+            .compositor
+            .clone()
+            .expect("wl_compositor bound");
+        let subcompositor = fixture
+            .client
+            .subcompositor
+            .clone()
+            .expect("wl_subcompositor bound");
+        let child = compositor.create_surface(&fixture.qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &surface, &fixture.qh, ());
+        subsurface.set_desync();
+        commit_buffer(&fixture.client, &fixture.qh, &child, w, h);
+        commit_again(fixture, window);
+        child
+    }
+
+    /// A fresh `w` x `h` buffer on a subsurface, committed by its client.
+    fn commit_child(fixture: &mut Fixture, child: &wl_surface::WlSurface, w: i32, h: i32) {
+        commit_buffer(&fixture.client, &fixture.qh, child, w, h);
+    }
+
+    /// **A self rule captures the client once until it commits.**
+    #[test]
+    fn a_self_rule_captures_the_client_once_until_it_commits() {
+        fx2_fixture!(fixture, "self-once");
+        let (_pane, window) = one_window(&mut fixture);
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, self_key(&mut fixture, &window, 6));
+        assert!(
+            !capture.stale(&self_key(&mut fixture, &window, 6)),
+            "recaptured with nothing committed"
+        );
+        commit_again(&mut fixture, &window);
+        pump_all(&mut fixture);
+        assert!(
+            capture.stale(&self_key(&mut fixture, &window, 6)),
+            "not recaptured after a commit"
+        );
+    }
+
+    /// **A subsurface's commit recaptures its client**: the capture is keyed
+    /// on every surface of the tree ([fx0] Ruling 9).
+    #[test]
+    fn a_subsurface_commit_recaptures_its_client() {
+        fx2_fixture!(fixture, "self-subsurface");
+        let (_pane, window) = one_window(&mut fixture);
+        let child = subsurface_of(&mut fixture, &window, 40, 30);
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, self_key(&mut fixture, &window, 6));
+        commit_child(&mut fixture, &child, 40, 30);
+        pump_all(&mut fixture);
+        assert!(
+            capture.stale(&self_key(&mut fixture, &window, 6)),
+            "a subsurface's commit did not recapture the client"
+        );
+    }
+
+    /// **The self capture is padded by the effect's reach**: client pixels
+    /// plus twice the reach, each way, the client's corner at the reach.
+    #[test]
+    fn the_self_capture_is_padded_by_the_effects_reach() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        fx2_fixture!(fixture, "self-padded");
+        let (_pane, window) = one_window(&mut fixture);
+        let source = crate::offscreen::PartSource::Client(&window);
+        let size = crate::offscreen::part_size(&fixture.state, &source, 1.0, 6).expect("a size");
+        let plain = crate::offscreen::client_pixels(
+            crate::render::flat(&fixture.state, &window)
+                .expect("flat")
+                .client
+                .size,
+            1.0,
+        );
+        assert_eq!(size, (plain.w + 12, plain.h + 12).into());
+        let elements = crate::offscreen::part_elements(&mut DummyRenderer, &source, 6, 1.0);
+        let corner = elements.first().map(|element| {
+            smithay::backend::renderer::element::Element::geometry(
+                element,
+                smithay::utils::Scale::from(1.0),
+            )
+            .loc
+        });
+        assert_eq!(
+            corner,
+            Some((6, 6).into()),
+            "the client's corner is not at the pad"
+        );
+    }
+
+    /// **Every wanted slot has its part's box, padded by its chain's reach**:
+    /// a client's, a scripted surface's on its monitor and a layer
+    /// surface's, each its own pixels plus twice the reach each way, the
+    /// part inside it; with no rule, none.
+    #[test]
+    fn every_wanted_slot_has_its_part_box_padded_by_its_reach() {
+        use crate::effect::plan::{Owner, PaneSlot, PartBox};
+        use crate::effect::rules::Slot;
+        use smithay::reexports::wayland_server::Resource as _;
+        fx2_fixture!(fixture, "self-boxes");
+        let (pane, window) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        let _ = fixture
+            .state
+            .surfaces
+            .declare(crate::scripted::Declaration::for_test(
+                "dock",
+                std::path::PathBuf::from("dock.qml"),
+                crate::scripted::Layer::Top,
+                crate::scripted::On::EveryMonitor,
+            ));
+        let _bar = bar(
+            &mut fixture.display,
+            &mut fixture.state,
+            &fixture.conn,
+            &fixture.client,
+            &fixture.qh,
+            30,
+        );
+        let mut none = crate::render::build_slots(&mut fixture.state);
+        crate::render::record_boxes(&fixture.state, &mut none);
+        assert!(
+            none.boxed(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind)
+                .is_none()
+        );
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = "*", part = "client", slot = "behind", effect = { "tint", reach = 6 } },
+                 { match = "*", part = "surface:dock", slot = "behind", effect = { "tint", reach = 2.5 } },
+                 { match = "*", part = "layer_shell:restore-*", slot = "front", effect = "tint" } }"#,
+        );
+        let mut slots = crate::render::build_slots(&mut fixture.state);
+        crate::render::record_boxes(&fixture.state, &mut slots);
+        let client = crate::render::flat(&fixture.state, &window)
+            .expect("flat")
+            .client
+            .size;
+        assert_eq!(
+            slots.boxed(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind),
+            Some(PartBox::around(
+                crate::offscreen::client_pixels(client, 1.0),
+                6,
+                [0.0; 4]
+            ))
+        );
+        let dock = fixture.state.surfaces.named("dock").expect("declared");
+        assert_eq!(
+            slots.boxed(
+                &Owner::Surface(dock, "fx2-self-boxes".to_owned()),
+                Slot::Behind
+            ),
+            Some(PartBox::around((1920, 1080).into(), 3, [0.0; 4])),
+            "a reach of 2.5 pads by a whole pixel more"
+        );
+        let (layer, geometry) = fixture
+            .state
+            .space
+            .outputs()
+            .find_map(|output| {
+                let map = smithay::desktop::layer_map_for_output(output);
+                let layer = map.layers().next()?.clone();
+                let geometry = map.layer_geometry(&layer)?;
+                Some((layer, geometry))
+            })
+            .expect("the bar is mapped");
+        assert_eq!(
+            slots.boxed(&Owner::LayerShell(layer.wl_surface().id()), Slot::Front),
+            Some(PartBox::around(
+                crate::offscreen::client_pixels(geometry.size, 1.0),
+                0,
+                [0.0; 4]
+            ))
+        );
+    }
+
+    /// **Only a chain reading its part asks for a capture**: a T1 chain
+    /// (`tint` reads `self`) does, a T0 one (`ring` reads only `shape`)
+    /// does not, wherever it is.
+    #[test]
+    fn only_a_chain_reading_its_part_asks_for_a_capture() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "self-only-t1");
+        let (pane, _window) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        let place = fixture.scratch.clone().expect("the tint folder's place");
+        crate::effect::host::tests::folder(
+            &place,
+            "ring",
+            "return { api = 1, inputs = { 'shape' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",
+            )],
+        );
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" },
+                 { match = "*", part = "client", slot = "front", effect = "ring" },
+                 { match = "*", part = "pane", slot = "behind", effect = "ring" } }"#,
+        );
+        let slots = crate::render::build_slots(&mut fixture.state);
+        assert_eq!(slots.wants().count(), 3, "the premise: three slots wanted");
+        let asked: Vec<_> = crate::render::self_inputs(&fixture.state, &slots)
+            .into_iter()
+            .map(|input| (input.owner, input.slot))
+            .collect();
+        assert_eq!(asked, [(Owner::Pane(pane, PaneSlot::Client), Slot::Behind)]);
     }
 
     /// **A pane no monitor shows is resolved for nothing**, the cull

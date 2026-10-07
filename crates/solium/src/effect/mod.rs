@@ -18,6 +18,7 @@ pub(crate) mod plan;
 pub(crate) mod rules;
 pub(crate) mod run;
 pub(crate) mod sandbox;
+pub(crate) mod store;
 pub(crate) mod tree;
 
 /// So `super::pool` resolves the same in `effect/run.rs` here and in

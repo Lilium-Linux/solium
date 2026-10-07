@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use smithay::utils::{Physical, Rectangle};
+use smithay::utils::{Physical, Rectangle, Size};
 use solium_effects::stage::Plan;
 
 use super::element::EffectElement;
@@ -17,10 +17,6 @@ use crate::pane::PaneId;
 #[derive(Debug)]
 pub(crate) struct BoundChain {
     pub(crate) plan: Plan,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 20's part captures are padded by it")
-    )]
     pub(crate) reach: f64,
     #[cfg_attr(
         not(test),
@@ -30,10 +26,6 @@ pub(crate) struct BoundChain {
         )
     )]
     pub(crate) bleed: f64,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 20 captures a part for a T1 chain only")
-    )]
     pub(crate) tier: Tier,
     #[cfg_attr(
         not(test),
@@ -199,6 +191,60 @@ pub(crate) struct Ready {
     pub(crate) reach: i32,
 }
 
+/// A slot's padded box in its part's own physical pixels: the box at
+/// `(0, 0)`, the part inside it in `uv` (x, y, w, h), the part's mask radii
+/// (top-left, top-right, bottom-left, bottom-right) and the reach that padded
+/// it. What a run reads, whether or not a capture was drawn this pass
+/// (Ruling 16). `tests::a_part_box_is_its_part_padded_by_its_reach_on_every_side`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PartBox {
+    pub(crate) padded: Rectangle<i32, Physical>,
+    pub(crate) content: [f32; 4],
+    pub(crate) radii: [f32; 4],
+    pub(crate) reach: i32,
+}
+
+impl PartBox {
+    /// A part of `own` pixels padded by `pad` on every side.
+    /// `tests::a_part_box_is_its_part_padded_by_its_reach_on_every_side`.
+    pub(crate) fn around(own: Size<i32, Physical>, pad: i32, radii: [f32; 4]) -> Self {
+        let padded: Size<i32, Physical> = (own.w + 2 * pad, own.h + 2 * pad).into();
+        Self {
+            padded: Rectangle::from_size(padded),
+            content: [
+                uv(pad, padded.w),
+                uv(pad, padded.h),
+                uv(own.w, padded.w),
+                uv(own.h, padded.h),
+            ],
+            radii,
+            reach: pad,
+        }
+    }
+
+    /// The padded box's size, as a run takes it.
+    /// `tests::a_part_box_is_its_part_padded_by_its_reach_on_every_side`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 21 runs a chain over its slot's box")
+    )]
+    pub(crate) fn size(&self) -> (u32, u32) {
+        (
+            u32::try_from(self.padded.size.w).unwrap_or(0),
+            u32::try_from(self.padded.size.h).unwrap_or(0),
+        )
+    }
+}
+
+/// `part` pixels of `whole`, in `uv`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a fraction of a texture side, given to GL as a float"
+)]
+fn uv(part: i32, whole: i32) -> f32 {
+    (f64::from(part) / f64::from(whole.max(1))) as f32
+}
+
 /// What effects this pass draws where: what the rules want, and what is
 /// ready. Built once a pass by `render::build_slots`, so every output and
 /// every screencopy places from the same answer.
@@ -206,6 +252,7 @@ pub(crate) struct Ready {
 #[derive(Debug, Default)]
 pub(crate) struct Slots {
     wants: HashMap<(Owner, Slot), RuleKey>,
+    boxes: HashMap<(Owner, Slot), PartBox>,
     ready: HashMap<(Owner, Slot), Option<Ready>>,
     reach: HashMap<PaneId, i32>,
     facts: u32,
@@ -224,14 +271,25 @@ impl Slots {
     }
 
     /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 20 captures each wanted slot's part")
-    )]
     pub(crate) fn wants(&self) -> impl Iterator<Item = (&Owner, Slot, RuleKey)> {
         self.wants
             .iter()
             .map(|((owner, slot), key)| (owner, *slot, *key))
+    }
+
+    /// A wanted slot's padded box (`render::record_boxes`).
+    /// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+    pub(crate) fn set_box(&mut self, owner: Owner, slot: Slot, part: PartBox) {
+        self.boxes.insert((owner, slot), part);
+    }
+
+    /// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 21 runs a chain over its slot's box")
+    )]
+    pub(crate) fn boxed(&self, owner: &Owner, slot: Slot) -> Option<PartBox> {
+        self.boxes.get(&(owner.clone(), slot)).copied()
     }
 
     /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
@@ -467,6 +525,25 @@ mod tests {
             "a titlebar rule reading nothing of the frame was refused"
         );
         let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A part's box is the part padded by its reach on every side**, the
+    /// part inside it in `uv`.
+    #[test]
+    fn a_part_box_is_its_part_padded_by_its_reach_on_every_side() {
+        let part = super::PartBox::around((100, 50).into(), 6, [4.0; 4]);
+        assert_eq!(
+            part.padded,
+            smithay::utils::Rectangle::from_size((112, 62).into())
+        );
+        assert_eq!(part.size(), (112, 62));
+        assert_eq!(
+            part.content,
+            [6.0 / 112.0, 6.0 / 62.0, 100.0 / 112.0, 50.0 / 62.0]
+        );
+        assert_eq!((part.radii, part.reach), ([4.0; 4], 6));
+        let bare = super::PartBox::around((100, 50).into(), 0, [0.0; 4]);
+        assert_eq!(bare.content, [0.0, 0.0, 1.0, 1.0]);
     }
 
     /// **A slot is wanted by its owner and slot alone, and ready apart from

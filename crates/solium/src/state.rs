@@ -617,6 +617,10 @@ pub(crate) struct Solium {
     /// The renderer's pooled targets: captures now, previews and effect
     /// passes later (spec §6.3 item 4). `pool::tests::a_target_is_made_once_and_its_fbo_with_it`.
     pub(crate) pool: crate::pool::Pool,
+    /// What each effect slot keeps between passes: its part's capture, its
+    /// chain's targets (Ruling 16). Swept once a pass by `render::prepare`.
+    /// `effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`.
+    pub(crate) store: crate::effect::store::Store,
 
     /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
     ///
@@ -1112,6 +1116,7 @@ impl Solium {
             rebind: false,
             timer: None,
             pool: crate::pool::Pool::new(0),
+            store: crate::effect::store::Store::default(),
             textures: None,
             focusing: false,
             closing: None,
