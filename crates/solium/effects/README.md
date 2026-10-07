@@ -161,9 +161,12 @@ A pass with a `scale` above 1 after passes below 1 is the size of what the
 matching smaller pass read, so a blur that halves a window three times and
 doubles it three times comes back to its exact size, odd or not. Every stage
 is checked as `effect.lua`'s own keys are, and a key a stage does not take is
-refused with the one you probably meant. An effect may not use itself,
-directly or through others, and one effect runs at most 256 passes, its
-states' included. `depends = "region"`, an outline a region publishes, waits
+refused with the one you probably meant. A name an effect saves or makes a
+state is a new GLSL name, because every pass reads it as `sol_<name>`:
+lower-case letters, digits and `_`, not one of the `sol_` names below, and
+not another of its names followed by `_box` or `_sampler`. An effect may not
+use itself, directly or through others, and one effect runs at most 256
+passes, its states' included. `depends = "region"`, an outline a region publishes, waits
 for regions, and is refused.
 
 ## What an effect's Lua can reach
