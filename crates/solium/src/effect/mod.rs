@@ -8,11 +8,11 @@
 
 pub(crate) mod gl;
 pub(crate) mod host;
+pub(crate) mod run;
 pub(crate) mod sandbox;
 
 /// So `super::pool` resolves the same in `effect/run.rs` here and in
 /// `dev/wirecheck`, which includes `pool.rs` beside it (Ruling 2).
-#[expect(unused_imports, reason = "Task 10's effect/run.rs is its reader")]
 pub(crate) use crate::pool;
 
 use smithay::backend::renderer::gles::GlesRenderer;

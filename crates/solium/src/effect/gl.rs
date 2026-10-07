@@ -4,7 +4,7 @@
 )]
 #![expect(
     dead_code,
-    reason = "Task 10's executor reads a program's uniforms and the unit count; wirecheck reads part"
+    reason = "Task 21's runner draws through the executor, which reads a program's uniforms; wirecheck reads part"
 )]
 
 //! Effect programs in raw GL (\[16\] decision 8's "rewrite its pipeline in raw

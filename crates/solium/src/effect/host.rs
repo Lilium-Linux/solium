@@ -870,7 +870,10 @@ impl<P: Clone> Host<P> {
 
     /// What this GPU renders into, once probed.
     /// `tests::the_formats_are_probed_once_and_only_while_something_is_wanted`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 10's preflight reads it"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 21's runner hands it to run::preflight")
+    )]
     pub(crate) fn formats(&self) -> Option<crate::pool::Formats> {
         self.formats
     }
@@ -991,7 +994,7 @@ impl<P: Clone> Host<P> {
     /// `tests::a_broken_effect_on_a_cold_start_is_absent_not_fatal`.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Task 10's executor looks effects up")
+        expect(dead_code, reason = "Task 18's slot plan looks effects up")
     )]
     pub(crate) fn effect(&self, name: &str) -> Option<Rc<Loaded<P>>> {
         self.slots.get(name).and_then(|slot| slot.current.clone())
@@ -1064,11 +1067,32 @@ impl<P: Clone> Host<P> {
             .and_then(|slot| slot.current.clone())
     }
 
-    #[expect(dead_code, reason = "Task 10's executor draws through it")]
+    #[expect(
+        dead_code,
+        reason = "Task 29's warp draws a folder's frag through it once it compiled"
+    )]
     pub(crate) fn program(&self, key: u64) -> Option<&P> {
         self.programs
             .get(&key)
             .and_then(|program| program.as_ref().ok())
+    }
+
+    /// A program by key, as `run::preflight` reads it: compiled, failed, or
+    /// asked for and not compiled yet. A key nothing asked for is no program
+    /// a later compile would bring, so it is a failure, not pending for ever.
+    /// `tests::a_programs_lookup_tells_pending_from_failed`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 21's runner looks programs up through it")
+    )]
+    pub(crate) fn lookup(&self, key: u64) -> super::run::Lookup<'_, P> {
+        use super::run::Lookup;
+        match self.programs.get(&key) {
+            Some(Ok(program)) => Lookup::Ready(program),
+            Some(Err(_)) => Lookup::Failed,
+            None if self.asked.contains_key(&key) => Lookup::Pending,
+            None => Lookup::Failed,
+        }
     }
 
     pub(crate) fn problems(&self) -> &[Problem] {
@@ -1726,6 +1750,36 @@ pub(crate) mod tests {
         host.compile_pending(&mut Counting::default());
         assert!(host.ready());
         assert!(host.effect("a").is_some());
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A program asked for and not compiled yet looks pending**, a compiled
+    /// one ready, a failed one failed: what `run::preflight` reads. A key
+    /// nothing asked for is no program a later compile would bring, so it is
+    /// a failure, not pending for ever.
+    #[test]
+    fn a_programs_lookup_tells_pending_from_failed() {
+        use super::super::run::Lookup;
+        let place = scratch("lookup");
+        folder(&place, "a", ONE_PASS, &[("effect.frag", FRAG)]);
+        folder(
+            &place,
+            "bad",
+            ONE_PASS,
+            &[("effect.frag", "vec4 sol_effect(vec2 uv) {\n  FAIL\n}\n")],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["a".to_owned(), "bad".to_owned()]);
+        let a = host.bind("a", &[]).expect("binds").plans[0].steps[0].key;
+        let bad = host.bind("bad", &[]).expect("binds").plans[0].steps[0].key;
+        assert!(matches!(host.lookup(a), Lookup::Pending));
+        assert!(
+            matches!(host.lookup(0), Lookup::Failed),
+            "asked for by nothing"
+        );
+        host.compile_pending(&mut Counting::default());
+        assert!(matches!(host.lookup(a), Lookup::Ready(_)));
+        assert!(matches!(host.lookup(bad), Lookup::Failed));
         let _ = std::fs::remove_dir_all(place);
     }
 

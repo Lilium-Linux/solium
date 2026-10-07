@@ -239,6 +239,19 @@ format the GPU lacks is dropped at bind, so the effect starts at its first
 rung that runs, and until then every rung is kept. With no effect wanted,
 `prepare` asks the host one question and touches no GL.
 
+A plan is run by `effect/run.rs`, in raw GL like the programs: each step is
+drawn into a pooled target in a frame opened on the carrier, reading
+`sol_tex` on texture unit 0 and the textures it `uses` on the next, at most
+eight in all, and puts back what smithay expects to find. States run first,
+and nothing waits on the CPU between steps, since one context's reads come
+after its writes; only the last step's fence goes back to the caller. Before
+it draws, a run asks the host for every program: one not compiled yet leaves
+the part as if no effect were configured that pass and latches nothing, and
+one that failed, or a GL error after the run, fails the chain for good. The
+effects' GPU time is one region a run phase, `gpu_effects_us` in the trace.
+Nothing runs a plan on screen yet; wirecheck runs them (cases 12d to 12g and
+12q).
+
 ### The arrangements are a crate too
 
 `crates/layout` is the third engine crate with nothing in `[dependencies]`:
@@ -318,8 +331,9 @@ renderer to choose instead. Drawing does not stay behind Smithay's generic
 - a fragment program of Solium's own, for rounded corners (`pass.rs`, which
   compiles the GLSL ES source kept in `crates/effects`);
 - effect programs from user folders, compiled from three source strings and
-  failing with the driver's log (`effect/gl.rs`), neither of which smithay's
-  program API gives;
+  failing with the driver's log (`effect/gl.rs`), and run with several
+  textures a pass (`effect/run.rs`), none of which smithay's program API
+  gives;
 - the EGL context and fence that QML on the GPU shares with Qt (`qml/paint.rs`,
   `surface.rs`).
 

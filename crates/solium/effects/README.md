@@ -217,6 +217,9 @@ vec4 sol_effect(vec2 uv) {
 ```
 
 `uv` runs from 0 to 1 across the box the pass draws, (0, 0) at its top-left.
+Every texture a pass reads is sampled linearly, so a read between two texels
+blends them, as a blur's taps want, and `sol_tex` past its edge reads the
+edge texel itself.
 Your file is compiled as it is, between a prelude Solium writes for the pass
 and a few lines that call `sol_effect`, and it stays a source string of its
 own, so the line numbers Solium reports from the compiler are your file's own
