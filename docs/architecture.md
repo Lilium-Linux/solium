@@ -224,7 +224,9 @@ GPU, `effect::host::Host` reads every folder the configuration wants, runs its
 `effect.lua` in a Lua of its own (`effect/sandbox.rs`), flattens its stages
 into one plan for its defaults and one for each `fallback` rung
 (`solium_effects::stage`), lints every pass's shader and hashes the folder;
-one whose hash has not changed keeps everything. At the top of the next
+one whose hash has not changed keeps everything, and is only bound again when
+an effect it uses or falls back to changed, so the programs that effect's old
+version compiled are deleted between frames. At the top of the next
 `prepare` the host compiles what changed, in raw GL from three source strings
 (`effect/gl.rs`: a prelude, the user's file untouched, an epilogue), so the
 driver's log names the user's own line, which smithay's program API would
