@@ -323,8 +323,8 @@ wanted slot whose chain failed or has not run draws the part (`replace`) or
 nothing (`behind`, `front`), and with no rules the walk is `PANE_ORDER`'s.
 A result is placed over its part grown by its reach and cut by the part's
 mask, unless its rule asks for the alpha or its chain reads `shape`; the
-off-screen cull grows a pane by the furthest its results reach. Nothing makes
-a slot ready yet.
+off-screen cull grows a pane by the furthest its results reach. A slot is
+ready once its chain has run, below.
 
 A slot whose chain reads its part's own pixels (T1) captures the part each
 pass (`render::self_inputs`, `offscreen::part_job`): the client's own surface
@@ -358,8 +358,22 @@ holds two and a second run of the same size makes nothing; and a state is
 made again only when what it `depends` on moves (`run::Keys`: the params'
 hash, the self capture's commit, the shape), when its size does, or when a
 state it reads was made again. The effects' GPU time is one region a run
-phase, `gpu_effects_us` in the trace. Nothing runs a plan on screen yet;
-wirecheck runs them (cases 12d to 12g and 12l to 12q).
+phase, `gpu_effects_us` in the trace; wirecheck runs plans on their own
+(cases 12d to 12g and 12l to 12q).
+
+`prepare` runs the chains once every self input is drawn or kept, on one
+bound carrier (`render::run_slots`, through a `render::Runner`). A self
+chain runs, its part's capture as its first input, only when that capture
+was redrawn this pass, its params changed or its padded box's size did
+(`effect::store::SlotState::needs_run`); otherwise its last result is placed
+again with the same id and commit, so nothing under it is damaged. With
+`SOLIUM_RECAPTURE=always` every capture is redrawn, so every chain runs every
+pass. A run's result is the slot's `Ready`, drawn through the masked program.
+A chain that fails is latched and said once, and its part is drawn as if no
+rule named it; one whose program has not compiled yet is drawn the same for
+that pass and latches nothing. A whole pane's self chain runs in a phase of
+its own after the rest. `effect_runs` in the trace counts the runs. A chain
+that reads nothing of the frame does not run yet.
 
 ### The arrangements are a crate too
 
