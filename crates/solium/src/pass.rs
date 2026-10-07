@@ -15,13 +15,11 @@
 //! describes. So `prepare` compiles, and `elements` only reads what it
 //! compiled (`Programs::clip_compiled`).
 
-use smithay::backend::renderer::gles::{
-    GlesPixelProgram, GlesRenderer, GlesTexProgram, UniformName, UniformType,
-};
-use solium_effects::fragment::{
-    CLIPPED_SOLID, CLIPPED_SURFACE, COLOUR_UNIFORM, Corners, Effect, GEO_PX_UNIFORM,
-    GEO_SIZE_UNIFORM, INPUT_TO_GEO_UNIFORM, Inputs, RADIUS_UNIFORM,
-};
+use smithay::backend::renderer::gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram};
+use solium_effects::fragment::{CLIPPED_SOLID, CLIPPED_SURFACE, Corners, Effect, Inputs};
+
+mod uniforms;
+pub(crate) use uniforms::registration;
 
 /// Whether this renderer can run an effect that reads `inputs` at all.
 ///
@@ -199,20 +197,17 @@ impl Programs {
 
     /// The clipped-surface programs, compiled on first use between frames and
     /// latched (`tests::a_program_that_will_not_compile_is_tried_once`).
-    /// `None` leaves a rounded window square rather than undrawn. Wirecheck's
-    /// case 11h compiles the same two sources with the same uniforms.
+    /// `None` leaves a rounded window square rather than undrawn. Each is
+    /// registered with the uniforms its source declares
+    /// (`tests::the_registered_uniforms_are_the_declared_ones_but_smithays`);
+    /// wirecheck's case 11h compiles the same two through the same
+    /// [`registration`].
     pub(crate) fn clip(&mut self, renderer: &mut GlesRenderer) -> Option<&ClipPrograms> {
         once(&mut self.clip, &mut self.clip_failed, || {
-            let shared = [
-                UniformName::new(INPUT_TO_GEO_UNIFORM, UniformType::Matrix3x3),
-                UniformName::new(GEO_SIZE_UNIFORM, UniformType::_2f),
-                UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
-                UniformName::new(GEO_PX_UNIFORM, UniformType::_1f),
-            ];
-            let texture = renderer.compile_custom_texture_shader(CLIPPED_SURFACE, &shared);
-            let mut solid_uniforms = shared.to_vec();
-            solid_uniforms.push(UniformName::new(COLOUR_UNIFORM, UniformType::_4f));
-            let solid = renderer.compile_custom_pixel_shader(CLIPPED_SOLID, &solid_uniforms);
+            let texture = renderer
+                .compile_custom_texture_shader(CLIPPED_SURFACE, &registration(CLIPPED_SURFACE));
+            let solid =
+                renderer.compile_custom_pixel_shader(CLIPPED_SOLID, &registration(CLIPPED_SOLID));
             match (texture, solid) {
                 (Ok(texture), Ok(solid)) => Some(ClipPrograms { texture, solid }),
                 (texture, solid) => {
@@ -396,5 +391,39 @@ mod tests {
             Some(7),
             "compiled once and kept"
         );
+    }
+
+    /// **The registered uniforms are the declared ones but smithay's**, with
+    /// the declared types: #94's defect (a `vec4` registered as `_1f`) cannot
+    /// be written again, because nothing is written by hand. Every source
+    /// registered through [`registration`]: the clipped pair, and wirecheck's
+    /// case 11's `ROUNDED_CORNERS`.
+    #[test]
+    fn the_registered_uniforms_are_the_declared_ones_but_smithays() {
+        use smithay::backend::renderer::gles::UniformType;
+        for source in [
+            solium_effects::fragment::CLIPPED_SURFACE,
+            solium_effects::fragment::CLIPPED_SOLID,
+            solium_effects::fragment::ROUNDED_CORNERS,
+        ] {
+            let registered = super::registration(source);
+            let declared: Vec<_> = solium_effects::glsl::uniforms(source)
+                .into_iter()
+                .filter(|each| !super::uniforms::SMITHAYS.contains(&each.name.as_str()))
+                .collect();
+            assert_eq!(registered.len(), declared.len(), "{source}");
+            for (name, uniform) in registered.iter().zip(&declared) {
+                assert_eq!(name.name, uniform.name);
+                let expected = match uniform.ty {
+                    solium_effects::glsl::Glsl::Float => UniformType::_1f,
+                    solium_effects::glsl::Glsl::Vec2 => UniformType::_2f,
+                    solium_effects::glsl::Glsl::Vec3 => UniformType::_3f,
+                    solium_effects::glsl::Glsl::Vec4 => UniformType::_4f,
+                    solium_effects::glsl::Glsl::Mat3 => UniformType::Matrix3x3,
+                    other => panic!("{other:?} is not registered"),
+                };
+                assert_eq!(name.type_, expected, "{}", uniform.name);
+            }
+        }
     }
 }

@@ -488,6 +488,72 @@ pub fn line_shift(probe_log: &str) -> u32 {
     }
 }
 
+/// A GLSL type a `uniform` can have.
+/// `tests::uniforms_reads_every_declaration_and_folds_the_external_pair`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glsl {
+    Float,
+    Int,
+    Bool,
+    Vec2,
+    Vec3,
+    Vec4,
+    Mat3,
+    Sampler2D,
+    SamplerExternal,
+}
+
+/// One `uniform` a source declares.
+/// `tests::uniforms_reads_every_declaration_and_folds_the_external_pair`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Uniform {
+    pub name: String,
+    pub ty: Glsl,
+}
+
+/// Every `uniform [precision] <type> <name>;` in `source`, in order, a name
+/// declared twice (the `EXTERNAL` pair) kept once as `sampler2D`. #95: the
+/// compositor's smithay registrations are built from this, so a registered
+/// type cannot disagree with the declared one.
+/// `tests::uniforms_reads_every_declaration_and_folds_the_external_pair`.
+pub fn uniforms(source: &str) -> Vec<Uniform> {
+    let mut found: Vec<Uniform> = Vec::new();
+    for line in uncommented(source).lines() {
+        let words: Vec<&str> = line
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect();
+        let (Some(&"uniform"), Some(name)) = (words.first(), words.last()) else {
+            continue;
+        };
+        let ty = match words.get(words.len().saturating_sub(2)).copied() {
+            Some("float") => Glsl::Float,
+            Some("int") => Glsl::Int,
+            Some("bool") => Glsl::Bool,
+            Some("vec2") => Glsl::Vec2,
+            Some("vec3") => Glsl::Vec3,
+            Some("vec4") => Glsl::Vec4,
+            Some("mat3") => Glsl::Mat3,
+            Some("sampler2D") => Glsl::Sampler2D,
+            Some("samplerExternalOES") => Glsl::SamplerExternal,
+            _ => continue,
+        };
+        match found.iter_mut().find(|each| each.name == *name) {
+            Some(each) => {
+                if ty == Glsl::Sampler2D {
+                    each.ty = ty;
+                }
+            }
+            None => found.push(Uniform {
+                name: (*name).to_owned(),
+                ty,
+            }),
+        }
+    }
+    found
+}
+
 /// FNV-1a 64 over `parts`, a 0xff byte after each so `["ab","c"]` and
 /// `["a","bc"]` differ. Stable across builds, so a log line can name a version.
 /// `tests::the_content_hash_is_stable_and_parts_do_not_run_together`.
@@ -784,6 +850,28 @@ mod tests {
             content_hash(&[]),
             0xcbf2_9ce4_8422_2325,
             "FNV-1a 64's offset basis"
+        );
+    }
+
+    /// **`uniforms` reads every declaration and folds the external pair**:
+    /// `tex`'s two spellings under `#if defined(EXTERNAL)` are one uniform.
+    #[test]
+    fn uniforms_reads_every_declaration_and_folds_the_external_pair() {
+        let source = "#version 100\n#if defined(EXTERNAL)\nuniform samplerExternalOES tex;\n#else\nuniform sampler2D tex;\n#endif\n\
+                      uniform highp vec4 corner_radius;\nuniform vec2 tex_size;\nuniform mat3 input_to_geo;\nvoid main() {}\n";
+        let found = super::uniforms(source);
+        let names: Vec<(&str, super::Glsl)> = found
+            .iter()
+            .map(|each| (each.name.as_str(), each.ty))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("tex", super::Glsl::Sampler2D),
+                ("corner_radius", super::Glsl::Vec4),
+                ("tex_size", super::Glsl::Vec2),
+                ("input_to_geo", super::Glsl::Mat3)
+            ]
         );
     }
 }

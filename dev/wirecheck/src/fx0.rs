@@ -705,25 +705,18 @@ fn drawn_alone(
 /// buffer drawn as a solid over the client is cut at (0, 0) and white at the
 /// centre.
 fn clipped_programs_cut_the_clients_corners(renderer: &mut GlesRenderer) -> Result<()> {
-    use smithay::backend::renderer::gles::{Uniform, UniformName, UniformType, UniformValue};
+    use crate::uniforms::registration;
+    use smithay::backend::renderer::gles::{Uniform, UniformValue};
     use solium_effects::fragment::{
         CLIPPED_SOLID, CLIPPED_SURFACE, COLOUR_UNIFORM, GEO_PX_UNIFORM, GEO_SIZE_UNIFORM,
         INPUT_TO_GEO_UNIFORM, RADIUS_UNIFORM,
     };
     println!("\n=== FX0: the clipped-surface programs cut the client's corners ===");
-    let shared = [
-        UniformName::new(INPUT_TO_GEO_UNIFORM, UniformType::Matrix3x3),
-        UniformName::new(GEO_SIZE_UNIFORM, UniformType::_2f),
-        UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
-        UniformName::new(GEO_PX_UNIFORM, UniformType::_1f),
-    ];
     let texture_program = renderer
-        .compile_custom_texture_shader(CLIPPED_SURFACE, &shared)
+        .compile_custom_texture_shader(CLIPPED_SURFACE, &registration(CLIPPED_SURFACE))
         .map_err(|err| anyhow!("CLIPPED_SURFACE did not compile in every variant: {err}"))?;
-    let mut solid_uniforms = shared.to_vec();
-    solid_uniforms.push(UniformName::new(COLOUR_UNIFORM, UniformType::_4f));
     let solid_program = renderer
-        .compile_custom_pixel_shader(CLIPPED_SOLID, &solid_uniforms)
+        .compile_custom_pixel_shader(CLIPPED_SOLID, &registration(CLIPPED_SOLID))
         .map_err(|err| anyhow!("CLIPPED_SOLID did not compile in both variants: {err}"))?;
 
     let side = 64;

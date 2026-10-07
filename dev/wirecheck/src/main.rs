@@ -27,9 +27,7 @@ use smithay::backend::egl::fence::EGLFence;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element as _, Id, Kind, RenderElement};
-use smithay::backend::renderer::gles::{
-    GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName, UniformType,
-};
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram, GlesTexture, Uniform};
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{
     Bind as _, Color32F, ExportMem as _, Frame as _, ImportDma as _, ImportMem as _, Offscreen as _,
@@ -44,6 +42,13 @@ use std::os::fd::{FromRawFd as _, OwnedFd};
 #[path = "../../../crates/solium/src/qml/target.rs"]
 #[allow(dead_code, reason = "target.rs carries fields only the compositor reads")]
 mod target;
+
+// The compositor's smithay registrations, read from each shader's own source
+// (#95) and included by path, so cases 11 and 11h register exactly what
+// `pass::Programs::clip` does
+// (`pass::tests::the_registered_uniforms_are_the_declared_ones_but_smithays`).
+#[path = "../../../crates/solium/src/pass/uniforms.rs"]
+mod uniforms;
 
 mod fx0;
 mod fx2;
@@ -2563,11 +2568,7 @@ fn main() -> Result<()> {
     // them would draw an XRGB window invisible and a video surface black.
     match renderer.compile_custom_texture_shader(
         solium_effects::fragment::ROUNDED_CORNERS,
-        &[
-            UniformName::new(solium_effects::fragment::RADIUS_UNIFORM, UniformType::_4f),
-            // Ours, because smithay gives a *texture* program no `size`.
-            UniformName::new(solium_effects::fragment::SIZE_UNIFORM, UniformType::_2f),
-        ],
+        &uniforms::registration(solium_effects::fragment::ROUNDED_CORNERS),
     ) {
         Ok(program) => {
             println!("  rounded-corner shader: compiled");
