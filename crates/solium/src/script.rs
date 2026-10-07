@@ -29,8 +29,10 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use mlua::{IntoLua, Lua, Table, Value};
+use smithay::reexports::input::{AccelProfile, ScrollMethod, TapButtonMap};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+use crate::input::devices::{DeviceKind, DeviceMatch, InputConfig, Settings as InputSettings};
 use crate::present::{Curve, Frame};
 
 /// A rectangle as a script sees it: plain numbers, no coordinate-space types.
@@ -499,6 +501,9 @@ pub(crate) enum Command {
     /// The idle blank, and what a window on a screen that is off is told.
     /// See `crate::idle::Settings`.
     Idle(crate::idle::Settings),
+    /// libinput device settings: a default per device type, and overrides
+    /// matched by name or by vendor/product. See `crate::input::devices`.
+    Input(crate::input::devices::InputConfig),
     /// Turn one monitor, by name, or every one, on or off. See `power.rs`.
     Power {
         monitor: Option<String>,
@@ -785,6 +790,170 @@ fn describe(value: &Value) -> String {
         Value::String(text) => text.to_string_lossy(),
         other => format!("<{}>", other.type_name()),
     }
+}
+
+/// A `devices` entry's `vendor` or `product`: a whole number from 0 to
+/// `u32::MAX`, as `libinput list-devices` or `lsusb` print it. Anything else
+/// is named in the log and the match criterion is left unset -- which, since
+/// [`crate::input::devices::DeviceMatch::matches`] requires at least one
+/// criterion, can turn an override that meant to match by vendor *and*
+/// product into one that matches by product alone. Worth warning about for
+/// exactly that reason.
+fn usb_id_field(row: &Table, key: &str) -> mlua::Result<Option<u32>> {
+    Ok(match row.get::<Value>(key)? {
+        Value::Nil => None,
+        Value::Integer(value) => match u32::try_from(value) {
+            Ok(id) => Some(id),
+            Err(_) => {
+                tracing::warn!(
+                    key,
+                    value,
+                    "devices: not a usb id (0 to 0xffffffff); unmatched"
+                );
+                None
+            }
+        },
+        other => {
+            tracing::warn!(
+                key,
+                value = describe(&other),
+                "devices: vendor and product are numbers; unmatched"
+            );
+            None
+        }
+    })
+}
+
+/// One table of libinput options -- a device type's defaults in `config.lua`'s
+/// `input` section, or one `devices` entry -- read field by field. A key left
+/// out keeps that field `None` (`crate::input::devices::Settings`'s own
+/// meaning: "config.lua did not say, leave it alone"); a key present but the
+/// wrong shape -- `tap = "yes"`, `accel_profile = "fastest"` -- is named in
+/// the log with `context` (the type's key, or `"devices"`) and left `None`
+/// too, the same policy `idle` and `cursor` already use. One field being
+/// wrong does not fail the rest of the table.
+/// `sol_input_warns_on_an_unrecognised_option_value_and_keeps_it_unset`.
+fn settings_from_table(table: &Table, context: &str) -> mlua::Result<InputSettings> {
+    let bool_field = |key: &str| -> mlua::Result<Option<bool>> {
+        Ok(match table.get::<Value>(key)? {
+            Value::Nil => None,
+            Value::Boolean(value) => Some(value),
+            other => {
+                tracing::warn!(
+                    context,
+                    key,
+                    value = describe(&other),
+                    "input: true or false; leaving it unset"
+                );
+                None
+            }
+        })
+    };
+
+    let tap_button_map = match table.get::<Value>("tap_button_map")? {
+        Value::Nil => None,
+        Value::String(ref text) => match text.to_string_lossy().as_ref() {
+            "left_right_middle" => Some(TapButtonMap::LeftRightMiddle),
+            "left_middle_right" => Some(TapButtonMap::LeftMiddleRight),
+            other => {
+                tracing::warn!(
+                    context,
+                    value = other,
+                    "input.tap_button_map: \"left_right_middle\" or \"left_middle_right\"; \
+                     leaving it unset"
+                );
+                None
+            }
+        },
+        other => {
+            tracing::warn!(
+                context,
+                value = describe(&other),
+                "input.tap_button_map: a string; leaving it unset"
+            );
+            None
+        }
+    };
+
+    let scroll_method = match table.get::<Value>("scroll_method")? {
+        Value::Nil => None,
+        Value::String(ref text) => match text.to_string_lossy().as_ref() {
+            "two_finger" => Some(ScrollMethod::TwoFinger),
+            "edge" => Some(ScrollMethod::Edge),
+            "button" => Some(ScrollMethod::OnButtonDown),
+            "no_scroll" => Some(ScrollMethod::NoScroll),
+            other => {
+                tracing::warn!(
+                    context,
+                    value = other,
+                    "input.scroll_method: \"two_finger\", \"edge\", \"button\" or \"no_scroll\"; \
+                     leaving it unset"
+                );
+                None
+            }
+        },
+        other => {
+            tracing::warn!(
+                context,
+                value = describe(&other),
+                "input.scroll_method: a string; leaving it unset"
+            );
+            None
+        }
+    };
+
+    let accel_profile = match table.get::<Value>("accel_profile")? {
+        Value::Nil => None,
+        Value::String(ref text) => match text.to_string_lossy().as_ref() {
+            "flat" => Some(AccelProfile::Flat),
+            "adaptive" => Some(AccelProfile::Adaptive),
+            other => {
+                tracing::warn!(
+                    context,
+                    value = other,
+                    "input.accel_profile: \"flat\" or \"adaptive\"; leaving it unset"
+                );
+                None
+            }
+        },
+        other => {
+            tracing::warn!(
+                context,
+                value = describe(&other),
+                "input.accel_profile: a string; leaving it unset"
+            );
+            None
+        }
+    };
+
+    let accel_speed = match table.get::<Value>("accel_speed")? {
+        Value::Nil => None,
+        other => match number(&other).filter(|speed| (-1.0..=1.0).contains(speed)) {
+            Some(speed) => Some(speed),
+            None => {
+                tracing::warn!(
+                    context,
+                    value = describe(&other),
+                    "input.accel_speed: a number from -1 to 1; leaving it unset"
+                );
+                None
+            }
+        },
+    };
+
+    Ok(InputSettings {
+        tap: bool_field("tap")?,
+        tap_button_map,
+        drag: bool_field("drag")?,
+        drag_lock: bool_field("drag_lock")?,
+        natural_scroll: bool_field("natural_scroll")?,
+        scroll_method,
+        accel_profile,
+        accel_speed,
+        disable_while_typing: bool_field("disable_while_typing")?,
+        left_handed: bool_field("left_handed")?,
+        middle_emulation: bool_field("middle_emulation")?,
+    })
 }
 
 /// What the configuration being replaced asked to keep, waiting in the new Lua
@@ -2959,6 +3128,61 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // libinput device settings (#157): a default per device type, and
+    // overrides matched by name or by vendor/product. `config.lua`'s `input`
+    // section, handed over as `sol.input(config.input)`.
+    //
+    // Each device-type key -- `touchpad`, `mouse`, `keyboard`, `touchscreen`,
+    // `tablet_tool`, `tablet_pad`, `switch` -- is a table of the options
+    // listed on `crate::input::devices::Settings`; left out, or not a table,
+    // every device of that type keeps libinput's own default. `devices` is a
+    // list of overrides, each a match -- `name` (a case-insensitive
+    // substring), `vendor` and `product` (as `libinput list-devices` or
+    // `lsusb` print them), at least one of the three -- plus any of the same
+    // options. Overrides apply in list order, over the type default and over
+    // each other, field by field: a later one changes only the fields it
+    // names, and a field none of them names keeps the type default. Applied
+    // to every device already connected and to each one `DeviceAdded` hands
+    // over later, and reapplied, from whatever the configuration now says,
+    // on every reload -- the live side of this is `tty.rs` and
+    // `crate::input::devices::Registry`, since only a backend has real
+    // devices to apply it to.
+    // `the_shipped_configuration_configures_a_touchpad_and_a_mouse`,
+    // `a_devices_entry_in_user_lua_overrides_one_field_of_the_matched_device`,
+    // `sol_input_warns_on_an_unrecognised_option_value_and_keeps_it_unset`.
+    sol.set(
+        "input",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut config = InputConfig::default();
+            if let Some(options) = options {
+                for (kind, key) in DeviceKind::CONFIGURABLE {
+                    if let Some(table) = options.get::<Option<mlua::Table>>(key)? {
+                        config.set_default(kind, settings_from_table(&table, key)?);
+                    }
+                }
+                if let Some(rows) = options.get::<Option<Vec<mlua::Table>>>("devices")? {
+                    for row in rows {
+                        let name_contains = row.get::<Option<String>>("name")?;
+                        let vendor = usb_id_field(&row, "vendor")?;
+                        let product = usb_id_field(&row, "product")?;
+                        let settings = settings_from_table(&row, "devices")?;
+                        config.push_override(
+                            DeviceMatch {
+                                name_contains,
+                                vendor,
+                                product,
+                            },
+                            settings,
+                        );
+                    }
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Input(config));
+            })
+        })?,
+    )?;
+
     // The monitor a window is on, or the active one when asked about nothing.
     //
     // Both answers are a work-area rect, so every script written when there
@@ -4964,6 +5188,7 @@ pub(crate) use tests::logged_while;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::devices::DeviceInfo;
 
     #[test]
     fn combos_normalise_to_one_spelling() {
@@ -6319,6 +6544,125 @@ mod tests {
                 Some(Duration::from_secs(1))
             );
         }
+    }
+
+    fn input_config(outcome: Outcome) -> Option<InputConfig> {
+        outcome
+            .commands
+            .into_iter()
+            .find_map(|command| match command {
+                Command::Input(config) => Some(config),
+                _ => None,
+            })
+    }
+
+    /// **The shipped configuration taps and scrolls naturally on a touchpad,
+    /// and does neither on a mouse** -- `config.lua`'s own `input` section,
+    /// read through `sol.input` exactly as `idle` is. A `user.lua` overriding
+    /// one field of `touchpad` keeps the other.
+    #[test]
+    fn the_shipped_configuration_configures_a_touchpad_and_a_mouse() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-input-default", "return {}")
+        else {
+            return;
+        };
+        let config = input_config(scripts.startup()).expect("`init.lua` calls `sol.input`");
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let touchpad = DeviceInfo {
+            id: "touchpad".into(),
+            name: "Synaptics TouchPad".into(),
+            kind: DeviceKind::Touchpad,
+            vendor: None,
+            product: None,
+        };
+        let mouse = DeviceInfo {
+            id: "mouse".into(),
+            name: "Any Mouse".into(),
+            kind: DeviceKind::Mouse,
+            vendor: None,
+            product: None,
+        };
+        assert_eq!(config.resolve(&touchpad).tap, Some(true));
+        assert_eq!(config.resolve(&touchpad).natural_scroll, Some(true));
+        assert_eq!(
+            config.resolve(&mouse).natural_scroll,
+            None,
+            "a mouse is not a surface your fingers are on; the shipped config says nothing \
+             about it, leaving libinput's own default"
+        );
+    }
+
+    /// **A `devices` entry matches the device `config.lua` names, overriding
+    /// only the fields it sets.** The integration half of
+    /// `devices::tests::a_name_matched_override_changes_only_the_fields_it_names`:
+    /// this proves the override actually reaches `Command::Input` from real
+    /// Lua syntax, parenthesis and all.
+    #[test]
+    fn a_devices_entry_in_user_lua_overrides_one_field_of_the_matched_device() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-input-override",
+            r#"
+            return {
+                input = {
+                    devices = {
+                        { name = "Synaptics", natural_scroll = false },
+                    },
+                },
+            }
+            "#,
+        ) else {
+            return;
+        };
+        let config = input_config(scripts.startup()).expect("`init.lua` calls `sol.input`");
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let resolved = config.resolve(&DeviceInfo {
+            id: "touchpad".into(),
+            name: "Synaptics TouchPad".into(),
+            kind: DeviceKind::Touchpad,
+            vendor: None,
+            product: None,
+        });
+        assert_eq!(
+            resolved.natural_scroll,
+            Some(false),
+            "the override's own field"
+        );
+        assert_eq!(
+            resolved.tap,
+            Some(true),
+            "the override named nothing about tap, so the touchpad default stands"
+        );
+    }
+
+    /// **A value of the wrong shape for its field is named in the log and
+    /// left unset, not fatal.** `accel_profile` only has two sensible
+    /// spellings, and a third must not take the rest of `input` down with it
+    /// -- the same policy `idle.dbus_inhibit` already has
+    /// (`idle_dbus_inhibit_false_owns_nothing`).
+    #[test]
+    fn sol_input_warns_on_an_unrecognised_option_value_and_keeps_it_unset() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-input-bad-value",
+            r#"sol.input({ mouse = { accel_profile = "fastest" } })"#,
+        );
+        let config = input_config(scripts.startup()).expect("the call ran");
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let mouse = DeviceInfo {
+            id: "mouse".into(),
+            name: "Any Mouse".into(),
+            kind: DeviceKind::Mouse,
+            vendor: None,
+            product: None,
+        };
+        assert_eq!(
+            config.resolve(&mouse).accel_profile,
+            None,
+            "\"fastest\" is not \"flat\" or \"adaptive\"; it must not be guessed at"
+        );
     }
 
     /// `sol.qml` is answered straight after the configuration is read, before
