@@ -23849,6 +23849,65 @@ end)
                 );
             }
 
+            /// **A click on a registered wallpaper surface that claims
+            /// nothing still clears keyboard focus** (#219): a wallpaper is
+            /// not empty space the way the plain empty-desktop test above
+            /// has it -- it is a real, interactive scripted surface at the
+            /// background layer, and `surface_claiming` walks it and calls
+            /// its `hit`, which here answers `Hit::Nothing` -- so this walks
+            /// a different path through `surface_pointer`/`surface_claiming`
+            /// than a point with no surface declared at all, and must land
+            /// on the same fallback.
+            #[test]
+            fn a_click_on_the_wallpaper_clears_keyboard_focus() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                desk.state
+                    .declare_surface(crate::scripted::Declaration::for_test(
+                        "wallpaper",
+                        std::path::PathBuf::from("/nonexistent/wallpaper-test.qml"),
+                        Scripted::Background,
+                        crate::scripted::On::Rect(screen()),
+                    ));
+                let wallpaper = desk
+                    .state
+                    .surfaces
+                    .named("wallpaper")
+                    .expect("the surface was declared");
+                desk.state
+                    .surfaces
+                    .get_mut(wallpaper)
+                    .expect("live")
+                    .stand_in(crate::scripted::Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..crate::scripted::Stand::solid()
+                    });
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let empty = (1700.0, 950.0);
+                assert!(
+                    desk.focused() == opened.pane
+                        && desk.state.window_under(empty.into()).is_none()
+                        && !desk.state.surface_pointer(false, empty.into(), None),
+                    "the premise: the window has the keyboard, {empty:?} is over the \
+                     wallpaper, and the wallpaper claims nothing there"
+                );
+
+                move_pointer(&mut desk.state, empty, 10);
+                click(&mut desk, 11);
+
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "a click on a non-claiming wallpaper left a window focused"
+                );
+            }
+
             /// **A fullscreen window's menu is drawn over the bar with it,
             /// and takes the press there.** Its popups are drawn in its own
             /// walk, which is the band it was lifted into.
