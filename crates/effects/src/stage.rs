@@ -276,6 +276,37 @@ fn names_in(stages: &[Stage], into: &mut Vec<String>) {
     }
 }
 
+/// Refuse a name in `known` that the prelude cannot declare as
+/// `sol_<name>`: no GLSL name, one of the prelude's own, or another known
+/// name's `_box` or `_sampler`. Checked once for every name an effect saves
+/// or makes a state anywhere, so one no pass reads is caught too, at load
+/// rather than as a compile error in Solium's own source string
+/// (`tests::a_saved_name_is_a_new_glsl_name`).
+fn check_known(effect: &str, known: &[String]) -> Result<(), String> {
+    for name in known {
+        if !spec::is_identifier(name) {
+            return Err(format!(
+                "effect `{effect}` names a result or state \"{name}\": a name is lower-case letters, digits and `_`"
+            ));
+        }
+        if glsl::VOCABULARY.contains(&name.as_str()) {
+            return Err(format!(
+                "effect `{effect}` names a result or state \"{name}\", which is the engine's own `sol_{name}`"
+            ));
+        }
+        if let Some(other) = known.iter().find(|other| {
+            [glsl::sampler(other), glsl::box_of(other)]
+                .iter()
+                .any(|declared| declared.strip_prefix("sol_") == Some(name.as_str()))
+        }) {
+            return Err(format!(
+                "effect `{effect}` names a result or state \"{name}\", which is `{other}`'s own `sol_{name}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// One flatten: the resolver, and what the walk has made so far.
 struct Flattener<'r> {
     #[expect(
@@ -354,6 +385,7 @@ impl Flattener<'_> {
             }
         }
         names_in(&binding.stages, &mut known);
+        check_known(name, &known)?;
         let cx = Context {
             effect: name,
             params: &params,
@@ -1142,6 +1174,90 @@ mod tests {
             ))
         };
         assert!(flatten("x", &[], &mut nested).is_err(), "jump inside jump");
+    }
+
+    /// **A saved name is a new GLSL name**: a `save`'s or a `state`'s name,
+    /// and a `state:<name>` input's, becomes `sol_<name>` in every pass's
+    /// prelude, so one that is no GLSL name, one of the prelude's own, or
+    /// another such name's `_box` or `_sampler` is refused here rather than
+    /// by the driver inside the prelude, even where no pass reads it.
+    #[test]
+    fn a_saved_name_is_a_new_glsl_name() {
+        let state = |name: &str| Stage::State {
+            name: name.to_owned(),
+            format: Format::Rgba8,
+            scale: 1.0,
+            depends: Depends::Shape,
+            body: vec![pass("d.frag", 1.0)],
+        };
+        let save = |name: &str| Stage::Save(name.to_owned());
+        let cases: Vec<(&str, Vec<&str>, Vec<Stage>)> = vec![
+            (
+                "time",
+                vec!["self"],
+                vec![pass("a.frag", 1.0), save("time")],
+            ),
+            ("shape", vec!["self"], vec![state("shape")]),
+            (
+                "effect",
+                vec!["self"],
+                vec![pass("a.frag", 1.0), save("effect")],
+            ),
+            ("tex_box", vec!["self"], vec![state("tex_box")]),
+            (
+                "Sharp",
+                vec!["self"],
+                vec![pass("a.frag", 1.0), save("Sharp")],
+            ),
+            ("2x", vec!["self"], vec![state("2x")]),
+            ("a-b", vec!["self"], vec![pass("a.frag", 1.0), save("a-b")]),
+            ("", vec!["self"], vec![pass("a.frag", 1.0), save("")]),
+            (
+                "sharp_box",
+                vec!["self"],
+                vec![
+                    pass("a.frag", 1.0),
+                    save("sharp"),
+                    save("sharp_box"),
+                    pass_using("b.frag", &["sharp"]),
+                ],
+            ),
+            ("self_sampler", vec!["self"], vec![state("self_sampler")]),
+            (
+                "seed",
+                vec!["self", "state:seed"],
+                vec![pass("a.frag", 1.0)],
+            ),
+            (
+                "noise",
+                vec!["self"],
+                vec![Stage::Repeat {
+                    over: Vec::new(),
+                    as_name: "n".to_owned(),
+                    body: vec![pass("a.frag", 1.0), save("noise")],
+                }],
+            ),
+        ];
+        for (name, inputs, stages) in cases {
+            let mut lib = |_: &str, _: &[(String, Value)]| -> Result<Binding, String> {
+                Ok(binding(&inputs, stages.clone()))
+            };
+            let refused = flatten("x", &[], &mut lib).expect_err(name);
+            assert!(refused.contains(&format!("\"{name}\"")), "{refused}");
+        }
+        let mut fine = |_: &str, _: &[(String, Value)]| -> Result<Binding, String> {
+            Ok(binding(
+                &["self", "backdrop", "state:dist"],
+                vec![
+                    state("dist"),
+                    pass("a.frag", 1.0),
+                    save("sharp_2"),
+                    save("box"),
+                    pass_using("b.frag", &["sharp_2", "box", "dist", "backdrop"]),
+                ],
+            ))
+        };
+        assert!(flatten("x", &[], &mut fine).is_ok());
     }
 
     /// **A plan runs at most 256 passes**, so a `repeat` over a long list,

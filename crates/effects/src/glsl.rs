@@ -166,8 +166,9 @@ float sol_noise(vec2 p) {
 
 /// The names the head declares, without their `sol_` prefix: what [`lint`]
 /// accepts besides the known texture names (`tests::lint_names_an_undeclared_param_at_its_line`
-/// reads `sol_tex` and `sol_effect` with no lint).
-const VOCABULARY: [&str; 22] = [
+/// reads `sol_tex` and `sol_effect` with no lint), and what a saved name may
+/// not be (`stage::tests::a_saved_name_is_a_new_glsl_name`).
+pub(crate) const VOCABULARY: [&str; 22] = [
     "effect",
     "tex",
     "tex_sampler",
