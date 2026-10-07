@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use mlua::{Lua, LuaOptions, StdLib, Table, Value as LuaValue};
 use solium_effects::spec::{self, EffectSpec, Extent, Given, GridSpec, ParamSpec, Rung, Value};
+use solium_effects::stage::{Depends, Format, Stage};
 
 use super::host::Problem;
 
@@ -102,10 +103,7 @@ impl Sandbox {
         })
     }
 
-    #[expect(
-        dead_code,
-        reason = "Task 8's stages and Task 26's mesh call through it"
-    )]
+    #[expect(dead_code, reason = "Task 26's mesh call is its reader")]
     pub(crate) fn lua(&self) -> &Lua {
         &self.lua
     }
@@ -170,6 +168,12 @@ impl Sandbox {
         Problem::error(&self.effect, &self.file, line, message)
     }
 
+    /// A problem at the effect's file, with no line: a table's shape
+    /// (`tests::a_stage_list_is_checked_whole`).
+    fn error(&self, message: &str) -> Problem {
+        Problem::error(&self.effect, &self.file, None, message.to_owned())
+    }
+
     /// Run `effect.lua` and read what it returned.
     pub(crate) fn load_effect(&mut self) -> Result<EffectSpec, Problem> {
         let text = std::fs::read_to_string(&self.file).map_err(|err| {
@@ -195,10 +199,6 @@ impl Sandbox {
     }
 
     /// The table `effect.lua` returned.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 8's stages read the table through it")
-    )]
     pub(crate) fn returned(&self) -> Result<Table, Problem> {
         let key = self.returned.as_ref().ok_or_else(|| {
             Problem::error(
@@ -215,13 +215,6 @@ impl Sandbox {
 
     /// The params as the `p` table every function of them is called with.
     /// `tests::reach_as_a_function_is_called_with_the_params`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Loaded::bind's, which Task 14's rules bind through"
-        )
-    )]
     pub(crate) fn params_table(&self, params: &[(String, Value)]) -> Result<Table, Problem> {
         let build = || -> mlua::Result<Table> {
             let table = self.lua.create_table()?;
@@ -240,6 +233,54 @@ impl Sandbox {
             Ok(table)
         };
         build().map_err(|err| self.problem(&err))
+    }
+
+    /// The effect's stages for these params: its `stages` list, or what its
+    /// `stages(p)` returns (called here, at load and at bind, never per
+    /// frame), or the one
+    /// pass its `frag` stands for. What a call returned is read raw, after
+    /// the call, so reading it runs none of the effect's Lua.
+    /// `tests::stages_are_read_and_a_typo_in_one_is_refused`,
+    /// `tests::reading_stages_runs_none_of_their_metamethods`.
+    pub(crate) fn stages(
+        &self,
+        spec: &EffectSpec,
+        params: &[(String, Value)],
+    ) -> Result<Vec<Stage>, Problem> {
+        if spec.stages == Given::Absent {
+            return Ok(spec
+                .frag
+                .iter()
+                .map(|frag| Stage::Pass {
+                    frag: frag.clone(),
+                    scale: 1.0,
+                    format: Format::Rgba8,
+                    uses: Vec::new(),
+                    input: None,
+                })
+                .collect());
+        }
+        let value: LuaValue = self
+            .returned()?
+            .raw_get("stages")
+            .map_err(|err| self.problem(&err))?;
+        let list = match value {
+            LuaValue::Table(list) => list,
+            LuaValue::Function(function) => {
+                let p = self.params_table(params)?;
+                match self.budgeted(Budget::LOAD.time, |_| function.call::<LuaValue>(p))? {
+                    LuaValue::Table(list) => list,
+                    other => {
+                        return Err(self.error(&format!(
+                            "`stages(p)` returned {}, not a list of stages",
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            _ => return Err(self.error("`stages` is a list or a function of the params")),
+        };
+        read_stages(&list).map_err(|message| self.error(&message))
     }
 
     /// `reach` or `bleed` for these params. `tests::reach_as_a_function_is_called_with_the_params`.
@@ -670,11 +711,291 @@ fn params(value: &LuaValue) -> Result<Vec<(String, ParamSpec)>, String> {
     Ok(read)
 }
 
+/// The kinds of stage: a stage is a table whose `[1]` names its kind
+/// (`tests::a_stage_list_is_checked_whole`).
+const KINDS: [&str; 6] = ["pass", "repeat", "save", "get", "use", "state"];
+/// The keys each kind takes besides its list part; a `use` takes the used
+/// effect's params, and `save` and `get` none.
+const PASS_KEYS: [&str; 4] = ["scale", "format", "uses", "input"];
+const REPEAT_KEYS: [&str; 2] = ["over", "as"];
+const STATE_KEYS: [&str; 4] = ["format", "scale", "depends", "stages"];
+
+/// A stage table's list part and its named keys.
+type Parts = (Vec<LuaValue>, Vec<(String, LuaValue)>);
+
+/// A table's list part and its named keys, sorted, read raw: any other key,
+/// or one past a hole in the list, is refused
+/// (`tests::a_stage_list_is_checked_whole`).
+fn parts(table: &Table) -> Result<Parts, String> {
+    let list: Vec<LuaValue> = table
+        .sequence_values::<LuaValue>()
+        .collect::<mlua::Result<_>>()
+        .map_err(|err| err.to_string())?;
+    let mut named = Vec::new();
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair.map_err(|err| err.to_string())?;
+        match key {
+            LuaValue::Integer(at)
+                if usize::try_from(at).is_ok_and(|at| (1..=list.len()).contains(&at)) => {}
+            LuaValue::String(key) => {
+                named.push((
+                    key.to_str().map_err(|err| err.to_string())?.to_string(),
+                    value,
+                ));
+            }
+            _ => {
+                return Err(
+                    "a stage is a list, its kind first, and named keys: nothing else".to_owned(),
+                );
+            }
+        }
+    }
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((list, named))
+}
+
+/// `stages`: a list of stage tables, each read by its kind.
+/// `tests::stages_are_read_and_a_typo_in_one_is_refused`,
+/// `tests::a_stage_list_is_checked_whole`,
+/// `tests::reading_stages_runs_none_of_their_metamethods`.
+fn read_stages(list: &Table) -> Result<Vec<Stage>, String> {
+    let (items, named) = parts(list)?;
+    if !named.is_empty() {
+        return Err("`stages` is a list of stages, with no other keys".to_owned());
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let at = index + 1;
+            let LuaValue::Table(table) = item else {
+                return Err(format!(
+                    "stage {at}: a stage is a table, such as {{ \"pass\", \"effect.frag\" }}"
+                ));
+            };
+            stage(table).map_err(|message| format!("stage {at}: {message}"))
+        })
+        .collect()
+}
+
+fn stage(table: &Table) -> Result<Stage, String> {
+    let (list, named) = parts(table)?;
+    let Some(LuaValue::String(kind)) = list.first() else {
+        return Err(format!(
+            "a stage begins with its kind: {}",
+            KINDS.join(", ")
+        ));
+    };
+    let kind = kind.to_str().map_err(|err| err.to_string())?.to_string();
+    match kind.as_str() {
+        "pass" => pass(&list, &named),
+        "repeat" => repeat(&list, &named),
+        "save" => {
+            refuse_other_keys("save", &named, &[])?;
+            Ok(Stage::Save(second("save", &list, "name")?))
+        }
+        "get" => {
+            refuse_other_keys("get", &named, &[])?;
+            Ok(Stage::Get(second("get", &list, "name")?))
+        }
+        "use" => use_of(&list, &named),
+        "state" => state(&list, &named),
+        other => {
+            let meant = spec::nearest(other, &KINDS)
+                .map(|meant| format!("; did you mean `{meant}`?"))
+                .unwrap_or_default();
+            Err(format!(
+                "`{other}` is not a kind of stage: {}{meant}",
+                KINDS.join(", ")
+            ))
+        }
+    }
+}
+
+/// A stage's one name or file, `[2]`, and nothing after it
+/// (`tests::a_stage_list_is_checked_whole`).
+fn second(kind: &str, list: &[LuaValue], what: &str) -> Result<String, String> {
+    match list {
+        [_] => Err(format!(
+            "a `{kind}` names its {what}: {{ \"{kind}\", <{what}> }}"
+        )),
+        [_, LuaValue::String(word)] => {
+            Ok(word.to_str().map_err(|err| err.to_string())?.to_string())
+        }
+        [_, _] => Err(format!("a `{kind}`'s {what} is a string")),
+        _ => Err(format!("a `{kind}` takes one {what}")),
+    }
+}
+
+/// Refuse a named key `kind` does not take, with the one probably meant
+/// (`tests::stages_are_read_and_a_typo_in_one_is_refused`).
+fn refuse_other_keys(
+    kind: &str,
+    named: &[(String, LuaValue)],
+    keys: &[&str],
+) -> Result<(), String> {
+    for (key, _) in named {
+        if keys.contains(&key.as_str()) {
+            continue;
+        }
+        if keys.is_empty() {
+            return Err(format!("a `{kind}` takes only its name, not `{key}`"));
+        }
+        let meant = spec::nearest(key, keys)
+            .map(|meant| format!("; did you mean `{meant}`?"))
+            .unwrap_or_default();
+        return Err(format!("`{key}` is not a key of a `{kind}`{meant}"));
+    }
+    Ok(())
+}
+
+fn key<'a>(named: &'a [(String, LuaValue)], key: &str) -> Option<&'a LuaValue> {
+    named
+        .iter()
+        .find(|(each, _)| each == key)
+        .map(|(_, value)| value)
+}
+
+/// `scale`: above 0, 1 when not given
+/// (`tests::reading_stages_runs_none_of_their_metamethods`).
+fn scale_of(named: &[(String, LuaValue)]) -> Result<f64, String> {
+    match key(named, "scale") {
+        None => Ok(1.0),
+        Some(value) => float(value)
+            .filter(|scale| *scale > 0.0)
+            .ok_or_else(|| "`scale` is a number above 0".to_owned()),
+    }
+}
+
+/// `format`: `rgba8` when not given (`tests::a_stage_list_is_checked_whole`).
+fn format_of(named: &[(String, LuaValue)]) -> Result<Format, String> {
+    match key(named, "format") {
+        None => Ok(Format::Rgba8),
+        Some(value) => match word(value, "format")?.as_str() {
+            "rgba8" => Ok(Format::Rgba8),
+            "rgba16f" => Ok(Format::Rgba16f),
+            _ => Err("`format` is \"rgba8\" or \"rgba16f\"".to_owned()),
+        },
+    }
+}
+
+/// `{ "pass", "<file>.frag", scale =, format =, uses =, input = }`
+/// (`tests::stages_are_read_and_a_typo_in_one_is_refused`).
+fn pass(list: &[LuaValue], named: &[(String, LuaValue)]) -> Result<Stage, String> {
+    let frag = second("pass", list, "frag")?;
+    refuse_other_keys("pass", named, &PASS_KEYS)?;
+    Ok(Stage::Pass {
+        frag,
+        scale: scale_of(named)?,
+        format: format_of(named)?,
+        uses: key(named, "uses")
+            .map(|value| words(value, "uses"))
+            .transpose()?
+            .unwrap_or_default(),
+        input: key(named, "input")
+            .map(|value| word(value, "input"))
+            .transpose()?,
+    })
+}
+
+/// `{ "repeat", over = { … }, as = "<name>", <stage>, … }`: the stages after
+/// its kind, once for each number
+/// (`tests::stages_are_read_and_a_typo_in_one_is_refused`).
+fn repeat(list: &[LuaValue], named: &[(String, LuaValue)]) -> Result<Stage, String> {
+    const OVER: &str = "`over` is a list of numbers, one for each run";
+    refuse_other_keys("repeat", named, &REPEAT_KEYS)?;
+    let over = match key(named, "over") {
+        Some(LuaValue::Table(numbers)) => {
+            let (numbers, keys) = parts(numbers).map_err(|_| OVER.to_owned())?;
+            if !keys.is_empty() {
+                return Err(OVER.to_owned());
+            }
+            numbers
+                .iter()
+                .map(|number| float(number).ok_or_else(|| OVER.to_owned()))
+                .collect::<Result<Vec<f64>, String>>()?
+        }
+        Some(_) => return Err(OVER.to_owned()),
+        None => return Err("a `repeat` says what it runs `over`: over = { 64, 32, … }".to_owned()),
+    };
+    let as_name = match key(named, "as") {
+        Some(value) => word(value, "as")?,
+        None => return Err("a `repeat` names its param: as = \"<name>\"".to_owned()),
+    };
+    let Some(stages) = list.get(1..).filter(|stages| !stages.is_empty()) else {
+        return Err(
+            "a `repeat` runs the stages after its kind: { \"repeat\", over = …, as = …, { \"pass\", … } }"
+                .to_owned(),
+        );
+    };
+    let body = stages
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let at = index + 1;
+            let LuaValue::Table(table) = item else {
+                return Err(format!("in the `repeat`, stage {at} is not a table"));
+            };
+            stage(table).map_err(|message| format!("in the `repeat`, stage {at}: {message}"))
+        })
+        .collect::<Result<Vec<Stage>, String>>()?;
+    Ok(Stage::Repeat {
+        over,
+        as_name,
+        body,
+    })
+}
+
+/// `{ "use", "<effect>", <param> = <value>, … }`: the used effect's params,
+/// read as a rung's are; binding checks them against its `params`
+/// (`tests::stages_are_read_and_a_typo_in_one_is_refused`).
+fn use_of(list: &[LuaValue], named: &[(String, LuaValue)]) -> Result<Stage, String> {
+    let effect = second("use", list, "effect")?;
+    let params = named
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), value_of(value, &format!("`use`'s `{name}`"))?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(Stage::Use { effect, params })
+}
+
+/// `{ "state", "<name>", depends =, format =, scale =, stages = { … } }`
+/// (`tests::a_stage_list_is_checked_whole`).
+fn state(list: &[LuaValue], named: &[(String, LuaValue)]) -> Result<Stage, String> {
+    const DEPENDS: &str =
+        "a `state` says what it `depends` on: \"shape\", \"params\", \"self\" or \"region\"";
+    let name = second("state", list, "name")?;
+    refuse_other_keys("state", named, &STATE_KEYS)?;
+    let depends = match key(named, "depends") {
+        Some(value) => match word(value, "depends")?.as_str() {
+            "shape" => Depends::Shape,
+            "params" => Depends::Params,
+            "self" => Depends::SelfCommit,
+            "region" => Depends::Region,
+            _ => return Err(DEPENDS.to_owned()),
+        },
+        None => return Err(DEPENDS.to_owned()),
+    };
+    let body = match key(named, "stages") {
+        Some(LuaValue::Table(stages)) => {
+            read_stages(stages).map_err(|message| format!("in its `stages`, {message}"))?
+        }
+        _ => return Err("a `state` makes its texture with `stages = { … }`".to_owned()),
+    };
+    Ok(Stage::State {
+        name,
+        format: format_of(named)?,
+        scale: scale_of(named)?,
+        depends,
+        body,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use solium_effects::spec::{Given, Value};
+    use solium_effects::stage::Stage;
 
     use super::{Budget, Sandbox, located};
     use crate::effect::host::tests::{folder, scratch};
@@ -933,6 +1254,116 @@ mod tests {
             )
             .expect("called");
         assert!((reach - 48.0).abs() < f64::EPSILON, "{reach}");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **`stages` as a function runs at load with the params**, and a stage
+    /// table is read with its kind, its frag and its keys; an unknown key in
+    /// a stage is refused.
+    #[test]
+    fn stages_are_read_and_a_typo_in_one_is_refused() {
+        let lua = "return { api = 1, inputs = { 'self' }, params = { passes = { 2, int = true } },
+            stages = function(p) local s = {} for i = 1, p.passes do s[#s + 1] = { 'pass', 'down.frag', scale = 0.5 } end
+                s[#s + 1] = { 'repeat', over = { 4, 2 }, as = 'jump', { 'pass', 'jump.frag', format = 'rgba16f' } }
+                s[#s + 1] = { 'use', 'tint', amount = 0.2 } return s end }";
+        let (mut reader, place) = sandbox("stages", lua);
+        let spec = reader.load_effect().expect("loads");
+        let stages = reader
+            .stages(&spec, &[("passes".to_owned(), Value::Int(2))])
+            .expect("read");
+        assert_eq!(stages.len(), 4);
+        assert!(
+            matches!(&stages[2], Stage::Repeat { as_name, body, .. } if as_name == "jump" && body.len() == 1)
+        );
+        assert!(
+            matches!(&stages[3], Stage::Use { effect, params } if effect == "tint" && params == &vec![("amount".to_owned(), Value::Number(0.2))])
+        );
+        let _ = std::fs::remove_dir_all(place);
+        let (mut typo, place) = sandbox(
+            "stage-typo",
+            "return { api = 1, stages = { { 'pass', 'a.frag', scal = 0.5 } } }",
+        );
+        let spec = typo.load_effect().expect("loads: stages are read at bind");
+        assert!(
+            typo.stages(&spec, &[])
+                .expect_err("refused")
+                .message
+                .contains("scal")
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A stage list is checked whole**, as `effect.lua`'s own keys are:
+    /// every stage's kind, its list part and its keys, and the stages a
+    /// `state` or a `stages(p)` gives, each refused saying what it wants.
+    #[test]
+    fn a_stage_list_is_checked_whole() {
+        let cases = [
+            ("{ { 'pass', 'a.frag' }, scale = 1 }", "no other keys"),
+            ("{ 'pass', 'a.frag' }", "stage 1"),
+            ("{ { 'pas', 'a.frag' } }", "`pass`"),
+            ("{ { 'pass', 'a.frag', [4] = 'b.frag' } }", "nothing else"),
+            ("{ { 'save', 3 } }", "is a string"),
+            ("{ { 'pass' } }", "frag"),
+            ("{ { 'pass', 'a.frag', 'b.frag' } }", "one frag"),
+            ("{ { 'pass', 'a.frag', scale = 0 } }", "above 0"),
+            ("{ { 'pass', 'a.frag', format = 'rgba32f' } }", "rgba16f"),
+            ("{ { 'pass', 'a.frag', uses = 'x' } }", "uses"),
+            ("{ { 'save', 'x', scale = 1 } }", "scale"),
+            (
+                "{ { 'repeat', over = { 1 }, { 'pass', 'a.frag' } } }",
+                "as =",
+            ),
+            (
+                "{ { 'repeat', over = { 1, 'x' }, as = 'n', { 'pass', 'a.frag' } } }",
+                "over",
+            ),
+            ("{ { 'repeat', over = { 1 }, as = 'n' } }", "runs"),
+            (
+                "{ { 'state', 's', stages = { { 'pass', 'a.frag' } } } }",
+                "depends",
+            ),
+            (
+                "{ { 'state', 's', depends = 'shape', stages = { { 'pass', 'a.frag', scal = 1 } } } }",
+                "scal",
+            ),
+            ("{ { 'use', 'tint', amount = print } }", "amount"),
+            ("function() return 3 end", "returned"),
+        ];
+        for (index, (stages, says)) in cases.iter().enumerate() {
+            let lua = format!("return {{ api = 1, inputs = {{ 'self' }}, stages = {stages} }}");
+            let (mut reader, place) = sandbox(&format!("whole-{index}"), &lua);
+            let spec = reader
+                .load_effect()
+                .unwrap_or_else(|problem| panic!("{stages}: {problem:?}"));
+            let problem = reader.stages(&spec, &[]).expect_err(stages);
+            assert!(problem.message.contains(says), "{stages}: {problem:?}");
+            let _ = std::fs::remove_dir_all(place);
+        }
+    }
+
+    /// **Reading stages runs none of their metamethods**: what `stages(p)`
+    /// returned is read after the call, outside any budget, as the returned
+    /// table is, so every read of a stage is raw.
+    #[test]
+    fn reading_stages_runs_none_of_their_metamethods() {
+        let lua = "local trap = { __index = function() error('a metamethod ran') end }
+            return { api = 1, inputs = { 'self' }, stages = function(p) return setmetatable({
+                setmetatable({ 'pass', 'a.frag' }, trap),
+                setmetatable({ 'state', 's', depends = 'shape',
+                    stages = setmetatable({ setmetatable({ 'pass', 'b.frag' }, trap) }, trap) }, trap),
+            }, trap) end }";
+        let (mut reader, place) = sandbox("raw-stages", lua);
+        let spec = reader.load_effect().expect("loads");
+        let stages = reader.stages(&spec, &[]).expect("read raw");
+        assert!(
+            matches!(&stages[0], Stage::Pass { scale, input: None, .. } if (*scale - 1.0).abs() < f64::EPSILON),
+            "{stages:?}"
+        );
+        assert!(
+            matches!(&stages[1], Stage::State { body, .. } if body.len() == 1),
+            "{stages:?}"
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 

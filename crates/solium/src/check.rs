@@ -353,8 +353,8 @@ fn knobs(pane: Option<&str>, loading: Option<&str>, report: &mut Report) {
 
 /// One effect folder: the sandbox, the schema, the lints, and the compile
 /// when `gpu` is given (Ruling 9). What it names (`pixels`, a `fallback`
-/// naming an effect) is looked for beside it first and then in `shipped`, as
-/// at run time.
+/// naming an effect, a `use` stage) is looked for beside it first and then in
+/// `shipped`, as at run time.
 /// `tests::a_broken_effect_folder_fails_check`,
 /// `tests::a_frag_reading_an_undeclared_param_fails_check_at_its_line`,
 /// `tests::a_name_missing_from_uses_is_a_warning_not_a_failure`,
@@ -1022,6 +1022,35 @@ mod tests {
         assert!(
             passed,
             "the closure did not resolve through the shipped folders: {out}"
+        );
+    }
+
+    /// **A folder's `use`s are checked with it**: a stage list that cannot be
+    /// read fails at `effect.lua`, and so does an effect it uses that is
+    /// broken or that nobody ships, while one using a shipped effect passes.
+    #[test]
+    fn a_folders_uses_are_checked_with_it() {
+        let place = crate::effect::host::tests::scratch("check-uses");
+        let check = |name: &str, stages: &str| {
+            let dir = crate::effect::host::tests::folder(
+                &place,
+                name,
+                &format!("return {{ api = 1, inputs = {{ 'self' }}, stages = {stages} }}"),
+                &[],
+            );
+            reported(|report| effect_folder::<Counting>(report, &dir, &effect_fixtures(), None))
+        };
+        let (passed, out) = check("fine", "{ { 'use', 'tint' } }");
+        assert!(passed, "{out}");
+        let (passed, out) = check("broken", "{ { 'use', 'api2' } }");
+        assert!(!passed && out.contains("api2/effect.lua"), "{out}");
+        let (passed, out) = check("missing", "{ { 'use', 'nowhere' } }");
+        assert!(!passed && out.contains("`nowhere`"), "{out}");
+        let (passed, out) = check("typo", "{ { 'pass', 'a.frag', scal = 1 } }");
+        let _ = std::fs::remove_dir_all(&place);
+        assert!(
+            !passed && out.contains("typo/effect.lua") && out.contains("`scal`"),
+            "{out}"
         );
     }
 

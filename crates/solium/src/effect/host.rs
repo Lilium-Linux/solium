@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use solium_effects::glsl::{self, Host as Glsl, Signature, Sources};
 use solium_effects::spec::{EffectSpec, Rung, Severity, Value};
+use solium_effects::stage::Stage;
 
 use super::sandbox::Sandbox;
 
@@ -52,7 +53,7 @@ impl Library {
             .find(|folder| folder.join("effect.lua").is_file())
     }
 
-    /// Where a folder's closure (`pixels`, `fallback`) is looked for when the
+    /// Where a folder's closure (`pixels`, `fallback`, `use`) is looked for when the
     /// user's folders lack it: the shipped folders, everywhere but in tests.
     /// `check::tests::a_user_folder_naming_a_shipped_effect_passes`.
     pub(crate) fn shipped(&self) -> &Path {
@@ -140,6 +141,9 @@ pub(crate) struct Loaded<P = super::gl::Program> {
     )]
     sandbox: Sandbox,
     hash: u64,
+    /// The effects its `use` stages name at the defaults, loaded with it
+    /// (`tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`).
+    used: Vec<String>,
     /// The programs this version needs, by content hash: it swaps in only
     /// once every one compiled
     /// (`tests::a_reload_with_a_broken_effect_keeps_the_one_that_ran`).
@@ -161,18 +165,26 @@ pub(crate) struct Bound {
 }
 
 impl<P> Loaded<P> {
-    /// Load the effect in `dir` into a sandbox of its own.
-    /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`.
+    /// Load the effect in `dir` into a sandbox of its own, and read its
+    /// stages at the defaults: a stage that cannot be read refuses the
+    /// version, and the effects its `use`s name are loaded with it.
+    /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`,
+    /// `tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`.
     pub(crate) fn load(name: &str, dir: &Path) -> Result<Self, Problem> {
         let file = dir.join("effect.lua");
         let mut sandbox = Sandbox::new(name, &file)?;
         let spec = sandbox.load_effect()?;
+        let (defaults, _) = solium_effects::spec::bind(&spec.params, &[])
+            .map_err(|message| Problem::error(name, &file, None, message))?;
+        let mut used = Vec::new();
+        named_by_use(&sandbox.stages(&spec, &defaults)?, &mut used);
         Ok(Self {
             name: name.to_owned(),
             dir: dir.to_owned(),
             spec,
             sandbox,
             hash: folder_hash(dir),
+            used,
             needs: Vec::new(),
             _program: std::marker::PhantomData,
         })
@@ -226,6 +238,22 @@ impl<P> Loaded<P> {
             bleed,
             warnings,
         })
+    }
+}
+
+/// The effects `use` stages name, anywhere in `stages`, each once
+/// (`tests::the_fixture_effects_load_and_bind_at_their_defaults`).
+fn named_by_use(stages: &[Stage], into: &mut Vec<String>) {
+    for stage in stages {
+        match stage {
+            Stage::Use { effect, .. } => {
+                if !into.contains(effect) {
+                    into.push(effect.clone());
+                }
+            }
+            Stage::Repeat { body, .. } | Stage::State { body, .. } => named_by_use(body, into),
+            Stage::Pass { .. } | Stage::Save(_) | Stage::Get(_) => {}
+        }
     }
 }
 
@@ -374,8 +402,9 @@ impl<P: Clone> Host<P> {
         &self.library
     }
 
-    /// Every name any origin wants, and their closure (`pixels`, a
-    /// `fallback` naming an effect; Task 8 adds `use`).
+    /// Every name any origin wants, and their closure: `pixels`, a
+    /// `fallback` naming an effect, and a `use` stage at the defaults
+    /// (`tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`).
     fn all_wanted(&self) -> BTreeSet<String> {
         let mut names: BTreeSet<String> = self.wanted.values().flatten().cloned().collect();
         let mut queue: Vec<String> = names.iter().cloned().collect();
@@ -391,7 +420,15 @@ impl<P: Clone> Host<P> {
                 Rung::Effect(name) => Some(name.clone()),
                 Rung::Params(_) => None,
             });
-            for more in loaded.spec().pixels.iter().cloned().chain(named) {
+            let used = loaded.used.iter().cloned();
+            for more in loaded
+                .spec()
+                .pixels
+                .iter()
+                .cloned()
+                .chain(named)
+                .chain(used)
+            {
                 if names.insert(more.clone()) {
                     queue.push(more);
                 }
@@ -1021,15 +1058,23 @@ pub(crate) mod tests {
         );
     }
 
-    /// **The fixture folders load**, each into a sandbox of its own, and
-    /// their defaults bind.
+    /// **The fixture folders load**, each into a sandbox of its own, their
+    /// stages read, and their defaults bind.
     #[test]
     fn the_fixture_effects_load_and_bind_at_their_defaults() {
         let fixtures = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/effects"
         ));
-        for name in ["identity", "kawase", "tint", "frost", "three"] {
+        for name in [
+            "identity",
+            "kawase",
+            "tint",
+            "frost",
+            "three",
+            "jump",
+            "state-count",
+        ] {
             let dir = fixtures.join(name);
             let loaded = super::Loaded::<u32>::load(name, &dir)
                 .unwrap_or_else(|problem| panic!("{name}: {problem:?}"));
@@ -1042,6 +1087,10 @@ pub(crate) mod tests {
             );
             assert_eq!(loaded.spec().api, 1, "{name}");
             assert!(!loaded.sandbox().poisoned() && loaded.needs.is_empty());
+            if name == "frost" {
+                // its stages(p) at the defaults use both.
+                assert_eq!(loaded.used, ["kawase", "tint"]);
+            }
             if matches!(name, "kawase" | "frost") {
                 // kawase's is a function of its defaults, 3 * 2^(3 + 1);
                 // frost's a number.
@@ -1388,6 +1437,61 @@ pub(crate) mod tests {
         host.compile_pending(&mut Counting::default());
         assert!(host.ready());
         assert!(host.effect("a").is_some());
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A used effect is loaded with its user**, as a `pixels` or a
+    /// `fallback` effect is: named by a `use` in a stage list, or in what
+    /// `stages(p)` gives at the defaults. Reading the stages at load refuses
+    /// a stage that cannot be read, as a problem at its file, and the
+    /// version with it.
+    #[test]
+    fn a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused() {
+        let place = scratch("used");
+        folder(
+            &place,
+            "listed",
+            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'plain' } } }",
+            &[],
+        );
+        folder(
+            &place,
+            "called",
+            "return { api = 1, inputs = { 'self' }, params = { n = { 1, int = true } },
+                stages = function(p) return { { 'use', p.n == 1 and 'other' or 'never' } } end }",
+            &[],
+        );
+        folder(&place, "plain", ONE_PASS, &[("effect.frag", FRAG)]);
+        folder(&place, "other", ONE_PASS, &[("effect.frag", FRAG)]);
+        folder(
+            &place,
+            "broken",
+            "return { api = 1, stages = { { 'pass', 'a.frag', scal = 0.5 } } }",
+            &[],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["listed", "called", "broken"].map(str::to_owned));
+        assert!(
+            host.has_pending("plain") && host.has_pending("other"),
+            "a used effect was not loaded: {:?}",
+            host.problems()
+        );
+        assert!(
+            !host
+                .problems()
+                .iter()
+                .any(|problem| problem.effect == "never"),
+            "only the defaults' stages are followed: {:?}",
+            host.problems()
+        );
+        assert!(!host.has_pending("broken"), "a broken stage was loaded");
+        assert!(
+            host.problems()
+                .iter()
+                .any(|problem| problem.effect == "broken" && problem.message.contains("scal")),
+            "{:?}",
+            host.problems()
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 
