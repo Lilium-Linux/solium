@@ -828,6 +828,17 @@ impl Solium {
     /// enough" (`autoreload::tests` and this module's own
     /// `tests::automatic_false_leaves_nothing_watched`).
     ///
+    /// **A deadline already armed is cleared too, whichever way `automatic`
+    /// moves.** `tty.rs` and `winit.rs` each hold a one-shot `calloop` timer
+    /// with no token saved anywhere this could cancel it by, so a change
+    /// noted just before `automatic` turns off would otherwise still reach
+    /// its deadline and fire -- the timer callback checks
+    /// [`Self::autoreload_settings`] itself before reloading (both call
+    /// sites), but resetting the deadline here as well means a `quiet_ms`
+    /// edited mid-burst does not inherit a countdown it never started.
+    /// `tests::automatic_false_leaves_nothing_watched`,
+    /// `tests::turning_automatic_off_clears_a_pending_deadline`.
+    ///
     /// Reached from `Command::AutoReload`, which `self.apply` can run from
     /// anywhere a script runs -- `start_scripts` (cold start and every
     /// reload) and a binding of the user's own alike -- so this recomputes
@@ -839,6 +850,7 @@ impl Solium {
         if self.autoreload_settings != settings {
             tracing::debug!(?settings, "automatic reload settings set");
             self.autoreload_settings = settings;
+            self.autoreload_debounce = crate::autoreload::Debounce::default();
         }
         let roots = if settings.automatic {
             crate::autoreload::watch_roots()

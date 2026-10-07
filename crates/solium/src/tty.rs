@@ -459,22 +459,35 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                                 Timer::from_duration(quiet),
                                 |_, (), state: &mut State| {
                                     let now = state.solium.clock.now();
-                                    if state.solium.autoreload_debounce.due(now) {
-                                        state.solium.autoreload_timer_armed = false;
-                                        // Exactly what `super+shift+r` does,
-                                        // plus the backend half only it can
-                                        // do: see `Request::Reload` below.
-                                        state.solium.reload();
-                                        reapply_input_settings(state);
-                                        return TimeoutAction::Drop;
+                                    // `decide_timer_outcome` re-checks
+                                    // `automatic`, not only the fd callback
+                                    // above that armed this timer: nothing
+                                    // keeps the token to cancel it by, so a
+                                    // change noted just before `automatic`
+                                    // turns off must still be refused here.
+                                    match crate::autoreload::decide_timer_outcome(
+                                        state.solium.autoreload_settings.automatic,
+                                        &mut state.solium.autoreload_debounce,
+                                        now,
+                                    ) {
+                                        crate::autoreload::TimerOutcome::Reload => {
+                                            state.solium.autoreload_timer_armed = false;
+                                            // Exactly what `super+shift+r`
+                                            // does, plus the backend half only
+                                            // it can do: see `Request::Reload`
+                                            // below.
+                                            state.solium.reload();
+                                            reapply_input_settings(state);
+                                            TimeoutAction::Drop
+                                        }
+                                        crate::autoreload::TimerOutcome::Wait(remaining) => {
+                                            TimeoutAction::ToDuration(remaining)
+                                        }
+                                        crate::autoreload::TimerOutcome::Drop => {
+                                            state.solium.autoreload_timer_armed = false;
+                                            TimeoutAction::Drop
+                                        }
                                     }
-                                    // A later note in the same burst moved the
-                                    // deadline out from under this timer;
-                                    // wait exactly the time left rather than
-                                    // inserting a second one.
-                                    TimeoutAction::ToDuration(
-                                        state.solium.autoreload_debounce.remaining(now),
-                                    )
                                 },
                             );
                             // Failing to arm it must not wedge every future

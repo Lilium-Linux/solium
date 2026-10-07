@@ -186,14 +186,30 @@ pub(crate) fn run() -> Result<()> {
                                 Timer::from_duration(quiet),
                                 |_, (), state: &mut Solium| {
                                     let now = state.clock.now();
-                                    if state.autoreload_debounce.due(now) {
-                                        state.autoreload_timer_armed = false;
-                                        state.reload();
-                                        return TimeoutAction::Drop;
+                                    // `decide_timer_outcome` re-checks
+                                    // `automatic`, not only the fd callback
+                                    // above that armed this timer: nothing
+                                    // keeps the token to cancel it by, so a
+                                    // change noted just before `automatic`
+                                    // turns off must still be refused here.
+                                    match crate::autoreload::decide_timer_outcome(
+                                        state.autoreload_settings.automatic,
+                                        &mut state.autoreload_debounce,
+                                        now,
+                                    ) {
+                                        crate::autoreload::TimerOutcome::Reload => {
+                                            state.autoreload_timer_armed = false;
+                                            state.reload();
+                                            TimeoutAction::Drop
+                                        }
+                                        crate::autoreload::TimerOutcome::Wait(remaining) => {
+                                            TimeoutAction::ToDuration(remaining)
+                                        }
+                                        crate::autoreload::TimerOutcome::Drop => {
+                                            state.autoreload_timer_armed = false;
+                                            TimeoutAction::Drop
+                                        }
                                     }
-                                    TimeoutAction::ToDuration(
-                                        state.autoreload_debounce.remaining(now),
-                                    )
                                 },
                             );
                             if armed.is_err() {

@@ -128,6 +128,43 @@ fn automatic_false_leaves_nothing_watched() {
     );
 }
 
+/// **Turning `automatic` off clears a deadline already pending** (#223
+/// review): the gap between a change being noted and the timer that would
+/// fire for it actually running is real -- nothing in `tty.rs`/`winit.rs`
+/// can cancel a `calloop` timer once armed -- so `configure_autoreload`
+/// resetting the debounce the moment settings change is what keeps a stale
+/// deadline from answering `due` later, after `automatic` is back on with no
+/// new change behind it. The timer callback's own re-check of `automatic`
+/// (`crate::autoreload::decide_timer_outcome`) is the other half, covered by
+/// `autoreload::tests::off_drops_the_timer_without_reloading_even_when_due`.
+#[test]
+fn turning_automatic_off_clears_a_pending_deadline() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+
+    state.configure_autoreload(crate::autoreload::Settings {
+        automatic: true,
+        quiet_ms: 300,
+    });
+    let now = state.clock.now();
+    state
+        .autoreload_debounce
+        .note(now, std::time::Duration::from_millis(300));
+
+    state.configure_autoreload(crate::autoreload::Settings {
+        automatic: false,
+        quiet_ms: 300,
+    });
+
+    assert!(
+        !state
+            .autoreload_debounce
+            .due(now + std::time::Duration::from_millis(300)),
+        "a deadline noted before automatic turned off must not still be pending after"
+    );
+}
+
 /// **A loading scene set outside every watched root is warned about, once**
 /// (#223 review): the gap `autoreload`'s module doc names -- a plain
 /// absolute path, with no `SOLIUM_LOADING` naming it instead to fold its

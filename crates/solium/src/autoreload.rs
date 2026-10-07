@@ -132,6 +132,52 @@ impl Debounce {
     }
 }
 
+/// What the one-shot timer in `tty.rs`/`winit.rs` does when it wakes, decided
+/// by [`decide_timer_outcome`] rather than inline in either backend so the
+/// decision is one piece of logic instead of two copies that could drift.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TimerOutcome {
+    /// The quiet period really has elapsed with automatic reload still on:
+    /// reload, and the timer is spent.
+    Reload,
+    /// Not due yet; sleep for exactly what is left rather than arming a
+    /// second timer on top of this one.
+    Wait(Duration),
+    /// Nothing to do and the timer is spent -- either the debounce was not
+    /// due, with nothing having armed it, or `automatic` is now off.
+    Drop,
+}
+
+/// Whether the automatic-reload timer should reload, wait longer, or drop
+/// itself, each time it wakes.
+///
+/// **`automatic` is read here, not only at the `calloop` fd callback that
+/// arms the timer.** Nothing in `tty.rs` or `winit.rs` keeps the
+/// `RegistrationToken` an armed `Timer::from_duration` hands back, so
+/// `configure_autoreload` turning `automatic` off cannot cancel a timer
+/// already counting down -- it still wakes at its deadline. Checking
+/// `automatic` again right here, rather than trusting that arming it implied
+/// it was still wanted, is what keeps a change noted a moment before the
+/// toggle from reloading anyway: `configure_autoreload` also resets the
+/// debounce when settings change, but that alone leaves `due` answering
+/// `false` forever rather than answering "off", which would reschedule the
+/// timer at `Duration::ZERO` forever instead of retiring it.
+/// `tests::off_drops_the_timer_without_reloading_even_when_due`,
+/// `tests::on_and_due_reloads`, `tests::on_and_not_due_waits_the_remainder`.
+pub(crate) fn decide_timer_outcome(
+    automatic: bool,
+    debounce: &mut Debounce,
+    now: Duration,
+) -> TimerOutcome {
+    if !automatic {
+        return TimerOutcome::Drop;
+    }
+    if debounce.due(now) {
+        return TimerOutcome::Reload;
+    }
+    TimerOutcome::Wait(debounce.remaining(now))
+}
+
 /// The pure core of [`watch_roots`]: which directories to watch, given the
 /// user's own configuration directory (`None`, or `Some` only when it is
 /// really a directory on this machine) and where the configuration actually
@@ -792,6 +838,46 @@ mod tests {
         assert_eq!(
             debounce.remaining(Duration::from_millis(100)),
             Duration::ZERO
+        );
+    }
+
+    /// The review's own failure scenario: `automatic` turned off between the
+    /// timer being armed and it firing must not reload, whatever the
+    /// debounce says -- and it must not be asked to wait either, since
+    /// nothing will turn `automatic` back on by itself.
+    #[test]
+    fn off_drops_the_timer_without_reloading_even_when_due() {
+        let quiet = Duration::from_millis(50);
+        let mut debounce = Debounce::default();
+        debounce.note(Duration::ZERO, quiet);
+        assert_eq!(
+            decide_timer_outcome(false, &mut debounce, quiet),
+            TimerOutcome::Drop,
+            "automatic off must win over a debounce that has come due"
+        );
+    }
+
+    #[test]
+    fn on_and_due_reloads() {
+        let quiet = Duration::from_millis(50);
+        let mut debounce = Debounce::default();
+        debounce.note(Duration::ZERO, quiet);
+        assert_eq!(
+            decide_timer_outcome(true, &mut debounce, quiet),
+            TimerOutcome::Reload
+        );
+    }
+
+    #[test]
+    fn on_and_not_due_waits_the_remainder() {
+        let quiet = Duration::from_millis(50);
+        let mut debounce = Debounce::default();
+        // A later note than the timer itself was armed for -- the same
+        // "another write arrived" case `remaining` already handles.
+        debounce.note(Duration::from_millis(20), quiet);
+        assert_eq!(
+            decide_timer_outcome(true, &mut debounce, Duration::from_millis(30)),
+            TimerOutcome::Wait(Duration::from_millis(40))
         );
     }
 }
