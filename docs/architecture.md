@@ -301,6 +301,18 @@ is applied (each `sol.pane`, a reload, the probe's rebind), never in
 leaving its slot empty, and a file that does not run keeps the rules that
 ran, its problems under `style:<folder>`.
 
+Once a pass, `render::prepare` resolves every rule, after the effects compile
+and before any capture is built (`render::build_slots`): for every part of
+each pane a monitor shows (the cull its captures make), each scripted
+surface's instance on each output and each client layer surface, the last
+matching rule per slot, kept in `Prepared.slots` (`effect::plan::Slots`) so
+every output and every screencopy places from one answer. A window's facts
+(`Solium::window_facts`) are gathered only for the keys some rule reads, and a
+slot is wanted only when its rule's chain is bound, since binding is the
+config load's and never a frame's. With no rules, neither the user's nor any
+pane style's, nothing is resolved and no fact is gathered. Nothing is drawn
+in a slot yet.
+
 A plan is run by `effect/run.rs`, in raw GL like the programs: each step is
 drawn into a pooled target in a frame opened on the carrier, reading
 `sol_tex` on texture unit 0 and the textures it `uses` on the next, at most

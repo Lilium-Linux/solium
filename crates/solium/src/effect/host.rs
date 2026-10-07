@@ -331,7 +331,7 @@ pub(crate) trait Compiler {
 /// `tests::a_new_version_is_a_new_generation`.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "Task 18's slot plan names effects by id")
+    expect(dead_code, reason = "Task 28's geometry names its effect by id")
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct EffectId {
@@ -1046,7 +1046,7 @@ impl<P: Clone> Host<P> {
     /// `tests::a_broken_effect_on_a_cold_start_is_absent_not_fatal`.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Task 18's slot plan looks effects up")
+        expect(dead_code, reason = "Task 26's geometry calls look an effect up")
     )]
     pub(crate) fn effect(&self, name: &str) -> Option<Rc<Loaded<P>>> {
         self.slots.get(name).and_then(|slot| slot.current.clone())
@@ -1094,7 +1094,7 @@ impl<P: Clone> Host<P> {
     /// The running version's id. `tests::a_new_version_is_a_new_generation`.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Task 18's slot plan names effects by id")
+        expect(dead_code, reason = "Task 28's geometry names its effect by id")
     )]
     pub(crate) fn id(&self, name: &str) -> Option<EffectId> {
         self.slots
@@ -1110,7 +1110,7 @@ impl<P: Clone> Host<P> {
     /// `tests::a_new_version_is_a_new_generation`.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Task 18's slot plan names effects by id")
+        expect(dead_code, reason = "Task 28's geometry names its effect by id")
     )]
     pub(crate) fn by_id(&self, id: EffectId) -> Option<Rc<Loaded<P>>> {
         self.slots

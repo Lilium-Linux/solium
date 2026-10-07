@@ -63,6 +63,14 @@ impl PaneId {
     pub(crate) const fn get(self) -> u64 {
         self.0
     }
+
+    /// For tests in other modules that need an id with no pane behind it, as
+    /// `SurfaceId::from_raw` is; nothing else invents one.
+    /// `effect::plan::tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    #[cfg(test)]
+    pub(crate) const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 /// What is inside a pane.

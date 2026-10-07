@@ -64,8 +64,10 @@ pub(crate) const TITLEBAR_HEIGHT: i32 = 32;
 /// path: every style this build ships is a folder under `panes/`, so the
 /// default has to be looked up where folders are. It is reached when no script
 /// has run or one set the style back to nothing — a session whose scripts
-/// failed to load still gets titlebars.
-const DEFAULT_STYLE: &str = "top";
+/// failed to load still gets titlebars. And so it is the style a framed pane
+/// is in when nothing has named one, as a rule's `style` match reads it
+/// (`state::tests::a_framed_panes_style_is_the_configured_one_or_the_default_and_a_bare_ones_is_none`).
+pub(crate) const DEFAULT_STYLE: &str = "top";
 
 /// What a frame button asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -838,6 +840,18 @@ impl Decoration {
     /// given frame draws is [`awake_at`]'s.
     pub(crate) fn layers_at(&self, depth: Depth) -> impl Iterator<Item = &str> {
         at(self.layers.iter(), depth).map(|layer| layer.name.as_str())
+    }
+
+    /// Every layer's name with its place among the style's layers
+    /// (`LayerSpec.index`: the scenes are built in declaration order, every
+    /// one or none), in declaration order and whatever its depth: what a
+    /// `layer:<name>` rule is resolved against, once a pass.
+    /// `tests::every_layer_is_named_with_its_place_among_the_styles_layers`.
+    pub(crate) fn layer_names(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| (index, layer.name.as_str()))
     }
 
     /// Hand every layer everything it is told about its window.
@@ -3874,6 +3888,29 @@ mod tests {
                 (1, style.rules_generation),
                 "the rules did not reach the renderer"
             );
+        });
+    }
+
+    /// **Every layer is named with its place among the style's layers**
+    /// (`LayerSpec.index`), whatever its depth: what a `layer:<name>` rule is
+    /// resolved against, and how a frame tells two layers of one name apart.
+    #[test]
+    fn every_layer_is_named_with_its_place_among_the_styles_layers() {
+        on_the_qt_thread(|| {
+            let dir = Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/panes/example"
+            ));
+            let style = crate::style::load(dir).expect("the fixture loads");
+            let decoration = Decoration::from_style(&style, 60, 88).expect("three scenes");
+            let named: Vec<(usize, &str)> = decoration.layer_names().collect();
+            let declared: Vec<(usize, &str)> = style
+                .layers
+                .iter()
+                .map(|spec| (spec.index, spec.name.as_str()))
+                .collect();
+            assert_eq!(named, [(0, "glow"), (1, "bar"), (2, "spikes")]);
+            assert_eq!(named, declared);
         });
     }
 

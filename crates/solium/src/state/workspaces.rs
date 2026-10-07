@@ -116,8 +116,10 @@ pub(super) fn put_away(bound: crate::group::Shift) -> bool {
 /// Whether a window is fullscreen, as the compositor last told it: the
 /// state its next configure carries, which is set and unset in
 /// `fullscreen_request` and `unfullscreen_request`.
-/// `leaving_fullscreen_puts_the_bar_back_on_top`.
-fn fullscreen(window: &Window) -> bool {
+/// `leaving_fullscreen_puts_the_bar_back_on_top`, and what a rule's
+/// `fullscreen` match reads
+/// (`real_client::a_rule_on_fullscreen_applies_from_the_configure_that_sets_it`).
+pub(crate) fn fullscreen(window: &Window) -> bool {
     window.toplevel().is_some_and(|toplevel| {
         toplevel.with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))
     })

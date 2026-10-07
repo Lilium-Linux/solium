@@ -262,6 +262,10 @@ pub(crate) struct Prepared {
         CommitCounter,
         crate::warp::UnitRect,
     )>,
+    /// Every rule resolved once this pass ([`build_slots`]), so every output
+    /// and every screencopy places from the same answer.
+    #[expect(dead_code, reason = "Task 19's slot walk places from it")]
+    pub(crate) slots: crate::effect::plan::Slots,
 }
 
 /// What a warp's mesh is a function of, in global space, so one comparison
@@ -461,6 +465,11 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         .unwrap_or(0);
     state.pool.set_budget(2 * largest);
 
+    // Every rule resolved once, after the effects compiled and before any
+    // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
+    // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
+    let slots = build_slots(state);
+
     let mut warps = Vec::new();
     let mut overs = Vec::new();
     let mut jobs = Vec::new();
@@ -529,10 +538,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // About three hundred comparisons at twelve panes -- nothing beside an
         // offscreen render, and the reason the cheap case stays cheap is that
         // `on_screen` is short, not that this line is.
-        if !state
-            .pane_outer_of(pane)
-            .is_some_and(|slot| state.on_any_output(slot))
-        {
+        if !shown(state, pane) {
             release(state);
             continue;
         }
@@ -637,7 +643,21 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             }
         }
     }
-    Prepared { warps, overs }
+    Prepared {
+        warps,
+        overs,
+        slots,
+    }
+}
+
+/// Whether any monitor shows a pane, asked of the rectangle `elements` asks
+/// it of: `prepare`'s cull, which [`build_slots`] makes too. `prepare`'s walk
+/// says at length why the slot and not the client's rectangle.
+/// `state::tests::real_client::a_pane_no_monitor_shows_gathers_no_fact_and_wants_no_slot`.
+fn shown(state: &Solium, pane: crate::pane::PaneId) -> bool {
+    state
+        .pane_outer_of(pane)
+        .is_some_and(|slot| state.on_any_output(slot))
 }
 
 /// What a capture becomes once drawn: `dev/fence-check.sh` has two warps,
@@ -697,16 +717,151 @@ fn declared_effects(
 /// (Ruling 15). The one place `prepare` reads them from.
 /// `tests::a_bare_pane_gets_no_style_rules`,
 /// `decoration::tests::a_decoration_carries_the_styles_rules`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 18's slot plan reads a pane's style rules")
-)]
 pub(crate) fn style_rules(frame: &crate::pane::Frame) -> (&[crate::effect::rules::Rule], u32) {
     match frame {
         crate::pane::Frame::Styled(decoration) => {
             (decoration.rules(), decoration.rules_generation())
         }
         crate::pane::Frame::Pending | crate::pane::Frame::None => (&[], 0),
+    }
+}
+
+/// Resolve every rule once this pass: for every part of every pane a monitor
+/// shows (the cull `prepare` makes), every scripted surface's instance on
+/// each output, and every client layer surface, what each slot wants. A
+/// resolved key wants a slot only when its chain is bound: every chain was
+/// bound at config load or when its style was applied (Ruling 15), so this
+/// binds nothing, and a style's rule that could not bind, already on the
+/// overlay, wants none. With no rules, the user's or any pane's style's,
+/// nothing is resolved and no fact gathered (spec §8.4).
+/// `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`,
+/// `state::tests::real_client::a_rule_on_focused_follows_the_keyboard`,
+/// `state::tests::real_client::a_surface_has_a_slot_per_monitor_and_a_layer_surface_one_of_its_own`.
+pub(crate) fn build_slots(state: &mut Solium) -> crate::effect::plan::Slots {
+    use crate::effect::plan::{self, PaneSlot, Slots};
+    use crate::effect::rules::{Facts, PartRef};
+    use smithay::reexports::wayland_server::Resource as _;
+    let state: &Solium = state;
+    let mut slots = Slots::default();
+    if state.rules.is_empty()
+        && state
+            .panes
+            .iter()
+            .all(|pane| style_rules(pane.frame()).0.is_empty())
+    {
+        return slots;
+    }
+    for held in state.panes.iter() {
+        let pane = held.id();
+        if !shown(state, pane) {
+            continue;
+        }
+        let (style, generation) = style_rules(held.frame());
+        let facts = state.window_facts(pane, state.rules.uses(style));
+        slots.gathered();
+        let view = Facts {
+            app_id: &facts.app_id,
+            title: &facts.title,
+            focused: facts.focused,
+            fullscreen: facts.fullscreen,
+            monitor: &facts.monitor,
+            style: &facts.style,
+            ..Facts::default()
+        };
+        let mut want = |slot_of: PaneSlot, part: PartRef<'_>| {
+            want_resolved(
+                &mut slots,
+                state,
+                &plan::Owner::Pane(pane, slot_of),
+                state.rules.resolve(style, generation, part, &view),
+            );
+        };
+        want(PaneSlot::Pane, PartRef::Pane);
+        want(PaneSlot::Client, PartRef::Client);
+        want(PaneSlot::Popups, PartRef::Popup);
+        want(PaneSlot::Titlebar, PartRef::Region("titlebar"));
+        for (index, name) in held
+            .decoration()
+            .into_iter()
+            .flat_map(|decoration| decoration.layer_names())
+        {
+            want(PaneSlot::Layer(index), PartRef::Layer(name));
+        }
+    }
+    // A style's rules are for its panes only (Ruling 15): surfaces and layer
+    // surfaces resolve the user's, so with none there is nothing to resolve.
+    if state.rules.is_empty() {
+        return slots;
+    }
+    let primary = state.primary_output();
+    for output in state.space.outputs() {
+        // One owner per scripted surface's instance on each output it is on,
+        // where `elements` puts it (`wanted`), matched by its name.
+        if let Some(geometry) = state.space.output_geometry(output) {
+            for surface in state.surfaces.iter() {
+                if surface
+                    .area_on(output, geometry, primary.as_ref())
+                    .is_none()
+                {
+                    continue;
+                }
+                slots.gathered();
+                let name = surface.name();
+                let facts = Facts {
+                    surface: name,
+                    ..Facts::default()
+                };
+                let resolved = state.rules.resolve(&[], 0, PartRef::Surface(name), &facts);
+                if !resolved.is_empty() {
+                    want_resolved(
+                        &mut slots,
+                        state,
+                        &plan::Owner::Surface(surface.id(), output.name()),
+                        resolved,
+                    );
+                }
+            }
+        }
+        // And one per client layer surface, matched by its namespace.
+        let map = layer_map_for_output(output);
+        for layer in map.layers() {
+            slots.gathered();
+            let namespace = layer.namespace();
+            let facts = Facts {
+                layer_shell: namespace,
+                ..Facts::default()
+            };
+            let resolved = state
+                .rules
+                .resolve(&[], 0, PartRef::LayerShell(namespace), &facts);
+            if !resolved.is_empty() {
+                want_resolved(
+                    &mut slots,
+                    state,
+                    &plan::Owner::LayerShell(layer.wl_surface().id()),
+                    resolved,
+                );
+            }
+        }
+    }
+    slots
+}
+
+/// Want each slot a part resolved to whose chain is bound.
+/// `state::tests::real_client::a_rule_whose_chain_is_not_bound_wants_no_slot`.
+fn want_resolved(
+    slots: &mut crate::effect::plan::Slots,
+    state: &Solium,
+    owner: &crate::effect::plan::Owner,
+    resolved: crate::effect::rules::Resolved,
+) {
+    use crate::effect::rules::Slot;
+    for slot in [Slot::Behind, Slot::Front, Slot::Replace] {
+        if let Some(key) = resolved.get(slot)
+            && state.chains.get(key).is_some()
+        {
+            slots.want(owner.clone(), slot, key);
+        }
     }
 }
 

@@ -292,7 +292,8 @@ at its rule number or at the effect's own file and line. `solium --check`
 fails on it too. With no rules nothing changes, and nothing costs anything.
 
 `blur` is not shipped yet, and an effect is not drawn in its slot yet: this
-build reads, checks and binds rules and names a broken one, and that is all.
+build reads, checks and binds rules, works out every frame which slots they
+fill, and names a broken one, and that is all.
 [The effects reference](../crates/solium/effects/README.md#rules) has every
 key a rule takes, and how to write an effect of your own.
 

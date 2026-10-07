@@ -15,17 +15,13 @@ pub(crate) mod gl;
 pub(crate) mod host;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "Task 18's slot plan gives each part its mask")
+    expect(
+        dead_code,
+        reason = "Task 19's walk cuts each slot's result by its mask"
+    )
 )]
 pub(crate) mod mask;
 pub(crate) mod plan;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Task 18's slot plan resolves the rules once a pass"
-    )
-)]
 pub(crate) mod rules;
 pub(crate) mod run;
 pub(crate) mod sandbox;

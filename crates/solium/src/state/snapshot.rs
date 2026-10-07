@@ -317,6 +317,10 @@ impl Solium {
                     return None;
                 }
                 let outer = self.pane_outer(pane);
+                // The two match keys a rule reads that nothing else here
+                // says, from where the rules read them, so a rule can be
+                // tried in Lua first: `real_client::sol_windows_carries_every_window_match_key`.
+                let facts = self.window_facts(pane.id(), crate::effect::rules::Keys::default());
                 Some(WindowInfo {
                     id: pane.id().get(),
                     rect: to_rect(outer),
@@ -370,6 +374,8 @@ impl Solium {
                     }),
                     cramped: pane.cramped(),
                     shown: crate::present::was_shown(pane),
+                    fullscreen: facts.fullscreen,
+                    style: facts.style,
                 })
             })
             .collect();

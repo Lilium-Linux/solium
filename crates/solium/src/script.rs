@@ -175,6 +175,15 @@ pub(crate) struct WindowInfo {
     /// already on screen whose limits changed (#115). See
     /// `real_client::client_sizes::a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`.
     pub(crate) shown: bool,
+    /// Whether the compositor last told it to be fullscreen: the state its
+    /// configures carry, which a rule's `fullscreen` match reads.
+    /// `real_client::sol_windows_carries_every_window_match_key`.
+    pub(crate) fullscreen: bool,
+    /// The pane style it is framed in, or `"none"` when it is drawn bare:
+    /// fullscreen, drawing its own decorations, or under `pane = "none"`.
+    /// What a rule's `style` match reads (`state::style_fact`).
+    /// `real_client::sol_windows_carries_every_window_match_key`.
+    pub(crate) style: String,
 }
 
 /// How a window is drawn this instant, as `Solium::window_under` reads it:
@@ -1946,7 +1955,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // limited neither side. `cramped` is the layout's own word coming back,
     // from `sol.place`. `app_id` is what `tiling.client_size_ignore` matches.
     // `shown` is whether the window's client has been shown yet; see
-    // `WindowInfo::shown`.
+    // `WindowInfo::shown`. `fullscreen` and `style` are the two match keys of
+    // an effect rule (`effects.rules`) nothing else here says, so every key a
+    // rule matches a window by can be read from Lua.
     sol.set(
         "windows",
         lua.create_function(|lua, ()| {
@@ -1970,6 +1981,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("max", size_table(lua, window.max)?)?;
                 entry.set("cramped", window.cramped)?;
                 entry.set("shown", window.shown)?;
+                entry.set("fullscreen", window.fullscreen)?;
+                entry.set("style", window.style.clone())?;
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
@@ -4532,6 +4545,8 @@ mod tests {
                 max: None,
                 cramped: false,
                 shown: true,
+                fullscreen: false,
+                style: String::new(),
             }],
             monitors: vec![MonitorInfo {
                 name: "test-1".to_owned(),
@@ -6180,6 +6195,8 @@ mod tests {
             max: None,
             cramped: false,
             shown: true,
+            fullscreen: false,
+            style: String::new(),
         };
         snapshot.windows = vec![
             window(1, false, Parentage::None),
@@ -6826,6 +6843,8 @@ mod tests {
                     max: None,
                     cramped: false,
                     shown: true,
+                    fullscreen: false,
+                    style: String::new(),
                 })
                 .collect(),
             monitors: vec![MonitorInfo {
@@ -8366,6 +8385,8 @@ mod dialogs {
             max: None,
             cramped: false,
             shown: true,
+            fullscreen: false,
+            style: String::new(),
         }
     }
 
@@ -11920,6 +11941,8 @@ mod directions {
             max: None,
             cramped: false,
             shown: true,
+            fullscreen: false,
+            style: String::new(),
         }
     }
 

@@ -1102,6 +1102,8 @@ mod desk {
             max: None,
             cramped: false,
             shown: true,
+            fullscreen: false,
+            style: String::new(),
         }
     }
 

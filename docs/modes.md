@@ -449,7 +449,7 @@ issue #116, and both halves above are what it cost.
 ```lua
 sol.windows()          -- every window: id, x, y, w, h, title, focused, monitor,
                        --                modal, parent, leaving, app_id, min, max,
-                       --                cramped, shown
+                       --                cramped, shown, fullscreen, style
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
                        --                 transform, focused, primary, power
                        --   (x, y, w, h: the work area, less layer-shell

@@ -963,6 +963,34 @@ fn size_window(window: &Window, client: Rectangle<i32, Logical>) {
     }
 }
 
+/// What rules match a window against, gathered only for the keys some rule
+/// reads (`effect::rules::Rules::uses`): the costly ones are empty
+/// otherwise. `sol.windows()` carries every one of them.
+/// `tests::real_client::sol_windows_carries_every_window_match_key`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct WindowFacts {
+    pub(crate) app_id: String,
+    pub(crate) title: String,
+    pub(crate) focused: bool,
+    pub(crate) fullscreen: bool,
+    pub(crate) monitor: String,
+    pub(crate) style: String,
+}
+
+/// A pane's `style` as a rule's match reads it: the configured style's name
+/// for a framed pane, the default's when nothing has named one (the style it
+/// is then framed in), and `"none"` for a bare one (fullscreen, drawing its
+/// own decorations, or under `pane = "none"`), so a style's own rules never
+/// reach a fullscreen window and yours can (Ruling 15).
+/// `tests::a_framed_panes_style_is_the_configured_one_or_the_default_and_a_bare_ones_is_none`.
+pub(crate) fn style_fact(framed: bool, configured: Option<&str>) -> &str {
+    if framed {
+        configured.unwrap_or(crate::decoration::DEFAULT_STYLE)
+    } else {
+        "none"
+    }
+}
+
 impl Solium {
     pub(crate) fn new(display_handle: DisplayHandle) -> Self {
         let mut seat_state = SeatState::new();
@@ -1545,6 +1573,52 @@ impl Solium {
                 |window| self.window_title(window),
             )
         })
+    }
+
+    /// A pane's facts, which rules match a window against: the costly ones
+    /// (`app_id`, `title`, `monitor`) only when some rule reads them
+    /// (`effect::rules::Rules::uses`), left empty otherwise. `focused` is what
+    /// the frame shows ([`Self::looks_focused`]), `fullscreen` the state the
+    /// compositor last told the client, and `style` [`style_fact`]'s, with the
+    /// monitor judged as `sol.windows()` judges it.
+    /// `tests::real_client::a_rule_on_focused_follows_the_keyboard`,
+    /// `tests::real_client::a_rule_on_fullscreen_applies_from_the_configure_that_sets_it`,
+    /// `tests::real_client::a_rule_for_another_app_leaves_a_window_with_an_empty_plan`.
+    pub(crate) fn window_facts(
+        &self,
+        pane: crate::pane::PaneId,
+        keys: crate::effect::rules::Keys,
+    ) -> WindowFacts {
+        let held = self.panes.get(pane);
+        let window = held.and_then(Pane::client);
+        WindowFacts {
+            app_id: if keys.app_id {
+                window
+                    .map(|window| self.script_app_id(window))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
+            title: if keys.title {
+                self.pane_title(pane)
+            } else {
+                String::new()
+            },
+            focused: self.looks_focused(pane),
+            fullscreen: window.is_some_and(workspaces::fullscreen),
+            monitor: if keys.monitor {
+                held.and_then(|held| self.output_of(self.pane_outer(held)))
+                    .map(|output| output.name())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
+            style: style_fact(
+                held.is_some_and(|held| matches!(held.frame(), crate::pane::Frame::Styled(_))),
+                self.decorations.style(),
+            )
+            .to_owned(),
+        }
     }
 
     /// Whether the compositor draws this window's frame.

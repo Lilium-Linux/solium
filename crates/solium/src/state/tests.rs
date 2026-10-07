@@ -191,6 +191,18 @@ fn settle_tells_the_scripts_once_per_change_of_the_problems() {
     assert_eq!(told, ["", "1", "1", "2"]);
 }
 
+/// **A framed pane's `style` is the configured style's name, the default's
+/// when none is named, and a bare pane's is `"none"`** (Ruling 15): a rule on
+/// `style = "top"` reaches a window framed by the default style as it does
+/// one framed by `pane = "top"`, and never a fullscreen one.
+#[test]
+fn a_framed_panes_style_is_the_configured_one_or_the_default_and_a_bare_ones_is_none() {
+    assert_eq!(style_fact(true, Some("frosted")), "frosted");
+    assert_eq!(style_fact(true, None), "top");
+    assert_eq!(style_fact(false, Some("top")), "none");
+    assert_eq!(style_fact(false, None), "none");
+}
+
 /// Rules from Lua source, read the way `sol.effects` reads them (as
 /// `effect::rules::tests::rules` does).
 fn tree(lua: &str) -> crate::effect::tree::Tree {
@@ -8583,6 +8595,424 @@ end)"#,
         assert!(
             capture.stale(&key(&mut renderer)),
             "the menu committed and its capture did not notice"
+        );
+    }
+
+    /// FX2's real-client fixture: [`tiled_fixture!`]'s parts in one place,
+    /// one monitor for them to be on, and every window opened through it with
+    /// its client's objects, so a test can commit to it or ask for fullscreen
+    /// as the client. The style is `none`, for `tiled_fixture!`'s reason (the
+    /// #99 rule). Its scratch folder, named by `label`, goes with it.
+    struct Fixture {
+        display: Display<Solium>,
+        state: Solium,
+        conn: Connection,
+        queue: wayland_client::EventQueue<Client>,
+        client: Client,
+        qh: QueueHandle<Client>,
+        label: &'static str,
+        opened: Vec<(Window, xdg_toplevel::XdgToplevel, wl_surface::WlSurface)>,
+        scratch: Option<std::path::PathBuf>,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Some(scratch) = self.scratch.take() {
+                let _ = std::fs::remove_dir_all(scratch);
+            }
+        }
+    }
+
+    /// `let mut fixture = Fixture { .. }`, made the way [`tiled_fixture!`]
+    /// makes its parts, with one 1920×1080 monitor at the origin named
+    /// `fx2-<label>` and one round trip, so the client starts having heard
+    /// everything.
+    macro_rules! fx2_fixture {
+        ($fixture:ident, $label:literal) => {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let _ = a_screen(&mut state, concat!("fx2-", $label), (0, 0));
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            let mut $fixture = Fixture {
+                display,
+                state,
+                conn,
+                queue,
+                client,
+                qh,
+                label: $label,
+                opened: Vec::new(),
+                scratch: None,
+            };
+        };
+    }
+
+    /// [`pump`], with the fixture's parts.
+    fn pump_all(fixture: &mut Fixture) {
+        pump(
+            &mut fixture.display,
+            &mut fixture.state,
+            &fixture.conn,
+            &fixture.qh,
+            &mut fixture.queue,
+            &mut fixture.client,
+        );
+    }
+
+    /// A window opened through the real protocol, kept with its client's
+    /// objects.
+    fn open_kept(fixture: &mut Fixture) -> Window {
+        let (window, toplevel, surface, _xdg) = open_xdg(
+            &mut fixture.display,
+            &mut fixture.state,
+            &fixture.conn,
+            &fixture.client,
+            &fixture.qh,
+        );
+        fixture.opened.push((window.clone(), toplevel, surface));
+        window
+    }
+
+    /// One window, tiled as [`tiled_alone`] tiles it.
+    fn one_window(fixture: &mut Fixture) -> (crate::pane::PaneId, Window) {
+        let window = open_kept(fixture);
+        let (pane, _tile) = tiled_alone(&mut fixture.state, &window);
+        (pane, window)
+    }
+
+    /// Two windows tiled beside each other on the fixture's one monitor
+    /// (not [`side_by_side`], which is two monitors).
+    fn side_by_side_windows(fixture: &mut Fixture) -> (crate::pane::PaneId, crate::pane::PaneId) {
+        use solium_layout::tree::Tiling;
+        let (left, right) = (open_kept(fixture), open_kept(fixture));
+        fixture.state.sync_panes();
+        let (left_id, right_id) = (
+            fixture.state.window_id(&left),
+            fixture.state.window_id(&right),
+        );
+        let (area, settings) = (tiled_area(), tiled_settings());
+        let mut tiling = Tiling::new();
+        tiling.insert(left_id, None, None, area, settings);
+        tiling.insert(right_id, Some(left_id), None, area, settings);
+        sweep(&mut fixture.state, &tiling);
+        fixture.state.settle(fixture.state.clock.now());
+        let pane = |window: &Window| {
+            fixture
+                .state
+                .panes
+                .id_of(window)
+                .expect("a client in the space has a pane")
+        };
+        (pane(&left), pane(&right))
+    }
+
+    /// The client's objects for a window this fixture opened.
+    fn kept(
+        fixture: &Fixture,
+        window: &Window,
+    ) -> (xdg_toplevel::XdgToplevel, wl_surface::WlSurface) {
+        fixture
+            .opened
+            .iter()
+            .find(|(each, ..)| each == window)
+            .map(|(_, toplevel, surface)| (toplevel.clone(), surface.clone()))
+            .expect("a window this fixture opened")
+    }
+
+    /// A fresh buffer at the window's size, committed by its client.
+    #[expect(
+        dead_code,
+        reason = "Task 21's self tier commits a window again to see its chain re-run"
+    )]
+    fn commit_again(fixture: &mut Fixture, window: &Window) {
+        let size = window.geometry().size;
+        let (_, surface) = kept(fixture, window);
+        commit_buffer(&fixture.client, &fixture.qh, &surface, size.w, size.h);
+        pump_all(fixture);
+    }
+
+    /// The window's client asks for fullscreen and the request is handled:
+    /// what the compositor answers is the configure it then sends.
+    fn ask_fullscreen(fixture: &mut Fixture, window: &Window) {
+        let (toplevel, _) = kept(fixture, window);
+        toplevel.set_fullscreen(None);
+        pump_all(fixture);
+    }
+
+    /// Give a pane's window the keyboard.
+    fn focus(fixture: &mut Fixture, pane: crate::pane::PaneId) {
+        let window = fixture
+            .state
+            .panes
+            .get(pane)
+            .and_then(Pane::client)
+            .cloned()
+            .expect("a pane with a client");
+        fixture
+            .state
+            .focus_window(&window, SERIAL_COUNTER.next_serial());
+    }
+
+    /// The fixture's effects looked for in its scratch folder alone, which
+    /// holds Task 14's `tint`.
+    fn with_tint_folder(fixture: &mut Fixture) {
+        let place = crate::effect::host::tests::scratch(&format!("fx2-{}", fixture.label));
+        crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+        fixture.state.effects = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(place.clone()),
+            place.join("none"),
+        ));
+        fixture.scratch = Some(place);
+    }
+
+    /// `sol.effects` given these rules, taken.
+    fn apply_rules(fixture: &mut Fixture, lua: &str) {
+        let rules = crate::effect::rules::parse(&tree(lua)).expect("parses");
+        fixture.state.apply_effects(Ok(rules));
+        assert!(
+            !fixture.state.rules.is_empty(),
+            "the rules were refused: {:?}",
+            fixture.state.effects.problems()
+        );
+    }
+
+    /// **A rule on `focused` follows the keyboard**: two windows, the rule's
+    /// slot moves with the focus.
+    #[test]
+    fn a_rule_on_focused_follows_the_keyboard() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-focused");
+        let (first, second) = side_by_side_windows(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { focused = true }, part = "client", slot = "front", effect = false },
+                 { match = { focused = true }, part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        focus(&mut fixture, first);
+        let slots = crate::render::build_slots(&mut fixture.state);
+        assert!(slots.wanted(&Owner::Pane(first, PaneSlot::Client), Slot::Behind));
+        assert!(!slots.wanted(&Owner::Pane(second, PaneSlot::Client), Slot::Behind));
+        assert!(
+            !slots.wanted(&Owner::Pane(first, PaneSlot::Client), Slot::Front),
+            "`effect = false` wants no slot"
+        );
+        focus(&mut fixture, second);
+        let slots = crate::render::build_slots(&mut fixture.state);
+        assert!(slots.wanted(&Owner::Pane(second, PaneSlot::Client), Slot::Behind));
+        assert!(!slots.wanted(&Owner::Pane(first, PaneSlot::Client), Slot::Behind));
+    }
+
+    /// **A rule on `fullscreen` applies from the configure that sets it**,
+    /// the state the compositor last told the client.
+    #[test]
+    fn a_rule_on_fullscreen_applies_from_the_configure_that_sets_it() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-fullscreen");
+        let (pane, window) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { fullscreen = true }, part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        assert!(
+            !crate::render::build_slots(&mut fixture.state)
+                .wanted(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind)
+        );
+        ask_fullscreen(&mut fixture, &window);
+        assert!(
+            crate::render::build_slots(&mut fixture.state)
+                .wanted(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind)
+        );
+    }
+
+    /// **A rule for another app leaves a window with an empty plan**, its
+    /// facts asked and matching nothing.
+    #[test]
+    fn a_rule_for_another_app_leaves_a_window_with_an_empty_plan() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-other-app");
+        let (pane, _) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { app_id = "mpv" }, part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        let slots = crate::render::build_slots(&mut fixture.state);
+        assert!(!slots.wanted(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind));
+        assert!(slots.is_empty());
+        assert_eq!(
+            slots.facts_gathered(),
+            1,
+            "the window's facts were not asked"
+        );
+    }
+
+    /// **`sol.windows()` carries every window match key**: `fullscreen` and
+    /// `style` beside `app_id`, `title`, `focused` and `monitor`.
+    #[test]
+    fn sol_windows_carries_every_window_match_key() {
+        fx2_fixture!(fixture, "windows-keys");
+        let (_, window) = one_window(&mut fixture);
+        let snapshot = fixture.state.snapshot();
+        let row = snapshot.windows.first().expect("one window");
+        assert!(!row.fullscreen);
+        assert_eq!(
+            row.style,
+            fixture.state.decorations.style().unwrap_or("none")
+        );
+        ask_fullscreen(&mut fixture, &window);
+        let snapshot = fixture.state.snapshot();
+        assert!(snapshot.windows.first().expect("one window").fullscreen);
+    }
+
+    /// **With no rules no slot is wanted and no fact is gathered** (spec
+    /// §8.4), though a window is on screen: the plan is empty and its counter
+    /// of facts gathered is 0.
+    #[test]
+    fn with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered() {
+        fx2_fixture!(fixture, "no-rules-no-facts");
+        let _ = one_window(&mut fixture);
+        let slots = crate::render::build_slots(&mut fixture.state);
+        assert!(slots.is_empty());
+        assert_eq!(
+            slots.facts_gathered(),
+            0,
+            "facts were gathered for a pane no rule can match"
+        );
+    }
+
+    /// **A scripted surface has a slot on each monitor it is on, and a
+    /// client layer surface one of its own**, each matched by its name: one
+    /// owner per instance per output, and one per layer surface whose
+    /// namespace the rule's glob takes.
+    #[test]
+    fn a_surface_has_a_slot_per_monitor_and_a_layer_surface_one_of_its_own() {
+        use crate::effect::plan::Owner;
+        use crate::effect::rules::Slot;
+        use smithay::reexports::wayland_server::Resource as _;
+        fx2_fixture!(fixture, "rule-surfaces");
+        let _ = a_screen(&mut fixture.state, "fx2-rule-surfaces-right", (1920, 0));
+        with_tint_folder(&mut fixture);
+        for (name, layer) in [
+            ("dock", crate::scripted::Layer::Top),
+            ("wallpaper", crate::scripted::Layer::Background),
+        ] {
+            let _ = fixture
+                .state
+                .surfaces
+                .declare(crate::scripted::Declaration::for_test(
+                    name,
+                    std::path::PathBuf::from(format!("{name}.qml")),
+                    layer,
+                    crate::scripted::On::EveryMonitor,
+                ));
+        }
+        let _bar = bar(
+            &mut fixture.display,
+            &mut fixture.state,
+            &fixture.conn,
+            &fixture.client,
+            &fixture.qh,
+            30,
+        );
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = "*", part = "surface:dock", slot = "behind", effect = "tint" },
+                 { match = "*", part = "layer_shell:restore-*", slot = "front", effect = "tint" } }"#,
+        );
+        let slots = crate::render::build_slots(&mut fixture.state);
+        let dock = fixture.state.surfaces.named("dock").expect("declared");
+        let wallpaper = fixture.state.surfaces.named("wallpaper").expect("declared");
+        for monitor in ["fx2-rule-surfaces", "fx2-rule-surfaces-right"] {
+            assert!(
+                slots.wanted(&Owner::Surface(dock, monitor.to_owned()), Slot::Behind),
+                "the dock on {monitor} has no slot"
+            );
+            assert!(!slots.wanted(&Owner::Surface(wallpaper, monitor.to_owned()), Slot::Behind));
+        }
+        let layered: Vec<_> = fixture
+            .state
+            .space
+            .outputs()
+            .flat_map(|output| {
+                smithay::desktop::layer_map_for_output(output)
+                    .layers()
+                    .map(|layer| layer.wl_surface().id())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(layered.len(), 1, "the premise: one layer surface, the bar");
+        assert!(slots.wanted(&Owner::LayerShell(layered[0].clone()), Slot::Front));
+        assert_eq!(
+            slots.wants().count(),
+            3,
+            "two docks and a bar, and nothing else"
+        );
+    }
+
+    /// **A resolved rule whose chain is not bound wants no slot**: every
+    /// chain is bound at config load or when its style is applied, never in
+    /// a frame (Ruling 15), so a rule that could not bind (a style's, its
+    /// problem already on the overlay) leaves its slot empty.
+    #[test]
+    fn a_rule_whose_chain_is_not_bound_wants_no_slot() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::{Origin, RuleKey, Slot};
+        fx2_fixture!(fixture, "rule-unbound");
+        let (pane, _) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        let client = Owner::Pane(pane, PaneSlot::Client);
+        assert!(crate::render::build_slots(&mut fixture.state).wanted(&client, Slot::Behind));
+        fixture.state.chains.remove(RuleKey {
+            origin: Origin::User,
+            index: 0,
+            generation: fixture.state.rules_generation,
+        });
+        assert!(!crate::render::build_slots(&mut fixture.state).wanted(&client, Slot::Behind));
+    }
+
+    /// **A pane no monitor shows is resolved for nothing**, the cull
+    /// `prepare` makes: a window parked a screen away, as a hidden
+    /// workspace's are, gathers no fact and wants no slot though a rule
+    /// matches it, while the window on screen does.
+    #[test]
+    fn a_pane_no_monitor_shows_gathers_no_fact_and_wants_no_slot() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-offscreen");
+        let (shown, _) = one_window(&mut fixture);
+        let parked = open_kept(&mut fixture);
+        fixture
+            .state
+            .map_stacked(parked.clone(), (-5000, 300), false);
+        fixture.state.sync_panes();
+        let parked = fixture.state.panes.id_of(&parked).expect("a pane");
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        let slots = crate::render::build_slots(&mut fixture.state);
+        assert!(slots.wanted(&Owner::Pane(shown, PaneSlot::Client), Slot::Behind));
+        assert!(!slots.wanted(&Owner::Pane(parked, PaneSlot::Client), Slot::Behind));
+        assert_eq!(
+            slots.facts_gathered(),
+            1,
+            "the parked window's facts were gathered"
         );
     }
 

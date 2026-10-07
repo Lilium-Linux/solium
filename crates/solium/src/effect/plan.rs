@@ -1,13 +1,16 @@
 //! What a frame draws for effects: the rules' chains, bound at config load,
-//! and (Task 18) the slots resolved once a pass.
+//! and the slots resolved once a pass ([`Slots`]).
 
 use std::collections::HashMap;
 use std::path::Path;
 
+use smithay::utils::{Physical, Rectangle};
 use solium_effects::stage::Plan;
 
+use super::element::EffectElement;
 use super::host::{Host, Problem};
-use super::rules::{Fill, Origin, Rule, RuleKey, Tier, runnable, tier};
+use super::rules::{Fill, Origin, Rule, RuleKey, Slot, Tier, runnable, tier};
+use crate::pane::PaneId;
 
 /// One rule's chain, bound and checked.
 /// `state::tests::a_broken_rule_keeps_the_rules_that_ran`.
@@ -23,7 +26,7 @@ pub(crate) struct BoundChain {
     pub(crate) bleed: f64,
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Task 18's slot plan reads the tier")
+        expect(dead_code, reason = "Task 20 captures a part for a T1 chain only")
     )]
     pub(crate) tier: Tier,
     #[cfg_attr(
@@ -101,7 +104,8 @@ impl Chains {
         self.by_key.remove(&key);
     }
 
-    #[expect(dead_code, reason = "Task 18's slot plan looks a slot's chain up")]
+    /// A slot's chain: a resolved key with none bound wants no slot
+    /// (Ruling 15). `state::tests::real_client::a_rule_whose_chain_is_not_bound_wants_no_slot`.
     pub(crate) fn get(&self, key: RuleKey) -> Option<&BoundChain> {
         self.by_key.get(&key)
     }
@@ -144,6 +148,171 @@ impl Chains {
             .filter(|(key, _)| key.origin == origin)
             .max_by_key(|(key, _)| (key.generation, std::cmp::Reverse(key.index)))
             .map(|(_, chain)| &chain.plan)
+    }
+}
+
+/// A pane's parts that have slots.
+/// `state::tests::real_client::a_rule_on_focused_follows_the_keyboard`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PaneSlot {
+    Pane,
+    Client,
+    Titlebar,
+    /// The style's layer at this index (`LayerSpec.index`).
+    /// `decoration::tests::every_layer_is_named_with_its_place_among_the_styles_layers`.
+    Layer(usize),
+    Popups,
+}
+
+/// Who a slot belongs to.
+/// `state::tests::real_client::a_surface_has_a_slot_per_monitor_and_a_layer_surface_one_of_its_own`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Owner {
+    Pane(PaneId, PaneSlot),
+    /// A scripted surface's instance on the output of this name.
+    Surface(crate::scripted::SurfaceId, String),
+    LayerShell(smithay::reexports::wayland_server::backend::ObjectId),
+}
+
+/// A slot's result, ready to place: the element, and the padded box it covers
+/// in the part's own physical pixels. Filled by Tasks 21 and 22; with no GPU
+/// a test marks a slot ready with none
+/// (`tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`).
+#[expect(
+    dead_code,
+    reason = "Tasks 21 and 22 make a slot ready from its chain's result"
+)]
+#[derive(Clone, Debug)]
+pub(crate) struct Ready {
+    pub(crate) element: EffectElement,
+    pub(crate) padded: Rectangle<i32, Physical>,
+    pub(crate) reach: i32,
+}
+
+/// What effects this pass draws where: what the rules want, and what is
+/// ready. Built once a pass by `render::build_slots`, so every output and
+/// every screencopy places from the same answer.
+/// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+#[derive(Debug, Default)]
+pub(crate) struct Slots {
+    wants: HashMap<(Owner, Slot), RuleKey>,
+    ready: HashMap<(Owner, Slot), Option<Ready>>,
+    reach: HashMap<PaneId, i32>,
+    facts: u32,
+}
+
+impl Slots {
+    /// `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the §8.4 guard's tests only")
+    )]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.wants.is_empty()
+    }
+
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    pub(crate) fn want(&mut self, owner: Owner, slot: Slot, key: RuleKey) {
+        self.wants.insert((owner, slot), key);
+    }
+
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 20 captures each wanted slot's part")
+    )]
+    pub(crate) fn wants(&self) -> impl Iterator<Item = (&Owner, Slot, RuleKey)> {
+        self.wants
+            .iter()
+            .map(|((owner, slot), key)| (owner, *slot, *key))
+    }
+
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by tests: the walk asks `is_ready`")
+    )]
+    pub(crate) fn wanted(&self, owner: &Owner, slot: Slot) -> bool {
+        self.wants.contains_key(&(owner.clone(), slot))
+    }
+
+    /// A slot's result, its pane reaching as far as it does
+    /// (`tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`).
+    #[expect(
+        dead_code,
+        reason = "Tasks 21 and 22 make a slot ready from its chain's result"
+    )]
+    pub(crate) fn set_ready(&mut self, owner: Owner, slot: Slot, ready: Ready) {
+        self.reached(&owner, ready.reach);
+        self.ready.insert((owner, slot), Some(ready));
+    }
+
+    /// A pane reaches as far as the furthest of its slots' results; a
+    /// surface's reach no pane.
+    /// `tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Tasks 21 and 22 make a slot ready")
+    )]
+    fn reached(&mut self, owner: &Owner, reach: i32) {
+        if let Owner::Pane(pane, _) = owner {
+            let furthest = self.reach.entry(*pane).or_insert(0);
+            *furthest = (*furthest).max(reach);
+        }
+    }
+
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 19's walk places a ready slot's element")
+    )]
+    pub(crate) fn at(&self, owner: &Owner, slot: Slot) -> Option<&Ready> {
+        self.ready
+            .get(&(owner.clone(), slot))
+            .and_then(Option::as_ref)
+    }
+
+    /// Whether the slot has a result to draw: what the walk asks.
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 19's walk asks it of every slot")
+    )]
+    pub(crate) fn is_ready(&self, owner: &Owner, slot: Slot) -> bool {
+        self.ready.contains_key(&(owner.clone(), slot))
+    }
+
+    /// A slot made ready with no texture, so the walk's order is testable
+    /// with no GPU (Tasks 19 and 25).
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    #[cfg(test)]
+    pub(crate) fn mark_ready(&mut self, owner: Owner, slot: Slot) {
+        self.ready.insert((owner, slot), None);
+    }
+
+    /// `tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 19's bleed cull grows a pane by it")
+    )]
+    pub(crate) fn reach(&self, pane: PaneId) -> i32 {
+        self.reach.get(&pane).copied().unwrap_or(0)
+    }
+
+    /// One owner's facts gathered and its rules resolved.
+    /// `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`.
+    pub(crate) fn gathered(&mut self) {
+        self.facts += 1;
+    }
+
+    /// How many owners' facts this pass gathered: 0 with no rules (spec §8.4).
+    /// `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the §8.4 guard's tests only")
+    )]
+    pub(crate) fn facts_gathered(&self) -> u32 {
+        self.facts
     }
 }
 
@@ -239,5 +408,61 @@ mod tests {
         assert_eq!(hash(&mut host, "2"), hash(&mut host, "2"));
         assert_ne!(hash(&mut host, "2"), hash(&mut host, "3"));
         let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A slot is wanted by its owner and slot alone, and ready apart from
+    /// being wanted**: what the walk asks of a pass's plan (Tasks 19, 25).
+    #[test]
+    fn a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart() {
+        use super::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::{Origin, RuleKey, Slot};
+        let client = Owner::Pane(crate::pane::PaneId::from_raw(7), PaneSlot::Client);
+        let key = RuleKey {
+            origin: Origin::User,
+            index: 0,
+            generation: 1,
+        };
+        let mut slots = Slots::default();
+        assert!(slots.is_empty());
+        slots.want(client.clone(), Slot::Behind, key);
+        assert!(!slots.is_empty());
+        assert!(slots.wanted(&client, Slot::Behind));
+        assert!(!slots.wanted(&client, Slot::Front));
+        assert!(!slots.wanted(
+            &Owner::Pane(crate::pane::PaneId::from_raw(7), PaneSlot::Pane),
+            Slot::Behind
+        ));
+        assert_eq!(
+            slots.wants().collect::<Vec<_>>(),
+            [(&client, Slot::Behind, key)]
+        );
+        assert!(!slots.is_ready(&client, Slot::Behind));
+        slots.mark_ready(client.clone(), Slot::Behind);
+        assert!(slots.is_ready(&client, Slot::Behind));
+        assert!(
+            slots.at(&client, Slot::Behind).is_none(),
+            "a slot marked ready in a test has no result to draw"
+        );
+    }
+
+    /// **A pane reaches as far as the furthest of its ready slots**, and a
+    /// surface's slots reach no pane: what the bleed cull grows a pane by
+    /// (Task 19).
+    #[test]
+    fn a_pane_reaches_as_far_as_its_furthest_ready_slot() {
+        use super::{Owner, PaneSlot, Slots};
+        let (pane, other) = (
+            crate::pane::PaneId::from_raw(1),
+            crate::pane::PaneId::from_raw(2),
+        );
+        let mut slots = Slots::default();
+        assert_eq!(slots.reach(pane), 0);
+        slots.reached(&Owner::Pane(pane, PaneSlot::Client), 12);
+        slots.reached(&Owner::Pane(pane, PaneSlot::Titlebar), 4);
+        slots.reached(
+            &Owner::Surface(crate::scripted::SurfaceId::from_raw(1), "DP-1".to_owned()),
+            40,
+        );
+        assert_eq!((slots.reach(pane), slots.reach(other)), (12, 0));
     }
 }

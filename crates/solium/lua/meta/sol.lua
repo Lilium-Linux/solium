@@ -53,6 +53,8 @@
 ---@field max? sol.Size The largest the application says it can be, frame included; absent when it set no limit.
 ---@field cramped boolean Whether the layout last placed it with `cramped = true`.
 ---@field shown boolean Whether its application has shown its first frame yet.
+---@field fullscreen boolean Whether the compositor last told it to be fullscreen.
+---@field style string The pane style it is framed in, or `"none"` when it is drawn bare: fullscreen, drawing its own decorations, or under the style `"none"`.
 
 ---One row of `sol.monitors()`. `x`, `y`, `w` and `h` are the work area: the
 ---monitor less what layer-shell bars and hosted surfaces reserve.
