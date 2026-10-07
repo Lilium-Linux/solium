@@ -213,17 +213,27 @@ impl Logind {
     /// `lock.*`, applied at start and on every reload.
     ///
     /// A reload that turns `before_sleep` on, having started without it, asks
-    /// for the inhibitor it did not have; one that turns it off lets go of
-    /// whatever it was holding. Neither tears down or restarts the listener:
-    /// `Lock` is heard either way, since running the locker does not depend
-    /// on `before_sleep` at all.
-    pub(crate) fn configure(&mut self, settings: Settings) {
+    /// for the inhibitor it did not have — unless the session is already
+    /// locked, in which case nothing will ever call [`Logind::locked`] to
+    /// release it (see `should_request_inhibitor_on_configure`). One that
+    /// turns it off lets go of whatever it was holding. Neither tears down or
+    /// restarts the listener: `Lock` is heard either way, since running the
+    /// locker does not depend on `before_sleep` at all.
+    ///
+    /// `locked` is the caller's own `Solium::lock.is_some()`: this module
+    /// cannot read that itself, `state/commands.rs` hands it over.
+    pub(crate) fn configure(&mut self, settings: Settings, locked: bool) {
         let had_before_sleep = self.settings.before_sleep;
         self.settings = settings;
         if matches!(self.bus, Bus::Nowhere) {
             return;
         }
-        if self.settings.before_sleep && !had_before_sleep && self.inhibitor.is_none() {
+        if should_request_inhibitor_on_configure(
+            had_before_sleep,
+            self.settings.before_sleep,
+            self.inhibitor.is_some(),
+            locked,
+        ) {
             self.request_inhibitor();
         } else if !self.settings.before_sleep && had_before_sleep {
             self.inhibitor = None;
@@ -331,6 +341,38 @@ fn should_run_locker(already_locked: bool) -> bool {
     !already_locked
 }
 
+/// Whether waking up should ask logind for a fresh inhibitor: `before_sleep`
+/// wants one held, none is currently held, and the session is not locked.
+///
+/// The last check is the one that matters: a lid opened on a still-locked
+/// session (nobody typed the password) will never call [`Logind::locked`]
+/// again for this lock, since `confirm_lock`'s own confirmation fires at most
+/// once per lock instance — so an inhibitor requested here would dangle until
+/// `InhibitDelayMaxUSec`, holding every later sleep attempt off for no
+/// reason and logging settle's "never confirmed" warning falsely. Its own
+/// function for the same reason as [`should_run_locker`]: a real
+/// `Solium::lock` needs a protocol handshake no unit test here can stand in
+/// for.
+/// `on_resumed_does_not_request_an_inhibitor_over_a_still_locked_session`.
+fn should_request_inhibitor_on_resume(before_sleep: bool, held: bool, locked: bool) -> bool {
+    before_sleep && !held && !locked
+}
+
+/// Whether a config reload should ask logind for a fresh inhibitor: the same
+/// decision as [`should_request_inhibitor_on_resume`], for the moment
+/// `before_sleep` flips from off to on instead of a wake. A reload while the
+/// session is already locked has nothing that will ever release what it took,
+/// same as the resume case.
+/// `a_config_reload_does_not_request_an_inhibitor_over_a_locked_session`.
+fn should_request_inhibitor_on_configure(
+    had_before_sleep: bool,
+    before_sleep: bool,
+    held: bool,
+    locked: bool,
+) -> bool {
+    before_sleep && !had_before_sleep && !held && !locked
+}
+
 /// `Lock`: run the locker unless a client already holds the session's lock.
 /// `a_lock_signal_runs_the_configured_locker_once`,
 /// `a_lock_signal_while_already_locked_runs_nothing`.
@@ -371,10 +413,16 @@ fn on_sleep_imminent(state: &mut crate::state::Solium) {
 /// `PrepareForSleep(false)`: woken up, with nothing left to release (either
 /// it already was, or the inhibitor was never taken to begin with). Ask for a
 /// fresh one so the next sleep is held for the lock again, the same as an
-/// ordinary unlock does.
+/// ordinary unlock does — unless the session woke still locked, in which case
+/// nothing will ever unlock it to release what this would take.
+/// `on_resumed_does_not_request_an_inhibitor_over_a_still_locked_session`.
 fn on_resumed(state: &mut crate::state::Solium) {
     state.logind.release_by = None;
-    if state.logind.settings.before_sleep && state.logind.inhibitor.is_none() {
+    if should_request_inhibitor_on_resume(
+        state.logind.settings.before_sleep,
+        state.logind.inhibitor.is_some(),
+        state.lock.is_some(),
+    ) {
         state.logind.request_inhibitor();
     }
 }
@@ -1015,10 +1063,13 @@ mod tests {
         assert!(logind.is_off());
         // Nothing to connect to, whatever happens.
         logind.locked(true);
-        logind.configure(Settings {
-            command: Some("true".to_owned()),
-            before_sleep: true,
-        });
+        logind.configure(
+            Settings {
+                command: Some("true".to_owned()),
+                before_sleep: true,
+            },
+            false,
+        );
     }
 
     #[test]
@@ -1062,6 +1113,57 @@ mod tests {
         assert!(
             should_run_locker(false),
             "refused to lock an unlocked session"
+        );
+    }
+
+    /// Waking up with the session still locked (the lid closed, slept, and
+    /// opened again with nobody typing the password) must not ask for a
+    /// fresh inhibitor: `Logind::locked(true)` already fired once for this
+    /// lock and will not fire again, so one taken here would dangle until
+    /// logind's own timeout. Every other combination still asks, same as
+    /// before this check existed.
+    /// `on_resumed_does_not_request_an_inhibitor_over_a_still_locked_session`.
+    #[test]
+    fn on_resumed_does_not_request_an_inhibitor_over_a_still_locked_session() {
+        assert!(
+            !should_request_inhibitor_on_resume(true, false, true),
+            "asked for an inhibitor over a session that woke up still locked"
+        );
+        assert!(
+            should_request_inhibitor_on_resume(true, false, false),
+            "refused to ask for an inhibitor on an ordinary, unlocked wake"
+        );
+        assert!(
+            !should_request_inhibitor_on_resume(false, false, false),
+            "asked for an inhibitor although before_sleep is off"
+        );
+        assert!(
+            !should_request_inhibitor_on_resume(true, true, false),
+            "asked for a second inhibitor while one is already held"
+        );
+    }
+
+    /// The same dangling-inhibitor gap, on a config reload instead of a wake:
+    /// flipping `before_sleep` on while the session is already locked must
+    /// not take an inhibitor nothing will ever release.
+    /// `a_config_reload_does_not_request_an_inhibitor_over_a_locked_session`.
+    #[test]
+    fn a_config_reload_does_not_request_an_inhibitor_over_a_locked_session() {
+        assert!(
+            !should_request_inhibitor_on_configure(false, true, false, true),
+            "asked for an inhibitor on a reload over an already-locked session"
+        );
+        assert!(
+            should_request_inhibitor_on_configure(false, true, false, false),
+            "refused to ask for an inhibitor on an ordinary before_sleep-on reload"
+        );
+        assert!(
+            !should_request_inhibitor_on_configure(true, true, false, false),
+            "asked again although before_sleep was already on"
+        );
+        assert!(
+            !should_request_inhibitor_on_configure(false, true, true, false),
+            "asked for a second inhibitor while one is already held"
         );
     }
 

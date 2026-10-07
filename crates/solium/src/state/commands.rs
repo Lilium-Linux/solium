@@ -384,7 +384,9 @@ impl Solium {
                     }
                 }
                 Command::Idle(settings) => self.idle.configure(settings),
-                Command::Lock(settings) => self.logind.configure(settings),
+                Command::Lock(settings) => {
+                    self.logind.configure(settings, self.lock.is_some());
+                }
                 Command::Power { monitor, on } => match monitor {
                     None => self.power_all(on),
                     Some(name) => {
