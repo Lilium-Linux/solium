@@ -947,6 +947,11 @@ mod tests {
                 "a name",
             ),
             (
+                r#"{ match = "*", part = "layer_shell:", slot = "front", effect = false }"#,
+                "part",
+                "a name",
+            ),
+            (
                 r#"{ match = "*", part = "layer_shell:*bar", slot = "front", effect = false }"#,
                 "part",
                 "prefix",
