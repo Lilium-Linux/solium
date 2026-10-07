@@ -1381,12 +1381,23 @@ tooltip's own way of saying "do not manage me" (`xwayland.rs`'s
 of `sol.windows()` — nothing a bar or a window list built from that call ever
 has to filter out by hand.
 
-It is still a real client with a real process, and `super+q` still closes it
-like any other X11 window: `WM_DELETE_WINDOW` when it answers one, and a kill
-of the client itself, by the pid Xwayland already named for it, the second
-time a close goes unanswered for a whole grace period with nothing to show
-for it — not a response, not a dialog, just silence (`state/close.rs`'s own
-notes on `GRACE` and `x11_refused_once` say why only silence counts).
+It is still a real client with a real process, but nothing in the shipped
+config can reach it to ask it to go. The shipped `super+q` only walks
+`sol.windows()` looking for a window with `focused == true`, and a window
+hidden this way never gets a row there at all to be found: the snapshot that
+builds `sol.windows()` drops an unmanaged pane before it becomes a
+`WindowInfo` (`state/snapshot.rs`), and the unmanaged path this window takes
+(`state/open.rs`'s `take_unmanaged_pane`) never grants it keyboard focus
+either, so `focused` could not be true for it regardless. A hung window of
+this shape cannot be stopped from inside the compositor today — only from
+outside it, with an ordinary `kill`, or by not letting it start in the first
+place, the way just below.
+
+The kill-after-silence mechanism `state/close.rs` added alongside this one
+(`GRACE`, `x11_refused_once`) is real, and it does help — for an ordinary,
+listed, managed X11 window that stops answering `WM_DELETE_WINDOW`, which is
+exactly what `super+q` can still reach the normal way. It was never reachable
+for this one.
 
 Nothing here stops the autostart entry from starting in the first place —
 that is Fedora's `/etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop`, not
