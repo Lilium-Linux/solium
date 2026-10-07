@@ -280,7 +280,11 @@ The capture waits until a window has been mapped for 30 frames, which is half a
 second at 60 Hz and less on a faster host, because a capture of an empty
 compositor is exactly the misleading result the mechanism exists to avoid. A
 captured frame is not presented — reading the framebuffer back invalidates the
-bind, and the following `submit` would fail to reallocate its EGL surface.
+bind, and the following `submit` would fail to reallocate its EGL surface. The
+damage tracker has recorded it all the same, so the buffer ages it is handed
+count that frame too (`crate::ages`). Handed the window's own ages, it left that
+frame's damage out of a later one, and a moving window's old edge stayed in a
+buffer as a line (#235, #179).
 
 Under `timeout`, a nested run ends the way a quit binding ends it, so a capture
 can be scripted end to end:
