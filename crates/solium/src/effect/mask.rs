@@ -15,12 +15,9 @@ pub(crate) enum Mask {
         radii: Corners,
     },
     /// The self capture's own alpha (`mask = "alpha"`, T1 only).
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "Task 21's self tier cuts a result by its own alpha"
-        )
+    #[expect(
+        dead_code,
+        reason = "Task 21's self tier cuts a result by its own alpha"
     )]
     OwnAlpha,
 }

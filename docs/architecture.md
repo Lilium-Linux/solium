@@ -310,8 +310,21 @@ every output and every screencopy places from one answer. A window's facts
 (`Solium::window_facts`) are gathered only for the keys some rule reads, and a
 slot is wanted only when its rule's chain is bound, since binding is the
 config load's and never a frame's. With no rules, neither the user's nor any
-pane style's, nothing is resolved and no fact is gathered. Nothing is drawn
-in a slot yet.
+pane style's, nothing is resolved and no fact is gathered.
+
+Each output then walks a pane's pieces with its slots (`render::pane_walk`):
+the pane's `front` and `behind` around its layers and client, under its
+popups; the client's around the client, its `replace` in the client's place;
+a layer's, and the titlebar's around the style's `bar` layer, through
+`Decoration::layer_elements`' hook; the popups' around the popups; and a
+layer surface's or a scripted surface's just over and under it
+(`render::stacked_walk`). A slot is drawn only once its result is ready, so a
+wanted slot whose chain failed or has not run draws the part (`replace`) or
+nothing (`behind`, `front`), and with no rules the walk is `PANE_ORDER`'s.
+A result is placed over its part grown by its reach and cut by the part's
+mask, unless its rule asks for the alpha or its chain reads `shape`; the
+off-screen cull grows a pane by the furthest its results reach. Nothing makes
+a slot ready yet.
 
 A plan is run by `effect/run.rs`, in raw GL like the programs: each step is
 drawn into a pooled target in a frame opened on the carrier, reading

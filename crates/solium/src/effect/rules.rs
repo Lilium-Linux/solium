@@ -827,12 +827,9 @@ impl Rules {
         resolved
     }
 
-    /// The rule a key names, the style's from `style`.
+    /// The rule a key names, the style's from `style`: the walk reads a
+    /// slot's for its mask (`render::cut_by_shape`).
     /// `tests::a_key_finds_its_rule_in_its_origin`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 19's walk reads a slot's rule for its mask")
-    )]
     pub(crate) fn rule<'a>(&'a self, style: &'a [Rule], key: RuleKey) -> Option<&'a Rule> {
         let [material, expansion, user] = &self.lists;
         let list = match key.origin {

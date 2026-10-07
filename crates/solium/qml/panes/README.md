@@ -276,7 +276,10 @@ the one side the style reserves most for, `top/`'s 32 pixels across the
 whole window above the client, its two outer corners rounded as the
 client's largest, or `left/`'s 34 down its side, square. A style that
 reserves its most on two sides or more (`border/` and `proximity/`, the same
-all round) or nothing at all has no titlebar region.
+all round) or nothing at all has no titlebar region. Its slots go around
+the style's layer named `bar`, or its first `frame` layer when none is:
+`behind` just under that layer, `front` just over it. A `layer:<name>`
+rule's go around that layer the same way, inside its depth.
 
 The file runs in an effect's Lua, not your configuration's: `math`, `table`
 and `string`, and no `sol`, no files and no `require`, stopped if it runs

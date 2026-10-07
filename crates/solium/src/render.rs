@@ -33,6 +33,11 @@ use smithay::{
 };
 
 use crate::{
+    effect::{
+        mask::{Mask, RegionSource as _},
+        plan::{PaneSlot, Slots},
+        rules::{MaskKind, Slot},
+    },
     layer,
     pane::Pane,
     present,
@@ -40,6 +45,7 @@ use crate::{
     state::Solium,
     style::Depth,
 };
+use solium_effects::fragment::Corners;
 
 render_elements! {
     /// Everything Solium can draw.
@@ -264,7 +270,6 @@ pub(crate) struct Prepared {
     )>,
     /// Every rule resolved once this pass ([`build_slots`]), so every output
     /// and every screencopy places from the same answer.
-    #[expect(dead_code, reason = "Task 19's slot walk places from it")]
     pub(crate) slots: crate::effect::plan::Slots,
 }
 
@@ -970,6 +975,9 @@ pub(crate) enum Piece {
     /// The client's own surface and the popups above it — or, for a pane whose
     /// application has not arrived, the scene standing in for one.
     Client,
+    /// An effect's slot around a part of the pane (Ruling 15). Only
+    /// [`pane_walk`] yields one.
+    Slot(PaneSlot, Slot),
 }
 
 /// A pane's pieces, topmost first: `above`, `frame`, the client, `behind`.
@@ -1009,6 +1017,330 @@ pub(crate) fn pane_pieces<T>(into: &mut Vec<T>, mut piece: impl FnMut(&mut Vec<T
     }
 }
 
+/// A pane's pieces with its slots, topmost first (Ruling 15): the pane's
+/// `front`, then `PANE_ORDER` with the client's slots around the client, then
+/// the pane's `behind`; a pane `replace` is the whole of it; a client
+/// `replace` takes the client's place. Layer and titlebar slots are inside
+/// `Layers`, around their layer ([`around_layer`]), and the popups' around
+/// the popups, which go in ahead of the walk.
+/// `tests::with_no_slots_the_pane_walk_is_pane_order`,
+/// `tests::client_slots_bracket_the_client_and_replace_takes_its_place`,
+/// `tests::pane_slots_are_around_the_sandwich_and_below_the_popups`.
+pub(crate) fn pane_walk<T>(
+    into: &mut Vec<T>,
+    has: &dyn Fn(PaneSlot, Slot) -> bool,
+    mut piece: impl FnMut(&mut Vec<T>, Piece),
+) {
+    if has(PaneSlot::Pane, Slot::Replace) {
+        piece(into, Piece::Slot(PaneSlot::Pane, Slot::Replace));
+        return;
+    }
+    if has(PaneSlot::Pane, Slot::Front) {
+        piece(into, Piece::Slot(PaneSlot::Pane, Slot::Front));
+    }
+    for each in PANE_ORDER {
+        match each {
+            Piece::Client => {
+                if has(PaneSlot::Client, Slot::Replace) {
+                    piece(into, Piece::Slot(PaneSlot::Client, Slot::Replace));
+                    continue;
+                }
+                if has(PaneSlot::Client, Slot::Front) {
+                    piece(into, Piece::Slot(PaneSlot::Client, Slot::Front));
+                }
+                piece(into, Piece::Client);
+                if has(PaneSlot::Client, Slot::Behind) {
+                    piece(into, Piece::Slot(PaneSlot::Client, Slot::Behind));
+                }
+            }
+            other => piece(into, other),
+        }
+    }
+    if has(PaneSlot::Pane, Slot::Behind) {
+        piece(into, Piece::Slot(PaneSlot::Pane, Slot::Behind));
+    }
+}
+
+/// The layer the titlebar's slots bracket: the one named `bar`, else the
+/// first `frame` layer, else none.
+/// `tests::titlebar_slots_bracket_the_bar_layer`.
+pub(crate) fn titlebar_layer(layers: &[(usize, Depth, &str)]) -> Option<usize> {
+    layers
+        .iter()
+        .find(|(_, _, name)| *name == "bar")
+        .or_else(|| layers.iter().find(|(_, depth, _)| *depth == Depth::Frame))
+        .map(|(index, _, _)| *index)
+}
+
+/// Where a slot around one of a style's layers goes: just before the layer
+/// (over it), in its place, or just after it (under it).
+/// `tests::around_a_layer_its_own_slots_are_outermost_and_the_titlebars_inside`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Around {
+    Before,
+    InPlace,
+    After,
+}
+
+/// The slots around the style's layer at `index`, topmost first, and where
+/// each goes: the layer's own outermost, and the titlebar's inside them when
+/// `titlebar` names this layer, a titlebar being a band of its layer. A
+/// layer's `replace` goes in its place; the titlebar's goes over the layer.
+/// `tests::around_a_layer_its_own_slots_are_outermost_and_the_titlebars_inside`.
+pub(crate) fn around_layer(
+    index: usize,
+    titlebar: Option<usize>,
+) -> impl Iterator<Item = (PaneSlot, Slot, Around)> {
+    let bar = titlebar == Some(index);
+    let layer = PaneSlot::Layer(index);
+    [
+        Some((layer, Slot::Front, Around::Before)),
+        bar.then_some((PaneSlot::Titlebar, Slot::Front, Around::Before)),
+        bar.then_some((PaneSlot::Titlebar, Slot::Replace, Around::Before)),
+        Some((layer, Slot::Replace, Around::InPlace)),
+        bar.then_some((PaneSlot::Titlebar, Slot::Behind, Around::After)),
+        Some((layer, Slot::Behind, Around::After)),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// `Decoration::layer_elements`' hook over the slots [`layer_slots`] placed:
+/// before the layer at `index`, those that go before it; after it, its
+/// `replace` in place of what the layer pushed, then those that go after.
+/// Each is pushed once. `tests::a_layers_replace_takes_its_place_and_its_other_slots_go_around_it`.
+pub(crate) fn place_around<T>(
+    placed: &mut [(usize, Around, Option<T>)],
+    mark: &mut usize,
+    into: &mut Vec<T>,
+    index: usize,
+    before: bool,
+) {
+    let mut push = |into: &mut Vec<T>, around: Around| {
+        into.extend(
+            placed
+                .iter_mut()
+                .filter(|(at, place, _)| *at == index && *place == around)
+                .filter_map(|(_, _, element)| element.take()),
+        );
+    };
+    if before {
+        push(into, Around::Before);
+        *mark = into.len();
+        return;
+    }
+    let len = into.len();
+    push(into, Around::InPlace);
+    if into.len() > len {
+        into.drain(*mark..len);
+    }
+    push(into, Around::After);
+}
+
+/// Whether a pane's slot has a result to draw: readiness and not wanting,
+/// so a wanted slot whose chain failed, or has not run, draws the part
+/// (`replace`) or nothing (`behind`, `front`). The one predicate the pane
+/// walk asks. `tests::a_wanted_slot_with_nothing_ready_draws_what_no_slot_draws`.
+pub(crate) fn slot_ready(
+    slots: &Slots,
+    pane: crate::pane::PaneId,
+) -> impl Fn(PaneSlot, Slot) -> bool + '_ {
+    move |part, slot| slots.is_ready(&crate::effect::plan::Owner::Pane(pane, part), slot)
+}
+
+/// Whether a pane drawn over `drawn` reaches `screen` once grown by `reach`
+/// on every side, the furthest its slots' results reach past it: the bleed
+/// cull. `tests::the_bleed_cull_counts_an_effects_reach`.
+pub(crate) fn reaches(
+    drawn: Rectangle<f64, Logical>,
+    reach: i32,
+    screen: Rectangle<i32, Logical>,
+) -> bool {
+    let reach = f64::from(reach);
+    Rectangle::<f64, Logical>::new(
+        (drawn.loc.x - reach, drawn.loc.y - reach).into(),
+        (drawn.size.w + 2.0 * reach, drawn.size.h + 2.0 * reach).into(),
+    )
+    .overlaps(screen.to_f64())
+}
+
+/// Where a ready slot's result goes on an output: its padded box over
+/// `part`, the part's own rectangle there in physical pixels, grown by the
+/// result's `reach` scaled as the part is drawn against the size it was
+/// padded at; and the part, with its `radii`, as the mask inside that box.
+/// `tests::a_slot_is_placed_over_its_part_grown_by_its_reach_as_the_part_is_drawn`.
+pub(crate) fn slot_placement(
+    part: Rectangle<f64, Physical>,
+    padded: Size<i32, Physical>,
+    reach: i32,
+    radii: Corners,
+) -> (
+    Rectangle<i32, Physical>,
+    (Rectangle<f64, Physical>, Corners),
+) {
+    let own = |padded: i32| f64::from((padded - 2 * reach).max(1));
+    let across = f64::from(reach) * part.size.w / own(padded.w);
+    let down = f64::from(reach) * part.size.h / own(padded.h);
+    let dst = Rectangle::<f64, Physical>::new(
+        (part.loc.x - across, part.loc.y - down).into(),
+        (part.size.w + 2.0 * across, part.size.h + 2.0 * down).into(),
+    )
+    .to_i32_round();
+    let mask = Rectangle::new(
+        (
+            part.loc.x - f64::from(dst.loc.x),
+            part.loc.y - f64::from(dst.loc.y),
+        )
+            .into(),
+        part.size,
+    );
+    (dst, (mask, radii))
+}
+
+/// Whether a slot's result is cut by its part's shape (\[16\] §2): unless
+/// its rule asks for the self capture's alpha, or its chain reads `shape`
+/// and so draws its own edges.
+/// `tests::a_result_is_cut_by_its_parts_shape_unless_it_owns_its_edges`.
+pub(crate) fn cut_by_shape(mask: MaskKind, reads_shape: bool) -> bool {
+    mask == MaskKind::Shape && !reads_shape
+}
+
+/// Every corner times `by`.
+fn corners_times(radii: Corners, by: f64) -> Corners {
+    Corners {
+        top_left: radii.top_left * by,
+        top_right: radii.top_right * by,
+        bottom_left: radii.bottom_left * by,
+        bottom_right: radii.bottom_right * by,
+    }
+}
+
+/// A ready slot's result placed over its part, `part` being the part's
+/// mask on this output in logical pixels (`effect::mask`), cut by it as
+/// [`cut_by_shape`] says, at `alpha`; nothing for a slot with no result.
+fn slot_element(
+    state: &Solium,
+    slots: &Slots,
+    owner: &crate::effect::plan::Owner,
+    slot: Slot,
+    part: Mask,
+    scale: f64,
+    alpha: f32,
+) -> Option<Element> {
+    let ready = slots.at(owner, slot)?;
+    let Mask::Rect { rect, radii } = part else {
+        return None;
+    };
+    let key = slots.key(owner, slot)?;
+    let style = match owner {
+        crate::effect::plan::Owner::Pane(pane, _) => state
+            .panes
+            .get(*pane)
+            .map_or(&[][..], |held| style_rules(held.frame()).0),
+        crate::effect::plan::Owner::Surface(..) | crate::effect::plan::Owner::LayerShell(_) => &[],
+    };
+    let cut = cut_by_shape(
+        state
+            .rules
+            .rule(style, key)
+            .map_or(MaskKind::Shape, |rule| rule.mask),
+        state
+            .chains
+            .get(key)
+            .is_some_and(|chain| chain.plan.reads.shape),
+    );
+    let (dst, mask) = slot_placement(
+        rect.to_physical(scale),
+        ready.padded.size,
+        ready.reach,
+        corners_times(radii, scale),
+    );
+    Some(Element::Effect(ready.element.at(
+        dst,
+        cut.then_some(mask),
+        alpha,
+    )))
+}
+
+/// The ready slots around a pane's layers at `depth`, placed, each with its
+/// layer's place and where it goes ([`around_layer`]): what `chrome`'s hook
+/// pushes ([`place_around`]), made before the decoration is borrowed to draw
+/// them.
+fn layer_slots(
+    state: &Solium,
+    slots: &Slots,
+    pane: crate::pane::PaneId,
+    depth: Depth,
+    drawing: crate::decoration::Drawing,
+) -> Vec<(usize, Around, Option<Element>)> {
+    let mut placed = Vec::new();
+    if slots.is_empty() {
+        return placed;
+    }
+    let Some(decoration) = state.panes.get(pane).and_then(Pane::decoration) else {
+        return placed;
+    };
+    let places: Vec<(usize, Depth, &str)> = decoration.layer_places().collect();
+    let titlebar = titlebar_layer(&places);
+    let regions = crate::effect::mask::FromInsets {
+        insets: decoration.insets(),
+        outer: drawing.outer,
+        radii: declared_rounding(state, pane).map_or(Corners::all(0.0), |effect| effect.radii()),
+    };
+    let zoom = (
+        drawing.rect.size.w / f64::from(drawing.outer.w.max(1)),
+        drawing.rect.size.h / f64::from(drawing.outer.h.max(1)),
+    );
+    for &(index, at, _) in &places {
+        if at != depth {
+            continue;
+        }
+        for (part, slot, around) in around_layer(index, titlebar) {
+            let owner = crate::effect::plan::Owner::Pane(pane, part);
+            if !slots.is_ready(&owner, slot) {
+                continue;
+            }
+            let mask = match part {
+                PaneSlot::Titlebar => regions.region("titlebar").map(|(band, radii)| Mask::Rect {
+                    rect: Rectangle::new(
+                        (
+                            drawing.rect.loc.x + f64::from(band.loc.x) * zoom.0,
+                            drawing.rect.loc.y + f64::from(band.loc.y) * zoom.1,
+                        )
+                            .into(),
+                        (
+                            f64::from(band.size.w) * zoom.0,
+                            f64::from(band.size.h) * zoom.1,
+                        )
+                            .into(),
+                    ),
+                    radii: corners_times(radii, zoom.0),
+                }),
+                _ => decoration
+                    .layer_canvas(index, drawing)
+                    .map(|canvas| Mask::Rect {
+                        rect: canvas,
+                        radii: Corners::all(0.0),
+                    }),
+            };
+            if let Some(element) = mask.and_then(|mask| {
+                slot_element(
+                    state,
+                    slots,
+                    &owner,
+                    slot,
+                    mask,
+                    drawing.scale,
+                    drawing.alpha,
+                )
+            }) {
+                placed.push((index, around, Some(element)));
+            }
+        }
+    }
+    placed
+}
+
 /// The frame around a pane, at one depth.
 ///
 /// Takes the pane's whole transform — through [`crate::decoration::Drawing`] —
@@ -1028,6 +1360,7 @@ fn chrome(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     elements: &mut Vec<Element>,
+    slots: Option<&Slots>,
     pane: crate::pane::PaneId,
     depth: Depth,
     drawing: crate::decoration::Drawing,
@@ -1042,6 +1375,9 @@ fn chrome(
         // `decoration::tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
         values: state.decorations.values(),
     };
+    let mut around = slots
+        .map(|slots| layer_slots(state, slots, pane, depth, drawing))
+        .unwrap_or_default();
     let mut animating = false;
     if let Some(decoration) = state.panes.get_mut(pane).and_then(Pane::decoration_mut) {
         // Already `Element`s: a layer is a memory buffer on the software path
@@ -1051,7 +1387,11 @@ fn chrome(
         // And already an answer about whether they are still moving, out of the
         // same call: asking afterwards is asking the flag the draw just spent.
         // See [`Drawn`].
-        animating = decoration.layer_elements(renderer, depth, &look, drawing, elements);
+        let mut mark = 0;
+        let mut hook = |into: &mut Vec<Element>, index: usize, before: bool| {
+            place_around(&mut around, &mut mark, into, index, before);
+        };
+        animating = decoration.layer_elements(renderer, depth, &look, drawing, elements, &mut hook);
     }
     // Ask for another frame while the decoration is still moving. The client
     // has not damaged anything, so without this the next frame never comes and
@@ -1372,11 +1712,13 @@ pub(crate) fn elements(
     }
 
     // Everything else, in the one order there is: [`stacked`] lists it,
-    // topmost first, and this turns each entry into elements and nothing more.
+    // topmost first, and this turns each entry into elements and nothing more,
+    // with the slots beside a surface when any slot is wanted ([`stacked_walk`]).
     let output = state.output_for(screen);
-    for each in stacked(state, screen, now) {
+    let listed = stacked(state, screen, now);
+    let mut draw = |each: Walked| {
         match each {
-            Stacked::Layer(surface, geometry) => {
+            Walked::Stacked(Stacked::Layer(surface, geometry)) => {
                 // A layer map's geometry is already in its own output's
                 // coordinates, so these are the one thing on this list that
                 // must *not* be shifted.
@@ -1391,14 +1733,14 @@ pub(crate) fn elements(
                     ))
                 }));
             }
-            Stacked::Surface(id, area, alpha) => {
+            Walked::Stacked(Stacked::Surface(id, area, alpha)) => {
                 if let Some(output) = output.as_ref() {
                     elements.extend(scripted(
                         state, renderer, output, id, area, alpha, screen, now, scale,
                     ));
                 }
             }
-            Stacked::Panes(nodes) => {
+            Walked::Stacked(Stacked::Panes(nodes)) => {
                 panes(
                     state,
                     renderer,
@@ -1410,13 +1752,45 @@ pub(crate) fn elements(
                     scale,
                 );
             }
+            Walked::Slot(owner, slot, rect, alpha) => {
+                let rect = match owner {
+                    crate::effect::plan::Owner::LayerShell(_) => rect,
+                    crate::effect::plan::Owner::Surface(..)
+                    | crate::effect::plan::Owner::Pane(..) => {
+                        Rectangle::new(rect.loc - screen.loc, rect.size)
+                    }
+                };
+                let part = Mask::Rect {
+                    rect: rect.to_f64(),
+                    radii: Corners::all(0.0),
+                };
+                elements.extend(slot_element(
+                    state,
+                    &prepared.slots,
+                    &owner,
+                    slot,
+                    part,
+                    scale,
+                    alpha,
+                ));
+            }
         }
+    };
+    match output.as_ref().filter(|_| !prepared.slots.is_empty()) {
+        Some(on) => stacked_walk(
+            listed,
+            &on.name(),
+            &|owner, slot| prepared.slots.is_ready(owner, slot),
+            &mut draw,
+        ),
+        None => listed.into_iter().map(Walked::Stacked).for_each(&mut draw),
     }
 
     elements
 }
 
 /// One entry of a monitor's frame, before it is turned into elements.
+#[derive(Debug)]
 pub(crate) enum Stacked {
     /// A client's layer surface, and where it is in its output's own
     /// coordinates.
@@ -1426,6 +1800,80 @@ pub(crate) enum Stacked {
     Surface(crate::scripted::SurfaceId, Rectangle<i32, Logical>, f32),
     /// Panes, in the order they are drawn in.
     Panes(Vec<(Node, f32)>),
+}
+
+/// One entry of [`stacked_walk`]: an entry of [`stacked`], or an effect's
+/// slot beside a layer surface or a scripted surface, with the rectangle and
+/// alpha that surface is drawn with, as its [`Stacked`] carries them.
+#[derive(Debug)]
+pub(crate) enum Walked {
+    Stacked(Stacked),
+    Slot(
+        crate::effect::plan::Owner,
+        Slot,
+        Rectangle<i32, Logical>,
+        f32,
+    ),
+}
+
+/// [`stacked`]'s entries with their slots (Ruling 15), `elements`' loop: a
+/// layer surface's or a scripted surface's `front` just over it, its
+/// `replace` in its place and its `behind` just under it, where `ready` says
+/// a slot has a result. `output` names the output they are on, which a
+/// scripted surface's slots are kept under.
+/// `state::tests::real_client::reflow_on_close::stacking::a_layer_shell_behind_slot_is_drawn_just_under_its_surface_and_a_surface_front_slot_just_over_it`;
+/// with no slot ready, every stacking test.
+pub(crate) fn stacked_walk(
+    stacked: Vec<Stacked>,
+    output: &str,
+    ready: &dyn Fn(&crate::effect::plan::Owner, Slot) -> bool,
+    mut push: impl FnMut(Walked),
+) {
+    use smithay::reexports::wayland_server::Resource as _;
+    for each in stacked {
+        let (owner, rect, alpha) = match &each {
+            Stacked::Layer(surface, geometry) => (
+                crate::effect::plan::Owner::LayerShell(surface.wl_surface().id()),
+                *geometry,
+                1.0,
+            ),
+            Stacked::Surface(id, area, alpha) => (
+                crate::effect::plan::Owner::Surface(*id, output.to_owned()),
+                *area,
+                *alpha,
+            ),
+            Stacked::Panes(_) => {
+                push(Walked::Stacked(each));
+                continue;
+            }
+        };
+        let mut each = Some(each);
+        bracket(
+            |slot| ready(&owner, slot),
+            |slot| match slot {
+                Some(slot) => push(Walked::Slot(owner.clone(), slot, rect, alpha)),
+                None => {
+                    if let Some(each) = each.take() {
+                        push(Walked::Stacked(each));
+                    }
+                }
+            },
+        );
+    }
+}
+
+/// A part with its slots, topmost first: its `front`, then its `replace` in
+/// its place or the part itself (`None`), then its `behind`, each slot only
+/// where `has` says. A layer surface, a scripted surface and a window's
+/// popups are walked so. `tests::a_part_is_bracketed_by_its_front_and_behind_and_replaced_in_its_place`.
+pub(crate) fn bracket(has: impl Fn(Slot) -> bool, mut piece: impl FnMut(Option<Slot>)) {
+    if has(Slot::Front) {
+        piece(Some(Slot::Front));
+    }
+    piece(has(Slot::Replace).then_some(Slot::Replace));
+    if has(Slot::Behind) {
+        piece(Some(Slot::Behind));
+    }
 }
 
 /// Everything on one monitor below the drag icon, topmost first.
@@ -1661,8 +2109,10 @@ fn panes(
         // Through the same `spread` the layers themselves are placed by, so the
         // rectangle this keeps a pane alive for is the rectangle its widest
         // layer will actually occupy — including the scaling, since a window
-        // enlarged by a mode has its bleed enlarged with it.
-        let reach = crate::decoration::spread(
+        // enlarged by a mode has its bleed enlarged with it. And grown by the
+        // furthest its effects' results reach
+        // (`tests::the_bleed_cull_counts_an_effects_reach`).
+        let bled = crate::decoration::spread(
             crate::decoration::Drawing {
                 rect: frame.rect,
                 outer: outer.size,
@@ -1679,7 +2129,9 @@ fn panes(
                 ),
         )
         .drawn;
-        if frame.matrix.is_identity() && frame.deform.is_none() && !reach.overlaps(screen.to_f64())
+        if frame.matrix.is_identity()
+            && frame.deform.is_none()
+            && !reaches(bled, prepared.slots.reach(pane), screen)
         {
             continue;
         }
@@ -1698,8 +2150,11 @@ fn panes(
         if remains {
             let mut client = Some(remains_elements(state, pane, &frame, outer.size, scale));
             pane_pieces(elements, |elements, piece| match piece {
-                Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
+                Piece::Layers(depth) => {
+                    chrome(state, renderer, elements, None, pane, depth, drawing);
+                }
                 Piece::Client => elements.extend(client.take().into_iter().flatten()),
+                Piece::Slot(..) => {}
             });
             continue;
         }
@@ -1717,9 +2172,9 @@ fn panes(
             // cover the client, and the handover does not restack anything.
             pane_pieces(elements, |elements, piece| match piece {
                 Piece::Layers(depth) if state.loading.decorated => {
-                    chrome(state, renderer, elements, pane, depth, drawing);
+                    chrome(state, renderer, elements, None, pane, depth, drawing);
                 }
-                Piece::Layers(_) => (),
+                Piece::Layers(_) | Piece::Slot(..) => (),
                 Piece::Client => scene(state, renderer, elements, pane, frame, now, scale),
             });
             continue;
@@ -1908,17 +2363,56 @@ fn panes(
         // In front on both paths: a warped pane's popups are a capture of
         // their own, drawn as a warp in front of the pane's above
         // (`tests::a_warped_panes_popups_are_in_front_of_it`).
-        let (popups, _) = popup_elements(renderer, &window, origin, output_scale, frame.opacity);
-        // Scaled with the window and not cut to its tile: a menu has to reach
-        // past its parent's tile, and a menu cut to it would lose every item
-        // past the tile's edge. The window's own fit with the cut taken off,
-        // which is `a_popup_reaches_past_its_parents_tile`. This is the only
-        // place a toplevel's popups are drawn on this path -- the toplevel
-        // itself is drawn from its own surface tree, which holds no popups;
-        // see [`toplevel_elements`].
-        elements.extend(popups.into_iter().filter_map(|element| {
-            fitted(element, origin, fitting.uncut(), output_scale).map(Fitted::into_element)
-        }));
+        let (popups, covered) =
+            popup_elements(renderer, &window, origin, output_scale, frame.opacity);
+        let popups_part = covered.map(|covered| Mask::Rect {
+            rect: Rectangle::new(
+                (
+                    placed.origin.x + f64::from(covered.loc.x) * fitting.factor.x,
+                    placed.origin.y + f64::from(covered.loc.y) * fitting.factor.y,
+                )
+                    .into(),
+                (
+                    f64::from(covered.size.w) * fitting.factor.x,
+                    f64::from(covered.size.h) * fitting.factor.y,
+                )
+                    .into(),
+            ),
+            radii: Corners::all(0.0),
+        });
+        let popups_owner = crate::effect::plan::Owner::Pane(pane, PaneSlot::Popups);
+        let mut popups = Some(popups);
+        // With their slots around them, as any part's (`bracket`).
+        bracket(
+            |slot| prepared.slots.is_ready(&popups_owner, slot),
+            |slot| match slot {
+                Some(slot) => elements.extend(popups_part.and_then(|part| {
+                    slot_element(
+                        state,
+                        &prepared.slots,
+                        &popups_owner,
+                        slot,
+                        part,
+                        scale,
+                        frame.opacity,
+                    )
+                })),
+                // Scaled with the window and not cut to its tile: a menu has
+                // to reach past its parent's tile, and a menu cut to it would
+                // lose every item past the tile's edge. The window's own fit
+                // with the cut taken off, which is
+                // `a_popup_reaches_past_its_parents_tile`. This is the only
+                // place a toplevel's popups are drawn on this path -- the
+                // toplevel itself is drawn from its own surface tree, which
+                // holds no popups; see [`toplevel_elements`].
+                None => {
+                    elements.extend(popups.take().into_iter().flatten().filter_map(|element| {
+                        fitted(element, origin, fitting.uncut(), output_scale)
+                            .map(Fitted::into_element)
+                    }))
+                }
+            },
+        );
 
         // **This is the sandwich.** The client goes into the list between the
         // layers its own style produced -- `above` and `frame` are already in
@@ -1937,8 +2431,43 @@ fn panes(
         // A style's rounding and its programs, asked once here, outside the
         // walk, which holds the state: `None` for every unstyled window.
         let rounded = clipped(state, pane);
-        pane_pieces(elements, |elements, piece| match piece {
-            Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
+        // With its slots: what is ready this pass goes around the pieces it
+        // belongs to, and with none the walk is `PANE_ORDER`
+        // (`tests::with_no_slots_the_pane_walk_is_pane_order`).
+        let ready = slot_ready(&prepared.slots, pane);
+        let zoom = frame.rect.size.w / f64::from(outer.size.w.max(1));
+        pane_walk(elements, &ready, |elements, piece| match piece {
+            Piece::Layers(depth) => chrome(
+                state,
+                renderer,
+                elements,
+                Some(&prepared.slots),
+                pane,
+                depth,
+                drawing,
+            ),
+            Piece::Slot(part, slot) => {
+                let radii = declared_rounding(state, pane).map(|effect| effect.radii());
+                let mask = match part {
+                    PaneSlot::Client => crate::effect::mask::client_mask(
+                        client,
+                        radii.map(|radii| corners_times(radii, fitting.factor.x)),
+                    ),
+                    _ => crate::effect::mask::pane_mask(
+                        frame.rect,
+                        radii.map(|radii| corners_times(radii, zoom)),
+                    ),
+                };
+                elements.extend(slot_element(
+                    state,
+                    &prepared.slots,
+                    &crate::effect::plan::Owner::Pane(pane, part),
+                    slot,
+                    mask,
+                    scale,
+                    frame.opacity,
+                ));
+            }
             Piece::Client => {
                 // Popups are not here: they went in above the whole sandwich,
                 // before this walk started. See the comment there.
@@ -2341,9 +2870,10 @@ pub(crate) fn flat_window_elements(
     pane_pieces(&mut elements, |elements, piece| match piece {
         Piece::Layers(depth) => {
             if let Some(pane) = pane {
-                chrome(state, renderer, elements, pane, depth, drawing);
+                chrome(state, renderer, elements, None, pane, depth, drawing);
             }
         }
+        Piece::Slot(..) => {}
         // A style's rounding, drawn here as on the flat path, so a deformed
         // window keeps its corners: each surface through the clipped
         // programs, at real size, cut to what the capture holds of the client
@@ -3631,7 +4161,7 @@ mod tests {
 
             let source = include_str!("render.rs");
             let popups = source
-                .find("let (popups, _) = popup_elements(")
+                .find("let (popups, covered) =")
                 .expect("`elements` still draws the popups");
             let sandwich = source[popups..]
                 .find("// **This is the sandwich.**")
@@ -4058,6 +4588,7 @@ mod tests {
             super::pane_pieces(&mut order, |into, piece| match piece {
                 super::Piece::Layers(depth) => into.extend(decoration.layers_at(depth)),
                 super::Piece::Client => into.push("<client>"),
+                super::Piece::Slot(..) => into.push("<slot>"),
             });
 
             assert_eq!(
@@ -4089,6 +4620,297 @@ mod tests {
                  always has"
             );
         });
+    }
+
+    /// The example fixture's `Decoration`, as
+    /// `a_client_is_drawn_between_two_layers_of_its_own_style` builds it. On
+    /// the Qt thread only, with no Wayland client in the test (the #99 rule).
+    fn example() -> crate::decoration::Decoration {
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/panes/example"
+        ));
+        let style = crate::style::load(dir).expect("the example fixture loads");
+        crate::decoration::Decoration::from_style(&style, 300, 200).expect("three scenes")
+    }
+
+    /// The walk over `decoration` with these slots, as names.
+    fn walked(
+        decoration: &crate::decoration::Decoration,
+        has: &dyn Fn(crate::effect::plan::PaneSlot, crate::effect::rules::Slot) -> bool,
+    ) -> Vec<String> {
+        let mut order: Vec<String> = Vec::new();
+        super::pane_walk(&mut order, has, |into, piece| match piece {
+            super::Piece::Layers(depth) => {
+                into.extend(decoration.layers_at(depth).map(ToOwned::to_owned));
+            }
+            super::Piece::Client => into.push("<client>".to_owned()),
+            super::Piece::Slot(part, slot) => into.push(format!("<{part:?} {slot:?}>")),
+        });
+        order
+    }
+
+    /// **With no slots the pane walk is `PANE_ORDER`**, exactly.
+    #[test]
+    fn with_no_slots_the_pane_walk_is_pane_order() {
+        on_the_qt_thread(|| {
+            assert_eq!(
+                walked(&example(), &|_, _| false),
+                ["spikes", "bar", "<client>", "glow"]
+            );
+        });
+    }
+
+    #[test]
+    fn client_slots_bracket_the_client_and_replace_takes_its_place() {
+        use crate::effect::plan::PaneSlot;
+        use crate::effect::rules::Slot;
+        on_the_qt_thread(|| {
+            let decoration = example();
+            assert_eq!(
+                walked(&decoration, &|part, slot| part == PaneSlot::Client
+                    && slot != Slot::Replace),
+                [
+                    "spikes",
+                    "bar",
+                    "<Client Front>",
+                    "<client>",
+                    "<Client Behind>",
+                    "glow"
+                ]
+            );
+            assert_eq!(
+                walked(&decoration, &|part, slot| part == PaneSlot::Client
+                    && slot == Slot::Replace),
+                ["spikes", "bar", "<Client Replace>", "glow"]
+            );
+        });
+    }
+
+    /// **Pane slots are around the sandwich**; the popups are not in the
+    /// walk at all (they go in ahead of it), so a pane's `front` is below them.
+    #[test]
+    fn pane_slots_are_around_the_sandwich_and_below_the_popups() {
+        use crate::effect::plan::PaneSlot;
+        use crate::effect::rules::Slot;
+        on_the_qt_thread(|| {
+            let decoration = example();
+            assert_eq!(
+                walked(&decoration, &|part, slot| part == PaneSlot::Pane
+                    && slot != Slot::Replace),
+                [
+                    "<Pane Front>",
+                    "spikes",
+                    "bar",
+                    "<client>",
+                    "glow",
+                    "<Pane Behind>"
+                ]
+            );
+            assert_eq!(
+                walked(&decoration, &|part, slot| part == PaneSlot::Pane
+                    && slot == Slot::Replace),
+                ["<Pane Replace>"]
+            );
+        });
+    }
+
+    /// **A wanted slot with nothing ready draws what no slot draws**: a
+    /// `replace` with nothing ready draws the part, `behind` and `front`
+    /// nothing, so the walk with every slot wanted and none ready is the walk
+    /// with none wanted. This is the walk's half of \[16\] §5's every-failure
+    /// test; that every real failure leaves its slot not ready is Task 24's.
+    #[test]
+    fn a_wanted_slot_with_nothing_ready_draws_what_no_slot_draws() {
+        use crate::effect::plan::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::{Origin, RuleKey, Slot};
+        on_the_qt_thread(|| {
+            let pane = crate::pane::PaneId::from_raw(1);
+            let key = RuleKey {
+                origin: Origin::User,
+                index: 0,
+                generation: 1,
+            };
+            let mut slots = Slots::default();
+            for part in [
+                PaneSlot::Pane,
+                PaneSlot::Client,
+                PaneSlot::Titlebar,
+                PaneSlot::Popups,
+                PaneSlot::Layer(0),
+                PaneSlot::Layer(1),
+                PaneSlot::Layer(2),
+            ] {
+                for slot in [Slot::Behind, Slot::Front, Slot::Replace] {
+                    slots.want(Owner::Pane(pane, part), slot, key);
+                }
+            }
+            let decoration = example();
+            let ready = super::slot_ready(&slots, pane);
+            assert_eq!(
+                walked(&decoration, &ready),
+                walked(&decoration, &|_, _| false),
+                "a wanted slot with nothing ready changed the walk"
+            );
+        });
+    }
+
+    /// **The titlebar's slots bracket the `bar` layer**, wherever its depth:
+    /// in `rounded` the bar is at `behind`.
+    #[test]
+    fn titlebar_slots_bracket_the_bar_layer() {
+        use crate::style::Depth;
+        assert_eq!(
+            super::titlebar_layer(&[(0, Depth::Frame, "border"), (1, Depth::Behind, "bar")]),
+            Some(1)
+        );
+        assert_eq!(
+            super::titlebar_layer(&[(0, Depth::Above, "spikes"), (1, Depth::Frame, "frame")]),
+            Some(1),
+            "no `bar`: the first frame layer"
+        );
+        assert_eq!(super::titlebar_layer(&[(0, Depth::Behind, "shadow")]), None);
+    }
+
+    /// **Around a layer its own slots are outermost**, the titlebar's inside
+    /// them on the titlebar's layer: a titlebar is a band of its layer. A
+    /// layer's `replace` goes in its place; the titlebar's, a band, over it.
+    #[test]
+    fn around_a_layer_its_own_slots_are_outermost_and_the_titlebars_inside() {
+        use super::Around::{After, Before, InPlace};
+        use crate::effect::plan::PaneSlot::{Layer, Titlebar};
+        use crate::effect::rules::Slot::{Behind, Front, Replace};
+        assert_eq!(
+            super::around_layer(1, Some(1)).collect::<Vec<_>>(),
+            [
+                (Layer(1), Front, Before),
+                (Titlebar, Front, Before),
+                (Titlebar, Replace, Before),
+                (Layer(1), Replace, InPlace),
+                (Titlebar, Behind, After),
+                (Layer(1), Behind, After),
+            ]
+        );
+        assert_eq!(
+            super::around_layer(0, Some(1)).collect::<Vec<_>>(),
+            [
+                (Layer(0), Front, Before),
+                (Layer(0), Replace, InPlace),
+                (Layer(0), Behind, After),
+            ],
+            "not the titlebar's layer"
+        );
+    }
+
+    /// **A part is bracketed by its `front` and `behind`, and replaced in its
+    /// place**: what a layer surface, a scripted surface and a window's
+    /// popups are walked by.
+    #[test]
+    fn a_part_is_bracketed_by_its_front_and_behind_and_replaced_in_its_place() {
+        use crate::effect::rules::Slot;
+        let walk = |has: &dyn Fn(Slot) -> bool| {
+            let mut order = Vec::new();
+            super::bracket(has, |slot| order.push(slot));
+            order
+        };
+        assert_eq!(walk(&|_| false), [None], "the part alone");
+        assert_eq!(
+            walk(&|slot| slot != Slot::Replace),
+            [Some(Slot::Front), None, Some(Slot::Behind)]
+        );
+        assert_eq!(walk(&|slot| slot == Slot::Replace), [Some(Slot::Replace)]);
+    }
+
+    /// **A layer's `replace` takes its place, and its other slots go around
+    /// it**: `chrome`'s hook, driven as `Decoration::layer_elements` drives
+    /// it, a layer's own elements pushed between the two calls.
+    #[test]
+    fn a_layers_replace_takes_its_place_and_its_other_slots_go_around_it() {
+        use super::Around::{After, Before, InPlace};
+        let drawn = |placed: &mut Vec<(usize, super::Around, Option<&'static str>)>| {
+            let (mut into, mut mark) = (vec!["above"], 0);
+            for (index, name) in [(0, "frame"), (1, "bar")] {
+                super::place_around(placed, &mut mark, &mut into, index, true);
+                into.push(name);
+                super::place_around(placed, &mut mark, &mut into, index, false);
+            }
+            into
+        };
+        assert_eq!(
+            drawn(&mut vec![
+                (1, Before, Some("<front>")),
+                (1, After, Some("<behind>")),
+            ]),
+            ["above", "frame", "<front>", "bar", "<behind>"]
+        );
+        assert_eq!(
+            drawn(&mut vec![
+                (1, Before, Some("<front>")),
+                (1, InPlace, Some("<replace>")),
+                (1, After, Some("<behind>")),
+            ]),
+            ["above", "frame", "<front>", "<replace>", "<behind>"]
+        );
+        assert_eq!(
+            drawn(&mut Vec::new()),
+            ["above", "frame", "bar"],
+            "nothing ready"
+        );
+    }
+
+    /// **The bleed cull counts an effect's reach**: a glow behind a pane
+    /// reaching onto a monitor keeps the pane there.
+    #[test]
+    fn the_bleed_cull_counts_an_effects_reach() {
+        let screen = smithay::utils::Rectangle::<i32, smithay::utils::Logical>::new(
+            (0, 0).into(),
+            (100, 100).into(),
+        );
+        let drawn = smithay::utils::Rectangle::<f64, smithay::utils::Logical>::new(
+            (110.0, 0.0).into(),
+            (50.0, 50.0).into(),
+        );
+        assert!(!super::reaches(drawn, 0, screen));
+        assert!(super::reaches(drawn, 12, screen));
+    }
+
+    /// **A slot is placed over its part grown by its reach, as the part is
+    /// drawn**: the padded box around the part's own rectangle, the mask the
+    /// part inside it; a part drawn at half size has its reach halved too.
+    #[test]
+    fn a_slot_is_placed_over_its_part_grown_by_its_reach_as_the_part_is_drawn() {
+        use smithay::utils::{Physical, Rectangle};
+        use solium_effects::fragment::Corners;
+        let radii = Corners::all(8.0);
+        let at = |x: f64, y: f64, w: f64, h: f64| {
+            Rectangle::<f64, Physical>::new((x, y).into(), (w, h).into())
+        };
+        let (dst, mask) =
+            super::slot_placement(at(100.0, 50.0, 200.0, 100.0), (224, 124).into(), 12, radii);
+        assert_eq!(dst, Rectangle::new((88, 38).into(), (224, 124).into()));
+        assert_eq!(mask, (at(12.0, 12.0, 200.0, 100.0), radii));
+        let (dst, mask) =
+            super::slot_placement(at(100.0, 50.0, 100.0, 50.0), (224, 124).into(), 12, radii);
+        assert_eq!(
+            dst,
+            Rectangle::new((94, 44).into(), (112, 62).into()),
+            "half size"
+        );
+        assert_eq!(mask, (at(6.0, 6.0, 100.0, 50.0), radii));
+    }
+
+    /// **A result is cut by its part's shape unless it owns its edges**: an
+    /// effect that reads `shape` draws its own (a glow outside the part), and
+    /// `mask = "alpha"` is the self capture's, not the shape's (\[16\] §2).
+    #[test]
+    fn a_result_is_cut_by_its_parts_shape_unless_it_owns_its_edges() {
+        use crate::effect::rules::MaskKind;
+        assert!(super::cut_by_shape(MaskKind::Shape, false));
+        assert!(
+            !super::cut_by_shape(MaskKind::Shape, true),
+            "it reads `shape`"
+        );
+        assert!(!super::cut_by_shape(MaskKind::Alpha, false));
     }
 
     #[test]

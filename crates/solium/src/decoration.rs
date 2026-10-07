@@ -403,6 +403,10 @@ struct LayerScene {
     depth: Depth,
     /// Which layer this is, for diagnostics and for the order tests.
     name: String,
+    /// Its place among the style's layers (`LayerSpec.index`), which a
+    /// `layer:<name>` rule's slots are kept under and the walk's hook is told
+    /// (`render::tests::around_a_layer_its_own_slots_are_outermost_and_the_titlebars_inside`).
+    index: usize,
     scene: qml::Scene,
     backing: Backing,
     /// How far past the pane this layer may paint, as it declared.
@@ -612,6 +616,7 @@ impl Decoration {
                 // moved into bundles without changing a pixel.
                 depth: Depth::Frame,
                 name: String::new(),
+                index: 0,
                 scene,
                 backing: Backing::for_host(on_gpu),
                 // A single QML file has no manifest to declare one in, so a
@@ -743,6 +748,12 @@ impl Decoration {
     /// Returns whether any layer drawn here is still animating, which comes out
     /// of the draw rather than from a question after it — see
     /// [`crate::render::Drawn`].
+    ///
+    /// `around(into, index, before)` is called just before and just after each
+    /// layer drawn, with its place among the style's layers: where an
+    /// effect's slots around that layer go (`render::around_layer`). With
+    /// nothing to add it pushes nothing, so the list is what it was
+    /// (`render::tests::with_no_slots_the_pane_walk_is_pane_order`).
     pub(crate) fn layer_elements(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -750,6 +761,7 @@ impl Decoration {
         look: &Look<'_>,
         drawing: Drawing,
         into: &mut Vec<Element>,
+        around: &mut dyn FnMut(&mut Vec<Element>, usize, bool),
     ) -> bool {
         let width = drawing.outer.w.max(1);
         let height = drawing.outer.h.max(1);
@@ -807,7 +819,9 @@ impl Decoration {
                 kind: Kind::Unspecified,
             };
             let drawn = layer.element(renderer, insets, size, placement, drawing.scale);
+            around(into, layer.index, true);
             into.extend(drawn.element);
+            around(into, layer.index, false);
             animating |= drawn.animating;
         }
         animating
@@ -840,6 +854,30 @@ impl Decoration {
     /// given frame draws is [`awake_at`]'s.
     pub(crate) fn layers_at(&self, depth: Depth) -> impl Iterator<Item = &str> {
         at(self.layers.iter(), depth).map(|layer| layer.name.as_str())
+    }
+
+    /// Every layer's place among the style's layers, its depth and its name,
+    /// in declaration order: what `render::titlebar_layer` picks the
+    /// titlebar's layer from (`render::tests::titlebar_slots_bracket_the_bar_layer`).
+    pub(crate) fn layer_places(&self) -> impl Iterator<Item = (usize, Depth, &str)> {
+        self.layers
+            .iter()
+            .map(|layer| (layer.index, layer.depth, layer.name.as_str()))
+    }
+
+    /// Where the layer at `index` is drawn for `drawing`: its canvas, the
+    /// pane grown by its bleed, scaled with the window, as
+    /// [`Self::layer_elements`] places it ([`spread`]). What a slot around it
+    /// is placed over.
+    pub(crate) fn layer_canvas(
+        &self,
+        index: usize,
+        drawing: Drawing,
+    ) -> Option<Rectangle<f64, Logical>> {
+        self.layers
+            .iter()
+            .find(|layer| layer.index == index)
+            .map(|layer| spread(drawing, layer.bleed).drawn)
     }
 
     /// Every layer's name with its place among the style's layers
@@ -1051,7 +1089,7 @@ impl Decoration {
             // The client is in the order because the order is the frame's, and
             // a walk that left it out would be a second list. It has no
             // property to take.
-            crate::render::Piece::Client => {}
+            crate::render::Piece::Client | crate::render::Piece::Slot(..) => {}
         });
         asked.first().copied()
     }
@@ -1329,6 +1367,7 @@ impl LayerScene {
         Ok(Self {
             depth: spec.depth,
             name: spec.name.clone(),
+            index: spec.index,
             scene,
             backing: Backing::for_host(on_gpu),
             bleed: spec.bleed,
@@ -1890,6 +1929,7 @@ fn say_what_was_built(dir: &Path, decoration: &Decoration) {
     crate::render::pane_pieces(&mut order, |into, piece| match piece {
         crate::render::Piece::Layers(depth) => into.extend(decoration.layers_at(depth)),
         crate::render::Piece::Client => into.push("<the client>"),
+        crate::render::Piece::Slot(..) => {}
     });
     // The reach as well as the order, because a style that looks wrong raises
     // two questions and neither is answerable from the screen. "The spikes are

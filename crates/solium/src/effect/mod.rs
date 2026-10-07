@@ -13,13 +13,6 @@
 pub(crate) mod element;
 pub(crate) mod gl;
 pub(crate) mod host;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Task 19's walk cuts each slot's result by its mask"
-    )
-)]
 pub(crate) mod mask;
 pub(crate) mod plan;
 pub(crate) mod rules;

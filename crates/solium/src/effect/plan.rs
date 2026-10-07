@@ -22,7 +22,13 @@ pub(crate) struct BoundChain {
         expect(dead_code, reason = "Task 20's part captures are padded by it")
     )]
     pub(crate) reach: f64,
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 19's bleed cull reads it"))]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no frame reads it yet: the cull grows a pane by its results' reach"
+        )
+    )]
     pub(crate) bleed: f64,
     #[cfg_attr(
         not(test),
@@ -178,10 +184,6 @@ pub(crate) enum Owner {
 /// in the part's own physical pixels. Filled by Tasks 21 and 22; with no GPU
 /// a test marks a slot ready with none
 /// (`tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`).
-#[expect(
-    dead_code,
-    reason = "Tasks 21 and 22 make a slot ready from its chain's result"
-)]
 #[derive(Clone, Debug)]
 pub(crate) struct Ready {
     pub(crate) element: EffectElement,
@@ -202,11 +204,8 @@ pub(crate) struct Slots {
 }
 
 impl Slots {
+    /// Nothing wanted.
     /// `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the §8.4 guard's tests only")
-    )]
     pub(crate) fn is_empty(&self) -> bool {
         self.wants.is_empty()
     }
@@ -236,6 +235,13 @@ impl Slots {
         self.wants.contains_key(&(owner.clone(), slot))
     }
 
+    /// The rule a wanted slot resolved to, whose mask and chain say how its
+    /// result is cut (`render::cut_by_shape`).
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
+    pub(crate) fn key(&self, owner: &Owner, slot: Slot) -> Option<RuleKey> {
+        self.wants.get(&(owner.clone(), slot)).copied()
+    }
+
     /// A slot's result, its pane reaching as far as it does
     /// (`tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`).
     #[expect(
@@ -262,10 +268,6 @@ impl Slots {
     }
 
     /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 19's walk places a ready slot's element")
-    )]
     pub(crate) fn at(&self, owner: &Owner, slot: Slot) -> Option<&Ready> {
         self.ready
             .get(&(owner.clone(), slot))
@@ -273,11 +275,8 @@ impl Slots {
     }
 
     /// Whether the slot has a result to draw: what the walk asks.
-    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 19's walk asks it of every slot")
-    )]
+    /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`,
+    /// `render::tests::a_wanted_slot_with_nothing_ready_draws_what_no_slot_draws`.
     pub(crate) fn is_ready(&self, owner: &Owner, slot: Slot) -> bool {
         self.ready.contains_key(&(owner.clone(), slot))
     }
@@ -290,11 +289,8 @@ impl Slots {
         self.ready.insert((owner, slot), None);
     }
 
-    /// `tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 19's bleed cull grows a pane by it")
-    )]
+    /// `tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`,
+    /// `render::tests::the_bleed_cull_counts_an_effects_reach`.
     pub(crate) fn reach(&self, pane: PaneId) -> i32 {
         self.reach.get(&pane).copied().unwrap_or(0)
     }
@@ -428,6 +424,8 @@ mod tests {
         assert!(!slots.is_empty());
         assert!(slots.wanted(&client, Slot::Behind));
         assert!(!slots.wanted(&client, Slot::Front));
+        assert_eq!(slots.key(&client, Slot::Behind), Some(key));
+        assert_eq!(slots.key(&client, Slot::Front), None);
         assert!(!slots.wanted(
             &Owner::Pane(crate::pane::PaneId::from_raw(7), PaneSlot::Pane),
             Slot::Behind

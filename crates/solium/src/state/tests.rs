@@ -1061,7 +1061,7 @@ fn the_focus_half_counts_a_frame_by_its_rectangle_where_the_renderer_counts_its_
         tokens(include_str!("../render.rs")).contains(&tokens(
             "if frame.matrix.is_identity()
                      && frame.deform.is_none()
-                     && !reach.overlaps(screen.to_f64())"
+                     && !reaches(bled, prepared.slots.reach(pane), screen)"
         )),
         "`render::elements` no longer culls by the bleed, or now culls a transformed frame: \
          the note beside `render::drawn_on` is out of date"
@@ -22925,7 +22925,7 @@ end)
         /// elements. The pointer is asked of the hit tests themselves.
         mod stacking {
             use super::*;
-            use crate::render::Stacked;
+            use crate::render::{Stacked, Walked};
             use crate::scripted::Layer as Scripted;
             use zwlr_layer_shell_v1::Layer as Client;
 
@@ -22939,6 +22939,8 @@ end)
                 Script(crate::scripted::SurfaceId),
                 /// A pane.
                 Pane(crate::pane::PaneId),
+                /// An effect's slot beside a surface.
+                Effect(crate::effect::rules::Slot),
             }
 
             /// The desk's monitor.
@@ -22951,21 +22953,42 @@ end)
                 drawn_by(desk, screen())
             }
 
-            /// What the monitor at `monitor` draws, topmost first.
+            /// What the monitor at `monitor` draws, topmost first, through
+            /// the walk `elements` draws with, no slot ready: so every
+            /// stacking test is the walk's guard that with no slot nothing
+            /// moves.
             fn drawn_by(desk: &Desk, monitor: Rectangle<i32, Logical>) -> Vec<Seen> {
-                crate::render::stacked(&desk.state, monitor, desk.state.clock.now())
-                    .into_iter()
-                    .flat_map(|each| match each {
-                        Stacked::Layer(surface, _) => {
-                            vec![Seen::Layer(surface.wl_surface().id().protocol_id())]
+                drawn_with(desk, monitor, &|_, _| false)
+            }
+
+            /// [`drawn_by`], with the slots `ready` says are ready.
+            fn drawn_with(
+                desk: &Desk,
+                monitor: Rectangle<i32, Logical>,
+                ready: &dyn Fn(&crate::effect::plan::Owner, crate::effect::rules::Slot) -> bool,
+            ) -> Vec<Seen> {
+                let output = desk
+                    .state
+                    .output_for(monitor)
+                    .map(|output| output.name())
+                    .unwrap_or_default();
+                let mut drawn = Vec::new();
+                crate::render::stacked_walk(
+                    crate::render::stacked(&desk.state, monitor, desk.state.clock.now()),
+                    &output,
+                    ready,
+                    |walked| match walked {
+                        Walked::Stacked(Stacked::Layer(surface, _)) => {
+                            drawn.push(Seen::Layer(surface.wl_surface().id().protocol_id()));
                         }
-                        Stacked::Surface(id, _, _) => vec![Seen::Script(id)],
-                        Stacked::Panes(nodes) => nodes
-                            .into_iter()
-                            .map(|((pane, ..), _)| Seen::Pane(pane))
-                            .collect(),
-                    })
-                    .collect()
+                        Walked::Stacked(Stacked::Surface(id, _, _)) => drawn.push(Seen::Script(id)),
+                        Walked::Stacked(Stacked::Panes(nodes)) => {
+                            drawn.extend(nodes.into_iter().map(|((pane, ..), _)| Seen::Pane(pane)))
+                        }
+                        Walked::Slot(_, slot, ..) => drawn.push(Seen::Effect(slot)),
+                    },
+                );
+                drawn
             }
 
             /// Whether `top` is drawn over `bottom`, both being drawn.
@@ -23205,6 +23228,36 @@ end)
                         desk.state.claim_under((100.0, 15.0).into())
                     ),
                     (Some(overlay), Claim::Surface)
+                );
+            }
+
+            /// **A layer-shell `behind` slot is drawn just under its surface,
+            /// and a scripted surface's `front` just over it.**
+            #[test]
+            fn a_layer_shell_behind_slot_is_drawn_just_under_its_surface_and_a_surface_front_slot_just_over_it()
+             {
+                use crate::effect::plan::Owner;
+                use crate::effect::rules::Slot;
+                let mut desk = Desk::new();
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let bar_id = id(&bar);
+                let script = scripted(&mut desk, "strip", Scripted::Bottom, strip(0, 1920));
+                let ready = |owner: &Owner, slot: Slot| match owner {
+                    Owner::LayerShell(id) => id.protocol_id() == bar_id && slot == Slot::Behind,
+                    Owner::Surface(id, _) => *id == script && slot == Slot::Front,
+                    Owner::Pane(..) => false,
+                };
+                let drawn = drawn_with(&desk, screen(), &ready);
+                let at = |seen| drawn.iter().position(|each| *each == seen).expect("drawn");
+                assert_eq!(
+                    at(Seen::Effect(Slot::Behind)),
+                    at(Seen::Layer(bar_id)) + 1,
+                    "{drawn:?}"
+                );
+                assert_eq!(
+                    at(Seen::Effect(Slot::Front)) + 1,
+                    at(Seen::Script(script)),
+                    "{drawn:?}"
                 );
             }
 
