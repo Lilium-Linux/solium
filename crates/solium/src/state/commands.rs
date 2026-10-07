@@ -384,6 +384,12 @@ impl Solium {
                     }
                 }
                 Command::Idle(settings) => self.idle.configure(settings),
+                // Only the data: applying it to real devices needs a
+                // libinput handle, which only a backend has. `tty.rs` reads
+                // `self.input.config()` on `DeviceAdded` and again on
+                // reload; the nested backend never does, which is correct --
+                // it has no libinput devices to apply anything to.
+                Command::Input(config) => self.input.configure(config),
                 Command::Power { monitor, on } => match monitor {
                     None => self.power_all(on),
                     Some(name) => {
