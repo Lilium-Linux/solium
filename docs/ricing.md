@@ -1369,6 +1369,39 @@ over.
 **[modes.md](modes.md)** is the guide, with a whole working mode in forty lines
 and the two mistakes everyone makes first.
 
+### An X11 helper that was never meant to be seen
+
+Some autostart entries exist only so a desktop portal has something to talk
+to — KDE's screen-sharing fallback, `xwaylandvideobridge`, is the one this was
+found against (issue #221), and it is not the only X11 program shaped this
+way. Its window says, through `WM_HINTS.input`, that it never wants the
+keyboard; Solium reads that the same way it already reads a menu's or a
+tooltip's own way of saying "do not manage me" (`xwayland.rs`'s
+`places_itself`), so such a window is not tiled, not decorated, and left out
+of `sol.windows()` — nothing a bar or a window list built from that call ever
+has to filter out by hand.
+
+It is still a real client with a real process, and `super+q` still closes it
+like any other X11 window: `WM_DELETE_WINDOW` when it answers one, and a kill
+of the client itself, by the pid Xwayland already named for it, the second
+time a close goes unanswered for a whole grace period with nothing to show
+for it — not a response, not a dialog, just silence (`state/close.rs`'s own
+notes on `GRACE` and `x11_refused_once` say why only silence counts).
+
+Nothing here stops the autostart entry from starting in the first place —
+that is Fedora's `/etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop`, not
+Solium's to own — so if you would rather it never ran at all, override it per
+session the way any `XDG_CONFIG_DIRS` autostart entry is overridden: a copy
+under `~/.config/autostart/` with `Hidden=true` added.
+
+    mkdir -p ~/.config/autostart
+    cp /etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop ~/.config/autostart/
+    printf 'Hidden=true\n' >> ~/.config/autostart/org.kde.xwaylandvideobridge.desktop
+
+A copy with `Hidden=true` is what every spec-following autostart reader
+treats as "do not start this one" — the original in `/etc/xdg/autostart` is
+untouched, so a package update to it never undoes the override.
+
 ## Worth knowing
 
 Each layer of a frame is drawn over its canvas: the window's outer rect, grown
