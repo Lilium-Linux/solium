@@ -177,6 +177,30 @@ pub(crate) struct WindowInfo {
     /// already on screen whose limits changed (#115). See
     /// `real_client::client_sizes::a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`.
     pub(crate) shown: bool,
+    /// Its `_NET_WM_WINDOW_TYPE`, by the name `xwayland::window_type_name`
+    /// gives it -- `"normal"` for an X11 window with none, same as
+    /// `xwayland::places_itself` and `floats_over_its_parent` already read it
+    /// -- or absent for a Wayland window, which has no such property to ask.
+    ///
+    /// The raw material a window rule (#56) needs for a case the compositor's
+    /// own default does not already cover generically: `accepts_input` below
+    /// is what decides whether a window is hidden at all (#221), and this is
+    /// what a rule can still key a *different* decision on for one that is
+    /// not -- floating every `"dialog"`, say, on top of a layout that does not
+    /// already do that on its own.
+    pub(crate) x11_type: Option<String>,
+    /// Whether the window may ever be given the keyboard: an X11 client's own
+    /// `WM_HINTS.input`, or `true` for a Wayland window, which has no
+    /// equivalent to decline with -- `xdg_toplevel` offers the keyboard to
+    /// every surface that can be focused and nothing else.
+    ///
+    /// `false` is what `xwayland::asks_not_to_be_shown` reads, nested inside
+    /// `map_window_request`, to decide a window is hidden before a script
+    /// ever sees it at all (#221) -- so this is never `false` on a row
+    /// `sol.windows()` actually returns today, and is here so a future
+    /// window rule (#56) has it without this compositor making that same
+    /// decision twice.
+    pub(crate) accepts_input: bool,
 }
 
 /// How a window is drawn this instant, as `Solium::window_under` reads it:
@@ -2478,7 +2502,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // limited neither side. `cramped` is the layout's own word coming back,
     // from `sol.place`. `app_id` is what `tiling.client_size_ignore` matches.
     // `shown` is whether the window's client has been shown yet; see
-    // `WindowInfo::shown`.
+    // `WindowInfo::shown`. `x11_type` and `accepts_input` are read only from
+    // an X11 window's own properties (#221) -- `nil` and `true` for a Wayland
+    // one -- and exist for a window rule (#56) to act on a case the
+    // compositor's own default (hiding a window `accepts_input` names false)
+    // does not already decide for it.
     sol.set(
         "windows",
         lua.create_function(|lua, ()| {
@@ -2502,6 +2530,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("max", size_table(lua, window.max)?)?;
                 entry.set("cramped", window.cramped)?;
                 entry.set("shown", window.shown)?;
+                entry.set("x11_type", window.x11_type.clone())?;
+                entry.set("accepts_input", window.accepts_input)?;
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
@@ -5379,6 +5409,8 @@ mod tests {
                 max: None,
                 cramped: false,
                 shown: true,
+                x11_type: None,
+                accepts_input: true,
             }],
             monitors: vec![MonitorInfo {
                 name: "test-1".to_owned(),
@@ -7443,6 +7475,8 @@ mod tests {
             max: None,
             cramped: false,
             shown: true,
+            x11_type: None,
+            accepts_input: true,
         };
         snapshot.windows = vec![
             window(1, false, Parentage::None),
@@ -7935,6 +7969,8 @@ mod tests {
                     max: None,
                     cramped: false,
                     shown: true,
+                    x11_type: None,
+                    accepts_input: true,
                 })
                 .collect(),
             monitors: vec![MonitorInfo {
@@ -11042,6 +11078,8 @@ mod dialogs {
             max: None,
             cramped: false,
             shown: true,
+            x11_type: None,
+            accepts_input: true,
         }
     }
 
@@ -14596,6 +14634,8 @@ mod directions {
             max: None,
             cramped: false,
             shown: true,
+            x11_type: None,
+            accepts_input: true,
         }
     }
 

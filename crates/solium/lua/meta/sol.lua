@@ -53,6 +53,8 @@
 ---@field max? sol.Size The largest the application says it can be, frame included; absent when it set no limit.
 ---@field cramped boolean Whether the layout last placed it with `cramped = true`.
 ---@field shown boolean Whether its application has shown its first frame yet.
+---@field x11_type? string Its X11 `_NET_WM_WINDOW_TYPE`, lower case (`"normal"`, `"dialog"`, `"utility"`, `"toolbar"`, `"menu"`, `"dropdown-menu"`, `"popup-menu"`, `"tooltip"`, `"notification"`, `"splash"`); `"normal"` for an X11 window with no type of its own, same as EWMH's own default, and absent for a Wayland window, which has no such property to ask.
+---@field accepts_input boolean Whether the window may ever be given the keyboard: an X11 client's own `WM_HINTS.input`, or `true` for a Wayland window, which has nothing equivalent to decline with. `false` is what hides a window from this list and from tiling and decoration in the first place (#221), so a row here never reads `false` today; it exists for a window rule to act on.
 
 ---One row of `sol.apps()`: an installed, visible application.
 ---@class sol.App
