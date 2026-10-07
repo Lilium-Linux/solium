@@ -351,20 +351,23 @@ fn knobs(pane: Option<&str>, loading: Option<&str>, report: &mut Report) {
     }
 }
 
-/// One effect folder: the sandbox, the schema, the lints, and the compile
-/// when `gpu` is given (Ruling 9). What it names (`pixels`, a `fallback`
-/// naming an effect, a `use` stage) is looked for beside it first and then in
-/// `shipped`, as at run time.
+/// One effect folder: the sandbox, the schema, the lints, binding at the
+/// defaults and at each rung, and, when `gpu` is given, the compile and the
+/// formats its render node renders into (Rulings 9, 11). What it names
+/// (`pixels`, a `fallback` naming an effect, a `use` stage) is looked for
+/// beside it first and then in `shipped`, as at run time.
 /// `tests::a_broken_effect_folder_fails_check`,
 /// `tests::a_frag_reading_an_undeclared_param_fails_check_at_its_line`,
 /// `tests::a_name_missing_from_uses_is_a_warning_not_a_failure`,
 /// `tests::with_no_render_node_shaders_are_said_not_compiled`,
-/// `tests::a_program_that_does_not_compile_fails_the_check`.
+/// `tests::with_no_render_node_formats_are_said_not_checked`,
+/// `tests::a_program_that_does_not_compile_fails_the_check`,
+/// `tests::an_effect_needing_rgba16f_fails_where_the_probe_says_it_is_missing`.
 pub(crate) fn effect_folder<C: crate::effect::host::Compiler>(
     report: &mut Report,
     dir: &Path,
     shipped: &Path,
-    gpu: Option<&mut C>,
+    gpu: Option<(&mut C, crate::pool::Formats)>,
 ) {
     use crate::effect::host::{Host, Library};
     // `solium --check .` inside a folder: a path ending in `.` or `..` has no
@@ -392,9 +395,14 @@ pub(crate) fn effect_folder<C: crate::effect::host::Compiler>(
     // The folder's own place first, then the shipped folders: a user's copy of
     // `zoom` names the shipped `fade` (`tests::a_user_folder_naming_a_shipped_effect_passes`).
     let mut host: Host<C::Program> = Host::new(Library::with(Some(parent), shipped.to_path_buf()));
+    // Known before the folder is bound, so a rung this GPU cannot render
+    // into is dropped as at run time; with no render node every rung is kept.
+    if let Some((_, formats)) = &gpu {
+        host.set_formats(*formats);
+    }
     host.want("check", [name.clone()]);
     let compiled = gpu.is_some();
-    if let Some(compiler) = gpu {
+    if let Some((compiler, _)) = gpu {
         host.compile_pending(compiler);
     }
     say(report, host.problems());
@@ -408,7 +416,7 @@ pub(crate) fn effect_folder<C: crate::effect::host::Compiler>(
             if compiled {
                 ""
             } else {
-                " (shaders not compiled: no render node)"
+                " (shaders not compiled: no render node; formats not checked)"
             }
         ));
     }
@@ -418,16 +426,18 @@ pub(crate) fn effect_folder<C: crate::effect::host::Compiler>(
 /// names, each with what it names in turn (Ruling 9). The shipped folders
 /// are `cargo test`'s, as the shipped styles are.
 /// `tests::every_user_folder_and_every_named_effect_is_checked`,
+/// `tests::with_no_render_node_formats_are_said_not_checked`,
 /// `cli::check_exits_1_on_a_broken_user_effect_folder`.
 pub(crate) fn effects<C: crate::effect::host::Compiler>(
     report: &mut Report,
     library: &crate::effect::host::Library,
     wanted: &[String],
-    mut gpu: Option<&mut C>,
+    mut gpu: Option<(&mut C, crate::pool::Formats)>,
 ) {
     report.line("  effects:");
     if gpu.is_none() {
         report.line("    shaders not compiled: no render node");
+        report.line("    formats not checked: no render node");
     }
     let mut seen = std::collections::BTreeSet::new();
     for dir in library.user_folders() {
@@ -440,11 +450,23 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         );
-        effect_folder(report, &dir, library.shipped(), gpu.as_deref_mut());
+        effect_folder(
+            report,
+            &dir,
+            library.shipped(),
+            gpu.as_mut()
+                .map(|(compiler, formats)| (&mut **compiler, *formats)),
+        );
     }
     for name in wanted.iter().filter(|name| !seen.contains(*name)) {
         match library.resolve(name) {
-            Some(dir) => effect_folder(report, &dir, library.shipped(), gpu.as_deref_mut()),
+            Some(dir) => effect_folder(
+                report,
+                &dir,
+                library.shipped(),
+                gpu.as_mut()
+                    .map(|(compiler, formats)| (&mut **compiler, *formats)),
+            ),
             None => report.fail(&format!(
                 "    `{name}`: the configuration names an effect nobody ships"
             )),
@@ -525,11 +547,13 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
         // (`cli::check_exits_0_on_a_good_effect_folder`).
         Some(dir) if dir.is_dir() && dir.join("effect.lua").is_file() => {
             let mut gpu = render_node();
+            let formats = gpu.as_mut().map(crate::pool::probe_formats);
+            let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
             effect_folder(
                 &mut report,
                 dir,
                 &crate::assets::effects(),
-                gpu.as_mut().map(crate::effect::GlCompiler).as_mut(),
+                compiler.as_mut().zip(formats),
             );
         }
         Some(file) => {
@@ -559,13 +583,10 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                         scenes(&mut scripts, &mut report);
                         styles(&mut report);
                         let mut gpu = render_node();
+                        let formats = gpu.as_mut().map(crate::pool::probe_formats);
+                        let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
                         let library = crate::effect::host::Library::new();
-                        effects(
-                            &mut report,
-                            &library,
-                            &[],
-                            gpu.as_mut().map(crate::effect::GlCompiler).as_mut(),
-                        );
+                        effects(&mut report, &library, &[], compiler.as_mut().zip(formats));
                         let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
                             .into_iter()
                             .find_map(|name| std::env::var(name).ok());
@@ -1080,11 +1101,69 @@ mod tests {
             &[("effect.frag", "vec4 sol_effect(vec2 uv) {\n  FAIL\n}\n")],
         );
         let mut compiler = Counting::default();
-        let (passed, out) =
-            reported(|report| effect_folder(report, &dir, &shipped(), Some(&mut compiler)));
+        let (passed, out) = reported(|report| {
+            effect_folder(
+                report,
+                &dir,
+                &shipped(),
+                Some((&mut compiler, crate::pool::Formats { rgba16f: true })),
+            );
+        });
         let _ = std::fs::remove_dir_all(place);
         assert!(!passed);
         assert!(out.contains("effect.frag:2"), "{out}");
+    }
+
+    /// **With no render node, formats are said not checked**, beside the
+    /// shaders, for one folder and for plain `--check`'s effects: every rung
+    /// is kept, and that is not a failure.
+    #[test]
+    fn with_no_render_node_formats_are_said_not_checked() {
+        let (passed, out) = reported(|report| {
+            effect_folder::<Counting>(report, &effect_fixture("identity"), &shipped(), None);
+        });
+        assert!(passed && out.contains("formats not checked"), "{out}");
+        let library = crate::effect::host::Library::with(None, effect_fixtures());
+        let (passed, out) = reported(|report| {
+            effects::<Counting>(report, &library, &["identity".to_owned()], None);
+        });
+        assert!(
+            passed && out.contains("    formats not checked: no render node"),
+            "{out}"
+        );
+    }
+
+    /// **An effect whose every rung needs `rgba16f` fails where the render
+    /// node's probe says it is missing**, and passes where it renders: the
+    /// formats are judged on the GPU the check opened.
+    #[test]
+    fn an_effect_needing_rgba16f_fails_where_the_probe_says_it_is_missing() {
+        let place = crate::effect::host::tests::scratch("check-rgba16f");
+        let dir = crate::effect::host::tests::folder(
+            &place,
+            "deep",
+            "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'effect.frag', format = 'rgba16f' } } }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let check = |rgba16f: bool| {
+            let mut compiler = Counting::default();
+            reported(|report| {
+                effect_folder(
+                    report,
+                    &dir,
+                    &shipped(),
+                    Some((&mut compiler, crate::pool::Formats { rgba16f })),
+                );
+            })
+        };
+        let (missing, out) = check(false);
+        assert!(!missing && out.contains("rgba16f"), "{out}");
+        let (renders, out) = check(true);
+        let _ = std::fs::remove_dir_all(place);
+        assert!(renders, "{out}");
     }
 
     /// **A folder named through `..` is checked by its own name**, as

@@ -103,7 +103,10 @@ impl Sandbox {
         })
     }
 
-    #[expect(dead_code, reason = "Task 26's mesh call is its reader")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 26's mesh call is its reader")
+    )]
     pub(crate) fn lua(&self) -> &Lua {
         &self.lua
     }
@@ -284,13 +287,6 @@ impl Sandbox {
     }
 
     /// `reach` or `bleed` for these params. `tests::reach_as_a_function_is_called_with_the_params`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Loaded::bind's, which Task 14's rules bind through"
-        )
-    )]
     pub(crate) fn extent(&self, key: &str, params: &[(String, Value)]) -> Result<f64, Problem> {
         let value: LuaValue = self
             .returned()?

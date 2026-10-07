@@ -318,8 +318,16 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     state.memory_report();
     // Effects compile here, between frames, where the context is current:
     // nothing at all when no effect is wanted (spec §8.4,
-    // `effect::host::tests::an_empty_host_touches_no_gl`).
+    // `effect::host::tests::an_empty_host_touches_no_gl`). The formats a
+    // plan may draw into are probed first, once, and only once something is
+    // wanted (`effect::host::tests::the_formats_are_probed_once_and_only_while_something_is_wanted`;
+    // the probe itself is wirecheck case 12c's). Task 14 turns a changed
+    // answer into a rebind after the frame.
     if !state.effects.is_idle() {
+        if state.effects.wants_formats() {
+            let found = crate::pool::probe_formats(renderer);
+            let _ = state.effects.set_formats(found);
+        }
         state
             .effects
             .compile_pending(&mut crate::effect::GlCompiler(renderer));

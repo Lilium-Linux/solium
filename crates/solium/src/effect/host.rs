@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use solium_effects::glsl::{self, Host as Glsl, Signature, Sources};
+use solium_effects::glsl::{self, Sources};
 use solium_effects::spec::{EffectSpec, Rung, Severity, Value};
-use solium_effects::stage::Stage;
+use solium_effects::stage::{Binding, Plan, Stage};
 
 use super::sandbox::Sandbox;
 
@@ -112,13 +112,6 @@ impl Problem {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Loaded::bind's, which Task 14's rules bind through"
-        )
-    )]
     pub(crate) fn warning(effect: &str, file: &Path, message: String) -> Self {
         Self {
             severity: Severity::Warning,
@@ -135,11 +128,12 @@ pub(crate) struct Loaded<P = super::gl::Program> {
     name: String,
     dir: PathBuf,
     spec: EffectSpec,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "bind's and Task 26's mesh call's")
-    )]
     sandbox: Sandbox,
+    /// The params at their defaults, and the stages `stages` gave for them at
+    /// load: a bind at the defaults reads these rather than calling
+    /// `stages(p)` again (`tests::a_fallback_naming_another_effect_binds_it_at_load`).
+    defaults: Vec<(String, Value)>,
+    stages: Vec<Stage>,
     hash: u64,
     /// The effects its `use` stages name at the defaults, loaded with it
     /// (`tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`).
@@ -152,16 +146,17 @@ pub(crate) struct Loaded<P = super::gl::Program> {
 }
 
 /// An effect bound with a rule's overrides.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 14's rules bind through it")
-)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Bound {
     pub(crate) params: Vec<(String, Value)>,
     pub(crate) reach: f64,
     pub(crate) bleed: f64,
     pub(crate) warnings: Vec<Problem>,
+    /// The configured plan, then one plan per fallback rung, each that
+    /// needs a format this GPU lacks dropped ([`Host::bind`]; empty from
+    /// [`Loaded::bind`]).
+    /// `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`.
+    pub(crate) plans: Vec<Plan>,
 }
 
 impl<P> Loaded<P> {
@@ -176,13 +171,16 @@ impl<P> Loaded<P> {
         let spec = sandbox.load_effect()?;
         let (defaults, _) = solium_effects::spec::bind(&spec.params, &[])
             .map_err(|message| Problem::error(name, &file, None, message))?;
+        let stages = sandbox.stages(&spec, &defaults)?;
         let mut used = Vec::new();
-        named_by_use(&sandbox.stages(&spec, &defaults)?, &mut used);
+        named_by_use(&stages, &mut used);
         Ok(Self {
             name: name.to_owned(),
             dir: dir.to_owned(),
             spec,
             sandbox,
+            defaults,
+            stages,
             hash: folder_hash(dir),
             used,
             needs: Vec::new(),
@@ -190,6 +188,13 @@ impl<P> Loaded<P> {
         })
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Task 26's revive loads a poisoned version again by it"
+        )
+    )]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -214,14 +219,20 @@ impl<P> Loaded<P> {
         self.hash
     }
 
+    /// The stages for `params` as bound: those read at load when they are
+    /// the defaults, else what `stages(p)` gives now. At load and at bind,
+    /// never per frame. `tests::a_fallback_naming_another_effect_binds_it_at_load`.
+    pub(crate) fn stages(&self, params: &[(String, Value)]) -> Result<Vec<Stage>, Problem> {
+        if params == self.defaults.as_slice() {
+            return Ok(self.stages.clone());
+        }
+        self.sandbox.stages(&self.spec, params)
+    }
+
     /// Bind with `overrides`: refused for an unknown param or a wrong kind,
     /// clamped with a warning out of range, then `reach` and `bleed` for them.
     /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`,
     /// `tests::binding_names_the_effect_and_warns_of_a_clamp`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 14's rules bind through it")
-    )]
     pub(crate) fn bind(&self, overrides: &[(String, Value)]) -> Result<Bound, Problem> {
         let file = self.dir.join("effect.lua");
         let (params, warnings) = solium_effects::spec::bind(&self.spec.params, overrides)
@@ -237,6 +248,7 @@ impl<P> Loaded<P> {
             reach,
             bleed,
             warnings,
+            plans: Vec::new(),
         })
     }
 }
@@ -354,6 +366,10 @@ pub(crate) struct Host<P = super::gl::Program> {
     sweep: bool,
     /// The compiler's [`Compiler::line_shift`], once a compile has failed.
     line_shift: Option<u32>,
+    /// What this GPU renders into: `None` until the first `prepare` probes
+    /// it, and then unknown rather than missing, so every rung is kept
+    /// (Ruling 11, `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`).
+    formats: Option<crate::pool::Formats>,
     problems: Vec<Problem>,
     generation: u64,
     /// Loads that read a folder: what `a_reload_loads_each_effect_once` counts.
@@ -373,6 +389,7 @@ impl<P: Clone> Host<P> {
             held: BTreeSet::new(),
             sweep: false,
             line_shift: None,
+            formats: None,
             problems: Vec::new(),
             generation: 0,
             #[cfg(test)]
@@ -384,7 +401,7 @@ impl<P: Clone> Host<P> {
     /// which rebinds every rule and calls this again.
     #[expect(
         dead_code,
-        reason = "Task 9's bound plans hold their programs through it"
+        reason = "Task 14's binder holds every rule's programs through it"
     )]
     pub(crate) fn hold(&mut self, keys: impl IntoIterator<Item = u64>) {
         let keys: BTreeSet<u64> = keys.into_iter().collect();
@@ -409,11 +426,7 @@ impl<P: Clone> Host<P> {
         let mut names: BTreeSet<String> = self.wanted.values().flatten().cloned().collect();
         let mut queue: Vec<String> = names.iter().cloned().collect();
         while let Some(name) = queue.pop() {
-            let Some(loaded) = self
-                .slots
-                .get(&name)
-                .and_then(|slot| slot.pending.as_ref().or(slot.current.as_deref()))
-            else {
+            let Some(loaded) = self.latest(&name) else {
                 continue;
             };
             let named = loaded.spec().fallback.iter().filter_map(|rung| match rung {
@@ -478,6 +491,7 @@ impl<P: Clone> Host<P> {
         // reload reads a changed folder once
         // (`tests::a_reload_loads_each_effect_once`).
         let mut loaded: BTreeSet<String> = BTreeSet::new();
+        let mut fresh: Vec<String> = Vec::new();
         loop {
             let next: Vec<String> = self
                 .all_wanted()
@@ -488,9 +502,17 @@ impl<P: Clone> Host<P> {
                 break;
             }
             for name in next {
-                self.load_one(&name);
+                if self.load_one(&name) {
+                    fresh.push(name.clone());
+                }
                 loaded.insert(name);
             }
+        }
+        // Bound once the whole closure is loaded, since a version's plans
+        // splice in the effects it uses and falls back to
+        // (`tests::a_fallback_naming_another_effect_binds_it_at_load`).
+        for name in fresh {
+            self.programs_of(&name);
         }
         let keep = self.all_wanted();
         let gone: Vec<String> = self
@@ -517,7 +539,9 @@ impl<P: Clone> Host<P> {
         }
     }
 
-    fn load_one(&mut self, name: &str) {
+    /// Load `name` if its folder changed, or was never loaded: whether a
+    /// new version is now pending.
+    fn load_one(&mut self, name: &str) -> bool {
         let Some(dir) = self.library.resolve(name) else {
             self.replace_problems(
                 name,
@@ -530,7 +554,7 @@ impl<P: Clone> Host<P> {
                     ),
                 )],
             );
-            return;
+            return false;
         };
         let hash = folder_hash(&dir);
         if let Some(slot) = self.slots.get(name)
@@ -540,85 +564,287 @@ impl<P: Clone> Host<P> {
                 .as_ref()
                 .is_some_and(|current| current.hash() == hash && current.dir() == dir)
         {
-            return;
+            return false;
         }
         #[cfg(test)]
         {
             self.loads += 1;
         }
-        let mut problems = Vec::new();
         match Loaded::<P>::load(name, &dir) {
-            Err(problem) => problems.push(problem),
-            Ok(mut loaded) => match self.programs_of(&loaded) {
-                Err(found) => problems.extend(found),
-                Ok((needs, warnings)) => {
-                    problems.extend(warnings);
-                    loaded.needs = needs;
-                    let index = self.slots.get(name).map_or_else(
-                        || {
-                            self.next_index += 1;
-                            self.next_index
-                        },
-                        |slot| slot.index,
-                    );
-                    let slot = self.slots.entry(name.to_owned()).or_insert(Versions {
-                        index,
-                        generation: 0,
-                        current: None,
-                        pending: None,
-                    });
-                    slot.pending = Some(loaded);
-                }
-            },
+            Err(problem) => {
+                self.replace_problems(name, vec![problem]);
+                false
+            }
+            Ok(loaded) => {
+                let index = self.slots.get(name).map_or_else(
+                    || {
+                        self.next_index += 1;
+                        self.next_index
+                    },
+                    |slot| slot.index,
+                );
+                let slot = self.slots.entry(name.to_owned()).or_insert(Versions {
+                    index,
+                    generation: 0,
+                    current: None,
+                    pending: None,
+                });
+                slot.pending = Some(loaded);
+                self.replace_problems(name, Vec::new());
+                true
+            }
         }
-        self.replace_problems(name, problems);
     }
 
-    /// The programs an effect's default binding needs, asked for, and its
-    /// lint warnings; a lint error refuses the version. For a `frag` effect
-    /// in this task; Task 9 adds every step of every rung.
-    fn programs_of(
+    /// Bind a pending version at its defaults and record every program its
+    /// plans ask for as its `needs`, so it swaps in only once each compiled;
+    /// a plan that cannot be made, or a lint error, refuses the version and
+    /// keeps the one that ran.
+    /// `tests::a_stage_effect_swaps_in_only_once_every_step_compiled`,
+    /// `tests::a_reload_whose_stage_fails_its_lints_keeps_the_one_that_ran`.
+    fn programs_of(&mut self, name: &str) {
+        if !self.has_pending(name) {
+            return;
+        }
+        match self.bind_plans(name, &[]) {
+            Ok((bound, needs)) => {
+                if let Some(pending) = self
+                    .slots
+                    .get_mut(name)
+                    .and_then(|slot| slot.pending.as_mut())
+                {
+                    pending.needs = needs;
+                }
+                self.add_problems(bound.warnings);
+            }
+            Err(problems) => {
+                // Refused as a load is: on a cold start the effect is absent
+                // (`tests::a_stage_effect_swaps_in_only_once_every_step_compiled`).
+                let cold = self.slots.get_mut(name).is_some_and(|slot| {
+                    slot.pending = None;
+                    slot.current.is_none()
+                });
+                if cold {
+                    self.slots.remove(name);
+                }
+                self.add_problems(problems);
+            }
+        }
+    }
+
+    /// The newest version of `name`: the one waiting to compile if there is
+    /// one, else the one that runs. What a bind at config load reads, since
+    /// a cold effect is not current until the next `prepare`.
+    /// `tests::a_fallback_naming_another_effect_binds_it_at_load`.
+    pub(crate) fn latest(&self, name: &str) -> Option<&Loaded<P>> {
+        self.slots
+            .get(name)
+            .and_then(|slot| slot.pending.as_ref().or(slot.current.as_deref()))
+    }
+
+    /// Bind `name` with `overrides` into its configured plan and one plan
+    /// per fallback rung, dropping any that needs a format this GPU lacks;
+    /// every step's program is asked for, and held until the next config
+    /// load's [`Self::hold`]. A cold effect binds against its pending
+    /// version. `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`,
+    /// `tests::a_fallback_naming_another_effect_binds_it_at_load`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 14's rules bind through it")
+    )]
+    pub(crate) fn bind(
         &mut self,
-        loaded: &Loaded<P>,
-    ) -> Result<(Vec<u64>, Vec<Problem>), Vec<Problem>> {
-        let Some(frag) = loaded.spec().frag.clone() else {
-            return Ok((Vec::new(), Vec::new()));
-        };
-        let file = loaded.dir().join(&frag);
-        let text = std::fs::read_to_string(&file).map_err(|err| {
+        name: &str,
+        overrides: &[(String, Value)],
+    ) -> Result<Bound, Problem> {
+        let (bound, keys) = self.bind_plans(name, overrides).map_err(|problems| {
+            problems.into_iter().next().unwrap_or_else(|| {
+                Problem::error(name, Path::new(name), None, "it did not bind".to_owned())
+            })
+        })?;
+        self.held.extend(keys);
+        Ok(bound)
+    }
+
+    /// [`Self::bind`]'s plans, and the key of every program they ask for, or
+    /// every problem that refused them; nothing is held. Every step's
+    /// `.frag` is linted before anything is asked for, so a refused binding
+    /// asks for nothing (`tests::a_stage_effect_swaps_in_only_once_every_step_compiled`).
+    fn bind_plans(
+        &mut self,
+        name: &str,
+        overrides: &[(String, Value)],
+    ) -> Result<(Bound, Vec<u64>), Vec<Problem>> {
+        let loaded = self.latest(name).ok_or_else(|| {
             vec![Problem::error(
-                loaded.name(),
-                &file,
+                name,
+                Path::new(name),
                 None,
-                format!("cannot read it: {err}"),
+                format!("no effect called `{name}` is loaded"),
             )]
         })?;
-        let signature = default_signature(loaded.spec(), Glsl::Pass);
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-        for lint in glsl::lint(&signature, &text) {
-            let problem = Problem {
-                line: Some(lint.line),
-                ..Problem::error(loaded.name(), &file, None, lint.message)
-            };
-            match lint.severity {
-                Severity::Error => errors.push(problem),
-                Severity::Warning => warnings.push(Problem {
-                    severity: lint.severity,
-                    ..problem
-                }),
+        let file = loaded.dir().join("effect.lua");
+        let mut bound = loaded.bind(overrides).map_err(|problem| vec![problem])?;
+        // Each plan to make: its root effect, its params, and which rung.
+        let mut wanted = vec![(name.to_owned(), overrides.to_vec(), None::<String>)];
+        for (index, rung) in loaded.spec().fallback.iter().enumerate() {
+            let which = Some(format!("its fallback {}", index + 1));
+            match rung {
+                Rung::Params(more) => {
+                    let mut with = overrides.to_vec();
+                    with.extend(more.iter().cloned());
+                    wanted.push((name.to_owned(), with, which));
+                }
+                Rung::Effect(other) => wanted.push((other.clone(), Vec::new(), which)),
             }
+        }
+        let mut plans = Vec::new();
+        for (root, with, rung) in wanted {
+            let mut resolve =
+                |effect: &str, params: &[(String, Value)]| -> Result<Binding, String> {
+                    let each = self
+                        .latest(effect)
+                        .ok_or_else(|| format!("`{effect}` is not loaded"))?;
+                    let (params, _) = solium_effects::spec::bind(&each.spec().params, params)?;
+                    let stages = each.stages(&params).map_err(|problem| problem.message)?;
+                    Ok(Binding {
+                        stages,
+                        inputs: each.spec().inputs.clone(),
+                        params,
+                    })
+                };
+            let plan =
+                solium_effects::stage::flatten(&root, &with, &mut resolve).map_err(|message| {
+                    let message = match &rung {
+                        Some(rung) => format!("{rung}: {message}"),
+                        None => message,
+                    };
+                    vec![Problem::error(name, &file, None, message)]
+                })?;
+            // Unknown formats (no probe yet) keep the plan: the probe's
+            // first answer rebinds (Ruling 11).
+            let lacking = self.formats.is_some_and(|formats| !formats.supports(&plan));
+            if !lacking {
+                plans.push(plan);
+            }
+        }
+        if plans.is_empty() {
+            return Err(vec![Problem::error(
+                name,
+                &file,
+                None,
+                "no version of this effect can run on this GPU: each draws into rgba16f, which it cannot render into"
+                    .to_owned(),
+            )]);
+        }
+        let mut texts: HashMap<PathBuf, String> = HashMap::new();
+        let mut asks = Vec::new();
+        let mut errors = Vec::new();
+        for step in plans.iter().flat_map(|plan| {
+            plan.steps
+                .iter()
+                .chain(plan.states.iter().flat_map(|state| state.steps.iter()))
+        }) {
+            let Some(dir) = self.latest(&step.effect).map(|each| each.dir().to_owned()) else {
+                errors.push(Problem::error(
+                    &step.effect,
+                    Path::new(&step.effect),
+                    None,
+                    format!("`{}` is not loaded", step.effect),
+                ));
+                continue;
+            };
+            let frag = dir.join(&step.frag);
+            if !texts.contains_key(&frag) {
+                match std::fs::read_to_string(&frag) {
+                    Ok(text) => {
+                        texts.insert(frag.clone(), text);
+                    }
+                    Err(err) => {
+                        let problem = Problem::error(
+                            &step.effect,
+                            &frag,
+                            None,
+                            format!("cannot read it: {err}"),
+                        );
+                        if !errors.contains(&problem) {
+                            errors.push(problem);
+                        }
+                        continue;
+                    }
+                }
+            }
+            let Some(text) = texts.get(&frag) else {
+                continue;
+            };
+            for lint in glsl::lint(&step.signature, text) {
+                let problem = Problem {
+                    line: Some(lint.line),
+                    severity: lint.severity,
+                    ..Problem::error(&step.effect, &frag, None, lint.message)
+                };
+                let into = match lint.severity {
+                    Severity::Error => &mut errors,
+                    Severity::Warning => &mut bound.warnings,
+                };
+                if !into.contains(&problem) {
+                    into.push(problem);
+                }
+            }
+            asks.push((
+                step.effect.clone(),
+                frag,
+                glsl::assemble(&step.signature, text),
+            ));
         }
         if !errors.is_empty() {
             return Err(errors);
         }
-        let key = self.request(
-            loaded.name(),
-            &file,
-            glsl::PASS_VERTEX,
-            glsl::assemble(&signature, &text),
-        );
-        Ok((vec![key], warnings))
+        let mut keys = Vec::with_capacity(asks.len());
+        for (effect, frag, sources) in asks {
+            keys.push(self.request(&effect, &frag, glsl::PASS_VERTEX, sources));
+        }
+        let mut at = keys.iter();
+        for step in plans.iter_mut().flat_map(|plan| {
+            plan.steps.iter_mut().chain(
+                plan.states
+                    .iter_mut()
+                    .flat_map(|state| state.steps.iter_mut()),
+            )
+        }) {
+            if let Some(key) = at.next() {
+                step.key = *key;
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        bound.plans = plans;
+        Ok((bound, keys))
+    }
+
+    /// What this GPU renders into, once probed.
+    /// `tests::the_formats_are_probed_once_and_only_while_something_is_wanted`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 10's preflight reads it"))]
+    pub(crate) fn formats(&self) -> Option<crate::pool::Formats> {
+        self.formats
+    }
+
+    /// Record what the probe found: whether that changed what was known
+    /// (`None` to `Some`, or another answer), which Task 14 turns into a
+    /// rebind after the frame.
+    /// `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`.
+    pub(crate) fn set_formats(&mut self, formats: crate::pool::Formats) -> bool {
+        let changed = self.formats != Some(formats);
+        self.formats = Some(formats);
+        changed
+    }
+
+    /// Whether `prepare` should probe the formats now: something is wanted
+    /// and they were never probed, so a desktop with no effect never makes
+    /// the probe's target.
+    /// `tests::the_formats_are_probed_once_and_only_while_something_is_wanted`.
+    pub(crate) fn wants_formats(&self) -> bool {
+        !self.is_idle() && self.formats.is_none()
     }
 
     /// Ask for a program; its key is the hash of its content, so two effects
@@ -726,10 +952,6 @@ impl<P: Clone> Host<P> {
 
     /// Whether a version of `name` waits for the next compile.
     /// `tests::present_wants_accumulate_until_a_reload`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests read it: --check reads the problems")
-    )]
     pub(crate) fn has_pending(&self, name: &str) -> bool {
         self.slots
             .get(name)
@@ -807,9 +1029,16 @@ impl<P: Clone> Host<P> {
         self.replace_problems(effect, Vec::new());
     }
 
+    /// Add what is not already listed: two effects binding one broken
+    /// `.frag` name it once (`tests::a_broken_frag_two_effects_bind_is_named_once`).
     fn add_problems(&mut self, problems: Vec<Problem>) {
-        if !problems.is_empty() {
-            self.problems.extend(problems);
+        let before = self.problems.len();
+        for problem in problems {
+            if !self.problems.contains(&problem) {
+                self.problems.push(problem);
+            }
+        }
+        if self.problems.len() != before {
             self.generation += 1;
         }
     }
@@ -862,29 +1091,6 @@ pub(crate) fn config_problem(error: &str) -> Problem {
         None,
         error.lines().next().unwrap_or(error).to_owned(),
     )
-}
-
-/// A `frag` effect's signature at its defaults: its params' kinds, no `uses`,
-/// its texture inputs known.
-/// `tests::a_log_numbered_across_the_strings_is_mapped_back`.
-pub(crate) fn default_signature(spec: &EffectSpec, host: Glsl) -> Signature {
-    Signature {
-        host,
-        params: spec
-            .params
-            .iter()
-            .filter_map(|(name, param)| {
-                glsl::kind_of(&param.default).map(|kind| (name.clone(), kind))
-            })
-            .collect(),
-        uses: Vec::new(),
-        known: spec
-            .inputs
-            .iter()
-            .filter(|input| *input != "shape")
-            .map(|input| input.trim_start_matches("state:").to_owned())
-            .collect(),
-    }
 }
 
 /// A driver's log as problems: string 1 at the `.frag`'s line; a string-0
@@ -1211,6 +1417,31 @@ pub(crate) mod tests {
         fn line_shift(&mut self) -> u32 {
             self.probed += 1;
             self.shift
+        }
+    }
+
+    /// A `frag` effect's signature at its defaults, as its one pass is
+    /// flattened: its params' kinds, no `uses`, its texture inputs known.
+    fn default_signature(
+        spec: &solium_effects::spec::EffectSpec,
+        host: solium_effects::glsl::Host,
+    ) -> solium_effects::glsl::Signature {
+        solium_effects::glsl::Signature {
+            host,
+            params: spec
+                .params
+                .iter()
+                .filter_map(|(name, param)| {
+                    solium_effects::glsl::kind_of(&param.default).map(|kind| (name.clone(), kind))
+                })
+                .collect(),
+            uses: Vec::new(),
+            known: spec
+                .inputs
+                .iter()
+                .filter(|input| *input != "shape")
+                .map(|input| input.trim_start_matches("state:").to_owned())
+                .collect(),
         }
     }
 
@@ -1552,7 +1783,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let sources = solium_effects::glsl::assemble(
-            &super::default_signature(&spec, solium_effects::glsl::Host::Pass),
+            &default_signature(&spec, solium_effects::glsl::Host::Pass),
             FRAG,
         );
         let prelude = sources.prelude.lines().count();
@@ -1697,5 +1928,225 @@ pub(crate) mod tests {
                 "reading /x/init.lua: No such file or directory"
             )
         );
+    }
+
+    /// **A stage asking for `rgba16f` where it is missing takes the
+    /// fallback**: the configured plan is dropped at load and the first rung
+    /// needing only `rgba8` comes first.
+    #[test]
+    fn a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback() {
+        let place = scratch("formats");
+        let frag = "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n";
+        folder(
+            &place,
+            "fine",
+            "return { api = 1, inputs = { 'self' }, params = { field = { 1, int = true } }, fallback = { { field = 0 } },
+            stages = function(p) if p.field == 1 then return { { 'pass', 'a.frag', format = 'rgba16f' } } end return { { 'pass', 'a.frag' } } end }",
+            &[("a.frag", frag)],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["fine".to_owned()]);
+        assert_eq!(
+            host.bind("fine", &[]).expect("binds").plans.len(),
+            2,
+            "formats not probed yet are unknown, not missing: every rung is kept"
+        );
+        assert!(
+            host.set_formats(crate::pool::Formats { rgba16f: false }),
+            "the first answer changes what is known"
+        );
+        let bound = host.bind("fine", &[]).expect("binds");
+        assert_eq!(bound.plans.len(), 1, "the rgba16f plan was dropped");
+        assert_eq!(
+            bound.plans[0].steps[0].format,
+            solium_effects::stage::Format::Rgba8
+        );
+        assert!(
+            !host.set_formats(crate::pool::Formats { rgba16f: false }),
+            "the same answer again asks for no rebind"
+        );
+        assert!(host.set_formats(crate::pool::Formats { rgba16f: true }));
+        assert_eq!(host.bind("fine", &[]).expect("binds").plans.len(), 2);
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A fallback naming another effect binds it at load**, and its `use`
+    /// closure with it; and **`stages` runs once per rung at bind**, never
+    /// again (its counter does not move over a hundred lookups).
+    #[test]
+    fn a_fallback_naming_another_effect_binds_it_at_load() {
+        let place = scratch("fallback-effect");
+        let frag = "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n";
+        folder(
+            &place,
+            "rich",
+            "calls = 0 return { api = 1, inputs = { 'self' }, fallback = { 'plain' }, stages = function(p) calls = calls + 1 return { { 'use', 'plain' } } end }",
+            &[],
+        );
+        folder(
+            &place,
+            "plain",
+            "return { api = 1, inputs = { 'self' }, frag = 'a.frag' }",
+            &[("a.frag", frag)],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["rich".to_owned()]);
+        let bound = host.bind("rich", &[]).expect("binds");
+        assert_eq!(bound.plans.len(), 2);
+        assert!(
+            host.effect("plain").is_some() || host.has_pending("plain"),
+            "loaded with its user"
+        );
+        let rich = host.latest("rich").expect("loaded");
+        for _ in 0..100 {
+            let _ = host.latest("rich");
+        }
+        let calls: i64 = rich
+            .sandbox()
+            .lua()
+            .globals()
+            .get("calls")
+            .expect("the counter");
+        assert_eq!(calls, 1, "stages ran per lookup, not once at bind");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A many-pass effect swaps in only once every step compiled**, each
+    /// step's program asked for at load: one `.frag` of two failing keeps the
+    /// effect absent and names that file at its line, and a stage's `.frag`
+    /// that fails its lints refuses the version at load, asking for nothing.
+    #[test]
+    fn a_stage_effect_swaps_in_only_once_every_step_compiled() {
+        let place = scratch("every-step");
+        let stages = "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'a.frag', scale = 0.5 }, { 'pass', 'b.frag', scale = 2 } } }";
+        let failing = "vec4 sol_effect(vec2 uv) {\n  FAIL\n}\n";
+        let linted = "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv) * p_nothing;\n}\n";
+        let lone = "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv).bgra;\n}\n";
+        folder(
+            &place,
+            "two",
+            stages,
+            &[("a.frag", FRAG), ("b.frag", failing)],
+        );
+        folder(
+            &place,
+            "linted",
+            stages,
+            &[("a.frag", lone), ("b.frag", linted)],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["two".to_owned(), "linted".to_owned()]);
+        assert!(
+            !host.has_pending("linted"),
+            "a stage's lint error was loaded"
+        );
+        let at = |effect: &str, file: &str, problems: &[super::Problem]| {
+            problems.iter().any(|problem| {
+                problem.effect == effect && problem.file.ends_with(file) && problem.line == Some(2)
+            })
+        };
+        assert!(
+            at("linted", "linted/b.frag", host.problems()),
+            "{:?}",
+            host.problems()
+        );
+        let mut compiler = Counting::default();
+        host.compile_pending(&mut compiler);
+        assert_eq!(
+            compiler.compiled.len(),
+            2,
+            "each of two's steps asked for, and nothing of the refused version"
+        );
+        assert!(
+            host.effect("two").is_none(),
+            "swapped in with a step that did not compile"
+        );
+        assert!(
+            at("two", "two/b.frag", host.problems()),
+            "{:?}",
+            host.problems()
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A reload whose stage fails its lints keeps the one that ran**: the
+    /// new version is refused at load, at the `.frag`'s line, and the old
+    /// one still runs.
+    #[test]
+    fn a_reload_whose_stage_fails_its_lints_keeps_the_one_that_ran() {
+        let place = scratch("stage-lint-reload");
+        let dir = folder(
+            &place,
+            "a",
+            "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'a.frag', scale = 0.5 } } }",
+            &[("a.frag", FRAG)],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["a".to_owned()]);
+        let mut compiler = Counting::default();
+        host.compile_pending(&mut compiler);
+        let first = host.effect("a").expect("v1");
+        std::fs::write(
+            dir.join("a.frag"),
+            "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv) * p_nothing;\n}\n",
+        )
+        .expect("v2");
+        host.reload();
+        assert!(!host.has_pending("a"), "a stage's lint error was loaded");
+        host.compile_pending(&mut compiler);
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &host.effect("a").expect("still v1")),
+            "the refused v2 replaced v1"
+        );
+        assert!(
+            host.problems()
+                .iter()
+                .any(|each| each.file == dir.join("a.frag") && each.line == Some(2)),
+            "{:?}",
+            host.problems()
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A broken `.frag` two effects bind is named once**: an effect using
+    /// another reads its steps at bind, and both refuse at the one line.
+    #[test]
+    fn a_broken_frag_two_effects_bind_is_named_once() {
+        let place = scratch("named-once");
+        let broken = "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv) * p_nothing;\n}\n";
+        folder(
+            &place,
+            "user",
+            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'plain' } } }",
+            &[],
+        );
+        folder(&place, "plain", ONE_PASS, &[("effect.frag", broken)]);
+        let mut host = host_with(&place);
+        host.want("rules", ["user".to_owned()]);
+        let named: Vec<_> = host
+            .problems()
+            .iter()
+            .filter(|problem| problem.file.ends_with("plain/effect.frag"))
+            .collect();
+        assert_eq!(named.len(), 1, "{:?}", host.problems());
+        assert!(!host.has_pending("user") && !host.has_pending("plain"));
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **The formats are probed once, and only while something is wanted**:
+    /// `prepare` asks this before it makes a 1×1 target of each format, so a
+    /// desktop with no effect configured never touches GL for it.
+    #[test]
+    fn the_formats_are_probed_once_and_only_while_something_is_wanted() {
+        let place = scratch("probe-once");
+        folder(&place, "a", ONE_PASS, &[("effect.frag", FRAG)]);
+        let mut host = host_with(&place);
+        assert!(!host.wants_formats(), "probed with nothing wanted");
+        host.want("rules", ["a".to_owned()]);
+        assert!(host.wants_formats());
+        assert!(host.set_formats(crate::pool::Formats { rgba16f: true }));
+        assert_eq!(host.formats(), Some(crate::pool::Formats { rgba16f: true }));
+        assert!(!host.wants_formats(), "probed twice");
+        let _ = std::fs::remove_dir_all(place);
     }
 }
