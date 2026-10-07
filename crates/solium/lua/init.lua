@@ -162,6 +162,42 @@ sol.bind("super+shift+q", function()
     sol.quit()
 end)
 
+-- The laptop keys (#151): plain bindings to the usual programs, the way any
+-- compositor's default configuration has them. A key whose program is not
+-- installed does nothing but log; `config.bindings` takes any of them over,
+-- and `false` there unbinds one. Volume through `wpctl` (PipeWire), capped at
+-- 100%, with shift for a 1% step; brightness through `brightnessctl`; media
+-- through `playerctl`; Print through `grim`, shift+Print a region with
+-- `slurp`, into ~/Pictures/Screenshots and onto the clipboard when `wl-copy`
+-- is there. Held keys do not repeat yet: a binding fires once per press.
+-- `script::shipped::every_shipped_binding_is_reachable_on_us`.
+local function run(...)
+    local argv = { ... }
+    return function()
+        sol.spawn(table.unpack(argv))
+    end
+end
+local SINK, SOURCE = "@DEFAULT_AUDIO_SINK@", "@DEFAULT_AUDIO_SOURCE@"
+sol.bind("XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "5%+"), "laptop keys")
+sol.bind("XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "5%-"), "laptop keys")
+sol.bind("shift+XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "1%+"), "laptop keys")
+sol.bind("shift+XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "1%-"), "laptop keys")
+sol.bind("XF86AudioMute", run("wpctl", "set-mute", SINK, "toggle"), "laptop keys")
+sol.bind("XF86AudioMicMute", run("wpctl", "set-mute", SOURCE, "toggle"), "laptop keys")
+sol.bind("XF86MonBrightnessUp", run("brightnessctl", "set", "5%+"), "laptop keys")
+sol.bind("XF86MonBrightnessDown", run("brightnessctl", "set", "5%-"), "laptop keys")
+sol.bind("XF86AudioPlay", run("playerctl", "play-pause"), "laptop keys")
+sol.bind("XF86AudioPause", run("playerctl", "play-pause"), "laptop keys")
+sol.bind("XF86AudioNext", run("playerctl", "next"), "laptop keys")
+sol.bind("XF86AudioPrev", run("playerctl", "previous"), "laptop keys")
+-- One shell line each, so the file name and the clipboard step stay in one
+-- place a user can read and copy; the name sorts by time.
+local SHOT = 'dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"; mkdir -p "$dir"; '
+    .. 'file="$dir/$(date +%Y-%m-%d_%H-%M-%S).png"; '
+local CLIP = ' && { command -v wl-copy >/dev/null && wl-copy < "$file" || true; }'
+sol.bind("Print", run("sh", "-c", SHOT .. 'grim "$file"' .. CLIP), "laptop keys")
+sol.bind("shift+Print", run("sh", "-c", SHOT .. 'area="$(slurp)" && grim -g "$area" "$file"' .. CLIP), "laptop keys")
+
 sol.log("solium configuration loaded")
 
 -- Show or hide the Developer Tweaks panel. Nothing without --debug-mode.
