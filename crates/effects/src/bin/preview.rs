@@ -2,8 +2,8 @@
 //!
 //! Embeds the deformation engine — compiled to WebAssembly — into
 //! `preview/index.html`, and writes the result. The page calls it directly, so
-//! the mesh you watch bend in a browser is the one `warp::mesh` builds for a
-//! real window. A reimplementation in JavaScript would drift the first time
+//! the mesh you watch bend in a browser is the one `warp::mesh_part` builds for
+//! a real window. A reimplementation in JavaScript would drift the first time
 //! either side changed, and the drift would be invisible because the page would
 //! still bend something plausible.
 //!

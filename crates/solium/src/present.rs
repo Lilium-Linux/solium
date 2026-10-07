@@ -172,8 +172,8 @@ pub(crate) struct Deform {
 
 /// A deform with its anchor resolved: what the renderer can actually draw.
 ///
-/// Separate from [`Deform`] so the resolution cannot be forgotten — there is
-/// no way to hand `warp::mesh` an unresolved anchor, because it does not take
+/// Separate from [`Deform`] so the resolution cannot be forgotten — there is no
+/// way to hand `warp::mesh_part` an unresolved anchor, because it does not take
 /// one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Aimed {

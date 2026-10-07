@@ -12,6 +12,7 @@ mod assets;
 mod capture;
 mod check;
 mod cli;
+mod clip;
 mod clocks;
 #[cfg(test)]
 mod commit;
@@ -26,6 +27,7 @@ mod idle;
 mod input;
 mod json;
 mod keyboard_change;
+mod keyed;
 mod keymap;
 mod launch;
 mod layer;

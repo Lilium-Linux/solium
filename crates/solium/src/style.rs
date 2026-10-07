@@ -990,7 +990,7 @@ mod tests {
         });
     }
 
-    /// **One of the two shipped bundles that ask for the pass, and the only
+    /// **One of the two shipped bundles that round the client, and the only
     /// thing in `cargo test` that loads this one.**
     ///
     /// `panes/rounded/` exists for exactly one reason — to be the thing a person

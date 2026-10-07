@@ -357,6 +357,23 @@ pub(crate) fn fence_wait() -> FenceWait {
     })
 }
 
+/// Whether every window capture is drawn on every pass, as before captures
+/// were keyed: `SOLIUM_RECAPTURE=always`. For an A/B on one build, and the
+/// control of the nested capture check. `tests::recapture_always_is_asked_for_by_name`.
+pub(crate) fn recapture_named(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("always")
+}
+
+/// `SOLIUM_RECAPTURE`, read once.
+pub(crate) fn recapture_always() -> bool {
+    thread_local! {
+        static DECIDED: std::cell::OnceCell<bool> = const { std::cell::OnceCell::new() };
+    }
+    DECIDED.with(|decided| {
+        *decided.get_or_init(|| recapture_named(std::env::var("SOLIUM_RECAPTURE").ok().as_deref()))
+    })
+}
+
 /// Whether to show the Developer Tweaks panel.
 ///
 /// `--debug-mode` anywhere in the arguments, so it composes with the backend
@@ -395,5 +412,14 @@ mod tests {
             warning.is_some_and(|said| said.contains("of")),
             "a typo is named"
         );
+    }
+
+    /// `SOLIUM_RECAPTURE=always` draws every capture on every pass; anything
+    /// else keys them.
+    #[test]
+    fn recapture_always_is_asked_for_by_name() {
+        assert!(super::recapture_named(Some("always")));
+        assert!(!super::recapture_named(Some("never")));
+        assert!(!super::recapture_named(None));
     }
 }

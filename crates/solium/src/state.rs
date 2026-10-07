@@ -602,6 +602,10 @@ pub(crate) struct Solium {
     /// rather than the backend so a capture can time itself (Ruling 5).
     pub(crate) timer: Option<crate::gputime::Timer>,
 
+    /// The renderer's pooled targets: captures now, previews and effect
+    /// passes later (spec §6.3 item 4). `pool::tests::a_target_is_made_once_and_its_fbo_with_it`.
+    pub(crate) pool: crate::pool::Pool,
+
     /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
     ///
     /// The global itself is created by whichever backend has a renderer, since
@@ -1063,6 +1067,7 @@ impl Solium {
             effects: crate::effect::host::Host::new(crate::effect::host::Library::new()),
             problems_told: 0,
             timer: None,
+            pool: crate::pool::Pool::new(0),
             textures: None,
             focusing: false,
             closing: None,

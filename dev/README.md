@@ -254,6 +254,7 @@ reads one that file does not list.
 | `SOLIUM_TERMINAL=<command line>` | The terminal `super+return` opens, split on spaces. | |
 | `SOLIUM_PANE=<name or path>` | The frame style for this run. | |
 | `SOLIUM_FENCE_WAIT=off` | A window capture drops its fence instead of waiting for it on the CPU. The default waits, and each session's log says which it ran with. | |
+| `SOLIUM_RECAPTURE=always` | Draw every window capture (a warp's, a rounded client's) on every pass, as before captures were kept until what they show changes. For an A/B on one build, and the control of `dev/pacing-nested.sh`'s capture count. | |
 | `SOLIUM_PACING` | Say where a pass's time went, on passes that overran the tightest monitor's frame; with it, GPU time, clocks and late flips. Misses are counted without it. | |
 | `SOLIUM_TRACE=<path>` | One JSON line per pass and per flip, and `SOLIUM_PACING` on. See *Measuring frame pacing on a TTY*. | |
 | `SOLIUM_QML=<mode>` | `auto`, `gpu` or `software`; see *QML on the GPU*. | |
@@ -407,7 +408,7 @@ that should not be.
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
-| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, clicks follow the rect a window is drawn at without following the `z` it is drawn above, and a genie on a second monitor lands on its target |
+| `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, clicks follow the rect a window is drawn at without following the `z` it is drawn above, a genie on a second monitor lands on its target, and a tilted window's menu is drawn whole and in front of it |
 | `dev/fence-check.sh` | skipping a capture's CPU fence wait (`SOLIUM_FENCE_WAIT=off`) changes no pixel |
 | `dev/pulse-control.sh [env…]` | the renderer is not frozen: a focused window in the `pulse` style moves in 150 ms |
 | `dev/effects-check.sh [section]…` | effects on screen, nested, one compositor per section, each judged beside `dev/pulse-control.sh`; `overlay` breaks the configuration and reloads it, and the problems overlay appears in the top-right corner while nothing else changes |
@@ -432,8 +433,8 @@ over the top, so the only place the failure shows is the hardware.
 `present-check.sh` exists because the wiring between a script and the screen is
 the one part of a presentation transform that no unit test reaches. `z` and
 `pivot` are read in `script.rs`, carried through `present::Frame`, and spent in
-`render::by_depth` and `warp::mesh` — all of which are pure functions with tests
-of their own. What sits between them is two field initialisers in the
+`render::by_depth` and `warp::mesh_part` — all of which are pure functions with
+tests of their own. What sits between them is two field initialisers in the
 `Command::Present` arm in `state/commands.rs`, and reverting *both* of those to
 their defaults passes the entire suite. So this measures pixels instead: it
 places one window at a known rect, turns it twenty degrees about two different
@@ -466,6 +467,15 @@ stacking order and asks whether each one, as it is drawn at that moment
   `outer.contains` is the obvious-looking simplification, it inverts both clicks,
   and it passes every other check in here.
 
+The last claim, `menu`, needs a client with a popup on cue, so its window is
+`wl-probe`'s (`WL_PROBE_POPUP`) rather than kitty's, and it needs `wl-probe`
+built beside `solium`. The window is tilted four degrees, and its menu, which
+reaches past the window's bottom-right corner, must be drawn whole: at least
+the 160x120 pixels of the untilted menu. A warped window's menu is a capture of
+its own drawn in front of the window's warp; drawn inside the window's capture,
+it was cut at the window's edge and lay under its frame.
+
+    cargo build -p wl-probe
     SOLIUM_CHECK_DIR=/tmp/present ./dev/present-check.sh   # keep the frames
 
 Kept out of `gate.sh` deliberately: it needs a host compositor to nest in and a
@@ -474,9 +484,14 @@ client to open, and a gate that cannot run headless is a gate that gets skipped.
 `dev/fence-check.sh` captures the same two windows with the capture's fence
 wait on twice, off once, and tilted a degree more once, and fails unless the
 first three are byte-identical and the fourth is not. Both windows are rounded
-and the first is tilted, so a capture runs for each on every frame. A race that
-shows once in several hundred frames is wirecheck's to catch (cases 11c and
-11d), not this.
+and both are tilted, so a warp's capture runs for each on every frame: a
+rounded window is no longer captured for its corners, so only a warp still
+captures. Every run
+sets `SOLIUM_RECAPTURE=always`: the windows' content is fixed, so a kept capture
+would be drawn once at startup and the fence wait would have nothing to skip on
+the frames compared. Forced, every capture is drawn, and waited for or not, on
+every frame. A race that shows once in several hundred frames is wirecheck's to
+catch (cases 11c and 11d), not this.
 
 `dev/pulse-control.sh` runs one focused window in the `pulse` style nested and
 fails unless two captures 150 ms apart differ: the known-animating control a
@@ -655,11 +670,14 @@ underneath it. The window was measured before the lock and after the unlock,
 which is the only way that bug is visible — while locked, nothing of it is on
 screen to see.
 
-Three more modes. `WL_PROBE_WINDOWS=<seconds>` maps two windows, one framed
+Four more modes. `WL_PROBE_WINDOWS=<seconds>` maps two windows, one framed
 by the compositor and one that draws its own, and holds them up to be looked
 at; with `WL_PROBE_FULLSCREEN=1` the first asks for fullscreen a second in, so
-the change can be photographed. `WL_PROBE_CONNECT_ONLY=1` connects, counts the
-globals and leaves, for hunting what a client that never draws costs.
+the change can be photographed. `WL_PROBE_POPUP=<seconds>` maps one window and
+a menu reaching past its bottom-right corner, each in a colour nothing else
+draws, for `dev/present-check.sh`'s `menu` case. `WL_PROBE_CONNECT_ONLY=1`
+connects, counts the globals and leaves, for hunting what a client that never
+draws costs.
 
 ## Hotplug, and how to test it without a cable
 

@@ -163,12 +163,19 @@ has each of them.
 client.radius: 12
 ```
 
-A style may round the client's own corners. It is the one effect that reads the
-window's *own* pixels, so a pane that declares it is rendered to a texture first
-and then drawn back through a fragment program — one extra pass per frame, for
-that window only. `client.radius: 0` is no effect at all rather than a radius of
-nothing, so a style that does not want it pays for none of this, and nine of
-the eleven shipped bundles do not want it.
+A style may round the client's own corners. The compositor cuts them as it
+draws the client: each of the window's surfaces goes through a fragment program
+where it already is, so rounding buys no pass at all and no copy of the window,
+and a window that is tilted or pulled by a genie keeps its corners.
+`client.radius: 0` is no effect at all rather than a radius of nothing, so a
+style that does not want it draws its client exactly as before, and nine of the
+eleven shipped bundles do not want it.
+
+A rounded window that fades in or out is faded surface by surface, with no
+picture of it taken: where a subsurface overlaps its parent (a player's video
+over its window, say) the two show through each other while the window is
+translucent. An opaque window looks as it always did. A fullscreen window has
+no frame, so it is drawn square; a maximised one keeps its corners.
 
 `pane = "rounded"` is one that does, and is there to be looked at. Two things
 in it are worth copying. The radius is in **logical** pixels — the compositor
@@ -185,7 +192,8 @@ radius: clientRadius           // or clientRadius + 2, to hug it from outside
 That split is the whole design: the compositor rounds the client, because those
 pixels belong to the application and only a shader can mask them, and QML rounds
 itself, because `Rectangle.radius` is free. A style that wants a rounded border
-around a *square* client sets only its own `radius` and buys no pass at all.
+around a *square* client sets only its own `radius`, and its client is drawn as
+an unstyled one is.
 
 #### One corner at a time
 

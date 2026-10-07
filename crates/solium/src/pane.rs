@@ -505,19 +505,23 @@ pub(crate) struct Pane {
     /// and every path that asks what is on screen asks for panes. What they
     /// are not is *windows*.
     managed: bool,
-    /// The texture this pane's warp captures are drawn into, kept across the
-    /// frames of an animation. See [`crate::offscreen::Scratch`].
+    /// The pooled targets this pane's captures are drawn into, kept across the
+    /// frames of an animation: a warp's, and its popups'. See
+    /// [`crate::keyed::Captures`].
     ///
-    /// A field for the reason `frame` and `closing_at` are fields, and with
-    /// rather more at stake: a `HashMap<PaneId, GlesTexture>` beside the panes
-    /// would be a sixth table reconciled by hand, and what an entry nobody
-    /// swept would keep is not a stale boolean but several megabytes of GBM.
-    /// This leaves with its pane.
+    /// **Owned by the pane, as a field**, for the reason `frame` and
+    /// `closing_at` are fields, and with rather more at stake: a
+    /// `HashMap<PaneId, GlesTexture>` beside the panes would be a sixth table
+    /// reconciled by hand, and what an entry nobody swept would keep is not a
+    /// stale boolean but several megabytes of GBM. This leaves with its pane,
+    /// and the pool deletes the framebuffer objects of what it drops at its
+    /// next sweep (`pool::tests::a_dropped_target_has_its_fbo_deleted_at_the_next_sweep`).
     ///
-    /// Empty on a pane nobody is warping, which is all of them on an ordinary
-    /// desktop: `render::prepare` hands it back on the first frame a pane is
-    /// not captured on.
-    scratch: crate::offscreen::Scratch,
+    /// Empty on a pane nobody is warping or styling, which is all of them on an
+    /// ordinary desktop: `render::prepare` hands it back on the first frame a
+    /// pane is not captured on
+    /// (`keyed::tests::a_pane_that_stops_warping_gives_the_texture_back`).
+    captures: crate::keyed::Captures,
     /// The size limits of this pane's client that the layouts were last told
     /// about (#115). Not what the snapshot reads -- that asks the client, so it
     /// is never behind -- but what `Solium::notice_limits` compares with, so
@@ -561,7 +565,7 @@ impl Pane {
             adopted: false,
             drawn: crate::present::Slot::default(),
             managed: true,
-            scratch: crate::offscreen::Scratch::default(),
+            captures: crate::keyed::Captures::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
         }
@@ -591,7 +595,7 @@ impl Pane {
             adopted: false,
             drawn: crate::present::Slot::default(),
             managed: true,
-            scratch: crate::offscreen::Scratch::default(),
+            captures: crate::keyed::Captures::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
         }
@@ -818,14 +822,14 @@ impl Pane {
         }
     }
 
-    /// The texture this pane's warp captures are drawn into. See the field and
-    /// [`crate::offscreen::Scratch`].
+    /// The pooled targets this pane's captures are drawn into. See the field
+    /// and [`crate::keyed::Captures`].
     ///
-    /// Only `_mut`, because both things anyone does with it — taking a texture
-    /// for a capture, handing one back when the warp ends — write to it. There
-    /// is nothing to read.
-    pub(crate) const fn scratch_mut(&mut self) -> &mut crate::offscreen::Scratch {
-        &mut self.scratch
+    /// Only `_mut`, because both things anyone does with them — taking a
+    /// target for a capture, handing one back when the capture ends — write
+    /// to them. There is nothing to read.
+    pub(crate) const fn captures_mut(&mut self) -> &mut crate::keyed::Captures {
+        &mut self.captures
     }
 
     /// Say what is drawn around this pane's client.
