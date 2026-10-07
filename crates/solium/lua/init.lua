@@ -18,6 +18,9 @@ sol.session(config.session)
 -- everything else. All of them take effect immediately when reloaded.
 sol.pane(config.pane)
 sol.loading(config.loading)
+-- Reload automatically when a file this configuration loaded changes
+-- (#223). See `config.lua`.
+sol.auto_reload(config.reload)
 -- What fills a window while a resize drag is ahead of its client. An absent
 -- table is not an error: a `config.lua` copied before this setting existed
 -- keeps the default rather than failing the whole configuration.

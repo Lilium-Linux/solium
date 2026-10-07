@@ -231,6 +231,12 @@
 ---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
 ---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
 
+---Automatic reload (#223). A key left out, or one that is not the right
+---kind, keeps the default.
+---@class sol.AutoReloadOptions
+---@field automatic? boolean Reload on its own when a file this configuration loaded changes. Default true; false watches nothing at all.
+---@field quiet_ms? number How long a burst of writes waits to go quiet before the one reload it earns, in milliseconds. Default 300.
+
 ---One device's libinput settings: a device-type default in `sol.input`, or
 ---one `devices` entry. A key left out keeps libinput's own default (or
 ---whatever a previous reload already set) rather than turning it off.
@@ -481,6 +487,13 @@ function sol.monitor_power(which, mode) end
 ---@param options? sol.IdleOptions
 ---@return nil
 function sol.idle(options) end
+
+---Automatic reload (#223): `config.reload`, which the shipped `init.lua`
+---hands over. Applied at once -- toggling it from a binding of your own
+---works mid-session, not only from `config.lua`.
+---@param options? sol.AutoReloadOptions
+---@return nil
+function sol.auto_reload(options) end
 
 ---Set libinput device settings: `config.input`, which the shipped `init.lua`
 ---hands over. Applied to every device already connected and to each one
