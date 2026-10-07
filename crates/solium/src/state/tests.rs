@@ -450,6 +450,54 @@ fn a_replaced_rule_set_holds_only_its_own_programs() {
     let _ = std::fs::remove_dir_all(place);
 }
 
+/// **A refused rule set leaves no compile asked for**: neither the program a
+/// rule of it bound that nothing had asked for (a param picking another
+/// `.frag`) nor the one an effect only it named would be compiled, so
+/// nothing reaches the GPU for a set that never ran.
+#[test]
+fn a_refused_rule_set_leaves_no_compile_asked_for() {
+    let place = crate::effect::host::tests::scratch("state-rules-refused-asks");
+    crate::effect::host::tests::folder(
+        &place,
+        "pick",
+        "return { api = 1, inputs = { 'self' }, params = { which = { 0, int = true } },
+            stages = function(p) if p.which == 1 then return { { 'pass', 'b.frag' } } end return { { 'pass', 'a.frag' } } end }",
+        &[
+            ("a.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n"),
+            ("b.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * 0.5; }\n"),
+        ],
+    );
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = "pick" } }"#,
+    ))
+    .expect("parses")));
+    let held = state.effects.held_for_test().clone();
+    let asked = state.effects.asked_for_test();
+    assert_eq!(asked.len(), 1, "the premise: a.frag is asked for");
+    state.apply_effects(Ok(crate::effect::rules::parse(&tree(
+        r#"{
+            { match = "*", part = "client", slot = "replace", effect = { "pick", which = 1 } },
+            { match = "*", part = "client", slot = "behind", effect = "tint" },
+            { match = "*", part = "client", slot = "front", effect = "nobody" },
+        }"#,
+    ))
+    .expect("parses")));
+    assert_eq!(
+        state.rules.effects(),
+        vec!["pick".to_owned()],
+        "the premise: the set was refused"
+    );
+    assert_eq!(state.effects.held_for_test(), &held);
+    assert_eq!(
+        state.effects.asked_for_test(),
+        asked,
+        "a refused set left a compile asked for"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
 /// **A deform at rest is aimed at nothing**, so a window brought back from a
 /// genie with `sol.present(id, {})` is not captured and warped on every frame
 /// for good (#140).

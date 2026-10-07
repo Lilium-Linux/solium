@@ -726,7 +726,9 @@ impl Solium {
     /// that ran (`tests::a_broken_rule_keeps_the_rules_that_ran`,
     /// `tests::a_blur_rule_without_source_is_refused_until_xray`). The rules
     /// taken hold their programs and a set replaced gives its back
-    /// (`tests::a_replaced_rule_set_holds_only_its_own_programs`). A reload
+    /// (`tests::a_replaced_rule_set_holds_only_its_own_programs`); a set
+    /// refused leaves no compile asked for
+    /// (`tests::a_refused_rule_set_leaves_no_compile_asked_for`). A reload
     /// replays `sol.effects`, so rules are bound again at every config load
     /// (`tests::a_reload_binds_the_rules_against_the_folders_it_read`).
     pub(crate) fn apply_effects(

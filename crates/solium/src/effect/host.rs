@@ -426,12 +426,41 @@ impl<P: Clone> Host<P> {
             self.held = keys;
             self.sweep = true;
         }
+        // A program a refused set's binding asked for is held by nothing now,
+        // so it is not compiled
+        // (`state::tests::a_refused_rule_set_leaves_no_compile_asked_for`).
+        self.forget_unheld_asks();
+    }
+
+    /// Forget every program asked for that nothing would keep once compiled:
+    /// not the bound rules ([`Self::hold`]), not a running version, not a
+    /// pending version's needs. Asked for by nobody, it is not compiled
+    /// (`tests::a_name_dropped_beside_one_kept_asks_for_nothing_of_its_own`,
+    /// `state::tests::a_refused_rule_set_leaves_no_compile_asked_for`).
+    fn forget_unheld_asks(&mut self) {
+        let kept: BTreeSet<u64> = self
+            .held
+            .iter()
+            .chain(self.slots.values().flat_map(|slot| {
+                slot.holds
+                    .iter()
+                    .chain(slot.pending.iter().flat_map(|pending| pending.needs.iter()))
+            }))
+            .copied()
+            .collect();
+        self.asked.retain(|key, _| kept.contains(key));
     }
 
     /// What [`Self::hold`] holds, for a test to read.
     #[cfg(test)]
     pub(crate) fn held_for_test(&self) -> &BTreeSet<u64> {
         &self.held
+    }
+
+    /// Every program asked for and not compiled yet, for a test to read.
+    #[cfg(test)]
+    pub(crate) fn asked_for_test(&self) -> BTreeSet<u64> {
+        self.asked.keys().copied().collect()
     }
 
     #[expect(
@@ -583,12 +612,11 @@ impl<P: Clone> Host<P> {
         for name in self.users_of(&fresh) {
             self.programs_of(&name);
         }
-        // With nothing wanted nothing is compiled: what was asked for and is
-        // no longer wanted is not asked for any more
-        // (`tests::a_name_dropped_before_it_compiled_asks_for_nothing`).
-        if keep.is_empty() {
-            self.asked.clear();
-        }
+        // What was asked for and is no longer wanted is not asked for any
+        // more, so with nothing wanted nothing is compiled
+        // (`tests::a_name_dropped_before_it_compiled_asks_for_nothing`,
+        // `tests::a_name_dropped_beside_one_kept_asks_for_nothing_of_its_own`).
+        self.forget_unheld_asks();
     }
 
     /// Load `name` if its folder changed, or was never loaded: whether a
@@ -705,7 +733,9 @@ impl<P: Clone> Host<P> {
     /// Bind `name` with `overrides` into its configured plan and one plan
     /// per fallback rung, dropping any that needs a format this GPU lacks;
     /// every step's program is asked for, and held until the rules' next
-    /// [`Self::hold`]. A cold effect binds against its pending
+    /// [`Self::hold`], which forgets the ask when the rules no longer hold
+    /// it (`state::tests::a_refused_rule_set_leaves_no_compile_asked_for`).
+    /// A cold effect binds against its pending
     /// version. `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`,
     /// `tests::a_fallback_naming_another_effect_binds_it_at_load`.
     pub(crate) fn bind(
@@ -1702,6 +1732,36 @@ pub(crate) mod tests {
         let mut compiler = Counting::default();
         host.compile_pending(&mut compiler);
         assert!(compiler.compiled.is_empty(), "{:?}", compiler.compiled);
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A name dropped before it compiled asks for nothing of its own**
+    /// while another stays wanted: only the one still wanted is compiled.
+    #[test]
+    fn a_name_dropped_beside_one_kept_asks_for_nothing_of_its_own() {
+        let place = scratch("dropped-beside-kept");
+        folder(&place, "a", ONE_PASS, &[("effect.frag", FRAG)]);
+        folder(
+            &place,
+            "b",
+            ONE_PASS,
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv) * 0.5;\n}\n",
+            )],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["a".to_owned(), "b".to_owned()]);
+        host.want("rules", ["a".to_owned()]);
+        let mut compiler = Counting::default();
+        host.compile_pending(&mut compiler);
+        assert_eq!(
+            compiler.compiled.len(),
+            1,
+            "a name nobody wants was still compiled: {:?}",
+            compiler.compiled
+        );
+        assert!(host.effect("a").is_some(), "the premise: a still runs");
         let _ = std::fs::remove_dir_all(place);
     }
 
