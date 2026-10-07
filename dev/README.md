@@ -412,7 +412,7 @@ that should not be.
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, clicks follow the rect a window is drawn at without following the `z` it is drawn above, a genie on a second monitor lands on its target, and a tilted window's menu is drawn whole and in front of it |
 | `dev/fence-check.sh` | skipping a capture's CPU fence wait (`SOLIUM_FENCE_WAIT=off`) changes no pixel |
 | `dev/pulse-control.sh [env…]` | the renderer is not frozen: a focused window in the `pulse` style moves in 150 ms |
-| `dev/effects-check.sh [section]…` | effects on screen, nested, one compositor per section, each judged beside `dev/pulse-control.sh`; `overlay` breaks the configuration and reloads it, and the problems overlay appears in the top-right corner while nothing else changes; `t0` draws a generated ring behind a window |
+| `dev/effects-check.sh [section]…` | effects on screen, nested, one compositor per section, each judged beside `dev/pulse-control.sh`; `overlay` breaks the configuration and reloads it, and the problems overlay appears in the top-right corner while nothing else changes; `t0` draws a generated ring behind a window; `blur` blurs a video player's own pixels through a rule; `none` shows nothing captured and nothing run with no rules; `fail` shows every part drawn when every effect fails |
 | `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. `--no-check` skipping the installed binary's check. A system prefix (`--prefix /usr` and `/usr/local`): everything under the prefix and nothing in `XDG_CONFIG_HOME`, no `config.sha256` and no `sudo` line, `--session-dir` refused, and `--check` passing from the staged `/usr/share/solium` with a broken user configuration. The Fedora package: `dev/rpm/solium.spec`'s `%files` against that install both ways; its `License` naming every installed `.license`; each `Requires` and `Recommends` naming the package that has the file (the Qt QML modules the shipped QML imports with the Qt version clause, Xwayland, flock, xdg-desktop-portal and the backends `lilium-portals.conf` names, and foot); and the spec refusing to parse without `commit` and `commitdate`. See *Installing it* and *A Fedora package* |
 | `dev/rpm.sh [--jobs N] [--image IMAGE]` | the package built from the commit checked out, unpacked without installing, passes `solium --check` with an empty configuration and takes its QML and Lua from its own `usr/share/solium`. See *A Fedora package* |
 
@@ -526,6 +526,31 @@ ring run once or twice and never in the last 2 s before the capture. A
 `judge.py` region number ending in `px` is pixels, not a fraction of the frame.
 A build whose `render::run_slots` skips a generated chain is its fail-first:
 nothing is drawn around the window, and the ring runs 0 times.
+
+`blur` opens a still terminal on the left and a video player on the right
+(ffplay's `testsrc2` at 60 fps, or a kitty printing the time when ffplay is
+missing), four times: with no rule, with the shipped `blur` blurring the
+player through `{ "blur", source = "self" }` matched by its title, with it
+blurring the still terminal, and that again with `SOLIUM_RECAPTURE=always`.
+The player's edge energy (`judge.py edges`) must fall to under half while the
+terminal stays byte-equal, and the player's chain must run. The still
+terminal's chain must run only on passes that captured it (`judge.py only`:
+its own few commits as kitty starts and loses the focus) and on none of the
+last 3 s, while the player keeps the passes coming (`judge.py since`); with
+`SOLIUM_RECAPTURE=always` it runs on every pass, the control that shows the
+count means something. Its fail-firsts: the rule's title misspelled in
+`blur.lua` (the player is not blurred, its chain never runs), and a build
+whose `SlotState::needs_run` always answers yes (the still window's chain
+runs on every pass, most of them capturing nothing).
+
+`none` opens the same two windows with no rule: the trace must show no pass
+that captured and no chain run (spec §8.4); adding a rule to `none.lua` is
+its fail-first. `fail` opens one window in the `top` style twice, once plain
+and once with a rule naming the `fail-compile` fixture (lint-clean, refused
+by every GPU) in every slot of every part of it: a problem naming it must be
+logged, and the frame must be the plain one within 1. Its fail-first is a
+`fail-compile` frag that compiles and draws red, with the check that
+something failed set aside: the frames differ.
 
 `clipboard-check.sh` runs its X11 half in a container, so the host needs no
 `xclip`. **Run it more than once.** The bug it was

@@ -8,6 +8,16 @@
   judge.py trace FILE FIELD               print the number of pass records in a
                                           SOLIUM_TRACE file whose FIELD is non-zero,
                                           and the field's total
+  judge.py after FILE FIELD               print the number of pass records from the
+                                          first whose FIELD is non-zero to the end,
+                                          and the field's total over them (0 0 when
+                                          none is)
+  judge.py only FILE FIELD WITH           print the number of pass records whose FIELD
+                                          is non-zero and how many of those have WITH
+                                          non-zero too; exit 0 if all of them do
+  judge.py since FILE FIELD MS            print the number of pass records within MS ms
+                                          of the trace's last one (by t_ns), and
+                                          FIELD's total over them
   judge.py quiet FILE FIELD MS            exit 0 if no pass record within MS ms of
                                           the trace's last one (by t_ns) has FIELD
                                           non-zero
@@ -94,6 +104,23 @@ def main(argv):
     if what == "trace":
         values = [record.get(argv[3], 0) for record in passes(argv[2])]
         print(sum(1 for value in values if value), sum(values))
+        return 0
+    if what == "after":
+        records = passes(argv[2])
+        first = next((at for at, record in enumerate(records) if record.get(argv[3], 0)), len(records))
+        since = records[first:]
+        print(len(since), sum(record.get(argv[3], 0) for record in since))
+        return 0
+    if what == "only":
+        loud = [record for record in passes(argv[2]) if record.get(argv[3], 0)]
+        both = [record for record in loud if record.get(argv[4], 0)]
+        print(len(loud), len(both))
+        return 0 if len(both) == len(loud) else 1
+    if what == "since":
+        records = passes(argv[2])
+        since = records[-1]["t_ns"] - int(argv[4]) * 1_000_000 if records else 0
+        late = [record for record in records if record["t_ns"] >= since]
+        print(len(late), sum(record.get(argv[3], 0) for record in late))
         return 0
     if what == "quiet":
         records = passes(argv[2])

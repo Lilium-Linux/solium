@@ -19,6 +19,18 @@
 #             capture): the band just outside the window changes, the window
 #             itself does not, and the ring runs once or twice, never once the
 #             window is at rest
+#   blur      a video player's own pixels blurred through a rule matching its
+#             title, the terminal beside it untouched; and, the player drawing
+#             throughout, a still window's chain run only when the window
+#             commits, never in the last 3 s while the passes run on, and on
+#             every pass with SOLIUM_RECAPTURE=always
+#   none      no rules: no pass captures and no chain runs
+#   fail      rules naming an effect that will not compile, in every slot of
+#             every part of a window: at rest the frame is the one with no
+#             rules
+#
+# The player is ffplay's testsrc2, or a kitty printing the time when ffplay is
+# missing.
 #
 # QML is software nested (#148). Only what this script started is ever
 # killed: a developer may have a nested Solium of their own running.
@@ -179,7 +191,128 @@ section_t0() {
     judge quiet "$out/t0-on/trace.jsonl" effect_runs 2000 >/dev/null && pass "t0: no run once the window was at rest" || fail "t0: the ring kept running with nothing changing"
 }
 
-all=(overlay t0)
+# player <title>: ffplay's test pattern, titled, or a kitty printing the time
+# ten times a second when ffplay is missing.
+player() {
+    if command -v ffplay >/dev/null; then
+        env -u DISPLAY WAYLAND_DISPLAY="$socket" SDL_VIDEODRIVER=wayland ffplay -loglevel error -an -loop 0 \
+            -window_title "$1" -f lavfi -i testsrc2=size=560x380:rate=60 >/dev/null 2>&1 &
+    else
+        WAYLAND_DISPLAY="$socket" kitty --config NONE --title "$1" -o cursor_blink_interval=0 \
+            sh -c 'while :; do printf "\r%s" "$(date +%T.%N)"; sleep 0.1; done' >/dev/null 2>&1 &
+    fi
+    echo "$!" >>"$pids"
+}
+
+# The still terminal the `blur` and `none` sections put beside the player.
+static_window() {
+    WAYLAND_DISPLAY="$socket" kitty --config NONE --title effects-check-static -o "background=#3a6ea5" \
+        -o cursor_blink_interval=0 -o confirm_os_window_close=0 -o font_size=14 \
+        sh -c "printf '\033[?25leffects-check: sharp text\n'; exec sleep 600" >/dev/null 2>&1 &
+    echo "$!" >>"$pids"
+}
+
+# blur  the player's own pixels blurred through a rule, the terminal beside it
+#       untouched; and, the player drawing at 60 fps throughout, a still
+#       window's chain runs only on the passes that captured the window, its
+#       own few commits as it starts and loses the focus, and on none of the
+#       last 3 s while the passes run on; on every pass with
+#       SOLIUM_RECAPTURE=always. Nested drawing follows damage, so the player
+#       keeps the passes coming; only the still window's runs say whether a
+#       chain re-runs only when its part draws.
+section_blur() {
+    local name
+    for name in blur-off blur-on blur-static blur-static-always; do
+        local extra=()
+        case "$name" in
+            blur-on) extra=(BLUR=player) ;;
+            blur-static) extra=(BLUR=static) ;;
+            blur-static-always) extra=(BLUR=static SOLIUM_RECAPTURE=always) ;;
+        esac
+        # A burst of two, because a single frame is written to the bare path
+        # and not beside it, where `wait_frames` counts; the first is judged.
+        SECTION_EFFECTS="$root/crates/solium/effects/blur" \
+            run_scene "$name" blur.lua "${extra[@]}" SOLIUM_TRACE="$out/$name/trace.jsonl" \
+            SOLIUM_CAPTURE_AT=6000 SOLIUM_CAPTURE_FRAMES=2 SOLIUM_CAPTURE_INTERVAL=100 || return
+        static_window
+        sleep 1.5
+        player effects-check-player
+        wait_frames 2 || return
+        stop
+    done
+    local off on
+    off="$(ls "$out/blur-off"/f-* | head -1)"
+    on="$(ls "$out/blur-on"/f-* | head -1)"
+    local sharp soft
+    sharp="$(judge edges "$off" 660px 80px 520px 340px)"
+    soft="$(judge edges "$on" 660px 80px 520px 340px)"
+    if (( soft * 2 < sharp )); then pass "blur: the player's edges fell from $sharp to $soft"; else fail "blur: the player is not blurred ($sharp -> $soft)"; fi
+    judge same "$off" "$on" 60px 80px 520px 340px >/dev/null && pass "blur: the terminal is untouched" || fail "blur: the rule reached the terminal"
+    local runs total
+    read -r runs total < <(judge trace "$out/blur-on/trace.jsonl" effect_runs)
+    runs="${runs:-0}" total="${total:-0}"
+    (( runs > 0 )) && pass "blur: the player's chain ran on $runs passes" || fail "blur: the player's chain never ran"
+    # The still window's chain runs only on a pass that captured the window,
+    # which only its own commits make (kitty's first buffers, and its redraw
+    # when the player takes the focus), and not at all in the last 3 s, while
+    # the player draws on; with SOLIUM_RECAPTURE=always, on every pass.
+    local passes still ran captured late quiet forced
+    read -r passes still < <(judge after "$out/blur-static/trace.jsonl" effect_runs)
+    read -r ran captured < <(judge only "$out/blur-static/trace.jsonl" effect_runs captures)
+    read -r late quiet < <(judge since "$out/blur-static/trace.jsonl" effect_runs 3000)
+    passes="${passes:-0}" still="${still:-0}" ran="${ran:-0}" captured="${captured:-0}" late="${late:-0}" quiet="${quiet:-0}"
+    (( still >= 1 && ran == captured )) \
+        && pass "blur: the still window's chain ran $still time(s) in $passes passes, each on a pass that captured it" \
+        || fail "blur: the still window's chain ran on $ran passes, $captured of them capturing it"
+    (( late >= 100 && quiet == 0 )) && pass "blur: no run in the last 3 s, $late passes while the player drew" \
+        || fail "blur: the still window's chain ran $quiet times in the last 3 s, $late passes"
+    read -r passes forced < <(judge after "$out/blur-static-always/trace.jsonl" effect_runs)
+    read -r late quiet < <(judge since "$out/blur-static-always/trace.jsonl" effect_runs 3000)
+    passes="${passes:-0}" forced="${forced:-0}" late="${late:-0}" quiet="${quiet:-0}"
+    (( passes > 0 && forced >= passes - 2 && quiet >= late - 2 )) \
+        && pass "blur: SOLIUM_RECAPTURE=always ran it on $forced of $passes passes, $quiet of the last $late" \
+        || fail "blur: the control ran it on $forced of $passes passes ($quiet of the last $late), so the counts above prove nothing"
+}
+
+# none  no rules: no pass captures and no chain runs once the windows are up.
+section_none() {
+    run_scene none none.lua SOLIUM_TRACE="$out/none/trace.jsonl" \
+        SOLIUM_CAPTURE_AT=6000 SOLIUM_CAPTURE_FRAMES=2 SOLIUM_CAPTURE_INTERVAL=100 || return
+    static_window
+    sleep 1.5
+    player effects-check-player
+    wait_frames 2 || return
+    stop
+    local captured runs
+    read -r captured _ < <(judge trace "$out/none/trace.jsonl" captures)
+    read -r runs _ < <(judge trace "$out/none/trace.jsonl" effect_runs)
+    captured="${captured:-0}" runs="${runs:-0}"
+    [[ -s "$out/none/trace.jsonl" ]] || { fail "none: no trace, so nothing was counted"; return; }
+    (( captured == 0 && runs == 0 )) && pass "none: nothing captured, nothing run" || fail "none: $captured passes captured and $runs ran with no rule"
+}
+
+# fail  rules naming an effect that will not compile on this GPU, in every
+#       slot of every part of a window: at rest the frame is the one with no
+#       rules ([16] §5, spec §8.4).
+section_fail() {
+    local name
+    for name in fail-off fail-on; do
+        local extra=()
+        [[ "$name" = fail-on ]] && extra=(FAIL=1)
+        SECTION_EFFECTS="$root/crates/solium/tests/fixtures/effects/fail-compile" \
+            run_scene "$name" fail.lua "${extra[@]}" \
+            SOLIUM_CAPTURE_AT=5000 SOLIUM_CAPTURE_FRAMES=2 SOLIUM_CAPTURE_INTERVAL=100 || return
+        kitty_window 3a6ea5
+        wait_frames 2 || return
+        stop
+    done
+    grep -q 'problem .*fail-compile' "$out/fail-on/log" || { fail "fail: nothing failed, so nothing was tested"; return; }
+    judge same "$(ls "$out/fail-off"/f-* | head -1)" "$(ls "$out/fail-on"/f-* | head -1)" 0 0 1 1 1 >/dev/null \
+        && pass "fail: with every effect failing, every part is drawn as with no rules" \
+        || fail "fail: a failing effect changed what was drawn"
+}
+
+all=(overlay t0 blur none fail)
 sections=("$@")
 [[ ${#sections[@]} -gt 0 ]] || sections=("${all[@]}")
 
