@@ -501,6 +501,10 @@ pub(crate) enum Command {
     /// The idle blank, and what a window on a screen that is off is told.
     /// See `crate::idle::Settings`.
     Idle(crate::idle::Settings),
+    /// Whether a change under the configuration reloads on its own, and how
+    /// long a burst of writes waits to go quiet first (#223). See
+    /// `crate::autoreload::Settings`.
+    AutoReload(crate::autoreload::Settings),
     /// libinput device settings: a default per device type, and overrides
     /// matched by name or by vendor/product. See `crate::input::devices`.
     Input(crate::input::devices::InputConfig),
@@ -3143,6 +3147,47 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Idle(idle));
+            })
+        })?,
+    )?;
+
+    // Automatic reload (#223): `config.reload`, handed over by `init.lua`.
+    // `automatic` is true or false, default true; `quiet_ms` is milliseconds
+    // of zero or more, default 300 -- long enough that an editor's own
+    // "write a temp file, rename it over the original" lands in one quiet
+    // period, short enough that a single save still feels instant. Either
+    // left out, or of the wrong kind, keeps the default, named in the log --
+    // the same contract every other `sol.<setting>` here keeps. Applied at
+    // once: `state/commands.rs`'s `configure_autoreload` arms or disarms the
+    // watch to match, so toggling this from a binding of your own works
+    // mid-session and not only from `config.lua`.
+    sol.set(
+        "auto_reload",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut settings = crate::autoreload::Settings::default();
+            if let Some(options) = options {
+                match options.get::<Value>("automatic") {
+                    Ok(Value::Boolean(on)) => settings.automatic = on,
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "reload.automatic is true or false; keeping the default, true"
+                    ),
+                }
+                match options.get::<Value>("quiet_ms") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value).filter(|amount| *amount >= 0.0) {
+                        Some(amount) => settings.quiet_ms = amount as u64,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "reload.quiet_ms is a number of milliseconds, zero or more; keeping \
+                             the default"
+                        ),
+                    },
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::AutoReload(settings));
             })
         })?,
     )?;
@@ -7070,6 +7115,91 @@ mod tests {
             lock,
             [crate::logind::Settings::default()],
             "the shipped init.lua did not hand config.lock over as it says"
+        );
+    }
+
+    /// `sol.auto_reload`'s own parsing (#223): a boolean `automatic`, a
+    /// non-negative `quiet_ms`, an absent table keeping both defaults, and a
+    /// value of the wrong kind named in the log with the default kept. See
+    /// `crate::autoreload::Settings`.
+    #[test]
+    fn sol_auto_reload_parses_automatic_and_quiet_ms() {
+        let directory = std::env::temp_dir().join("solium-script-test-auto-reload");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::AutoReload(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::AutoReload")
+        };
+
+        assert_eq!(
+            configured("sol.auto_reload({ automatic = false })"),
+            crate::autoreload::Settings {
+                automatic: false,
+                ..crate::autoreload::Settings::default()
+            }
+        );
+        assert_eq!(
+            configured("sol.auto_reload({ quiet_ms = 50 })"),
+            crate::autoreload::Settings {
+                quiet_ms: 50,
+                ..crate::autoreload::Settings::default()
+            }
+        );
+        // Said nothing, two ways, and said something of the wrong kind.
+        for source in [
+            "sol.auto_reload()",
+            "sol.auto_reload({})",
+            r#"sol.auto_reload({ automatic = "yes", quiet_ms = "soon" })"#,
+        ] {
+            assert_eq!(
+                configured(source),
+                crate::autoreload::Settings::default(),
+                "{source:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped configuration's `reload` table matches
+    /// `autoreload::Settings`'s own default**, the same parity
+    /// `the_shipped_configuration_s_lock_table_matches_the_rust_default` holds
+    /// for `lock`: a future edit to `config.lua`'s `reload.automatic` or
+    /// `reload.quiet_ms` without a matching change to
+    /// `autoreload::Settings::default`, or the other way around, must fail a
+    /// test rather than ship a mismatch.
+    #[test]
+    fn the_shipped_configuration_s_reload_table_matches_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-auto-reload-default", "return {}")
+        else {
+            return;
+        };
+        let reload: Vec<crate::autoreload::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::AutoReload(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            reload,
+            [crate::autoreload::Settings::default()],
+            "the shipped init.lua did not hand config.reload over as it says"
         );
     }
 

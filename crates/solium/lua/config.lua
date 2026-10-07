@@ -890,6 +890,26 @@ local defaults = {
         fade = 180,
     },
 
+    -- Reload automatically when a file this configuration loaded changes
+    -- (#223): the configuration directory itself, every Lua module
+    -- `require` found in it, your pane styles, your loading scenes and your
+    -- shell, if you have one. Saved the same way `super+shift+r` reads it --
+    -- a broken file leaves the running configuration alone and reports it
+    -- the same way a manual reload does.
+    reload = {
+        -- false turns this off entirely: nothing is watched at all, not
+        -- merely "watched but never acted on" -- so a configuration directory
+        -- on a slow network mount, say, costs nothing once this is off.
+        automatic = true,
+
+        -- How long a burst of writes waits to go quiet before the one reload
+        -- it earns, in milliseconds. An editor that saves by writing a
+        -- temporary file and renaming it over the original fires this
+        -- several times a few milliseconds apart; 300 lands all of them in
+        -- one quiet period while still feeling instant for a single save.
+        quiet_ms = 300,
+    },
+
     -- What a window looks like while you are dragging its edge.
     --
     -- A client cannot be resized; it can only be *asked*, and it answers when
