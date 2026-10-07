@@ -1647,9 +1647,10 @@ fn gpu_fields(gpu: Option<crate::gputime::Gpu>) -> String {
     };
     let [a, b, c, d] = sample.outputs_ns.map(|nanos| nanos / 1_000);
     format!(
-        r#","gpu":"{status}","gpu_us":{},"gpu_prep_us":{},"gpu_out_us":[{a},{b},{c},{d}]}}"#,
+        r#","gpu":"{status}","gpu_us":{},"gpu_prep_us":{},"gpu_effects_us":{},"gpu_out_us":[{a},{b},{c},{d}]}}"#,
         sample.total_ns / 1_000,
-        sample.captures_ns / 1_000
+        sample.captures_ns / 1_000,
+        sample.effects_ns / 1_000
     )
 }
 
@@ -2692,6 +2693,7 @@ mod tests {
         "gpu",
         "gpu_us",
         "gpu_prep_us",
+        "gpu_effects_us",
         "gpu_out_us",
     ];
 

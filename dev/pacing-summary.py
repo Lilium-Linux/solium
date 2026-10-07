@@ -20,7 +20,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-TIMES = ["total_us", "prep_us", "qml_us", "elements_us", "gles_us", "commit_us", "gpu_us", "gpu_prep_us"]
+TIMES = ["total_us", "prep_us", "qml_us", "elements_us", "gles_us", "commit_us", "gpu_us", "gpu_prep_us", "gpu_effects_us"]
 
 
 def spread(values):
@@ -67,6 +67,8 @@ def main():
     timed = [one for one in passes if one.get("gpu") == "ok"]
     for field in TIMES:
         pool = timed if field.startswith("gpu") else passes
+        if pool and not any(field in one for one in pool):
+            continue
         print(f"  {field:<12} {spread([one.get(field, 0) for one in pool])}")
     print(f"missed {sum(1 for one in passes if one.get('missed'))} of {len(passes)} passes")
     late, flipped = defaultdict(int), Counter()

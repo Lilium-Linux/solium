@@ -1201,9 +1201,10 @@ A pass record carries `pass`, `t_ns` (CLOCK_MONOTONIC at its start),
 `captures`, `panes`, `drew`, `scenes`, `animating`, `rendered`, `built`,
 `rebound`, `qml` (Qt's microseconds per scene), `clocks`, `gpu_mhz`,
 `mem_mhz`, `pstate`, `gpu` (`ok`, `unsupported`, `late` or `disjoint`),
-`gpu_us`, `gpu_prep_us` and `gpu_out_us`. A flip record carries `flip` (the
-pass), `monitor`, `seq`, `at_ns`, `queued_ns` and `late`, the vblanks it
-missed. `dev/pacing-summary.py` reads them.
+`gpu_us`, `gpu_prep_us` (the captures), `gpu_effects_us` (the effect chains,
+timed as one region a run phase) and `gpu_out_us`. A flip record carries
+`flip` (the pass), `monitor`, `seq`, `at_ns`, `queued_ns` and `late`, the
+vblanks it missed. `dev/pacing-summary.py` reads them.
 
 ## Installing it
 

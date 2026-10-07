@@ -42,6 +42,15 @@ pub(crate) enum Region {
     Capture,
     /// One output's draw, by its index in the backend's list.
     Output(u8),
+    /// Effect chains run into pooled targets: one region around a whole run
+    /// phase, not one a run, so a dozen effect slots do not use up
+    /// [`REGIONS`] (Ruling 10): `gpu_effects_us`.
+    /// `tests::effects_are_summed_apart_from_captures`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 21's runner opens it around a run phase")
+    )]
+    Effect,
 }
 
 /// One pass's GPU time. `tests::regions_sum_per_pass_and_captures_are_split_out`.
@@ -51,6 +60,8 @@ pub(crate) struct GpuSample {
     /// first start to last end, which would count waits on Qt's fences.
     pub(crate) total_ns: u64,
     pub(crate) captures_ns: u64,
+    /// `tests::effects_are_summed_apart_from_captures`.
+    pub(crate) effects_ns: u64,
     /// The first four outputs; a fifth is in the total only.
     /// `tests::a_fifth_output_is_in_the_total_only`.
     pub(crate) outputs_ns: [u64; 4],
@@ -277,6 +288,9 @@ impl Ring {
                         if let Some(sum) = sample.outputs_ns.get_mut(usize::from(*output)) {
                             *sum = sum.saturating_add(spent);
                         }
+                    }
+                    Region::Effect => {
+                        sample.effects_ns = sample.effects_ns.saturating_add(spent);
                     }
                 }
             }
@@ -672,6 +686,32 @@ mod tests {
             ..GpuSample::default()
         };
         expected.outputs_ns[0] = 500;
+        assert_eq!(ring.done, vec![(1, Gpu::Ok(expected))]);
+    }
+
+    /// **Effects are a region of their own**: a run phase's GPU time is
+    /// summed into `effects_ns`, apart from the captures', and is in the
+    /// total, which is `gpu_effects_us` beside `gpu_prep_us`.
+    #[test]
+    fn effects_are_summed_apart_from_captures() {
+        let mut fake = Fake::lagging(0);
+        fake.values = vec![1_000, 1_100, 1_200, 1_450, 1_500, 1_520];
+        let mut ring = Ring::new(ids());
+        fake.now = 1;
+        ring.begin(&mut fake, 1);
+        for region in [Region::Capture, Region::Effect, Region::Effect] {
+            let stamp = ring.open(&mut fake, region);
+            ring.close(&mut fake, stamp);
+        }
+        fake.now = 2;
+        ring.begin(&mut fake, 2);
+        let expected = GpuSample {
+            total_ns: 370,
+            captures_ns: 100,
+            effects_ns: 270,
+            regions: 3,
+            ..GpuSample::default()
+        };
         assert_eq!(ring.done, vec![(1, Gpu::Ok(expected))]);
     }
 
