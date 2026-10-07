@@ -22929,6 +22929,7 @@ end)
             use super::*;
             use crate::render::Stacked;
             use crate::scripted::Layer as Scripted;
+            use smithay::backend::input::ButtonState;
             use zwlr_layer_shell_v1::Layer as Client;
 
             /// Something on the monitor, by a number both ends of the
@@ -23696,6 +23697,215 @@ end)
                     (other.pane, under.pane),
                     "(the window with the keyboard with the pointer on the bar, and on the \
                      window below it)"
+                );
+            }
+
+            /// Press the left button at the pointer's current location, and
+            /// release it: a plain click, through the real input path.
+            fn click(desk: &mut Desk, time: u64) {
+                let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Pressed,
+                    time,
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    time + 1,
+                );
+            }
+
+            /// **A click on empty desktop clears keyboard focus** (#219): the
+            /// window that held it before the click no longer does, and
+            /// `sol.windows()`'s `focused` -- which `desk.focused()` reads
+            /// the same way `focused_window` does -- agrees.
+            #[test]
+            fn a_click_on_empty_desktop_clears_keyboard_focus() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let empty = (1700.0, 950.0);
+                assert!(
+                    desk.focused() == opened.pane
+                        && desk.state.window_under(empty.into()).is_none(),
+                    "the premise: the window has the keyboard, and {empty:?} is empty desktop"
+                );
+
+                move_pointer(&mut desk.state, empty, 10);
+                click(&mut desk, 11);
+
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "a click on empty desktop left a window focused"
+                );
+            }
+
+            /// **A click on empty desktop with nothing already focused does
+            /// nothing**: `Solium::clear_focus` declines before it ever asks
+            /// `give_keyboard` for a serial nobody needed, so this is a click
+            /// with no window to lose and no window gained, on a desk that
+            /// never had one.
+            #[test]
+            fn a_click_on_empty_desktop_with_nothing_focused_does_nothing() {
+                let mut desk = Desk::new();
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "the premise: nothing has the keyboard"
+                );
+
+                move_pointer(&mut desk.state, (1700.0, 950.0), 10);
+                click(&mut desk, 11);
+
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "a click on empty desktop focused a window that was never there"
+                );
+            }
+
+            /// **A window with `click_to_focus` off keeps whatever already
+            /// has the keyboard, including on a press over a *different*
+            /// window** -- the fallback that clears focus for an unclaimed
+            /// press (#219) must not fire just because this press was not
+            /// click-to-focus's to answer.
+            #[test]
+            fn a_click_on_a_window_with_click_to_focus_off_leaves_focus_alone() {
+                let mut desk = Desk::new();
+                let under = desk.open_surface();
+                let under_window = window_of(&desk, under.pane);
+                desk.state
+                    .space
+                    .map_element(under_window, (100, 100), false);
+                let other = desk.open_surface();
+                let other_window = window_of(&desk, other.pane);
+                desk.state
+                    .space
+                    .map_element(other_window.clone(), (800, 300), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                desk.state
+                    .focus_window(&other_window, SERIAL_COUNTER.next_serial());
+                desk.state.profile.click_to_focus = false;
+                desk.state.profile.focus_follows_mouse = false;
+                let on_under = (150.0, 150.0);
+                assert!(
+                    desk.focused() == other.pane
+                        && desk.state.window_under(on_under.into()).is_some(),
+                    "the premise: the other window has the keyboard, and {on_under:?} is on \
+                     the first window"
+                );
+
+                move_pointer(&mut desk.state, on_under, 10);
+                click(&mut desk, 11);
+
+                assert_eq!(
+                    desk.focused(),
+                    other.pane,
+                    "a press that click-to-focus declined to answer cleared focus instead of \
+                     leaving it alone"
+                );
+            }
+
+            /// **A click on a real client's bar is none of #219's business**:
+            /// the bar is not empty desktop, so the fallback that clears
+            /// focus for an unclaimed press must not reach past it, however
+            /// the bar's own client answers the press.
+            #[test]
+            fn the_bar_above_the_windows_is_left_alone() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let (_bar, _layered) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let on_the_bar = (960.0, 15.0);
+                assert!(
+                    desk.focused() == opened.pane && desk.state.client_above(on_the_bar.into()),
+                    "the premise: the window has the keyboard, and the bar is over {on_the_bar:?}"
+                );
+
+                move_pointer(&mut desk.state, on_the_bar, 10);
+                click(&mut desk, 11);
+
+                assert_eq!(
+                    desk.focused(),
+                    opened.pane,
+                    "a click on the bar cleared the window's keyboard focus"
+                );
+            }
+
+            /// **A click on a registered wallpaper surface that claims
+            /// nothing still clears keyboard focus** (#219): a wallpaper is
+            /// not empty space the way the plain empty-desktop test above
+            /// has it -- it is a real, interactive scripted surface at the
+            /// background layer, and `surface_claiming` walks it and calls
+            /// its `hit`, which here answers `Hit::Nothing` -- so this walks
+            /// a different path through `surface_pointer`/`surface_claiming`
+            /// than a point with no surface declared at all, and must land
+            /// on the same fallback.
+            #[test]
+            fn a_click_on_the_wallpaper_clears_keyboard_focus() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = window_of(&desk, opened.pane);
+                desk.state
+                    .space
+                    .map_element(window.clone(), (100, 100), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                desk.state
+                    .declare_surface(crate::scripted::Declaration::for_test(
+                        "wallpaper",
+                        std::path::PathBuf::from("/nonexistent/wallpaper-test.qml"),
+                        Scripted::Background,
+                        crate::scripted::On::Rect(screen()),
+                    ));
+                let wallpaper = desk
+                    .state
+                    .surfaces
+                    .named("wallpaper")
+                    .expect("the surface was declared");
+                desk.state
+                    .surfaces
+                    .get_mut(wallpaper)
+                    .expect("live")
+                    .stand_in(crate::scripted::Stand {
+                        hit: |_| crate::qml::hosted::Hit::Nothing,
+                        ..crate::scripted::Stand::solid()
+                    });
+                desk.state
+                    .focus_window(&window, SERIAL_COUNTER.next_serial());
+                let empty = (1700.0, 950.0);
+                assert!(
+                    desk.focused() == opened.pane
+                        && desk.state.window_under(empty.into()).is_none()
+                        && !desk.state.surface_pointer(false, empty.into(), None),
+                    "the premise: the window has the keyboard, {empty:?} is over the \
+                     wallpaper, and the wallpaper claims nothing there"
+                );
+
+                move_pointer(&mut desk.state, empty, 10);
+                click(&mut desk, 11);
+
+                assert!(
+                    desk.state.focused_window().is_none(),
+                    "a click on a non-claiming wallpaper left a window focused"
                 );
             }
 

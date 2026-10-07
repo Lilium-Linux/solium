@@ -307,4 +307,29 @@ impl Solium {
         self.scripts = Some(scripts);
         self.apply(outcome);
     }
+
+    /// Take the keyboard off whatever window has it, for a press that landed
+    /// on nothing a window, a client or a scene claimed: empty desktop, or
+    /// the wallpaper (#219). `focus.clear_on_empty_click` in `config.lua`;
+    /// the call site is `input::pointer_button`.
+    ///
+    /// Declines quietly rather than asking [`Self::may_focus`]: there is no
+    /// window here for the lock's gate to ask about, and `give_keyboard`'s
+    /// own `None` arm is always allowed -- taking the keyboard off everything
+    /// cannot deliver a key to anyone behind the lock either. What it does
+    /// decline is a scene's hold ([`Self::hosted_keyboard`]) and a seat that
+    /// already has nothing, the same two `settle_focus` declines for its own
+    /// reasons: a click past an overview's search field must not yank the
+    /// keyboard out from under it, and a click on empty desktop with nothing
+    /// focused already has nothing to do.
+    /// `a_click_on_empty_desktop_clears_keyboard_focus`,
+    /// `a_click_on_empty_desktop_with_nothing_focused_does_nothing`.
+    pub(crate) fn clear_focus(&mut self, serial: Serial) {
+        if self.hosted_keyboard.is_some() || self.focused_window().is_none() {
+            return;
+        }
+        self.redraw = true;
+        self.give_keyboard(None, serial);
+        crate::xwayland::activate(self, None);
+    }
 }

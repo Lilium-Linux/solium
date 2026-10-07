@@ -1337,6 +1337,27 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         return;
     }
 
+    // Reaching here with no window under the pointer is the answer to "was
+    // this press on anything": a scene, a client, chrome and a window each
+    // claim the press above by returning, and a window with `click_to_focus`
+    // off still falls through here *with one under the pointer* -- which
+    // must change nothing, not clear whatever another window already holds.
+    // What is left is empty desktop or the wallpaper, and #219 is the window
+    // that stayed focused forever once a press landed there, so this clears
+    // the keyboard instead, when the profile says to.
+    // `a_click_on_empty_desktop_clears_keyboard_focus`,
+    // `a_click_on_the_wallpaper_clears_keyboard_focus`,
+    // `a_click_on_a_window_with_click_to_focus_off_leaves_focus_alone`,
+    // `the_bar_above_the_windows_is_left_alone`.
+    if pressed
+        && !pointer.is_grabbed()
+        && !on_a_client
+        && state.profile.clear_focus_on_empty_click
+        && state.window_under(location).is_none()
+    {
+        state.clear_focus(serial);
+    }
+
     forward_button(state, &pointer, &forward);
 
     // Outside the grab now: the pointer's lock is released, so a script may

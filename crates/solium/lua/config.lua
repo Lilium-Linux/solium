@@ -22,13 +22,12 @@
 -- Not here yet, because nothing reads them from this file
 -- ([#159](https://github.com/Lilium-Linux/solium/issues/159)):
 --
---   * Whether focus follows the pointer, and the key held to drag a window:
---     SOLIUM_FORM_FACTOR picks the first, SOLIUM_DRAG_MODIFIER the second.
---     Natural scrolling moved out of this list in #157: it is `input`'s
+--   * The key held to drag a window: SOLIUM_DRAG_MODIFIER. Natural
+--     scrolling moved out of this list in #157: it is `input`'s
 --     per-device-type `natural_scroll` below, which is what
 --     SOLIUM_FORM_FACTOR's own guess ("a laptop has a touchpad") was really
---     standing in for -- a device's own type now decides it directly, which
---     a form factor could only ever approximate.
+--     standing in for. Whether focus follows the pointer moved into `focus`
+--     below with #219, which needed it per mode.
 --   * The terminal `super+return` opens: SOLIUM_TERMINAL, or bind
 --     `super+return` yourself in `bindings` below.
 --   * The overview's animations, fixed in `lua/overview.lua` at 260 ms in and
@@ -726,6 +725,48 @@ local defaults = {
         before_sleep = true,
     },
 
+    -- Who takes the keyboard on a click or a hover, and when nobody does
+    -- (#219). `lua/modes.lua` hands this over on every mode change, so a
+    -- mode's own entry below answers immediately, without waiting for a
+    -- reload.
+    focus = {
+        -- A press on empty desktop, the wallpaper, or a shell surface that
+        -- does not take the keyboard clears keyboard focus, so a window you
+        -- clicked away from stops taking what you type. `false` leaves the
+        -- last focused window holding the keyboard until something else
+        -- takes it.
+        clear_on_empty_click = true,
+
+        -- Per mode (the names `modes.register` uses): `"click"` focuses a
+        -- window only on a press; `"follow"` also focuses it when the
+        -- pointer moves over it, which is what every tiling compositor
+        -- people arrive from does, and the compositor's own default for the
+        -- machine ([#159](https://github.com/Lilium-Linux/solium/issues/159),
+        -- `SOLIUM_FORM_FACTOR`) when a mode says neither.
+        --
+        -- Floating -- the desktop, with no layout in charge and windows free
+        -- to overlap -- defaults to click-only here: a window you are not
+        -- using sits under the pointer on the way to the one you want, and
+        -- hovering it should not steal the keyboard from what you were
+        -- typing into. Every other mode keeps the machine's own default
+        -- unless you name it too:
+        --
+        --     focus = { modes = { floating = "follow", scrolling = "click" } },
+        --
+        modes = {
+            floating = "click",
+        },
+
+        -- `click` and `follow` above, for every mode at once rather than one
+        -- at a time -- not here by default, so that `nil` can mean "whatever
+        -- this machine's form factor already answered" rather than a fixed
+        -- default that cannot know it:
+        --
+        --     focus = { follow = false },   -- never follow the pointer, in any mode
+        --     focus = { click = false },    -- a mode must `sol.focus` its own clicks
+        --
+    },
+
     -- Telling the rest of the session that Solium is its desktop.
     --
     -- Portals, programs D-Bus starts on demand, ~/.config/autostart and user
@@ -1307,6 +1348,15 @@ local open_sections = {
         num = true,
     },
     cursor = { theme = true, size = true, scene = true },
+    -- `click` and `follow` are deliberately absent from `focus` above, so
+    -- that leaving either out of a `user.lua` means "nil", not "zero" --
+    -- the same reason `keyboard` and `cursor` need naming here rather than
+    -- being read off their own defaults.
+    focus = { click = true, follow = true },
+    -- Mode names are open-ended, the same as a key combination: a mode
+    -- outside this file can register any name with `modes.register` and
+    -- give `focus.modes` an entry of its own.
+    ["focus.modes"] = true,
     -- `true` rather than a set of names: everything is accepted.
     bindings = true,
 }
@@ -1461,8 +1511,11 @@ end
 --     `monitors` entry are not checked here. `mode` misspelled as `moed` is
 --     merged as written and the monitor keeps its default mode.
 --   * `keyboard`, `cursor` and `bindings` are the sections above; the first
---     two are checked against a list this file restates, the third against
---     nothing.
+--     two are checked against a list this file restates, the other two
+--     against nothing: `bindings` because any key combination is one, and
+--     `focus.modes` because mode names are open-ended the same way (a mode
+--     outside this file can register any name). `focus.modes.folating`
+--     merges in silently, exactly like a misspelled binding.
 --   * A value of the wrong *type* is not this check's business. `gap = "12"`
 --     is a recognised key and passes.
 for _, entry in ipairs(unrecognised) do

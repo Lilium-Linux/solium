@@ -275,6 +275,15 @@
 ---@field command? string The locker to run on `Lock`, and before sleep: `"swaylock -f"`, say. Split on whitespace, with no quoting. Unset (the default) runs nothing.
 ---@field before_sleep? boolean Hold sleep until the locker above has confirmed the lock, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
 
+---The input profile's focus policy (#219). A key left out keeps whatever it
+---already answered -- there is no fixed default here the way `sol.idle` has
+---one, since that would have to know the machine's own form factor
+---(#159) and a mode calling this does not.
+---@class sol.FocusModeOptions
+---@field click? boolean Whether a press focuses the window it lands on.
+---@field follow? boolean Whether moving the pointer over a window focuses it.
+---@field clear_on_empty_click? boolean Whether a press on empty desktop or the wallpaper clears keyboard focus. A press on a client's own shell surface (a bar, say) is not covered yet, even one that declines the keyboard: see #219.
+
 ---The pointer's theme. A key left out, or no table, means the configuration
 ---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
 ---@class sol.CursorOptions
@@ -494,6 +503,12 @@ function sol.input(options) end
 ---@param options? sol.LockOptions
 ---@return nil
 function sol.lock(options) end
+
+---Override the focus input policy: `config.focus`, which `lua/modes.lua`
+---hands over on every mode change as well as at load. See #219.
+---@param options? sol.FocusModeOptions
+---@return nil
+function sol.focus_mode(options) end
 
 ---The work area of the monitor a window is on, or of the active monitor when
 ---no window is named or the id is unknown.
