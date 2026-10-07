@@ -383,6 +383,20 @@ impl Solium {
                             .and_then(|x11| x11.hints())
                             .and_then(|hints| hints.input)
                             .unwrap_or(true),
+                        // `WM_CLASS`'s two fields, for a window rule (#56)
+                        // and for `config.x11.hidden`'s own match in
+                        // `xwayland::map_window_request` -- read directly
+                        // off the surface rather than cached here, the same
+                        // as `x11_type` above. `None` for a Wayland window,
+                        // which has no `WM_CLASS` to have read.
+                        class: pane
+                            .client()
+                            .and_then(Window::x11_surface)
+                            .map(|x11| x11.class()),
+                        instance: pane
+                            .client()
+                            .and_then(Window::x11_surface)
+                            .map(|x11| x11.instance()),
                     })
                 })
                 .collect();

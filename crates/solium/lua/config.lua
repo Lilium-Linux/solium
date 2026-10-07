@@ -725,6 +725,21 @@ local defaults = {
         before_sleep = true,
     },
 
+    -- X11 windows that are refused a tile, decoration or bar entry outright
+    -- (#221): some autostart entries, such as KDE's screen-sharing fallback
+    -- `xwaylandvideobridge`, exist only so a portal has something to talk to
+    -- and were never meant to be seen. See docs/ricing.md.
+    x11 = {
+        -- WM_CLASS names to hide, matched case-insensitively against either
+        -- field X11 clients set (`xprop WM_CLASS` on a nested window shows
+        -- both: class first, instance second). A name here replaces this
+        -- whole list rather than adding to it, so keep `xwaylandvideobridge`
+        -- in your own copy unless you want it shown again.
+        --
+        --     hidden = { "xwaylandvideobridge", "my-tray-helper" },
+        hidden = { "xwaylandvideobridge" },
+    },
+
     -- Who takes the keyboard on a click or a hover, and when nobody does
     -- (#219). `lua/modes.lua` hands this over on every mode change, so a
     -- mode's own entry below answers immediately, without waiting for a

@@ -154,10 +154,33 @@ pub(crate) const fn floats_over_its_parent(kind: Option<WmWindowType>) -> bool {
     matches!(kind, Some(WmWindowType::Dialog))
 }
 
-/// Whether a window's own hints ask not to be shown or listed at all: not
-/// tiled, not decorated, and left out of `sol.windows()` — hidden from the bar
-/// and the window list, the same treatment `places_itself` already gives a
-/// menu or a tooltip, for a different reason.
+/// `config.x11.hidden`, handed over by the shipped `init.lua`'s
+/// `sol.x11(config.x11)`: the `WM_CLASS` names [`asks_not_to_be_shown`] hides
+/// outright, the same way a menu or a `Dialog` is handled generically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Settings {
+    /// Matched case-insensitively against either `WM_CLASS` field —
+    /// `X11Surface::class()` or `X11Surface::instance()` — since toolkits
+    /// disagree about which one carries the name a person would recognise,
+    /// and a name on this list does not say which the application used.
+    pub(crate) hidden: Vec<String>,
+}
+
+impl Default for Settings {
+    /// KDE's screen-sharing fallback (#221) is the one name this ships with
+    /// unasked; anything else in `hidden` is something a person's own
+    /// `config.lua` put there.
+    fn default() -> Self {
+        Self {
+            hidden: vec!["xwaylandvideobridge".to_owned()],
+        }
+    }
+}
+
+/// Whether `hidden` names this window by its `WM_CLASS`: not tiled, not
+/// decorated, and left out of `sol.windows()` — hidden from the bar and the
+/// window list, the same treatment `places_itself` already gives a menu or a
+/// tooltip, for a different reason.
 ///
 /// **Issue #221.** KDE's `xwaylandvideobridge` is an ordinary top-level window
 /// by every measure `places_itself` and `floats_over_its_parent` ask:
@@ -167,44 +190,42 @@ pub(crate) const fn floats_over_its_parent(kind: Option<WmWindowType>) -> bool {
 /// on Plasma it is invisible, and here it was an ordinary window nothing could
 /// dismiss.
 ///
-/// What singles it out, read nested with `xprop` rather than from its source
-/// (`dev/run-nested.sh`, and the one XWayland display it manages): `WM_HINTS`.
-/// `input` is `false`, which ICCCM §4.1.7 reserves for exactly this — "the
-/// window manager *may* set the input focus" to a window, and a window that
-/// spends that "may" saying no is declaring, in the one vocabulary every X11
-/// toolkit already speaks, that nobody is meant to interact with it. Tiling
-/// such a window wastes a share of the screen on something no key or click can
-/// ever reach; decorating it draws a titlebar with nothing behind the
-/// buttons.
+/// **This used to read `WM_HINTS.input` instead, and that reading was wrong.**
+/// ICCCM §4.1.7 reserves `input: false` for "the window manager *may* set the
+/// input focus" to a window — but *may* is not *never*: the very next clause
+/// names the 'Globally Active' input model, an ordinary, focusable
+/// application that declines `WM_HINTS.input` on purpose and takes the
+/// keyboard itself through `WM_TAKE_FOCUS` instead. `input: false` hid every
+/// window of that shape along with the one window the rule was written for.
+/// `WM_CLASS` is the identifier ICCCM actually hands a window manager for "I
+/// know what this specific program is" — `xprop`, `wmctrl` and every
+/// `.desktop` file already key off it — so a name on `hidden` is a much
+/// narrower, and correct, claim than a hint three other kinds of window can
+/// legitimately set too.
 ///
 /// **Not `_NET_WM_STATE_SKIP_TASKBAR` or `SKIP_PAGER`**, which is what the
-/// issue went looking for first. A real `xwaylandvideobridge`, read the same
-/// way, sets neither: this build's whole `_NET_WM_STATE` is empty of its own
-/// accord, which is the ceiling `floats_over_its_parent`'s own doc already
-/// names — smithay 0.7's `X11Surface` never reads a client's own
+/// issue went looking for first. A real `xwaylandvideobridge`, read nested
+/// with `xprop`, sets neither: this build's whole `_NET_WM_STATE` is empty of
+/// its own accord, which is the ceiling `floats_over_its_parent`'s own doc
+/// already names — smithay 0.7's `X11Surface` never reads a client's own
 /// `_NET_WM_STATE` at all, only ever writing what the compositor put there
-/// itself (`change_net_state`). `WM_HINTS.input`, read through
-/// `X11Surface::hints`, is the one ICCCM signal this case actually carries,
-/// and it generalises beyond this one application: anything that opens a
-/// window and then disclaims it — a tray helper, a portal bridge, a backward
-/// compatibility shim — says so the same way.
+/// itself (`change_net_state`).
 ///
 /// **Not `_NET_WM_WINDOW_OPACITY` either**, which is the other half of what
 /// makes the window invisible on a desktop that honours it. smithay 0.7 does
 /// not read that atom either — `WmWindowProperty` names ten properties at
 /// `xwm/surface.rs` and it is not one of them — so there is nothing on
-/// `X11Surface` to ask. Reading it ourselves would mean a second X11
-/// connection beside the one `X11Wm` already holds, for one additional atom;
-/// `floats_over_its_parent`'s own doc already declined that trade once, for
-/// `_NET_WM_STATE_MODAL`, on the same grounds. A window hidden by this
-/// function at least takes no tile and draws no titlebar; it is not promised
-/// invisible, and a client that paints real pixels into it still shows them.
+/// `X11Surface` to ask. A window hidden by this function at least takes no
+/// tile and draws no titlebar; it is not promised invisible, and a client
+/// that paints real pixels into it still shows them.
 ///
 /// Asked only of a window `places_itself` has already said no to: a menu or a
 /// tooltip is unmanaged for its own reason and never reaches this question in
 /// `map_window_request`.
-pub(crate) const fn asks_not_to_be_shown(accepts_input: Option<bool>) -> bool {
-    matches!(accepts_input, Some(false))
+pub(crate) fn asks_not_to_be_shown(hidden: &[String], class: &str, instance: &str) -> bool {
+    hidden
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(class) || name.eq_ignore_ascii_case(instance))
 }
 
 /// [`asks_not_to_be_shown`], except a `Dialog` is never hidden by it.
@@ -212,16 +233,17 @@ pub(crate) const fn asks_not_to_be_shown(accepts_input: Option<bool>) -> bool {
 /// `places_itself` already keeps `Dialog` out of its own list for a reason
 /// written down there (#72): `refused_with_a_dialog` is watching for exactly
 /// this window type, because a dialog appearing where a close was pending is
-/// the evidence the close was answered. ICCCM does not forbid a dialog
-/// answered entirely by mouse from also setting `WM_HINTS.input: false` — a
-/// "Save changes?" box with nothing to type into has no real use for the
-/// keyboard — and `asks_not_to_be_shown` alone cannot tell that one apart from
-/// `xwaylandvideobridge`. Routing it to the hidden, unmanaged branch instead
-/// would make `refused_with_a_dialog` blind to the one close it exists to
-/// answer, for a saving that only ever mattered for #221's own window, which
-/// is never a `Dialog` in the first place.
-pub(crate) const fn is_hidden(kind: Option<WmWindowType>, accepts_input: Option<bool>) -> bool {
-    !matches!(kind, Some(WmWindowType::Dialog)) && asks_not_to_be_shown(accepts_input)
+/// the evidence the close was answered. Nothing stops a future `hidden` entry
+/// from naming a class some application also uses for a confirmation dialog;
+/// keeping this guard rather than trusting every entry never to collide with
+/// a real one costs nothing and loses nothing.
+pub(crate) fn is_hidden(
+    kind: Option<WmWindowType>,
+    hidden: &[String],
+    class: &str,
+    instance: &str,
+) -> bool {
+    !matches!(kind, Some(WmWindowType::Dialog)) && asks_not_to_be_shown(hidden, class, instance)
 }
 
 /// The name a script is given for an X11 window's `_NET_WM_WINDOW_TYPE`, for
@@ -420,7 +442,7 @@ impl XwmHandler for Solium {
         // up just before the move.
         let self_placing = places_itself(window.window_type());
         // Asked only when the window is not already self-placing: a menu
-        // never carries meaningful `WM_HINTS` for this question, and
+        // never carries a meaningful `WM_CLASS` for this question, and
         // `asks_not_to_be_shown`'s own doc is about the window that *is*
         // otherwise an ordinary one. `is_hidden` keeps a `Dialog` out of this
         // question the same way `places_itself` already does (its own doc
@@ -428,7 +450,9 @@ impl XwmHandler for Solium {
         let hidden = !self_placing
             && is_hidden(
                 window.window_type(),
-                window.hints().and_then(|hints| hints.input),
+                &self.x11.hidden,
+                &window.class(),
+                &window.instance(),
             );
         // Where the client put it. A menu positions itself with a
         // ConfigureRequest before it maps -- `configure_request` below grants
@@ -1035,66 +1059,133 @@ impl XwmHandler for crate::tty::State {
 #[cfg(test)]
 mod tests {
     use super::{
-        asks_not_to_be_shown, floats_over_its_parent, is_hidden, kill_client, places_itself,
-        window_type_name,
+        Settings, asks_not_to_be_shown, floats_over_its_parent, is_hidden, kill_client,
+        places_itself, window_type_name,
     };
     use smithay::xwayland::xwm::WmWindowType;
 
-    /// **#221: `WM_HINTS.input = false` is the one thing that hides a window
-    /// `places_itself` did not already catch.** A real `xwaylandvideobridge`,
-    /// read nested with `xprop`, is this exact shape: `_NET_WM_WINDOW_TYPE_NORMAL`,
-    /// no override-redirect, and `input: false` the only hint that marks it.
+    /// **#221: a window named in `hidden` is hidden**, by either `WM_CLASS`
+    /// field — class or instance, either one, is enough.
     #[test]
-    fn a_window_that_declines_input_asks_not_to_be_shown() {
+    fn a_window_named_in_hidden_asks_not_to_be_shown() {
+        let hidden = Settings::default().hidden;
         assert!(
-            asks_not_to_be_shown(Some(false)),
-            "WM_HINTS.input = false is ICCCM's own way to say nobody should \
-             interact with this window"
+            asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+            "the default list names xwaylandvideobridge on both WM_CLASS fields"
+        );
+        assert!(
+            asks_not_to_be_shown(&hidden, "some-other-class", "xwaylandvideobridge"),
+            "the instance alone matching is enough"
+        );
+        assert!(
+            asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "some-other-instance"),
+            "the class alone matching is enough"
         );
     }
 
+    /// **#221 review: the 'Globally Active' case.** ICCCM §4.1.7 names an
+    /// input model, right beside the clause the old rule misread, where an
+    /// ordinary application declines `WM_HINTS.input` and takes the keyboard
+    /// itself through `WM_TAKE_FOCUS`. A window of that shape whose class is
+    /// not on `hidden` must stay shown and managed — `accepts_input` plays no
+    /// part in this decision any more, so this test does not even pass one.
     #[test]
-    fn a_window_that_may_take_input_is_shown_as_usual() {
+    fn an_unlisted_window_is_shown_regardless_of_input() {
+        let hidden = Settings::default().hidden;
         assert!(
-            !asks_not_to_be_shown(Some(true)),
-            "input = true is an ordinary, interactive window"
+            !asks_not_to_be_shown(&hidden, "a-globally-active-app", "a-globally-active-app"),
+            "a class absent from hidden is never hidden, whatever its WM_HINTS said"
         );
         assert!(
-            !asks_not_to_be_shown(None),
-            "a client that set no WM_HINTS at all has asked for nothing special"
+            !is_hidden(
+                Some(WmWindowType::Normal),
+                &hidden,
+                "a-globally-active-app",
+                "a-globally-active-app"
+            ),
+            "an ordinary, unlisted window reaches the managed path"
+        );
+    }
+
+    /// Matching is case-insensitive on either `WM_CLASS` field: a name in
+    /// `config.lua` should not have to match a client's own capitalisation.
+    #[test]
+    fn matching_is_case_insensitive() {
+        let hidden = vec!["XwaylandVideoBridge".to_owned()];
+        assert!(
+            asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+            "a lower-case class should still match a mixed-case configured name"
+        );
+        assert!(
+            asks_not_to_be_shown(&hidden, "XWAYLANDVIDEOBRIDGE", "XWAYLANDVIDEOBRIDGE"),
+            "and an upper-case one"
+        );
+    }
+
+    /// A `hidden` list from configuration replaces the default rather than
+    /// adding to it — the same contract `sol.x11`'s own parsing test checks
+    /// at the Lua boundary, down at the plain function this one actually
+    /// reaches.
+    #[test]
+    fn a_configured_list_replaces_the_default() {
+        let configured = vec!["my-tray-helper".to_owned()];
+        assert!(
+            asks_not_to_be_shown(&configured, "my-tray-helper", "my-tray-helper"),
+            "a name the configuration added is hidden"
+        );
+        assert!(
+            !asks_not_to_be_shown(&configured, "xwaylandvideobridge", "xwaylandvideobridge"),
+            "the default name is gone once the configuration names its own list"
         );
     }
 
     /// **#221 review.** `asks_not_to_be_shown` alone cannot tell
-    /// `xwaylandvideobridge` apart from a confirmation dialog answered by
-    /// mouse, which can legitimately decline the keyboard too. `is_hidden` is
-    /// the line that keeps the second one reaching `refused_with_a_dialog`.
+    /// `xwaylandvideobridge` apart from a confirmation dialog that happens to
+    /// share its class with something on `hidden`. `is_hidden` is the line
+    /// that keeps a `Dialog` reaching `refused_with_a_dialog` regardless.
     #[test]
-    fn a_dialog_that_declines_input_is_still_not_hidden() {
+    fn a_dialog_is_never_hidden() {
+        let hidden = Settings::default().hidden;
         assert!(
-            !is_hidden(Some(WmWindowType::Dialog), Some(false)),
+            !is_hidden(
+                Some(WmWindowType::Dialog),
+                &hidden,
+                "xwaylandvideobridge",
+                "xwaylandvideobridge"
+            ),
             "a Dialog stays on the managed path the same way places_itself \
-             already keeps it there (#72), even when it declines input"
+             already keeps it there (#72), even when its class is listed"
         );
     }
 
     #[test]
     fn everything_else_is_hidden_the_way_asks_not_to_be_shown_already_said() {
+        let hidden = Settings::default().hidden;
         for kind in [
             None,
             Some(WmWindowType::Normal),
             Some(WmWindowType::Utility),
         ] {
             assert_eq!(
-                is_hidden(kind, Some(false)),
-                asks_not_to_be_shown(Some(false)),
-                "{kind:?} has no reason to differ from the plain ICCCM reading"
+                is_hidden(kind, &hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+                asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+                "{kind:?} has no reason to differ from the plain WM_CLASS reading"
             );
             assert!(
-                !is_hidden(kind, Some(true)),
-                "{kind:?} that accepts input is never hidden"
+                !is_hidden(kind, &hidden, "an-ordinary-app", "an-ordinary-app"),
+                "{kind:?} not on the list is never hidden"
             );
         }
+    }
+
+    /// The shipped default names only `xwaylandvideobridge`, the one case
+    /// this hides unasked (#221).
+    #[test]
+    fn the_default_hides_only_xwaylandvideobridge() {
+        assert_eq!(
+            Settings::default().hidden,
+            vec!["xwaylandvideobridge".to_owned()]
+        );
     }
 
     /// `sol.windows()`'s `x11_type` is `None` reaching `script.rs` for a

@@ -393,6 +393,12 @@ impl Solium {
                 Command::Lock(settings) => {
                     self.logind.configure(settings, self.lock.is_some());
                 }
+                Command::X11(settings) => {
+                    if self.x11 != settings {
+                        tracing::debug!(?settings, "which WM_CLASS names are hidden set");
+                        self.x11 = settings;
+                    }
+                }
                 Command::FocusMode {
                     click,
                     follow,
