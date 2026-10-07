@@ -228,6 +228,65 @@ impl Plan {
         formats.dedup();
         formats
     }
+
+    /// For each step, the index of the last step that reads it, through
+    /// `sol_tex` or `uses`, if any does: the plan's steps, or one state's.
+    /// `tests::a_saved_result_keeps_its_slot_until_its_last_reader`.
+    pub fn last_readers(steps: &[Step]) -> Vec<Option<usize>> {
+        let mut last = vec![None; steps.len()];
+        for (index, step) in steps.iter().enumerate() {
+            for feed in std::iter::once(&step.first).chain(step.uses.iter().map(|(_, feed)| feed)) {
+                if let Feed::Step(k) = feed
+                    && let Some(reader) = last.get_mut(*k)
+                {
+                    *reader = Some(index);
+                }
+            }
+        }
+        last
+    }
+
+    /// A target slot for each step, and how many slots: a step takes the
+    /// first slot of its size and format whose step no step from this one
+    /// on reads, else a new one, so a step never draws into what it reads
+    /// and a jump flood ping-pongs between two. The last step may take a
+    /// freed slot too: nothing draws after it in the run, and the next run
+    /// draws a new result. `sizes` are [`Plan::sizes`]' for these steps.
+    /// `tests::a_repeated_pass_ping_pongs_between_two_targets`,
+    /// `tests::a_saved_result_keeps_its_slot_until_its_last_reader`,
+    /// `tests::a_slot_is_shared_only_at_one_size_and_format`.
+    pub fn slots(steps: &[Step], sizes: &[(u32, u32)]) -> (Vec<usize>, usize) {
+        let readers = Self::last_readers(steps);
+        let mut slots = Vec::with_capacity(steps.len());
+        // Per slot: its size, its format, and the step whose result it holds.
+        let mut held: Vec<((u32, u32), Format, usize)> = Vec::new();
+        for (index, step) in steps.iter().enumerate() {
+            let size = sizes.get(index).copied().unwrap_or((1, 1));
+            let free = held.iter().position(|&(each, format, holder)| {
+                each == size
+                    && format == step.format
+                    && readers
+                        .get(holder)
+                        .copied()
+                        .flatten()
+                        .is_none_or(|reader| reader < index)
+            });
+            let slot = match free {
+                Some(slot) => {
+                    if let Some(entry) = held.get_mut(slot) {
+                        entry.2 = index;
+                    }
+                    slot
+                }
+                None => {
+                    held.push((size, step.format, index));
+                    held.len() - 1
+                }
+            };
+            slots.push(slot);
+        }
+        (slots, held.len())
+    }
 }
 
 /// One effect bound by name: its stages for the bound params, the inputs it
@@ -1461,5 +1520,98 @@ mod tests {
         assert_eq!(blur.formats(), [Format::Rgba8]);
         let state = flatten("x", &[], &mut a_shrunk_state).expect("flattens");
         assert_eq!(state.formats(), [Format::Rgba8, Format::Rgba16f]);
+    }
+
+    /// **A repeated pass ping-pongs between two targets**: eight jump-flood
+    /// steps of one size need two slots, because each reads only the last.
+    #[test]
+    fn a_repeated_pass_ping_pongs_between_two_targets() {
+        let mut jump = |_: &str, _: &[(String, Value)]| -> Result<Binding, String> {
+            Ok(Binding {
+                stages: vec![Stage::Repeat {
+                    over: vec![64.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0, 1.0],
+                    as_name: "jump".to_owned(),
+                    body: vec![pass("jump.frag", 1.0)],
+                }],
+                inputs: vec!["self".to_owned()],
+                params: Vec::new(),
+            })
+        };
+        let plan = flatten("jump", &[], &mut jump).expect("flattens");
+        let (sizes, _) = plan.sizes((300, 200));
+        let (slots, count) = super::Plan::slots(&plan.steps, &sizes);
+        assert_eq!(count, 2, "{slots:?}");
+        assert_eq!(slots, [0, 1, 0, 1, 0, 1, 0, 1]);
+    }
+
+    /// A saved result stays live until its last reader: `both.frag` reads
+    /// `sharp`, so `sharp`'s slot is not reused before it.
+    #[test]
+    fn a_saved_result_keeps_its_slot_until_its_last_reader() {
+        let mut lib = |_: &str, _: &[(String, Value)]| -> Result<Binding, String> {
+            Ok(Binding {
+                stages: vec![
+                    pass("a.frag", 1.0),
+                    Stage::Save("sharp".to_owned()),
+                    pass("b.frag", 1.0),
+                    pass("c.frag", 1.0),
+                    Stage::Pass {
+                        frag: "both.frag".to_owned(),
+                        scale: 1.0,
+                        format: Format::Rgba8,
+                        uses: vec!["sharp".to_owned()],
+                        input: None,
+                    },
+                ],
+                inputs: vec!["self".to_owned()],
+                params: Vec::new(),
+            })
+        };
+        let plan = flatten("x", &[], &mut lib).expect("flattens");
+        let (sizes, _) = plan.sizes((10, 10));
+        let (slots, _) = super::Plan::slots(&plan.steps, &sizes);
+        assert!(
+            slots[2] != slots[0] && slots[3] != slots[0],
+            "sharp's slot was reused while both.frag still reads it: {slots:?}"
+        );
+        assert_eq!(
+            super::Plan::last_readers(&plan.steps),
+            [Some(3), Some(2), Some(3), None],
+            "a.frag's result is last read by both.frag, through `uses`"
+        );
+    }
+
+    /// **A slot is shared only at one size and one format**: a two-pass
+    /// dual Kawase of 257×129 draws 129×65, 65×33, 129×65 and 257×129, and
+    /// its second 129×65 takes the first's slot once nothing reads it; after
+    /// it, an `rgba16f` pass of 257×129 does not take the free `rgba8` slot
+    /// of that size, and the `rgba8` pass after that does.
+    #[test]
+    fn a_slot_is_shared_only_at_one_size_and_format() {
+        let plan = flatten(
+            "blur",
+            &[("passes".to_owned(), Value::Int(2))],
+            &mut library,
+        )
+        .expect("flattens");
+        let (mut sizes, _) = plan.sizes((257, 129));
+        assert_eq!(sizes, [(129, 65), (65, 33), (129, 65), (257, 129)]);
+        assert_eq!(
+            super::Plan::slots(&plan.steps, &sizes),
+            (vec![0, 1, 0, 2], 3)
+        );
+        let mut steps = plan.steps.clone();
+        for format in [Format::Rgba8, Format::Rgba16f, Format::Rgba8] {
+            let mut step = steps[0].clone();
+            step.format = format;
+            step.first = Feed::Step(steps.len() - 1);
+            step.size = Size::Like(Feed::Step(steps.len() - 1));
+            steps.push(step);
+            sizes.push((257, 129));
+        }
+        assert_eq!(
+            super::Plan::slots(&steps, &sizes),
+            (vec![0, 1, 0, 2, 3, 4, 2], 5)
+        );
     }
 }
