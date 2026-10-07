@@ -559,6 +559,10 @@ pub(crate) struct Solium {
     pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
     /// The X display number XWayland took, for `DISPLAY` in children.
     pub(crate) x11_display: Option<u32>,
+    /// `config.x11`, handed over by `sol.x11`: the `WM_CLASS` names
+    /// `map_window_request` refuses a tile, decoration or bar entry to
+    /// outright (#221). See `xwayland::Settings`.
+    pub(crate) x11: crate::xwayland::Settings,
     /// What systemd and D-Bus activation have been told about this session,
     /// and the stop and unset it owes them on exit. See `session.rs`.
     pub(crate) session: crate::session::Session,
@@ -1134,6 +1138,7 @@ impl Solium {
             reported_at: std::time::Duration::ZERO,
             xwm: None,
             x11_display: None,
+            x11: crate::xwayland::Settings::default(),
             session: crate::session::Session::off(),
             logind: crate::logind::Logind::off(),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(

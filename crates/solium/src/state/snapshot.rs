@@ -273,106 +273,133 @@ impl Solium {
         // Built from panes, not from the space: this is the list scripts place,
         // so a window that exists but has no client yet has to be in it or the
         // layout will never give it anywhere to be.
-        let windows = self
-            .panes
-            .iter()
-            .rev()
-            .filter_map(|pane| {
-                // The remains of a window whose client has gone, fading out.
-                // Never listed, in any event, and not under `reserves_a_slot`
-                // below: a layout handed one places it and `adopt` puts it
-                // into a tree -- an immortal invisible tile, since nothing
-                // sends a second `close`. Its `close` went out while it was
-                // still the window it had been (`Self::depart`).
-                //
-                // **Belt and braces, and said so.** Every such pane is also
-                // `gone`, which the filter further down already leaves out, so
-                // no test fails without this line; it holds for a pane that is
-                // `Leaving` by any later route that forgets to mark it.
-                if pane.ghost() {
-                    return None;
-                }
-                // A pane whose application has not arrived is in this list --
-                // that is what makes the layout reserve its place before there
-                // is anything to put in it. Unless it was asked not to: a
-                // window that takes no slot until it is really there is a
-                // setting, because which of the two reads better is taste.
-                if pane.client().is_none() && !self.loading.reserves_a_slot {
-                    return None;
-                }
-                // A menu, a tooltip, a drag icon. On screen and under the
-                // pointer, but not a window: a layout given one reserves a
-                // slot for it and reflows the desktop around something that
-                // will be gone in a moment.
-                if !pane.managed() {
-                    return None;
-                }
-                // A window scripts have been told has gone, in any event after
-                // that one: its pane is only waiting for `sync_panes` to retire
-                // it. Listed, it was a window a layout could place or `adopt`
-                // put back into a tree. `close`'s own snapshot still lists it,
-                // so a script can ask which window it was. See
-                // `adopt_in_the_frame_a_window_went_keeps_no_leaf_for_it`.
-                if pane.gone() && self.closing != Some(pane.id()) {
-                    return None;
-                }
-                let outer = self.pane_outer(pane);
-                Some(WindowInfo {
-                    id: pane.id().get(),
-                    rect: to_rect(outer),
-                    drawn: Drawn {
-                        slot: outer,
-                        frame: self.drawn_at(pane, outer, now),
-                    },
-                    // What the user asked for, until the client has an opinion.
-                    title: pane.client().map_or_else(
-                        || pane.program().unwrap_or_default().to_owned(),
-                        |window| self.window_title(window),
-                    ),
-                    focused: pane.client().is_some() && focused.as_ref() == pane.client(),
-                    monitor: self
-                        .output_of(outer)
-                        .map(|output| output.name())
-                        .unwrap_or_default(),
-                    // A pane with no client yet is a reserved slot, and a
-                    // reserved slot has no client to have said either of these
-                    // things -- so it is an ordinary window until one arrives,
-                    // and the `modal_changed` that arrives with it re-runs the
-                    // layout.
-                    modal: pane.client().is_some_and(|window| self.is_modal(window)),
-                    parent: pane
-                        .client()
-                        .map_or(Parentage::None, |window| self.parent_of(window)),
-                    // From `closing` until the window is given back, and in
-                    // `close`'s own snapshot, which still lists the window so a
-                    // script can ask which one it was. That includes a client
-                    // that closed itself and was never `closing`, because
-                    // `trigger_close` marks every pane it tells scripts about
-                    // as gone, and a gone pane is leaving. See
-                    // `WindowInfo::leaving` and
-                    // `the_window_list_says_which_windows_are_leaving`.
-                    leaving: pane.leaving(),
-                    app_id: pane
-                        .client()
-                        .map(|window| self.script_app_id(window))
-                        .unwrap_or_default(),
-                    // Read live rather than from what the layouts were last
-                    // told, so the `open` of a window whose client said so
-                    // before its first buffer -- every X11 window, and an xdg
-                    // one launched outside `sol.spawn` -- is decided with its
-                    // limits in hand. A pane with no client has said nothing.
-                    // `real_client::client_sizes::a_window_that_opens_with_a_minimum_hears_it_once`.
-                    min: pane.client().and_then(|window| {
-                        in_pane(limits_of(window).min, self.insets_of(pane.id()))
-                    }),
-                    max: pane.client().and_then(|window| {
-                        in_pane(limits_of(window).max, self.insets_of(pane.id()))
-                    }),
-                    cramped: pane.cramped(),
-                    shown: crate::present::was_shown(pane),
+        let windows =
+            self.panes
+                .iter()
+                .rev()
+                .filter_map(|pane| {
+                    // The remains of a window whose client has gone, fading out.
+                    // Never listed, in any event, and not under `reserves_a_slot`
+                    // below: a layout handed one places it and `adopt` puts it
+                    // into a tree -- an immortal invisible tile, since nothing
+                    // sends a second `close`. Its `close` went out while it was
+                    // still the window it had been (`Self::depart`).
+                    //
+                    // **Belt and braces, and said so.** Every such pane is also
+                    // `gone`, which the filter further down already leaves out, so
+                    // no test fails without this line; it holds for a pane that is
+                    // `Leaving` by any later route that forgets to mark it.
+                    if pane.ghost() {
+                        return None;
+                    }
+                    // A pane whose application has not arrived is in this list --
+                    // that is what makes the layout reserve its place before there
+                    // is anything to put in it. Unless it was asked not to: a
+                    // window that takes no slot until it is really there is a
+                    // setting, because which of the two reads better is taste.
+                    if pane.client().is_none() && !self.loading.reserves_a_slot {
+                        return None;
+                    }
+                    // A menu, a tooltip, a drag icon. On screen and under the
+                    // pointer, but not a window: a layout given one reserves a
+                    // slot for it and reflows the desktop around something that
+                    // will be gone in a moment.
+                    if !pane.managed() {
+                        return None;
+                    }
+                    // A window scripts have been told has gone, in any event after
+                    // that one: its pane is only waiting for `sync_panes` to retire
+                    // it. Listed, it was a window a layout could place or `adopt`
+                    // put back into a tree. `close`'s own snapshot still lists it,
+                    // so a script can ask which window it was. See
+                    // `adopt_in_the_frame_a_window_went_keeps_no_leaf_for_it`.
+                    if pane.gone() && self.closing != Some(pane.id()) {
+                        return None;
+                    }
+                    let outer = self.pane_outer(pane);
+                    Some(WindowInfo {
+                        id: pane.id().get(),
+                        rect: to_rect(outer),
+                        drawn: Drawn {
+                            slot: outer,
+                            frame: self.drawn_at(pane, outer, now),
+                        },
+                        // What the user asked for, until the client has an opinion.
+                        title: pane.client().map_or_else(
+                            || pane.program().unwrap_or_default().to_owned(),
+                            |window| self.window_title(window),
+                        ),
+                        focused: pane.client().is_some() && focused.as_ref() == pane.client(),
+                        monitor: self
+                            .output_of(outer)
+                            .map(|output| output.name())
+                            .unwrap_or_default(),
+                        // A pane with no client yet is a reserved slot, and a
+                        // reserved slot has no client to have said either of these
+                        // things -- so it is an ordinary window until one arrives,
+                        // and the `modal_changed` that arrives with it re-runs the
+                        // layout.
+                        modal: pane.client().is_some_and(|window| self.is_modal(window)),
+                        parent: pane
+                            .client()
+                            .map_or(Parentage::None, |window| self.parent_of(window)),
+                        // From `closing` until the window is given back, and in
+                        // `close`'s own snapshot, which still lists the window so a
+                        // script can ask which one it was. That includes a client
+                        // that closed itself and was never `closing`, because
+                        // `trigger_close` marks every pane it tells scripts about
+                        // as gone, and a gone pane is leaving. See
+                        // `WindowInfo::leaving` and
+                        // `the_window_list_says_which_windows_are_leaving`.
+                        leaving: pane.leaving(),
+                        app_id: pane
+                            .client()
+                            .map(|window| self.script_app_id(window))
+                            .unwrap_or_default(),
+                        // Read live rather than from what the layouts were last
+                        // told, so the `open` of a window whose client said so
+                        // before its first buffer -- every X11 window, and an xdg
+                        // one launched outside `sol.spawn` -- is decided with its
+                        // limits in hand. A pane with no client has said nothing.
+                        // `real_client::client_sizes::a_window_that_opens_with_a_minimum_hears_it_once`.
+                        min: pane.client().and_then(|window| {
+                            in_pane(limits_of(window).min, self.insets_of(pane.id()))
+                        }),
+                        max: pane.client().and_then(|window| {
+                            in_pane(limits_of(window).max, self.insets_of(pane.id()))
+                        }),
+                        cramped: pane.cramped(),
+                        shown: crate::present::was_shown(pane),
+                        // `None` for a Wayland window -- there is no
+                        // `_NET_WM_WINDOW_TYPE` to have read -- never `"normal"`
+                        // standing in for "not X11", which is what would let a
+                        // window rule mistake the one for the other.
+                        x11_type: pane.client().and_then(Window::x11_surface).map(|x11| {
+                            crate::xwayland::window_type_name(x11.window_type()).to_owned()
+                        }),
+                        accepts_input: pane
+                            .client()
+                            .and_then(Window::x11_surface)
+                            .and_then(|x11| x11.hints())
+                            .and_then(|hints| hints.input)
+                            .unwrap_or(true),
+                        // `WM_CLASS`'s two fields, for a window rule (#56)
+                        // and for `config.x11.hidden`'s own match in
+                        // `xwayland::map_window_request` -- read directly
+                        // off the surface rather than cached here, the same
+                        // as `x11_type` above. `None` for a Wayland window,
+                        // which has no `WM_CLASS` to have read.
+                        class: pane
+                            .client()
+                            .and_then(Window::x11_surface)
+                            .map(|x11| x11.class()),
+                        instance: pane
+                            .client()
+                            .and_then(Window::x11_surface)
+                            .map(|x11| x11.instance()),
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
         let active = self.active_output();
         let primary = self.primary_output();

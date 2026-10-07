@@ -1102,6 +1102,10 @@ mod desk {
             max: None,
             cramped: false,
             shown: true,
+            x11_type: None,
+            accepts_input: true,
+            class: None,
+            instance: None,
         }
     }
 

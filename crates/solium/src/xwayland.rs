@@ -154,6 +154,123 @@ pub(crate) const fn floats_over_its_parent(kind: Option<WmWindowType>) -> bool {
     matches!(kind, Some(WmWindowType::Dialog))
 }
 
+/// `config.x11.hidden`, handed over by the shipped `init.lua`'s
+/// `sol.x11(config.x11)`: the `WM_CLASS` names [`asks_not_to_be_shown`] hides
+/// outright, the same way a menu or a `Dialog` is handled generically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Settings {
+    /// Matched case-insensitively against either `WM_CLASS` field —
+    /// `X11Surface::class()` or `X11Surface::instance()` — since toolkits
+    /// disagree about which one carries the name a person would recognise,
+    /// and a name on this list does not say which the application used.
+    pub(crate) hidden: Vec<String>,
+}
+
+impl Default for Settings {
+    /// KDE's screen-sharing fallback (#221) is the one name this ships with
+    /// unasked; anything else in `hidden` is something a person's own
+    /// `config.lua` put there.
+    fn default() -> Self {
+        Self {
+            hidden: vec!["xwaylandvideobridge".to_owned()],
+        }
+    }
+}
+
+/// Whether `hidden` names this window by its `WM_CLASS`: not tiled, not
+/// decorated, and left out of `sol.windows()` — hidden from the bar and the
+/// window list, the same treatment `places_itself` already gives a menu or a
+/// tooltip, for a different reason.
+///
+/// **Issue #221.** KDE's `xwaylandvideobridge` is an ordinary top-level window
+/// by every measure `places_itself` and `floats_over_its_parent` ask:
+/// `_NET_WM_WINDOW_TYPE_NORMAL`, no override-redirect, `WM_PROTOCOLS` offering
+/// `WM_DELETE_WINDOW`. So it used to arrive on the tiled, decorated, listed
+/// path meant for an application a person opens and drives, and stayed there —
+/// on Plasma it is invisible, and here it was an ordinary window nothing could
+/// dismiss.
+///
+/// **This used to read `WM_HINTS.input` instead, and that reading was wrong.**
+/// ICCCM §4.1.7 reserves `input: false` for "the window manager *may* set the
+/// input focus" to a window — but *may* is not *never*: the very next clause
+/// names the 'Globally Active' input model, an ordinary, focusable
+/// application that declines `WM_HINTS.input` on purpose and takes the
+/// keyboard itself through `WM_TAKE_FOCUS` instead. `input: false` hid every
+/// window of that shape along with the one window the rule was written for.
+/// `WM_CLASS` is the identifier ICCCM actually hands a window manager for "I
+/// know what this specific program is" — `xprop`, `wmctrl` and every
+/// `.desktop` file already key off it — so a name on `hidden` is a much
+/// narrower, and correct, claim than a hint three other kinds of window can
+/// legitimately set too.
+///
+/// **Not `_NET_WM_STATE_SKIP_TASKBAR` or `SKIP_PAGER`**, which is what the
+/// issue went looking for first. A real `xwaylandvideobridge`, read nested
+/// with `xprop`, sets neither: this build's whole `_NET_WM_STATE` is empty of
+/// its own accord, which is the ceiling `floats_over_its_parent`'s own doc
+/// already names — smithay 0.7's `X11Surface` never reads a client's own
+/// `_NET_WM_STATE` at all, only ever writing what the compositor put there
+/// itself (`change_net_state`).
+///
+/// **Not `_NET_WM_WINDOW_OPACITY` either**, which is the other half of what
+/// makes the window invisible on a desktop that honours it. smithay 0.7 does
+/// not read that atom either — `WmWindowProperty` names ten properties at
+/// `xwm/surface.rs` and it is not one of them — so there is nothing on
+/// `X11Surface` to ask. A window hidden by this function at least takes no
+/// tile and draws no titlebar; it is not promised invisible, and a client
+/// that paints real pixels into it still shows them.
+///
+/// Asked only of a window `places_itself` has already said no to: a menu or a
+/// tooltip is unmanaged for its own reason and never reaches this question in
+/// `map_window_request`.
+pub(crate) fn asks_not_to_be_shown(hidden: &[String], class: &str, instance: &str) -> bool {
+    hidden
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(class) || name.eq_ignore_ascii_case(instance))
+}
+
+/// [`asks_not_to_be_shown`], except a `Dialog` is never hidden by it.
+///
+/// `places_itself` already keeps `Dialog` out of its own list for a reason
+/// written down there (#72): `refused_with_a_dialog` is watching for exactly
+/// this window type, because a dialog appearing where a close was pending is
+/// the evidence the close was answered. Nothing stops a future `hidden` entry
+/// from naming a class some application also uses for a confirmation dialog;
+/// keeping this guard rather than trusting every entry never to collide with
+/// a real one costs nothing and loses nothing.
+pub(crate) fn is_hidden(
+    kind: Option<WmWindowType>,
+    hidden: &[String],
+    class: &str,
+    instance: &str,
+) -> bool {
+    !matches!(kind, Some(WmWindowType::Dialog)) && asks_not_to_be_shown(hidden, class, instance)
+}
+
+/// The name a script is given for an X11 window's `_NET_WM_WINDOW_TYPE`, for
+/// `sol.windows()`'s `x11_type` — the raw material a window rule (#56) needs
+/// to act on a case this file's own policy does not cover, such as a `Dialog`
+/// or a `Utility` palette a layout wants to treat differently.
+///
+/// Lower case, as every other name this compositor hands to Lua is
+/// (`transform`, `power`, `fill`...). `None`'s own EWMH reading is `Normal`,
+/// same as `places_itself` and `floats_over_its_parent` already give it, so it
+/// is named rather than left absent — absent is reserved for "not an X11
+/// window at all", which `WindowInfo::x11_type` is.
+pub(crate) const fn window_type_name(kind: Option<WmWindowType>) -> &'static str {
+    match kind {
+        None | Some(WmWindowType::Normal) => "normal",
+        Some(WmWindowType::Dialog) => "dialog",
+        Some(WmWindowType::Utility) => "utility",
+        Some(WmWindowType::Toolbar) => "toolbar",
+        Some(WmWindowType::Menu) => "menu",
+        Some(WmWindowType::DropdownMenu) => "dropdown-menu",
+        Some(WmWindowType::PopupMenu) => "popup-menu",
+        Some(WmWindowType::Tooltip) => "tooltip",
+        Some(WmWindowType::Notification) => "notification",
+        Some(WmWindowType::Splash) => "splash",
+    }
+}
+
 /// The event loop's data, whatever the backend made it, has a compositor in it.
 ///
 /// XWayland's sources are inserted into the loop the backend owns, and the two
@@ -320,16 +437,38 @@ impl XwmHandler for Solium {
             tracing::warn!(?err, "could not map an X11 window");
             return;
         }
-        // Both reads happen before the surface is moved into the element.
+        // Read before the surface is moved into the element: this, `hidden`
+        // below, `asked_for`, and the client pid `remember_client_pid` looks
+        // up just before the move.
         let self_placing = places_itself(window.window_type());
+        // Asked only when the window is not already self-placing: a menu
+        // never carries a meaningful `WM_CLASS` for this question, and
+        // `asks_not_to_be_shown`'s own doc is about the window that *is*
+        // otherwise an ordinary one. `is_hidden` keeps a `Dialog` out of this
+        // question the same way `places_itself` already does (its own doc
+        // says why; #221 review).
+        let hidden = !self_placing
+            && is_hidden(
+                window.window_type(),
+                &self.x11.hidden,
+                &window.class(),
+                &window.instance(),
+            );
         // Where the client put it. A menu positions itself with a
         // ConfigureRequest before it maps -- `configure_request` below grants
         // those, and smithay records the result as the surface's geometry --
         // so this is the spot the client computed next to its button, not the
         // (0, 0) a window starts life at.
         let asked_for = window.geometry().loc;
+        // Which process it is, read before the surface is moved into the
+        // element, for `Windows`' `pid` and so a hidden window's close can
+        // reach it too (#221's `close.rs`): `remember_client_pid` only ever
+        // asks once, so asking here does not cost the ordinary path a second
+        // round trip to XWayland.
+        // `models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`.
+        remember_client_pid(&window);
         let element = Window::new_x11_window(window);
-        if self_placing {
+        if self_placing || hidden {
             // Deliberately the same two lines as
             // `mapped_override_redirect_window`: placed where the client
             // asked, and given an *unmanaged* pane. The pane is what keeps it
@@ -342,14 +481,17 @@ impl XwmHandler for Solium {
             // three of those guards ask `Pane::managed` and nothing else,
             // which is why the only thing needed to land on the right side of
             // them is `take_unmanaged_pane`.
+            //
+            // A hidden-but-not-self-placing window shares the branch rather
+            // than getting one of its own: it has no `ConfigureRequest` of its
+            // own placement to honour either way, since nothing here asked
+            // for one, so `asked_for` is simply wherever XWayland put it at
+            // `CreateNotify` -- as good a spot as any for a window nothing
+            // will ever tile, and the one `configure_notify` already follows
+            // for an unmanaged pane if the client moves itself later.
             self.space.map_element(element.clone(), asked_for, true);
             self.take_unmanaged_pane(element);
             return;
-        }
-        // Which process it is, for `Windows`' `pid`.
-        // `models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`.
-        if let Some(x11) = element.x11_surface() {
-            remember_client_pid(x11);
         }
         self.map_stacked(element.clone(), (0, 0), true);
         self.take_pane(element.clone());
@@ -753,6 +895,55 @@ pub(crate) fn client_pid(window: &X11Surface) -> Option<u32> {
     window.user_data().get::<ClientPid>().and_then(|pid| pid.0)
 }
 
+/// End an X11 client's process outright, by the pid Xwayland named for it at
+/// `CreateNotify` ([`client_pid`]) -- never by matching its name, which is the
+/// one thing every other process on the machine shares with it.
+///
+/// `Solium::settle_closing` is the one caller (#221): a client whose
+/// `WM_DELETE_WINDOW` has already gone unanswered for a whole `GRACE`
+/// (`Solium::settle_refused`) is asked a second time with this instead of the
+/// request again, because a second polite ask of a client that has already
+/// demonstrated it will not answer learns nothing a second `GRACE` would not
+/// already have told the first one.
+///
+/// `Signal::TERM`, not `KILL`: the ordinary way a process is asked to end
+/// everywhere else in this compositor (`signals.rs`'s own `ENDING`), so a
+/// client with cleanup worth running -- a temp file, a lock -- still gets the
+/// chance a `WM_DELETE_WINDOW` it ignored already failed to give it. Nothing
+/// here waits to see whether it took: the client's own exit, or XWayland
+/// tearing its window down behind it, reaches `unmapped_window` and
+/// `destroyed_window` exactly as any other client going does, and from there
+/// the pane leaves the way every pane leaves (`Solium::depart`).
+///
+/// Tested directly, against a real process of its own
+/// (`tests::a_real_process_is_dead_after_being_killed`), rather than through
+/// `settle_closing`: nothing in this crate's tests can build a live
+/// `X11Surface` to call it with (`map_window_request`'s own note says why), so
+/// this is the boundary — the signal this function sends is real, and what
+/// calls it with a real pid is read, not driven.
+pub(crate) fn kill_client(pid: u32) {
+    use smithay::reexports::rustix::process::{Pid, Signal, kill_process};
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        // A real pid_t never gets this big (Linux's own pid_max tops out far
+        // below `i32::MAX`); kept so a `u32` this function cannot otherwise
+        // rule out is refused here rather than laundered into a fabricated
+        // sentinel pid.
+        tracing::warn!(pid, "an X11 client's pid could not be named to kill");
+        return;
+    };
+    let Some(pid) = Pid::from_raw(raw_pid) else {
+        // `remember_client_pid` already filters out 0; a negative value
+        // cannot come from `get_client_pid`'s `u32` at all. Nothing a real
+        // Xwayland has ever been seen to send, kept so this stays total
+        // rather than panicking on it.
+        tracing::warn!(pid, "an X11 client's pid could not be named to kill");
+        return;
+    };
+    if let Err(err) = kill_process(pid, Signal::TERM) {
+        tracing::warn!(?err, ?pid, "could not kill an unresponsive X11 client");
+    }
+}
+
 /// The hardware backend's loop data, forwarding to the compositor inside it.
 ///
 /// XWayland's window manager is driven from the event loop, and on the
@@ -867,8 +1058,192 @@ impl XwmHandler for crate::tty::State {
 
 #[cfg(test)]
 mod tests {
-    use super::{floats_over_its_parent, places_itself};
+    use super::{
+        Settings, asks_not_to_be_shown, floats_over_its_parent, is_hidden, kill_client,
+        places_itself, window_type_name,
+    };
     use smithay::xwayland::xwm::WmWindowType;
+
+    /// **#221: a window named in `hidden` is hidden**, by either `WM_CLASS`
+    /// field — class or instance, either one, is enough.
+    #[test]
+    fn a_window_named_in_hidden_asks_not_to_be_shown() {
+        let hidden = Settings::default().hidden;
+        assert!(
+            asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+            "the default list names xwaylandvideobridge on both WM_CLASS fields"
+        );
+        assert!(
+            asks_not_to_be_shown(&hidden, "some-other-class", "xwaylandvideobridge"),
+            "the instance alone matching is enough"
+        );
+        assert!(
+            asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "some-other-instance"),
+            "the class alone matching is enough"
+        );
+    }
+
+    /// **#221 review: the 'Globally Active' case.** ICCCM §4.1.7 names an
+    /// input model, right beside the clause the old rule misread, where an
+    /// ordinary application declines `WM_HINTS.input` and takes the keyboard
+    /// itself through `WM_TAKE_FOCUS`. A window of that shape whose class is
+    /// not on `hidden` must stay shown and managed — `accepts_input` plays no
+    /// part in this decision any more, so this test does not even pass one.
+    #[test]
+    fn an_unlisted_window_is_shown_regardless_of_input() {
+        let hidden = Settings::default().hidden;
+        assert!(
+            !asks_not_to_be_shown(&hidden, "a-globally-active-app", "a-globally-active-app"),
+            "a class absent from hidden is never hidden, whatever its WM_HINTS said"
+        );
+        assert!(
+            !is_hidden(
+                Some(WmWindowType::Normal),
+                &hidden,
+                "a-globally-active-app",
+                "a-globally-active-app"
+            ),
+            "an ordinary, unlisted window reaches the managed path"
+        );
+    }
+
+    /// Matching is case-insensitive on either `WM_CLASS` field: a name in
+    /// `config.lua` should not have to match a client's own capitalisation.
+    #[test]
+    fn matching_is_case_insensitive() {
+        let hidden = vec!["XwaylandVideoBridge".to_owned()];
+        assert!(
+            asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+            "a lower-case class should still match a mixed-case configured name"
+        );
+        assert!(
+            asks_not_to_be_shown(&hidden, "XWAYLANDVIDEOBRIDGE", "XWAYLANDVIDEOBRIDGE"),
+            "and an upper-case one"
+        );
+    }
+
+    /// A `hidden` list from configuration replaces the default rather than
+    /// adding to it — the same contract `sol.x11`'s own parsing test checks
+    /// at the Lua boundary, down at the plain function this one actually
+    /// reaches.
+    #[test]
+    fn a_configured_list_replaces_the_default() {
+        let configured = vec!["my-tray-helper".to_owned()];
+        assert!(
+            asks_not_to_be_shown(&configured, "my-tray-helper", "my-tray-helper"),
+            "a name the configuration added is hidden"
+        );
+        assert!(
+            !asks_not_to_be_shown(&configured, "xwaylandvideobridge", "xwaylandvideobridge"),
+            "the default name is gone once the configuration names its own list"
+        );
+    }
+
+    /// **#221 review.** `asks_not_to_be_shown` alone cannot tell
+    /// `xwaylandvideobridge` apart from a confirmation dialog that happens to
+    /// share its class with something on `hidden`. `is_hidden` is the line
+    /// that keeps a `Dialog` reaching `refused_with_a_dialog` regardless.
+    #[test]
+    fn a_dialog_is_never_hidden() {
+        let hidden = Settings::default().hidden;
+        assert!(
+            !is_hidden(
+                Some(WmWindowType::Dialog),
+                &hidden,
+                "xwaylandvideobridge",
+                "xwaylandvideobridge"
+            ),
+            "a Dialog stays on the managed path the same way places_itself \
+             already keeps it there (#72), even when its class is listed"
+        );
+    }
+
+    #[test]
+    fn everything_else_is_hidden_the_way_asks_not_to_be_shown_already_said() {
+        let hidden = Settings::default().hidden;
+        for kind in [
+            None,
+            Some(WmWindowType::Normal),
+            Some(WmWindowType::Utility),
+        ] {
+            assert_eq!(
+                is_hidden(kind, &hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+                asks_not_to_be_shown(&hidden, "xwaylandvideobridge", "xwaylandvideobridge"),
+                "{kind:?} has no reason to differ from the plain WM_CLASS reading"
+            );
+            assert!(
+                !is_hidden(kind, &hidden, "an-ordinary-app", "an-ordinary-app"),
+                "{kind:?} not on the list is never hidden"
+            );
+        }
+    }
+
+    /// The shipped default names only `xwaylandvideobridge`, the one case
+    /// this hides unasked (#221).
+    #[test]
+    fn the_default_hides_only_xwaylandvideobridge() {
+        assert_eq!(
+            Settings::default().hidden,
+            vec!["xwaylandvideobridge".to_owned()]
+        );
+    }
+
+    /// `sol.windows()`'s `x11_type` is `None` reaching `script.rs` for a
+    /// Wayland window and this string for an X11 one; `None`'s own EWMH
+    /// reading inside the X11 half is `"normal"`, matching `places_itself`
+    /// and `floats_over_its_parent`.
+    #[test]
+    fn every_window_type_has_a_lower_case_name_for_lua() {
+        assert_eq!(window_type_name(None), "normal");
+        assert_eq!(window_type_name(Some(WmWindowType::Normal)), "normal");
+        assert_eq!(window_type_name(Some(WmWindowType::Dialog)), "dialog");
+        assert_eq!(window_type_name(Some(WmWindowType::Utility)), "utility");
+        assert_eq!(window_type_name(Some(WmWindowType::Toolbar)), "toolbar");
+        assert_eq!(window_type_name(Some(WmWindowType::Menu)), "menu");
+        assert_eq!(
+            window_type_name(Some(WmWindowType::DropdownMenu)),
+            "dropdown-menu"
+        );
+        assert_eq!(
+            window_type_name(Some(WmWindowType::PopupMenu)),
+            "popup-menu"
+        );
+        assert_eq!(window_type_name(Some(WmWindowType::Tooltip)), "tooltip");
+        assert_eq!(
+            window_type_name(Some(WmWindowType::Notification)),
+            "notification"
+        );
+        assert_eq!(window_type_name(Some(WmWindowType::Splash)), "splash");
+    }
+
+    /// **#221: `kill_client` against a real process**, since nothing in this
+    /// crate's tests can build the `X11Surface` `Solium::settle_closing`
+    /// actually calls it with. `sleep` is spawned as a stand-in for an X11
+    /// client's connection process -- the signal does not know or care that
+    /// it never opened a display -- and its own `wait` is the proof: a
+    /// process `Signal::TERM` reached exits by that signal, not on its own.
+    #[test]
+    fn a_real_process_is_dead_after_being_killed() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawning a throwaway process to kill");
+        kill_client(child.id());
+        let status = child
+            .wait()
+            .expect("waiting on the process this test just killed");
+        assert!(
+            !status.success(),
+            "a process asked to sleep for 30s that exited successfully was \
+             never killed at all"
+        );
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(smithay::reexports::rustix::process::Signal::TERM.as_raw()),
+            "kill_client must ask with SIGTERM, the same signal every other \
+             process this compositor ends gets (signals.rs's ENDING)"
+        );
+    }
 
     /// The kinds issue #104 is about. Opened under the pointer, positioned by
     /// a client from a widget we cannot see, gone on the next click.

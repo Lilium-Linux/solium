@@ -1413,6 +1413,62 @@ over.
 **[modes.md](modes.md)** is the guide, with a whole working mode in forty lines
 and the two mistakes everyone makes first.
 
+### An X11 helper that was never meant to be seen
+
+Some autostart entries exist only so a desktop portal has something to talk
+to — KDE's screen-sharing fallback, `xwaylandvideobridge`, is the one this was
+found against (issue #221), and it is not the only X11 program shaped this
+way. Solium hides a window like it by `config.x11.hidden`, a list of `WM_CLASS`
+names matched case-insensitively against either field a client sets (`xprop
+WM_CLASS` on a nested window shows both). A listed window is not tiled, not
+decorated, and left out of `sol.windows()` — nothing a bar or a window list
+built from that call ever has to filter out by hand — the same treatment
+`xwayland.rs`'s `places_itself` already gives a menu or a tooltip, for a
+different reason. The default names only `xwaylandvideobridge`; add your own
+in `config.lua`'s `x11.hidden` for anything else shaped this way, keeping
+`xwaylandvideobridge` in the list if you still want it hidden, since a
+configured list replaces the default rather than adding to it.
+
+**This used to key off `WM_HINTS.input` instead, and hid more than it meant
+to.** ICCCM reserves `input: false` for a window that never wants the
+keyboard, but it also names an entirely ordinary 'Globally Active' input
+model — ordinary, ICCCM-conforming applications that set `input: false` and
+take the keyboard themselves through `WM_TAKE_FOCUS` — and that old rule hid
+every one of them too. `WM_CLASS` is a much narrower claim: a name on `hidden`
+says "this specific program", not "anything that declines this one hint".
+
+It is still a real client with a real process, but nothing in the shipped
+config can reach it to ask it to go. The shipped `super+q` only walks
+`sol.windows()` looking for a window with `focused == true`, and a window
+hidden this way never gets a row there at all to be found: the snapshot that
+builds `sol.windows()` drops an unmanaged pane before it becomes a
+`WindowInfo` (`state/snapshot.rs`), and the unmanaged path this window takes
+(`state/open.rs`'s `take_unmanaged_pane`) never grants it keyboard focus
+either, so `focused` could not be true for it regardless. A hung window of
+this shape cannot be stopped from inside the compositor today — only from
+outside it, with an ordinary `kill`, or by not letting it start in the first
+place, the way just below.
+
+The kill-after-silence mechanism `state/close.rs` added alongside this one
+(`GRACE`, `x11_refused_once`) is real, and it does help — for an ordinary,
+listed, managed X11 window that stops answering `WM_DELETE_WINDOW`, which is
+exactly what `super+q` can still reach the normal way. It was never reachable
+for this one.
+
+Nothing here stops the autostart entry from starting in the first place —
+that is Fedora's `/etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop`, not
+Solium's to own — so if you would rather it never ran at all, override it per
+session the way any `XDG_CONFIG_DIRS` autostart entry is overridden: a copy
+under `~/.config/autostart/` with `Hidden=true` added.
+
+    mkdir -p ~/.config/autostart
+    cp /etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop ~/.config/autostart/
+    printf 'Hidden=true\n' >> ~/.config/autostart/org.kde.xwaylandvideobridge.desktop
+
+A copy with `Hidden=true` is what every spec-following autostart reader
+treats as "do not start this one" — the original in `/etc/xdg/autostart` is
+untouched, so a package update to it never undoes the override.
+
 ## Worth knowing
 
 Each layer of a frame is drawn over its canvas: the window's outer rect, grown

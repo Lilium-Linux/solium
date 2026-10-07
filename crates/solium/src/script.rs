@@ -177,6 +177,40 @@ pub(crate) struct WindowInfo {
     /// already on screen whose limits changed (#115). See
     /// `real_client::client_sizes::a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`.
     pub(crate) shown: bool,
+    /// Its `_NET_WM_WINDOW_TYPE`, by the name `xwayland::window_type_name`
+    /// gives it -- `"normal"` for an X11 window with none, same as
+    /// `xwayland::places_itself` and `floats_over_its_parent` already read it
+    /// -- or absent for a Wayland window, which has no such property to ask.
+    ///
+    /// The raw material a window rule (#56) needs for a case the compositor's
+    /// own default does not already cover generically -- floating every
+    /// `"dialog"`, say, on top of a layout that does not already do that on
+    /// its own.
+    pub(crate) x11_type: Option<String>,
+    /// Whether the window may ever be given the keyboard: an X11 client's own
+    /// `WM_HINTS.input`, or `true` for a Wayland window, which has no
+    /// equivalent to decline with -- `xdg_toplevel` offers the keyboard to
+    /// every surface that can be focused and nothing else.
+    ///
+    /// **Not what decides whether a window is hidden.** That used to be this
+    /// field alone (#221's first cut), and it was wrong: ICCCM's 'Globally
+    /// Active' input model is an ordinary, focusable application that sets
+    /// `input: false` on purpose and takes the keyboard itself through
+    /// `WM_TAKE_FOCUS`, so a row here can read `false` for a window a person
+    /// is actually using. `config.x11.hidden`, matched against `class` and
+    /// `instance` below, is what `map_window_request` hides on now; this
+    /// field is kept, unused for that decision, so a window rule (#56) still
+    /// has it to key some other decision on.
+    pub(crate) accepts_input: bool,
+    /// Its `WM_CLASS` class (`X11Surface::class()`), or absent for a Wayland
+    /// window, which has no such property. Matched case-insensitively against
+    /// `config.x11.hidden`, along with `instance`, to decide whether the
+    /// window was ever shown at all (#221); kept here too for a window rule
+    /// (#56) that wants to act on the same identity.
+    pub(crate) class: Option<String>,
+    /// Its `WM_CLASS` instance (`X11Surface::instance()`), or absent for a
+    /// Wayland window. See `class`.
+    pub(crate) instance: Option<String>,
 }
 
 /// How a window is drawn this instant, as `Solium::window_under` reads it:
@@ -511,6 +545,10 @@ pub(crate) enum Command {
     /// logind's `Lock` and sleep signals: the locker to run, and whether to
     /// hold sleep for it. See `crate::logind::Settings`.
     Lock(crate::logind::Settings),
+    /// Which `WM_CLASS` names are refused a tile, decoration or bar entry
+    /// outright: `sol.x11`, from `config.x11` (#221). See
+    /// `crate::xwayland::Settings`.
+    X11(crate::xwayland::Settings),
     /// Override the input profile's focus policy: `sol.focus_mode`, which
     /// `lua/modes.lua` calls on every mode change and `init.lua` once at
     /// load, both from `config.focus` (#219).
@@ -2482,7 +2520,12 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // limited neither side. `cramped` is the layout's own word coming back,
     // from `sol.place`. `app_id` is what `tiling.client_size_ignore` matches.
     // `shown` is whether the window's client has been shown yet; see
-    // `WindowInfo::shown`.
+    // `WindowInfo::shown`. `x11_type`, `accepts_input`, `class` and
+    // `instance` are read only from an X11 window's own properties (#221) --
+    // `nil` for a Wayland one, except `accepts_input`, which is `true` -- and
+    // exist for a window rule (#56) to act on a case the compositor's own
+    // default (hiding a window whose `class` or `instance` is in
+    // `config.x11.hidden`) does not already decide for it.
     sol.set(
         "windows",
         lua.create_function(|lua, ()| {
@@ -2506,6 +2549,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("max", size_table(lua, window.max)?)?;
                 entry.set("cramped", window.cramped)?;
                 entry.set("shown", window.shown)?;
+                entry.set("x11_type", window.x11_type.clone())?;
+                entry.set("accepts_input", window.accepts_input)?;
+                entry.set("class", window.class.clone())?;
+                entry.set("instance", window.instance.clone())?;
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
@@ -3282,6 +3329,60 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Lock(settings));
+            })
+        })?,
+    )?;
+
+    // Which `WM_CLASS` names are refused a tile, decoration or bar entry
+    // outright (#221): `config.x11`, handed over by `init.lua`. `hidden` is a
+    // list of strings, matched case-insensitively against either `WM_CLASS`
+    // field (`X11Surface::class()` or `X11Surface::instance()`); absent, or
+    // not a table of strings, keeps the default list rather than emptying
+    // it, the same as `sol.resize` and `sol.idle` keep theirs — see
+    // `xwayland::Settings::default`.
+    sol.set(
+        "x11",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut settings = crate::xwayland::Settings::default();
+            if let Some(options) = options {
+                match options.get::<Value>("hidden") {
+                    // Each element is read as a `Value` first and only kept
+                    // when it is actually `Value::String` -- not through
+                    // `sequence_values::<String>()` directly, which would
+                    // silently stringify a number the way Lua's own
+                    // `tostring` does, and a WM_CLASS name that came from
+                    // `5` by accident is a configuration mistake, not a
+                    // value worth keeping.
+                    Ok(Value::Table(list)) => {
+                        let mut names = Vec::new();
+                        let mut every_one_a_string = true;
+                        for value in list.sequence_values::<Value>() {
+                            match value {
+                                Ok(Value::String(name)) => match name.to_str() {
+                                    Ok(name) => names.push(name.to_owned()),
+                                    Err(_) => every_one_a_string = false,
+                                },
+                                _ => every_one_a_string = false,
+                            }
+                            if !every_one_a_string {
+                                break;
+                            }
+                        }
+                        if every_one_a_string {
+                            settings.hidden = names;
+                        } else {
+                            tracing::warn!("x11.hidden is a list of strings; keeping the default");
+                        }
+                    }
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "x11.hidden is a list of strings; keeping the default"
+                    ),
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::X11(settings));
             })
         })?,
     )?;
@@ -5424,6 +5525,10 @@ mod tests {
                 max: None,
                 cramped: false,
                 shown: true,
+                x11_type: None,
+                accepts_input: true,
+                class: None,
+                instance: None,
             }],
             monitors: vec![MonitorInfo {
                 name: "test-1".to_owned(),
@@ -7172,6 +7277,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// `sol.x11`'s own parsing (#221): a table of strings for `hidden`, an
+    /// absent table or key keeping the default, and a value of the wrong
+    /// kind named in the log with the default kept, the same contract
+    /// `sol_lock_parses_command_and_before_sleep` checks for `sol.lock`.
+    #[test]
+    fn sol_x11_parses_hidden_as_a_list_of_strings() {
+        let directory = std::env::temp_dir().join("solium-script-test-x11");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::X11(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::X11")
+        };
+
+        assert_eq!(
+            configured(r#"sol.x11({ hidden = { "my-tray-helper", "another-one" } })"#),
+            crate::xwayland::Settings {
+                hidden: vec!["my-tray-helper".to_owned(), "another-one".to_owned()],
+            },
+            "a configured list replaces the default rather than adding to it"
+        );
+        assert_eq!(
+            configured(r#"sol.x11({ hidden = {} })"#),
+            crate::xwayland::Settings { hidden: vec![] },
+            "an empty list is a real answer: hide nothing at all"
+        );
+        // Said nothing, three ways, and said something of the wrong kind.
+        for source in [
+            "sol.x11()",
+            "sol.x11({})",
+            r#"sol.x11({ hidden = "xwaylandvideobridge" })"#,
+            "sol.x11({ hidden = { 5, 6 } })",
+        ] {
+            assert_eq!(
+                configured(source),
+                crate::xwayland::Settings::default(),
+                "{source:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// **The shipped configuration's `reload` table matches
     /// `autoreload::Settings`'s own default**, the same parity
     /// `the_shipped_configuration_s_lock_table_matches_the_rust_default` holds
@@ -7200,6 +7358,35 @@ mod tests {
             reload,
             [crate::autoreload::Settings::default()],
             "the shipped init.lua did not hand config.reload over as it says"
+        );
+    }
+
+    /// **The shipped configuration's `x11.hidden` matches
+    /// `xwayland::Settings`'s own default** (#221), the same parity
+    /// `the_shipped_configuration_s_lock_table_matches_the_rust_default`
+    /// holds for `lock`: a future edit to one without the other must fail a
+    /// test rather than ship a mismatch.
+    #[test]
+    fn the_shipped_configuration_s_x11_table_matches_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-x11-default", "return {}")
+        else {
+            return;
+        };
+        let x11: Vec<crate::xwayland::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::X11(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            x11,
+            [crate::xwayland::Settings::default()],
+            "the shipped init.lua did not hand config.x11 over as it says"
         );
     }
 
@@ -7573,6 +7760,10 @@ mod tests {
             max: None,
             cramped: false,
             shown: true,
+            x11_type: None,
+            accepts_input: true,
+            class: None,
+            instance: None,
         };
         snapshot.windows = vec![
             window(1, false, Parentage::None),
@@ -8065,6 +8256,10 @@ mod tests {
                     max: None,
                     cramped: false,
                     shown: true,
+                    x11_type: None,
+                    accepts_input: true,
+                    class: None,
+                    instance: None,
                 })
                 .collect(),
             monitors: vec![MonitorInfo {
@@ -11172,6 +11367,10 @@ mod dialogs {
             max: None,
             cramped: false,
             shown: true,
+            x11_type: None,
+            accepts_input: true,
+            class: None,
+            instance: None,
         }
     }
 
@@ -14726,6 +14925,10 @@ mod directions {
             max: None,
             cramped: false,
             shown: true,
+            x11_type: None,
+            accepts_input: true,
+            class: None,
+            instance: None,
         }
     }
 
