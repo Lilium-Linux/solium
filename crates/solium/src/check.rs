@@ -490,15 +490,17 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
     }
 }
 
-/// The rules the configuration handed over as it loaded, when they parsed;
-/// none when they did not, which [`config`] has failed.
-/// `tests::the_effects_a_rule_names_are_checked`.
+/// The rules the configuration handed over as it loaded (none when it named
+/// none), or `None` when they did not parse, which [`config`] has failed.
+/// `tests::the_effects_a_rule_names_are_checked`,
+/// `tests::rules_that_did_not_parse_are_not_called_ok`.
 pub(crate) fn configured_rules(
     scripts: &crate::script::Scripts,
-) -> Vec<crate::effect::rules::Rule> {
+) -> Option<Vec<crate::effect::rules::Rule>> {
     match scripts.effects_at_load() {
-        Some(Ok(rules)) => rules,
-        Some(Err(_)) | None => Vec::new(),
+        Some(Ok(rules)) => Some(rules),
+        None => Some(Vec::new()),
+        Some(Err(_)) => None,
     }
 }
 
@@ -510,15 +512,23 @@ pub(crate) fn wanted_by(rules: &[crate::effect::rules::Rule]) -> Vec<String> {
 
 /// The rules bound as at load, GPU-free: a rule the compositor would refuse
 /// fails, a tier this build cannot run included (Ruling 14), at the
-/// effect's own file and line where it has one.
-/// `tests::a_rule_reading_xray_fails_the_check`.
+/// effect's own file and line where it has one; rules that did not parse
+/// are not bound, and not said to pass.
+/// `tests::a_rule_reading_xray_fails_the_check`,
+/// `tests::rules_that_did_not_parse_are_not_called_ok`.
 pub(crate) fn rules(
     report: &mut Report,
     library: &crate::effect::host::Library,
-    rules: &[crate::effect::rules::Rule],
+    rules: Option<&[crate::effect::rules::Rule]>,
     formats: Option<crate::pool::Formats>,
 ) {
     report.line("  effects.rules:");
+    // Rules that did not parse, which `config` has failed, are not said to
+    // pass (`tests::rules_that_did_not_parse_are_not_called_ok`).
+    let Some(rules) = rules else {
+        report.line("    rules not checked: effects.rules did not parse");
+        return;
+    };
     let mut host = crate::effect::host::Host::new(library.clone());
     if let Some(formats) = formats {
         host.set_formats(formats);
@@ -662,10 +672,10 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                         effects(
                             &mut report,
                             &library,
-                            &wanted_by(&configured),
+                            &wanted_by(configured.as_deref().unwrap_or_default()),
                             compiler.as_mut().zip(formats),
                         );
-                        rules(&mut report, &library, &configured, formats);
+                        rules(&mut report, &library, configured.as_deref(), formats);
                         let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
                             .into_iter()
                             .find_map(|name| std::env::var(name).ok());
@@ -1361,7 +1371,7 @@ mod tests {
 
     /// The rules an `init.lua` calling `sol.effects{ rules = <rules> }`
     /// hands over, as `--check` reads them.
-    fn rules_from(directory: &Path, rules: &str) -> Vec<crate::effect::rules::Rule> {
+    fn rules_from(directory: &Path, rules: &str) -> Option<Vec<crate::effect::rules::Rule>> {
         let config = directory.join("init.lua");
         std::fs::write(&config, format!("sol.effects({{ rules = {rules} }})")).expect("writing");
         let scripts = crate::script::Scripts::load(&config).expect("loading");
@@ -1376,7 +1386,8 @@ mod tests {
         let rules = rules_from(
             &directory,
             r#"{ { match = "*", part = "client", slot = "behind", effect = { { "identity" }, { "typo" } } } }"#,
-        );
+        )
+        .expect("parsed");
         let _ = std::fs::remove_dir_all(directory);
         let wanted = super::wanted_by(&rules);
         assert_eq!(wanted, ["identity".to_owned(), "typo".to_owned()]);
@@ -1407,7 +1418,7 @@ mod tests {
         let library = crate::effect::host::Library::with(Some(effects.clone()), place.join("none"));
         let check = |rules: &str| {
             let rules = rules_from(&place, rules);
-            reported(|report| super::rules(report, &library, &rules, None))
+            reported(|report| super::rules(report, &library, rules.as_deref(), None))
         };
         let (passed, out) =
             check(r#"{ { match = "*", part = "client", slot = "behind", effect = "soft" } }"#);
@@ -1418,5 +1429,22 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(place);
         assert!(passed, "{out}");
+    }
+
+    /// **Rules that did not parse are not called ok**: [`config`] has failed
+    /// them already, and the rules section says it did not check them rather
+    /// than "0 rule(s): ok".
+    #[test]
+    fn rules_that_did_not_parse_are_not_called_ok() {
+        let directory = crate::effect::host::tests::scratch("check-rules-unparsed");
+        let rules = rules_from(
+            &directory,
+            r#"{ { match = "*", part = "regoin:titlebar", slot = "behind", effect = false } }"#,
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(rules.is_none(), "the premise: the rules did not parse");
+        let library = crate::effect::host::Library::with(None, effect_fixtures());
+        let (_, out) = reported(|report| super::rules(report, &library, rules.as_deref(), None));
+        assert!(!out.contains("ok") && out.contains("not checked"), "{out}");
     }
 }

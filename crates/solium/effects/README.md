@@ -140,7 +140,8 @@ and that is not a failure.
 Plain `solium --check` checks every folder in your `effects/` this way,
 named or not, and every effect your configuration's rules name, and then
 binds each rule as the compositor would, so a rule it would refuse fails
-there too. A folder with no `effect.lua` fails, and so does one whose name
+there too. Rules that do not parse fail by their number and key, and are not
+bound: it says `rules not checked: effects.rules did not parse`. A folder with no `effect.lua` fails, and so does one whose name
 cannot name an effect, such as `Blur`, since nothing could use it.
 
 ## What `effect.lua` returns
