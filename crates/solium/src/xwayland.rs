@@ -899,7 +899,15 @@ pub(crate) fn client_pid(window: &X11Surface) -> Option<u32> {
 /// calls it with a real pid is read, not driven.
 pub(crate) fn kill_client(pid: u32) {
     use smithay::reexports::rustix::process::{Pid, Signal, kill_process};
-    let Some(pid) = Pid::from_raw(i32::try_from(pid).unwrap_or(i32::MAX)) else {
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        // A real pid_t never gets this big (Linux's own pid_max tops out far
+        // below `i32::MAX`); kept so a `u32` this function cannot otherwise
+        // rule out is refused here rather than laundered into a fabricated
+        // sentinel pid.
+        tracing::warn!(pid, "an X11 client's pid could not be named to kill");
+        return;
+    };
+    let Some(pid) = Pid::from_raw(raw_pid) else {
         // `remember_client_pid` already filters out 0; a negative value
         // cannot come from `get_client_pid`'s `u32` at all. Nothing a real
         // Xwayland has ever been seen to send, kept so this stays total
