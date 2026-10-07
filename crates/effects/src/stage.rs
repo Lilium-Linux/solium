@@ -18,6 +18,11 @@ use crate::spec::{self, Value};
 /// `tests::a_plan_runs_at_most_256_passes`.
 const MOST_STEPS: usize = 256;
 
+/// The most textures one pass reads: `sol_tex` on unit 0 and its `uses` on
+/// the next, GLES 2's guaranteed minimum of fragment texture units, so a pass
+/// runs on every GPU (Ruling 10). `tests::a_pass_reads_at_most_eight_textures`.
+pub const MOST_TEXTURES: usize = 8;
+
 /// What a target holds: 8 bits a channel, or half floats (`rgba16f`, which a
 /// GPU may lack; Task 9 probes it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -526,6 +531,14 @@ impl Flattener<'_> {
                         let feed = cx.feed(name, scope)?;
                         mark(&mut self.reads, &feed);
                         bound.push((name.clone(), feed));
+                    }
+                    // `tests::a_pass_reads_at_most_eight_textures`.
+                    if bound.len() + 1 > MOST_TEXTURES {
+                        return Err(format!(
+                            "`{frag}` reads {} textures, `sol_tex` and {} in `uses`: a pass reads at most {MOST_TEXTURES}",
+                            bound.len() + 1,
+                            bound.len()
+                        ));
                     }
                     mark(&mut self.reads, &first);
                     let mut params = cx.params.to_vec();
@@ -1351,6 +1364,43 @@ mod tests {
         );
         let refused = flatten("more", &[], &mut lib).expect_err("257");
         assert!(refused.contains("256"), "{refused}");
+    }
+
+    /// **A pass reads at most eight textures**: `sol_tex` on unit 0 and seven
+    /// in `uses` on the next, GLES 2's guaranteed minimum (Ruling 10). An
+    /// eighth name in `uses` is refused at load, naming the pass; `shape`,
+    /// which is no texture, is not counted.
+    #[test]
+    fn a_pass_reads_at_most_eight_textures() {
+        let names = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"];
+        let with = |uses: &[&str]| {
+            let mut stages = vec![pass("a.frag", 1.0)];
+            stages.extend(names.iter().map(|name| Stage::Save((*name).to_owned())));
+            stages.push(pass_using("many.frag", uses));
+            binding(&["self"], stages)
+        };
+        let mut seven = |_: &str, _: &[(String, Value)]| Ok(with(&names[..7]));
+        assert_eq!(
+            flatten("x", &[], &mut seven).expect("eight textures").steps[1]
+                .uses
+                .len(),
+            7
+        );
+        let mut shaped = |_: &str, _: &[(String, Value)]| {
+            let mut uses = names[..7].to_vec();
+            uses.push("shape");
+            Ok(with(&uses))
+        };
+        assert!(
+            flatten("x", &[], &mut shaped).is_ok(),
+            "shape is no texture"
+        );
+        let mut eight = |_: &str, _: &[(String, Value)]| Ok(with(&names));
+        let refused = flatten("x", &[], &mut eight).expect_err("nine textures");
+        assert!(
+            refused.contains("many.frag") && refused.contains("at most 8"),
+            "{refused}"
+        );
     }
 
     /// **A three-pass blur returns to its odd size**: 1151×101 goes down to
