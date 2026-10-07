@@ -448,6 +448,26 @@ Item {
 whatever the configuration said, and a scene that ignores it — like the one
 above — is perfectly valid.
 
+### Reloading without pressing anything
+
+Saving a file under `~/.config/solium` — `user.lua`, a module of your own, a
+pane style, a loading scene, your wallpaper or your shell — reloads it on its
+own, the same way `super+shift+r` does: a typo leaves the running
+configuration alone and logs it, same as a manual reload.
+
+```lua
+reload = {
+    automatic = false,  -- back to pressing super+shift+r yourself
+    quiet_ms = 600,      -- wait longer for a slow save to settle
+}
+```
+
+`automatic` defaults to true. A burst of writes from one save — an editor
+that writes a temporary file and renames it over the original fires several —
+is collapsed into the one reload it earns, `quiet_ms` after the last write in
+it, not one reload per write. `automatic = false` watches nothing at all,
+rather than merely never finishing the wait.
+
 ### Your keyboard
 
 ```lua
