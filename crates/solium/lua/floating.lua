@@ -202,31 +202,82 @@ sol.on("close", function(id)
     maximized[id] = nil
 end)
 
+-- Exactly the combinations the last `bind_keys` call bound, so `unbind_keys`
+-- can let go of exactly those rather than asking `config.floating.snap`
+-- again -- which `config.floating.snap` may have moved off the plain arrows
+-- entirely by then (`unbind_keys`'s own comment).
+local bound = {}
+
 -- Bind the four keys this file owns, from `config.floating.snap`; `false`
 -- leaves one unbound, as a key in `config.bindings` does.
-local function bind_keys()
-    local keys = config.floating.snap or {}
-    if keys.left then
-        sol.bind(keys.left, function() snap("left") end)
+--
+-- A combination `config.bindings` has an entry for -- even `false` -- is
+-- skipped rather than taken over: that entry already outranks every shipped
+-- binding once (#117, `require("bindings")` is the last line of `init.lua`),
+-- and a user who wrote `config.bindings["super+left"] = ...` wins at the
+-- *first* load while this file's own `bind_keys` runs before `bindings.lua`
+-- does -- "at load it wins as intended" is the premise
+-- `a_config_bindings_override_on_an_arrow_survives_leaving_and_returning_to_floating`
+-- starts from. Without this, the override would win at load, lose the first
+-- time floating let go and `unbind_keys` handed the arrows back to it, and
+-- then lose *again* the next time floating took over, since this function
+-- would reassert the shipped snap over it a second time with nothing left
+-- to stop it.
+local function take(combo, action)
+    if not combo then
+        return
     end
-    if keys.right then
-        sol.bind(keys.right, function() snap("right") end)
+    if (config.bindings or {})[combo] ~= nil then
+        return
     end
-    if keys.maximize then
-        sol.bind(keys.maximize, maximize_or_quarter)
-    end
-    if keys.restore then
-        sol.bind(keys.restore, restore)
-    end
+    sol.bind(combo, action)
+    bound[#bound + 1] = combo
 end
 
--- Give the four keys back to `direction.lua`'s own bindings. Not `sol.unbind`,
--- which would leave them doing nothing at all in tiling and scrolling, where
--- they have always meant focus by direction (#150) -- the point of asking
--- `direction.lua` to rebind its defaults is that tiling and scrolling never
--- notice this file exists.
+local function bind_keys()
+    bound = {}
+    local keys = config.floating.snap or {}
+    take(keys.left, function() snap("left") end)
+    take(keys.right, function() snap("right") end)
+    take(keys.maximize, maximize_or_quarter)
+    take(keys.restore, restore)
+end
+
+-- Give back exactly what `bind_keys` bound, then put the plain arrows back
+-- to whatever `config.bindings` says for them -- not `direction.bind_arrows()`
+-- unconditionally, which only knows the shipped answer (`sol.focus_direction`)
+-- and used to reassert it over a configured override every time floating let
+-- go, not only once: a `config.bindings["super+left"]` function won at load,
+-- since `require("bindings")` is the last line of `init.lua`
+-- (`bindings.lua`'s own comment), and then lost to this on the very first
+-- `super+t`. `bindings.rebind` is `require("bindings")`'s own decision, asked
+-- again for one combination, so the arrows go back to what a reload would
+-- have given them -- a configured override, or the shipped default, never
+-- unconditionally the latter.
+--
+-- The first loop is what the arrows alone cannot be: a snap key
+-- `config.floating.snap` moved off a plain arrow, onto a combination of its
+-- own (`snap.left = "super+z"`, say), is nothing the second loop below ever
+-- looks at, and so would be left bound to `snap` forever once tiling or
+-- scrolling took over, with nothing left to ever call `sol.unbind` on it.
+-- `require("bindings")` happens here, lazily, rather than at this file's own
+-- top level: this file loads before `bindings.lua` does (`init.lua`'s own
+-- order), and asking at load would run `config.bindings` before tiling,
+-- scrolling and this file's own `bind_keys` have bound anything at all,
+-- inverting "the later call wins" for every configured key, not only these
+-- four. By the time a mode switch can call this, `init.lua` has already
+-- required `bindings` once, so this only ever reaches the cache.
+-- `a_config_bindings_override_on_an_arrow_survives_leaving_and_returning_to_floating`
+-- and `a_snap_key_moved_off_the_plain_arrows_is_not_left_bound_once_floating_lets_go`.
 local function unbind_keys()
-    direction.bind_arrows()
+    for _, combo in ipairs(bound) do
+        sol.unbind(combo)
+    end
+    bound = {}
+    local bindings = require("bindings")
+    for _, dir in ipairs({ "left", "right", "up", "down" }) do
+        bindings.rebind("super+" .. dir, function() sol.focus_direction(dir) end)
+    end
 end
 
 modes.watch(function(name)

@@ -18,6 +18,8 @@
 
 local config = require("config")
 
+local bindings = {}
+
 -- Split on spaces, the same way and for the same reason `init.lua` does: a
 -- terminal often needs arguments to open a *new* window, and `"kitty -e nvim"`
 -- should mean what it looks like it means. An argument that itself contains a
@@ -91,3 +93,37 @@ for combo, what in pairs(config.bindings or {}) do
             taken and "config.bindings, replacing a shipped binding" or "config.bindings")
     end
 end
+
+-- Decide one combination exactly as the loop above decided every combination
+-- in `config.bindings`, for code that has to redo that decision for a single
+-- key after load rather than once at it.
+--
+-- `floating.lua` is the one caller: leaving the mode it is in charge of has
+-- to hand `super+left` and its three neighbours back to *something*, and
+-- `config.bindings` -- not the shipped default unconditionally -- is what
+-- `require("bindings")` already answered once, at the end of `init.lua`.
+-- Repeating that answer rather than reaching past it is what keeps a
+-- configured override alive for the rest of the session instead of just
+-- until the first `super+t` (#222's own review).
+--
+-- `fallback`, a function taking no arguments, is bound when `config.bindings`
+-- says nothing at all about `combo` -- not when it says `false`, which means
+-- unbound, same as the loop above.
+function bindings.rebind(combo, fallback)
+    local what = (config.bindings or {})[combo]
+    if what == nil then
+        sol.bind(combo, fallback)
+        return
+    end
+    if what == false then
+        if sol.bound(combo) then
+            sol.unbind(combo, "config.bindings")
+        end
+        return
+    end
+    local taken = sol.bound(combo)
+    sol.bind(combo, handler(combo, what),
+        taken and "config.bindings, replacing a shipped binding" or "config.bindings")
+end
+
+return bindings

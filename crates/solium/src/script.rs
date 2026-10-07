@@ -14461,6 +14461,16 @@ mod directions {
         /// `package.path` is the entry's own and the directory is one per call,
         /// for the reasons `dialogs::scripts` gives.
         fn new(before: &str, monitors: Vec<MonitorInfo>) -> Self {
+            Self::new_with(before, "", monitors)
+        }
+
+        /// As `new`, with `after` run once every layout script this harness
+        /// loads has been required -- the one hook a test needing
+        /// `require("bindings")` has, since the real `init.lua` requires it
+        /// *last* (`bindings.lua`'s own comment) and this harness otherwise
+        /// has no module after `floating` at all.
+        /// `a_config_bindings_override_on_an_arrow_survives_leaving_and_returning_to_floating`.
+        fn new_with(before: &str, after: &str, monitors: Vec<MonitorInfo>) -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let directory = std::env::temp_dir()
@@ -14477,7 +14487,8 @@ mod directions {
                      require(\"tiling\")\n\
                      require(\"scrolling\")\n\
                      require(\"direction\")\n\
-                     require(\"floating\")\n",
+                     require(\"floating\")\n\
+                     {after}\n",
                     shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
                 ),
             )
@@ -16124,6 +16135,88 @@ mod directions {
         assert!(
             about(snapped.h, WIDE.h) && snapped.h > tiled.h + 100.0,
             "super+left did not snap once floating took over: tiled {tiled:?} snapped {snapped:?}"
+        );
+    }
+
+    /// **A `config.bindings` override on a plain arrow survives leaving and
+    /// returning to desktop mode**: it must win once, at load (the premise
+    /// below), and go on winning every time `super+t`/`super+s` hands the
+    /// arrows back, not just until the first one (#222's review).
+    ///
+    /// `require("bindings")` runs as `new_with`'s `after`, exactly where the
+    /// real `init.lua` has it -- last -- so `super+left`'s override wins the
+    /// same way it would in production, with no help from this file's own
+    /// fix: that part was never broken. What was broken is the *second*
+    /// assertion, once a mode switch has run `unbind_keys` at least once.
+    #[test]
+    fn a_config_bindings_override_on_an_arrow_survives_leaving_and_returning_to_floating() {
+        let mut desk = Desk::new_with(
+            "local config = require(\"config\")\n\
+             config.bindings[\"super+left\"] = function() sol.status(\"custom-left\") end\n",
+            "require(\"bindings\")\n",
+            one_screen(),
+        );
+
+        let status = |desk: &mut Desk, combo: &str| {
+            desk.scripts
+                .key(combo, desk.snapshot())
+                .status
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            status(&mut desk, "super+left"),
+            "custom-left",
+            "the premise: the override wins while floating is in charge"
+        );
+
+        // Leave floating (tiling) and come back (self-toggle): both are
+        // `unbind_keys`, the first into tiling and the second out of it.
+        desk.press("super+t");
+        assert_eq!(
+            status(&mut desk, "super+left"),
+            "custom-left",
+            "leaving floating silently reverted super+left to the shipped default"
+        );
+        desk.press("super+t");
+        assert_eq!(
+            status(&mut desk, "super+left"),
+            "custom-left",
+            "returning to floating silently reverted super+left to the shipped default"
+        );
+    }
+
+    /// **A snap key `config.floating.snap` has moved off its plain arrow is
+    /// not left bound once floating lets go.** `config.floating.snap.left =
+    /// "super+z"` moves what `super+left` used to mean off the arrow
+    /// entirely; leaving floating must give `super+z` back to nothing, not
+    /// leave it calling `snap("left")` in tiling for the rest of the session
+    /// (#222's review).
+    #[test]
+    fn a_snap_key_moved_off_the_plain_arrows_is_not_left_bound_once_floating_lets_go() {
+        let mut desk = Desk::new(
+            "local config = require(\"config\")\n\
+             config.floating.snap.left = \"super+z\"\n",
+            one_screen(),
+        );
+        desk.open(1, "DP-1", (1280.0, 720.0));
+
+        assert!(
+            desk.scripts.has_binding("super+z"),
+            "the premise: super+z is bound while floating is in charge"
+        );
+        let commands = desk.press("super+z");
+        assert_eq!(
+            places(&commands),
+            vec![1],
+            "the premise: super+z snaps the focused window"
+        );
+
+        desk.press("super+t");
+        assert!(
+            !desk.scripts.has_binding("super+z"),
+            "super+z is still bound after floating let go of it, to whatever it last did \
+             with it -- it is not one of the four plain arrows, so nothing ever gives it \
+             back to anything"
         );
     }
 }

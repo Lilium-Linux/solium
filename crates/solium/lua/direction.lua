@@ -290,10 +290,13 @@ end)
 -- function and not four bare `sol.bind` calls, because `lua/floating.lua`
 -- takes these four over while it is the mode in charge, for snapping a
 -- window like Windows (#222) -- the way `overview.lua` binds Escape only
--- while it is up -- and has to be able to give them back unchanged when it
--- lets go, rather than leaving them bound to whatever it last did with them.
--- `floating.lua` is the only caller; this file always calls it once itself,
--- below, so a configuration that never loads `floating` sees no difference.
+-- while it is up -- and has to be able to give them back when it lets go.
+-- Called once here, below, so a configuration that never loads `floating`
+-- sees no difference; `lua/floating.lua`'s `unbind_keys` calls each of the
+-- four bodies individually, as a `fallback` to `bindings.rebind`, rather than
+-- this function itself -- a `config.bindings` override on one of these four
+-- must win over the shipped answer below every time floating lets go, not
+-- only once, and this function alone has no way to ask about one.
 function direction.bind_arrows()
     sol.bind("super+left", function() sol.focus_direction("left") end)
     sol.bind("super+right", function() sol.focus_direction("right") end)
