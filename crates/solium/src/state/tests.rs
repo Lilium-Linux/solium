@@ -7998,8 +7998,7 @@ end)"#,
     ///
     /// Driven through the real placement and the real transform, and read
     /// through `render::place_client`, which is what `elements` draws the
-    /// surfaces with and what `offscreen::client_job` sizes a masked
-    /// client from. Three frames: the first, one a little way in, and one
+    /// surfaces with. Three frames: the first, one a little way in, and one
     /// most of the way.
     #[test]
     fn a_glide_that_narrows_a_tiled_window_is_drawn_1_to_1_on_its_first_frame() {
@@ -8402,7 +8401,7 @@ end)"#,
     /// **#133 review, findings 3 and 6: a warped window is captured at the
     /// rectangle its warp is drawn over.**
     ///
-    /// `warp::mesh` spreads the whole of the capture over the frame's
+    /// `warp::mesh_part` spreads the whole of the capture over the frame's
     /// rect, and that rect comes from `pane_outer_of`, which the cap holds
     /// to the tile. The capture was sized from `outer_geometry` -- the
     /// committed size -- so an oversized tiled client was squashed into
@@ -8488,9 +8487,10 @@ end)"#,
     /// **#133 review, findings 2 and 8: a toplevel is drawn without its
     /// popups.**
     ///
-    /// Every path that draws a client draws its popups itself --
-    /// `elements` uncut above the sandwich, `flat_window_elements` into the
-    /// warp's capture -- and smithay's `Window::render_elements` draws them
+    /// Every path that draws a client draws its popups itself, through
+    /// `render::popup_elements` -- `elements` uncut above the sandwich, a
+    /// warped pane apart from its capture (`a_warped_panes_capture_holds_no_popups`)
+    /// -- and smithay's `Window::render_elements` draws them
     /// *again*, ahead of the toplevel's own tree. On the ordinary path that
     /// second copy went through the toplevel's fit and was cut to the
     /// tile, one layer under the uncut one, so a translucent pixel of a
@@ -8562,6 +8562,82 @@ end)"#,
         );
     }
 
+    /// **A warped pane's capture holds no popups**: they are drawn in front of
+    /// it from a capture of their own, not under its titlebar.
+    #[test]
+    fn a_warped_panes_capture_holds_no_popups() {
+        use smithay::backend::renderer::element::{Element as _, Id};
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface, xdg_surface) =
+            open_xdg(&mut display, &mut state, &conn, &client, &qh);
+        let _popup = drawn_popup(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+            &xdg_surface,
+            (10, 10),
+            (40, 30),
+        );
+        let toplevel = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+            .expect("an xdg toplevel");
+        let popup = smithay::desktop::PopupManager::popups_for_surface(&toplevel)
+            .next()
+            .map(|(popup, _)| popup.wl_surface().clone())
+            .expect("the popup");
+        let popup_id = Id::from_wayland_resource(&popup);
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let client_side = crate::render::client_piece(&mut renderer, &window, (0, 0).into(), scale);
+        assert!(
+            client_side.iter().all(|element| element.id() != &popup_id),
+            "the capture's client holds the popup"
+        );
+        let (popups, covered) =
+            crate::render::popup_elements(&mut renderer, &window, (0, 0).into(), scale, 1.0);
+        assert!(popups.iter().any(|element| element.id() == &popup_id));
+        assert_eq!(covered.map(|rect| rect.size), Some((40, 30).into()));
+    }
+
+    /// A popup reaching past its window is captured whole: the rectangle its
+    /// capture is made at reaches past the window too.
+    #[test]
+    fn a_popup_past_the_window_is_captured_whole() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface, xdg_surface) =
+            open_xdg(&mut display, &mut state, &conn, &client, &qh);
+        let size = window.geometry().size;
+        let _popup = drawn_popup(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+            &xdg_surface,
+            (size.w - 10, size.h - 10),
+            (60, 50),
+        );
+        let (_, covered) = crate::render::popup_elements(
+            &mut DummyRenderer,
+            &window,
+            (0, 0).into(),
+            smithay::utils::Scale::from(1.0),
+            1.0,
+        );
+        let covered = covered.expect("the popup covers something");
+        assert!(
+            covered.loc.x + covered.size.w > size.w && covered.loc.y + covered.size.h > size.h,
+            "{covered:?} stops at the window"
+        );
+    }
+
     /// **A genie aimed at a surface aims at its instance on the window's own
     /// monitor**, not on the monitor the pointer is on (#143). A missing scene
     /// file builds no scene (`scripted.rs`, `Surface::sync`), so no Qt is
@@ -8626,7 +8702,7 @@ end)"#,
         let key = |renderer: &mut DummyRenderer| {
             let elements =
                 crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
-            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+            crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, 1.0, &elements)
         };
         let mut capture = crate::keyed::Capture::<u32>::default();
         capture.drawn(1, key(&mut renderer));
@@ -8669,7 +8745,7 @@ end)"#,
         let key = |renderer: &mut DummyRenderer| {
             let elements =
                 crate::render::toplevel_elements(renderer, &window, (0, 0).into(), scale, 1.0);
-            crate::keyed::Inputs::of(crate::keyed::Kind::Client, size, 1.0, &elements)
+            crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, 1.0, &elements)
         };
         let mut capture = crate::keyed::Capture::<u32>::default();
         capture.drawn(1, key(&mut renderer));
@@ -8685,6 +8761,55 @@ end)"#,
         assert!(
             capture.stale(&key(&mut renderer)),
             "the subsurface committed and the capture did not notice"
+        );
+    }
+
+    /// **A menu that commits during a flight is captured again**: the popups'
+    /// own capture is keyed on the popups' surfaces, so a warped window's menu
+    /// shows its live content, not the picture it had when the flight began.
+    #[test]
+    fn a_commit_on_a_popup_makes_the_popups_capture_stale() {
+        use smithay::backend::renderer::test::DummyRenderer;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface, xdg_surface) =
+            open_xdg(&mut display, &mut state, &conn, &client, &qh);
+        let popup = drawn_popup(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+            &xdg_surface,
+            (10, 10),
+            (40, 30),
+        );
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let key = |renderer: &mut DummyRenderer| {
+            let (elements, covered) =
+                crate::render::popup_elements(renderer, &window, (0, 0).into(), scale, 1.0);
+            let size = covered.map_or((1, 1).into(), |rect| (rect.size.w, rect.size.h).into());
+            crate::keyed::Inputs::of(crate::keyed::Kind::Over, size, 1.0, &elements)
+        };
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, key(&mut renderer));
+        assert!(
+            !capture.stale(&key(&mut renderer)),
+            "nothing committed, and the menu would be drawn again"
+        );
+        commit_buffer(&client, &qh, &popup, 40, 30);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert!(
+            capture.stale(&key(&mut renderer)),
+            "the menu committed and its capture did not notice"
         );
     }
 

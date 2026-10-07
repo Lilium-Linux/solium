@@ -3,9 +3,9 @@
 # Does skipping a capture's CPU fence wait change a single pixel?
 #
 # Nested. dev/fence-check/scene.lua draws two kitty windows of fixed content
-# in the rounded style, the first tilted, so both captures run on every frame:
-# the client's (for its corners) and the warp's. Five frames from each of
-# four runs:
+# in the rounded style, both tilted, so a warp's capture runs for each on
+# every frame (with SOLIUM_RECAPTURE=always). Five frames from each of four
+# runs:
 #
 #   on-1    the default: a capture waits on the CPU
 #   on-2    the same again: the determinism baseline

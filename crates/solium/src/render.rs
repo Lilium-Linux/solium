@@ -83,15 +83,13 @@ render_elements! {
     Remains = RescaleRenderElement<crate::remains::Surface>,
     /// The same, cut to the tile the window left, as a live `Tiled` is.
     RemainsTiled = CropRenderElement<RescaleRenderElement<crate::remains::Surface>>,
-    /// A client drawn from a texture of its own, *through a fragment program*.
-    ///
-    /// The one thing `Screen` above cannot be. `TextureRenderElement` has no
-    /// constructor that takes a program — checked against
-    /// `element/texture.rs` — so an effect that masks the node's own pixels
-    /// needs an element carrying one. See `pass::Rounded`, and `warp::Warp`
-    /// beside it, which is the other element written here for the same kind of
-    /// reason.
-    Rounded = crate::pass::Rounded,
+    /// A client surface drawn through its client's rounded rectangle, in its
+    /// own place: rounding with no capture. See `crate::clip`.
+    ClippedWindow = RescaleRenderElement<crate::clip::Clipped>,
+    /// The same, cut to its tile.
+    ClippedTiled = CropRenderElement<RescaleRenderElement<crate::clip::Clipped>>,
+    /// The same inside a warp's capture, drawn at real size as `Window2` is.
+    Clipped2 = crate::clip::Clipped,
 }
 
 /// The two questions that together mean "will a later frame differ from this
@@ -222,8 +220,8 @@ impl Drawn {
     }
 }
 
-/// Textures captured for this frame: one per deformed window, and one per
-/// window whose style masks its client.
+/// Textures captured for this frame: one per deformed window, and one more for
+/// its popups while it has any open.
 ///
 /// Such a window is drawn into a texture of its own first. That pass binds a
 /// framebuffer, so it cannot happen while the output's buffer is already
@@ -233,19 +231,19 @@ impl Drawn {
 /// their own pass, before the backend binds anything, and `elements` only
 /// spends what this collected.
 ///
-/// **That is why a pass is not run from inside the `Piece::Client` arm**, which
-/// is where the decision about it is made and would be the obvious place to
-/// run it. `elements` is called with the output already bound on the nested
+/// **That is why a capture is not drawn from inside `panes`**, which is where
+/// the warp is placed and would be the obvious place to draw it. `elements` is
+/// called with the output already bound on the nested
 /// backend (`winit.rs`) and inside `offscreen::Screens::draw`; a bind
 /// underneath a bind is the frozen-compositor failure above.
 ///
-/// Two lists rather than one keyed by kind, because they are different things:
-/// a warp keeps a texture, the program to draw it through, and the id and
+/// A warp keeps a texture, the program to draw it through, and the id and
 /// commit its element carries (its pane capture's id, and a commit that moves
 /// only when the capture is redrawn or the mesh's [`Shape`] changes:
-/// `keyed::tests::a_warp_at_rest_keeps_its_commit`), and a masked client
-/// keeps a texture, the size it was captured at, a radius in physical pixels
-/// and the program to draw it through. See [`crate::pass::Pass`].
+/// `keyed::tests::a_warp_at_rest_keeps_its_commit`). A warped pane's popups
+/// are a second list, a warp of their own drawn in front of the pane's, which
+/// also keeps the part of the pane's unit square they cover
+/// (`offscreen::over_job`).
 ///
 /// Built in two phases: every capture's element list first, which can run Qt,
 /// then every capture drawn on one bound carrier, which must not
@@ -253,7 +251,14 @@ impl Drawn {
 #[derive(Default)]
 pub(crate) struct Prepared {
     warps: Vec<(Window, GlesTexture, crate::warp::Program, Id, CommitCounter)>,
-    passes: Vec<(Window, crate::pass::Pass)>,
+    overs: Vec<(
+        Window,
+        GlesTexture,
+        crate::warp::Program,
+        Id,
+        CommitCounter,
+        crate::warp::UnitRect,
+    )>,
 }
 
 /// What a warp's mesh is a function of, in global space, so one comparison
@@ -281,12 +286,44 @@ impl Shape {
     }
 }
 
+/// Which of a warped pane's two warps goes in first, which is nearer the
+/// front: its popups, as on the flat path. `tests::a_warped_panes_popups_are_in_front_of_it`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WarpPiece {
+    Over,
+    Pane,
+}
+
+pub(crate) const WARP_ORDER: [WarpPiece; 2] = [WarpPiece::Over, WarpPiece::Pane];
+
+/// The part of a pane's unit square its popups cover: their rectangle,
+/// relative to the client's corner at `client_corner` in the pane, over the
+/// pane's `outer` size. `tests::the_popups_part_is_their_rectangle_over_the_pane`.
+pub(crate) fn over_part(
+    outer: Size<i32, Logical>,
+    client_corner: Point<i32, Logical>,
+    covered: Rectangle<i32, Logical>,
+) -> crate::warp::UnitRect {
+    let (w, h) = (f64::from(outer.w.max(1)), f64::from(outer.h.max(1)));
+    let (x, y) = (
+        f64::from(client_corner.x + covered.loc.x),
+        f64::from(client_corner.y + covered.loc.y),
+    );
+    crate::warp::UnitRect {
+        u0: x / w,
+        v0: y / h,
+        u1: (x + f64::from(covered.size.w)) / w,
+        v1: (y + f64::from(covered.size.h)) / h,
+    }
+}
+
 /// What `prepare` does with a pane. `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Route {
     /// Captured, and drawn through the warp.
     Warp,
-    /// The flat path, through its style's client pass if it has one.
+    /// The flat path, its client rounded where it is if its style says so
+    /// (`tests::a_style_with_a_radius_is_drawn_inline`).
     Flat,
 }
 
@@ -318,23 +355,32 @@ impl Prepared {
         )
     }
 
-    /// The pass captured for `window`, if its style asked for one.
-    ///
-    /// `None` for every window on a machine nobody has styled, and it is the
-    /// answer that keeps the ordinary client on the path it has always taken.
-    /// Borrowed rather than cloned for the same reason `warp` lends: one
-    /// capture is placed once per output the window is on.
-    fn pass(&self, window: &Window) -> Option<&crate::pass::Pass> {
-        self.passes
-            .iter()
-            .find(|(each, _)| each == window)
-            .map(|(_, pass)| pass)
+    /// Lend the capture of `window`'s popups, for the warp drawn in front of
+    /// its own, with the part of the pane's unit square it covers. Lent for
+    /// `warp`'s reason. `None` when it has no popups open.
+    /// `dev/present-check.sh`'s `menu` case draws it.
+    fn over(
+        &self,
+        window: &Window,
+    ) -> Option<(
+        GlesTexture,
+        crate::warp::Program,
+        Id,
+        CommitCounter,
+        crate::warp::UnitRect,
+    )> {
+        self.overs.iter().find(|(each, ..)| each == window).map(
+            |(_, texture, program, id, commit, part)| {
+                (texture.clone(), *program, id.clone(), *commit, *part)
+            },
+        )
     }
 }
 
 /// Capture a texture for every window that cannot be drawn from its surfaces
-/// where they are: one whose transform is not a rectangle, and one whose style
-/// masks its client.
+/// where they are: one whose transform is not a rectangle. A rounded window is
+/// drawn from its surfaces, each through the clipped programs this compiles
+/// (`tests::a_style_with_a_radius_is_drawn_inline`).
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
 /// Note on the clock: this walk calls [`Solium::drawn`], which samples the
@@ -388,7 +434,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     state.pool.set_budget(2 * largest);
 
     let mut warps = Vec::new();
-    let mut passes = Vec::new();
+    let mut overs = Vec::new();
     let mut jobs = Vec::new();
 
     for (pane, window) in state.on_screen() {
@@ -408,6 +454,15 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             release(state);
             continue;
         };
+        // A rounded client's programs, compiled here, between frames, so the
+        // first frame that draws it has them: `elements` never compiles
+        // (`clipped`). Before the cull and the guard below, where a rounded
+        // pane now stops, wanting no capture
+        // (`tests::a_pane_neither_warped_nor_styled_wants_no_capture`); the
+        // rounded shot of `dev/pacing-nested.sh` draws through them.
+        if declared_rounding(state, pane).is_some() {
+            let _ = state.programs.clip(renderer);
+        }
         // **A pane no monitor shows is not captured**, and this is the same
         // question `elements` asks one screen at a time before it draws
         // anything: `!global.overlaps(screen)`, the containment rule that
@@ -433,13 +488,12 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // `frame_insets` gives an undecorated window none. So the question is
         // asked of the rectangle `elements` will ask it of.
         //
-        // Being wrong in that direction is *not* a blank corner, which is what
-        // this comment used to say: `Prepared::pass` answering `None` falls
-        // through to the ordinary surface path below, so a wrongly culled pane
-        // is a SQUARE-CORNERED window for one frame. Worth knowing, because it
-        // sets how hard to lean -- the failure is cosmetic and self-correcting,
-        // while being wrong the other way is a capture per window per frame
-        // for the life of the session.
+        // Being wrong in that direction is *not* a blank window: a pane with
+        // no capture is drawn from its surfaces by the flat path, rounded or
+        // not, so a wrongly culled warp is a FLAT window for one frame. Worth
+        // knowing, because it sets how hard to lean -- the failure is cosmetic
+        // and self-correcting, while being wrong the other way is a capture
+        // per window per frame for the life of the session.
         //
         // Costed honestly: `pane_outer_of` is two linear `Panes::get` scans
         // (one through `insets_of`) plus an `element_location`, so this is
@@ -459,11 +513,9 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // texture for it would be a megabyte a frame spent on a warp that
         // `elements` has already decided not to do.
         let frame = state.drawn(pane, outer);
-        // At *its own monitor's* scale, in both branches below. One frame can
-        // span monitors at different scales, and a texture taken at 1x and
-        // drawn on a 2x screen is the blur this whole change exists to remove
-        // -- and, for a pass, the radius that is right on one screen and wrong
-        // on the other.
+        // At *its own monitor's* scale. One frame can span monitors at
+        // different scales, and a texture taken at 1x and drawn on a 2x screen
+        // is the blur this whole change exists to remove.
         //
         // A deformed window with no warp program takes the flat path below
         // instead of being captured for a warp that cannot be drawn:
@@ -476,18 +528,17 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             None
         };
         let routed = route(warped, program.is_some());
-        let declared = declared_effects(state, pane);
-        // A pane neither warped nor styled builds no job (spec §8.4).
+        // A pane that is not warped builds no job, rounded or not (spec §8.4).
         // `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
-        if wanted_capture(routed, &declared).is_none() {
-            // Said out loud rather than skipped. `needs_pass` answering `None`
-            // for `Inputs::Backdrop` is right -- there is nothing composited
-            // beneath a node for this renderer to sample -- but a blur that
-            // silently renders as no blur looks like a style that failed to
-            // load and is never reported as a compositor bug. See
-            // `fragment::Inputs::Backdrop`, and
+        if wanted_capture(routed).is_none() {
+            // Said out loud rather than skipped. Not drawing `Inputs::Backdrop`
+            // is right -- there is nothing composited beneath a node for this
+            // renderer to sample -- but a blur that silently renders as no
+            // blur looks like a style that failed to load and is never
+            // reported as a compositor bug. See `fragment::Inputs::Backdrop`,
+            // and
             // `pass::tests::an_effect_that_cannot_be_run_is_named_once_and_not_every_frame`.
-            if let Some(refused) = crate::pass::refused(&declared) {
+            if let Some(refused) = crate::pass::refused(&declared_effects(state, pane)) {
                 state.programs.refuse(refused);
             }
             release(state);
@@ -499,36 +550,46 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             // moves when this does, as well as when its capture is redrawn.
             // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
             let shape = Shape::of(&frame, aimed, scale);
+            let job = crate::offscreen::pane_job(state, renderer, pane, &window, scale);
+            // Its popups the same way, in a capture of their own that `panes`
+            // draws in front of the pane's warp
+            // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept until
+            // they commit:
+            // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
+            let over = if job.is_some() {
+                crate::offscreen::over_job(state, renderer, pane, &window, scale)
+            } else {
+                None
+            };
+            // Holding only what it captures this pass: popups that closed give
+            // their capture back while the pane goes on warping.
+            // `keyed::tests::a_warped_pane_whose_popups_close_gives_their_capture_back`.
+            let kinds: &[crate::keyed::Kind] = if over.is_some() {
+                &[crate::keyed::Kind::Pane, crate::keyed::Kind::Over]
+            } else {
+                &[crate::keyed::Kind::Pane]
+            };
             let (panes, pool) = (&mut state.panes, &mut state.pool);
             if let Some(held) = panes.get_mut(pane) {
-                held.captures_mut()
-                    .keep_only(Some(crate::keyed::Kind::Pane), pool);
+                held.captures_mut().keep_only(kinds, pool);
             }
-            if let Some(job) = crate::offscreen::pane_job(state, renderer, pane, &window, scale) {
+            if let Some(job) = job {
                 // Already drawn from exactly this: no frame (`offscreen::kept`,
                 // `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`).
                 if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
-                    let commit = warp_commit(state, pane, shape, false);
-                    warps.push((window, texture, program, id, commit));
+                    let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, false);
+                    warps.push((window.clone(), texture, program, id, commit));
                 } else {
-                    jobs.push((job, Then::Warp(window, program, pane, shape)));
+                    jobs.push((job, Then::Warp(window.clone(), program, pane, shape)));
                 }
             }
-            continue;
-        }
-
-        // Flat, so its style may still want its client masked. Asked *after*
-        // the warp branch and never as well as it, because the two want
-        // different sizes -- and because a deformed window loses its effects
-        // for the length of the deform, the same recorded limit its bleed
-        // already has. See `flat_window_elements`.
-        if let Some((job, then)) = client_job_for(state, renderer, pane, &window, outer, &declared)
-        {
-            match (crate::offscreen::kept(state, &job), then) {
-                (Some((texture, id, commit)), Then::Pass(window, pending)) => {
-                    passes.push((window, pending.with(texture, id, commit)));
+            if let Some((job, part)) = over {
+                if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
+                    let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
+                    overs.push((window, texture, program, id, commit, part));
+                } else {
+                    jobs.push((job, Then::Over(window, program, pane, shape, part)));
                 }
-                (_, then) => jobs.push((job, then)),
             }
             continue;
         }
@@ -536,48 +597,59 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     }
 
     // Every list is built: draw them all, on one carrier.
-    for (then, texture, id, commit) in crate::offscreen::draw(state, renderer, jobs) {
+    for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
         match then {
             Then::Warp(window, program, pane, shape) => {
-                let commit = warp_commit(state, pane, shape, true);
+                let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
                 warps.push((window, texture, program, id, commit));
             }
-            Then::Pass(window, pending) => {
-                passes.push((window, pending.with(texture, id, commit)));
+            Then::Over(window, program, pane, shape, part) => {
+                let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
+                overs.push((window, texture, program, id, commit, part));
             }
         }
     }
-    Prepared { warps, passes }
+    Prepared { warps, overs }
 }
 
-/// What a capture becomes once drawn: `dev/fence-check.sh` has one of each.
-/// A warp carries its pane and the [`Shape`] its commit is moved by.
+/// What a capture becomes once drawn: `dev/fence-check.sh` has two warps,
+/// `dev/present-check.sh`'s menu case a warp and its popups. A warp
+/// carries its pane and the [`Shape`] its commit is moved by; its popups' warp
+/// the part of the pane they cover as well.
 #[derive(Debug)]
 enum Then {
     Warp(Window, crate::warp::Program, crate::pane::PaneId, Shape),
-    Pass(Window, crate::pass::Pending),
+    Over(
+        Window,
+        crate::warp::Program,
+        crate::pane::PaneId,
+        Shape,
+        crate::warp::UnitRect,
+    ),
 }
 
-/// The commit `pane`'s warp carries this pass: moved when its capture was
-/// `redrawn` or its `shape` changed, and only then.
-/// `keyed::tests::a_warp_at_rest_keeps_its_commit`.
+/// The commit `pane`'s `kind` of warp carries this pass, its own or its
+/// popups': moved when its capture was `redrawn` or its `shape` changed, and
+/// only then. `keyed::tests::a_warp_at_rest_keeps_its_commit`,
+/// `keyed::tests::the_popups_warp_commits_apart_from_the_panes`.
 fn warp_commit(
     state: &mut Solium,
     pane: crate::pane::PaneId,
+    kind: crate::keyed::Kind,
     shape: Shape,
     redrawn: bool,
 ) -> CommitCounter {
     state
         .panes
         .get_mut(pane)
-        .map(|held| held.captures_mut().warp_commit_for(shape, redrawn))
+        .map(|held| held.captures_mut().warp_commit_for(kind, shape, redrawn))
         .unwrap_or_default()
 }
 
 /// The effects a pane's style declares, copied out so nothing borrows the
 /// state: nought or one, and `Vec::new()` (no allocation) for every
 /// unstyled window. Lifted from what was `client_pass`.
-/// `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
+/// `decoration::tests::a_decoration_with_no_declared_radius_runs_no_pass`.
 fn declared_effects(
     state: &Solium,
     pane: crate::pane::PaneId,
@@ -591,56 +663,96 @@ fn declared_effects(
         .to_vec()
 }
 
-/// Which capture a pane wants this pass: its warp's, its style's client
-/// pass, or none, which is every unstyled, unwarped window.
-/// `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
-pub(crate) fn wanted_capture(
-    route: Route,
-    declared: &[solium_effects::fragment::Effect],
-) -> Option<crate::keyed::Kind> {
-    match route {
-        Route::Warp => Some(crate::keyed::Kind::Pane),
-        Route::Flat => crate::pass::needs_pass(declared).map(|_| crate::keyed::Kind::Client),
+/// The rounding a pane's style declares, if any: the one inline effect today.
+/// `tests::a_style_with_no_radius_wraps_nothing`, `tests::a_style_with_a_radius_is_drawn_inline`,
+/// `tests::a_none_effect_does_not_hide_the_rounding_behind_it`, `tests::of_two_roundings_the_first_wins`.
+pub(crate) fn rounding(
+    effects: &[solium_effects::fragment::Effect],
+) -> Option<solium_effects::fragment::Effect> {
+    effects.iter().copied().find(|effect| {
+        effect.inputs() == solium_effects::fragment::Inputs::Inline && !effect.is_none_effect()
+    })
+}
+
+/// The rounding a pane's style declares, read without borrowing the state.
+/// A fullscreen pane has no frame, so none: `decoration::tests::a_fullscreen_window_is_drawn_square`.
+fn declared_rounding(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+) -> Option<solium_effects::fragment::Effect> {
+    rounding(&declared_effects(state, pane))
+}
+
+/// What a pane's client is clipped with this frame: its rounding and the
+/// programs `prepare` compiled, or `None` (the path every unstyled window
+/// takes, untouched). **Never compiles**: `elements` may run with an output
+/// bound, where a compile's `make_current` is the frozen-compositor failure
+/// `Prepared`'s doc describes; `prepare` compiles them, between frames.
+fn clipped(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+) -> Option<(solium_effects::fragment::Effect, crate::pass::ClipPrograms)> {
+    let effect = declared_rounding(state, pane)?;
+    Some((effect, state.programs.clip_compiled()?.clone()))
+}
+
+/// A client's clip on the flat path: the client's rectangle as drawn,
+/// `drawn`, taken back through the rescale by `factor` about `origin` into
+/// the surfaces' own pixels, where `clip::input_to_geo` measures. At 1:1 it
+/// is `drawn` itself. `tests::a_zoomed_clients_clip_is_the_whole_client`.
+pub(crate) fn drawn_clip(
+    drawn: Rectangle<i32, Physical>,
+    origin: Point<i32, Physical>,
+    factor: Scale<f64>,
+    radii: solium_effects::fragment::Corners,
+) -> crate::clip::Clip {
+    let back = |at: i32, about: i32, by: f64| f64::from(about) + f64::from(at - about) / by;
+    crate::clip::Clip {
+        rect: Rectangle::new(
+            (
+                back(drawn.loc.x, origin.x, factor.x),
+                back(drawn.loc.y, origin.y, factor.y),
+            )
+                .into(),
+            (
+                f64::from(drawn.size.w) / factor.x,
+                f64::from(drawn.size.h) / factor.y,
+            )
+                .into(),
+        ),
+        radii,
+        origin,
+        factor,
     }
 }
 
-/// Build this pane's client pass, if its style asked for one: the capture's
-/// job, and the pass waiting for its texture.
-///
-/// `declared` is [`declared_effects`]' answer, which `prepare` has already
-/// asked [`wanted_capture`] about, so a pane reaching here wants a pass.
-///
-/// Every `None` is a refusal to make a window worse than it was -- a shader
-/// that would not compile, a client with nothing mapped yet -- and each of
-/// them leaves the client drawn square through the path it has always taken,
-/// rather than not drawn at all.
-fn client_job_for(
-    state: &mut Solium,
-    renderer: &mut GlesRenderer,
-    pane: crate::pane::PaneId,
-    window: &Window,
-    outer: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
-    declared: &[solium_effects::fragment::Effect],
-) -> Option<(crate::offscreen::Job, Then)> {
-    let effect = crate::pass::needs_pass(declared)?;
-    let scale = state.scale_of(outer);
-    // The program first, and the capture only if there is one: a driver that
-    // cannot build this shader should cost someone their rounded corners, not
-    // an offscreen pass per window per frame to draw a texture through nothing.
-    //
-    // Compiled here rather than at the draw because this is between frames --
-    // `prepare` runs before any output is bound -- which is the one place
-    // `compile_custom_texture_shader`'s `make_current` is safe. `Programs`
-    // says why at length, and the borrow checker enforces it.
-    let program = state.programs.rounded(renderer)?.clone();
-    let (job, opaque) = crate::offscreen::client_job(state, renderer, pane, window, scale)?;
-    let (panes, pool) = (&mut state.panes, &mut state.pool);
-    if let Some(held) = panes.get_mut(pane) {
-        held.captures_mut()
-            .keep_only(Some(crate::keyed::Kind::Client), pool);
+/// A client's clip inside a warp's capture, which draws it at real size with
+/// its tree at `origin`: its `geometry` (relative to the tree) there, cut to
+/// the `hole` the frame leaves it from `origin`, which is what the capture
+/// holds of it. `tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`.
+pub(crate) fn capture_clip(
+    origin: Point<i32, Physical>,
+    hole: Size<i32, Physical>,
+    geometry: Rectangle<i32, Physical>,
+    radii: solium_effects::fragment::Corners,
+) -> crate::clip::Clip {
+    let room = Rectangle::new(origin, hole);
+    let client = Rectangle::new(origin + geometry.loc, geometry.size);
+    crate::clip::Clip {
+        rect: client.intersection(room).unwrap_or(room).to_f64(),
+        radii,
+        origin,
+        factor: Scale::from(1.0),
     }
-    let pending = crate::pass::Pending::new(job.size, effect, scale, opaque, program);
-    Some((job, Then::Pass(window.clone(), pending)))
+}
+
+/// Which capture a pane wants this pass: its warp's, or none, which is every
+/// unwarped window, rounded or not. `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
+pub(crate) fn wanted_capture(route: Route) -> Option<crate::keyed::Kind> {
+    match route {
+        Route::Warp => Some(crate::keyed::Kind::Pane),
+        Route::Flat => None,
+    }
 }
 
 /// Everything to draw this frame, topmost first.
@@ -1156,7 +1268,7 @@ pub(crate) fn stacked(
     // The third gate is *not* in [`panes`] and that argument does not cover
     // it. It is in `prepare`, which walks `on_screen()` separately and
     // earlier, and its panes never see this sort. It is safe for an unrelated
-    // reason: `Prepared::texture` and `Prepared::pass` find their answer *by
+    // reason: `Prepared::warp` and `Prepared::over` find their answer *by
     // `Window`*, so what `prepare` produces is content-addressed and the order
     // it produced it in cannot reach here. Left in stacking order deliberately
     // — sorting it would be a sort per frame buying nothing.
@@ -1224,14 +1336,15 @@ pub(crate) fn stacked(
     drawn
 }
 
-/// A warp's mesh on one screen: the frame and its deform's target, both in
-/// global space, moved onto the screen together.
-/// `tests::a_genie_on_the_second_monitor_lands_on_its_target`,
+/// A warp's mesh on one screen, over `part` of the pane's unit square: the
+/// frame and its deform's target, both in global space, moved onto the screen
+/// together. `tests::a_genie_on_the_second_monitor_lands_on_its_target`,
 /// `tests::a_genie_on_the_first_monitor_is_unchanged`.
 pub(crate) fn warp_mesh_on(
     screen: Rectangle<i32, Logical>,
     frame: &present::Frame,
     aimed: Option<present::Aimed>,
+    part: crate::warp::UnitRect,
     scale: f64,
 ) -> Option<crate::warp::Mesh> {
     let shift = Point::<f64, Logical>::from((-f64::from(screen.loc.x), -f64::from(screen.loc.y)));
@@ -1240,7 +1353,14 @@ pub(crate) fn warp_mesh_on(
         to: onto(aimed.to),
         ..aimed
     });
-    crate::warp::mesh(onto(frame.rect), frame.matrix, aimed, frame.pivot, scale)
+    crate::warp::mesh_part(
+        onto(frame.rect),
+        part,
+        frame.matrix,
+        aimed,
+        frame.pivot,
+        scale,
+    )
 }
 
 /// Draw panes, in the order given.
@@ -1427,9 +1547,13 @@ fn panes(
         };
 
         // A transform that is not identity cannot be drawn as a rectangle. The
-        // window is rendered flat into a texture first — frame and popups
-        // included — and that texture is bent, so the whole window deforms as
-        // one thing instead of the client tilting away from its own titlebar.
+        // window is rendered flat into a texture first — frame included — and
+        // that texture is bent, so the whole window deforms as one thing
+        // instead of the client tilting away from its own titlebar. Its popups
+        // are not in that texture (`state::tests::a_warped_panes_capture_holds_no_popups`):
+        // they are a capture of their own, bent by the same matrix and deform
+        // over their part of the pane, and drawn in front of it
+        // (`tests::a_warped_panes_popups_are_in_front_of_it`).
         //
         // The deform's anchor is resolved *here*, on the frame that draws it,
         // because what it is aimed at moves — see `present::Anchor`. An anchor
@@ -1438,20 +1562,59 @@ fn panes(
         // an effect.
         let aimed = state.aimed_at_for(pane, frame.deform);
         if (!frame.matrix.is_identity() || aimed.is_some())
-            && let Some(mesh) = warp_mesh_on(screen, &drawn_global, aimed, scale)
             && let Some((texture, program, id, commit)) = prepared.warp(&window)
+            && let Some(pane_mesh) = warp_mesh_on(
+                screen,
+                &drawn_global,
+                aimed,
+                crate::warp::UnitRect::WHOLE,
+                scale,
+            )
         {
-            // Its pane capture's id for life, and the commit `prepare` moved
-            // only if the picture or the mesh changed, so a still warp is not
-            // damaged and a moving one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
-            elements.push(Element::Warped(crate::warp::Warp::new(
-                id,
-                commit,
-                texture,
-                mesh,
-                frame.opacity,
-                program,
-            )));
+            // The pane's own mesh first: it can fail (a vertex behind the
+            // viewer), and then nothing of the warp is pushed and the pane
+            // falls through to the flat path below, as before. A popups' mesh
+            // that fails alone drops the popups for that frame and keeps the
+            // pane. Popups first, nearer the front:
+            // `tests::a_warped_panes_popups_are_in_front_of_it`, and
+            // `dev/present-check.sh`'s `menu` case through the real draw.
+            let mut pane_warp = Some((id, texture, pane_mesh));
+            for piece in WARP_ORDER {
+                match piece {
+                    WarpPiece::Over => {
+                        if let Some((over_texture, over_program, over_id, over_commit, part)) =
+                            prepared.over(&window)
+                            && let Some(mesh) =
+                                warp_mesh_on(screen, &drawn_global, aimed, part, scale)
+                        {
+                            elements.push(Element::Warped(crate::warp::Warp::new(
+                                over_id,
+                                over_commit,
+                                over_texture,
+                                mesh,
+                                frame.opacity,
+                                over_program,
+                            )));
+                        }
+                    }
+                    WarpPiece::Pane => {
+                        // Its pane capture's id for life, and the commit
+                        // `prepare` moved only if the picture or the mesh
+                        // changed, so a still warp is not damaged and a moving
+                        // one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
+                        if let Some((id, texture, mesh)) = pane_warp.take() {
+                            elements.push(Element::Warped(crate::warp::Warp::new(
+                                id,
+                                commit,
+                                texture,
+                                mesh,
+                                frame.opacity,
+                                program,
+                            )));
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -1546,35 +1709,21 @@ fn panes(
         // frontmost thing its window owns while it is up -- that is what a
         // grab means -- and a style's overlay layer covering one would be the
         // same bug with a different layer's name on it.
-        if let Some(surface) = window
-            .toplevel()
-            .map(|toplevel| toplevel.wl_surface().clone())
-        {
-            for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-                let popup_origin =
-                    origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-                let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                    render_elements_from_surface_tree(
-                        renderer,
-                        popup.wl_surface(),
-                        popup_origin,
-                        output_scale,
-                        frame.opacity,
-                        Kind::Unspecified,
-                    );
-                // Scaled with the window and not cut to its tile: a menu has
-                // to reach past its parent's tile, and a menu cut to it would
-                // lose every item past the tile's edge. The window's own fit
-                // with the cut taken off, which is
-                // `a_popup_reaches_past_its_parents_tile`. This loop is the
-                // only place a toplevel's popups are drawn on this path -- the
-                // toplevel itself is drawn from its own surface tree, which
-                // holds no popups; see [`toplevel_elements`].
-                elements.extend(popup_elements.into_iter().filter_map(|element| {
-                    fitted(element, origin, fitting.uncut(), output_scale).map(Fitted::into_element)
-                }));
-            }
-        }
+        //
+        // In front on both paths: a warped pane's popups are a capture of
+        // their own, drawn as a warp in front of the pane's above
+        // (`tests::a_warped_panes_popups_are_in_front_of_it`).
+        let (popups, _) = popup_elements(renderer, &window, origin, output_scale, frame.opacity);
+        // Scaled with the window and not cut to its tile: a menu has to reach
+        // past its parent's tile, and a menu cut to it would lose every item
+        // past the tile's edge. The window's own fit with the cut taken off,
+        // which is `a_popup_reaches_past_its_parents_tile`. This is the only
+        // place a toplevel's popups are drawn on this path -- the toplevel
+        // itself is drawn from its own surface tree, which holds no popups;
+        // see [`toplevel_elements`].
+        elements.extend(popups.into_iter().filter_map(|element| {
+            fitted(element, origin, fitting.uncut(), output_scale).map(Fitted::into_element)
+        }));
 
         // **This is the sandwich.** The client goes into the list between the
         // layers its own style produced -- `above` and `frame` are already in
@@ -1589,77 +1738,15 @@ fn panes(
         // space: a frame that takes nothing and floats over the window -- a bar
         // that appears on hover, a border that does not push the client around
         // -- is a decoration too.
+        //
+        // A style's rounding and its programs, asked once here, outside the
+        // walk, which holds the state: `None` for every unstyled window.
+        let rounded = clipped(state, pane);
         pane_pieces(elements, |elements, piece| match piece {
             Piece::Layers(depth) => chrome(state, renderer, elements, pane, depth, drawing),
             Piece::Client => {
                 // Popups are not here: they went in above the whole sandwich,
                 // before this walk started. See the comment there.
-
-                // An effect that reads the node's own pixels cannot be an
-                // element laid over the client, because it needs the client's
-                // pixels before it can draw. So the client's surfaces were
-                // rendered into a texture of their own in `prepare`, and that
-                // texture is drawn here, through the effect's program, in
-                // their place -- one element where there were several.
-                //
-                // The popups above are deliberately outside this: a popup is
-                // its own window, reaching past the client's rectangle, and
-                // masking it to the client's corners would cut the corners off
-                // a menu.
-                //
-                // **Everything below this branch is the path every unstyled
-                // window takes and is untouched: no capture, no bind, no
-                // program, no extra element.** `Prepared::pass` answering
-                // `None` -- which it does for every window whose style
-                // declares no effect, because `prepare` put nothing in the
-                // list -- is what keeps it that way.
-                if let Some(pass) = prepared.pass(&window) {
-                    // The client's drawn rectangle, which is not the texture's
-                    // size: a window being animated smaller is captured at its
-                    // real size and drawn into less of the screen. The corner
-                    // therefore shrinks with the window, which is what it
-                    // should do -- the mask is in the texture's own space.
-                    //
-                    // Built from `origin` rather than converting `client`
-                    // whole, so the element's position is the *same* number
-                    // the surfaces below would have used rather than a second
-                    // rounding of it.
-                    //
-                    // **The texture is measured the same way this is, and that
-                    // is deliberate.** This rounds and
-                    // `offscreen::client_pixels` rounds. The warp's
-                    // `offscreen::pixels` ceils and still does, so the two
-                    // differ at a fractional scale: 1149 logical by 1.25 is
-                    // 1437 against 1436.
-                    //
-                    // An earlier version of this comment recorded that
-                    // difference on the client path and called it invisible --
-                    // a corner landing marginally inside where the arithmetic
-                    // says, not a defect to hunt. That was true about the
-                    // geometry and wrong about everything else, which is why
-                    // the sizing changed rather than the comment. `pass::
-                    // covers` asks whether the client's surfaces covered the
-                    // capture; a surface's opaque region is sized with
-                    // `to_i32_round`; a capture one pixel wider therefore has a
-                    // column nothing ever claims, and the window gave up its
-                    // opaque region for good on exactly the outputs a
-                    // fractional scale is ordinary on. `client_pixels` carries
-                    // the rest of it.
-                    //
-                    // **`corner`, not `origin`.** This path does not scale by
-                    // `factor` at all -- the capture is drawn into the whole of
-                    // the client's drawn rectangle, which is a stretch whatever
-                    // the configured fill says -- so there is no slack for a
-                    // held picture to be anchored against, and offsetting a
-                    // rectangle that is already the full width would hang it
-                    // over the edge it was meant to be pinned to.
-                    let dst = smithay::utils::Rectangle::new(
-                        corner,
-                        client.size.to_physical_precise_round(scale),
-                    );
-                    elements.push(Element::Rounded(pass.at(dst, frame.opacity)));
-                    return;
-                }
 
                 // A surface's top-left is not the window's. A client that draws
                 // its own decorations puts its drop shadow *outside* the window
@@ -1679,6 +1766,31 @@ fn panes(
                         output_scale,
                         frame.opacity,
                     );
+                // A style's rounding: each surface wrapped, in its own place,
+                // and cut to the client's rectangle as drawn, taken back
+                // through the zoom into the surfaces' own pixels
+                // (`clip::tests::input_to_geo_maps_each_corner_of_a_surface_onto_the_client`,
+                // `tests::a_zoomed_clients_clip_is_the_whole_client`). `None`
+                // for every unstyled window, which takes the lines after this
+                // unchanged.
+                if let Some((effect, programs)) = &rounded {
+                    let clip = drawn_clip(
+                        Rectangle::new(corner, client.size.to_physical_precise_round(scale)),
+                        origin,
+                        fitting.factor,
+                        crate::pass::physical_radii(*effect, scale),
+                    );
+                    elements.extend(window_elements.into_iter().filter_map(|element| {
+                        fitted(
+                            crate::clip::Clipped::new(element, clip, programs.clone()),
+                            origin,
+                            fitting,
+                            output_scale,
+                        )
+                        .map(Fitted::into_clipped)
+                    }));
+                    return;
+                }
                 // Cut to the tile when there is anything to cut, and a surface
                 // the cut leaves nothing of -- a subsurface wholly past the
                 // tile's edge -- is dropped: `CropRenderElement` has no empty
@@ -1977,28 +2089,34 @@ fn cursor(
 /// deformed as one thing. Built at the origin because the texture *is* the
 /// window's own space; where it lands on screen is the warp's business.
 ///
-/// **At the pane's size, from [`flat`], which for a tiled client that
-/// committed more than its tile is the tile (#133).** `warp::mesh` spreads the
-/// whole texture over the frame's rect, and that rect is the pane's; a capture
-/// at the committed size pressed the whole buffer into the tile for the
-/// length of a genie or a tilt, and told the frame the uncapped width as well,
-/// so its titlebar was laid out at one width while warped and another once
-/// landed. The client's surfaces are drawn at their own size, so what reaches
-/// past the tile is simply off the texture's edge -- the cut `elements` makes
-/// with a crop, made here by the framebuffer.
+/// **At the pane's size, from [`flat`], which for a tiled client that committed
+/// more than its tile is the tile (#133).** `warp::mesh_part` spreads the whole
+/// texture over the frame's rect, and that rect is the pane's; a capture at the
+/// committed size pressed the whole buffer into the tile for the length of a
+/// genie or a tilt, and told the frame the uncapped width as well, so its
+/// titlebar was laid out at one width while warped and another once landed. The
+/// client's surfaces are drawn at their own size, so what reaches past the tile
+/// is simply off the texture's edge -- the cut `elements` makes with a crop,
+/// made here by the framebuffer.
 ///
 /// **A deformed window loses its bleed, and that is a known limit rather than
 /// an oversight.** `offscreen::pane_job` sizes its texture from the window's
 /// outer rect, so a layer placed at `(-bleed.left, -bleed.top)` falls outside
 /// the framebuffer and is clipped by the renderer — the spikes are simply not
 /// in the picture that gets bent. Fixing it means capturing at the decoration's
-/// widest canvas *and* building `warp::mesh` over that larger rectangle, since
-/// the mesh is what maps the texture back onto the window; both the genie's
-/// anchor arithmetic and `crates/effects` are written against the window's own
-/// rect today. It is `capture`'s change and the effects plan's, not this one's.
-/// What it costs meanwhile is an effect that disappears while a window is being
-/// deformed and comes back when it lands, which is visible but is not wrong
-/// pixels.
+/// widest canvas *and* building `warp::mesh_part` over that larger rectangle,
+/// since the mesh is what maps the texture back onto the window; both the
+/// genie's anchor arithmetic and `crates/effects` are written against the
+/// window's own rect today. It is `capture`'s change and the effects plan's,
+/// not this one's. What it costs meanwhile is an effect that disappears while a
+/// window is being deformed and comes back when it lands, which is visible but
+/// is not wrong pixels.
+///
+/// **No popups.** A warped pane's popups are a capture of their own
+/// (`offscreen::over_job`), drawn in front of the warp: inside this one they
+/// sat under the titlebar and were cut at the window's edge.
+/// `state::tests::a_warped_panes_capture_holds_no_popups`,
+/// `tests::a_warped_panes_popups_are_in_front_of_it`.
 pub(crate) fn flat_window_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -2032,6 +2150,9 @@ pub(crate) fn flat_window_elements(
     let origin =
         Point::<i32, Logical>::from((insets.left, insets.top)).to_physical_precise_round(scale);
 
+    // Asked before the walk, which holds the state.
+    let rounded = pane.and_then(|pane| clipped(state, pane));
+
     // The same `PANE_ORDER` a flat window goes through, so a tilted window
     // carries its layers in the order it would have had standing still. A
     // second sequence of calls here is how a deformed window would come to have
@@ -2042,92 +2163,37 @@ pub(crate) fn flat_window_elements(
                 chrome(state, renderer, elements, pane, depth, drawing);
             }
         }
-        // **A deformed window loses its client effects too, for the same
-        // reason and with the same shape as the bleed above.** No pass is run
-        // here, so a window with a `client.radius` has square corners for the
-        // length of a genie and rounded ones the moment it lands.
-        //
-        // It is not an oversight and it is not one line. A pass needs a
-        // texture of the client alone, and the texture it would be drawn into
-        // is the one this function is filling -- so the pane would need two
-        // captures in one pass, where `render::wanted_capture` deliberately
-        // picks one. The honest fix is the same fix the bleed needs: capture
-        // at the decoration's widest canvas and map the mesh over it, which is
-        // `pane_job`'s change and not this one's.
-        //
-        // What it costs meanwhile is visible but is not wrong pixels, which is
-        // the same trade the bleed already makes.
+        // A style's rounding, drawn here as on the flat path, so a deformed
+        // window keeps its corners: each surface through the clipped
+        // programs, at real size, cut to what the capture holds of the client
+        // (`tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`).
         Piece::Client => {
-            if let Some(surface) = window
-                .toplevel()
-                .map(|toplevel| toplevel.wl_surface().clone())
-            {
-                for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-                    let popup_origin =
-                        origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
-                    let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                        render_elements_from_surface_tree(
-                            renderer,
-                            popup.wl_surface(),
-                            popup_origin,
-                            output_scale,
-                            1.0,
-                            Kind::Unspecified,
-                        );
-                    elements.extend(popup_elements.into_iter().map(Element::Window2));
+            let surfaces = client_piece(renderer, window, origin, output_scale);
+            match &rounded {
+                Some((effect, programs)) => {
+                    let clip = capture_clip(
+                        origin,
+                        Size::<i32, Logical>::from((
+                            outer.w - insets.horizontal(),
+                            outer.h - insets.vertical(),
+                        ))
+                        .to_physical_precise_round(scale),
+                        window.geometry().to_physical_precise_round(scale),
+                        crate::pass::physical_radii(*effect, scale),
+                    );
+                    elements.extend(surfaces.into_iter().map(|surface| {
+                        Element::Clipped2(crate::clip::Clipped::new(
+                            surface,
+                            clip,
+                            programs.clone(),
+                        ))
+                    }));
                 }
+                None => elements.extend(surfaces.into_iter().map(Element::Window2)),
             }
-
-            // The toplevel's own tree: its popups are the loop above's.
-            let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                toplevel_elements(renderer, window, origin, output_scale, 1.0);
-            elements.extend(window_elements.into_iter().map(Element::Window2));
         }
     });
     elements
-}
-
-/// One window's **client**, flat, at the origin and its real size.
-///
-/// What `offscreen::client_job` draws into the texture a fragment program
-/// then masks. The client and nothing else: no frame, no layers, no popups,
-/// and the reason for each is on `client_job` — briefly, a layer's pixels
-/// are Qt's and Qt rounds itself, and a popup is its own window and must not
-/// be clipped to the one it belongs to.
-///
-/// At the origin because the texture *is* the client's own space; where it
-/// lands on screen is `elements`' business, exactly as the warp's is.
-///
-/// Takes no `&Solium` — unlike [`flat_window_elements`], which needs the pane
-/// for its layers — which is why the capture around it can hold the state
-/// mutably while this runs.
-pub(crate) fn client_elements(
-    renderer: &mut GlesRenderer,
-    window: &Window,
-    scale: f64,
-) -> Vec<Element> {
-    // A surface's top-left is not the window's: a client drawing its own
-    // decorations puts its shadow outside the geometry and says so through
-    // `set_window_geometry`. Drawing the tree at the origin would put the
-    // shadow where the window belongs and push the window down and right by
-    // its width — the Firefox defect `elements` records — and here it would
-    // also mask the wrong rectangle. So the tree is offset the same way, which
-    // makes the texture exactly the window's geometry rect and clips the
-    // shadow off it.
-    let origin = smithay::utils::Point::<i32, smithay::utils::Logical>::from((
-        -window.geometry().loc.x,
-        -window.geometry().loc.y,
-    ))
-    .to_physical_precise_round(scale);
-    // Fully opaque, like the warp's capture and for the same reason: the
-    // element drawn from this texture applies the pane's opacity to the whole
-    // of it afterwards, so fading here as well would fade it squared.
-    // The toplevel's own tree and not smithay's whole window, which would
-    // draw every popup into the capture as well -- clipped to the client and
-    // masked with it, under the unmasked copy `elements` draws.
-    let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        toplevel_elements(renderer, window, origin, Scale::from(scale), 1.0);
-    surfaces.into_iter().map(Element::Window2).collect()
 }
 
 /// The rectangle a warped window is captured at, and where its client sits in
@@ -2185,9 +2251,8 @@ pub(crate) struct Placed {
 /// `outer` is the pane's own outer size -- what its frame canvas is
 /// rasterised at -- and `committed` the size its client committed. The one
 /// answer every reader of a client's picture shares: `elements` draws the
-/// surfaces through it, `offscreen::client_job` sizes a masked client's
-/// texture from its [`Fit::shown`], and `Solium::surface_under` inverts it, so
-/// a press lands on the pixel the picture put there.
+/// surfaces through it, and `Solium::surface_under` inverts it, so a press
+/// lands on the pixel the picture put there.
 pub(crate) fn place_client(
     state: &Solium,
     pane: &Pane,
@@ -2402,6 +2467,16 @@ impl Fitted<WaylandSurfaceRenderElement<GlesRenderer>> {
     }
 }
 
+impl Fitted<crate::clip::Clipped> {
+    /// Into the frame's element list: a rounded client's surface.
+    fn into_clipped(self) -> Element {
+        match self {
+            Self::Whole(each) => Element::ClippedWindow(each),
+            Self::Cut(each) => Element::ClippedTiled(each),
+        }
+    }
+}
+
 impl Fitted<crate::remains::Surface> {
     /// Into the frame's element list. Not `into_element`, which the path
     /// `Fitted::into_element` above has to name without a type.
@@ -2429,18 +2504,19 @@ impl Fitted<crate::remains::Surface> {
 /// fill, where that surface was (`remains::Picture::elements`).
 ///
 /// **Two things the live path does are not done here**, both read and neither
-/// tested, since no test has a GPU. A style's client pass (`Prepared::pass`:
-/// the `client.radius` mask of `rounded` and `flush`) is not applied, so under
-/// those styles the corners of what fades are square from its first frame.
-/// And a matrix or a deform (`Prepared::texture`: a tilt, a genie) is not
-/// either: what fades is flat at `frame.rect`, so a tilted window snaps flat
-/// on its first frame and one pulled into the dock by a genie pops back to
-/// full size before it fades. Both are keyed by the client's `Window`, which a
-/// window that has gone no longer has, and [`prepare`] releases the pane's
-/// captures (`keyed::Captures`) on the first frame it has none -- where the last
-/// capture of it was, which either could have been drawn from. The default
-/// style, `top`, has no client pass, and the tilt and the genie are what
-/// `init.lua`'s dev bindings and `tweaks.lua`'s effects ask for.
+/// tested, since no test has a GPU. A style's rounding (the `client.radius`
+/// of `rounded` and `flush`) is not applied: `clip::Clipped` wraps a live
+/// client's surface, which this is not, so under those styles the corners of
+/// what fades are square from its first frame. And a matrix or a deform
+/// (`Prepared::warp`: a tilt, a genie) is not either: what fades is flat at
+/// `frame.rect`, so a tilted window snaps flat on its first frame and one
+/// pulled into the dock by a genie pops back to full size before it fades. A
+/// warp is keyed by the client's `Window`, which a window that has gone no
+/// longer has, and [`prepare`] releases the pane's captures
+/// (`keyed::Captures`) on the first frame it has none -- where the last
+/// capture of it was, which it could have been drawn from. The default style,
+/// `top`, has no rounding, and the tilt and the genie are what `init.lua`'s
+/// dev bindings and `tweaks.lua`'s effects ask for.
 pub(crate) fn remains_elements(
     state: &Solium,
     pane: crate::pane::PaneId,
@@ -2558,6 +2634,72 @@ where
     }
 }
 
+/// A toplevel's popups, drawn from the client's corner at `origin`, and the
+/// rectangle they cover relative to that corner, which may reach past the
+/// window. The one walk of `popups_for_surface`: the flat path draws these in
+/// front of the whole sandwich, a warped pane in front of its warp (Ruling 15).
+/// `state::tests::a_warped_panes_capture_holds_no_popups`,
+/// `state::tests::a_popup_past_the_window_is_captured_whole`.
+pub(crate) fn popup_elements<R>(
+    renderer: &mut R,
+    window: &Window,
+    origin: Point<i32, Physical>,
+    scale: Scale<f64>,
+    alpha: f32,
+) -> (
+    Vec<WaylandSurfaceRenderElement<R>>,
+    Option<Rectangle<i32, Logical>>,
+)
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let mut elements = Vec::new();
+    let mut covered: Option<Rectangle<i32, Logical>> = None;
+    let Some(surface) = window
+        .toplevel()
+        .map(|toplevel| toplevel.wl_surface().clone())
+    else {
+        return (elements, covered);
+    };
+    for (popup, offset) in PopupManager::popups_for_surface(&surface) {
+        let at = origin + (offset - popup.geometry().loc).to_physical_precise_round(scale);
+        elements.extend(render_elements_from_surface_tree(
+            renderer,
+            popup.wl_surface(),
+            at,
+            scale,
+            alpha,
+            Kind::Unspecified,
+        ));
+        // The tree where it is drawn, not the popup's window geometry: a popup
+        // that sets none has a zero-sized one, and what a capture of it must
+        // hold is everything drawn above.
+        // `state::tests::a_warped_panes_capture_holds_no_popups`.
+        let rect = smithay::desktop::utils::bbox_from_surface_tree(
+            popup.wl_surface(),
+            offset - popup.geometry().loc,
+        );
+        covered = Some(covered.map_or(rect, |held| held.merge(rect)));
+    }
+    (elements, covered)
+}
+
+/// What a pane's capture draws of its client: its own surface tree, no
+/// popups. `state::tests::a_warped_panes_capture_holds_no_popups`.
+pub(crate) fn client_piece<R>(
+    renderer: &mut R,
+    window: &Window,
+    origin: Point<i32, Physical>,
+    scale: Scale<f64>,
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    toplevel_elements(renderer, window, origin, scale, 1.0)
+}
+
 /// Drawn size over real size, guarding the degenerate case.
 ///
 /// A zero-sized window is not drawable, but it is reachable: a client can
@@ -2594,19 +2736,162 @@ mod tests {
     /// **The guard (spec §8.4): a pane neither warped nor styled wants no
     /// capture**, so it builds no job, and a pass of such panes binds no
     /// carrier: `offscreen::draw` returns at once on an empty list. A warp
-    /// wants its pane's capture, and a rounded style its client pass (until
-    /// Task 23a draws rounding inline).
+    /// wants its pane's capture, and nothing else does: rounding is drawn
+    /// inline.
     #[test]
     fn a_pane_neither_warped_nor_styled_wants_no_capture() {
-        use solium_effects::fragment::{Corners, Effect};
-        assert_eq!(super::wanted_capture(super::Route::Flat, &[]), None);
+        assert_eq!(super::wanted_capture(super::Route::Flat), None);
         assert_eq!(
-            super::wanted_capture(super::Route::Warp, &[]),
+            super::wanted_capture(super::Route::Warp),
             Some(crate::keyed::Kind::Pane)
         );
+    }
+
+    /// The guard: a style with no radius draws its client as before, with no
+    /// clip and no program: the unstyled path is untouched (spec §8.4).
+    #[test]
+    fn a_style_with_no_radius_wraps_nothing() {
+        assert!(super::rounding(&[]).is_none());
+        let none =
+            solium_effects::fragment::Effect::rounded(solium_effects::fragment::Corners::all(0.0));
+        assert!(
+            super::rounding(&[none]).is_none(),
+            "a zero radius is no effect"
+        );
+    }
+
+    /// And a style with a radius is drawn inline, never captured.
+    #[test]
+    fn a_style_with_a_radius_is_drawn_inline() {
+        let rounded =
+            solium_effects::fragment::Effect::rounded(solium_effects::fragment::Corners::all(12.0));
+        assert_eq!(super::rounding(&[rounded]), Some(rounded));
+        assert_eq!(rounded.inputs(), solium_effects::fragment::Inputs::Inline);
+    }
+
+    /// The rounding is the first one *with a radius*, not the first in the
+    /// list: a style that declared a zero radius and then a real one would
+    /// otherwise round nothing, and a one-element list cannot tell "skipped
+    /// it" from "stopped at it".
+    #[test]
+    fn a_none_effect_does_not_hide_the_rounding_behind_it() {
+        use solium_effects::fragment::{Corners, Effect};
+        let rounded = Effect::rounded(Corners::all(8.0));
         assert_eq!(
-            super::wanted_capture(super::Route::Flat, &[Effect::rounded(Corners::all(12.0))]),
-            Some(crate::keyed::Kind::Client)
+            super::rounding(&[Effect::rounded(Corners::all(0.0)), rounded]),
+            Some(rounded)
+        );
+    }
+
+    /// And of two, the first wins.
+    #[test]
+    fn of_two_roundings_the_first_wins() {
+        use solium_effects::fragment::{Corners, Effect};
+        let first = Effect::rounded(Corners::all(4.0));
+        let second = Effect::rounded(Corners::all(12.0));
+        assert_eq!(super::rounding(&[first, second]), Some(first));
+    }
+
+    /// **A zoomed client is clipped to the whole of itself.** The clip is
+    /// measured in the surfaces' own pixels, before the rescale
+    /// (`clip::input_to_geo`), so the client's rectangle as drawn is taken
+    /// back through it: a 300x200 client drawn at half size, 150x100, is
+    /// clipped to 300x200. Clipped to the 150x100 it is drawn at, the
+    /// window in an overview or opening would lose all but its top-left
+    /// quarter. At 1:1 it is the drawn rectangle itself, a held picture's
+    /// slack included.
+    #[test]
+    fn a_zoomed_clients_clip_is_the_whole_client() {
+        use smithay::utils::{Physical, Rectangle, Scale};
+        use solium_effects::fragment::Corners;
+        let radii = Corners::all(12.0);
+        let half = super::drawn_clip(
+            Rectangle::<i32, Physical>::new((110, 220).into(), (150, 100).into()),
+            (110, 220).into(),
+            Scale::from(0.5),
+            radii,
+        );
+        assert_eq!(
+            half.rect,
+            Rectangle::new((110.0, 220.0).into(), (300.0, 200.0).into())
+        );
+        assert_eq!(
+            (half.origin, half.factor, half.radii),
+            ((110, 220).into(), Scale::from(0.5), radii)
+        );
+        let held = super::drawn_clip(
+            Rectangle::<i32, Physical>::new((100, 200).into(), (150, 100).into()),
+            (110, 220).into(),
+            Scale::from(1.0),
+            radii,
+        );
+        assert_eq!(
+            held.rect,
+            Rectangle::new((100.0, 200.0).into(), (150.0, 100.0).into())
+        );
+    }
+
+    /// **In a warp's capture a client is clipped to what the capture holds of
+    /// it**: its geometry where the capture draws its tree, cut to the room
+    /// the frame leaves it, so a tiled client that committed more than its
+    /// tile is rounded at the tile's corners, where the capture's edge cuts it.
+    #[test]
+    fn in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it() {
+        use smithay::utils::{Physical, Rectangle};
+        use solium_effects::fragment::Corners;
+        let radii = Corners::all(12.0);
+        let wide = super::capture_clip(
+            (10, 30).into(),
+            (300, 200).into(),
+            Rectangle::<i32, Physical>::from_size((400, 260).into()),
+            radii,
+        );
+        assert_eq!(
+            wide.rect,
+            Rectangle::new((10.0, 30.0).into(), (300.0, 200.0).into())
+        );
+        let small = super::capture_clip(
+            (10, 30).into(),
+            (300, 200).into(),
+            Rectangle::<i32, Physical>::from_size((250, 150).into()),
+            radii,
+        );
+        assert_eq!(
+            small.rect,
+            Rectangle::new((10.0, 30.0).into(), (250.0, 150.0).into())
+        );
+        assert_eq!(
+            (small.origin, small.factor),
+            ((10, 30).into(), smithay::utils::Scale::from(1.0)),
+            "drawn at real size"
+        );
+    }
+
+    /// **A warped pane's popups are in front of it**, as on the flat path.
+    #[test]
+    fn a_warped_panes_popups_are_in_front_of_it() {
+        assert_eq!(
+            super::WARP_ORDER,
+            [super::WarpPiece::Over, super::WarpPiece::Pane]
+        );
+    }
+
+    /// The popups' part of the pane: their rectangle, moved by the client's
+    /// corner in the pane, over the pane's size; past the pane, past 1.
+    #[test]
+    fn the_popups_part_is_their_rectangle_over_the_pane() {
+        let outer = smithay::utils::Size::from((400, 300));
+        let corner = smithay::utils::Point::from((0, 30));
+        let covered = smithay::utils::Rectangle::new((300, 240).into(), (200, 90).into());
+        let part = super::over_part(outer, corner, covered);
+        assert_eq!(
+            part,
+            crate::warp::UnitRect {
+                u0: 0.75,
+                v0: 0.9,
+                u1: 1.25,
+                v1: 1.2
+            }
         );
     }
 
@@ -2633,7 +2918,14 @@ mod tests {
             (800, 600).into(),
         ));
         let aimed = genie_to(crate::present::logical((2800.0, 1000.0), (120.0, 24.0)));
-        let mesh = super::warp_mesh_on(screen, &frame, Some(aimed), 1.25).expect("a mesh");
+        let mesh = super::warp_mesh_on(
+            screen,
+            &frame,
+            Some(aimed),
+            crate::warp::UnitRect::WHOLE,
+            1.25,
+        )
+        .expect("a mesh");
         let (left, top) = ((2800.0 - 1920.0) * 1.25, 1000.0 * 1.25);
         for corner in mesh.vertices() {
             let (x, y) = (f64::from(corner.x), f64::from(corner.y));
@@ -2656,7 +2948,14 @@ mod tests {
             (800, 600).into(),
         ));
         let aimed = genie_to(crate::present::logical((880.0, 1000.0), (120.0, 24.0)));
-        let on = super::warp_mesh_on(screen, &frame, Some(aimed), 1.25).expect("a mesh");
+        let on = super::warp_mesh_on(
+            screen,
+            &frame,
+            Some(aimed),
+            crate::warp::UnitRect::WHOLE,
+            1.25,
+        )
+        .expect("a mesh");
         let direct = crate::warp::mesh(frame.rect, frame.matrix, Some(aimed), frame.pivot, 1.25)
             .expect("a mesh");
         let pairs = on.vertices().iter().zip(direct.vertices());
@@ -3141,15 +3440,15 @@ mod tests {
 
             let source = include_str!("render.rs");
             let popups = source
-                .find("for (popup, offset) in PopupManager::popups_for_surface(&surface) {")
-                .expect("`elements` still walks the popups");
+                .find("let (popups, _) = popup_elements(")
+                .expect("`elements` still draws the popups");
             let sandwich = source[popups..]
                 .find("// **This is the sandwich.**")
                 .map(|at| popups + at)
                 .expect("and the sandwich still follows them");
             assert!(
                 source[popups..sandwich].contains("fitting.uncut()"),
-                "the popup loop in `elements` no longer draws through the uncut fit"
+                "the popups in `elements` no longer draw through the uncut fit"
             );
         }
     }

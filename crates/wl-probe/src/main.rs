@@ -55,6 +55,8 @@ use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_toplevel_decoration_v1::{self, Mode as DecorationMode, ZxdgToplevelDecorationV1},
 };
 use wayland_protocols::xdg::shell::client::{
+    xdg_popup::XdgPopup,
+    xdg_positioner::{self, XdgPositioner},
     xdg_surface::{self, XdgSurface},
     xdg_toplevel::XdgToplevel,
     xdg_wm_base::{self, XdgWmBase},
@@ -267,6 +269,15 @@ fn main() {
     if let Ok(hold) = std::env::var("WL_PROBE_WINDOWS") {
         let seconds: u64 = hold.trim().parse().unwrap_or(20);
         show_windows(&connection, &mut queue, &mut probe, seconds);
+        return;
+    }
+
+    // One window and a popup reaching past its bottom-right corner, in two
+    // colours nothing else draws, held up to be photographed: what a menu over
+    // a warped window looks like. `dev/present-check.sh`'s menu case.
+    if let Ok(hold) = std::env::var("WL_PROBE_POPUP") {
+        let seconds: u64 = hold.trim().parse().unwrap_or(20);
+        show_popup(&connection, &mut queue, &mut probe, seconds);
         return;
     }
 
@@ -569,6 +580,76 @@ fn show_windows(
             asked = true;
         }
         // Redraw whatever we were configured to, so a resize is honoured.
+        if queue.roundtrip(probe).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// `WL_PROBE_POPUP=<seconds>`: a 520x360 toplevel in the window colour and a
+/// 160x120 popup in the menu colour, anchored 20 px inside its bottom-right
+/// corner so it reaches past it.
+fn show_popup(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    seconds: u64,
+) {
+    let handle = queue.handle();
+    let (Some(compositor), Some(shm), Some(wm_base)) = (
+        probe.compositor.clone(),
+        probe.shm.clone(),
+        probe.wm_base.clone(),
+    ) else {
+        eprintln!("wl-probe: the compositor would not hand over the basics");
+        return;
+    };
+    let surface = compositor.create_surface(&handle, ());
+    let xdg = wm_base.get_xdg_surface(&surface, &handle, ());
+    let toplevel = xdg.get_toplevel(&handle, ());
+    toplevel.set_title("menu".to_owned());
+    toplevel.set_app_id("wl-probe-popup".to_owned());
+    surface.commit();
+    for _ in 0..60 {
+        if settle(connection, queue, probe).is_err() {
+            return;
+        }
+        if probe.configured {
+            break;
+        }
+    }
+    let window = tinted_buffer(&shm, &handle, 520, 360, [0xc0, 0xa0, 0x20, 0xff]);
+    surface.attach(Some(&window), 0, 0);
+    surface.damage(0, 0, i32::MAX, i32::MAX);
+    surface.commit();
+    let _ = settle(connection, queue, probe);
+
+    let menu = compositor.create_surface(&handle, ());
+    let menu_xdg = wm_base.get_xdg_surface(&menu, &handle, ());
+    let positioner = wm_base.create_positioner(&handle, ());
+    positioner.set_size(160, 120);
+    positioner.set_anchor_rect(500, 340, 1, 1);
+    positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+    positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+    let _popup = menu_xdg.get_popup(Some(&xdg), &positioner, &handle, ());
+    probe.configured = false;
+    menu.commit();
+    for _ in 0..60 {
+        if settle(connection, queue, probe).is_err() {
+            return;
+        }
+        if probe.configured {
+            break;
+        }
+    }
+    let colour = tinted_buffer(&shm, &handle, 160, 120, [0x40, 0x20, 0xd0, 0xff]);
+    menu.attach(Some(&colour), 0, 0);
+    menu.damage(0, 0, i32::MAX, i32::MAX);
+    menu.commit();
+    println!("a window and its menu are up");
+    let until = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
         if queue.roundtrip(probe).is_err() {
             break;
         }
@@ -1800,6 +1881,8 @@ delegate_noop!(Probe: ignore wl_shm::WlShm);
 delegate_noop!(Probe: ignore WlShmPool);
 delegate_noop!(Probe: ignore WlBuffer);
 delegate_noop!(Probe: ignore XdgToplevel);
+delegate_noop!(Probe: ignore XdgPopup);
+delegate_noop!(Probe: ignore XdgPositioner);
 delegate_noop!(Probe: ignore ZwlrLayerShellV1);
 delegate_noop!(Probe: ignore ZwlrScreencopyManagerV1);
 delegate_noop!(Probe: ignore ExtSessionLockManagerV1);

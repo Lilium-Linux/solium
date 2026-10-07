@@ -5,9 +5,9 @@
   A test harness for Solium's vertex deformations. Deliberately plain.
 
   The window is a grid of flat quads because that is exactly what the compositor
-  draws: `warp::mesh` cuts the same cells, in the same order, and hands them to
-  GLES. Drawing anything smoother here would be this page flattering an effect
-  the screen will not.
+  draws: `warp::mesh_part` cuts the same cells, in the same order, and hands
+  them to GLES. Drawing anything smoother here would be this page flattering an
+  effect the screen will not.
 
   The engine is compiled to WebAssembly and *called* from this page, so the
   shape tuned here is the code that bends real windows. A copy of `place` in

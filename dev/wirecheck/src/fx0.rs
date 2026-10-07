@@ -32,6 +32,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     warp_program_draws(renderer)?;
     pooled_target_through_the_carrier(renderer)?;
     a_warp_redrawn_under_partial_damage_blends_once(renderer)?;
+    clipped_programs_cut_the_clients_corners(renderer)?;
     Ok(())
 }
 
@@ -656,5 +657,199 @@ fn a_warp_redrawn_under_partial_damage_blends_once(renderer: &mut GlesRenderer) 
         ));
     }
     println!("  outside the damage, blended once");
+    Ok(())
+}
+
+/// A 64² target cleared transparent, one draw into it through `draw`, and
+/// the pixels read back once the draw is done.
+fn drawn_alone(
+    renderer: &mut GlesRenderer,
+    side: i32,
+    draw: impl FnOnce(
+        &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    ) -> Result<(), smithay::backend::renderer::gles::GlesError>,
+) -> Result<Vec<u8>> {
+    let mut target: GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, (side, side).into())
+        .map_err(|err| anyhow!("{err}"))?;
+    {
+        let mut framebuffer = renderer.bind(&mut target).map_err(|err| anyhow!("{err}"))?;
+        let mut frame = renderer
+            .render(&mut framebuffer, (side, side).into(), Transform::Normal)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .clear(
+                Color32F::TRANSPARENT,
+                &[Rectangle::from_size((side, side).into())],
+            )
+            .map_err(|err| anyhow!("{err}"))?;
+        draw(&mut frame).map_err(|err| anyhow!("drawing through the program: {err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    read(renderer, &mut target, side)
+}
+
+/// **Case 11h: the clipped-surface programs cut the client's corners, and
+/// only the client's.** Both compile, in every variant smithay builds (three
+/// texture defines, each with and without `DEBUG_FLAGS`; the pixel program
+/// with and without it). Then, each into its own 64² target cleared
+/// transparent, as one 64² client at radius 16: a root surface over the whole
+/// client, in the ARGB and the XRGB variant (whose X byte is zero, so
+/// `NO_ALPHA` must force it opaque), has its four corners cut and its centre
+/// white; a 32² subsurface at the client's bottom-right quarter is cut at
+/// (63, 63), the client's corner, and not at (32, 32), its own; a single-pixel
+/// buffer drawn as a solid over the client is cut at (0, 0) and white at the
+/// centre.
+fn clipped_programs_cut_the_clients_corners(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::gles::{Uniform, UniformName, UniformType, UniformValue};
+    use solium_effects::fragment::{
+        CLIPPED_SOLID, CLIPPED_SURFACE, COLOUR_UNIFORM, GEO_PX_UNIFORM, GEO_SIZE_UNIFORM,
+        INPUT_TO_GEO_UNIFORM, RADIUS_UNIFORM,
+    };
+    println!("\n=== FX0: the clipped-surface programs cut the client's corners ===");
+    let shared = [
+        UniformName::new(INPUT_TO_GEO_UNIFORM, UniformType::Matrix3x3),
+        UniformName::new(GEO_SIZE_UNIFORM, UniformType::_2f),
+        UniformName::new(RADIUS_UNIFORM, UniformType::_4f),
+        UniformName::new(GEO_PX_UNIFORM, UniformType::_1f),
+    ];
+    let texture_program = renderer
+        .compile_custom_texture_shader(CLIPPED_SURFACE, &shared)
+        .map_err(|err| anyhow!("CLIPPED_SURFACE did not compile in every variant: {err}"))?;
+    let mut solid_uniforms = shared.to_vec();
+    solid_uniforms.push(UniformName::new(COLOUR_UNIFORM, UniformType::_4f));
+    let solid_program = renderer
+        .compile_custom_pixel_shader(CLIPPED_SOLID, &solid_uniforms)
+        .map_err(|err| anyhow!("CLIPPED_SOLID did not compile in both variants: {err}"))?;
+
+    let side = 64;
+    // Column-major: v_coords 0..1 onto the client's 0..64.
+    let root: [f32; 9] = [64.0, 0.0, 0.0, 0.0, 64.0, 0.0, 0.0, 0.0, 1.0];
+    // v_coords 0..1 onto the client's 32..64, both axes.
+    let subsurface: [f32; 9] = [32.0, 0.0, 0.0, 0.0, 32.0, 0.0, 32.0, 32.0, 1.0];
+    let uniforms = |matrix: [f32; 9]| -> Vec<Uniform<'static>> {
+        vec![
+            Uniform::new(
+                INPUT_TO_GEO_UNIFORM,
+                UniformValue::Matrix3x3 {
+                    matrices: vec![matrix],
+                    transpose: false,
+                },
+            ),
+            Uniform::new(GEO_SIZE_UNIFORM, (64.0_f32, 64.0_f32)),
+            Uniform::new(RADIUS_UNIFORM, (16.0_f32, 16.0_f32, 16.0_f32, 16.0_f32)),
+            Uniform::new(GEO_PX_UNIFORM, 1.0_f32),
+        ]
+    };
+    let alpha_at = |pixels: &[u8], x: i32, y: i32| pixels[((y * side + x) * 4 + 3) as usize];
+    let white_at = |pixels: &[u8], x: i32, y: i32| {
+        let at = ((y * side + x) * 4) as usize;
+        pixels.get(at..at + 4) == Some(&[255, 255, 255, 255][..])
+    };
+
+    for (what, fourcc, fourth) in [
+        ("root surface", Fourcc::Argb8888, 255_u8),
+        ("root surface, XRGB", Fourcc::Xrgb8888, 0_u8),
+    ] {
+        let picture = [255_u8, 255, 255, fourth].repeat((side * side) as usize);
+        let surface = renderer
+            .import_memory(&picture, fourcc, (side, side).into(), false)
+            .map_err(|err| anyhow!("{err}"))?;
+        let whole = Rectangle::from_size((side, side).into());
+        let wanted = uniforms(root);
+        let pixels = drawn_alone(renderer, side, |frame| {
+            frame.render_texture_from_to(
+                &surface,
+                Rectangle::from_size((f64::from(side), f64::from(side)).into()),
+                whole,
+                &[whole],
+                &[],
+                Transform::Normal,
+                1.0,
+                Some(&texture_program),
+                &wanted,
+            )
+        })?;
+        for (x, y) in [(0, 0), (side - 1, 0), (0, side - 1), (side - 1, side - 1)] {
+            let alpha = alpha_at(&pixels, x, y);
+            if alpha != 0 {
+                return Err(anyhow!(
+                    "the {what}: the client's corner pixel ({x}, {y}) is at alpha {alpha}, not cut"
+                ));
+            }
+        }
+        if !white_at(&pixels, side / 2, side / 2) {
+            return Err(anyhow!(
+                "the {what}: the centre pixel (32, 32) is not opaque white"
+            ));
+        }
+    }
+
+    let quarter = side / 2;
+    let picture = [255_u8; 4].repeat((quarter * quarter) as usize);
+    let surface = renderer
+        .import_memory(&picture, Fourcc::Argb8888, (quarter, quarter).into(), false)
+        .map_err(|err| anyhow!("{err}"))?;
+    let wanted = uniforms(subsurface);
+    let pixels = drawn_alone(renderer, side, |frame| {
+        frame.render_texture_from_to(
+            &surface,
+            Rectangle::from_size((f64::from(quarter), f64::from(quarter)).into()),
+            Rectangle::new((quarter, quarter).into(), (quarter, quarter).into()),
+            &[Rectangle::from_size((quarter, quarter).into())],
+            &[],
+            Transform::Normal,
+            1.0,
+            Some(&texture_program),
+            &wanted,
+        )
+    })?;
+    let alpha = alpha_at(&pixels, side - 1, side - 1);
+    if alpha != 0 {
+        return Err(anyhow!(
+            "the subsurface: pixel (63, 63), the client's corner, is at alpha {alpha}, not cut"
+        ));
+    }
+    if !white_at(&pixels, quarter, quarter) {
+        return Err(anyhow!(
+            "the subsurface: pixel (32, 32), its own corner and not the client's, was cut"
+        ));
+    }
+
+    let mut wanted = uniforms(root);
+    wanted.push(Uniform::new(
+        COLOUR_UNIFORM,
+        (1.0_f32, 1.0_f32, 1.0_f32, 1.0_f32),
+    ));
+    let pixels = drawn_alone(renderer, side, |frame| {
+        frame.render_pixel_shader_to(
+            &solid_program,
+            Rectangle::from_size((f64::from(side), f64::from(side)).into()),
+            Rectangle::from_size((side, side).into()),
+            (side, side).into(),
+            None,
+            1.0,
+            &wanted,
+        )
+    })?;
+    let alpha = alpha_at(&pixels, 0, 0);
+    if alpha != 0 {
+        return Err(anyhow!(
+            "the single-pixel buffer: pixel (0, 0) is at alpha {alpha}, not cut"
+        ));
+    }
+    if !white_at(&pixels, side / 2, side / 2) {
+        return Err(anyhow!(
+            "the single-pixel buffer: the centre pixel (32, 32) is not opaque white"
+        ));
+    }
+    println!(
+        "  both compiled; a root surface (ARGB and XRGB), a subsurface and a single-pixel \
+         buffer are cut at the client's corners, and the subsurface not at its own"
+    );
     Ok(())
 }

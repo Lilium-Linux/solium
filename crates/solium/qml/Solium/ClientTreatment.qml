@@ -1,10 +1,10 @@
 // What is done to the client's own surface, as opposed to around it.
 //
-// `radius` is read. `style::load` turns a non-zero one into an effect that
-// declares `inputs: self`, because it masks the node's own texture. Zero is
-// *no effect* rather than an effect that rounds by nothing: the difference is
-// an offscreen pass per window per frame, and every shipped style leaves this
-// alone.
+// `radius` is read. `style::load` turns a non-zero one into an effect drawn
+// inline: each of the client's surfaces goes through a program, where it is,
+// that cuts its corners. Zero is *no effect* rather than an effect that rounds
+// by nothing: the difference is a program on every surface of every window,
+// and every shipped style but `rounded` and `flush` leaves this alone.
 //
 // `shadow` is still reserved. It is the same shape — it derives from the
 // node's own texture rather than masking it — and nothing draws it yet. See

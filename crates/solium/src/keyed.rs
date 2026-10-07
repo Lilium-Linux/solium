@@ -8,6 +8,9 @@
 //! A pane's warp carries its pane capture's id and a commit of its own, which
 //! moves when that capture is redrawn and when the warp's mesh changes shape:
 //! `tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
+//! Its popups' warp, drawn in front of it, does the same with the popups'
+//! capture, apart from the pane's:
+//! `tests::the_popups_warp_commits_apart_from_the_panes`.
 
 use smithay::{
     backend::renderer::{
@@ -20,15 +23,17 @@ use smithay::{
 
 use crate::pool::{Alloc, Pool, Target};
 
-/// What a capture is of. Two kinds never share a texture: a warped pane and a
-/// rounded one want different sizes.
-/// `tests::a_pane_switching_kinds_lets_the_other_capture_go`.
+/// What a capture is of. Two kinds never share a texture: a pane and its
+/// popups want different sizes.
+/// `tests::a_capture_of_another_kind_at_the_same_size_is_stale`,
+/// `tests::a_warped_pane_keeps_its_popups_capture`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     /// The whole pane, frame included: a warp's picture.
     Pane,
-    /// The client alone: a style's client pass.
-    Client,
+    /// A warped pane's popups, drawn in front of its warp:
+    /// `render::tests::a_warped_panes_popups_are_in_front_of_it`.
+    Over,
 }
 
 /// One element a capture was drawn from: what the damage tracker itself
@@ -170,46 +175,50 @@ impl<T: Clone> Capture<Target<T>> {
     }
 }
 
-/// Every capture one pane keeps, by kind, and the commit its warp carries.
-/// Owned by the pane, as `offscreen::Scratch` was.
-/// `tests::a_pane_switching_kinds_lets_the_other_capture_go`,
+/// Every capture one pane keeps, by kind, and the commit each of its warps
+/// carries. Owned by the pane, as `offscreen::Scratch` was.
+/// `tests::a_warped_pane_keeps_its_popups_capture`,
 /// `tests::a_warp_at_rest_keeps_its_commit`.
 #[derive(Debug)]
 pub(crate) struct Captures<T = GlesTexture> {
     pub(crate) pane: Capture<Target<T>>,
-    pub(crate) client: Capture<Target<T>>,
-    /// The shape the warp's mesh was last drawn from.
-    shape: Option<crate::render::Shape>,
-    /// The warp's commit: its id is the pane capture's.
-    warp_commit: CommitCounter,
+    /// A warped pane's popups, at the rectangle they cover, kept with the
+    /// pane's while they are open: `tests::a_warped_pane_keeps_its_popups_capture`,
+    /// `tests::a_warped_pane_whose_popups_close_gives_their_capture_back`.
+    pub(crate) over: Capture<Target<T>>,
+    /// Each warp's shape and commit: the pane's and its popups'. A warp's id
+    /// is its capture's. `tests::the_popups_warp_commits_apart_from_the_panes`.
+    warps: [(Option<crate::render::Shape>, CommitCounter); 2],
 }
 
 impl<T> Default for Captures<T> {
     fn default() -> Self {
         Self {
             pane: Capture::default(),
-            client: Capture::default(),
-            shape: None,
-            warp_commit: CommitCounter::default(),
+            over: Capture::default(),
+            warps: [(None, CommitCounter::default()); 2],
         }
     }
 }
 
 impl<T> Captures<T> {
-    /// The warp's commit this pass: moved when its capture was redrawn or its
-    /// shape changed, and only then.
+    /// The commit `kind`'s warp carries this pass, the pane's or its popups':
+    /// moved when its capture was redrawn or its shape changed, and only then.
     /// `tests::a_warp_at_rest_keeps_its_commit`,
-    /// `tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
+    /// `tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`,
+    /// `tests::the_popups_warp_commits_apart_from_the_panes`.
     pub(crate) fn warp_commit_for(
         &mut self,
+        kind: Kind,
         shape: crate::render::Shape,
         redrawn: bool,
     ) -> CommitCounter {
-        if redrawn || self.shape != Some(shape) {
-            self.warp_commit.increment();
-            self.shape = Some(shape);
+        let (held, commit) = &mut self.warps[usize::from(kind == Kind::Over)];
+        if redrawn || *held != Some(shape) {
+            commit.increment();
+            *held = Some(shape);
         }
-        self.warp_commit
+        *commit
     }
 }
 
@@ -217,17 +226,19 @@ impl<T: Clone> Captures<T> {
     pub(crate) fn get_mut(&mut self, kind: Kind) -> &mut Capture<Target<T>> {
         match kind {
             Kind::Pane => &mut self.pane,
-            Kind::Client => &mut self.client,
+            Kind::Over => &mut self.over,
         }
     }
 
-    /// Give back every capture but `kind`'s (all of them for `None`): a pane
-    /// that captures nothing this pass holds nothing.
+    /// Give back every capture but those of `kinds`, the ones it captures this
+    /// pass: a pane that captures nothing holds nothing, and a warped pane
+    /// keeps its popups' capture only while it has popups open.
     /// `tests::a_pane_that_stops_warping_gives_the_texture_back`,
-    /// `tests::a_pane_switching_kinds_lets_the_other_capture_go`.
-    pub(crate) fn keep_only(&mut self, kind: Option<Kind>, pool: &mut Pool<T>) {
-        for each in [Kind::Pane, Kind::Client] {
-            if Some(each) != kind {
+    /// `tests::a_warped_pane_keeps_its_popups_capture`,
+    /// `tests::a_warped_pane_whose_popups_close_gives_their_capture_back`.
+    pub(crate) fn keep_only(&mut self, kinds: &[Kind], pool: &mut Pool<T>) {
+        for each in [Kind::Pane, Kind::Over] {
+            if !kinds.contains(&each) {
                 self.get_mut(each).release(pool);
             }
         }
@@ -248,14 +259,14 @@ mod tests {
         Inputs::of::<SolidColorRenderElement>(kind, size(1150, 850), 1.0, &[])
     }
 
-    /// The kind is in the key: a pane switching between a warp and a client
-    /// capture at the same size does not reuse the other's picture.
+    /// The kind is in the key: a pane's capture and its popups' at the same
+    /// size do not reuse each other's picture.
     #[test]
     fn a_capture_of_another_kind_at_the_same_size_is_stale() {
         let mut capture = Capture::<u32>::default();
         capture.drawn(1, nothing(Kind::Pane));
         assert!(!capture.stale(&nothing(Kind::Pane)));
-        assert!(capture.stale(&nothing(Kind::Client)));
+        assert!(capture.stale(&nothing(Kind::Over)));
     }
 
     /// **A redrawn capture moves its commit and keeps its id**, which is what
@@ -291,8 +302,9 @@ mod tests {
     #[test]
     fn a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit() {
         let mut captures = Captures::<u32>::default();
-        let first = captures.warp_commit_for(shape(0.0), false);
-        let turned = captures.warp_commit_for(shape(std::f32::consts::FRAC_PI_2), false);
+        let first = captures.warp_commit_for(Kind::Pane, shape(0.0), false);
+        let turned =
+            captures.warp_commit_for(Kind::Pane, shape(std::f32::consts::FRAC_PI_2), false);
         assert_ne!(first, turned);
     }
 
@@ -300,9 +312,28 @@ mod tests {
     #[test]
     fn a_warp_at_rest_keeps_its_commit() {
         let mut captures = Captures::<u32>::default();
-        let first = captures.warp_commit_for(shape(0.3), false);
-        assert_eq!(captures.warp_commit_for(shape(0.3), false), first);
-        assert_ne!(captures.warp_commit_for(shape(0.3), true), first);
+        let first = captures.warp_commit_for(Kind::Pane, shape(0.3), false);
+        assert_eq!(
+            captures.warp_commit_for(Kind::Pane, shape(0.3), false),
+            first
+        );
+        assert_ne!(
+            captures.warp_commit_for(Kind::Pane, shape(0.3), true),
+            first
+        );
+    }
+
+    /// The popups' warp has a commit of its own: a menu that commits does not
+    /// make the window under it redraw, nor the other way round.
+    #[test]
+    fn the_popups_warp_commits_apart_from_the_panes() {
+        let mut captures = Captures::<u32>::default();
+        let pane = captures.warp_commit_for(Kind::Pane, shape(0.3), false);
+        let _over = captures.warp_commit_for(Kind::Over, shape(0.3), true);
+        assert_eq!(
+            captures.warp_commit_for(Kind::Pane, shape(0.3), false),
+            pane
+        );
     }
 
     /// A GBM buffer freed when its last handle goes, as `offscreen`'s tests
@@ -367,9 +398,10 @@ mod tests {
     /// A warped window holds still long enough for its target to be reused
     /// because the size a capture asks for is the window's own
     /// (`offscreen::pixels`), never anything the warp does: a transform is
-    /// applied to the texture afterwards, by `warp::mesh`, and `present.rs`'s
-    /// first rule is that it never changes the geometry the texture is sized
-    /// from. So sixty frames ask for one size, and get one target.
+    /// applied to the texture afterwards, by `warp::mesh_part`, and
+    /// `present.rs`'s first rule is that it never changes the geometry the
+    /// texture is sized from. So sixty frames ask for one size, and get one
+    /// target.
     ///
     /// Arithmetic, and it needs neither Qt nor a GPU — which is the only
     /// reason there is any coverage of this at all. `cargo test` runs in a
@@ -436,37 +468,54 @@ mod tests {
         captures
             .get_mut(Kind::Pane)
             .drawn(target, nothing(Kind::Pane));
-        captures.keep_only(None, &mut pool);
+        captures.keep_only(&[], &mut pool);
         assert_eq!(alloc.freed.get(), 1);
         assert!(captures.get_mut(Kind::Pane).target().is_none());
     }
 
-    /// A pane that goes from a warp to its client pass lets the warp's capture
-    /// go, and keeps the other: two kinds at two sizes never share a texture.
+    /// A warped pane with popups open keeps their capture with its own, and
+    /// gives it back with the rest when it stops warping.
     #[test]
-    fn a_pane_switching_kinds_lets_the_other_capture_go() {
+    fn a_warped_pane_keeps_its_popups_capture() {
         let (mut captures, mut pool, mut alloc) =
             (Captures::<Handle>::default(), Pool::new(0), counting());
-        let warp = captures
-            .get_mut(Kind::Pane)
-            .target_for(&mut pool, &mut alloc, size(1150, 900))
-            .expect("a target");
-        captures
-            .get_mut(Kind::Pane)
-            .drawn(warp, nothing(Kind::Pane));
-        let client = captures
-            .get_mut(Kind::Client)
-            .target_for(&mut pool, &mut alloc, size(1136, 820))
-            .expect("a target");
-        captures
-            .get_mut(Kind::Client)
-            .drawn(client, nothing(Kind::Client));
-        captures.keep_only(Some(Kind::Client), &mut pool);
-        assert!(captures.get_mut(Kind::Pane).target().is_none());
+        for kind in [Kind::Pane, Kind::Over] {
+            let target = captures
+                .get_mut(kind)
+                .target_for(&mut pool, &mut alloc, size(400, 300))
+                .expect("a target");
+            captures.get_mut(kind).drawn(target, nothing(kind));
+        }
+        captures.keep_only(&[Kind::Pane, Kind::Over], &mut pool);
         assert!(
-            captures.get_mut(Kind::Client).target().is_some(),
-            "the capture asked for is kept"
+            captures.get_mut(Kind::Over).target().is_some(),
+            "a warped pane let its popups' capture go"
         );
+        captures.keep_only(&[], &mut pool);
+        assert!(captures.get_mut(Kind::Over).target().is_none());
+        assert_eq!(alloc.freed.get(), 2);
+    }
+
+    /// **A warped pane whose popups close gives their capture back**: it holds
+    /// only what it captured this pass, so a menu closed during a flight does
+    /// not keep its texture for as long as the window goes on warping.
+    #[test]
+    fn a_warped_pane_whose_popups_close_gives_their_capture_back() {
+        let (mut captures, mut pool, mut alloc) =
+            (Captures::<Handle>::default(), Pool::new(0), counting());
+        for kind in [Kind::Pane, Kind::Over] {
+            let target = captures
+                .get_mut(kind)
+                .target_for(&mut pool, &mut alloc, size(400, 300))
+                .expect("a target");
+            captures.get_mut(kind).drawn(target, nothing(kind));
+        }
+        captures.keep_only(&[Kind::Pane], &mut pool);
+        assert!(
+            captures.get_mut(Kind::Over).target().is_none(),
+            "the menu closed and the pane kept its capture"
+        );
+        assert!(captures.get_mut(Kind::Pane).target().is_some());
         assert_eq!(alloc.freed.get(), 1);
     }
 }

@@ -506,7 +506,7 @@ pub(crate) struct Pane {
     /// are not is *windows*.
     managed: bool,
     /// The pooled targets this pane's captures are drawn into, kept across the
-    /// frames of an animation: a warp's, or its style's client pass. See
+    /// frames of an animation: a warp's, and its popups'. See
     /// [`crate::keyed::Captures`].
     ///
     /// **Owned by the pane, as a field**, for the reason `frame` and

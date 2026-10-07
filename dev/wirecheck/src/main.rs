@@ -415,9 +415,9 @@ fn solid(w: i32, h: i32, blue_green_red: [u8; 3], fourth: u8) -> Vec<u8> {
 ///
 /// [`draw_and_read`]'s sibling, and it exists because they cannot be one
 /// function: a `TextureRenderElement` has no constructor that takes a program
-/// -- which is the whole reason `solium::pass::Rounded` is written by hand --
+/// -- which is the whole reason `solium::clip::Clipped` is written by hand --
 /// so the program has to reach the draw through `render_texture_from_to`. The
-/// argument list is `Rounded::draw`'s, in the same order, deliberately: what
+/// argument list is `Clipped::draw`'s, in the same order, deliberately: what
 /// this is checking is the call the compositor makes.
 fn draw_through_program(
     renderer: &mut GlesRenderer,
@@ -437,7 +437,7 @@ fn draw_through_program(
         let mut frame = renderer
             .render(&mut framebuffer, size, Transform::Normal)
             .map_err(|err| anyhow!("starting the program draw: {err}"))?;
-        // Transparent, as `offscreen::client_job` clears to, so a cut
+        // Transparent, as `pool::paint` clears a capture to, so a cut
         // corner reads back as nothing rather than as black.
         frame
             .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size)])
@@ -458,16 +458,14 @@ fn draw_through_program(
                 &[
                     // `(tl, tr, bl, br)` -- `Corners`' field order, which is
                     // the order `fragment.rs` indexes `corner_radius` by, and
-                    // the order `pass::packed_radii` packs for
-                    // `pass::Rounded::draw`. Four values the CALLER chooses
+                    // the order `clip::Clipped`'s uniforms pack. Four values
+                    // the CALLER chooses
                     // rather than one repeated, because a transposition
                     // type-checks, compiles, and draws a perfectly ordinary
                     // window with its corners swapped. `rounded_corners_cut`
                     // sends four distinct ones for exactly that reason, and it
-                    // is the only draw in the tree that can see the packing: a
-                    // unit test in `pass.rs` holds the compositor's tuple to
-                    // the shader's `picked` lines, but as text, and nothing
-                    // but this checks the tuple in this file.
+                    // is the only draw in the tree that can see the packing of
+                    // the tuple in this file.
                     //
                     // A 4-tuple and not a bare `f32`, which `UniformValue`
                     // would turn into `_1f` against a `vec4` location and
@@ -580,8 +578,7 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
         // colour survives the program unswapped; and `tex_size` arrived -- if
         // that uniform never reaches the shader it stays 0, the clamp makes `r`
         // 0, `away` 0, and `smoothstep(-0.5, 0.5, 0.0)` paints *every* fragment
-        // at exactly 50%, which is the failure `pass::Rounded::draw` tells the
-        // reader to recognise rather than hunt as a blend bug.
+        // at exactly 50%: recognise it rather than hunt it as a blend bug.
         let middle = at(SIDE / 2, SIDE / 2);
         let wanted = [COLOUR[0], COLOUR[1], COLOUR[2], 255];
         if middle != wanted {
@@ -598,8 +595,8 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
                  an unset radius draws the texture fully OPAQUE and uncut, so \
                  it is assertion 2 below that catches it, not this one. Note \
                  the uniforms are THIS file's, not the compositor's: nothing \
-                 here runs `pass::Rounded::draw`, so a wrong uniform there is \
-                 invisible to this case and always has been; nothing at all \
+                 here runs `clip::Clipped::draw`, so a wrong uniform there is \
+                 invisible to this case (case 11h draws through it); nothing at all \
                  means the picture did not reach the program; the right colour \
                  in the wrong order means a channel swap on the way in or out"
             ));
@@ -684,12 +681,8 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
     // permutation of `corner_radius` draws the identical picture. So a
     // transposition between `Corners`' field order and the shader's component
     // order type-checks, compiles, links, and swaps a window's corners on
-    // screen. The compositor's side of it is a unit test too --
-    // `the_radius_uniform_is_packed_in_the_order_the_shader_picks`, in
-    // `pass.rs`, holds `packed_radii` to the component letters in the
-    // shader's `picked` lines -- but that reads the shader as text. This
-    // file's own tuple, and what a GPU does with either, nothing but a real
-    // draw with four different values can tell.
+    // screen. This file's own tuple, and what a GPU does with it, nothing but
+    // a real draw with four different values can tell.
     //
     // `style.rs` had this exact blindness and closed it the same way: four
     // distinct values instead of one repeated.
@@ -739,7 +732,7 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
                      read them as a permutation first, because a `corner_radius` \
                      packed in any order but (tl, tr, bl, br) lands here and \
                      nothing else in the workspace can see it. `fragment.rs`'s \
-                     `picked` lines, `pass::Rounded::draw`'s tuple and this \
+                     `picked` lines, `clip::Clipped`'s tuple and this \
                      file's `Uniform::new` all have to agree"
                 ));
             }
@@ -776,8 +769,8 @@ fn rounded_corners_cut(renderer: &mut GlesRenderer, program: &GlesTexProgram) ->
     // ordinary value that the CPU side has no opinion about. The partial count
     // is what sees it.
     //
-    // It is also the tighter half of the same claim `pass::opaque_inside`
-    // makes on the CPU -- an uncut side gets an inset of zero, which is a lie
+    // It is also the tighter half of the same claim `clip::cut_corners`
+    // makes on the CPU -- a square corner gives up no pixel, which is a lie
     // unless the outermost row really is opaque -- and the measured failure at
     // r=0.3, alpha 228, is inside the partial band by twenty counts. So this
     // catches the near miss and not only the flagrant one.

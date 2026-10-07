@@ -81,10 +81,11 @@ Item {
     // What is done to the client's own surface, rather than around it.
     //
     // `radius` is read: `style::load` turns a non-zero one into an effect
-    // declaring `inputs: self`. Zero is *no effect* and not an effect that
-    // rounds by nothing — the difference is an offscreen pass per window per
-    // frame, so a style that leaves this alone costs exactly what it did
-    // before the property existed. `shadow` is the same shape and is still
+    // drawn inline, each of the client's surfaces through a program where it
+    // is. Zero is *no effect* and not an effect that rounds by nothing — the
+    // difference is a program on every surface of every window, so a style
+    // that leaves this alone costs exactly what it did before the property
+    // existed. `shadow` is the same shape and is still
     // reserved: it derives from the node's silhouette rather than masking it,
     // and nothing draws it yet.
     //

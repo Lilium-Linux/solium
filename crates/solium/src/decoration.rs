@@ -1109,7 +1109,7 @@ impl Backing {
 /// the point.
 ///
 /// The *first* effect that is really an effect, which is the same choice
-/// `pass::needs_pass` makes and is made here again rather than shared with it:
+/// `render::rounding` makes and is made here again rather than shared with it:
 /// that one answers in `Effect`s for a shader, this one in numbers for QML,
 /// and a `Style` holding two rounding effects at once is a thing to design
 /// when something can declare one.
@@ -1134,8 +1134,8 @@ fn client_radii(style: &Style) -> Corners {
 /// one, and `Corners::is_none` refuses only the case where *all* of them are.
 /// On the compositor's side it means something — the shader's `p` is pushed
 /// further negative on both axes, so a negative radius *inflates* the shape
-/// rather than cutting it, and `pass::side_inset` keeps the sign and clamps
-/// only the inset it derives from it.
+/// rather than cutting it, and `clip::cut_corners` keeps the sign and clamps
+/// only the square it cuts from it.
 ///
 /// QML has no such reading. `Rectangle.radius` is undefined for a negative,
 /// and a layer doing arithmetic on one — `clientRadius + 2`, the outward hug —
@@ -3755,10 +3755,11 @@ mod tests {
     /// no other way to reach them.**
     ///
     /// Nothing keeps a `Style` once `from_style` has read it, so the pane's
-    /// decoration is where `render::prepare` asks whether this window needs a
-    /// pass. Asserted through `pass::needs_pass` as well as against the list,
-    /// because the list being right and the question being asked of it are two
-    /// separate things and only the second one draws anything.
+    /// decoration is where `render::elements` asks whether this window's
+    /// client is clipped. Asserted through `render::rounding` as well as
+    /// against the list, because the list being right and the question being
+    /// asked of it are two separate things and only the second one draws
+    /// anything.
     #[test]
     fn a_decoration_carries_the_styles_client_effects() {
         on_the_qt_thread(|| {
@@ -3774,11 +3775,11 @@ mod tests {
                 "the declared radius has to survive the trip onto the pane"
             );
             assert_eq!(
-                crate::pass::needs_pass(decoration.effects()),
+                crate::render::rounding(decoration.effects()),
                 Some(solium_effects::fragment::Effect::rounded(
                     solium_effects::fragment::Corners::all(12.0)
                 )),
-                "and be recognised as wanting a pass, which is what runs one"
+                "and be recognised as a rounding, which is what clips the client"
             );
 
             let _ = std::fs::remove_dir_all(&dir);
@@ -3791,10 +3792,10 @@ mod tests {
     /// drawn by before any of this existed -- no capture, no bind, no program,
     /// no extra element.
     ///
-    /// `needs_pass` answering `None` is the whole of what keeps it there, so
-    /// that is what is asserted rather than the empty list alone: a list that
-    /// is empty and a question that is never asked of it look identical from
-    /// here and are not.
+    /// `render::rounding` answering `None` is the whole of what keeps it
+    /// there, so that is what is asserted rather than the empty list alone: a
+    /// list that is empty and a question that is never asked of it look
+    /// identical from here and are not.
     #[test]
     fn a_decoration_with_no_declared_radius_runs_no_pass() {
         on_the_qt_thread(|| {
@@ -3804,9 +3805,9 @@ mod tests {
 
             assert!(decoration.effects().is_empty());
             assert_eq!(
-                crate::pass::needs_pass(decoration.effects()),
+                crate::render::rounding(decoration.effects()),
                 None,
-                "an unstyled window must not buy an offscreen pass per frame"
+                "an unstyled window must not be drawn through a program per surface"
             );
 
             let _ = std::fs::remove_dir_all(&dir);
@@ -4838,6 +4839,49 @@ mod tests {
     /// to run with `pane = "none"`: a Qt scene in a process holding a raw
     /// libwayland connection aborts the test binary. So that test never has a
     /// `Styled` frame to lose, and this one is the half with one.
+    /// **A fullscreen window is drawn square**, so it keeps direct scanout,
+    /// and a framed one, maximised included, keeps its corners: what
+    /// `render::rounding` is asked of is the pane's frame's effects, and going
+    /// fullscreen drops the frame. The calls are `Solium::fullscreen_request`'s,
+    /// in its order, on a pane really framed in the shipped `rounded` style,
+    /// for the reason `a_rebuilt_frame_does_not_take_the_way_back_with_it`
+    /// gives.
+    #[test]
+    fn a_fullscreen_window_is_drawn_square() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let (mut panes, id) = one_pane();
+            let mut decorations = Decorations::default();
+            decorations.set_style(&mut panes, Some("rounded".to_string()));
+            decorations.insert(&mut panes, id, 300, 200);
+            let rounding = |panes: &Panes| {
+                crate::render::rounding(
+                    panes
+                        .get(id)
+                        .and_then(Pane::decoration)
+                        .map(Decoration::effects)
+                        .unwrap_or_default(),
+                )
+            };
+            assert!(
+                rounding(&panes).is_some(),
+                "a window framed in `rounded` is rounded, maximised or not, or \
+                 the square one below proves nothing"
+            );
+
+            decorations.remove(&mut panes, id);
+            decorations.set_bare(&mut panes, id);
+            assert_eq!(
+                rounding(&panes),
+                None,
+                "fullscreen, it is drawn square: no clip, so its surfaces stay \
+                 scanout candidates"
+            );
+        });
+    }
+
     #[test]
     fn a_rebuilt_frame_does_not_take_the_way_back_with_it() {
         if the_environment_has_already_chosen() {

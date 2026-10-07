@@ -3,7 +3,7 @@
 # Does a presentation transform put pixels where it says it does, and does the
 # pointer still land where it should?
 #
-# Five claims, none of which `cargo test` can reach. The `Command::Present` ->
+# Six claims, none of which `cargo test` can reach. The `Command::Present` ->
 # `Frame` wiring in `state/commands.rs` is the seam this exists for: reverting
 # `z` and `pivot` there to their defaults passes the whole unit suite, because
 # every test of them is a test of `script.rs` and of pure functions below it,
@@ -35,6 +35,14 @@
 #           it must be inside that rectangle. The deform's target is moved
 #           onto the screen with the window, which `render::warp_mesh_on`'s
 #           tests pin; this is the same thing through the real draw.
+#
+#   menu    a warped window's menu is drawn whole and in front of it (0.8).
+#           wl-probe's window with a popup reaching past its bottom-right
+#           corner, tilted four degrees: the menu's colour must cover at least
+#           150x110 pixels. The popup is a capture of its own, drawn as a warp
+#           in front of the window's (`render::WARP_ORDER`); inside the
+#           window's capture it was cut at the window's edge, and drawn under
+#           its frame.
 #
 # A reverted `z` reads as "nothing sorts" and would be caught by looking. A
 # reverted `pivot` is not, and the strongest statement of that is measured:
@@ -71,6 +79,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$root/target/debug/solium"
 here="$root/dev/present-check"
 [[ -x "$binary" ]] || { echo "not built: $binary  (see dev/README.md)" >&2; exit 1; }
+probe="$root/target/debug/wl-probe"
+[[ -x "$probe" ]] || { echo "not built: $probe  (cargo build -p wl-probe)" >&2; exit 1; }
 command -v kitty >/dev/null || { echo "present-check: needs kitty as a client" >&2; exit 1; }
 
 out="${SOLIUM_CHECK_DIR:-$(mktemp -d -t solium-present-XXXXXX)}"
@@ -134,7 +144,8 @@ captured() {
 #
 # `$1` name, `$2` lua, `$3` capture-at ms, `$4` frames, `$5` interval ms,
 # `$6` the last moment the configuration scheduled anything, in ms,
-# `$7` extra environment (newline separated), rest: `title:rrggbb` per client.
+# `$7` extra environment (newline separated), rest: `title:rrggbb` per client,
+# or `probe:popup` for wl-probe's window with a menu (`WL_PROBE_POPUP`).
 shoot() {
     local name="$1" lua="$2" at="$3" frames="$4" interval="$5" until_ms="$6" extra="$7"
     shift 7
@@ -177,6 +188,14 @@ shoot() {
     local index=0
     for spec in "$@"; do
         local title="${spec%%:*}" colour="${spec##*:}"
+        if [[ "$spec" == "probe:popup" ]]; then
+            WAYLAND_DISPLAY="$socket" WL_PROBE_POPUP=30 "$probe" \
+                >"$dir/client-$index.log" 2>&1 &
+            pids+=("$!")
+            index=$((index + 1))
+            sleep "$(awk "BEGIN{print $SPAWN_INTERVAL/1000}")"
+            continue
+        fi
         WAYLAND_DISPLAY="$socket" kitty --config NONE --title "$title" \
             -o "background=#$colour" -o "foreground=#$colour" \
             -o "cursor=#$colour" -o "cursor_text_color=#$colour" \
@@ -217,9 +236,11 @@ shoot() {
 # broken environment.
 measure() { env -u LD_LIBRARY_PATH python3 "$here/measure.py" "$@"; }
 
-# The window colour and the marker colour every configuration uses.
+# The window colour and the marker colour every configuration uses, and the
+# colour of wl-probe's menu.
 WINDOW=(32 160 192)
 MARKER=(255 255 0)
+MENU=(208 32 64)
 
 corner_of() {
     measure corner "$1" "${WINDOW[@]}" "${MARKER[@]}" 8 \
@@ -364,6 +385,26 @@ then
     fi
 else
     fail "the aim capture did not run"
+fi
+
+echo "present-check: a menu over a tilted window"
+ready=$(ready_at 1)
+if shoot menu "$here/menu.lua" $((ready + 1400)) 1 16 $((ready + 2000)) \
+    "SOLIUM_TRIGGER_AT=$((ready + 700)):super+t" \
+    "probe:popup"
+then
+    span=$(measure span "$out/menu/f" "${MENU[@]}" 8)
+    note "menu drawn" "${span#"$out/menu/f" }"
+    read -r x0 x1 y0 y1 < <(echo "$span" | sed -n 's/.* x \(-\?[0-9]*\)\.\.\(-\?[0-9]*\)  y \(-\?[0-9]*\)\.\.\(-\?[0-9]*\).*/\1 \2 \3 \4/p')
+    # A tilt of four degrees leaves a 160x120 menu's box larger, never
+    # smaller; one cut at the window's edge, or not drawn, is smaller.
+    if [[ -z "${x0:-}" ]]; then
+        fail "menu: no menu was drawn over the tilted window (see $out/menu/log)"
+    elif (( x1 - x0 + 1 < 150 || y1 - y0 + 1 < 110 )); then
+        fail "menu: drawn at ($x0,$y0)-($x1,$y1), smaller than a whole 160x120 menu"
+    fi
+else
+    fail "the menu capture did not run"
 fi
 
 if [[ "$failures" -gt 0 ]]; then

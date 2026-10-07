@@ -2,7 +2,7 @@
 //!
 //! This exists for the preview: the engine is built for `wasm32` and driven
 //! from the page, which means the mesh you watch bend in a browser is the one
-//! `warp::mesh` builds for a real window. A reimplementation in JavaScript
+//! `warp::mesh_part` builds for a real window. A reimplementation in JavaScript
 //! would drift the first time either changed, and the drift would be
 //! invisible -- the page would still bend something plausible.
 //!
@@ -90,9 +90,9 @@ pub extern "C" fn solium_effect_rows(index: u32, axis: u32) -> u32 {
 /// Deform a window into a target and write the whole grid out.
 ///
 /// Returns how many points were written. They are in row-major order --
-/// `columns + 1` across, `rows + 1` down -- which is the order `warp::mesh`
-/// walks, so a page drawing quads out of this is drawing the compositor's
-/// own cells.
+/// `columns + 1` across, `rows + 1` down -- which is the order
+/// `warp::mesh_part` walks, so a page drawing quads out of this is drawing the
+/// compositor's own cells.
 #[expect(unsafe_code, reason = "exporting a C symbol for the preview")]
 #[unsafe(no_mangle)]
 pub extern "C" fn solium_effect_grid(
