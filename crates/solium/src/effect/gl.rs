@@ -91,6 +91,19 @@ impl Program {
         }
     }
 
+    /// A program with no GL name, no buffer and no uniforms, which no test
+    /// ever draws: what `host::tests::Refusing` answers for a source it does
+    /// not refuse, so a `Solium`'s own host compiles with no GPU.
+    /// `state::tests::real_client::every_failure_leaves_the_part_drawn`.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            id: 0,
+            buffer: 0,
+            uniforms: Vec::new(),
+        }
+    }
+
     /// Every active uniform, as the driver reports it: wirecheck case 12b.
     pub(crate) fn uniforms(&self) -> &[(String, i32, u32)] {
         &self.uniforms

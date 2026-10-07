@@ -351,6 +351,43 @@ pub(crate) fn route(warped: bool, program: bool) -> Route {
     }
 }
 
+/// `prepare`'s warp condition for a pane drawn over `outer`: the frame it is
+/// drawn with this pass and what its deform is aimed at, when its matrix is
+/// not the identity or its deform is aimed at something; `None` when it is
+/// drawn flat, which with no effects is every window at rest, a fullscreen
+/// one included (Ruling 24).
+///
+/// The anchor is resolved here, and not merely tested for presence: a deform
+/// aimed at a pane that has closed draws flat, and capturing a texture for it
+/// would be a megabyte a frame spent on a warp that `elements` has already
+/// decided not to do.
+/// `state::tests::real_client::a_fullscreen_window_with_no_rule_takes_todays_path`.
+pub(crate) fn warp_of(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+    outer: Rectangle<i32, Logical>,
+) -> Option<(present::Frame, Option<present::Aimed>)> {
+    let frame = state.drawn(pane, outer);
+    let aimed = state.aimed_at_for(pane, frame.deform);
+    (!frame.matrix.is_identity() || aimed.is_some()).then_some((frame, aimed))
+}
+
+/// Whether `prepare` warps a pane this pass, asked with no renderer: its
+/// client's outer rectangle, as `prepare` finds it, through [`warp_of`].
+/// `state::tests::real_client::a_fullscreen_window_with_no_rule_takes_todays_path`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "prepare asks warp_of with the rectangle it has")
+)]
+pub(crate) fn wants_warp(state: &Solium, pane: crate::pane::PaneId) -> bool {
+    state
+        .panes
+        .get(pane)
+        .and_then(crate::pane::Pane::client)
+        .and_then(|window| state.outer_geometry(window))
+        .is_some_and(|outer| warp_of(state, pane, outer).is_some())
+}
+
 impl Prepared {
     /// Lend the texture captured for `window`, the program to draw it
     /// through, and the id and commit its warp carries, if there is one.
@@ -593,11 +630,6 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             release(state);
             continue;
         }
-        // The anchor is resolved here, and not merely tested for presence: a
-        // deform aimed at a pane that has closed draws flat, and capturing a
-        // texture for it would be a megabyte a frame spent on a warp that
-        // `elements` has already decided not to do.
-        let frame = state.drawn(pane, outer);
         // At *its own monitor's* scale. One frame can span monitors at
         // different scales, and a texture taken at 1x and drawn on a 2x screen
         // is the blur this whole change exists to remove.
@@ -605,14 +637,13 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         // A deformed window with no warp program takes the flat path below
         // instead of being captured for a warp that cannot be drawn:
         // `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
-        let aimed = state.aimed_at_for(pane, frame.deform);
-        let warped = !frame.matrix.is_identity() || aimed.is_some();
-        let program = if warped {
+        let warp = warp_of(state, pane, outer);
+        let program = if warp.is_some() {
             state.programs.warp(renderer)
         } else {
             None
         };
-        let routed = route(warped, program.is_some());
+        let routed = route(warp.is_some(), program.is_some());
         // A pane that is not warped builds no job, rounded or not (spec §8.4).
         // `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
         if wanted_capture(routed).is_none() {
@@ -629,7 +660,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             release(state);
             continue;
         }
-        if let (Route::Warp, Some(program)) = (routed, program) {
+        if let (Route::Warp, Some(program), Some((frame, aimed))) = (routed, program, warp) {
             let scale = state.scale_of(outer);
             // What its mesh is drawn from, in global space: the warp's commit
             // moves when this does, as well as when its capture is redrawn.

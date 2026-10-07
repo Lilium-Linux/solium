@@ -357,6 +357,13 @@ impl Slots {
         self.ready.insert((owner, slot), None);
     }
 
+    /// How many slots have a result to draw, of every owner.
+    /// `state::tests::real_client::every_failure_leaves_the_part_drawn`.
+    #[cfg(test)]
+    pub(crate) fn ready_count(&self) -> usize {
+        self.ready.len()
+    }
+
     /// `tests::a_pane_reaches_as_far_as_its_furthest_ready_slot`,
     /// `render::tests::the_bleed_cull_counts_an_effects_reach`.
     pub(crate) fn reach(&self, pane: PaneId) -> i32 {

@@ -10022,6 +10022,209 @@ end)"#,
         );
     }
 
+    /// **A fullscreen window with no rule takes today's path**: no slot is
+    /// wanted, it is not warped, it wants no capture, and with no slot ready
+    /// its walk is `PANE_ORDER` (`with_no_slots_the_pane_walk_is_pane_order`),
+    /// so `panes` builds the surface elements it builds today, which is what
+    /// smithay's DRM compositor assigns planes from (Ruling 24).
+    #[test]
+    fn a_fullscreen_window_with_no_rule_takes_todays_path() {
+        use crate::effect::plan::PaneSlot;
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "fullscreen-no-rule");
+        let (pane, window) = one_window(&mut fixture);
+        ask_fullscreen(&mut fixture, &window);
+        let (_, surface) = kept(&fixture, &window);
+        commit_buffer(&fixture.client, &fixture.qh, &surface, 1920, 1080);
+        pump_all(&mut fixture);
+        fixture.state.clock.advance(Duration::from_secs(1));
+        let now = fixture.state.clock.now();
+        fixture.state.settle(now);
+        pump_all(&mut fixture);
+        assert_eq!(
+            fixture.state.real_geometry(&window),
+            Some(Rectangle::new((0, 0).into(), (1920, 1080).into())),
+            "the premise: the window is fullscreen on the monitor"
+        );
+        let slots = crate::render::build_slots(&mut fixture.state);
+        assert!(slots.is_empty());
+        assert!(
+            !crate::render::wants_warp(&fixture.state, pane),
+            "a fullscreen window with no rule is warped"
+        );
+        assert_eq!(
+            crate::render::wanted_capture(crate::render::Route::Flat),
+            None
+        );
+        let ready = crate::render::slot_ready(&slots, pane);
+        for part in [PaneSlot::Pane, PaneSlot::Client, PaneSlot::Popups] {
+            for slot in [Slot::Behind, Slot::Front, Slot::Replace] {
+                assert!(!ready(part, slot));
+            }
+        }
+    }
+
+    /// One window, tiled as [`one_window`] tiles it, with a 120×80 menu
+    /// drawn on it, so the window has a `popup` part.
+    fn one_window_with_a_menu(
+        fixture: &mut Fixture,
+    ) -> (crate::pane::PaneId, Window, wl_surface::WlSurface) {
+        let (window, toplevel, surface, xdg) = open_xdg(
+            &mut fixture.display,
+            &mut fixture.state,
+            &fixture.conn,
+            &fixture.client,
+            &fixture.qh,
+        );
+        fixture.opened.push((window.clone(), toplevel, surface));
+        let (pane, _tile) = tiled_alone(&mut fixture.state, &window);
+        let menu = drawn_popup(
+            &mut fixture.display,
+            &mut fixture.state,
+            &fixture.conn,
+            &fixture.qh,
+            &mut fixture.queue,
+            &mut fixture.client,
+            &xdg,
+            (20, 20),
+            (120, 80),
+        );
+        (pane, window, menu)
+    }
+
+    /// **Every way an effect can fail leaves every part drawn** ([16] §5,
+    /// spec §8.4). Rules cover every part a window has here and every slot,
+    /// each set naming one effect that fails its own way: a Lua error and a
+    /// `p_` typo are refused at load, the set with them; a program that will
+    /// not compile, a GPU on which every run fails, and a self effect whose
+    /// capture was never drawn are wanted and never ready. In each, no slot is
+    /// ready, and the pane's walk is the walk with no rule at all.
+    #[test]
+    fn every_failure_leaves_the_part_drawn() {
+        use crate::effect::plan::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "every-failure");
+        let (pane, _window, _menu) = one_window_with_a_menu(&mut fixture);
+        let fixtures = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/effects"
+        ));
+        fixture.state.effects = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(fixtures.to_owned()),
+            fixtures.join("none"),
+        ));
+        let walk = |slots: &Slots| {
+            let mut pieces = Vec::new();
+            crate::render::pane_walk(
+                &mut pieces,
+                &crate::render::slot_ready(slots, pane),
+                |into, piece| into.push(piece),
+            );
+            pieces
+        };
+        let plain = walk(&Slots::default());
+        let every = |effect: &str, parts: &[&str]| {
+            let mut lua = String::from("{");
+            for part in parts {
+                for slot in ["behind", "front", "replace"] {
+                    lua.push_str(&format!(
+                        " {{ match = \"*\", part = \"{part}\", slot = \"{slot}\", effect = {effect} }},"
+                    ));
+                }
+            }
+            lua.push('}');
+            crate::effect::rules::parse(&tree(&lua)).expect("parses")
+        };
+        let all = [
+            "pane",
+            "client",
+            "popup",
+            "region:titlebar",
+            "layer_shell:*",
+        ];
+        // A titlebar rule reading `self` is refused when it binds, until P15
+        // (`effect::plan::tests::a_region_self_rule_is_refused_until_p15`),
+        // which would keep the self effect's whole set out here.
+        let unbanded = ["pane", "client", "popup", "layer_shell:*"];
+        // Whether its chains get as far as a run: a program that would not
+        // compile and a GPU that fails every run are each tried and fail; a
+        // self effect with no capture is never run.
+        for (effect, parts, refused, run) in [
+            (r#""fail-lua""#, &all[..], true, false),
+            (r#""fail-lint""#, &all[..], true, false),
+            (r#""fail-compile""#, &all[..], false, true),
+            (r#""ring""#, &all[..], false, true),
+            (
+                r#"{ "tint", source = "self" }"#,
+                &unbanded[..],
+                false,
+                false,
+            ),
+        ] {
+            let before = fixture.state.rules_generation;
+            fixture.state.apply_effects(Ok(every(effect, parts)));
+            assert_eq!(
+                fixture.state.rules_generation == before,
+                refused,
+                "{effect}: refused at load or not ({:?})",
+                fixture.state.effects.problems()
+            );
+            fixture
+                .state
+                .effects
+                .compile_pending(&mut crate::effect::host::tests::Refusing);
+            let mut slots = crate::render::build_slots(&mut fixture.state);
+            for part in [PaneSlot::Pane, PaneSlot::Client, PaneSlot::Popups] {
+                assert_eq!(
+                    slots.wanted(&Owner::Pane(pane, part), Slot::Replace),
+                    !refused,
+                    "{effect}: the premise, the {part:?}'s slot wanted or not"
+                );
+            }
+            crate::render::record_boxes(&fixture.state, &mut slots);
+            let Solium {
+                store,
+                effects,
+                chains,
+                ..
+            } = &mut fixture.state;
+            let mut cx = crate::render::RunCx {
+                store,
+                effects: &*effects,
+                chains,
+                masked: None,
+                now: 0.0,
+                pass: 1,
+            };
+            let mut runner = crate::render::tests::NoGpu::default();
+            for nest in [crate::render::Nest::Inner, crate::render::Nest::Whole] {
+                crate::render::run_slots(
+                    &mut cx,
+                    &mut crate::pool::Pool::new(0),
+                    &mut runner,
+                    &mut slots,
+                    &crate::effect::store::Drawn::default(),
+                    nest,
+                );
+            }
+            assert_eq!(
+                runner.runs > 0,
+                run,
+                "{effect}: the premise, its chains were run or not"
+            );
+            assert_eq!(
+                slots.ready_count(),
+                0,
+                "{effect}: a failing effect made a slot ready"
+            );
+            assert_eq!(
+                walk(&slots),
+                plain,
+                "{effect}: the pane's walk is not the walk with no rule"
+            );
+        }
+    }
+
     /// **A scripted surface has a slot on each monitor it is on, and a
     /// client layer surface one of its own**, each matched by its name: one
     /// owner per instance per output, and one per layer surface whose
@@ -24825,6 +25028,88 @@ end)
                     at(Seen::Effect(Slot::Front)) + 1,
                     at(Seen::Script(script)),
                     "{drawn:?}"
+                );
+            }
+
+            /// **Every failure leaves a layer surface and a scripted surface
+            /// drawn**: the stacked walk with failing rules on both is the
+            /// walk with none (the owners `every_failure_leaves_the_part_drawn`
+            /// cannot make).
+            #[test]
+            fn every_failure_leaves_layer_and_scripted_surfaces_drawn() {
+                use crate::effect::plan::Owner;
+                use crate::effect::rules::Slot;
+                let mut desk = Desk::new();
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 30);
+                let script = scripted(&mut desk, "strip", Scripted::Bottom, strip(0, 1920));
+                let plain = drawn(&desk);
+                let fixtures = std::path::Path::new(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/effects"
+                ));
+                desk.state.effects =
+                    crate::effect::host::Host::new(crate::effect::host::Library::with(
+                        Some(fixtures.to_owned()),
+                        fixtures.join("none"),
+                    ));
+                let rules = r#"{ { match = "*", part = "layer_shell:*", slot = "behind", effect = "ring" },
+                                 { match = "*", part = "layer_shell:*", slot = "replace", effect = "fail-compile" },
+                                 { match = "*", part = "surface:strip", slot = "front", effect = "ring" },
+                                 { match = "*", part = "surface:strip", slot = "replace", effect = "fail-compile" } }"#;
+                desk.state.apply_effects(Ok(
+                    crate::effect::rules::parse(&tree(rules)).expect("parses")
+                ));
+                desk.state
+                    .effects
+                    .compile_pending(&mut crate::effect::host::tests::Refusing);
+                let mut slots = crate::render::build_slots(&mut desk.state);
+                let bar_id = id(&bar);
+                let mut owners: Vec<(bool, Slot)> = slots
+                    .wants()
+                    .map(|(owner, slot, _)| match owner {
+                        Owner::LayerShell(surface) => (surface.protocol_id() == bar_id, slot),
+                        Owner::Surface(surface, _) => (*surface == script, slot),
+                        Owner::Pane(..) => (false, slot),
+                    })
+                    .collect();
+                owners.sort_by_key(|(_, slot)| format!("{slot:?}"));
+                assert_eq!(
+                    owners.len(),
+                    4,
+                    "the premise: both surfaces' two slots are wanted, and nothing else: {owners:?}"
+                );
+                assert!(owners.iter().all(|(theirs, _)| *theirs), "{owners:?}");
+                crate::render::record_boxes(&desk.state, &mut slots);
+                let Solium {
+                    store,
+                    effects,
+                    chains,
+                    ..
+                } = &mut desk.state;
+                let mut cx = crate::render::RunCx {
+                    store,
+                    effects: &*effects,
+                    chains,
+                    masked: None,
+                    now: 0.0,
+                    pass: 1,
+                };
+                let mut runner = crate::render::tests::NoGpu::default();
+                crate::render::run_slots(
+                    &mut cx,
+                    &mut crate::pool::Pool::new(0),
+                    &mut runner,
+                    &mut slots,
+                    &crate::effect::store::Drawn::default(),
+                    crate::render::Nest::Inner,
+                );
+                assert_eq!(
+                    runner.runs, 4,
+                    "the premise: every chain was run, and failed"
+                );
+                assert_eq!(
+                    drawn_with(&desk, screen(), &|owner, slot| slots.is_ready(owner, slot)),
+                    plain
                 );
             }
 

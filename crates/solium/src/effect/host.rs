@@ -1559,6 +1559,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// A compiler for a `Solium`'s own host, with no GPU: it refuses a
+    /// source whose user string contains `FAIL` with a Mesa-shaped log at
+    /// that line, as [`Counting`] does, and answers a program no test ever
+    /// draws otherwise (`gl::Program::for_test`).
+    /// `state::tests::real_client::every_failure_leaves_the_part_drawn`.
+    #[derive(Debug)]
+    pub(crate) struct Refusing;
+
+    impl super::Compiler for Refusing {
+        type Program = crate::effect::gl::Program;
+        fn compile(
+            &mut self,
+            _vertex: &str,
+            sources: &solium_effects::glsl::Sources,
+        ) -> Result<crate::effect::gl::Program, String> {
+            if let Some(index) = sources.user.lines().position(|line| line.contains("FAIL")) {
+                let line = u32::try_from(index).expect("a short source") + 1;
+                return Err(format!("1:{line}(1): error: FAIL is not GLSL"));
+            }
+            Ok(crate::effect::gl::Program::for_test())
+        }
+        fn delete(&mut self, _program: crate::effect::gl::Program) {}
+    }
+
     /// A `frag` effect's signature at its defaults, as its one pass is
     /// flattened: its params' kinds, no `uses`, its texture inputs known.
     fn default_signature(
