@@ -20,8 +20,8 @@ mod gputime;
 mod warp_gl;
 
 #[path = "../../../crates/solium/src/pool.rs"]
-#[allow(dead_code, reason = "the compositor's pool, of which this case needs part")]
-mod pool;
+#[allow(dead_code, reason = "the compositor's pool, of which these cases need part")]
+pub(crate) mod pool;
 
 /// Every FX0 case, in order.
 pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
@@ -517,7 +517,7 @@ fn pooled_target_through_the_carrier(renderer: &mut GlesRenderer) -> Result<()> 
     let side = 64;
     let mut pool = pool::Pool::new(64 << 20);
     let target = pool
-        .target(&mut pool::Gl(renderer), (side, side).into())
+        .target(&mut pool::Gl(renderer), (side, side).into(), pool::Format::Rgba8)
         .ok_or_else(|| anyhow!("no pooled target"))?;
     let mut carrier = pool.carrier(renderer).ok_or_else(|| anyhow!("no carrier"))?;
     {

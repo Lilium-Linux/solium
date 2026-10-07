@@ -19,9 +19,12 @@
 //! case 11f pins it, and \[16\] decision 1's revisit at Smithay 0.8 must check
 //! it again.
 //!
-//! Smithay and std only, so `dev/wirecheck` includes this file.
+//! Smithay, std and the effects crate only, so `dev/wirecheck` includes this
+//! file.
 
 use std::{cell::RefCell, rc::Rc};
+
+use solium_effects::stage::Plan;
 
 use smithay::{
     backend::{
@@ -35,11 +38,16 @@ use smithay::{
     utils::{Physical, Rectangle, Scale, Size, Transform},
 };
 
+/// What a target holds: the effects crate's one enum, so a plan's formats
+/// and the pool's are the same type (\[fx0\] Ruling 10 left `rgba16f` to
+/// X1.3). `tests::a_target_of_another_format_is_another_target`.
+pub(crate) use solium_effects::stage::Format;
+
 /// What makes a target, so the pool's policy is tested with no GPU, as
 /// `offscreen::Scratch`'s was. `tests::a_target_is_made_once_and_its_fbo_with_it`.
 pub(crate) trait Alloc {
     type Tex: Clone;
-    fn make(&mut self, size: Size<i32, Physical>) -> Option<Self::Tex>;
+    fn make(&mut self, size: Size<i32, Physical>, format: Format) -> Option<Self::Tex>;
     fn fbo(&mut self, texture: &Self::Tex) -> Option<u32>;
 }
 
@@ -59,13 +67,15 @@ impl Drop for Fbo {
     }
 }
 
-/// One pooled target: a texture of exactly `size`, and its framebuffer object.
-/// `tests::a_target_of_another_size_is_made_anew`.
+/// One pooled target: a texture of exactly `size` and `format`, and its
+/// framebuffer object. `tests::a_target_of_another_size_is_made_anew`,
+/// `tests::a_target_of_another_format_is_another_target`.
 #[derive(Clone, Debug)]
 pub(crate) struct Target<T = GlesTexture> {
     texture: T,
     fbo: Rc<Fbo>,
     size: Size<i32, Physical>,
+    format: Format,
 }
 
 impl<T> Target<T> {
@@ -77,6 +87,9 @@ impl<T> Target<T> {
     }
     pub(crate) fn fbo(&self) -> u32 {
         self.fbo.name
+    }
+    pub(crate) fn format(&self) -> Format {
+        self.format
     }
 }
 
@@ -93,8 +106,14 @@ pub(crate) struct Pool<T = GlesTexture> {
     carrier: Option<T>,
 }
 
-fn bytes(size: Size<i32, Physical>) -> usize {
-    usize::try_from(size.w).unwrap_or(0) * usize::try_from(size.h).unwrap_or(0) * 4
+/// What a target costs the budget: four bytes a pixel, eight in `rgba16f`.
+/// `tests::rgba16f_counts_eight_bytes_a_pixel_against_the_budget`.
+fn bytes(size: Size<i32, Physical>, format: Format) -> usize {
+    let pixel = match format {
+        Format::Rgba8 => 4,
+        Format::Rgba16f => 8,
+    };
+    usize::try_from(size.w).unwrap_or(0) * usize::try_from(size.h).unwrap_or(0) * pixel
 }
 
 impl<T: Clone> Pool<T> {
@@ -111,19 +130,25 @@ impl<T: Clone> Pool<T> {
         self.budget = budget;
     }
 
-    /// A target of exactly `size`: from the free list, or made with its
-    /// framebuffer object. Exact sizes, because a capture's UVs and the warp's
-    /// `src` take the whole texture as the picture (`warp.rs:227-229`).
-    /// `tests::a_target_of_another_size_is_made_anew`.
+    /// A target of exactly `size` and `format`: from the free list, or made
+    /// with its framebuffer object. Exact sizes, because a capture's UVs and
+    /// the warp's `src` take the whole texture as the picture
+    /// (`warp.rs:227-229`). `tests::a_target_of_another_size_is_made_anew`,
+    /// `tests::a_target_of_another_format_is_another_target`.
     pub(crate) fn target<A: Alloc<Tex = T>>(
         &mut self,
         alloc: &mut A,
         size: Size<i32, Physical>,
+        format: Format,
     ) -> Option<Target<T>> {
-        if let Some(at) = self.free.iter().position(|held| held.size == size) {
+        if let Some(at) = self
+            .free
+            .iter()
+            .position(|held| held.size == size && held.format == format)
+        {
             return Some(self.free.swap_remove(at));
         }
-        let texture = alloc.make(size)?;
+        let texture = alloc.make(size, format)?;
         let name = alloc.fbo(&texture)?;
         Some(Target {
             texture,
@@ -132,14 +157,20 @@ impl<T: Clone> Pool<T> {
                 doomed: Rc::clone(&self.doomed),
             }),
             size,
+            format,
         })
     }
 
     /// Hand a target back for reuse; over budget it is dropped instead.
-    /// `tests::a_target_given_back_over_budget_is_dropped`.
+    /// `tests::a_target_given_back_over_budget_is_dropped`,
+    /// `tests::rgba16f_counts_eight_bytes_a_pixel_against_the_budget`.
     pub(crate) fn give_back(&mut self, target: Target<T>) {
-        let held: usize = self.free.iter().map(|each| bytes(each.size)).sum();
-        if held + bytes(target.size) <= self.budget {
+        let held: usize = self
+            .free
+            .iter()
+            .map(|each| bytes(each.size, each.format))
+            .sum();
+        if held + bytes(target.size, target.format) <= self.budget {
             self.free.push(target);
         }
     }
@@ -186,10 +217,12 @@ pub(crate) struct Gl<'a>(pub(crate) &'a mut GlesRenderer);
 impl Alloc for Gl<'_> {
     type Tex = GlesTexture;
 
-    fn make(&mut self, size: Size<i32, Physical>) -> Option<GlesTexture> {
-        self.0
-            .create_buffer(Fourcc::Abgr8888, (size.w, size.h).into())
-            .ok()
+    fn make(&mut self, size: Size<i32, Physical>, format: Format) -> Option<GlesTexture> {
+        let fourcc = match format {
+            Format::Rgba8 => Fourcc::Abgr8888,
+            Format::Rgba16f => Fourcc::Abgr16161616f,
+        };
+        self.0.create_buffer(fourcc, (size.w, size.h).into()).ok()
     }
 
     fn fbo(&mut self, texture: &GlesTexture) -> Option<u32> {
@@ -221,6 +254,43 @@ impl Alloc for Gl<'_> {
             .ok()
             .flatten()
     }
+}
+
+/// What this GPU can render into, found once with a 1×1 target of each
+/// format beyond `rgba8`: wirecheck case 12c.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Formats {
+    pub(crate) rgba16f: bool,
+}
+
+impl Formats {
+    /// Whether a plan can run here: every format it draws into renders.
+    /// `effect::host::tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`.
+    pub(crate) fn supports(self, plan: &Plan) -> bool {
+        self.rgba16f || !plan.formats().contains(&Format::Rgba16f)
+    }
+}
+
+/// Probe the formats: a 1×1 target of each, whose framebuffer is complete
+/// or not (`Gl::fbo` answers `None` for an incomplete one, and smithay
+/// refuses `rgba16f` outright on a context without GLES 3). The target goes
+/// back to `pool`'s doomed list; sweep it. Wirecheck case 12c, which draws
+/// into one where the probe says yes.
+pub(crate) fn formats(renderer: &mut GlesRenderer, pool: &mut Pool) -> Formats {
+    let rgba16f = pool
+        .target(&mut Gl(renderer), (1, 1).into(), Format::Rgba16f)
+        .is_some();
+    Formats { rgba16f }
+}
+
+/// [`formats`] through a pool of its own, swept at once: what `prepare` and
+/// `--check` ask once of the GPU they hold, leaving no framebuffer behind.
+/// Wirecheck case 12c probes the same way.
+pub(crate) fn probe_formats(renderer: &mut GlesRenderer) -> Formats {
+    let mut pool = Pool::new(0);
+    let found = formats(renderer, &mut pool);
+    pool.sweep(renderer);
+    found
 }
 
 /// A frame of `target`'s size, opened on the bound carrier, drawing into the
@@ -283,19 +353,22 @@ pub(crate) fn chain_sizes(
 mod tests {
     use smithay::utils::{Physical, Size};
 
-    use super::{Alloc, Pool, chain_sizes};
+    use super::{Alloc, Format, Pool, chain_sizes};
 
-    /// Textures and framebuffer objects a test can count.
+    /// Textures and framebuffer objects a test can count, and the format
+    /// each texture was made in.
     #[derive(Debug, Default)]
     struct Counted {
         textures: u32,
         fbos: u32,
+        made: Vec<Format>,
     }
 
     impl Alloc for Counted {
         type Tex = u32;
-        fn make(&mut self, _size: Size<i32, Physical>) -> Option<u32> {
+        fn make(&mut self, _size: Size<i32, Physical>, format: Format) -> Option<u32> {
             self.textures += 1;
+            self.made.push(format);
             Some(self.textures)
         }
         fn fbo(&mut self, _texture: &u32) -> Option<u32> {
@@ -313,9 +386,13 @@ mod tests {
     #[test]
     fn a_target_is_made_once_and_its_fbo_with_it() {
         let (mut pool, mut alloc) = (Pool::<u32>::new(64 << 20), Counted::default());
-        let first = pool.target(&mut alloc, size(1150, 850)).expect("a target");
+        let first = pool
+            .target(&mut alloc, size(1150, 850), Format::Rgba8)
+            .expect("a target");
         pool.give_back(first);
-        let again = pool.target(&mut alloc, size(1150, 850)).expect("a target");
+        let again = pool
+            .target(&mut alloc, size(1150, 850), Format::Rgba8)
+            .expect("a target");
         assert_eq!((alloc.textures, alloc.fbos), (1, 1));
         assert_eq!(again.fbo(), 101);
     }
@@ -324,9 +401,13 @@ mod tests {
     #[test]
     fn a_target_of_another_size_is_made_anew() {
         let (mut pool, mut alloc) = (Pool::<u32>::new(64 << 20), Counted::default());
-        let first = pool.target(&mut alloc, size(1150, 850)).expect("a target");
+        let first = pool
+            .target(&mut alloc, size(1150, 850), Format::Rgba8)
+            .expect("a target");
         pool.give_back(first);
-        let _other = pool.target(&mut alloc, size(1150, 851)).expect("a target");
+        let _other = pool
+            .target(&mut alloc, size(1150, 851), Format::Rgba8)
+            .expect("a target");
         assert_eq!(alloc.textures, 2);
     }
 
@@ -335,7 +416,9 @@ mod tests {
     #[test]
     fn a_dropped_target_has_its_fbo_deleted_at_the_next_sweep() {
         let (mut pool, mut alloc) = (Pool::<u32>::new(64 << 20), Counted::default());
-        let target = pool.target(&mut alloc, size(64, 64)).expect("a target");
+        let target = pool
+            .target(&mut alloc, size(64, 64), Format::Rgba8)
+            .expect("a target");
         let held = target.clone();
         drop(target);
         assert!(pool.doomed().is_empty(), "a clone still holds it");
@@ -350,11 +433,49 @@ mod tests {
     fn a_target_given_back_over_budget_is_dropped() {
         let one = 100 * 100 * 4;
         let (mut pool, mut alloc) = (Pool::<u32>::new(one), Counted::default());
-        let first = pool.target(&mut alloc, size(100, 100)).expect("a target");
-        let second = pool.target(&mut alloc, size(100, 100)).expect("a target");
+        let first = pool
+            .target(&mut alloc, size(100, 100), Format::Rgba8)
+            .expect("a target");
+        let second = pool
+            .target(&mut alloc, size(100, 100), Format::Rgba8)
+            .expect("a target");
         pool.give_back(first);
         pool.give_back(second);
         assert_eq!(pool.doomed(), vec![102], "the second went over budget");
+    }
+
+    /// **A target of another format is another target**: an `rgba8` given
+    /// back is not handed out for `rgba16f` at the same size, and the
+    /// format reaches what makes the texture.
+    #[test]
+    fn a_target_of_another_format_is_another_target() {
+        let (mut pool, mut alloc) = (Pool::<u32>::new(64 << 20), Counted::default());
+        let eight = pool
+            .target(&mut alloc, size(64, 64), Format::Rgba8)
+            .expect("a target");
+        pool.give_back(eight);
+        let half = pool
+            .target(&mut alloc, size(64, 64), Format::Rgba16f)
+            .expect("a target");
+        assert_eq!(alloc.textures, 2);
+        assert_eq!(alloc.made, [Format::Rgba8, Format::Rgba16f]);
+        assert_eq!(half.format(), Format::Rgba16f);
+    }
+
+    /// **`rgba16f` counts eight bytes a pixel against the budget**: the
+    /// over-budget drop happens at half the pixels.
+    #[test]
+    fn rgba16f_counts_eight_bytes_a_pixel_against_the_budget() {
+        let (mut pool, mut alloc) = (Pool::<u32>::new(100 * 100 * 8), Counted::default());
+        let first = pool
+            .target(&mut alloc, size(100, 100), Format::Rgba16f)
+            .expect("a target");
+        let second = pool
+            .target(&mut alloc, size(100, 100), Format::Rgba16f)
+            .expect("a target");
+        pool.give_back(first);
+        pool.give_back(second);
+        assert_eq!(pool.doomed(), vec![102]);
     }
 
     /// The mip chain's levels: halved, rounded up, until both sides fit.

@@ -13,10 +13,15 @@ use solium_effects::glsl::{self, Host, ParamKind, Signature};
 )]
 mod gl;
 
+/// The compositor's pool, included once, by FX0's cases: case 12c probes
+/// its formats.
+use crate::fx0::pool;
+
 /// Every FX2 case, in order.
 pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_typo_is_reported_at_its_own_line(renderer)?;
     introspection_agrees_with_the_signature(renderer)?;
+    rgba16f_is_renderable_or_reported(renderer)?;
     Ok(())
 }
 
@@ -118,4 +123,67 @@ fn introspection_agrees_with_the_signature(renderer: &mut GlesRenderer) -> Resul
         .map_err(|err| anyhow!("{err}"))?;
     println!("  float, int, vec4 and two samplers, as declared");
     Ok(())
+}
+
+/// **Case 12c: an `rgba16f` target is renderable here, or reported
+/// unsupported**, and the probe agrees with a real draw: 0.5 cleared into a
+/// 1×1 half-float target through the pool's own framebuffer reads back as
+/// 0.5, which an 8-bit target could not hold exactly.
+fn rgba16f_is_renderable_or_reported(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::{Bind as _, Color32F, Frame as _};
+    use smithay::utils::Rectangle;
+    println!("\n=== FX2: rgba16f renders here, or is reported missing ===");
+    let mut pool = pool::Pool::new(1 << 20);
+    let formats = pool::formats(renderer, &mut pool);
+    pool.sweep(renderer);
+    if !formats.rgba16f {
+        println!("  rgba16f: not renderable on this GPU; effects start at a fallback (Ruling 11)");
+        return Ok(());
+    }
+    let target = pool
+        .target(&mut pool::Gl(renderer), (1, 1).into(), pool::Format::Rgba16f)
+        .ok_or_else(|| anyhow!("the probe said yes and no target came"))?;
+    let mut carrier = pool.carrier(renderer).ok_or_else(|| anyhow!("no carrier"))?;
+    {
+        let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+        let mut frame =
+            pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+        frame
+            .clear(Color32F::new(0.5, 0.5, 0.5, 0.5), &[Rectangle::from_size((1, 1).into())])
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let read = read_float(renderer, target.fbo())?;
+    drop(target);
+    pool.sweep(renderer);
+    if read.iter().any(|channel| (channel - 0.5).abs() > 1e-3) {
+        return Err(anyhow!("an rgba16f target cleared to 0.5 read back {read:?}"));
+    }
+    println!("  rgba16f: renderable, 0.5 reads back as {}", read[0]);
+    Ok(())
+}
+
+/// One pixel of a float colour buffer, read as `RGBA`/`FLOAT`, which GLES 3
+/// accepts for any floating-point framebuffer, through the target's own
+/// framebuffer object.
+fn read_float(renderer: &mut GlesRenderer, fbo: u32) -> Result<[f32; 4]> {
+    let mut pixel = [0.0_f32; 4];
+    // SAFETY: `with_context` makes the context current; the framebuffer was
+    // made in it, and `pixel` holds the four floats one pixel reads as.
+    let error = renderer
+        .with_context(|gl| unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+            gl.ReadPixels(0, 0, 1, 1, ffi::RGBA, ffi::FLOAT, pixel.as_mut_ptr().cast());
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            gl.GetError()
+        })
+        .map_err(|err| anyhow!("{err}"))?;
+    if error != ffi::NO_ERROR {
+        return Err(anyhow!("reading the rgba16f target back failed: GL error {error:#x}"));
+    }
+    Ok(pixel)
 }
