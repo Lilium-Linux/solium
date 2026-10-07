@@ -8,8 +8,18 @@
 
 pub(crate) mod gl;
 pub(crate) mod host;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "sol.effects reads rules from Task 14")
+)]
+pub(crate) mod rules;
 pub(crate) mod run;
 pub(crate) mod sandbox;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "sol.effects reads rules from Task 14")
+)]
+pub(crate) mod tree;
 
 /// So `super::pool` resolves the same in `effect/run.rs` here and in
 /// `dev/wirecheck`, which includes `pool.rs` beside it (Ruling 2).
