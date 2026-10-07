@@ -30,6 +30,15 @@ mod gl;
 )]
 mod run;
 
+/// The compositor's effect element (Smithay and `solium_effects` only): case
+/// 12h draws it.
+#[path = "../../../crates/solium/src/effect/element.rs"]
+#[allow(
+    dead_code,
+    reason = "the compositor's effect element, of which case 12h draws the element"
+)]
+mod element;
+
 /// The compositor's pool, included once, by FX0's cases: case 12c probes
 /// its formats, and the executor draws into its targets.
 use crate::fx0::pool;
@@ -49,6 +58,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_held_instance_dropped_gives_its_targets_back(renderer)?;
     a_chain_feeds_each_links_result_to_the_next(renderer)?;
     nothing_is_allocated_while_a_result_is_drawn(renderer)?;
+    a_result_is_cut_by_its_mask(renderer)?;
     Ok(())
 }
 
@@ -1312,5 +1322,86 @@ fn nothing_is_allocated_while_a_result_is_drawn(renderer: &mut GlesRenderer) -> 
         return Err(anyhow!("the result drawn differs from the result by {off}"));
     }
     println!("  the result drawn by smithay, with no target made");
+    Ok(())
+}
+
+const GREEN: [u8; 4] = [0, 255, 0, 255];
+const CLEAR: [u8; 4] = [0, 0, 0, 0];
+
+/// **Case 12h: a result drawn through its mask: outside cut, inside exact.**
+/// The compositor's own `EffectElement`, over a 148×98 box through
+/// `MASKED_TEXTURE` compiled as `Programs::masked` compiles it, drawn by
+/// `pool::paint` into a pooled target as captures draw: a solid green result
+/// cut by the mask `(24, 24, 100, 50)` at radius 10 is green at (74, 49) and
+/// (30, 49), and transparent at (10, 10) and at (25, 25), inside the rect past
+/// a corner's arc. The same from a 74×49 result drawn over the 148×98 box,
+/// because the mask is measured in the placement's pixels; and with no mask,
+/// the result whole.
+fn a_result_is_cut_by_its_mask(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::Frame as _;
+    use smithay::backend::renderer::element::Id;
+    use smithay::backend::renderer::utils::CommitCounter;
+    use smithay::utils::Physical;
+    use solium_effects::fragment::{Corners, MASKED_TEXTURE};
+    println!("\n=== FX2: a result drawn through its mask: outside cut, inside exact ===");
+    let program = renderer
+        .compile_custom_texture_shader(
+            MASKED_TEXTURE,
+            &crate::uniforms::registration(MASKED_TEXTURE),
+        )
+        .map_err(|err| anyhow!("MASKED_TEXTURE did not compile in every variant: {err}"))?;
+    let side = (148, 98);
+    let mask = (
+        Rectangle::<f64, Physical>::new((24.0, 24.0).into(), (100.0, 50.0).into()),
+        Corners::all(10.0),
+    );
+    let cut = [
+        ((74, 49), GREEN),
+        ((10, 10), CLEAR),
+        ((25, 25), CLEAR),
+        ((30, 49), GREEN),
+    ];
+    let whole = [((0, 0), GREEN), ((10, 10), GREEN), ((147, 97), GREEN)];
+    let mut pool = pool::Pool::new(0);
+    let mut carrier = pool.carrier(renderer).ok_or_else(|| anyhow!("no carrier"))?;
+    for (what, result, mask, points) in [
+        ("a 148×98 result", (148, 98), Some(mask), &cut[..]),
+        ("a 74×49 result over the 148×98 box", (74, 49), Some(mask), &cut[..]),
+        ("a result with no mask", (148, 98), None, &whole[..]),
+    ] {
+        let (texture, _) = upload(renderer, result, |_, _| GREEN)?;
+        let placed =
+            element::EffectElement::new(Id::new(), CommitCounter::default(), texture, program.clone())
+                .at(Rectangle::from_size(side.into()), mask, 1.0);
+        let target = pool
+            .target(&mut pool::Gl(renderer), side.into(), pool::Format::Rgba8)
+            .ok_or_else(|| anyhow!("no pooled target"))?;
+        {
+            let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
+            let mut frame =
+                pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+            pool::paint(&mut frame, side.into(), &[placed], 1.0)
+                .map_err(|err| anyhow!("{err}"))?;
+            frame
+                .finish()
+                .map_err(|err| anyhow!("{err}"))?
+                .wait()
+                .map_err(|err| anyhow!("{err:?}"))?;
+        }
+        let drawn = read_rgba(renderer, target.texture())?;
+        drop(target);
+        for &((x, y), want) in points {
+            let at = (y * usize::try_from(side.0)? + x) * 4;
+            let got = drawn.get(at..at + 4).unwrap_or_default();
+            if got != want {
+                return Err(anyhow!("{what}: ({x}, {y}) is {got:?}, not {want:?}"));
+            }
+        }
+    }
+    pool.sweep(renderer);
+    println!(
+        "  inside exact, outside and past a corner's arc transparent, drawn 1:1 and at twice \
+         its size; with no mask, whole"
+    );
     Ok(())
 }

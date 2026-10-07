@@ -90,6 +90,9 @@ render_elements! {
     ClippedTiled = CropRenderElement<RescaleRenderElement<crate::clip::Clipped>>,
     /// The same inside a warp's capture, drawn at real size as `Window2` is.
     Clipped2 = crate::clip::Clipped,
+    /// An effect's result in its slot, cut by its part's mask. See
+    /// `crate::effect::element`.
+    Effect = crate::effect::element::EffectElement,
 }
 
 /// The two questions that together mean "will a later frame differ from this

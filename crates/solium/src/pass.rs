@@ -16,7 +16,9 @@
 //! compiled (`Programs::clip_compiled`).
 
 use smithay::backend::renderer::gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram};
-use solium_effects::fragment::{CLIPPED_SOLID, CLIPPED_SURFACE, Corners, Effect, Inputs};
+use solium_effects::fragment::{
+    CLIPPED_SOLID, CLIPPED_SURFACE, Corners, Effect, Inputs, MASKED_TEXTURE,
+};
 
 mod uniforms;
 pub(crate) use uniforms::registration;
@@ -160,6 +162,11 @@ pub(crate) struct Programs {
     clip: Option<ClipPrograms>,
     /// As `warp_failed`, for the clipped-surface programs.
     clip_failed: bool,
+    /// The program an effect's result is drawn through
+    /// (`effect::element::EffectElement`), on the same terms as `warp`.
+    masked: Option<GlesTexProgram>,
+    /// As `warp_failed`, for the masked program.
+    masked_failed: bool,
     /// Set once an effect this renderer cannot run has been named, for the
     /// same reason and on the same terms. See [`Programs::refuse`].
     refused: bool,
@@ -228,6 +235,35 @@ impl Programs {
     /// whose style declares a rounding.
     pub(crate) fn clip_compiled(&self) -> Option<&ClipPrograms> {
         self.clip.as_ref()
+    }
+
+    /// The program an effect's result is drawn through, cut by its part's
+    /// mask (`effect::element`), compiled on first use between frames and
+    /// latched (`tests::a_program_that_will_not_compile_is_tried_once`), with
+    /// the uniforms its source declares
+    /// (`tests::the_masked_programs_registration_is_its_declared_uniforms`);
+    /// wirecheck's case 12h compiles the same through the same
+    /// [`registration`].
+    #[expect(
+        dead_code,
+        reason = "Task 21's prepare compiles it while a slot is wanted"
+    )]
+    pub(crate) fn masked(&mut self, renderer: &mut GlesRenderer) -> Option<&GlesTexProgram> {
+        once(&mut self.masked, &mut self.masked_failed, || {
+            renderer
+                .compile_custom_texture_shader(MASKED_TEXTURE, &registration(MASKED_TEXTURE))
+                .map_err(|err| {
+                    tracing::warn!(?err, "the masked-texture shader did not compile");
+                })
+                .ok()
+        })
+    }
+
+    /// The masked program if [`Programs::masked`] has compiled it, for
+    /// `render::elements`, which must never compile (this module's doc).
+    #[expect(dead_code, reason = "Task 21 places a ready slot's result through it")]
+    pub(crate) fn masked_compiled(&self) -> Option<&GlesTexProgram> {
+        self.masked.as_ref()
     }
 
     /// Say, once, that a style declares an effect this renderer cannot run.
@@ -390,6 +426,31 @@ mod tests {
             super::once(&mut slot, &mut failed, || Some(8)).copied(),
             Some(7),
             "compiled once and kept"
+        );
+    }
+
+    /// **The masked program's registration is its declared uniforms**: what
+    /// `Programs::masked` compiles `MASKED_TEXTURE` with, and wirecheck's
+    /// case 12h with it, names the mask's rectangle, radii and size with the
+    /// types the source declares (a `vec2` registered as `_1f` would leave
+    /// every fragment's mask unset, #94).
+    #[test]
+    fn the_masked_programs_registration_is_its_declared_uniforms() {
+        use smithay::backend::renderer::gles::UniformType;
+        use solium_effects::fragment::{
+            MASK_RADII_UNIFORM, MASK_RECT_UNIFORM, MASK_SIZE_UNIFORM, MASKED_TEXTURE,
+        };
+        let registered: Vec<_> = super::registration(MASKED_TEXTURE)
+            .into_iter()
+            .map(|uniform| (uniform.name.into_owned(), uniform.type_))
+            .collect();
+        assert_eq!(
+            registered,
+            vec![
+                (MASK_RECT_UNIFORM.to_owned(), UniformType::_4f),
+                (MASK_RADII_UNIFORM.to_owned(), UniformType::_4f),
+                (MASK_SIZE_UNIFORM.to_owned(), UniformType::_2f),
+            ]
         );
     }
 
