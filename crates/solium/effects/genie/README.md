@@ -6,6 +6,11 @@ way in rather than shrinking. Played backwards, the same file draws a window
 out of its target. It is a geometry effect, a `mesh` and nothing else: it
 moves the window's picture and leaves its pixels as they are.
 
+Nothing plays a geometry folder yet: the genie on `super+m` and in the
+Developer tweaks is still drawn by the Rust genie this file is held to
+(below), until `sol.present` names folders. What follows is what the
+folder does once it is played.
+
 | Param | Default | What it does |
 |---|---|---|
 | `spread` | `1.4` | how much of the window is in motion at once: 0 or more. At 0 the window is pulled in rigidly; a larger one starts the far edge later, drawing the tail out behind the lead |
@@ -36,5 +41,6 @@ agree within 10⁻⁹ of a pixel. The effects crate's preview page
 the oracle, so the shape it shows is the shape this file draws.
 
 To change it, copy this folder to `~/.config/solium/effects/genie/`: your
-copy is used in its place, everywhere that names `genie`. `solium --check
-~/.config/solium/effects/genie` checks your copy without starting anything.
+copy is used in its place wherever an effect named `genie` is played.
+`solium --check ~/.config/solium/effects/genie` checks your copy without
+starting anything.
