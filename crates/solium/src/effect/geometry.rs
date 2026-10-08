@@ -303,7 +303,8 @@ pub(crate) fn turned(grid: GridSpec, axis: Axis) -> (u32, u32) {
 /// The side of `from` that `to`'s centre lies on, for `axis = "auto"`,
 /// picked once when a flight starts: the larger of the two offsets, each
 /// over the window's half-size; vertical on a tie; `down` when the target's
-/// centre is inside. `tests::auto_picks_the_side_the_target_lies_on`.
+/// centre is inside, the window's edge included.
+/// `tests::auto_picks_the_side_the_target_lies_on`.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "Task 28's sol.present resolves auto through it")
@@ -989,6 +990,12 @@ pub(crate) mod tests {
         assert_eq!(at(1500.0, 195.0), Axis::Right);
         assert_eq!(at(-900.0, 195.0), Axis::Left);
         assert_eq!(at(295.0, 195.0), Axis::Down, "inside");
+        // Inside but off the centre: the target's centre (300, 120) is 0.8
+        // of the half-height above, up by the offsets alone.
+        assert_eq!(at(295.0, 115.0), Axis::Down, "inside, above the centre");
+        // On the window's top-left corner (dx = dy = −1): the edge counts as
+        // inside, or the tie would make it up.
+        assert_eq!(at(95.0, 95.0), Axis::Down, "on the top-left corner, inside");
         assert_eq!(
             at(495.0, 295.0),
             Axis::Down,
