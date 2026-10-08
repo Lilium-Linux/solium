@@ -449,6 +449,10 @@ pub(crate) fn run() -> Result<()> {
     } else {
         OutputDamageTracker::from_output(&output)
     };
+    // Which of the frames it records the window shows: a captured one is
+    // drawn and not shown, and the window's buffer ages count only those
+    // shown. See `crate::ages`.
+    let mut ages = crate::ages::Ages::default();
     // Where each monitor sits in the global space. Refreshed every frame rather
     // than held, because `super+shift+r` can rearrange them.
     let mut screens: Vec<Rectangle<i32, smithay::utils::Logical>> = Vec::new();
@@ -721,10 +725,16 @@ pub(crate) fn run() -> Result<()> {
         // damage, which is the one thing a lock screen may never do. A locked
         // screen is static, so the whole cost of this is a full redraw on the
         // handful of frames a lock screen ever draws.
+        //
+        // **In the tracker's frames, not the window's.** The window counts
+        // the frames it was shown, and a captured frame is drawn and never
+        // shown, so its age handed straight over leaves out a frame of damage:
+        // the strip a moving window uncovered in it stays where its edge was
+        // (#235, #179). `ages::tests::a_frame_drawn_and_not_shown_leaves_no_stale_strip`.
         let age = if state.lock.is_some() || changing {
             0
         } else {
-            backend.buffer_age().unwrap_or(0)
+            ages.for_tracker(backend.buffer_age().unwrap_or(0))
         };
 
         // Before the frame is decided: a drag that moved since the last one is
@@ -833,13 +843,13 @@ pub(crate) fn run() -> Result<()> {
         // before the guard, so that acquired a buffer on every idle frame and
         // threw it away without ever submitting it. The host's EGL surface ends
         // up in a state it complains about at sixty errors a second.
-        let (rendered, captured) = if !wanted {
-            (false, false)
+        let (rendered, captured, failed) = if !wanted {
+            (false, false, false)
         } else {
             match backend.bind() {
                 Err(err) => {
                     tracing::warn!(?err, "could not bind the backend buffer, skipping frame");
-                    (false, false)
+                    (false, false, false)
                 }
                 Ok((renderer, mut framebuffer)) => {
                     // Every window reaches the screen through the presentation
@@ -1008,7 +1018,7 @@ pub(crate) fn run() -> Result<()> {
                         };
                     }
 
-                    (result.is_ok() && damaged, captured)
+                    (result.is_ok() && damaged, captured, result.is_err())
                 }
             }
         };
@@ -1016,7 +1026,8 @@ pub(crate) fn run() -> Result<()> {
         // Reading the framebuffer back invalidates the bind, so a captured
         // frame is not presented. One frame of a 60 Hz window is not visible,
         // and attempting the submit anyway costs an EGL surface reallocation
-        // that fails.
+        // that fails. The damage tracker has recorded it all the same, which
+        // is what `ages` is told below.
         // Presentation feedback, nested.
         //
         // A compositor inside another compositor cannot know when the host
@@ -1051,7 +1062,7 @@ pub(crate) fn run() -> Result<()> {
         // to the host. Measured under the same phase so the two backends read
         // the same way, with the caveat in `dev/README.md` that there is no
         // page flip here and the host may or may not block us.
-        if rendered && !captured {
+        let shown = if rendered && !captured {
             let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
             match backend.submit(Some(&[damage])) {
                 // Handed to the host: as far as a nested compositor can see,
@@ -1078,9 +1089,24 @@ pub(crate) fn run() -> Result<()> {
                             Step::Draw | Step::Darken | Step::Rest => {}
                         }
                     }
+                    true
                 }
-                Err(err) => tracing::warn!(?err, "submit failed"),
+                Err(err) => {
+                    tracing::warn!(?err, "submit failed");
+                    false
+                }
             }
+        } else {
+            false
+        };
+        // Every frame the tracker recorded, and whether the window was shown
+        // it: a capture, or a submit that failed, was not. A render that
+        // failed reset the tracker, which keeps nothing old after it.
+        // `ages::tests::a_frame_drawn_and_not_shown_leaves_no_stale_strip`.
+        if rendered {
+            ages.recorded(shown);
+        } else if failed {
+            ages.forget();
         }
 
         let wall = std::time::SystemTime::now()
