@@ -27,6 +27,24 @@ pub const RESERVED: [&str; 15] = [
     "bleed",
 ];
 
+/// The fields of a `mesh`'s `t` the engine writes: a geometry effect's
+/// params share `t` with them, so none may take one of these names
+/// (`tests::names_inputs_and_defaults_are_checked`).
+pub const T_FIELDS: [&str; 12] = [
+    "progress",
+    "clamped",
+    "direction",
+    "axis",
+    "seed",
+    "scale",
+    "cols",
+    "rows",
+    "from",
+    "to",
+    "monitor",
+    "part",
+];
+
 /// The inputs the engine has, besides `state:<name>`.
 pub const INPUTS: [&str; 4] = ["self", "backdrop", "shape", "old"];
 
@@ -183,6 +201,11 @@ impl EffectSpec {
             if !is_identifier(name) {
                 return Err(format!(
                     "param `{name}`: a name is lower-case letters, digits and `_`"
+                ));
+            }
+            if self.mesh && T_FIELDS.contains(&name.as_str()) {
+                return Err(format!(
+                    "a param may not be called `{name}`: `t.{name}` is the engine's"
                 ));
             }
             if let Some(default) = number(&param.default)
@@ -456,6 +479,20 @@ mod tests {
         );
         assert!(with("Passes").check().is_err(), "not a GLSL-safe name");
         assert!(with("passes").check().is_ok());
+        let geometry = |name: &str| EffectSpec {
+            frag: None,
+            mesh: true,
+            ..with(name)
+        };
+        assert!(
+            geometry("progress").check().is_err(),
+            "a mesh's `t.progress` is the engine's"
+        );
+        assert!(geometry("spread").check().is_ok());
+        assert!(
+            with("progress").check().is_ok(),
+            "an effect with no mesh has no `t`"
+        );
         assert!(
             EffectSpec {
                 inputs: vec!["backdrop".to_owned(), "state:distance".to_owned()],
