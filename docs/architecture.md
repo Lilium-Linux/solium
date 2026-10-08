@@ -361,9 +361,18 @@ state it reads was made again. The effects' GPU time is one region a run
 phase, `gpu_effects_us` in the trace; wirecheck runs plans on their own
 (cases 12d to 12g and 12l to 12q).
 
-`prepare` runs the chains once every self input is drawn or kept, on one
-bound carrier (`render::run_slots`, through a `render::Runner`). A self
-chain runs, its part's capture as its first input, only when that capture
+`prepare` goes in phases (`render::effect_phases`, over a `render::Phases`
+the tests drive with no GPU): compile what is pending; resolve the slots;
+capture and run every part but a whole pane; capture a whole pane, whose
+capture walks the results the first phase made and never its own, and run
+its chains; and only then build and draw the warps, so a warped window's
+capture walks the same slots as the flat path, in the same order, with this
+pass's results in them. A blurred window stays blurred while it tilts or
+genies, and a chain that re-ran makes the warp's capture stale while a result
+placed again does not (`dev/effects-check.sh tilt`). The store and the pool
+are swept once, at the end. Each run phase binds one carrier, and none when
+none of its chains is wanted (`render::run_slots`, through a
+`render::Runner`). A self chain runs, its part's capture as its first input, only when that capture
 was redrawn this pass, its params changed or its padded box's size did
 (`effect::store::SlotState::needs_run`); otherwise its last result is placed
 again with the same id and commit, so nothing under it is damaged. With
@@ -371,8 +380,7 @@ again with the same id and commit, so nothing under it is damaged. With
 pass. A run's result is the slot's `Ready`, drawn through the masked program.
 A chain that fails is latched and said once, and its part is drawn as if no
 rule named it; one whose program has not compiled yet is drawn the same for
-that pass and latches nothing. A whole pane's self chain runs in a phase of
-its own after the rest. `effect_runs` in the trace counts the runs. A chain
+that pass and latches nothing. `effect_runs` in the trace counts the runs. A chain
 that reads nothing of the frame (T0, `Tier::Generated`: only `shape` and its
 states) captures nothing: its first input is the pool's one 1x1 transparent
 texture (`pool::Pool::blank`), its input never counts as redrawn
