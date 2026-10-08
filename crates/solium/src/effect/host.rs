@@ -356,6 +356,11 @@ struct Versions<P> {
     /// (`tests::an_effect_changed_under_its_user_gives_its_old_program_back`).
     holds: Vec<u64>,
     pending: Option<Loaded<P>>,
+    /// [`Host::revive`] gave the running version up: its folder changed
+    /// since it loaded, or loading it again failed. It is not tried again,
+    /// and its folder not read, until a reload or a new version
+    /// (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`).
+    given_up: bool,
 }
 
 /// Every effect the configuration wants, loaded GPU-free at config load and
@@ -632,12 +637,14 @@ impl<P: Clone> Host<P> {
             return false;
         };
         let hash = folder_hash(&dir);
+        // A running version its budget stopped is read again even when its
+        // folder is unchanged, so a reload rebuilds what `revive` gave up
+        // (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`).
         if let Some(slot) = self.slots.get(name)
             && slot.pending.is_none()
-            && slot
-                .current
-                .as_ref()
-                .is_some_and(|current| current.hash() == hash && current.dir() == dir)
+            && slot.current.as_ref().is_some_and(|current| {
+                current.hash() == hash && current.dir() == dir && !current.sandbox().poisoned()
+            })
         {
             return false;
         }
@@ -674,6 +681,7 @@ impl<P: Clone> Host<P> {
                     current: None,
                     holds: Vec::new(),
                     pending: None,
+                    given_up: false,
                 });
                 slot.pending = Some(loaded);
                 self.replace_problems(name, Vec::new());
@@ -1053,9 +1061,19 @@ impl<P: Clone> Host<P> {
     /// unchanged, keeping its programs, its `needs` and its `EffectId`, so
     /// only the panes whose call came in the pass that overran fade. A folder
     /// changed since it loaded waits for the reload that reads it.
-    /// `geometry::tests::a_stopped_state_is_rebuilt_after_the_frame`.
+    /// `geometry::tests::a_stopped_state_is_rebuilt_after_the_frame`,
+    /// `tests::a_stopped_state_whose_folder_changed_waits_for_the_reload`.
     pub(crate) fn revive(&mut self) {
+        self.revive_with(Loaded::<P>::load);
+    }
+
+    /// [`Self::revive`], loading a folder with `load`.
+    fn revive_with(&mut self, load: impl Fn(&str, &Path) -> Result<Loaded<P>, Problem>) {
+        let mut problems = Vec::new();
         for slot in self.slots.values_mut() {
+            if slot.given_up {
+                continue;
+            }
             let Some(current) = slot
                 .current
                 .as_ref()
@@ -1063,14 +1081,34 @@ impl<P: Clone> Host<P> {
             else {
                 continue;
             };
+            #[cfg(test)]
+            {
+                self.loads += 1;
+            }
+            // Read before, so a changed folder's Lua is not run, and after,
+            // so a save during the load is not swapped in under the old id
+            // (`tests::a_stopped_state_whose_folder_changed_waits_for_the_reload`,
+            // `tests::a_folder_saved_during_a_rebuild_is_not_swapped_in`).
             if folder_hash(current.dir()) != current.hash() {
+                slot.given_up = true;
                 continue;
             }
-            if let Ok(mut fresh) = Loaded::<P>::load(current.name(), current.dir()) {
-                fresh.needs.clone_from(&current.needs);
-                slot.current = Some(Rc::new(fresh));
+            match load(current.name(), current.dir()) {
+                Ok(mut fresh) if fresh.hash() == current.hash() => {
+                    // `tests::a_rebuilt_state_keeps_what_its_version_needs`.
+                    fresh.needs.clone_from(&current.needs);
+                    slot.current = Some(Rc::new(fresh));
+                }
+                Ok(_) => slot.given_up = true,
+                // A rebuild that fails is said, once, and not tried again
+                // every frame (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`).
+                Err(problem) => {
+                    slot.given_up = true;
+                    problems.push(problem);
+                }
             }
         }
+        self.add_problems(problems);
     }
 
     /// The version of `name` that runs, if one compiled.
@@ -1242,6 +1280,7 @@ fn swap_in<P>(slot: &mut Versions<P>, pending: Loaded<P>) {
     slot.generation += 1;
     slot.holds = pending.needs.clone();
     slot.current = Some(Rc::new(pending));
+    slot.given_up = false;
 }
 
 /// A geometry file held to its rest at its defaults (`geometry::at_rest`),
@@ -2218,6 +2257,147 @@ pub(crate) mod tests {
         assert!(
             stopped.message.contains("100 ms its checks at load have"),
             "{stopped:?}"
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// A host wanting `spin` (`geometry::tests::SPIN`) in `place`, its
+    /// running version stopped by its budget: what `revive` is for.
+    fn stopped_in(place: &Path) -> (super::Host<u32>, std::rc::Rc<super::Loaded<u32>>) {
+        let mut host = host_with(place);
+        host.want("rules", ["spin".to_owned()]);
+        host.compile_pending(&mut Counting::default());
+        let stopped = host.effect("spin").expect("current");
+        stopped
+            .sandbox()
+            .lua()
+            .globals()
+            .set("spin", true)
+            .expect("set");
+        assert_eq!(
+            crate::effect::geometry::mesh(
+                stopped.sandbox(),
+                &crate::effect::geometry::tests::ask(),
+                1,
+                1
+            ),
+            Err(super::Refusal::Budget)
+        );
+        (host, stopped)
+    }
+
+    /// **A stopped state whose folder changed waits for the reload** (Ruling
+    /// 4): the changed folder's Lua is not run, nothing is swapped in under
+    /// the old version's id, and the reload reads it as a new version.
+    #[test]
+    fn a_stopped_state_whose_folder_changed_waits_for_the_reload() {
+        let place = scratch("revive-changed");
+        let dir = folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
+        let (mut host, _stopped) = stopped_in(&place);
+        let id = host.id("spin");
+        std::fs::write(dir.join("effect.lua"), crate::effect::geometry::tests::FLAT)
+            .expect("a save");
+        let read = std::cell::Cell::new(0);
+        host.revive_with(|name, dir| {
+            read.set(read.get() + 1);
+            super::Loaded::load(name, dir)
+        });
+        assert_eq!(read.get(), 0, "a changed folder's Lua was run");
+        assert!(
+            host.effect("spin").expect("loaded").sandbox().poisoned(),
+            "a changed folder was swapped in under the old version"
+        );
+        assert_eq!(host.id("spin"), id);
+        host.reload();
+        assert!(!host.effect("spin").expect("loaded").sandbox().poisoned());
+        assert_ne!(host.id("spin"), id, "the reload's is a new version");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A folder saved during a rebuild is not swapped in**: the hash is
+    /// read again after the load, so what the load read is the folder the
+    /// version was, or nothing changes (here the load reads another folder,
+    /// as a save between the two reads would make it).
+    #[test]
+    fn a_folder_saved_during_a_rebuild_is_not_swapped_in() {
+        let place = scratch("revive-saved");
+        folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
+        let other = folder(&place, "other", crate::effect::geometry::tests::FLAT, &[]);
+        let (mut host, _stopped) = stopped_in(&place);
+        host.revive_with(|name, _| super::Loaded::load(name, &other));
+        assert!(
+            host.effect("spin").expect("loaded").sandbox().poisoned(),
+            "a load of other files was swapped in"
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A rebuilt state keeps what its version needs** (Ruling 4): its
+    /// programs stay its own, and `needs` says which.
+    #[test]
+    fn a_rebuilt_state_keeps_what_its_version_needs() {
+        let place = scratch("revive-needs");
+        let lua = crate::effect::geometry::tests::SPIN
+            .replace("grid = { 1, 1 },", "grid = { 1, 1 }, frag = 'effect.frag',");
+        folder(
+            &place,
+            "spin",
+            &lua,
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let (mut host, stopped) = stopped_in(&place);
+        assert!(!stopped.needs.is_empty(), "its frag is a program it needs");
+        host.revive();
+        let fresh = host.effect("spin").expect("loaded");
+        assert!(!fresh.sandbox().poisoned());
+        assert_eq!(fresh.needs, stopped.needs);
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A rebuild that fails is a problem, and waits for a reload**: it is
+    /// named on the overlay once, the next frame's `revive` reads nothing,
+    /// and a reload of the unchanged folder builds it again and takes the
+    /// problem away.
+    #[test]
+    fn a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload() {
+        let place = scratch("revive-fails");
+        folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
+        let (mut host, _stopped) = stopped_in(&place);
+        let failed = "it did not load again";
+        host.revive_with(|name, dir| {
+            Err(super::Problem::error(
+                name,
+                &dir.join("effect.lua"),
+                None,
+                failed.to_owned(),
+            ))
+        });
+        assert!(
+            host.problems()
+                .iter()
+                .any(|each| each.effect == "spin" && each.message == failed),
+            "{:?}",
+            host.problems()
+        );
+        assert!(host.effect("spin").expect("loaded").sandbox().poisoned());
+        let before = host.loads;
+        host.revive();
+        assert_eq!(
+            host.loads, before,
+            "a failed rebuild was tried again before a reload"
+        );
+        host.reload();
+        assert!(
+            !host.effect("spin").expect("loaded").sandbox().poisoned(),
+            "a reload of the unchanged folder left it stopped"
+        );
+        assert!(
+            host.problems().iter().all(|each| each.message != failed),
+            "{:?}",
+            host.problems()
         );
         let _ = std::fs::remove_dir_all(place);
     }
