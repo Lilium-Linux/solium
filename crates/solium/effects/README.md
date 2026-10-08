@@ -410,8 +410,11 @@ refused, and the window is not drawn through it.
 
 When the effect loads, `mesh` is called at progress 0 and 1, on all four
 axes, arriving, leaving and resizing, and at progress 0 it must put every
-point exactly where the window is, within 10⁻⁹ of a pixel: an effect starts
-and ends with the window at rest. These 24 calls have `load_ms` between them,
+point exactly where the window is, within 10⁻⁹ of a pixel, over the window
+and over a `t.part` inside it: an effect starts and ends with the window at
+rest, and a grid that ignores `t.part` (placing point `(c, r)` at `c / cols`
+rather than `sol_grid`'s) would squeeze a popup past the window's edge onto
+it. These 36 calls have `load_ms` between them,
 and the fastest must take no more than the 2 ms a frame gives, or every
 frame would stop it. One that fails any of this is refused, and named on
 the overlay and by `solium --check` at the line its `mesh` is on.

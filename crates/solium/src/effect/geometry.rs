@@ -189,23 +189,42 @@ fn checked(
     Ok(points)
 }
 
+/// A part of the window the checks at load draw at rest beside the whole of
+/// it: in from each edge by a different amount, so a file that places
+/// points from `c / cols` instead of the part, or reads one side's bound for
+/// another's, moves them, and would squeeze a part reaching past the window
+/// (its popups) onto it
+/// (`tests::a_file_that_ignores_its_part_is_refused_at_load`). Inside the
+/// window and not past it, because at progress 0 a geometry rests only
+/// there: the genie has begun to pull what lies beyond its leading edge (as
+/// the Rust genie it is held to has). A sample, as the rectangles beside it
+/// are, not a behaviour.
+const INNER: UnitRect = UnitRect {
+    u0: 0.25,
+    v0: 0.125,
+    u1: 0.875,
+    v1: 0.5,
+};
+
 /// The load-time contract: at progress 0 the file draws the window exactly
 /// where it is, on all four axes and in every direction (+1 arriving, −1
-/// leaving, 0 resizing), within 1e-9; at progress 1 it writes a valid grid.
+/// leaving, 0 resizing), within 1e-9, over the window and over a part of it
+/// ([`INNER`]); at progress 1 it writes a valid grid.
 /// `tests::a_geometry_file_that_moves_the_window_at_progress_zero_is_refused_at_load`,
 /// `tests::a_file_that_moves_the_window_arriving_is_refused_at_load`,
 /// `tests::a_file_that_moves_the_window_resizing_is_refused_at_load`,
 /// `tests::a_file_that_moves_the_window_on_one_axis_is_refused_at_load`,
-/// `tests::a_file_whose_grid_at_progress_one_is_not_finite_is_refused_at_load`.
+/// `tests::a_file_whose_grid_at_progress_one_is_not_finite_is_refused_at_load`,
+/// `tests::a_file_that_ignores_its_part_is_refused_at_load`.
 ///
-/// Its 24 calls share one load budget, the sandbox's
+/// Its 36 calls share one load budget, the sandbox's
 /// `effects.sandbox.load_ms` (100 ms by default), so a load holds the thread
 /// no longer than one load-time call
 /// (`tests::the_checks_at_load_share_one_budget`,
 /// `tests::the_checks_at_load_read_the_configured_load_budget`); and a version whose
 /// fastest call is longer than a frame gives a `mesh` is refused, since
 /// every frame would stop it. The fastest, because one call is slow when
-/// the machine is busy, and 24 are slow only when the file is
+/// the machine is busy, and 36 are slow only when the file is
 /// (`tests::a_mesh_too_slow_for_a_frame_is_refused_at_load`).
 pub(crate) fn at_rest(
     sandbox: &Sandbox,
@@ -233,22 +252,26 @@ pub(crate) fn at_rest(
                 scale: 1.0,
                 params,
             };
-            let points = clock.call(sandbox, &ask, cols, rows)?;
-            let mut at = points.as_chunks::<2>().0.iter();
-            for r in 0..=rows {
-                for c in 0..=cols {
-                    let (x, y) = from.at(
-                        f64::from(c) / f64::from(cols),
-                        f64::from(r) / f64::from(rows),
-                    );
-                    let Some(&[px, py]) = at.next() else {
-                        return Err(Refusal::MovesAtRest);
-                    };
-                    if (px - x).abs() > 1e-9 || (py - y).abs() > 1e-9 {
-                        return Err(Refusal::MovesAtRest);
+            for part in [UnitRect::WHOLE, INNER] {
+                ask.part = part;
+                let points = clock.call(sandbox, &ask, cols, rows)?;
+                let mut at = points.as_chunks::<2>().0.iter();
+                for r in 0..=rows {
+                    for c in 0..=cols {
+                        let (x, y) = from.at(
+                            part.u0 + (part.u1 - part.u0) * (f64::from(c) / f64::from(cols)),
+                            part.v0 + (part.v1 - part.v0) * (f64::from(r) / f64::from(rows)),
+                        );
+                        let Some(&[px, py]) = at.next() else {
+                            return Err(Refusal::MovesAtRest);
+                        };
+                        if (px - x).abs() > 1e-9 || (py - y).abs() > 1e-9 {
+                            return Err(Refusal::MovesAtRest);
+                        }
                     }
                 }
             }
+            ask.part = UnitRect::WHOLE;
             ask.progress = 1.0;
             ask.clamped = 1.0;
             clock.call(sandbox, &ask, cols, rows)?;
@@ -656,6 +679,39 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(place);
     }
 
+    /// **A file that ignores its part is refused at load**: one that places
+    /// point `(c, r)` at the window's `(c / cols, r / rows)`, not at
+    /// `sol_grid`'s, draws the whole window right and would squeeze a part
+    /// that reaches past it (its popups) onto the window; so the checks at
+    /// load draw a part of the window at rest too.
+    #[test]
+    fn a_file_that_ignores_its_part_is_refused_at_load() {
+        let lua = "return { api = 1, grid = { 2, 2 }, mesh = function(t, cols, rows, out)
+            local n = 0
+            for r = 0, rows do for c = 0, cols do local u, v = c / cols, r / rows
+            out[n + 1], out[n + 2], n = t.from.x + u * t.from.w, t.from.y + v * t.from.h, n + 2 end end end }";
+        let (sandbox, place) = loaded("ignores-part", lua);
+        let whole = Ask {
+            progress: 0.0,
+            clamped: 0.0,
+            ..ask()
+        };
+        let drawn = mesh(&sandbox, &whole, 2, 2).expect("a grid");
+        assert!(
+            (drawn[2] - 300.0).abs() < 1e-9,
+            "the premise: it draws the whole window where it is"
+        );
+        assert_eq!(
+            at_rest(
+                &sandbox,
+                solium_effects::spec::GridSpec::Fixed { cols: 2, rows: 2 },
+                &[]
+            ),
+            Err(Refusal::MovesAtRest)
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
     /// A grid of one cell, as the checks at load are given it.
     const ONE: solium_effects::spec::GridSpec =
         solium_effects::spec::GridSpec::Fixed { cols: 1, rows: 1 };
@@ -808,8 +864,8 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(place);
     }
 
-    /// **The checks at load share one budget**: 24 calls of 20 ms each are
-    /// stopped at the load budget's 100 ms, not run for 480, so a load holds
+    /// **The checks at load share one budget**: 36 calls of 20 ms each are
+    /// stopped at the load budget's 100 ms, not run for 720, so a load holds
     /// the compositor's thread no longer than one load-time call; and since
     /// every call before the stop was too slow for a frame, that is the
     /// refusal.

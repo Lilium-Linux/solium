@@ -420,7 +420,8 @@ and reused every call, so a pass allocates nothing in Lua; what it wrote is
 checked (the count, every number finite, every point inside a box four
 monitors wide and high centred on the pane's) before a vertex of it is
 drawn. At load the file is called at
-progress 0 and 1, on every axis and in every direction, 24 calls sharing one
+progress 0 and 1, on every axis and in every direction, and at rest over a
+part of the window too, 36 calls sharing one
 load budget (`effects.sandbox.load_ms`, 100 ms by default; the sandbox's
 memory is `effects.sandbox.memory_mib`, both in `effect::settings` with the
 engine's other keys), and refused unless it draws the window exactly where it is at
