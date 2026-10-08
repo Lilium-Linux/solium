@@ -158,7 +158,9 @@ pub(crate) struct MeshKey {
     cols: u32,
     rows: u32,
     axis: Axis,
-    direction: i8,
+    /// As it is, not its `signum`, which makes a resize's 0 an open's +1
+    /// (`tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`).
+    direction: u64,
     seed: u64,
     progress: u64,
     from: [u64; 4],
@@ -179,8 +181,6 @@ impl MeshKey {
         rows: u32,
     ) -> Self {
         let rect = |r: Rect| [r.x.to_bits(), r.y.to_bits(), r.w.to_bits(), r.h.to_bits()];
-        #[expect(clippy::cast_possible_truncation, reason = "a direction, -1, 0 or 1")]
-        let direction = ask.direction.signum() as i8;
         Self {
             effect,
             params,
@@ -193,7 +193,7 @@ impl MeshKey {
             cols,
             rows,
             axis: ask.axis,
-            direction,
+            direction: ask.direction.to_bits(),
             seed: ask.seed.to_bits(),
             progress: ask.progress.to_bits(),
             from: rect(ask.from),
@@ -1470,6 +1470,23 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(built, 6);
+        // A direction of 0 (a resize) is not +1 (an open), though `signum`
+        // makes them one: the key holds the direction as it is.
+        for direction in [0.0, 1.0] {
+            let asked = Ask { direction, ..ask() };
+            let key = super::MeshKey::new(
+                crate::effect::host::EffectId::for_test(1),
+                super::Params::default(),
+                &asked,
+                1,
+                1,
+            );
+            let _ = meshes.get_or_build(key, || {
+                built += 1;
+                Ok(grid())
+            });
+        }
+        assert_eq!(built, 8, "a resize's key was an open's");
     }
 
     /// **Params pack up to their limit and lerp only like with like**: a
