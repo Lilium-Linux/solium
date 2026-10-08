@@ -378,13 +378,32 @@ pub(crate) fn paint<E: RenderElement<GlesRenderer>>(
     let mut first = Ok(());
     for element in draw_order(elements) {
         let (source, destination) = (element.src(), element.geometry(Scale::from(scale)));
-        if let Err(err) = element.draw(frame, source, destination, &whole, &[])
+        let Some(damage) = element_damage(size, destination) else {
+            continue;
+        };
+        if let Err(err) = element.draw(frame, source, destination, &[damage], &[])
             && first.is_ok()
         {
             first = Err(err);
         }
     }
     first
+}
+
+/// What of a target of `size` an element drawn at `dst` covers, in the
+/// element's own space, which is how smithay's damage tracker hands `draw`
+/// its damage. The target's own rectangle handed over as it is reads, for
+/// an element whose corner is above and left of the target's -- a slot's
+/// result padded by its reach, a layer grown by its bleed -- as a cut a pad
+/// short at its right and bottom. `None` for an element wholly off the
+/// target. `tests::an_element_past_the_targets_corner_is_drawn_over_all_of_it`.
+fn element_damage(
+    size: Size<i32, Physical>,
+    dst: Rectangle<i32, Physical>,
+) -> Option<Rectangle<i32, Physical>> {
+    let mut covered = Rectangle::from_size(size).intersection(dst)?;
+    covered.loc -= dst.loc;
+    Some(covered)
 }
 
 /// The levels of a mip chain from `base` down to `fit`: halved, rounded up,
@@ -412,6 +431,32 @@ mod tests {
     use smithay::utils::{Physical, Size};
 
     use super::{Alloc, Format, Pool, chain_sizes, draw_order};
+
+    /// **An element whose corner is past the target's is drawn over all of
+    /// the target**: a slot's result padded by its reach sits at minus its
+    /// reach in a warp's capture, and the target's own rectangle handed to
+    /// it as its damage left a strip as wide as the reach undrawn at its
+    /// right and bottom, so a blurred window shrank while it was warped.
+    #[test]
+    fn an_element_past_the_targets_corner_is_drawn_over_all_of_it() {
+        use smithay::utils::Rectangle;
+        let size: Size<i32, Physical> = (100, 80).into();
+        assert_eq!(
+            super::element_damage(size, Rectangle::new((-12, -12).into(), (124, 104).into())),
+            Some(Rectangle::new((12, 12).into(), (100, 80).into())),
+            "a padded result: all of the target, in its own space"
+        );
+        assert_eq!(
+            super::element_damage(size, Rectangle::new((10, 20).into(), (30, 30).into())),
+            Some(Rectangle::from_size((30, 30).into())),
+            "an element inside the target: all of the element"
+        );
+        assert_eq!(
+            super::element_damage(size, Rectangle::new((200, 0).into(), (10, 10).into())),
+            None,
+            "an element off the target: nothing"
+        );
+    }
 
     /// **A capture draws its topmost-first list back to front**, exactly as
     /// the monitor's own flat path does. Pinned directly on `draw_order`
