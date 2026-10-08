@@ -212,7 +212,7 @@
 ---@field progress? number How far into `to`, the mesh's `t.progress`: 1, all the way, when it is left out, which is what one animates towards; 0 is the window where it is. `t.direction` is -1 for a present.
 ---@field seed? number A number in [0, 1) for the mesh's `t.seed`; 0 when it is left out.
 ---@field failed? "flat"|"hide" This present's own: what it draws when its mesh is refused or its folder is missing, the window undeformed or nothing of it; `effects.present.failed`'s when it is left out.
----@field on_reload? "flat"|"keep" This present's own: when its folder is reloaded while it plays, drawn flat for the rest of the move, or on the version it began with; `effects.present.on_reload`'s when it is left out.
+---@field on_reload? "flat"|"keep" This present's own: when a reload finds its folder changed while it plays, drawn flat for the rest of the move, or on the version it began with; a reload that leaves the folder as it was changes nothing. `effects.present.on_reload`'s when it is left out.
 ---@field spread? number The genie's param: how much of the window is in motion at once. 0 is rigid.
 
 ---Where `sol.place` puts a window.
@@ -499,7 +499,7 @@ function sol.problems() end
 ---@field rules? sol.Rule[] The rules; left out, none.
 ---@field sandbox? { load_ms?: number, memory_mib?: integer } What an effect's own Lua may spend as it loads: `load_ms` for each call, shared by the checks a `mesh` is put through at load (100 by default, 10 to 5000), and `memory_mib` of memory (16 by default, 1 to 512). A folder past either is named by `sol.problems()` and not loaded; changing either loads every effect again.
 ---@field limits? { params?: integer } How many numbers a geometry or a pixels effect's params may be once packed (8 by default, 1 to 64); one with more is named by `sol.problems()`, never cut.
----@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when its folder is reloaded while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with). A deform may say either for itself.
+---@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when a reload finds its folder changed while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with; a reload that leaves the folder as it was changes nothing). A deform may say either for itself.
 
 ---Which effects go where, all at once: a set with a broken rule is refused
 ---whole, its errors listed by `sol.problems()`, and the rules that ran stay.

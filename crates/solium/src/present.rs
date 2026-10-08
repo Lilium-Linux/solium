@@ -860,6 +860,27 @@ pub(crate) fn presented(pane: &Pane) -> bool {
     .unwrap_or(false)
 }
 
+/// The geometry effects a pane's transform still draws: its start's while
+/// it is under way (a present clearing a genie draws the genie back out),
+/// and its target's (held there once it lands). What a reload keeps wanted
+/// (`state::tests::real_client::a_reload_that_leaves_a_presents_folder_unchanged_keeps_it`).
+pub(crate) fn geometries(pane: &Pane, now: Duration) -> Vec<Geometry> {
+    with_slot(pane, |slot| {
+        slot.map(|transform| {
+            let start = (!transform.finished(now))
+                .then_some(transform.from.deform)
+                .flatten();
+            start
+                .into_iter()
+                .chain(transform.to.deform)
+                .map(|deform| deform.effect)
+                .collect()
+        })
+    })
+    .flatten()
+    .unwrap_or_default()
+}
+
 /// Where a pane's transform is headed, for a test to read what a present
 /// asked for.
 #[cfg(test)]

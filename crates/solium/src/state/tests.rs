@@ -10367,6 +10367,54 @@ end)"#,
         );
     }
 
+    /// The reload `super+shift+r` makes (`Solium::reload_from`), of a
+    /// configuration that names no effect, written beside the fixture's
+    /// scratch effects.
+    fn reload(fixture: &mut Fixture) {
+        let place = fixture.scratch.clone().expect("a scratch folder");
+        let entry = place.join("init.lua");
+        std::fs::write(&entry, "sol.pane('none')\n").expect("an init.lua");
+        fixture.state.reload_from(&entry);
+    }
+
+    /// **A reload that leaves a present's folder unchanged keeps it**
+    /// (Ruling 7: an unrelated reload rebuilds nothing): a genie under way
+    /// under `on_reload = "flat"` still draws from its folder, through its
+    /// grid and under the same id, after a reload that did not edit it, so
+    /// only an edit makes it follow `on_reload`
+    /// (`a_reload_mid_present_follows_on_reload`).
+    #[test]
+    fn a_reload_that_leaves_a_presents_folder_unchanged_keeps_it() {
+        fx2_fixture!(fixture, "present-unchanged");
+        let (pane, _) = one_window(&mut fixture);
+        let _ = scratch_genie(&mut fixture);
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'genie', progress = 0.5, on_reload = 'flat', to = {to} }}"),
+        );
+        let id = geometry_of(&fixture, pane).map(|geometry| geometry.effect);
+        assert_eq!(id, fixture.state.effects.id("genie"), "the premise");
+        reload(&mut fixture);
+        assert!(
+            crate::render::present_source(&fixture.state, pane).is_some(),
+            "a reload that did not change the folder ended the present"
+        );
+        assert_eq!(
+            fixture.state.effects.id("genie"),
+            id,
+            "the unchanged folder lost its id"
+        );
+        assert!(
+            matches!(
+                planned(&mut fixture, pane),
+                crate::render::Planned::Warp { grid: Some(_), .. }
+            ),
+            "not drawn through its grid after the reload"
+        );
+    }
+
     /// **A reload mid-present follows `on_reload`**: with the default
     /// `"flat"` a present whose folder changed has no source for its grid,
     /// and is drawn flat; with `"keep"` its grid comes from the version it
@@ -10392,7 +10440,7 @@ end)"#,
             let file = folder.join("effect.lua");
             let edited = std::fs::read_to_string(&file).expect("read") + "-- edited\n";
             std::fs::write(&file, edited).expect("edited");
-            fixture.state.effects.reload();
+            reload(&mut fixture);
             assert_eq!(
                 crate::render::present_source(&fixture.state, pane).is_some(),
                 kept,

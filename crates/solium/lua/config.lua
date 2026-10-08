@@ -1386,9 +1386,10 @@ local defaults = {
         limits = { params = 8 },
         -- What a `sol.present` deform draws when its mesh is refused or its
         -- folder is missing (`failed`: "flat", the window undeformed, or
-        -- "hide"), and when its folder is reloaded mid-flight (`on_reload`:
-        -- "flat", or "keep", the version it began with). A deform may say
-        -- either for itself.
+        -- "hide"), and when a reload finds its folder changed mid-flight
+        -- (`on_reload`: "flat", or "keep", the version it began with); a
+        -- reload that leaves the folder as it was changes nothing. A deform
+        -- may say either for itself.
         present = { failed = "flat", on_reload = "flat" },
     },
 

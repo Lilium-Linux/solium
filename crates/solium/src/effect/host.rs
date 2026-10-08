@@ -598,13 +598,39 @@ impl<P: Clone> Host<P> {
     /// its bindings name them again as they run.
     /// `tests::a_failed_content_is_not_retried_until_it_changes_or_a_reload`,
     /// `tests::present_wants_accumulate_until_a_reload`.
+    #[cfg(test)]
     pub(crate) fn reload(&mut self) {
+        self.reload_keeping(Vec::new());
+    }
+
+    /// [`Self::reload`], `sol.present` keeping `live`, the names a geometry
+    /// still draws with: an unchanged one keeps its version and its id
+    /// (Ruling 7: an unrelated reload rebuilds nothing), and only one whose
+    /// folder changed ends a present under way, by its `on_reload`.
+    /// `tests::a_reload_keeps_what_a_live_present_names`,
+    /// `state::tests::real_client::a_reload_that_leaves_a_presents_folder_unchanged_keeps_it`.
+    pub(crate) fn reload_keeping(&mut self, live: impl IntoIterator<Item = String>) {
         self.programs.retain(|_, program| program.is_ok());
-        self.wanted.remove("present");
+        let live: BTreeSet<String> = live.into_iter().collect();
+        if live.is_empty() {
+            self.wanted.remove("present");
+        } else {
+            self.wanted.insert("present", live);
+        }
         // And what binding them said (`present:<name>`), for the same reason
         // (`tests::present_wants_accumulate_until_a_reload`).
         self.clear_problems_prefixed("present:");
         self.settle_wanted(true);
+    }
+
+    /// The name of the effect an id is a version of, whichever version:
+    /// what a reload keeps wanted for a geometry under way.
+    /// `tests::a_reload_keeps_what_a_live_present_names`.
+    pub(crate) fn name_of(&self, id: EffectId) -> Option<&str> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.index == id.index)
+            .map(|(name, _)| name.as_str())
     }
 
     fn settle_wanted(&mut self, again: bool) {
@@ -2567,6 +2593,37 @@ pub(crate) mod tests {
                 .all(|each| each.effect != "present:a"),
             "a reload keeps what binding a present said: {:?}",
             host.problems()
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A reload keeps what a live present names**: of two names presents
+    /// wanted, the one a geometry under way still names stays, with its id
+    /// while its folder is unchanged, and the other goes; once that folder
+    /// changes, a reload gives it a new version, and the old id answers
+    /// nothing.
+    #[test]
+    fn a_reload_keeps_what_a_live_present_names() {
+        let flat = crate::effect::geometry::tests::FLAT;
+        let place = scratch("present-live");
+        folder(&place, "a", flat, &[]);
+        folder(&place, "b", flat, &[]);
+        let mut host = host_with(&place);
+        host.add_wanted("present", ["a".to_owned(), "b".to_owned()]);
+        let id = host.id("a").expect("a geometry file is current at once");
+        assert_eq!(host.name_of(id), Some("a"));
+        host.reload_keeping(["a".to_owned()]);
+        assert_eq!(
+            host.id("a"),
+            Some(id),
+            "an unchanged folder a present names lost its id"
+        );
+        assert!(host.effect("b").is_none(), "a name nothing draws was kept");
+        std::fs::write(place.join("a/effect.lua"), format!("{flat}\n-- edited\n")).expect("edited");
+        host.reload_keeping(["a".to_owned()]);
+        assert!(
+            host.id("a").is_some_and(|now| now != id) && host.by_id(id).is_none(),
+            "a changed folder kept the version a present began with"
         );
         let _ = std::fs::remove_dir_all(place);
     }

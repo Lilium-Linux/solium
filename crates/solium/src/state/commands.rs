@@ -909,7 +909,19 @@ impl Solium {
                 // Before the scripts start, so the rules their `sol.effects`
                 // hands over bind against the folders as they now are
                 // (`a_reload_binds_the_rules_against_the_folders_it_read`).
-                self.effects.reload();
+                // A `sol.present` geometry under way keeps its name wanted,
+                // so an unchanged folder keeps its version and its id, and
+                // only a changed one ends the present by its `on_reload`
+                // (`tests::real_client::a_reload_that_leaves_a_presents_folder_unchanged_keeps_it`).
+                let now = self.clock.now();
+                let live: Vec<String> = self
+                    .panes
+                    .iter()
+                    .flat_map(|pane| present::geometries(pane, now))
+                    .filter_map(|geometry| self.effects.name_of(geometry.effect))
+                    .map(str::to_owned)
+                    .collect();
+                self.effects.reload_keeping(live);
                 // The style's rules, read and bound again against the folders
                 // as they now are, for a configuration that does not name its
                 // style again
