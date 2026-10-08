@@ -69,13 +69,16 @@ pub(crate) fn state_of(lua: &Lua) -> Option<State> {
     (read.is_ok() && !raw.is_null()).then_some(State(raw))
 }
 
-/// A watched call: whose thread, and when it is due.
+/// A watched call: whose thread, and when it is sent its stop next.
 #[derive(Debug)]
 struct Flight {
     id: u64,
     thread: libc::pthread_t,
-    due: Instant,
-    sent: bool,
+    /// Its due, and then, while it runs on, a stop again every `every`: a
+    /// stop can be lost, its hook taken off by a stale signal's
+    /// (`tests::a_call_whose_stop_was_lost_is_sent_another`).
+    next: Instant,
+    every: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -150,29 +153,21 @@ impl Clock {
         self.flights.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The watchdog's loop: send each call past its due the signal, once,
-    /// and sleep until the next due or the next call.
+    /// The watchdog's loop: send each call past its due the signal, and
+    /// again every `every` while it runs on, and sleep until the next send
+    /// or the next call.
     fn watch(&self) {
         let mut flights = self.lock();
         loop {
             let now = Instant::now();
-            for flight in flights
-                .calls
-                .iter_mut()
-                .filter(|flight| !flight.sent && flight.due <= now)
-            {
+            for flight in flights.calls.iter_mut().filter(|flight| flight.next <= now) {
                 // SAFETY: a flight's thread is inside its call, and leaves
                 // this list under this lock before the call returns, so it
                 // is alive.
                 let _ = unsafe { libc::pthread_kill(flight.thread, self.signal) };
-                flight.sent = true;
+                flight.next = now + flight.every;
             }
-            flights.wakes = flights
-                .calls
-                .iter()
-                .filter(|flight| !flight.sent)
-                .map(|flight| flight.due)
-                .min();
+            flights.wakes = flights.calls.iter().map(|flight| flight.next).min();
             flights = match flights.wakes {
                 None => self
                     .wake
@@ -188,10 +183,11 @@ impl Clock {
         }
     }
 
-    /// Put a call due at `due`, on this thread, in the watchdog's list, and
-    /// wake the watchdog only if it would sleep past it
+    /// Put a call due at `due`, on this thread, in the watchdog's list, sent
+    /// its stop again every `every` past it, and wake the watchdog only if it
+    /// would sleep past it
     /// (`tests::a_call_is_stopped_at_its_own_deadline_whatever_else_is_in_flight`).
-    fn add(&self, due: Instant) -> u64 {
+    fn add(&self, due: Instant, every: Duration) -> u64 {
         let mut flights = self.lock();
         flights.next += 1;
         let id = flights.next;
@@ -200,8 +196,8 @@ impl Clock {
         flights.calls.push(Flight {
             id,
             thread,
-            due,
-            sent: false,
+            next: due,
+            every,
         });
         let sooner = flights.wakes.is_none_or(|wakes| due < wakes);
         if sooner {
@@ -233,9 +229,12 @@ impl Clock {
         let _ = STOPPED_HERE.try_with(|stopped| stopped.store(false, Ordering::SeqCst));
         let _ = DUE.try_with(|at| at.store(nanos_after_base(due), Ordering::SeqCst));
         let _ = ARMED.try_with(|armed| armed.store(state.0, Ordering::SeqCst));
+        // Sent again a budget after each send, a millisecond at least
+        // (`tests::a_call_whose_stop_was_lost_is_sent_another`).
+        let every = budget.max(Duration::from_millis(1));
         let watching = Watching {
             clock: self,
-            id: self.add(due),
+            id: self.add(due, every),
             state: state.0,
         };
         let result = call();
@@ -288,20 +287,27 @@ fn on_signal() {
 /// The armed hook, at the call's next instruction: stop the call if it is
 /// due, and otherwise take itself off, since the signal was for a call that
 /// has returned. `tests::a_signal_for_a_call_already_returned_stops_nothing`.
+///
+/// It takes itself off before it reads the clock: read first, a signal for
+/// this call coming between the read and the taking off would arm a hook
+/// that is then taken off, and the stop be lost until the watchdog sends
+/// another (`tests::a_call_whose_stop_was_lost_is_sent_another`).
 unsafe extern "C-unwind" fn stop(state: *mut ffi::lua_State, _debug: *mut ffi::lua_Debug) {
+    // SAFETY: inside `state`'s hook, on its own thread.
+    unsafe { ffi::lua_sethook(state, None, 0, 0) };
     let due = DUE
         .try_with(|due| due.load(Ordering::SeqCst))
         .unwrap_or(u64::MAX);
     if nanos_after_base(Instant::now()) < due {
-        // SAFETY: inside `state`'s hook, on its own thread.
-        unsafe { ffi::lua_sethook(state, None, 0, 0) };
         return;
     }
+    // SAFETY: as above; armed again, so a Rust callback that swallows the
+    // stop's error meets another at the next instruction.
+    unsafe { ffi::lua_sethook(state, Some(stop), ffi::LUA_MASKCOUNT, 1) };
     let _ = STOPPED_HERE.try_with(|stopped| stopped.store(true, Ordering::SeqCst));
     // SAFETY: a hook may raise an error, as `lua.c`'s `lstop` does; it
     // unwinds to the call's protected call, past this frame, which holds
-    // nothing to drop. The hook stays armed, so a Rust callback that
-    // swallows the error meets another at the next instruction.
+    // nothing to drop.
     unsafe {
         ffi::luaL_where(state, 0);
         ffi::lua_pushstring(state, STOPPED.as_ptr());
@@ -369,6 +375,47 @@ mod tests {
         });
         assert!(!stopped, "{result:?}");
         assert_eq!(result.expect("it ran"), 5_000_050_000);
+        assert!(!hooked(&lua));
+    }
+
+    /// **A call whose stop was lost is sent another**: the watchdog signals
+    /// a call past its due again every budget until it returns. Here the
+    /// stop is armed while the call sleeps past its due in Rust and then
+    /// taken off, as a stale signal's hook taking itself off just as the
+    /// real one armed it would; the call still stops, long before the two
+    /// seconds it would spin.
+    #[test]
+    fn a_call_whose_stop_was_lost_is_sent_another() {
+        let lua = Lua::new();
+        let clock = clock().expect("the watchdog starts");
+        let state = state_of(&lua).expect("the state");
+        let raw = state.0;
+        let lose = lua
+            .create_function(move |_, ()| {
+                std::thread::sleep(Duration::from_millis(20));
+                // SAFETY: this thread's own state, inside its own call.
+                unsafe { ffi::lua_sethook(raw, None, 0, 0) };
+                Ok(())
+            })
+            .expect("a function");
+        lua.globals().set("lose", lose).expect("set");
+        let began = Instant::now();
+        let over = lua
+            .create_function(move |_, ()| Ok(began.elapsed() > Duration::from_secs(2)))
+            .expect("a function");
+        lua.globals().set("over", over).expect("set");
+        let (result, stopped) = clock.run(state, Duration::from_millis(5), || {
+            lua.load("lose() while not over() do end").exec()
+        });
+        assert!(
+            stopped && result.is_err(),
+            "the lost stop was not sent again: {result:?}"
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            began.elapsed()
+        );
         assert!(!hooked(&lua));
     }
 
