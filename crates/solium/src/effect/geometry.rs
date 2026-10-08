@@ -885,8 +885,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// **Past the window**: a part of (−0.1, −0.1)–(1.1, 1.1) and one of
-    /// (0.8, 0.8)–(1.4, 1.3) land where `mesh_part`'s Rust genie puts them.
+    /// **Past the window**, on all four axes: parts of (−0.1, −0.1)–(1.1, 1.1),
+    /// (0.8, 0.8)–(1.4, 1.3) and (0.8, −0.1)–(1.4, 1.1) land where
+    /// `mesh_part`'s Rust genie puts them, over the turned grid. The last two
+    /// reach past the window differently across and along, so a sideways
+    /// sweep that read the part's rows for its columns, or columns placed
+    /// without the part, would bend the wrong points (a side dock's shadow or
+    /// popup).
     #[test]
     fn the_genie_folder_matches_past_the_window() {
         let genie = shipped_genie();
@@ -894,7 +899,7 @@ pub(crate) mod tests {
             Rect::new(100.0, 50.0, 800.0, 600.0),
             Rect::new(600.0, 1000.0, 64.0, 32.0),
         );
-        for part in [
+        let parts = [
             UnitRect {
                 u0: -0.1,
                 v0: -0.1,
@@ -907,41 +912,66 @@ pub(crate) mod tests {
                 u1: 1.4,
                 v1: 1.3,
             },
-        ] {
-            let rust = solium_effects::Deform::Genie {
-                progress: 0.37,
-                spread: 1.4,
-                axis: Axis::Down,
-            };
-            let params = [(
-                "spread".to_owned(),
-                solium_effects::spec::Value::Number(f64::from(1.4_f32)),
-            )];
-            let ask = Ask {
-                progress: f64::from(0.37_f32),
-                clamped: f64::from(0.37_f32),
-                direction: -1.0,
-                axis: Axis::Down,
-                from,
-                to: Some(to),
-                part,
-                seed: 0.0,
-                monitor: Rect::new(0.0, 0.0, 2560.0, 1440.0),
-                scale: 1.0,
-                params: &params,
-            };
-            let lua = mesh(&genie, &ask, 8, 48).expect("a grid");
-            let mut index = 0;
-            for r in 0..=48_u32 {
-                for c in 0..=8_u32 {
-                    let u = part.u0 + (part.u1 - part.u0) * (f64::from(c) / 8.0);
-                    let v = part.v0 + (part.v1 - part.v0) * (f64::from(r) / 48.0);
-                    let (x, y) = rust.place(from, to, u, v);
-                    assert!(
-                        (lua[index] - x).abs() <= 1e-9 && (lua[index + 1] - y).abs() <= 1e-9,
-                        "part {part:?} at ({c}, {r})"
-                    );
-                    index += 2;
+            UnitRect {
+                u0: 0.8,
+                v0: -0.1,
+                u1: 1.4,
+                v1: 1.1,
+            },
+        ];
+        for (_, axis) in Axis::all() {
+            let (cols, rows) = super::turned(
+                solium_effects::spec::GridSpec::Turning {
+                    along: 48,
+                    across: 8,
+                },
+                axis,
+            );
+            for spread in [0.5_f32, 1.4, 4.0] {
+                for progress in [0.37_f32, 0.99] {
+                    let rust = solium_effects::Deform::Genie {
+                        progress,
+                        spread,
+                        axis,
+                    };
+                    let params = [(
+                        "spread".to_owned(),
+                        solium_effects::spec::Value::Number(f64::from(spread)),
+                    )];
+                    for part in parts {
+                        let ask = Ask {
+                            progress: f64::from(progress),
+                            clamped: f64::from(progress),
+                            direction: -1.0,
+                            axis,
+                            from,
+                            to: Some(to),
+                            part,
+                            seed: 0.0,
+                            monitor: Rect::new(0.0, 0.0, 2560.0, 1440.0),
+                            scale: 1.0,
+                            params: &params,
+                        };
+                        let lua = mesh(&genie, &ask, cols, rows).expect("a grid");
+                        let mut index = 0;
+                        for r in 0..=rows {
+                            for c in 0..=cols {
+                                let u = part.u0
+                                    + (part.u1 - part.u0) * (f64::from(c) / f64::from(cols));
+                                let v = part.v0
+                                    + (part.v1 - part.v0) * (f64::from(r) / f64::from(rows));
+                                let (x, y) = rust.place(from, to, u, v);
+                                assert!(
+                                    (lua[index] - x).abs() <= 1e-9
+                                        && (lua[index + 1] - y).abs() <= 1e-9,
+                                    "{axis:?} spread {spread} progress {progress} part {part:?} at ({c}, {r}): lua ({}, {}) rust ({x}, {y})",
+                                    lua[index],
+                                    lua[index + 1]
+                                );
+                                index += 2;
+                            }
+                        }
+                    }
                 }
             }
         }
