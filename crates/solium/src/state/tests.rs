@@ -10457,6 +10457,50 @@ end)"#,
         }
     }
 
+    /// The pane's pinned version, if any.
+    fn pinned(fixture: &Fixture, pane: crate::pane::PaneId) -> bool {
+        fixture
+            .state
+            .panes
+            .get(pane)
+            .is_some_and(|held| held.meshes().pinned.is_some())
+    }
+
+    /// **A pinned version is let go when its present lands**: a present
+    /// under `on_reload = "keep"` pins the version it began with, kept while
+    /// the window is held at its progress, and a present with no deform
+    /// that lands lets it go, so no pane holds a stale Lua state to the end
+    /// of its life.
+    #[test]
+    fn a_pinned_version_is_let_go_when_its_present_lands() {
+        fx2_fixture!(fixture, "present-unpinned");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'genie', progress = 0.5, on_reload = 'keep', to = {to} }}"),
+        );
+        let now = fixture.state.clock.now();
+        let _ = fixture.state.settle(now);
+        assert!(
+            pinned(&fixture, pane),
+            "the version a held present began with was let go"
+        );
+        present_now(&mut fixture, pane, None, None);
+        let now = fixture.state.clock.now();
+        let _ = fixture.state.settle(now);
+        assert!(
+            !crate::present::transformed(fixture.state.panes.get(pane).expect("the pane")),
+            "the premise: the present landed and was released"
+        );
+        assert!(
+            !pinned(&fixture, pane),
+            "a landed present still pins its version"
+        );
+    }
+
     /// **A rule on `focused` follows the keyboard**: two windows, the rule's
     /// slot moves with the focus.
     #[test]

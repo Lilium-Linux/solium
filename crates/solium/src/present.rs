@@ -863,7 +863,9 @@ pub(crate) fn presented(pane: &Pane) -> bool {
 /// The geometry effects a pane's transform still draws: its start's while
 /// it is under way (a present clearing a genie draws the genie back out),
 /// and its target's (held there once it lands). What a reload keeps wanted
-/// (`state::tests::real_client::a_reload_that_leaves_a_presents_folder_unchanged_keeps_it`).
+/// (`state::tests::real_client::a_reload_that_leaves_a_presents_folder_unchanged_keeps_it`)
+/// and what a pinned version is held for
+/// (`state::tests::real_client::a_pinned_version_is_let_go_when_its_present_lands`).
 pub(crate) fn geometries(pane: &Pane, now: Duration) -> Vec<Geometry> {
     with_slot(pane, |slot| {
         slot.map(|transform| {

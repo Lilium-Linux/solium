@@ -1944,6 +1944,26 @@ impl Solium {
         for pane in self.panes.iter() {
             animating |= present::settle(pane, self.pane_outer(pane), now);
         }
+        // A version `on_reload = "keep"` pinned is held to the end of its
+        // transform, and no longer: a whole Lua state, let go once nothing
+        // the pane draws keeps it
+        // (`tests::real_client::a_pinned_version_is_let_go_when_its_present_lands`).
+        let unpinned: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| pane.meshes().pinned.is_some())
+            .filter(|pane| {
+                !present::geometries(pane, now).iter().any(|geometry| {
+                    geometry.on_reload == crate::effect::settings::PresentReload::Keep
+                })
+            })
+            .map(Pane::id)
+            .collect();
+        for id in unpinned {
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.meshes_mut().pinned = None;
+            }
+        }
         // A window shrinking back out of fullscreen or maximised that has
         // landed is an ordinary window again, with nothing of its shrink kept.
         // `a_window_glides_into_fullscreen_and_out_again`.
