@@ -148,6 +148,45 @@ fn check_exits_0_on_a_good_effect_folder() {
     );
 }
 
+/// **`--check <folder>` reads the configuration's `effects.sandbox`**, as
+/// the session loads the folder under it: one that builds 20 MiB exits 1
+/// with no configuration (the default 16 MiB) and 0 under one that gives
+/// 64.
+#[test]
+fn check_of_a_folder_reads_the_configured_sandbox() {
+    let check = |name: &str, configured: bool| {
+        let folder = std::env::temp_dir()
+            .join(format!("solium-cli-test-{}-{name}", std::process::id()))
+            .join("big");
+        let argument = folder.to_string_lossy().into_owned();
+        run_args_with(&["--check", &argument], name, |dir| {
+            std::fs::create_dir_all(dir.join("big")).expect("the folder");
+            std::fs::write(
+                dir.join("big/effect.lua"),
+                "local big = string.rep('x', 20 * 1024 * 1024)\nreturn { api = 1, inputs = { 'self' }, frag = 'effect.frag' }\n",
+            )
+            .expect("its effect.lua");
+            std::fs::write(
+                dir.join("big/effect.frag"),
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )
+            .expect("its frag");
+            if configured {
+                std::fs::write(
+                    dir.join("init.lua"),
+                    "sol.effects({ sandbox = { memory_mib = 64, load_ms = 5000 } })\n",
+                )
+                .expect("an init.lua");
+            }
+        })
+    };
+    let (code, out, err) = check("check-caps-default", false);
+    assert_eq!(code, 1, "the premise: 20 MiB under 16: {out}{err}");
+    let (code, out, err) = check("check-caps-roomy", true);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("big: ok"), "{out}");
+}
+
 /// **Plain `--check` exits 1 on a broken folder in the user's effects/**
 /// (spec §8.4), and 0 with the same configuration and no such folder.
 #[test]

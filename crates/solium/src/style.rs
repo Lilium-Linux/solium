@@ -270,12 +270,14 @@ pub(crate) fn rules_of(dir: &Path) -> StyleRules {
     rules_with(dir, caps())
 }
 
-/// [`rules_of`] under `caps`. A file read once is not read again for the
+/// [`rules_of`] under `caps`, which `--check` reads a style under too
+/// (`check::tests::a_styles_effects_lua_is_checked_under_the_configured_sandbox`).
+/// A file read once is not read again for the
 /// same content, unless reading it failed and the caps have changed since,
 /// so a budget or a memory cap that refused it can be raised; what read is
 /// kept whatever the caps, as a larger budget changes nothing for it.
 /// `tests::a_styles_effects_lua_reads_under_the_configured_caps`.
-fn rules_with(dir: &Path, caps: crate::effect::settings::Caps) -> StyleRules {
+pub(crate) fn rules_with(dir: &Path, caps: crate::effect::settings::Caps) -> StyleRules {
     use crate::effect::host::Problem;
     let file = dir.join("effects.lua");
     if !file.is_file() {

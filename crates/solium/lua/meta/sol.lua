@@ -494,7 +494,7 @@ function sol.problems() end
 ---`sandbox`, `limits` or `present` given anything but a table, a number
 ---outside its bounds (`1/0` and `0/0` included) or a word outside its words
 ---refuses the whole set, its rules too, named by `sol.problems()` under
----`"settings"`, and what ran stays.
+---`"settings"`, and what ran stays; `solium --check` fails on it.
 ---@class sol.EffectsOptions
 ---@field rules? sol.Rule[] The rules; left out, none.
 ---@field sandbox? { load_ms?: number, memory_mib?: integer } What an effect's own Lua may spend as it loads: `load_ms` for each call, shared by the checks a `mesh` is put through at load (100 by default, 10 to 5000), and `memory_mib` of memory (16 by default, 1 to 512). A folder past either is named by `sol.problems()` and not loaded; changing either loads every effect again.

@@ -154,9 +154,11 @@ own, every key in it, the checks of its shaders below, and the effects it
 names in turn (`pixels`, a `fallback` naming an effect, a `use` stage),
 looked for beside it
 first and then among the shipped folders, as when it runs, so a copy of a
-shipped effect that names another shipped one passes. Errors are printed at
-their file and line and exit 1; warnings are printed and pass. `solium
---check .` inside the folder does the same.
+shipped effect that names another shipped one passes. Its Lua runs under
+your configuration's `effects.sandbox` ([below](#what-an-effects-lua-can-reach)), as the
+session loads it, or the defaults if your configuration does not load.
+Errors are printed at their file and line and exit 1; warnings are printed
+and pass. `solium --check .` inside the folder does the same.
 
 Its shaders are compiled on this machine's GPU, on the first render node, and
 only there: a compile says what this machine's driver accepts and nothing
@@ -172,10 +174,14 @@ Plain `solium --check` checks every folder in your `effects/` this way,
 named or not, and every effect your configuration's rules name, and then
 binds each rule as the compositor would, so a rule it would refuse fails
 there too. Rules that do not parse fail by their number and key, and are not
-bound: it says `rules not checked: effects.rules did not parse`. A folder with no `effect.lua` fails, and so does one whose name
-cannot name an effect, such as `Blur`, since nothing could use it. The
-`effects.lua` of each pane style of your own is read too, and fails on what
-the overlay would name.
+bound; nor are the rules of a `sol.effects` whose own keys (`sandbox`,
+`limits`, `present`) are refused, which fails naming the key, since the
+session refuses that whole call: it says `rules not checked: they did not
+parse, or their sol.effects was refused`. A folder with no `effect.lua`
+fails, and so does one whose name cannot name an effect, such as `Blur`,
+since nothing could use it. The `effects.lua` of each pane style of your
+own is read too, and fails on what the overlay would name. Every effect and
+style is read under your `effects.sandbox`.
 
 ## What `effect.lua` returns
 

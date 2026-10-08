@@ -1226,6 +1226,25 @@ impl Scripts {
         })
     }
 
+    /// The engine's own keys the configuration handed over as it loaded,
+    /// the last `sol.effects` winning, as [`Self::effects_at_load`] reads
+    /// its rules: `--check` judges them as the session would.
+    /// `check::tests::a_refused_effects_key_fails_the_check`.
+    pub(crate) fn effect_settings_at_load(
+        &self,
+    ) -> Option<Result<crate::effect::settings::Settings, String>> {
+        self.lua.app_data_ref::<Pending>().and_then(|pending| {
+            pending
+                .commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::Effects { settings, .. } => Some(settings.clone()),
+                    _ => None,
+                })
+        })
+    }
+
     /// What the configuration said through `sol.qml`, if anything.
     pub(crate) fn qml(&self) -> crate::qml::renderer::Configured {
         self.lua
