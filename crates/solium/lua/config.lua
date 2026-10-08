@@ -1388,8 +1388,8 @@ local defaults = {
         -- folder is missing (`failed`: "flat", the window undeformed, or
         -- "hide"), and when a reload finds its folder changed mid-flight
         -- (`on_reload`: "flat", or "keep", the version it began with); a
-        -- reload that leaves the folder as it was changes nothing. A deform
-        -- may say either for itself.
+        -- reload that leaves the folder as it was changes nothing, even one
+        -- that changes `sandbox`. A deform may say either for itself.
         present = { failed = "flat", on_reload = "flat" },
     },
 

@@ -330,8 +330,10 @@ pub(crate) trait Compiler {
 }
 
 /// An effect version: which folder, and which load of it. A reload that
-/// changes it gives a new generation, and an old id resolves to nothing.
-/// `tests::a_new_version_is_a_new_generation`.
+/// changes it gives a new generation, and an old id resolves to nothing;
+/// one that reads it as it was, under new caps, keeps the id.
+/// `tests::a_new_version_is_a_new_generation`,
+/// `tests::new_caps_keep_an_unchanged_folders_id`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct EffectId {
     index: u32,
@@ -504,7 +506,9 @@ impl<P: Clone> Host<P> {
     /// whether they changed. Every wanted folder loaded under other caps is
     /// loaded again now, so an effect a budget refused can load under a
     /// larger one, and the folders the same `sol.effects` names load under
-    /// the new caps (`tests::new_caps_load_every_wanted_folder_again`).
+    /// the new caps (`tests::new_caps_load_every_wanted_folder_again`); an
+    /// unchanged folder keeps its id, so a present under way is not ended
+    /// (`tests::new_caps_keep_an_unchanged_folders_id`).
     pub(crate) fn set_caps(&mut self, caps: Caps) -> bool {
         if caps == self.caps {
             return false;
@@ -1259,7 +1263,10 @@ impl<P: Clone> Host<P> {
     /// `state::tests::real_client::a_geometry_with_a_frag_presents_before_it_compiled`.
     pub(crate) fn upcoming(&self, name: &str) -> Option<EffectId> {
         let slot = self.slots.get(name)?;
+        // The same folder compiling again under new caps keeps the running
+        // id (`tests::new_caps_keep_an_unchanged_folders_id`).
         let generation = match (&slot.pending, &slot.current) {
+            (Some(pending), _) if same_folder(slot, pending) => slot.generation,
             (Some(_), _) => slot.generation.checked_add(1)?,
             (None, Some(_)) => slot.generation,
             (None, None) => return None,
@@ -1365,13 +1372,28 @@ impl<P: Clone> Host<P> {
     }
 }
 
-/// `pending` swapped in as the version that runs, a new generation holding
-/// what it needs (`tests::a_new_version_is_a_new_generation`).
+/// `pending` swapped in as the version that runs, holding what it needs: a
+/// new generation (`tests::a_new_version_is_a_new_generation`), unless it
+/// is the running one's folder as it was ([`same_folder`]).
 fn swap_in<P>(slot: &mut Versions<P>, pending: Loaded<P>) {
-    slot.generation += 1;
+    if !same_folder(slot, &pending) {
+        slot.generation += 1;
+    }
     slot.holds = pending.needs.clone();
     slot.current = Some(Rc::new(pending));
     slot.given_up = false;
+}
+
+/// Whether `pending` is the running version's folder as it was, loaded again
+/// only because the caps changed or its state was stopped: the same version,
+/// which keeps its id as [`Host::revive`]'s rebuild does, so new
+/// `effects.sandbox` caps end no present under way
+/// (`tests::new_caps_keep_an_unchanged_folders_id`,
+/// `state::tests::real_client::a_reload_that_changes_only_the_sandbox_keeps_a_present`).
+fn same_folder<P>(slot: &Versions<P>, pending: &Loaded<P>) -> bool {
+    slot.current
+        .as_ref()
+        .is_some_and(|current| current.hash() == pending.hash() && current.dir() == pending.dir())
 }
 
 /// A geometry file held to its rest at its defaults (`geometry::at_rest`),
@@ -2341,6 +2363,51 @@ pub(crate) mod tests {
         let before = host.loads;
         assert!(!host.set_caps(big), "the same caps are no change");
         assert_eq!(host.loads, before, "the same caps loaded a folder again");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **New caps keep an unchanged folder's id**: what loads again only
+    /// because `effects.sandbox` changed is the same version under new caps,
+    /// so a geometry swapped in at once and one whose frag compiles first
+    /// both keep the id a present carries, and the id they take while
+    /// compiling ([`Host::upcoming`]) is that one too; an edit is still a
+    /// new generation (`a_new_version_is_a_new_generation`).
+    #[test]
+    fn new_caps_keep_an_unchanged_folders_id() {
+        let place = scratch("new-caps-id");
+        folder(&place, "flat", crate::effect::geometry::tests::FLAT, &[]);
+        folder(&place, "frag", ONE_PASS, &[("effect.frag", FRAG)]);
+        let mut host = host_with(&place);
+        host.want("rules", ["flat".to_owned(), "frag".to_owned()]);
+        host.compile_pending(&mut Counting::default());
+        let (flat, frag) = (
+            host.id("flat").expect("flat runs"),
+            host.id("frag").expect("frag runs"),
+        );
+        let caps = crate::effect::settings::Caps {
+            memory: 32 << 20,
+            load: std::time::Duration::from_millis(5000),
+        };
+        assert!(host.set_caps(caps));
+        assert!(
+            host.has_pending("frag") && !host.has_pending("flat"),
+            "the premise: both loaded again, and only the frag waits"
+        );
+        assert_eq!(host.id("flat"), Some(flat), "a geometry lost its id");
+        assert_eq!(
+            host.upcoming("frag"),
+            Some(frag),
+            "a frag compiling again under new caps was given a new id"
+        );
+        host.compile_pending(&mut Counting::default());
+        assert_eq!(host.id("frag"), Some(frag), "a frag lost its id");
+        for (name, id) in [("flat", flat), ("frag", frag)] {
+            assert_eq!(
+                host.by_id(id).map(|loaded| loaded.sandbox().caps()),
+                Some(caps),
+                "{name}'s id does not name the version under the new caps"
+            );
+        }
         let _ = std::fs::remove_dir_all(place);
     }
 

@@ -444,7 +444,8 @@ undeformed; or `"hide"`), and so does a refused grid of its open menus,
 which reach past the window: each is said once a present in Solium's log.
 A folder a reload finds changed while a present plays draws it flat for
 the rest of the move, or on the version it began with under `on_reload =
-"keep"`; a reload that leaves the folder as it was changes nothing.
+"keep"`; a reload that leaves the folder as it was changes nothing, even
+one that changes `effects.sandbox`.
 
 The shipped [`genie`](genie/README.md) is a whole one in a page of Lua: it
 works out how far each row has gone, once (each column, when the window is

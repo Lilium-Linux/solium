@@ -10371,9 +10371,14 @@ end)"#,
     /// configuration that names no effect, written beside the fixture's
     /// scratch effects.
     fn reload(fixture: &mut Fixture) {
+        reload_with(fixture, "sol.pane('none')\n");
+    }
+
+    /// [`reload`], of a configuration that reads `init`.
+    fn reload_with(fixture: &mut Fixture, init: &str) {
         let place = fixture.scratch.clone().expect("a scratch folder");
         let entry = place.join("init.lua");
-        std::fs::write(&entry, "sol.pane('none')\n").expect("an init.lua");
+        std::fs::write(&entry, init).expect("an init.lua");
         fixture.state.reload_from(&entry);
     }
 
@@ -10405,6 +10410,66 @@ end)"#,
             fixture.state.effects.id("genie"),
             id,
             "the unchanged folder lost its id"
+        );
+        assert!(
+            matches!(
+                planned(&mut fixture, pane),
+                crate::render::Planned::Warp { grid: Some(_), .. }
+            ),
+            "not drawn through its grid after the reload"
+        );
+    }
+
+    /// **A reload that changes only `effects.sandbox` keeps a present**: the
+    /// new caps load the genie's unchanged folder again, under them, and
+    /// it keeps its id, so a window held at progress 0.5 under the default
+    /// `on_reload = "flat"` is still drawn through its grid; only an edit
+    /// makes it follow `on_reload` (`a_reload_mid_present_follows_on_reload`).
+    #[test]
+    fn a_reload_that_changes_only_the_sandbox_keeps_a_present() {
+        fx2_fixture!(fixture, "present-caps");
+        let (pane, _) = one_window(&mut fixture);
+        let _ = scratch_genie(&mut fixture);
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'genie', progress = 0.5, on_reload = 'flat', to = {to} }}"),
+        );
+        let id = geometry_of(&fixture, pane).map(|geometry| geometry.effect);
+        assert_eq!(id, fixture.state.effects.id("genie"), "the premise");
+        let before = fixture.state.effects.caps();
+        reload_with(
+            &mut fixture,
+            "sol.effects({ rules = {}, sandbox = { memory_mib = 32 } })\n",
+        );
+        assert!(
+            fixture.state.effects.problems().is_empty(),
+            "{:?}",
+            fixture.state.effects.problems()
+        );
+        assert!(
+            fixture.state.effects.caps() != before
+                && fixture.state.effects.caps().memory == 32 << 20,
+            "the premise: the reload changed the caps"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .effects
+                .effect("genie")
+                .map(|loaded| loaded.sandbox().caps()),
+            Some(fixture.state.effects.caps()),
+            "the genie that runs is not the one loaded under the new caps"
+        );
+        assert!(
+            crate::render::present_source(&fixture.state, pane).is_some(),
+            "a reload that changed only the caps ended the present"
+        );
+        assert_eq!(
+            fixture.state.effects.id("genie"),
+            id,
+            "the unchanged folder lost its id to new caps"
         );
         assert!(
             matches!(
