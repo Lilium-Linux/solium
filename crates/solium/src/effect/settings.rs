@@ -200,19 +200,72 @@ fn known(options: &Tree, path: &str, keys: &[&str]) -> Result<(), String> {
     }
 }
 
-/// `sol.effects`' options, beside `rules`: every key checked, each number
-/// within its bounds and each word one of its words, or the whole set
-/// refused naming the key.
+/// The tables under `effects` whose keys [`parse`] reads, each with its
+/// keys. Task 27b adds `mesh_ms` and `revive` to `sandbox`'s, and
+/// `geometry` with its own.
+const TABLES: [(&str, &[&str]); 3] = [
+    ("sandbox", &["load_ms", "memory_mib"]),
+    ("limits", &["params"]),
+    ("present", &["failed", "on_reload"]),
+];
+
+/// `sol.effects`' options as a [`Tree`], a number that is not finite kept
+/// where [`Tree::from_lua`] drops it (directly under `effects`, and in
+/// [`TABLES`]), so `load_ms = 1/0` is refused for its bounds rather than
+/// read as the default.
+/// `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
+pub(crate) fn tree_of(options: &mlua::Table) -> mlua::Result<Tree> {
+    let mut tree =
+        Tree::from_lua(&mlua::Value::Table(options.clone()))?.unwrap_or_else(|| Tree::Table {
+            list: Vec::new(),
+            fields: std::collections::BTreeMap::new(),
+        });
+    if let Tree::Table { fields, .. } = &mut tree {
+        keep_non_finite(options, fields)?;
+        for (table, _) in TABLES {
+            if let Ok(mlua::Value::Table(inner)) = options.raw_get::<mlua::Value>(table)
+                && let Some(Tree::Table { fields, .. }) = fields.get_mut(table)
+            {
+                keep_non_finite(&inner, fields)?;
+            }
+        }
+    }
+    Ok(tree)
+}
+
+/// Every named number of `table` that is not finite, into `fields`.
+fn keep_non_finite(
+    table: &mlua::Table,
+    fields: &mut std::collections::BTreeMap<String, Tree>,
+) -> mlua::Result<()> {
+    for pair in table.pairs::<mlua::Value, mlua::Value>() {
+        if let (mlua::Value::String(key), mlua::Value::Number(number)) = pair?
+            && !number.is_finite()
+        {
+            fields.insert(key.to_str()?.to_owned(), Tree::Number(number));
+        }
+    }
+    Ok(())
+}
+
+/// `sol.effects`' options, beside `rules`: every key checked, each table's
+/// key a table, each number within its bounds and each word one of its
+/// words, or the whole set refused naming the key.
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
 pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
     known(options, "", KEYS)?;
-    for (table, keys) in [
-        ("sandbox", &["load_ms", "memory_mib"][..]),
-        ("limits", &["params"][..]),
-        ("present", &["failed", "on_reload"][..]),
-    ] {
-        if let Some(tree) = options.field(table) {
-            known(tree, &format!(".{table}"), keys)?;
+    for (table, keys) in TABLES {
+        match options.field(table) {
+            None => {}
+            Some(tree @ Tree::Table { .. }) => known(tree, &format!(".{table}"), keys)?,
+            // Anything else is refused, not read as the defaults.
+            Some(_) => {
+                let keys: Vec<String> = keys.iter().map(|key| format!("`{key}`")).collect();
+                return Err(format!(
+                    "`effects.{table}` is a table of {}",
+                    keys.join(", ")
+                ));
+            }
         }
     }
     let load = bounded(options, "sandbox.load_ms", 100.0, 10.0, 5000.0)?;
@@ -249,16 +302,18 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
 mod tests {
     use super::Tree;
 
+    /// `sol.effects`' options as it reads them ([`super::tree_of`]).
     fn tree(lua: &str) -> Tree {
         let state = mlua::Lua::new();
-        let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
-        Tree::from_lua(&value).expect("readable").expect("a value")
+        let table: mlua::Table = state.load(lua).eval().expect("the test's Lua");
+        super::tree_of(&table).expect("readable")
     }
 
     /// **The engine's keys read with their defaults and within their
     /// bounds** (Ruling 28): a set naming none is today's numbers; a number
-    /// outside its bounds, a word outside its words and an unknown key are
-    /// each refused, naming the key.
+    /// outside its bounds (one that is not finite included), a word outside
+    /// its words, a table's key given anything but a table, and an unknown
+    /// key are each refused, naming the key.
     #[test]
     fn the_engines_keys_read_with_their_defaults_and_bounds() {
         let none = super::parse(&tree("{ rules = {} }")).expect("parses");
@@ -316,6 +371,25 @@ mod tests {
                 "`effects.sandbox` has no key `load`",
             ),
             ("{ sandbx = {} }", "sandbox"),
+            // Not a table: refused, not read as the defaults.
+            ("{ present = 'hide' }", "`effects.present` is a table"),
+            ("{ sandbox = 5 }", "`effects.sandbox` is a table"),
+            ("{ limits = true }", "`effects.limits` is a table"),
+            ("{ sandbox = 1/0 }", "`effects.sandbox` is a table"),
+            // Not finite: refused for its bounds, not dropped for the
+            // default.
+            (
+                "{ sandbox = { load_ms = 1/0 } }",
+                "`effects.sandbox.load_ms` is a number from 10 to 5000",
+            ),
+            (
+                "{ limits = { params = 0/0 } }",
+                "`effects.limits.params` is a number from 1 to 64",
+            ),
+            (
+                "{ present = { failed = -1/0 } }",
+                "`effects.present.failed` is \"flat\" or \"hide\"",
+            ),
         ] {
             let refused = super::parse(&tree(lua)).expect_err(lua);
             assert!(refused.contains(says), "{lua}: {refused}");

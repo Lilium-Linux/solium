@@ -490,9 +490,11 @@ function sol.problems() end
 ---@field mask? "shape"|"alpha" How the result is cut: the part's shape (the default), or the alpha of the part's own pixels, which needs `source = "self"`.
 
 ---What `sol.effects` takes: the rules, and the engine's own numbers and
----policies beside them, each with its default. A key it does not know, a
----number outside its bounds or a word outside its words refuses the whole
----set, named by `sol.problems()` under `"settings"`, and what ran stays.
+---policies beside them, each with its default. A key it does not know,
+---`sandbox`, `limits` or `present` given anything but a table, a number
+---outside its bounds (`1/0` and `0/0` included) or a word outside its words
+---refuses the whole set, its rules too, named by `sol.problems()` under
+---`"settings"`, and what ran stays.
 ---@class sol.EffectsOptions
 ---@field rules? sol.Rule[] The rules; left out, none.
 ---@field sandbox? { load_ms?: number, memory_mib?: integer } What an effect's own Lua may spend as it loads: `load_ms` for each call, shared by the checks a `mesh` is put through at load (100 by default, 10 to 5000), and `memory_mib` of memory (16 by default, 1 to 512). A folder past either is named by `sol.problems()` and not loaded; changing either loads every effect again.

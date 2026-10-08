@@ -2619,10 +2619,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let settings = match options {
                 None => Ok(crate::effect::settings::Settings::default()),
                 Some(table) => {
-                    match crate::effect::tree::Tree::from_lua(&mlua::Value::Table(table))? {
-                        Some(tree) => crate::effect::settings::parse(&tree),
-                        None => Ok(crate::effect::settings::Settings::default()),
-                    }
+                    crate::effect::settings::parse(&crate::effect::settings::tree_of(&table)?)
                 }
             };
             with_pending(lua, |pending| {
