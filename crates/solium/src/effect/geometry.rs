@@ -70,7 +70,9 @@ impl Params {
     }
 
     /// Each lerped toward `other`'s when both hold as many; `other`'s
-    /// otherwise (another effect's params do not blend with these).
+    /// otherwise. Whether both are one effect's, which a count cannot tell,
+    /// is `present::Geometry::mix`'s to ask
+    /// (`present::tests::another_effects_params_are_the_destinations_not_a_blend`).
     /// `tests::params_pack_up_to_their_limit_and_lerp_only_like_with_like`.
     pub(crate) fn lerp(self, other: Self, t: f64) -> Self {
         if self.len != other.len {

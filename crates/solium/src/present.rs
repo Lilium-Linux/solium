@@ -189,12 +189,17 @@ impl Geometry {
         }
     }
 
-    /// Progress and params lerp when both name as many params; the effect,
-    /// the axis, the seed, the policies and, for another effect's params,
-    /// the params are the destination's.
-    /// `tests::an_anchor_does_not_blend_halfway`.
+    /// Progress lerps, and the params when both are the same effect's (as
+    /// many of them); the effect, the axis, the seed, the policies and,
+    /// for another effect's params, the params are the destination's.
+    /// `tests::an_anchor_does_not_blend_halfway`,
+    /// `tests::another_effects_params_are_the_destinations_not_a_blend`.
     fn mix(self, other: Self, t: f64) -> Self {
-        let params = self.params.lerp(other.params, t);
+        let params = if self.effect == other.effect {
+            self.params.lerp(other.params, t)
+        } else {
+            other.params
+        };
         Self {
             progress: self.progress + (other.progress - self.progress) * t,
             params,
@@ -1414,6 +1419,29 @@ mod tests {
             clearing.map(|deform| deform.effect.progress),
             Some(0.5),
             "half way back to rest"
+        );
+    }
+
+    /// **Another effect's params do not blend**: a geometry interrupted by
+    /// another effect with as many params takes the destination's params
+    /// whole, and only the same effect's lerp.
+    #[test]
+    fn another_effects_params_are_the_destinations_not_a_blend() {
+        use crate::effect::geometry::Params;
+        let geometry = |effect: u32, value: f32| Geometry {
+            effect: crate::effect::host::EffectId::for_test(effect),
+            params: Params::pack(&[value], 8).expect("one number"),
+            ..Geometry::for_test(crate::effect::settings::PresentFailed::Flat)
+        };
+        assert_eq!(
+            geometry(1, 1.0).mix(geometry(2, 3.0), 0.25).params,
+            geometry(2, 3.0).params,
+            "another effect's params were lerped"
+        );
+        assert_eq!(
+            geometry(1, 1.0).mix(geometry(1, 3.0), 0.25).params,
+            geometry(1, 1.5).params,
+            "the same effect's params did not lerp"
         );
     }
 
