@@ -2237,7 +2237,9 @@ pub(crate) mod tests {
 
     /// **New caps load every wanted folder again**, and only then: an
     /// effect the default 16 MiB refused loads once `effects.sandbox` gives
-    /// it 64, and the same caps again load nothing.
+    /// it 64, one compiled and unchanged is loaded again under them (its
+    /// frame-time memory cap is the new one too), and the same caps again
+    /// load nothing.
     #[test]
     fn new_caps_load_every_wanted_folder_again() {
         let place = scratch("new-caps");
@@ -2251,6 +2253,13 @@ pub(crate) mod tests {
         let mut host = host_with(&place);
         host.want("rules", ["big".to_owned(), "small".to_owned()]);
         assert!(host.latest("big").is_none(), "20 MiB loaded under 16");
+        // Compiled, so `small` is current and nothing of it pending: only
+        // the caps can make its unchanged folder load again.
+        host.compile_pending(&mut Counting::default());
+        assert!(
+            host.effect("small").is_some() && !host.has_pending("small"),
+            "the premise: small runs, and nothing of it waits"
+        );
         // A long budget beside it, so a busy machine building the string
         // slowly is not what is tested.
         let big = crate::effect::settings::Caps {
@@ -2273,6 +2282,12 @@ pub(crate) mod tests {
             host.latest("small").map(|loaded| loaded.sandbox().caps()),
             Some(big),
             "an unchanged folder kept the caps it loaded under"
+        );
+        host.compile_pending(&mut Counting::default());
+        assert_eq!(
+            host.effect("small").map(|loaded| loaded.sandbox().caps()),
+            Some(big),
+            "the version that runs is not the one loaded under the new caps"
         );
         let before = host.loads;
         assert!(!host.set_caps(big), "the same caps are no change");
