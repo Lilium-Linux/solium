@@ -194,6 +194,63 @@ fn a_refused_effects_setting_keeps_everything_as_it_was() {
     let _ = std::fs::remove_dir_all(place);
 }
 
+/// **A reload that no longer calls `sol.effects` drops a refused set's
+/// problem**: the configuration that refused it is gone, so what it said
+/// goes with it, as the new configuration says it again or not.
+#[test]
+fn a_reload_drops_a_refused_settings_problem() {
+    let directory = crate::effect::host::tests::scratch("state-settings-reload");
+    let entry = directory.join("init.lua");
+    std::fs::write(&entry, "sol.pane('none')\n").expect("writing the test script");
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    let settings = |state: &Solium| {
+        state
+            .effects
+            .problems()
+            .iter()
+            .filter(|problem| problem.effect == "settings")
+            .count()
+    };
+    apply_effects_lua(&mut state, "{ sandbox = { load_ms = 1 } }");
+    assert_eq!(settings(&state), 1, "the premise: the set was refused");
+    state.reload_from(&entry);
+    let _ = std::fs::remove_dir_all(directory);
+    assert_eq!(
+        settings(&state),
+        0,
+        "a configuration that no longer calls sol.effects kept its problem: {:?}",
+        state.effects.problems()
+    );
+}
+
+/// **A refused set with broken rules says both**: its settings' error and
+/// every rule's, as each alone would.
+#[test]
+fn a_refused_set_with_broken_rules_says_both() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    apply_effects_lua(
+        &mut state,
+        "{ rules = { { match = '*', part = 'regoin:titlebar', slot = 'behind', effect = false } }, sandbox = { load_ms = 1 } }",
+    );
+    let said = |effect: &str| {
+        state
+            .effects
+            .problems()
+            .iter()
+            .any(|problem| problem.effect == effect)
+    };
+    assert!(said("settings"), "{:?}", state.effects.problems());
+    assert!(
+        said("rules"),
+        "the rules' errors were dropped: {:?}",
+        state.effects.problems()
+    );
+}
+
 /// **A broken configuration reload is a problem**, so the overlay of the
 /// configuration still running lists it, a second failure replaces it rather
 /// than adding to it, and a reload that works clears it.

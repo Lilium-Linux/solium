@@ -915,6 +915,10 @@ impl Solium {
                 // style again
                 // (`tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`).
                 self.apply_style_rules();
+                // What the old configuration's refused `sol.effects` said is
+                // the old configuration's: the new one says it again, or it
+                // is gone (`tests::a_reload_drops_a_refused_settings_problem`).
+                self.effects.clear_problems_of("settings");
                 self.start_scripts(Some(scripts));
                 // A configuration that loads mends the one that did not
                 // (`a_failed_reload_is_a_problem_until_one_succeeds`).
@@ -1102,9 +1106,10 @@ impl Solium {
     }
 
     /// One `sol.effects`: its settings and its rules, or, when either did
-    /// not parse, neither, with the error on the overlay (Ruling 28): the
+    /// not parse, neither, with every error on the overlay (Ruling 28): the
     /// settings first, so the folders the same call's rules name load under
-    /// its caps. `tests::a_refused_effects_setting_keeps_everything_as_it_was`.
+    /// its caps. `tests::a_refused_effects_setting_keeps_everything_as_it_was`,
+    /// `tests::a_refused_set_with_broken_rules_says_both`.
     pub(crate) fn apply_effects_set(
         &mut self,
         rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
@@ -1120,6 +1125,11 @@ impl Solium {
                         None,
                         error,
                     ));
+                // The rules' own errors too, as they say them alone; rules
+                // that parsed are not taken, since the set is refused.
+                if rules.is_err() {
+                    self.apply_effects(rules);
+                }
             }
             Ok(settings) => {
                 self.effects.clear_problems_of("settings");
