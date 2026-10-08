@@ -32,6 +32,10 @@
 #             pulled into the bottom of the screen by a genie: blurred flat,
 #             still blurred while tilted and while it genies, against the
 #             same run with no rule
+#   genie     a window held half way through the shipped genie (super+g),
+#             drawn through the `genie` folder's grid and, on the same debug
+#             build, through the Rust genie's (SOLIUM_GEOMETRY_ORACLE=genie):
+#             every channel of the two frames within 1
 #
 # The player is ffplay's testsrc2, or a kitty printing the time when ffplay is
 # missing.
@@ -364,7 +368,39 @@ section_tilt() {
     done
 }
 
-all=(overlay t0 blur none fail tilt)
+# genie  the `genie` folder against the Rust genie it is held to, on one
+#        debug build: a window held half way into a strip below the monitor
+#        (super+g at 4.5 s; frames at 4 s, at rest, and 6 s), once with
+#        SOLIUM_GEOMETRY_ORACLE=genie and once without; every channel of the
+#        whole 6 s frame within 1. With GENIE_FAIL=1 the folder's run alone
+#        is given spread 1.5 against the oracle's 1.4, and the two differ:
+#        the check failing as it should.
+section_genie() {
+    local name
+    for name in genie-oracle genie-folder; do
+        local extra=()
+        [[ "$name" = genie-oracle ]] && extra=(SOLIUM_GEOMETRY_ORACLE=genie)
+        [[ "$name" = genie-folder && -n "${GENIE_FAIL:-}" ]] && extra=(GENIE_SPREAD=1.5)
+        run_scene "$name" genie.lua "${extra[@]}" SOLIUM_TRIGGER_AT=4500:super+g \
+            SOLIUM_CAPTURE_AT=4000 SOLIUM_CAPTURE_FRAMES=2 SOLIUM_CAPTURE_INTERVAL=2000 || return
+        kitty_window 3a6ea5
+        wait_frames 2 || return
+        stop
+    done
+    local oracle=("$out/genie-oracle"/f-*) folder=("$out/genie-folder"/f-*)
+    # The window was pulled, or the two runs agree for nothing: below where
+    # it stood (its bottom edge is at 550) the genie frame differs from the
+    # one at rest.
+    judge differs "${folder[0]}" "${folder[1]}" 420px 560px 520px 300px >/dev/null \
+        || { fail "genie: the window did not move at super+g, so nothing was tested"; return; }
+    if judge same "${oracle[1]}" "${folder[1]}" 0 0 1 1 1 >/dev/null; then
+        pass "genie: the folder's genie equals the Rust genie within 1"
+    else
+        fail "genie: the folder's genie differs from the Rust genie"
+    fi
+}
+
+all=(overlay t0 blur none fail tilt genie)
 sections=("$@")
 [[ ${#sections[@]} -gt 0 ]] || sections=("${all[@]}")
 
