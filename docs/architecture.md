@@ -421,7 +421,9 @@ checked (the count, every number finite, every point inside a box four
 monitors wide and high centred on the pane's) before a vertex of it is
 drawn. At load the file is called at
 progress 0 and 1, on every axis and in every direction, 24 calls sharing one
-100 ms budget, and refused unless it draws the window exactly where it is at
+load budget (`effects.sandbox.load_ms`, 100 ms by default; the sandbox's
+memory is `effects.sandbox.memory_mib`, both in `effect::settings` with the
+engine's other keys), and refused unless it draws the window exactly where it is at
 rest and the fastest of those calls fits the 2 ms a frame gives (the
 fastest, since one call is slow when the machine is busy and all of them
 only when the file is), at its `mesh`'s line on the overlay and in

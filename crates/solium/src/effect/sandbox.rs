@@ -8,8 +8,12 @@
 //! budget's stop and loop (milestone 1 Task 11 had to wrap them for the
 //! configuration's Lua; an effect has no use for them).
 //!
-//! Every call runs against a deadline, 100 ms at load and 2 ms for a
-//! per-frame `mesh`: `tests::an_effect_that_never_returns_is_stopped_within_its_budget`,
+//! Every call runs against a deadline, `effects.sandbox.load_ms` (100 ms by
+//! default) at load and 2 ms for a per-frame `mesh`, and a state holds at
+//! most `effects.sandbox.memory_mib` (16 MiB by default):
+//! `tests::an_effect_that_never_returns_is_stopped_within_its_budget`,
+//! `tests::the_load_budget_is_configurable`,
+//! `tests::the_memory_cap_is_configurable`,
 //! `geometry::tests::a_mesh_that_runs_forever_is_stopped_by_its_budget`. It
 //! runs with no hook, and [`super::watch`]'s watchdog arms one only once the
 //! call is past its deadline, because Lua 5.4 takes its slow path on every
@@ -33,22 +37,15 @@ use solium_effects::spec::{self, EffectSpec, Extent, Given, GridSpec, ParamSpec,
 use solium_effects::stage::{Depends, Format, Stage};
 
 use super::host::Problem;
+use super::settings::Caps;
 use super::watch;
 
-/// How long a call may run, and how much memory a state may hold.
+/// How long a per-frame call may run. A load-time call's budget and a
+/// state's memory are its [`Caps`], `effects.sandbox`.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Budget {
-    pub(crate) time: Duration,
-    pub(crate) memory: usize,
-}
+pub(crate) struct Budget;
 
 impl Budget {
-    /// A load-time call: `effect.lua`, `stages`, `reach`, `bleed` (the
-    /// 2026-10-01 "Lua at 100 ms" decision).
-    pub(crate) const LOAD: Self = Self {
-        time: Duration::from_millis(100),
-        memory: 16 << 20,
-    };
     /// A per-frame `mesh` call, which the fastest of the checks at load
     /// must fit too (`geometry::tests::a_mesh_too_slow_for_a_frame_is_refused_at_load`).
     pub(crate) const MESH: Duration = Duration::from_millis(2);
@@ -56,6 +53,10 @@ impl Budget {
 
 const EVERY: u32 = 10_000;
 const STOPPED: &str = "the effect ran past its budget and was stopped";
+
+/// The key a load-time call's budget is, named when it stops one
+/// (`tests::the_load_budget_is_configurable`).
+const LOAD_KEY: &str = "effects.sandbox.load_ms";
 
 /// What every effect's Lua may call, run before its own file: `sol_phase`
 /// and `sol_grid` (`geometry::tests::an_effects_lua_has_math_and_the_prelude_and_no_sol`).
@@ -81,6 +82,9 @@ pub(crate) struct Sandbox {
     lua: Lua,
     effect: String,
     file: PathBuf,
+    /// What it was made with: its memory, and every load-time call's budget
+    /// (`tests::the_load_budget_is_configurable`).
+    caps: Caps,
     returned: Option<mlua::RegistryKey>,
     /// Set when a call was stopped by its budget: mlua 0.12.1 leaves the
     /// error object in the stopped frame's locals, so this state runs nothing
@@ -101,7 +105,17 @@ impl std::fmt::Debug for Sandbox {
 }
 
 impl Sandbox {
+    /// [`Self::with_caps`] at the default caps, 100 ms and 16 MiB.
+    #[cfg(test)]
     pub(crate) fn new(effect: &str, file: &Path) -> Result<Self, Problem> {
+        Self::with_caps(effect, file, Caps::default())
+    }
+
+    /// A state for `effect`'s `file`, holding at most `caps.memory`, whose
+    /// load-time calls have `caps.load` each
+    /// (`tests::the_load_budget_is_configurable`,
+    /// `tests::the_memory_cap_is_configurable`).
+    pub(crate) fn with_caps(effect: &str, file: &Path, caps: Caps) -> Result<Self, Problem> {
         let fail = |err: mlua::Error| {
             Problem::error(
                 effect,
@@ -115,7 +129,7 @@ impl Sandbox {
             LuaOptions::new(),
         )
         .map_err(fail)?;
-        lua.set_memory_limit(Budget::LOAD.memory).map_err(fail)?;
+        lua.set_memory_limit(caps.memory).map_err(fail)?;
         harden(&lua, effect, file).map_err(fail)?;
         lua.load(PRELUDE)
             .set_name("=prelude")
@@ -126,6 +140,7 @@ impl Sandbox {
             lua,
             effect: effect.to_owned(),
             file: file.to_owned(),
+            caps,
             returned: None,
             poisoned: std::cell::Cell::new(false),
         })
@@ -135,6 +150,13 @@ impl Sandbox {
     #[cfg(test)]
     pub(crate) fn lua(&self) -> &Lua {
         &self.lua
+    }
+
+    /// What this state was made with: what `geometry::at_rest`'s checks
+    /// share, and what a problem with them names
+    /// (`geometry::tests::the_checks_at_load_read_the_configured_load_budget`).
+    pub(crate) fn caps(&self) -> Caps {
+        self.caps
     }
 
     /// Whether a call was stopped by its budget, so this state must not run
@@ -150,6 +172,24 @@ impl Sandbox {
     pub(crate) fn budgeted<R>(
         &self,
         limit: Duration,
+        call: impl FnOnce(&Lua) -> mlua::Result<R>,
+    ) -> Result<R, Problem> {
+        self.budgeted_as(limit, None, call)
+    }
+
+    /// A load-time call: [`Self::budgeted`] under `effects.sandbox.load_ms`,
+    /// which a stop names (`tests::the_load_budget_is_configurable`).
+    fn at_load<R>(&self, call: impl FnOnce(&Lua) -> mlua::Result<R>) -> Result<R, Problem> {
+        self.budgeted_as(self.caps.load, Some(LOAD_KEY), call)
+    }
+
+    /// [`Self::budgeted`], a stop naming `key` when there is one, and a
+    /// state that ran out of memory naming `effects.sandbox.memory_mib`
+    /// (`tests::the_memory_cap_is_configurable`).
+    fn budgeted_as<R>(
+        &self,
+        limit: Duration,
+        key: Option<&str>,
         call: impl FnOnce(&Lua) -> mlua::Result<R>,
     ) -> Result<R, Problem> {
         if self.poisoned.get() {
@@ -171,7 +211,15 @@ impl Sandbox {
         result.map_err(|err| {
             let mut problem = self.problem(&err);
             if stopped {
-                problem.message = format!("{STOPPED} ({} ms)", limit.as_millis());
+                problem.message = match key {
+                    Some(key) => format!("{STOPPED} ({} ms, `{key}`)", limit.as_millis()),
+                    None => format!("{STOPPED} ({} ms)", limit.as_millis()),
+                };
+            } else if out_of_memory(&err) {
+                problem.message = format!(
+                    "the effect's Lua ran past its memory, `effects.sandbox.memory_mib` ({} MiB)",
+                    self.caps.memory >> 20
+                );
             }
             problem
         })
@@ -238,9 +286,8 @@ impl Sandbox {
             )
         })?;
         let name = format!("@{}", self.file.display());
-        let returned: Table = self.budgeted(Budget::LOAD.time, |lua| {
-            lua.load(text.as_str()).set_name(name).eval::<Table>()
-        })?;
+        let returned: Table =
+            self.at_load(|lua| lua.load(text.as_str()).set_name(name).eval::<Table>())?;
         let spec = read_spec(&returned)
             .map_err(|message| Problem::error(&self.effect, &self.file, None, message))?;
         self.returned = Some(
@@ -379,7 +426,7 @@ impl Sandbox {
             LuaValue::Table(list) => list,
             LuaValue::Function(function) => {
                 let p = self.params_table(params)?;
-                match self.budgeted(Budget::LOAD.time, |_| function.call::<LuaValue>(p))? {
+                match self.at_load(|_| function.call::<LuaValue>(p))? {
                     LuaValue::Table(list) => list,
                     other => {
                         return Err(self.error(&format!(
@@ -408,7 +455,7 @@ impl Sandbox {
             LuaValue::Number(number) => Ok(number),
             LuaValue::Function(function) => {
                 let p = self.params_table(params)?;
-                let got: f64 = self.budgeted(Budget::LOAD.time, |_| function.call(p))?;
+                let got: f64 = self.at_load(|_| function.call(p))?;
                 if got.is_finite() && got >= 0.0 {
                     Ok(got)
                 } else {
@@ -429,9 +476,19 @@ impl Sandbox {
             Problem::error(&self.effect, path, None, format!("cannot read it: {err}"))
         })?;
         let name = format!("@{}", path.display());
-        self.budgeted(Budget::LOAD.time, |lua| {
-            lua.load(text.as_str()).set_name(name).eval::<LuaValue>()
-        })
+        self.at_load(|lua| lua.load(text.as_str()).set_name(name).eval::<LuaValue>())
+    }
+}
+
+/// Whether `err` is Lua running out of the memory its state may hold,
+/// however a call wrapped it (`tests::the_memory_cap_is_configurable`).
+fn out_of_memory(err: &mlua::Error) -> bool {
+    match err {
+        mlua::Error::MemoryError(_) => true,
+        mlua::Error::CallbackError { cause, .. } | mlua::Error::WithContext { cause, .. } => {
+            out_of_memory(cause)
+        }
+        _ => false,
     }
 }
 
@@ -1152,7 +1209,7 @@ mod tests {
     use solium_effects::spec::{Given, Value};
     use solium_effects::stage::Stage;
 
-    use super::{Budget, Sandbox, located};
+    use super::{Caps, Sandbox, located};
     use crate::effect::host::tests::{folder, scratch};
 
     fn sandbox(name: &str, lua: &str) -> (Sandbox, std::path::PathBuf) {
@@ -1234,7 +1291,7 @@ mod tests {
         let started = Instant::now();
         drop(state);
         assert!(
-            started.elapsed() < Budget::LOAD.time + Duration::from_millis(400),
+            started.elapsed() < Caps::default().load + Duration::from_millis(400),
             "{:?}",
             started.elapsed()
         );
@@ -1251,14 +1308,14 @@ mod tests {
         let started = Instant::now();
         let problem = sandbox.load_effect().expect_err("stopped");
         assert!(
-            started.elapsed() < Budget::LOAD.time + Duration::from_millis(400),
+            started.elapsed() < Caps::default().load + Duration::from_millis(400),
             "{:?}",
             started.elapsed()
         );
         assert!(problem.message.contains("budget"), "{problem:?}");
         assert!(sandbox.poisoned(), "a stopped state is poisoned");
         let again = sandbox
-            .budgeted(Budget::LOAD.time, |_| Ok(()))
+            .budgeted(Caps::default().load, |_| Ok(()))
             .expect_err("nothing more runs in it");
         assert!(again.message.contains("not run again"), "{again:?}");
         let _ = std::fs::remove_dir_all(place);
@@ -1283,8 +1340,9 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        let (result, stopped) =
-            sandbox.hooked(Budget::LOAD.time, |lua| lua.load("return 1").eval::<i64>());
+        let (result, stopped) = sandbox.hooked(Caps::default().load, |lua| {
+            lua.load("return 1").eval::<i64>()
+        });
         assert_eq!((result.ok(), stopped), (Some(1), false));
         let mut hooked = true;
         // SAFETY: the closure reads the state's hook and touches no stack.
@@ -1309,6 +1367,84 @@ mod tests {
         let problem = sandbox.load_effect().expect_err("stopped");
         assert!(problem.message.contains("memory"), "{problem:?}");
         assert!(!sandbox.poisoned(), "only a stop by the clock poisons");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **The load budget is `effects.sandbox.load_ms`**: an `effect.lua`
+    /// that never returns is stopped before 1000 ms under the default 100,
+    /// its problem naming the key, and not before 1000 under
+    /// `load_ms = 1000`.
+    #[test]
+    fn the_load_budget_is_configurable() {
+        let place = scratch("load-budget");
+        let dir = folder(&place, "endless", "while true do end", &[]);
+        let file = dir.join("effect.lua");
+        let started = Instant::now();
+        let stopped = Sandbox::new("endless", &file)
+            .expect("a sandbox")
+            .load_effect()
+            .expect_err("stopped");
+        assert!(
+            stopped.message.contains("budget")
+                && stopped.message.contains("effects.sandbox.load_ms")
+                && started.elapsed() < Duration::from_millis(1000),
+            "{} after {:?}",
+            stopped.message,
+            started.elapsed()
+        );
+        let caps = Caps {
+            load: Duration::from_millis(1000),
+            ..Caps::default()
+        };
+        let started = Instant::now();
+        let _ = Sandbox::with_caps("endless", &file, caps)
+            .expect("a sandbox")
+            .load_effect()
+            .expect_err("stopped");
+        assert!(
+            started.elapsed() >= Duration::from_millis(1000),
+            "stopped at {:?}, before its configured budget",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **The memory cap is `effects.sandbox.memory_mib`**: an effect that
+    /// builds a 20 MiB string fails under the default 16, its problem naming
+    /// the key, and loads under 64.
+    #[test]
+    fn the_memory_cap_is_configurable() {
+        let place = scratch("memory-cap");
+        let dir = folder(
+            &place,
+            "big",
+            "local big = string.rep('x', 20 * 1024 * 1024)\nreturn { api = 1, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let file = dir.join("effect.lua");
+        let failed = Sandbox::new("big", &file)
+            .expect("a sandbox")
+            .load_effect()
+            .expect_err("16 MiB stops it");
+        assert!(
+            failed.message.contains("memory")
+                && failed.message.contains("effects.sandbox.memory_mib"),
+            "{}",
+            failed.message
+        );
+        // A long budget beside it, so a busy machine building the string
+        // slowly is not what is tested.
+        let caps = Caps {
+            memory: 64 << 20,
+            load: Duration::from_millis(5000),
+        };
+        Sandbox::with_caps("big", &file, caps)
+            .expect("a sandbox")
+            .load_effect()
+            .expect("loads under 64 MiB");
         let _ = std::fs::remove_dir_all(place);
     }
 

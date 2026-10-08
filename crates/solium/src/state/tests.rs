@@ -112,6 +112,88 @@ fn a_reload_reads_the_effect_folders_again() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// `sol.effects(<lua>)` through the compositor's `Command::Effects` arm, as
+/// the shipped `init.lua` hands `config.effects` over.
+fn apply_effects_lua(state: &mut Solium, lua: &str) {
+    let options = tree(lua);
+    let rules = options
+        .field("rules")
+        .map_or_else(|| Ok(Vec::new()), crate::effect::rules::parse);
+    let settings = crate::effect::settings::parse(&options);
+    state.apply_effects_set(rules, settings);
+}
+
+/// **`effects.sandbox` reaches the host and the styles' reader**: the caps
+/// one `sol.effects` gives are what every effect's Lua and every style's
+/// `effects.lua` are made with, and what it gives is kept for its readers.
+#[test]
+fn effects_sandbox_reaches_the_host_and_the_styles_reader() {
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    apply_effects_lua(
+        &mut state,
+        "{ sandbox = { load_ms = 300, memory_mib = 32 }, limits = { params = 12 } }",
+    );
+    let caps = crate::effect::settings::Caps {
+        load: std::time::Duration::from_millis(300),
+        memory: 32 << 20,
+    };
+    assert_eq!(state.effects.caps(), caps);
+    let styles = crate::style::caps();
+    assert_eq!(state.effect_settings.limits.params, 12);
+    // Back to the defaults, which every other test reads styles under.
+    apply_effects_lua(&mut state, "{}");
+    assert_eq!(styles, caps, "the styles' reader kept its own caps");
+    assert_eq!(
+        crate::style::caps(),
+        crate::effect::settings::Caps::default()
+    );
+}
+
+/// **A refused setting keeps everything as it was**: a key out of its bounds
+/// is a problem under `settings`, and neither the caps nor the rules of the
+/// same `sol.effects` are taken; a set that parses clears it.
+#[test]
+fn a_refused_effects_setting_keeps_everything_as_it_was() {
+    let place = crate::effect::host::tests::scratch("state-refused-setting");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    let rule = "{ { match = '*', part = 'client', slot = 'behind', effect = 'tint' } }";
+    apply_effects_lua(
+        &mut state,
+        &format!("{{ rules = {rule}, sandbox = {{ load_ms = 1 }} }}"),
+    );
+    assert!(
+        state.rules.is_empty(),
+        "the rules of a refused set were taken"
+    );
+    assert_eq!(
+        state.effects.caps(),
+        crate::effect::settings::Caps::default()
+    );
+    let said = |state: &Solium| {
+        state
+            .effects
+            .problems()
+            .iter()
+            .filter(|problem| problem.effect == "settings")
+            .map(|problem| problem.message.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        said(&state)
+            .iter()
+            .any(|message| message.contains("effects.sandbox.load_ms")),
+        "{:?}",
+        state.effects.problems()
+    );
+    apply_effects_lua(&mut state, &format!("{{ rules = {rule} }}"));
+    assert!(!state.rules.is_empty(), "{:?}", state.effects.problems());
+    assert!(said(&state).is_empty(), "{:?}", said(&state));
+    let _ = std::fs::remove_dir_all(place);
+}
+
 /// **A broken configuration reload is a problem**, so the overlay of the
 /// configuration still running lists it, a second failure replaces it rather
 /// than adding to it, and a reload that works clears it.

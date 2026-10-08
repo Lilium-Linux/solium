@@ -712,6 +712,11 @@ pub(crate) struct Solium {
     /// compiled at the top of `render::prepare` (Ruling 7).
     /// `effect::host::tests::an_empty_host_touches_no_gl`.
     pub(crate) effects: crate::effect::host::Host,
+    /// The engine's own keys, `effects.sandbox`, `limits` and `present`, as
+    /// the last `sol.effects` gave them (Ruling 28): what binding a
+    /// `sol.present` geometry reads.
+    /// `tests::effects_sandbox_reaches_the_host_and_the_styles_reader`.
+    pub(crate) effect_settings: crate::effect::settings::Settings,
     /// The problems' generation the scripts were last told about, so `settle`
     /// fires `problems` once per change:
     /// `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.
@@ -1271,6 +1276,7 @@ impl Solium {
             pointer: crate::cursor::Pointer::default(),
             programs: crate::pass::Programs::default(),
             effects: crate::effect::host::Host::new(crate::effect::host::Library::new()),
+            effect_settings: crate::effect::settings::Settings::default(),
             problems_told: 0,
             rules: crate::effect::rules::Rules::default(),
             chains: crate::effect::plan::Chains::default(),

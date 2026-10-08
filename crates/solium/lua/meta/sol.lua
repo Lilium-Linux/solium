@@ -125,7 +125,7 @@
 ---One row of `sol.problems()`: something broken in an effect, a rule or the
 ---configuration, and where.
 ---@class sol.Problem
----@field effect string The effect's name, `"config"` for the configuration, or `"rules"` for a rule of `sol.effects`, at its effect's file and line when the effect is what failed.
+---@field effect string The effect's name, `"config"` for the configuration, `"rules"` for a rule of `sol.effects`, or `"settings"` for the engine's own keys beside them, at its effect's file and line when the effect is what failed.
 ---@field file string The file the problem is in.
 ---@field line? integer Its line in that file, where one is known.
 ---@field column? integer Its column, where the compiler gave one.
@@ -481,12 +481,23 @@ function sol.problems() end
 ---@field source? "self"|"xray"|"live"|"auto" What the chain's first input reads in place of its own: `"self"`, the part's own pixels. On the rule or in its first link. Reading the backdrop from xray waits for X2.1 and the live backdrop for X4.1, both refused when the rules are applied.
 ---@field mask? "shape"|"alpha" How the result is cut: the part's shape (the default), or the alpha of the part's own pixels, which needs `source = "self"`.
 
+---What `sol.effects` takes: the rules, and the engine's own numbers and
+---policies beside them, each with its default. A key it does not know, a
+---number outside its bounds or a word outside its words refuses the whole
+---set, named by `sol.problems()` under `"settings"`, and what ran stays.
+---@class sol.EffectsOptions
+---@field rules? sol.Rule[] The rules; left out, none.
+---@field sandbox? { load_ms?: number, memory_mib?: integer } What an effect's own Lua may spend as it loads: `load_ms` for each call, shared by the checks a `mesh` is put through at load (100 by default, 10 to 5000), and `memory_mib` of memory (16 by default, 1 to 512). A folder past either is named by `sol.problems()` and not loaded; changing either loads every effect again.
+---@field limits? { params?: integer } How many numbers a geometry or a pixels effect's params may be once packed (8 by default, 1 to 64); one with more is named by `sol.problems()`, never cut.
+---@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when its folder is reloaded while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with). A deform may say either for itself.
+
 ---Which effects go where, all at once: a set with a broken rule is refused
 ---whole, its errors listed by `sol.problems()`, and the rules that ran stay.
 ---Every effect a rule names is loaded and every link bound with its params
 ---when this is called, at load and at every reload; `rules` left out is no
----rules.
----@param options? { rules?: sol.Rule[] }
+---rules. The engine's own keys beside them are applied first, so the effects
+---the rules name load under them.
+---@param options? sol.EffectsOptions
 ---@return nil
 function sol.effects(options) end
 

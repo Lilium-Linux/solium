@@ -226,12 +226,36 @@ impl StyleRules {
     }
 }
 
-/// Per style folder: the hash of the `effects.lua` last read, and what
-/// reading it gave. One for the process, not one per thread, so a pane's
-/// rules and the chains bound for them agree on a generation wherever each
-/// was read. `tests::effects_lua_is_read_once_per_content`.
-static READ: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (u64, StyleRules)>> =
+/// Per style folder: the hash of the `effects.lua` last read, the caps it
+/// was read under, and what reading it gave. One for the process, not one
+/// per thread, so a pane's rules and the chains bound for them agree on a
+/// generation wherever each was read. `tests::effects_lua_is_read_once_per_content`.
+type Read = (u64, crate::effect::settings::Caps, StyleRules);
+static READ: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Read>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// What a style's `effects.lua` runs under, `effects.sandbox`, as the host's
+/// effects do: one for the process, as [`READ`] is, so the style read when a
+/// pane is framed and the one its rules are bound from are read alike.
+/// `tests::a_styles_effects_lua_reads_under_the_configured_caps`.
+static CAPS: std::sync::Mutex<crate::effect::settings::Caps> =
+    std::sync::Mutex::new(crate::effect::settings::Caps::DEFAULT);
+
+/// Read every style's `effects.lua` under `caps` from now on
+/// (`Solium::apply_settings`):
+/// `state::tests::effects_sandbox_reaches_the_host_and_the_styles_reader`.
+pub(crate) fn set_caps(caps: crate::effect::settings::Caps) {
+    *CAPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = caps;
+}
+
+/// What a style's `effects.lua` runs under now.
+pub(crate) fn caps() -> crate::effect::settings::Caps {
+    *CAPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The generation the last new list of rules was given.
 static GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -243,6 +267,15 @@ static GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::
 /// `tests::effects_lua_is_read_once_per_content`,
 /// `tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`.
 pub(crate) fn rules_of(dir: &Path) -> StyleRules {
+    rules_with(dir, caps())
+}
+
+/// [`rules_of`] under `caps`. A file read once is not read again for the
+/// same content, unless reading it failed and the caps have changed since,
+/// so a budget or a memory cap that refused it can be raised; what read is
+/// kept whatever the caps, as a larger budget changes nothing for it.
+/// `tests::a_styles_effects_lua_reads_under_the_configured_caps`.
+fn rules_with(dir: &Path, caps: crate::effect::settings::Caps) -> StyleRules {
     use crate::effect::host::Problem;
     let file = dir.join("effects.lua");
     if !file.is_file() {
@@ -261,7 +294,7 @@ pub(crate) fn rules_of(dir: &Path) -> StyleRules {
     // (`tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`).
     let ran = read
         .get(dir)
-        .map_or_else(StyleRules::none, |(_, read)| StyleRules {
+        .map_or_else(StyleRules::none, |(_, _, read)| StyleRules {
             problems: Vec::new(),
             ..read.clone()
         });
@@ -280,10 +313,12 @@ pub(crate) fn rules_of(dir: &Path) -> StyleRules {
         }
     };
     let hash = solium_effects::glsl::content_hash(&[&bytes]);
-    if let Some((_, found)) = read.get(dir).filter(|(seen, _)| *seen == hash) {
+    if let Some((_, _, found)) = read.get(dir).filter(|(seen, under, found)| {
+        *seen == hash && (found.problems.is_empty() || *under == caps)
+    }) {
         return found.clone();
     }
-    let rules = match read_rules(&effect, &file) {
+    let rules = match read_rules(&effect, &file, caps) {
         Ok(rules) => StyleRules {
             rules: std::sync::Arc::from(rules),
             generation: GENERATION
@@ -293,7 +328,7 @@ pub(crate) fn rules_of(dir: &Path) -> StyleRules {
         },
         Err(problems) => StyleRules { problems, ..ran },
     };
-    read.insert(dir.to_owned(), (hash, rules.clone()));
+    read.insert(dir.to_owned(), (hash, caps, rules.clone()));
     rules
 }
 
@@ -304,11 +339,12 @@ pub(crate) fn rules_of(dir: &Path) -> StyleRules {
 fn read_rules(
     effect: &str,
     file: &Path,
+    caps: crate::effect::settings::Caps,
 ) -> Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::host::Problem>> {
     use crate::effect::host::Problem;
     use crate::effect::tree::Tree;
-    let sandbox =
-        crate::effect::sandbox::Sandbox::new(effect, file).map_err(|problem| vec![problem])?;
+    let sandbox = crate::effect::sandbox::Sandbox::with_caps(effect, file, caps)
+        .map_err(|problem| vec![problem])?;
     let value = sandbox.eval_file(file).map_err(|problem| vec![problem])?;
     let problem = |message: String| vec![Problem::error(effect, file, None, message)];
     let tree = match Tree::from_lua(&value).map_err(|err| problem(err.to_string()))? {
@@ -1851,6 +1887,41 @@ mod tests {
         let c = super::rules_of(&dir);
         assert_eq!(c.rules.len(), 1);
         assert_ne!(a.generation, c.generation);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **A style's `effects.lua` reads under the configured caps**: one that
+    /// builds a 20 MiB string is refused under the default 16 MiB, naming the
+    /// key, and read once `effects.sandbox.memory_mib` is 64, although its
+    /// content has not changed.
+    #[test]
+    fn a_styles_effects_lua_reads_under_the_configured_caps() {
+        let dir = fixture("caps", "import Solium\nPaneStyle {}\n");
+        std::fs::write(
+            dir.join("effects.lua"),
+            "local big = string.rep('x', 20 * 1024 * 1024) return {}",
+        )
+        .expect("writing");
+        let default = crate::effect::settings::Caps::default();
+        let refused = super::rules_with(&dir, default);
+        assert!(
+            refused
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("effects.sandbox.memory_mib")),
+            "{:?}",
+            refused.problems
+        );
+        let read = super::rules_with(
+            &dir,
+            // A long budget beside it, so a busy machine building the
+            // string slowly is not what is tested.
+            crate::effect::settings::Caps {
+                memory: 64 << 20,
+                load: std::time::Duration::from_millis(5000),
+            },
+        );
+        assert!(read.problems.is_empty(), "{:?}", read.problems);
         let _ = std::fs::remove_dir_all(dir);
     }
 

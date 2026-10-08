@@ -130,7 +130,8 @@ What is broken is named with its file and line in the top-right corner of
 your primary monitor, for as long as it is broken: a Lua error in an
 `effect.lua`, a check of a shader that fails, a compile the GPU refused, a
 rule that cannot be applied (above), a pane style's `effects.lua` that does
-not run or a rule of it that cannot be bound. A
+not run or a rule of it that cannot be bound, a key of `effects` outside its
+bounds (which keeps the rules and keys that ran). A
 configuration that fails to reload is listed there too, at its own line, and
 the configuration that was running before it keeps running. The list goes
 when a reload leaves nothing broken. A version of an effect that fails keeps
@@ -300,9 +301,15 @@ window is, 0 leading and 1 following; and `sol_grid(t, c, r)`, the window's
 `(u, v)` at point `(c, r)` of a `mesh`'s grid ([below](#writing-a-mesh)).
 
 Every call into an effect, running `effect.lua` or a function of its params,
-has 100 ms, a `mesh` call in a frame 2 ms, and the checks a `mesh` is put
-through when it loads ([below](#writing-a-mesh)) 100 ms between them; its
-Lua has 16 MiB. A call runs at full speed, with nothing counting its
+has `effects.sandbox.load_ms` (100 ms unless you change it), a `mesh` call
+in a frame 2 ms, and the checks a `mesh` is put through when it loads
+([below](#writing-a-mesh)) `load_ms` between them; its Lua has
+`effects.sandbox.memory_mib` (16 MiB unless you change it). Both are keys
+of `effects` in your configuration, `sandbox = { load_ms = 100, memory_mib =
+16 }`, from 10 to 5000 ms and from 1 to 512 MiB; changing either loads every
+effect again, and a pane style's `effects.lua` runs under them too. A
+problem the budget or the memory caused names the key. A call runs at full
+speed, with nothing counting its
 instructions. One that runs longer is stopped at its next Lua instruction,
 so a call into the `string` or `table` library runs to its end first; one
 that asks for more memory is stopped there. An effect stopped by the clock
@@ -404,7 +411,7 @@ refused, and the window is not drawn through it.
 When the effect loads, `mesh` is called at progress 0 and 1, on all four
 axes, arriving, leaving and resizing, and at progress 0 it must put every
 point exactly where the window is, within 10⁻⁹ of a pixel: an effect starts
-and ends with the window at rest. These 24 calls have 100 ms between them,
+and ends with the window at rest. These 24 calls have `load_ms` between them,
 and the fastest must take no more than the 2 ms a frame gives, or every
 frame would stop it. One that fails any of this is refused, and named on
 the overlay and by `solium --check` at the line its `mesh` is on.

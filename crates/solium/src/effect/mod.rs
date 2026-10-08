@@ -15,6 +15,7 @@ pub(crate) mod plan;
 pub(crate) mod rules;
 pub(crate) mod run;
 pub(crate) mod sandbox;
+pub(crate) mod settings;
 pub(crate) mod store;
 pub(crate) mod tree;
 pub(crate) mod watch;

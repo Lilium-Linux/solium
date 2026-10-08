@@ -19,6 +19,13 @@ use solium_effects::{Axis, Rect};
 use super::sandbox::{Budget, Sandbox, numbers};
 use crate::warp::UnitRect;
 
+/// The most numeric params a geometry or pixels effect may pack:
+/// `effects.limits.params`' upper bound. A representation's size, not a
+/// behaviour (Ruling 28): a geometry rides `present::Frame`, which is `Copy`,
+/// so its params are an inline array, and the key picks how many of it may
+/// be used. `settings::tests::the_engines_keys_read_with_their_defaults_and_bounds`.
+pub(crate) const PARAMS_MAX: usize = 64;
+
 /// Why a `mesh` call's grid is not drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Refusal {
@@ -191,9 +198,11 @@ fn checked(
 /// `tests::a_file_that_moves_the_window_on_one_axis_is_refused_at_load`,
 /// `tests::a_file_whose_grid_at_progress_one_is_not_finite_is_refused_at_load`.
 ///
-/// Its 24 calls share one load budget (Ruling 4's 100 ms for a load-time
-/// call), so a load holds the thread no longer than one such call
-/// (`tests::the_checks_at_load_share_one_budget`); and a version whose
+/// Its 24 calls share one load budget, the sandbox's
+/// `effects.sandbox.load_ms` (100 ms by default), so a load holds the thread
+/// no longer than one load-time call
+/// (`tests::the_checks_at_load_share_one_budget`,
+/// `tests::the_checks_at_load_read_the_configured_load_budget`); and a version whose
 /// fastest call is longer than a frame gives a `mesh` is refused, since
 /// every frame would stop it. The fastest, because one call is slow when
 /// the machine is busy, and 24 are slow only when the file is
@@ -205,7 +214,7 @@ pub(crate) fn at_rest(
 ) -> Result<(), Refusal> {
     let from = Rect::new(100.0, 100.0, 400.0, 300.0);
     let mut clock = Checks {
-        deadline: Instant::now() + Budget::LOAD.time,
+        deadline: Instant::now() + sandbox.caps().load,
         fastest: None,
     };
     for (_, axis) in Axis::all() {
@@ -723,6 +732,64 @@ pub(crate) mod tests {
         sandbox.lua().globals().set("wait", wait).expect("set");
         sandbox.load_effect().expect("loads");
         (sandbox, place)
+    }
+
+    /// [`waiting`]'s file made with `caps`, whose `mesh` waits `ms` on its
+    /// first call only: the checks at load share one deadline, so one slow
+    /// call is what a slow check costs, and the fast calls after it keep the
+    /// fastest under a frame's budget.
+    fn waiting_once(
+        name: &str,
+        ms: u64,
+        caps: crate::effect::settings::Caps,
+    ) -> (Sandbox, std::path::PathBuf) {
+        let lua = format!(
+            "local waited = false
+            return {{ api = 1, grid = {{ 1, 1 }}, mesh = function(t, cols, rows, out)
+            if not waited then waited = true wait({ms}) end
+            local n = 0 for r = 0, rows do for c = 0, cols do local u, v = sol_grid(t, c, r)
+            out[n + 1], out[n + 2], n = t.from.x + u * t.from.w, t.from.y + v * t.from.h, n + 2 end end end }}"
+        );
+        let place = scratch(&format!("geometry-{name}"));
+        let dir = folder(&place, name, &lua, &[]);
+        let mut sandbox =
+            Sandbox::with_caps(name, &dir.join("effect.lua"), caps).expect("a sandbox");
+        let wait = sandbox
+            .lua()
+            .create_function(|_, ms: u64| {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                Ok(())
+            })
+            .expect("a function");
+        sandbox.lua().globals().set("wait", wait).expect("set");
+        sandbox.load_effect().expect("loads");
+        (sandbox, place)
+    }
+
+    /// **The checks at load share `effects.sandbox.load_ms`**: a geometry
+    /// file whose first check at load takes 150 ms is stopped under the
+    /// default 100, and passes under `load_ms = 500`.
+    #[test]
+    fn the_checks_at_load_read_the_configured_load_budget() {
+        let (sandbox, place) =
+            waiting_once("slow-once", 150, crate::effect::settings::Caps::default());
+        assert_eq!(
+            at_rest(&sandbox, ONE, &[]),
+            Err(Refusal::Budget),
+            "150 ms passed under the default 100"
+        );
+        let _ = std::fs::remove_dir_all(place);
+        let caps = crate::effect::settings::Caps {
+            load: std::time::Duration::from_millis(500),
+            ..crate::effect::settings::Caps::default()
+        };
+        let (sandbox, place) = waiting_once("slow-once-raised", 150, caps);
+        assert_eq!(
+            at_rest(&sandbox, ONE, &[]),
+            Ok(()),
+            "refused under load_ms = 500"
+        );
+        let _ = std::fs::remove_dir_all(place);
     }
 
     /// **A mesh too slow for a frame is refused at load**: every frame would

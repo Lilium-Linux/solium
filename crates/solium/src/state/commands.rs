@@ -503,7 +503,7 @@ impl Solium {
                         self.redraw = true;
                     }
                 }
-                Command::Effects { rules } => self.apply_effects(rules),
+                Command::Effects { rules, settings } => self.apply_effects_set(rules, settings),
                 Command::Decoration { name } => {
                     // The slots windows occupy are kept; what changes is how
                     // much of each slot the frame takes, so every client is
@@ -999,6 +999,49 @@ impl Solium {
         let outcome = scripts.problems_changed(snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
+    }
+
+    /// One `sol.effects`: its settings and its rules, or, when either did
+    /// not parse, neither, with the error on the overlay (Ruling 28): the
+    /// settings first, so the folders the same call's rules name load under
+    /// its caps. `tests::a_refused_effects_setting_keeps_everything_as_it_was`.
+    pub(crate) fn apply_effects_set(
+        &mut self,
+        rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
+        settings: Result<crate::effect::settings::Settings, String>,
+    ) {
+        match settings {
+            Err(error) => {
+                self.effects.clear_problems_of("settings");
+                self.effects
+                    .push_problem(crate::effect::host::Problem::error(
+                        "settings",
+                        &Scripts::config_path(),
+                        None,
+                        error,
+                    ));
+            }
+            Ok(settings) => {
+                self.effects.clear_problems_of("settings");
+                if rules.is_ok() {
+                    self.apply_settings(settings);
+                }
+                self.apply_effects(rules);
+            }
+        }
+    }
+
+    /// The engine's own keys, `effects.sandbox`, `limits` and `present`
+    /// (Ruling 28): kept for what reads them, and the caps handed to the
+    /// host and to the reader of a style's `effects.lua`, which read again
+    /// what new caps may change.
+    /// `tests::effects_sandbox_reaches_the_host_and_the_styles_reader`.
+    pub(crate) fn apply_settings(&mut self, settings: crate::effect::settings::Settings) {
+        self.effect_settings = settings;
+        if self.effects.set_caps(settings.sandbox) {
+            crate::style::set_caps(settings.sandbox);
+            self.apply_style_rules();
+        }
     }
 
     /// Rules from `sol.effects`: all of them bound and runnable, or none

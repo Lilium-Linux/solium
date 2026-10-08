@@ -609,9 +609,12 @@ pub(crate) enum Command {
     Cursor(crate::cursor::theme::Configured),
     /// `sol.effects{ rules = … }`: the user's rules, parsed, or every error
     /// in them, applied whole or not at all
-    /// (`state::tests::a_broken_rule_keeps_the_rules_that_ran`).
+    /// (`state::tests::a_broken_rule_keeps_the_rules_that_ran`); and the
+    /// engine's own keys beside them, `sandbox`, `limits` and `present`
+    /// (`tests::sol_effects_reaches_the_compositor_with_its_settings`).
     Effects {
         rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
+        settings: Result<crate::effect::settings::Settings, String>,
     },
 }
 
@@ -1206,7 +1209,7 @@ impl Scripts {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    Command::Effects { rules } => Some(rules.clone()),
+                    Command::Effects { rules, .. } => Some(rules.clone()),
                     _ => None,
                 })
         })
@@ -2585,11 +2588,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
 
     // Effects on parts of windows: `sol.effects{ rules = { … } }`, parsed
     // here and applied whole, or not at all
-    // (`state::tests::a_broken_rule_keeps_the_rules_that_ran`).
+    // (`state::tests::a_broken_rule_keeps_the_rules_that_ran`), with the
+    // engine's own keys beside them (Ruling 28,
+    // `tests::sol_effects_reaches_the_compositor_with_its_settings`).
     sol.set(
         "effects",
         lua.create_function(|lua, options: Option<Table>| {
             let rules = match options
+                .as_ref()
                 .map(|table| table.get::<mlua::Value>("rules"))
                 .transpose()?
             {
@@ -2599,8 +2605,17 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     None => Ok(Vec::new()),
                 },
             };
+            let settings = match options {
+                None => Ok(crate::effect::settings::Settings::default()),
+                Some(table) => {
+                    match crate::effect::tree::Tree::from_lua(&mlua::Value::Table(table))? {
+                        Some(tree) => crate::effect::settings::parse(&tree),
+                        None => Ok(crate::effect::settings::Settings::default()),
+                    }
+                }
+            };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Effects { rules });
+                pending.commands.push(Command::Effects { rules, settings });
             })
         })?,
     )?;
@@ -8978,10 +8993,53 @@ mod tests {
         let commands = scripts.startup().commands;
         let _ = std::fs::remove_dir_all(&directory);
         let rules = commands.iter().find_map(|command| match command {
-            Command::Effects { rules } => Some(rules.clone()),
+            Command::Effects { rules, .. } => Some(rules.clone()),
             _ => None,
         });
         assert_eq!(rules.expect("sent").expect("parsed").len(), 1);
+    }
+
+    /// **`sol.effects` reaches the compositor with its settings**: the
+    /// engine's keys beside the rules, parsed; a key out of its bounds is
+    /// the set's error; no options at all are the defaults.
+    #[test]
+    fn sol_effects_reaches_the_compositor_with_its_settings() {
+        let directory =
+            std::env::temp_dir().join(format!("solium-effects-settings-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            "sol.effects({ rules = {}, sandbox = { load_ms = 250 }, present = { failed = 'hide' } })\n\
+             sol.effects({ limits = { params = 99 } })\nsol.effects()\n",
+        )
+        .expect("writing");
+        let mut scripts = Scripts::load(&config).expect("loading");
+        let commands = scripts.startup().commands;
+        let _ = std::fs::remove_dir_all(&directory);
+        let sets: Vec<_> = commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Effects { settings, .. } => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let [set, refused, none] = sets.as_slice() else {
+            panic!("three sets: {sets:?}");
+        };
+        let set = set.as_ref().expect("parsed");
+        assert_eq!(set.sandbox.load, std::time::Duration::from_millis(250));
+        assert_eq!(
+            set.present.failed,
+            crate::effect::settings::PresentFailed::Hide
+        );
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.contains("effects.limits.params")),
+            "{refused:?}"
+        );
+        assert_eq!(none, &Ok(crate::effect::settings::Settings::default()));
     }
 
     /// **A broken rule reaches the compositor as its errors**, so the
@@ -9004,7 +9062,7 @@ mod tests {
         let sets: Vec<_> = commands
             .into_iter()
             .filter_map(|command| match command {
-                Command::Effects { rules } => Some(rules),
+                Command::Effects { rules, .. } => Some(rules),
                 _ => None,
             })
             .collect();
@@ -9039,7 +9097,7 @@ mod tests {
                 .commands
                 .into_iter()
                 .find_map(|command| match command {
-                    Command::Effects { rules } => Some(rules),
+                    Command::Effects { rules, .. } => Some(rules),
                     _ => None,
                 });
             let _ = std::fs::remove_dir_all(&directory);
@@ -9049,6 +9107,46 @@ mod tests {
                 "{user}"
             );
             assert_eq!(unknown, 0, "{user}: `effects` is a setting");
+        }
+    }
+
+    /// **The shipped configuration writes out the engine's defaults**:
+    /// `config.lua`'s `effects.sandbox`, `limits` and `present` are the
+    /// numbers Rust defaults to, so the two cannot drift; and a `user.lua`
+    /// that raises one reaches the compositor.
+    #[test]
+    fn the_shipped_configuration_writes_out_the_engines_defaults() {
+        for (user, wanted) in [
+            ("return {}", crate::effect::settings::Settings::default()),
+            (
+                "return { effects = { sandbox = { load_ms = 300 } } }",
+                crate::effect::settings::Settings {
+                    sandbox: crate::effect::settings::Caps {
+                        load: std::time::Duration::from_millis(300),
+                        ..crate::effect::settings::Caps::default()
+                    },
+                    ..crate::effect::settings::Settings::default()
+                },
+            ),
+        ] {
+            let Some((directory, mut scripts)) =
+                shipped_init_with_user("solium-effects-settings", user)
+            else {
+                return;
+            };
+            let unknown = scripts.unknown_settings().len();
+            let settings =
+                scripts
+                    .startup()
+                    .commands
+                    .into_iter()
+                    .find_map(|command| match command {
+                        Command::Effects { settings, .. } => Some(settings),
+                        _ => None,
+                    });
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(settings, Some(Ok(wanted)), "{user}");
+            assert_eq!(unknown, 0, "{user}: every key is a setting");
         }
     }
 

@@ -1375,6 +1375,21 @@ local defaults = {
         -- is refused whole, named on the overlay, and the rules that ran stay.
         -- A pane style's own rules, in its effects.lua, come first: yours win.
         rules = {},
+        -- What an effect's own Lua may spend as it loads: `load_ms` of time
+        -- for each call (10 to 5000), shared by the checks a geometry
+        -- effect's `mesh` is put through, and `memory_mib` of memory (1 to
+        -- 512). A folder past either is named on the overlay and not loaded.
+        sandbox = { load_ms = 100, memory_mib = 16 },
+        -- How many numbers an effect's params may be when a geometry or a
+        -- pixels effect packs them (1 to 64); one with more is named on the
+        -- overlay, never cut.
+        limits = { params = 8 },
+        -- What a `sol.present` deform draws when its mesh is refused or its
+        -- folder is missing (`failed`: "flat", the window undeformed, or
+        -- "hide"), and when its folder is reloaded mid-flight (`on_reload`:
+        -- "flat", or "keep", the version it began with). A deform may say
+        -- either for itself.
+        present = { failed = "flat", on_reload = "flat" },
     },
 
     -- How much of a window trails behind it in the genie, for the Developer

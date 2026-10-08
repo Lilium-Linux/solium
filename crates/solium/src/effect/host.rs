@@ -16,6 +16,7 @@ use solium_effects::stage::{Binding, Plan, Stage};
 
 use super::geometry::{self, Refusal};
 use super::sandbox::{Budget, Sandbox};
+use super::settings::Caps;
 
 /// Where effect folders are looked for: the user's, then the shipped.
 #[derive(Clone, Debug)]
@@ -168,9 +169,16 @@ impl<P> Loaded<P> {
     /// version, and the effects its `use`s name are loaded with it.
     /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`,
     /// `tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`.
+    #[cfg(test)]
     pub(crate) fn load(name: &str, dir: &Path) -> Result<Self, Problem> {
+        Self::load_with(name, dir, Caps::default())
+    }
+
+    /// [`Self::load`], its Lua made with `caps` (`effects.sandbox`):
+    /// `tests::a_mesh_stopped_at_load_names_its_budget_and_key`.
+    pub(crate) fn load_with(name: &str, dir: &Path, caps: Caps) -> Result<Self, Problem> {
         let file = dir.join("effect.lua");
-        let mut sandbox = Sandbox::new(name, &file)?;
+        let mut sandbox = Sandbox::with_caps(name, &file, caps)?;
         let spec = sandbox.load_effect()?;
         let (defaults, _) = solium_effects::spec::bind(&spec.params, &[])
             .map_err(|message| Problem::error(name, &file, None, message))?;
@@ -385,6 +393,10 @@ pub(crate) struct Host<P = super::gl::Program> {
     sweep: bool,
     /// The compiler's [`Compiler::line_shift`], once a compile has failed.
     line_shift: Option<u32>,
+    /// What every effect's Lua is made with, `effects.sandbox`: a version
+    /// loaded under other caps is loaded again
+    /// (`tests::new_caps_load_every_wanted_folder_again`).
+    caps: Caps,
     /// What this GPU renders into: `None` until the first `prepare` probes
     /// it, and then unknown rather than missing, so every rung is kept
     /// (Ruling 11, `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`).
@@ -408,6 +420,7 @@ impl<P: Clone> Host<P> {
             held: BTreeSet::new(),
             sweep: false,
             line_shift: None,
+            caps: Caps::default(),
             formats: None,
             problems: Vec::new(),
             generation: 0,
@@ -469,6 +482,26 @@ impl<P: Clone> Host<P> {
     )]
     pub(crate) fn library(&self) -> &Library {
         &self.library
+    }
+
+    /// What every effect's Lua is made with from now on, `effects.sandbox`;
+    /// whether they changed. Every wanted folder loaded under other caps is
+    /// loaded again now, so an effect a budget refused can load under a
+    /// larger one, and the folders the same `sol.effects` names load under
+    /// the new caps (`tests::new_caps_load_every_wanted_folder_again`).
+    pub(crate) fn set_caps(&mut self, caps: Caps) -> bool {
+        if caps == self.caps {
+            return false;
+        }
+        self.caps = caps;
+        self.settle_wanted(true);
+        true
+    }
+
+    /// What every effect's Lua is made with, for a test to read.
+    #[cfg(test)]
+    pub(crate) fn caps(&self) -> Caps {
+        self.caps
     }
 
     /// Every name any origin wants, and their closure: `pixels`, a
@@ -639,11 +672,16 @@ impl<P: Clone> Host<P> {
         let hash = folder_hash(&dir);
         // A running version its budget stopped is read again even when its
         // folder is unchanged, so a reload rebuilds what `revive` gave up
-        // (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`).
+        // (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`),
+        // and so is one loaded under other caps
+        // (`tests::new_caps_load_every_wanted_folder_again`).
         if let Some(slot) = self.slots.get(name)
             && slot.pending.is_none()
             && slot.current.as_ref().is_some_and(|current| {
-                current.hash() == hash && current.dir() == dir && !current.sandbox().poisoned()
+                current.hash() == hash
+                    && current.dir() == dir
+                    && !current.sandbox().poisoned()
+                    && current.sandbox().caps() == self.caps
             })
         {
             return false;
@@ -652,7 +690,7 @@ impl<P: Clone> Host<P> {
         {
             self.loads += 1;
         }
-        match Loaded::<P>::load(name, &dir) {
+        match Loaded::<P>::load_with(name, &dir, self.caps) {
             Err(problem) => {
                 self.replace_problems(name, vec![problem]);
                 false
@@ -1064,7 +1102,8 @@ impl<P: Clone> Host<P> {
     /// `geometry::tests::a_stopped_state_is_rebuilt_after_the_frame`,
     /// `tests::a_stopped_state_whose_folder_changed_waits_for_the_reload`.
     pub(crate) fn revive(&mut self) {
-        self.revive_with(Loaded::<P>::load);
+        let caps = self.caps;
+        self.revive_with(|name, dir| Loaded::<P>::load_with(name, dir, caps));
     }
 
     /// [`Self::revive`], loading a folder with `load`.
@@ -1306,8 +1345,8 @@ fn at_rest_problem<P>(loaded: &Loaded<P>, refusal: Refusal) -> Problem {
             return Problem::error(loaded.name(), &file, line, message);
         }
         Refusal::Budget => format!(
-            "its mesh ran past the {} ms its checks at load have (progress 0 and 1, every axis and direction), and was stopped",
-            Budget::LOAD.time.as_millis()
+            "its mesh ran past the {} ms its checks at load have (`effects.sandbox.load_ms`; progress 0 and 1, every axis and direction), and was stopped",
+            loaded.sandbox().caps().load.as_millis()
         ),
         Refusal::Slow { took } => format!(
             "its mesh takes {:.1} ms a call; a frame gives it {} ms",
@@ -2189,6 +2228,83 @@ pub(crate) mod tests {
             host.loads - before,
             1,
             "a changed effect was loaded more than once by one reload"
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **New caps load every wanted folder again**, and only then: an
+    /// effect the default 16 MiB refused loads once `effects.sandbox` gives
+    /// it 64, and the same caps again load nothing.
+    #[test]
+    fn new_caps_load_every_wanted_folder_again() {
+        let place = scratch("new-caps");
+        folder(
+            &place,
+            "big",
+            "local big = string.rep('x', 20 * 1024 * 1024)\nreturn { api = 1, frag = 'effect.frag' }",
+            &[("effect.frag", FRAG)],
+        );
+        folder(&place, "small", ONE_PASS, &[("effect.frag", FRAG)]);
+        let mut host = host_with(&place);
+        host.want("rules", ["big".to_owned(), "small".to_owned()]);
+        assert!(host.latest("big").is_none(), "20 MiB loaded under 16");
+        // A long budget beside it, so a busy machine building the string
+        // slowly is not what is tested.
+        let big = crate::effect::settings::Caps {
+            memory: 64 << 20,
+            load: std::time::Duration::from_millis(5000),
+        };
+        assert!(host.set_caps(big));
+        assert_eq!(host.caps(), big);
+        assert!(
+            host.latest("big").is_some(),
+            "not loaded again under 64 MiB: {:?}",
+            host.problems()
+        );
+        assert!(
+            host.problems().iter().all(|each| each.effect != "big"),
+            "{:?}",
+            host.problems()
+        );
+        assert_eq!(
+            host.latest("small").map(|loaded| loaded.sandbox().caps()),
+            Some(big),
+            "an unchanged folder kept the caps it loaded under"
+        );
+        let before = host.loads;
+        assert!(!host.set_caps(big), "the same caps are no change");
+        assert_eq!(host.loads, before, "the same caps loaded a folder again");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A mesh stopped at load names its budget and its key**: under
+    /// `effects.sandbox.load_ms = 250` a `mesh` that never returns is one
+    /// problem, saying 250 ms and the key.
+    #[test]
+    fn a_mesh_stopped_at_load_names_its_budget_and_key() {
+        let place = scratch("stopped-at-load");
+        folder(
+            &place,
+            "endless",
+            "return { api = 1, grid = { 1, 1 }, mesh = function(t, cols, rows, out) while true do end end }",
+            &[],
+        );
+        let mut host = host_with(&place);
+        host.set_caps(crate::effect::settings::Caps {
+            load: std::time::Duration::from_millis(250),
+            ..crate::effect::settings::Caps::default()
+        });
+        host.want("present", ["endless".to_owned()]);
+        let problems: Vec<_> = host
+            .problems()
+            .iter()
+            .filter(|each| each.effect == "endless")
+            .collect();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].message.contains("250 ms")
+                && problems[0].message.contains("effects.sandbox.load_ms"),
+            "{problems:?}"
         );
         let _ = std::fs::remove_dir_all(place);
     }
