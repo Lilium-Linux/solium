@@ -16,6 +16,7 @@ pub(crate) mod run;
 pub(crate) mod sandbox;
 pub(crate) mod store;
 pub(crate) mod tree;
+pub(crate) mod watch;
 
 /// So `super::pool` resolves the same in `effect/run.rs` here and in
 /// `dev/wirecheck`, which includes `pool.rs` beside it (Ruling 2).

@@ -7,12 +7,13 @@
 //! budget's stop and loop (milestone 1 Task 11 had to wrap them for the
 //! configuration's Lua; an effect has no use for them).
 //!
-//! Every call runs under an instruction hook installed for that call only,
-//! every 10 000 instructions, checking a deadline:
-//! `tests::an_effect_that_never_returns_is_stopped_within_its_budget`. Not a
-//! standing hook, because Lua 5.4 takes its slow path on every instruction
-//! while one is installed (\[16\] §4's 36.5 µs against 18 µs), and a per-frame
-//! `mesh` call would pay it whether or not anything runs long.
+//! Every call runs against a deadline:
+//! `tests::an_effect_that_never_returns_is_stopped_within_its_budget`. It
+//! runs with no hook, and [`super::watch`]'s watchdog arms one only once the
+//! call is past its deadline, because Lua 5.4 takes its slow path on every
+//! instruction while a count hook is set, which doubles a genie's `mesh`
+//! call (FX-S5). Where the watchdog cannot run, a count hook is installed
+//! for the call and taken off after it ([`Sandbox::hooked`]).
 //!
 //! What an effect returned is read with raw gets only, outside any call, so
 //! reading it runs none of the effect's Lua: a metatable on a param cannot
@@ -22,11 +23,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use mlua::{Lua, LuaOptions, StdLib, Table, Value as LuaValue};
+use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Table, Value as LuaValue};
 use solium_effects::spec::{self, EffectSpec, Extent, Given, GridSpec, ParamSpec, Rung, Value};
 use solium_effects::stage::{Depends, Format, Stage};
 
 use super::host::Problem;
+use super::watch;
 
 /// How long a call may run, and how much memory a state may hold.
 #[derive(Clone, Copy, Debug)]
@@ -50,9 +52,13 @@ impl Budget {
 const EVERY: u32 = 10_000;
 const STOPPED: &str = "the effect ran past its budget and was stopped";
 
-/// When the call running now must have returned by.
+/// When the hooked call running now must have returned by, and whether the
+/// hook stopped it.
 #[derive(Debug, Default)]
-struct Due(Option<Instant>);
+struct Due {
+    at: Option<Instant>,
+    stopped: bool,
+}
 
 pub(crate) struct Sandbox {
     lua: Lua,
@@ -118,7 +124,9 @@ impl Sandbox {
         self.poisoned.get()
     }
 
-    /// Run `call` under a deadline `limit` from now.
+    /// Run `call` under a deadline `limit` from now, on the watchdog's clock
+    /// ([`watch::clock`]), or under a count hook where it cannot run
+    /// ([`Self::hooked`]); a call the deadline stopped poisons this state.
     /// `tests::an_effect_that_never_returns_is_stopped_within_its_budget`.
     pub(crate) fn budgeted<R>(
         &self,
@@ -133,19 +141,47 @@ impl Sandbox {
                 format!("{STOPPED} earlier, and is not run again until a reload"),
             ));
         }
+        let watched = watch::clock().and_then(|clock| Some((clock, watch::state_of(&self.lua)?)));
+        let (result, stopped) = match watched {
+            Some((clock, state)) => clock.run(state, limit, || call(&self.lua)),
+            None => self.hooked(limit, call),
+        };
+        if stopped {
+            self.poisoned.set(true);
+        }
+        result.map_err(|err| {
+            let mut problem = self.problem(&err);
+            if stopped {
+                problem.message = format!("{STOPPED} ({} ms)", limit.as_millis());
+            }
+            problem
+        })
+    }
+
+    /// Run `call` under a count hook installed for it, every 10 000
+    /// instructions, checking its deadline: what a call falls back to where
+    /// the watchdog cannot run. What it returned, and whether the hook
+    /// stopped it. The hook goes with the call, since mlua's
+    /// `remove_global_hook` leaves Lua's set until it next fires.
+    /// `tests::the_hook_a_call_falls_back_to_stops_it_and_goes_with_it`.
+    pub(crate) fn hooked<R>(
+        &self,
+        limit: Duration,
+        call: impl FnOnce(&Lua) -> mlua::Result<R>,
+    ) -> (mlua::Result<R>, bool) {
         if let Ok(Some(mut due)) = self.lua.try_app_data_mut::<Due>() {
-            due.0 = Some(Instant::now() + limit);
+            *due = Due {
+                at: Some(Instant::now() + limit),
+                stopped: false,
+            };
         }
         let hooked = self.lua.set_global_hook(
-            mlua::HookTriggers::new().every_nth_instruction(EVERY),
+            HookTriggers::new().every_nth_instruction(EVERY),
             |lua, _debug| {
-                let late = lua
-                    .try_app_data_ref::<Due>()
-                    .ok()
-                    .flatten()
-                    .and_then(|due| due.0)
-                    .is_some_and(|due| Instant::now() >= due);
-                if late {
+                if let Ok(Some(mut due)) = lua.try_app_data_mut::<Due>()
+                    && due.at.is_some_and(|at| Instant::now() >= at)
+                {
+                    due.stopped = true;
                     return Err(mlua::Error::runtime(STOPPED));
                 }
                 Ok(mlua::VmState::Continue)
@@ -153,17 +189,12 @@ impl Sandbox {
         );
         let result = hooked.and_then(|()| call(&self.lua));
         self.lua.remove_global_hook();
-        if let Ok(Some(mut due)) = self.lua.try_app_data_mut::<Due>() {
-            due.0 = None;
-        }
-        result.map_err(|err| {
-            let mut problem = self.problem(&err);
-            if problem.message.contains(STOPPED) {
-                self.poisoned.set(true);
-                problem.message = format!("{STOPPED} ({} ms)", limit.as_millis());
-            }
-            problem
-        })
+        self.lua.remove_hook();
+        let stopped = match self.lua.try_app_data_mut::<Due>() {
+            Ok(Some(mut due)) => std::mem::take(&mut *due).stopped,
+            _ => false,
+        };
+        (result, stopped)
     }
 
     fn problem(&self, err: &mlua::Error) -> Problem {
@@ -1091,6 +1122,40 @@ mod tests {
             .budgeted(Budget::LOAD.time, |_| Ok(()))
             .expect_err("nothing more runs in it");
         assert!(again.message.contains("not run again"), "{again:?}");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **The hook a call falls back to stops it, and goes with the call**
+    /// (when the watchdog cannot start, `watch::clock`): mlua's
+    /// `remove_global_hook` leaves Lua's hook set until it next fires, and
+    /// while any count hook is set every instruction takes Lua's slow path
+    /// (FX-S5).
+    #[test]
+    #[expect(unsafe_code, reason = "reading the state's hook")]
+    fn the_hook_a_call_falls_back_to_stops_it_and_goes_with_it() {
+        let (sandbox, place) = sandbox("unhooked", "return { api = 1, frag = 'effect.frag' }");
+        let started = Instant::now();
+        let (result, stopped) = sandbox.hooked(Duration::from_millis(5), |lua| {
+            lua.load("while true do end").exec()
+        });
+        assert!(stopped && result.is_err(), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "{:?}",
+            started.elapsed()
+        );
+        let (result, stopped) =
+            sandbox.hooked(Budget::LOAD.time, |lua| lua.load("return 1").eval::<i64>());
+        assert_eq!((result.ok(), stopped), (Some(1), false));
+        let mut hooked = true;
+        // SAFETY: the closure reads the state's hook and touches no stack.
+        let read = unsafe {
+            sandbox.lua().exec_raw::<()>((), |state| {
+                hooked = mlua::ffi::lua_gethook(state).is_some();
+            })
+        };
+        read.expect("the hook read");
+        assert!(!hooked, "the hook outlived its call");
         let _ = std::fs::remove_dir_all(place);
     }
 
