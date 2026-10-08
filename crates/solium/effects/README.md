@@ -190,7 +190,7 @@ never quietly means a default.
 | `frag` | a one-pass effect's shader, a file in the folder |
 | `stages` | a many-pass effect's passes: a list, or a function of the params, below |
 | `pixels` | another effect's name, whose `frag` draws this one's pixels |
-| `mesh` | a geometry effect's `function(t, cols, rows, out)` |
+| `mesh` | a geometry effect's `function(t, cols, rows, out)`, [below](#writing-a-mesh) |
 | `grid` | a geometry effect's grid: `{ along = 48, across = 8 }`, which turns with the direction the window moves in, or a fixed `{ cols, rows }` |
 | `reach` | how far beyond its part the effect reads, in pixels: a number, or a function of the params |
 | `bleed` | how far beyond its part the effect draws, likewise |
@@ -230,7 +230,11 @@ param's: a number (a whole one with `int = true`), four numbers, a boolean,
 or a word. Its name is lower-case letters, digits and `_`, and it may not be
 one of the words said beside params where an effect is used: `source`,
 `mask`, `keep`, `effect`, `geometry`, `pixels`, `decoration`, `duration`,
-`easing`, `motion`, `from`, `to`, `axis`, `reach` and `bleed`.
+`easing`, `motion`, `from`, `to`, `axis`, `reach` and `bleed`. An effect
+with a `mesh` finds its params in `t`, beside the fields Solium writes
+there, so neither may it take one of theirs: `progress`, `clamped`,
+`direction`, `axis`, `seed`, `scale`, `cols`, `rows`, `from`, `to`,
+`monitor` and `part`.
 
 Where the effect is used its params can be given, as in
 `{ "blur", passes = 2 }`. A param the effect does not have is refused, with
@@ -286,12 +290,19 @@ that reach nothing outside it. There is no `sol`, `io`, `os`, `require`,
 `load`, `loadfile` or `dofile`, no `pcall` or `xpcall`, no `collectgarbage`
 and no `string.dump`. `print` writes a debug line to Solium's log, naming the
 effect. A metatable may not have a `__gc` finaliser, because a finaliser runs
-where nothing can stop it.
+where nothing can stop it. Two functions of Solium's are there before your
+file runs: `sol_phase(u, v, axis)`, how far through a sweep along `axis`
+(`"down"`, `"up"`, `"left"` or `"right"`) the point at `(u, v)` of the
+window is, 0 leading and 1 following; and `sol_grid(t, c, r)`, the window's
+`(u, v)` at point `(c, r)` of a `mesh`'s grid ([below](#writing-a-mesh)).
 
 Every call into an effect, running `effect.lua` or a function of its params,
-has 100 ms, and its Lua 16 MiB. One that runs longer, or holds more, is
-stopped; an effect stopped by the clock runs nothing more until it is loaded
-again. A Lua error is reported at its file and line.
+has 100 ms, a `mesh` call 2 ms, and its Lua 16 MiB. A call runs at full
+speed, with nothing counting its instructions, and one that runs longer is
+stopped where it is, as one that holds more is. An effect stopped by the
+clock runs nothing more in that Lua: after the frame Solium loads it again
+from its folder, if the folder has not changed since it was loaded, and
+otherwise at the next reload. A Lua error is reported at its file and line.
 
 ## Writing a `.frag`
 
@@ -333,6 +344,62 @@ A `p_` name the effect has no param for, and a `sol_` name that is none of
 these, are errors at their line, with the param you probably meant; reading a
 texture the pass does not list in its `uses` is a warning, since it reads
 transparent. Comments are skipped.
+
+## Writing a `mesh`
+
+A geometry effect moves the window's picture rather than its pixels: its
+`mesh` places a grid of points, and the window is drawn stretched across
+them. This one leaves the window where it is:
+
+```lua
+return {
+  api = 1,
+  grid = { along = 48, across = 8 },
+  mesh = function(t, cols, rows, out)
+    local n = 0
+    for r = 0, rows do
+      for c = 0, cols do
+        local u, v = sol_grid(t, c, r)
+        out[n + 1] = t.from.x + u * t.from.w
+        out[n + 2] = t.from.y + v * t.from.h
+        n = n + 2
+      end
+    end
+  end,
+}
+```
+
+`mesh(t, cols, rows, out)` writes the whole grid into `out`: x and y for
+each of its `(cols + 1) × (rows + 1)` points, row by row from the top-left,
+in global logical pixels. `cols` and `rows` are the grid's, from `grid`: one
+given as `along` and `across` runs `along` the way the window is pulled.
+`t` says the rest:
+
+| Field | What it is |
+|---|---|
+| `t.progress`, `t.clamped` | how far the effect has gone: 0 where the window rests, 1 at the far end, which a spring may carry past; the same clamped to 0..1 |
+| `t.direction` | +1 arriving, −1 leaving, 0 resizing |
+| `t.axis` | which way the window is pulled: `"down"`, `"up"`, `"left"` or `"right"` |
+| `t.from`, `t.to` | the window's rectangle, and the one it is pulled toward (its own when there is none), each `{ x, y, w, h }` |
+| `t.monitor` | the window's monitor's rectangle |
+| `t.part` | the part of the window's unit square the grid covers, `{ u0, v0, u1, v1 }`, which can reach past it for a shadow or a popup; `sol_grid` reads it |
+| `t.seed`, `t.scale` | a random number fixed for the effect; the monitor's scale |
+| `t.cols`, `t.rows` | the grid's size, as the call is given it |
+| `t.<param>` | each param: a number, a boolean, a table of four numbers, or a word as a string |
+
+`t` and `out` are the same two tables at every call, so a frame makes no
+garbage, and `out` is emptied before each. What `mesh` wrote is checked
+before a point of it is drawn: the right count of numbers, every one
+finite, and none further than four monitors' width or height from the
+window's monitor. A grid that fails, a Lua error, or a call its 2 ms
+stopped is refused, and the window is not drawn through it.
+
+When the effect loads, `mesh` is called at progress 0 and 1, on all four
+axes, arriving, leaving and resizing, and at progress 0 it must put every
+point exactly where the window is, within 10⁻⁹ of a pixel: an effect starts
+and ends with the window at rest. One that does not is refused, and named
+on the overlay and by `solium --check` at the line its `mesh` is on.
+Geometry effects are loaded and checked; no configuration plays one yet.
 
 ## The shipped folders
 
