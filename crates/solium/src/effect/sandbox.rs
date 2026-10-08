@@ -7,13 +7,17 @@
 //! budget's stop and loop (milestone 1 Task 11 had to wrap them for the
 //! configuration's Lua; an effect has no use for them).
 //!
-//! Every call runs against a deadline:
-//! `tests::an_effect_that_never_returns_is_stopped_within_its_budget`. It
+//! Every call runs against a deadline, 100 ms at load and 2 ms for a
+//! per-frame `mesh`: `tests::an_effect_that_never_returns_is_stopped_within_its_budget`,
+//! `geometry::tests::a_mesh_that_runs_forever_is_stopped_by_its_budget`. It
 //! runs with no hook, and [`super::watch`]'s watchdog arms one only once the
 //! call is past its deadline, because Lua 5.4 takes its slow path on every
 //! instruction while a count hook is set, which doubles a genie's `mesh`
 //! call (FX-S5). Where the watchdog cannot run, a count hook is installed
 //! for the call and taken off after it ([`Sandbox::hooked`]).
+//!
+//! Every effect's Lua starts with the prelude, `prelude.lua`: `sol_phase`
+//! and `sol_grid` (`geometry::tests::an_effects_lua_has_math_and_the_prelude_and_no_sol`).
 //!
 //! What an effect returned is read with raw gets only, outside any call, so
 //! reading it runs none of the effect's Lua: a metatable on a param cannot
@@ -44,13 +48,28 @@ impl Budget {
         time: Duration::from_millis(100),
         memory: 16 << 20,
     };
-    /// A per-frame `mesh` call (Task 26).
-    #[expect(dead_code, reason = "Task 26's mesh call is its reader")]
+    /// A per-frame `mesh` call.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Task 28's grids call mesh once a pass")
+    )]
     pub(crate) const MESH: Duration = Duration::from_millis(2);
 }
 
 const EVERY: u32 = 10_000;
 const STOPPED: &str = "the effect ran past its budget and was stopped";
+
+/// What every effect's Lua may call, run before its own file: `sol_phase`
+/// and `sol_grid` (`geometry::tests::an_effects_lua_has_math_and_the_prelude_and_no_sol`).
+const PRELUDE: &str = include_str!("prelude.lua");
+
+/// Where a `mesh` call's reused `t` and `out` are kept in the registry.
+const T_KEY: &str = "solium_t";
+const OUT_KEY: &str = "solium_out";
+
+/// How many numbers `out` has room for when it is made: a genie's 48 by 8
+/// grid writes 882. It grows, once, for a bigger grid.
+const OUT_ROOM: usize = 1024;
 
 /// When the hooked call running now must have returned by, and whether the
 /// hook stopped it.
@@ -67,9 +86,10 @@ pub(crate) struct Sandbox {
     returned: Option<mlua::RegistryKey>,
     /// Set when a call was stopped by its budget: mlua 0.12.1 leaves the
     /// error object in the stopped frame's locals, so this state runs nothing
-    /// more; `Host::revive` (Task 26) makes a new one after the frame, or a
-    /// reload does (Ruling 4).
-    /// `tests::an_effect_that_never_returns_is_stopped_within_its_budget`.
+    /// more; `Host::revive` makes a new one after the frame, or a reload does
+    /// (Ruling 4).
+    /// `tests::an_effect_that_never_returns_is_stopped_within_its_budget`,
+    /// `geometry::tests::a_stopped_state_is_rebuilt_after_the_frame`.
     poisoned: std::cell::Cell<bool>,
 }
 
@@ -99,6 +119,10 @@ impl Sandbox {
         .map_err(fail)?;
         lua.set_memory_limit(Budget::LOAD.memory).map_err(fail)?;
         harden(&lua, effect, file).map_err(fail)?;
+        lua.load(PRELUDE)
+            .set_name("=prelude")
+            .exec()
+            .map_err(fail)?;
         lua.set_app_data(Due::default());
         Ok(Self {
             lua,
@@ -109,17 +133,14 @@ impl Sandbox {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 26's mesh call is its reader")
-    )]
+    /// The effect's own Lua, for a test to reach its globals.
+    #[cfg(test)]
     pub(crate) fn lua(&self) -> &Lua {
         &self.lua
     }
 
     /// Whether a call was stopped by its budget, so this state must not run
     /// again. `tests::an_effect_that_never_returns_is_stopped_within_its_budget`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 26's revive reads it"))]
     pub(crate) fn poisoned(&self) -> bool {
         self.poisoned.get()
     }
@@ -247,6 +268,63 @@ impl Sandbox {
             .map_err(|err| self.problem(&err))
     }
 
+    /// The table `effect.lua` returned, inside a call.
+    fn returned_table(&self) -> mlua::Result<Table> {
+        let key = self
+            .returned
+            .as_ref()
+            .ok_or_else(|| mlua::Error::runtime("the effect was never loaded"))?;
+        self.lua.registry_value(key)
+    }
+
+    /// Call the effect's `mesh` under `limit` with the reused `t` and `out`
+    /// (made once, kept in the registry), and read `out` back. `fill` writes
+    /// this call's fields into `t`. A call once a pass has
+    /// [`Budget::MESH`], and the checks at load the load budget, since a
+    /// version refused there stays refused until a reload, where a stop once
+    /// a pass is rebuilt after the frame (Ruling 4). `out` is emptied before
+    /// each call, so a short write after a full one is short
+    /// (`geometry::tests::the_out_table_is_cleared_between_calls`), and
+    /// nothing is sized by the grid beyond what a state can hold, so a grid
+    /// no Lua could fill is a refusal, not a crash
+    /// (`geometry::tests::a_grid_no_lua_could_fill_is_refused_not_allocated`).
+    pub(crate) fn call_mesh(
+        &self,
+        limit: Duration,
+        fill: impl FnOnce(&Lua, &Table, &Table) -> mlua::Result<()>,
+        cols: u32,
+        rows: u32,
+    ) -> Result<Vec<f64>, Problem> {
+        let wanted = numbers(cols, rows);
+        self.budgeted(limit, |lua| {
+            let (t, out) = reused(lua)?;
+            out.clear()?;
+            fill(lua, &t, &out)?;
+            t.raw_set("cols", cols)?;
+            t.raw_set("rows", rows)?;
+            let mesh: mlua::Function = self.returned_table()?.raw_get("mesh")?;
+            mesh.call::<()>((t, cols, rows, out.clone()))?;
+            let mut points = Vec::with_capacity(wanted.min(OUT_ROOM));
+            for index in 1..=wanted {
+                match out.raw_get::<Option<f64>>(index)? {
+                    Some(point) => points.push(point),
+                    None => break,
+                }
+            }
+            Ok(points)
+        })
+    }
+
+    /// The line the effect's `mesh` is defined on, where a problem with what
+    /// it draws is said to be.
+    /// `host::tests::a_geometry_file_that_moves_the_window_at_rest_is_a_problem_at_its_mesh`.
+    pub(crate) fn mesh_line(&self) -> Option<u32> {
+        let mesh: mlua::Function = self.returned_table().ok()?.raw_get("mesh").ok()?;
+        mesh.info()
+            .line_defined
+            .and_then(|line| u32::try_from(line).ok())
+    }
+
     /// The params as the `p` table every function of them is called with.
     /// `tests::reach_as_a_function_is_called_with_the_params`.
     pub(crate) fn params_table(&self, params: &[(String, Value)]) -> Result<Table, Problem> {
@@ -356,6 +434,38 @@ impl Sandbox {
             lua.load(text.as_str()).set_name(name).eval::<LuaValue>()
         })
     }
+}
+
+/// How many numbers a grid of `cols` by `rows` cells is: x and y for each of
+/// its points, worked out without overflowing
+/// (`geometry::tests::a_grid_no_lua_could_fill_is_refused_not_allocated`).
+pub(crate) fn numbers(cols: u32, rows: u32) -> usize {
+    let points = |cells: u32| {
+        usize::try_from(cells)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+    };
+    points(cols).saturating_mul(points(rows)).saturating_mul(2)
+}
+
+/// A `mesh` call's `t`, with its four rectangles, and its `out`: made on the
+/// first call and kept in the registry, so a pass allocates nothing in Lua.
+/// `geometry::tests::every_param_reaches_t`.
+fn reused(lua: &Lua) -> mlua::Result<(Table, Table)> {
+    if let (Some(t), Some(out)) = (
+        lua.named_registry_value::<Option<Table>>(T_KEY)?,
+        lua.named_registry_value::<Option<Table>>(OUT_KEY)?,
+    ) {
+        return Ok((t, out));
+    }
+    let t = lua.create_table_with_capacity(0, 16)?;
+    for rect in ["from", "to", "monitor", "part"] {
+        t.raw_set(rect, lua.create_table_with_capacity(0, 4)?)?;
+    }
+    let out = lua.create_table_with_capacity(OUT_ROOM, 0)?;
+    lua.set_named_registry_value(T_KEY, &t)?;
+    lua.set_named_registry_value(OUT_KEY, &out)?;
+    Ok((t, out))
 }
 
 /// Take out of the base library what reaches files or catches the stop, make

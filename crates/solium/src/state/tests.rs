@@ -392,6 +392,32 @@ fn the_formats_probe_rebinds_the_rules_after_the_frame() {
     let _ = std::fs::remove_dir_all(place);
 }
 
+/// **`settle` rebuilds an effect its budget stopped, after the frame**
+/// (Ruling 4), so the next pane's `mesh` call runs on a fresh state.
+#[test]
+fn settle_rebuilds_an_effect_its_budget_stopped() {
+    let place = crate::effect::host::tests::scratch("state-revive");
+    crate::effect::host::tests::folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.effects.want("present", ["spin".to_owned()]);
+    let stopped = state.effects.effect("spin").expect("current");
+    stopped
+        .sandbox()
+        .lua()
+        .globals()
+        .set("spin", true)
+        .expect("set");
+    let ask = crate::effect::geometry::tests::ask();
+    assert!(crate::effect::geometry::mesh(stopped.sandbox(), &ask, 1, 1).is_err());
+    let _ = state.settle(state.clock.now());
+    let fresh = state.effects.effect("spin").expect("still current");
+    assert!(
+        !fresh.sandbox().poisoned(),
+        "settle did not rebuild the stopped effect"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
 /// **A reload binds the rules against the folders it read**, so an effect
 /// changed on disk is the version its rule runs: here a param's default.
 #[test]

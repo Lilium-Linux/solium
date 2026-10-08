@@ -1126,6 +1126,20 @@ mod tests {
         );
     }
 
+    /// **A geometry file that moves the window at rest fails the check**, at
+    /// its `mesh`'s line, as it is refused at load.
+    #[test]
+    fn a_geometry_file_that_moves_the_window_at_rest_fails_the_check() {
+        let (passed, out) = reported(|report| {
+            effect_folder::<Counting>(report, &effect_fixture("mover"), &shipped(), None);
+        });
+        assert!(!passed, "{out}");
+        assert!(
+            out.contains("mover/effect.lua:7") && out.contains("progress 0"),
+            "{out}"
+        );
+    }
+
     /// **A `.frag` reading an undeclared param fails the check at its line**,
     /// with no GPU at all.
     #[test]

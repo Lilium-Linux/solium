@@ -11,10 +11,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use solium_effects::glsl::{self, Sources};
-use solium_effects::spec::{EffectSpec, Rung, Severity, Value};
+use solium_effects::spec::{EffectSpec, GridSpec, Rung, Severity, Value};
 use solium_effects::stage::{Binding, Plan, Stage};
 
-use super::sandbox::Sandbox;
+use super::geometry::{self, Refusal};
+use super::sandbox::{Budget, Sandbox};
 
 /// Where effect folders are looked for: the user's, then the shipped.
 #[derive(Clone, Debug)]
@@ -190,13 +191,6 @@ impl<P> Loaded<P> {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task 26's revive loads a poisoned version again by it"
-        )
-    )]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -209,12 +203,13 @@ impl<P> Loaded<P> {
         &self.spec
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 26's mesh call is its reader")
-    )]
     pub(crate) fn sandbox(&self) -> &Sandbox {
         &self.sandbox
+    }
+
+    /// The params at their defaults, as a bind with no overrides gives them.
+    pub(crate) fn defaults(&self) -> &[(String, Value)] {
+        &self.defaults
     }
 
     pub(crate) fn hash(&self) -> u64 {
@@ -656,6 +651,16 @@ impl<P: Clone> Host<P> {
                 false
             }
             Ok(loaded) => {
+                // A geometry file is held to drawing the window where it is
+                // at progress 0 before it is a version (Ruling 19), and a
+                // refusal keeps the version that ran:
+                // `tests::a_geometry_file_that_moves_the_window_at_rest_is_a_problem_at_its_mesh`.
+                if loaded.spec().mesh
+                    && let Some(problem) = refused_at_rest(&loaded)
+                {
+                    self.replace_problems(name, vec![problem]);
+                    return false;
+                }
                 let index = self.slots.get(name).map_or_else(
                     || {
                         self.next_index += 1;
@@ -696,12 +701,19 @@ impl<P: Clone> Host<P> {
         }
         match self.bind_plans(name, &[]) {
             Ok((bound, needs)) => {
-                if let Some(pending) = self
-                    .slots
-                    .get_mut(name)
-                    .and_then(|slot| slot.pending.as_mut())
-                {
-                    pending.needs = needs;
+                if let Some(slot) = self.slots.get_mut(name) {
+                    // With nothing to compile (a geometry file alone) the
+                    // version is current at once, so a `sol.present` genie
+                    // resolves its id on the pass it is named:
+                    // `tests::a_version_with_nothing_to_compile_is_current_at_once`.
+                    if needs.is_empty() {
+                        if let Some(pending) = slot.pending.take() {
+                            swap_in(slot, pending);
+                            self.sweep = true;
+                        }
+                    } else if let Some(pending) = slot.pending.as_mut() {
+                        pending.needs = needs;
+                    }
                 }
                 self.add_problems(bound.warnings);
             }
@@ -1007,9 +1019,7 @@ impl<P: Clone> Host<P> {
                 .iter()
                 .all(|key| matches!(self.programs.get(key), Some(Ok(_))))
             {
-                slot.generation += 1;
-                slot.holds = pending.needs.clone();
-                slot.current = Some(Rc::new(pending));
+                swap_in(slot, pending);
             }
         }
         if std::mem::take(&mut self.sweep) {
@@ -1038,11 +1048,36 @@ impl<P: Clone> Host<P> {
         }
     }
 
+    /// Rebuild every effect whose Lua its budget stopped, GPU-free, after
+    /// the frame (Ruling 4): the same folder loaded again when its hash is
+    /// unchanged, keeping its programs, its `needs` and its `EffectId`, so
+    /// only the panes whose call came in the pass that overran fade. A folder
+    /// changed since it loaded waits for the reload that reads it.
+    /// `geometry::tests::a_stopped_state_is_rebuilt_after_the_frame`.
+    pub(crate) fn revive(&mut self) {
+        for slot in self.slots.values_mut() {
+            let Some(current) = slot
+                .current
+                .as_ref()
+                .filter(|current| current.sandbox().poisoned())
+            else {
+                continue;
+            };
+            if folder_hash(current.dir()) != current.hash() {
+                continue;
+            }
+            if let Ok(mut fresh) = Loaded::<P>::load(current.name(), current.dir()) {
+                fresh.needs.clone_from(&current.needs);
+                slot.current = Some(Rc::new(fresh));
+            }
+        }
+    }
+
     /// The version of `name` that runs, if one compiled.
     /// `tests::a_broken_effect_on_a_cold_start_is_absent_not_fatal`.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Task 26's geometry calls look an effect up")
+        expect(dead_code, reason = "Task 28's grids look an effect up")
     )]
     pub(crate) fn effect(&self, name: &str) -> Option<Rc<Loaded<P>>> {
         self.slots.get(name).and_then(|slot| slot.current.clone())
@@ -1199,6 +1234,47 @@ impl<P: Clone> Host<P> {
             && self.slots.values().all(|slot| slot.pending.is_none())
             && self.wanted.values().all(BTreeSet::is_empty)
     }
+}
+
+/// `pending` swapped in as the version that runs, a new generation holding
+/// what it needs (`tests::a_new_version_is_a_new_generation`).
+fn swap_in<P>(slot: &mut Versions<P>, pending: Loaded<P>) {
+    slot.generation += 1;
+    slot.holds = pending.needs.clone();
+    slot.current = Some(Rc::new(pending));
+}
+
+/// A geometry file held to its rest at its defaults (`geometry::at_rest`),
+/// and why not, as a problem at its file: a Lua error at its own line,
+/// anything else at its `mesh`'s.
+/// `tests::a_geometry_file_that_moves_the_window_at_rest_is_a_problem_at_its_mesh`.
+fn refused_at_rest<P>(loaded: &Loaded<P>) -> Option<Problem> {
+    let grid = loaded
+        .spec()
+        .grid
+        .unwrap_or(GridSpec::Fixed { cols: 1, rows: 1 });
+    let refusal = geometry::at_rest(loaded.sandbox(), grid, loaded.defaults()).err()?;
+    let file = loaded.dir().join("effect.lua");
+    let line = loaded.sandbox().mesh_line();
+    let message = match refusal {
+        Refusal::Error { line, message } => {
+            return Some(Problem::error(loaded.name(), &file, line, message));
+        }
+        Refusal::Budget => format!(
+            "its mesh ran past its budget ({} ms) at progress 0 or 1, and was stopped",
+            Budget::LOAD.time.as_millis()
+        ),
+        Refusal::Count { wanted, got } => {
+            format!("its mesh wrote {got} numbers, where its grid has {wanted}: x and y for each point")
+        }
+        Refusal::NotFinite => "its mesh wrote a number that is not finite".to_owned(),
+        Refusal::TooBig => {
+            "its mesh put a point more than four monitors' width or height from the window's monitor"
+                .to_owned()
+        }
+        Refusal::MovesAtRest => "its mesh moves the window at progress 0: at rest a geometry draws the window where it is, arriving, leaving and resizing".to_owned(),
+    };
+    Some(Problem::error(loaded.name(), &file, line, message))
 }
 
 /// A configuration error as a problem: the first `<file>.lua:<line>:` in it
@@ -2065,6 +2141,47 @@ pub(crate) mod tests {
             "a changed effect was loaded more than once by one reload"
         );
         let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A version with nothing to compile is current at once**: a
+    /// geometry-only effect `sol.present` names resolves its id on the pass
+    /// it is named, with no compile between.
+    #[test]
+    fn a_version_with_nothing_to_compile_is_current_at_once() {
+        let place = scratch("current-at-once");
+        folder(&place, "flat", crate::effect::geometry::tests::FLAT, &[]);
+        let mut host = host_with(&place);
+        host.add_wanted("present", ["flat".to_owned()]);
+        assert!(
+            host.id("flat").is_some() && !host.has_pending("flat"),
+            "a geometry-only effect waited for a compile"
+        );
+        assert!(host.ready());
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A geometry file that moves the window at rest is refused at load**,
+    /// a problem at its `mesh`'s line, and no version at all.
+    #[test]
+    fn a_geometry_file_that_moves_the_window_at_rest_is_a_problem_at_its_mesh() {
+        let fixtures = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/effects"
+        ));
+        let mut host: super::Host<u32> = super::Host::new(Library::with(None, fixtures.to_owned()));
+        host.want("present", ["mover".to_owned()]);
+        assert!(
+            host.latest("mover").is_none(),
+            "a version that moves at rest was loaded"
+        );
+        let problem = host
+            .problems()
+            .iter()
+            .find(|each| each.effect == "mover")
+            .expect("a problem");
+        assert_eq!(problem.line, Some(7), "{problem:?}");
+        assert!(problem.message.contains("progress 0"), "{problem:?}");
+        assert!(problem.file.ends_with("mover/effect.lua"), "{problem:?}");
     }
 
     /// **`sol.present`'s names accumulate until a reload**: a second genie

@@ -1973,6 +1973,11 @@ impl Solium {
         if self.rebind {
             self.rebind_effects();
         }
+        // An effect whose Lua its budget stopped this frame is loaded again
+        // from its unchanged folder, after the frame and never in `prepare`
+        // (Ruling 4); nothing is read unless one was stopped:
+        // `tests::settle_rebuilds_an_effect_its_budget_stopped`.
+        self.effects.revive();
         // The overlay hears about a changed problem once, after the frame
         // that found it:
         // `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.
