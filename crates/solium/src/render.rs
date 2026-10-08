@@ -255,9 +255,11 @@ impl Drawn {
 /// also keeps the part of the pane's unit square they cover
 /// (`offscreen::over_job`).
 ///
-/// Built in two phases: every capture's element list first, which can run Qt,
-/// then every capture drawn on one bound carrier, which must not
-/// (`offscreen::draw`).
+/// Built in phases ([`effect_phases`]): in each, every capture's element list
+/// first, which can run Qt, then every capture drawn on one bound carrier,
+/// which must not (`offscreen::draw`); the warps last, once the chains whose
+/// results their captures hold have run
+/// (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
 #[derive(Default)]
 pub(crate) struct Prepared {
     warps: Vec<(Window, GlesTexture, crate::warp::Program, Id, CommitCounter)>,
@@ -455,22 +457,6 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // for exactly that reason. See `pacing::Phase`.
     let _prep = crate::pacing::span(crate::pacing::Phase::Prep);
     state.memory_report();
-    // Effects compile here, between frames, where the context is current:
-    // nothing at all when no effect is wanted (spec §8.4,
-    // `effect::host::tests::an_empty_host_touches_no_gl`). The formats a
-    // plan may draw into are probed first, once, and only once something is
-    // wanted (`effect::host::tests::the_formats_are_probed_once_and_only_while_something_is_wanted`;
-    // the probe itself is wirecheck case 12c's). A changed answer rebinds
-    // the rules after the frame (`note_formats`).
-    if !state.effects.is_idle() {
-        if state.effects.wants_formats() {
-            let found = crate::pool::probe_formats(renderer);
-            note_formats(state, found);
-        }
-        state
-            .effects
-            .compile_pending(&mut crate::effect::GlCompiler(renderer));
-    }
     // What the pointer is standing on can change without the pointer moving --
     // a window slides under it, a mode opens -- and there is no input event for
     // that. Asked here rather than in `Solium::settle`, which runs *after* the
@@ -508,234 +494,199 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         .unwrap_or(0);
     state.pool.set_budget(2 * largest);
 
-    // Every rule resolved once, after the effects compiled and before any
-    // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
-    // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
-    let mut slots = build_slots(state);
-    // Every wanted slot's box, and its state in the store, kept while it is
-    // wanted and given back by the sweep below once it is not
-    // (`effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`).
-    record_boxes(state, &mut slots);
-    let pass = state.store.next_pass();
-    for (owner, slot, key) in slots.wants() {
-        state.store.slot_mut(owner, slot, key).seen = pass;
+    // The effects and the captures, in the one order that lets a warped
+    // pane's capture hold its slots' results (Ruling 17):
+    // `tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`.
+    let mut gpu = Gpu {
+        state,
+        renderer,
+        drawn: crate::effect::store::Drawn::default(),
+        warps: Vec::new(),
+        overs: Vec::new(),
+        pass: 0,
+    };
+    let slots = effect_phases(&mut gpu);
+    Prepared {
+        warps: gpu.warps,
+        overs: gpu.overs,
+        slots,
     }
-    // What a slot's result is drawn through, compiled here, between frames,
-    // while a slot is wanted, since `elements` never compiles; nothing with
-    // none (spec §8.4,
-    // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
-    if !slots.is_empty() {
+}
+
+/// `prepare`'s effect phases, so their order is one function a test drives
+/// (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
+pub(crate) trait Phases {
+    /// Compile what the host was asked for, probe the formats, compile
+    /// `Programs::masked` when an effect is wanted (Ruling 7, spec C14).
+    fn compile(&mut self);
+    /// Resolve the slots once this pass ([`build_slots`] over the panes a
+    /// monitor shows) and record their boxes ([`record_boxes`]).
+    fn resolve(&mut self) -> Slots;
+    /// Build and draw one nest's self captures; a capture that is not stale
+    /// is kept. Both go into the pass's `Drawn`.
+    fn captures(&mut self, slots: &Slots, nest: Nest);
+    /// Run one nest's chains on one bound carrier ([`run_slots`]).
+    fn chains(&mut self, slots: &mut Slots, nest: Nest);
+    /// Build the warp and `over` jobs from `slots` as they are now, draw
+    /// them, and place what they made in `Prepared`.
+    fn warps(&mut self, slots: &Slots);
+    /// The store's sweep and the pool's, once a pass.
+    fn sweep(&mut self);
+}
+
+/// `prepare`'s order (Ruling 17): the warp and `over` jobs are built only
+/// once every chain that can put a result in them has run this pass, and a
+/// whole pane's self capture only once the chains inside it have.
+/// `tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`.
+pub(crate) fn effect_phases(phases: &mut impl Phases) -> Slots {
+    phases.compile();
+    let mut slots = phases.resolve();
+    for nest in [Nest::Inner, Nest::Whole] {
+        phases.captures(&slots, nest);
+        phases.chains(&mut slots, nest);
+    }
+    phases.warps(&slots);
+    phases.sweep();
+    slots
+}
+
+/// [`Phases`] on the GPU: `prepare`'s own work, after the memory report,
+/// the QML tick and the pool's budget, driven in the order
+/// `tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`
+/// pins. What the passes make is gathered here for `Prepared`.
+struct Gpu<'a> {
+    state: &'a mut Solium,
+    renderer: &'a mut GlesRenderer,
+    /// Each self input this pass, kept or drawn: what the chains read
+    /// (`effect::store::tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`).
+    drawn: crate::effect::store::Drawn,
+    warps: Vec<(Window, GlesTexture, crate::warp::Program, Id, CommitCounter)>,
+    overs: Vec<(
+        Window,
+        GlesTexture,
+        crate::warp::Program,
+        Id,
+        CommitCounter,
+        crate::warp::UnitRect,
+    )>,
+    /// The store's pass, set by `resolve`.
+    pass: u64,
+}
+
+impl std::fmt::Debug for Gpu<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gpu")
+            .field("warps", &self.warps.len())
+            .field("overs", &self.overs.len())
+            .field("pass", &self.pass)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Phases for Gpu<'_> {
+    fn compile(&mut self) {
+        let (state, renderer) = (&mut *self.state, &mut *self.renderer);
+        // Effects compile here, between frames, where the context is current:
+        // nothing at all when no effect is wanted (spec §8.4,
+        // `effect::host::tests::an_empty_host_touches_no_gl`). The formats a
+        // plan may draw into are probed first, once, and only once something is
+        // wanted (`effect::host::tests::the_formats_are_probed_once_and_only_while_something_is_wanted`;
+        // the probe itself is wirecheck case 12c's). A changed answer rebinds
+        // the rules after the frame (`note_formats`).
+        if state.effects.is_idle() {
+            return;
+        }
+        if state.effects.wants_formats() {
+            let found = crate::pool::probe_formats(renderer);
+            note_formats(state, found);
+        }
+        state
+            .effects
+            .compile_pending(&mut crate::effect::GlCompiler(renderer));
+        // What a slot's result is drawn through, compiled here, between
+        // frames, while an effect is wanted, since `elements` never compiles;
+        // nothing with none (spec §8.4,
+        // `effect::host::tests::an_empty_host_touches_no_gl`).
         let _ = state.programs.masked(renderer);
     }
 
-    let mut warps = Vec::new();
-    let mut overs = Vec::new();
-    let mut jobs = Vec::new();
-    // Each self input this pass, kept or drawn: what the chains read
-    // (`effect::store::tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`).
-    let mut drawn = crate::effect::store::Drawn::default();
+    fn resolve(&mut self) -> Slots {
+        let state = &mut *self.state;
+        // Every rule resolved once, after the effects compiled and before any
+        // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
+        // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
+        let mut slots = build_slots(state);
+        // Every wanted slot's box, and its state in the store, kept while it is
+        // wanted and given back by the sweep once it is not
+        // (`effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`).
+        record_boxes(state, &mut slots);
+        self.pass = state.store.next_pass();
+        for (owner, slot, key) in slots.wants() {
+            state.store.slot_mut(owner, slot, key).seen = self.pass;
+        }
+        slots
+    }
 
-    // A part's self input, padded by its chain's reach and drawn only when
-    // what it is drawn from differs (`offscreen::kept`,
-    // `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`).
-    // None with no slot wanted (spec §8.4).
-    for input in self_inputs(state, &slots) {
-        let Some(source) = input.found.source() else {
-            continue;
-        };
-        let Some(job) = crate::offscreen::part_job(
+    fn captures(&mut self, slots: &Slots, nest: Nest) {
+        let (state, renderer) = (&mut *self.state, &mut *self.renderer);
+        let mut jobs = Vec::new();
+        // A part's self input, padded by its chain's reach and drawn only when
+        // what it is drawn from differs (`offscreen::kept`,
+        // `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`).
+        // A whole pane's is built in the later nest, so it walks what the
+        // inner chains made this pass
+        // (`tests::a_whole_panes_capture_walks_its_inner_slots_and_not_its_own`).
+        // None with no slot wanted, and then no carrier is bound (spec §8.4).
+        for input in self_inputs(state, slots) {
+            if Nest::of(&input.owner, crate::effect::rules::Tier::Own) != nest {
+                continue;
+            }
+            let Some(source) = input.found.source() else {
+                continue;
+            };
+            let Some(job) = crate::offscreen::part_job(
+                state,
+                renderer,
+                input.owner.clone(),
+                input.slot,
+                source,
+                input.scale,
+                input.pad,
+                slots,
+            ) else {
+                continue;
+            };
+            match crate::offscreen::kept(state, &job) {
+                Some((texture, _id, commit)) => {
+                    self.drawn
+                        .insert(input.owner, input.slot, texture, false, commit);
+                }
+                None => jobs.push((job, (input.owner, input.slot))),
+            }
+        }
+        for ((owner, slot), texture, _id, commit) in crate::offscreen::draw(state, renderer, jobs) {
+            self.drawn.insert(owner, slot, texture, true, commit);
+        }
+    }
+
+    fn chains(&mut self, slots: &mut Slots, nest: Nest) {
+        // The chains, once their inputs are drawn or kept, on one bound
+        // carrier (Ruling 10): a self chain runs only when its part committed
+        // or its params or size changed, and is otherwise placed again as it
+        // was (`effect::store::tests::a_self_chain_runs_once_until_its_part_commits`).
+        // Nothing runs and no carrier is bound with no chain of this nest
+        // wanted (spec §8.4,
+        // `tests::a_run_phase_with_no_chain_of_its_own_binds_nothing`).
+        if !runs_in(slots, &self.state.chains, nest) {
+            return;
+        }
+        let Self {
             state,
             renderer,
-            input.owner.clone(),
-            input.slot,
-            source,
-            input.scale,
-            input.pad,
-        ) else {
-            continue;
-        };
-        match crate::offscreen::kept(state, &job) {
-            Some((texture, _id, commit)) => {
-                drawn.insert(input.owner, input.slot, texture, false, commit);
-            }
-            None => jobs.push((job, Then::Slot(input.owner, input.slot))),
-        }
-    }
-
-    for (pane, window) in state.on_screen() {
-        // Nothing captured means nothing to keep. A pane holds the targets it
-        // was last captured into between frames -- megabytes of them -- and
-        // there is no later frame on which handing them back gets cheaper, so
-        // an overview that warps twenty windows and is then closed would
-        // otherwise leave twenty behind for the session. See
-        // `keyed::Captures`, and
-        // `keyed::tests::a_pane_that_stops_warping_gives_the_texture_back`.
-        let release = |state: &mut Solium| crate::offscreen::release(state, pane);
-        let Some(window) = window else {
-            release(state);
-            continue;
-        };
-        let Some(outer) = state.outer_geometry(&window) else {
-            release(state);
-            continue;
-        };
-        // A rounded client's programs, compiled here, between frames, so the
-        // first frame that draws it has them: `elements` never compiles
-        // (`clipped`). Before the cull and the guard below, where a rounded
-        // pane now stops, wanting no capture
-        // (`tests::a_pane_neither_warped_nor_styled_wants_no_capture`); the
-        // rounded shot of `dev/pacing-nested.sh` draws through them.
-        if declared_rounding(state, pane).is_some() {
-            let _ = state.programs.clip(renderer);
-        }
-        // **A pane no monitor shows is not captured**, and this is the same
-        // question `elements` asks one screen at a time before it draws
-        // anything: `!global.overlaps(screen)`, the containment rule that
-        // makes a workspace switch work. A hidden workspace is not unmapped,
-        // it is *parked a screen away*, so without this every window on every
-        // workspace is captured on every frame for as long as the session
-        // lasts -- and `release` below never fires either, because the capture
-        // keeps succeeding.
-        //
-        // It was survivable while a capture meant a warp: a window is deformed
-        // for the length of an animation and then stops. A `client.radius` is
-        // permanent, so twelve windows across three workspaces became twelve
-        // full-window offscreen renders a frame and ~47 MB of captures held
-        // for the session, a third of it for windows nothing ever draws.
-        //
-        // **The slot, through the same `pane_outer_of` call `elements` makes,
-        // and not the `outer` above.** They differ in exactly two places and
-        // the slot is the safer of the two in both: `pane_geometry` falls back
-        // to the layout's rectangle for a window that has mapped without a
-        // size yet -- where `outer_geometry` is a zero-size rect that overlaps
-        // nothing and would be culled while `elements` went on to draw it --
-        // and `insets_of` grows by the decoration's insets where
-        // `frame_insets` gives an undecorated window none. So the question is
-        // asked of the rectangle `elements` will ask it of.
-        //
-        // Being wrong in that direction is *not* a blank window: a pane with
-        // no capture is drawn from its surfaces by the flat path, rounded or
-        // not, so a wrongly culled warp is a FLAT window for one frame. Worth
-        // knowing, because it sets how hard to lean -- the failure is cosmetic
-        // and self-correcting, while being wrong the other way is a capture
-        // per window per frame for the life of the session.
-        //
-        // Costed honestly: `pane_outer_of` is two linear `Panes::get` scans
-        // (one through `insets_of`) plus an `element_location`, so this is
-        // O(panes) per pane per frame, not the single `overlaps` it reads as.
-        // About three hundred comparisons at twelve panes -- nothing beside an
-        // offscreen render, and the reason the cheap case stays cheap is that
-        // `on_screen` is short, not that this line is.
-        if !shown(state, pane) {
-            release(state);
-            continue;
-        }
-        // At *its own monitor's* scale. One frame can span monitors at
-        // different scales, and a texture taken at 1x and drawn on a 2x screen
-        // is the blur this whole change exists to remove.
-        //
-        // A deformed window with no warp program takes the flat path below
-        // instead of being captured for a warp that cannot be drawn:
-        // `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
-        let warp = warp_of(state, pane, outer);
-        let program = if warp.is_some() {
-            state.programs.warp(renderer)
-        } else {
-            None
-        };
-        let routed = route(warp.is_some(), program.is_some());
-        // A pane that is not warped builds no job, rounded or not (spec §8.4).
-        // `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
-        if wanted_capture(routed).is_none() {
-            // Said out loud rather than skipped. Not drawing `Inputs::Backdrop`
-            // is right -- there is nothing composited beneath a node for this
-            // renderer to sample -- but a blur that silently renders as no
-            // blur looks like a style that failed to load and is never
-            // reported as a compositor bug. See `fragment::Inputs::Backdrop`,
-            // and
-            // `pass::tests::an_effect_that_cannot_be_run_is_named_once_and_not_every_frame`.
-            if let Some(refused) = crate::pass::refused(&declared_effects(state, pane)) {
-                state.programs.refuse(refused);
-            }
-            release(state);
-            continue;
-        }
-        if let (Route::Warp, Some(program), Some((frame, aimed))) = (routed, program, warp) {
-            let scale = state.scale_of(outer);
-            // What its mesh is drawn from, in global space: the warp's commit
-            // moves when this does, as well as when its capture is redrawn.
-            // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
-            let shape = Shape::of(&frame, aimed, scale);
-            let job = crate::offscreen::pane_job(state, renderer, pane, &window, scale);
-            // Its popups the same way, in a capture of their own that `panes`
-            // draws in front of the pane's warp
-            // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept until
-            // they commit:
-            // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
-            let over = if job.is_some() {
-                crate::offscreen::over_job(state, renderer, pane, &window, scale)
-            } else {
-                None
-            };
-            // Holding only what it captures this pass: popups that closed give
-            // their capture back while the pane goes on warping.
-            // `keyed::tests::a_warped_pane_whose_popups_close_gives_their_capture_back`.
-            let kinds: &[crate::keyed::Kind] = if over.is_some() {
-                &[crate::keyed::Kind::Pane, crate::keyed::Kind::Over]
-            } else {
-                &[crate::keyed::Kind::Pane]
-            };
-            let (panes, pool) = (&mut state.panes, &mut state.pool);
-            if let Some(held) = panes.get_mut(pane) {
-                held.captures_mut().keep(kinds, pool);
-            }
-            if let Some(job) = job {
-                // Already drawn from exactly this: no frame (`offscreen::kept`,
-                // `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`).
-                if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
-                    let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, false);
-                    warps.push((window.clone(), texture, program, id, commit));
-                } else {
-                    jobs.push((job, Then::Warp(window.clone(), program, pane, shape)));
-                }
-            }
-            if let Some((job, part)) = over {
-                if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
-                    let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
-                    overs.push((window, texture, program, id, commit, part));
-                } else {
-                    jobs.push((job, Then::Over(window, program, pane, shape, part)));
-                }
-            }
-            continue;
-        }
-        release(state);
-    }
-
-    // Every list is built: draw them all, on one carrier.
-    for (then, texture, id, commit) in crate::offscreen::draw(state, renderer, jobs) {
-        match then {
-            Then::Warp(window, program, pane, shape) => {
-                let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
-                warps.push((window, texture, program, id, commit));
-            }
-            Then::Over(window, program, pane, shape, part) => {
-                let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
-                overs.push((window, texture, program, id, commit, part));
-            }
-            Then::Slot(owner, slot) => {
-                drawn.insert(owner, slot, texture, true, commit);
-            }
-        }
-    }
-    // The chains, once their inputs are drawn or kept, on one bound carrier
-    // (Ruling 10): a self chain runs only when its part committed or its
-    // params or size changed, and is otherwise placed again as it was
-    // (`effect::store::tests::a_self_chain_runs_once_until_its_part_commits`).
-    // Task 25 moves the two phases between its draws (Ruling 17). Nothing
-    // runs and no carrier is bound with no slot wanted (spec §8.4,
-    // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
-    if !slots.is_empty() {
+            drawn,
+            pass,
+            ..
+        } = self;
         let Solium {
             store,
             pool,
@@ -745,29 +696,205 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
             timer,
             clock,
             ..
-        } = &mut *state;
+        } = &mut **state;
         let mut cx = RunCx {
             store,
             effects: &*effects,
             chains,
             masked: programs.masked_compiled().cloned(),
             now: clock.now().as_secs_f32(),
-            pass,
+            pass: *pass,
         };
+        let drawn = &*drawn;
         let _ = with_carrier(pool, renderer, |renderer, carrier, pool| {
             let mut runner = GlRunner::new(renderer, carrier, timer.as_mut());
-            for nest in [Nest::Inner, Nest::Whole] {
-                run_slots(&mut cx, pool, &mut runner, &mut slots, &drawn, nest);
-            }
+            run_slots(&mut cx, pool, &mut runner, slots, drawn, nest);
         });
     }
-    // A slot no rule wanted this pass gives its targets back.
-    // `effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`.
-    state.store.sweep(pass, &mut state.pool);
-    Prepared {
-        warps,
-        overs,
-        slots,
+
+    fn warps(&mut self, slots: &Slots) {
+        let (state, renderer) = (&mut *self.state, &mut *self.renderer);
+        let mut jobs = Vec::new();
+        for (pane, window) in state.on_screen() {
+            // Nothing captured means nothing to keep. A pane holds the targets it
+            // was last captured into between frames -- megabytes of them -- and
+            // there is no later frame on which handing them back gets cheaper, so
+            // an overview that warps twenty windows and is then closed would
+            // otherwise leave twenty behind for the session. See
+            // `keyed::Captures`, and
+            // `keyed::tests::a_pane_that_stops_warping_gives_the_texture_back`.
+            let release = |state: &mut Solium| crate::offscreen::release(state, pane);
+            let Some(window) = window else {
+                release(state);
+                continue;
+            };
+            let Some(outer) = state.outer_geometry(&window) else {
+                release(state);
+                continue;
+            };
+            // A rounded client's programs, compiled here, between frames, so the
+            // first frame that draws it has them: `elements` never compiles
+            // (`clipped`). Before the cull and the guard below, where a rounded
+            // pane now stops, wanting no capture
+            // (`tests::a_pane_neither_warped_nor_styled_wants_no_capture`); the
+            // rounded shot of `dev/pacing-nested.sh` draws through them.
+            if declared_rounding(state, pane).is_some() {
+                let _ = state.programs.clip(renderer);
+            }
+            // **A pane no monitor shows is not captured**, and this is the same
+            // question `elements` asks one screen at a time before it draws
+            // anything: `!global.overlaps(screen)`, the containment rule that
+            // makes a workspace switch work. A hidden workspace is not unmapped,
+            // it is *parked a screen away*, so without this every window on every
+            // workspace is captured on every frame for as long as the session
+            // lasts -- and `release` below never fires either, because the capture
+            // keeps succeeding.
+            //
+            // It was survivable while a capture meant a warp: a window is deformed
+            // for the length of an animation and then stops. A `client.radius` is
+            // permanent, so twelve windows across three workspaces became twelve
+            // full-window offscreen renders a frame and ~47 MB of captures held
+            // for the session, a third of it for windows nothing ever draws.
+            //
+            // **The slot, through the same `pane_outer_of` call `elements` makes,
+            // and not the `outer` above.** They differ in exactly two places and
+            // the slot is the safer of the two in both: `pane_geometry` falls back
+            // to the layout's rectangle for a window that has mapped without a
+            // size yet -- where `outer_geometry` is a zero-size rect that overlaps
+            // nothing and would be culled while `elements` went on to draw it --
+            // and `insets_of` grows by the decoration's insets where
+            // `frame_insets` gives an undecorated window none. So the question is
+            // asked of the rectangle `elements` will ask it of.
+            //
+            // Being wrong in that direction is *not* a blank window: a pane with
+            // no capture is drawn from its surfaces by the flat path, rounded or
+            // not, so a wrongly culled warp is a FLAT window for one frame. Worth
+            // knowing, because it sets how hard to lean -- the failure is cosmetic
+            // and self-correcting, while being wrong the other way is a capture
+            // per window per frame for the life of the session.
+            //
+            // Costed honestly: `pane_outer_of` is two linear `Panes::get` scans
+            // (one through `insets_of`) plus an `element_location`, so this is
+            // O(panes) per pane per frame, not the single `overlaps` it reads as.
+            // About three hundred comparisons at twelve panes -- nothing beside an
+            // offscreen render, and the reason the cheap case stays cheap is that
+            // `on_screen` is short, not that this line is.
+            if !shown(state, pane) {
+                release(state);
+                continue;
+            }
+            // At *its own monitor's* scale. One frame can span monitors at
+            // different scales, and a texture taken at 1x and drawn on a 2x screen
+            // is the blur this whole change exists to remove.
+            //
+            // A deformed window with no warp program takes the flat path below
+            // instead of being captured for a warp that cannot be drawn:
+            // `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
+            let warp = warp_of(state, pane, outer);
+            let program = if warp.is_some() {
+                state.programs.warp(renderer)
+            } else {
+                None
+            };
+            let routed = route(warp.is_some(), program.is_some());
+            // A pane that is not warped builds no job, rounded or not (spec §8.4).
+            // `tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
+            if wanted_capture(routed).is_none() {
+                // Said out loud rather than skipped. Not drawing `Inputs::Backdrop`
+                // is right -- there is nothing composited beneath a node for this
+                // renderer to sample -- but a blur that silently renders as no
+                // blur looks like a style that failed to load and is never
+                // reported as a compositor bug. See `fragment::Inputs::Backdrop`,
+                // and
+                // `pass::tests::an_effect_that_cannot_be_run_is_named_once_and_not_every_frame`.
+                if let Some(refused) = crate::pass::refused(&declared_effects(state, pane)) {
+                    state.programs.refuse(refused);
+                }
+                release(state);
+                continue;
+            }
+            if let (Route::Warp, Some(program), Some((frame, aimed))) = (routed, program, warp) {
+                let scale = state.scale_of(outer);
+                // What its mesh is drawn from, in global space: the warp's commit
+                // moves when this does, as well as when its capture is redrawn.
+                // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
+                let shape = Shape::of(&frame, aimed, scale);
+                let job = crate::offscreen::pane_job(state, renderer, pane, &window, scale, slots);
+                // Its popups the same way, in a capture of their own that `panes`
+                // draws in front of the pane's warp
+                // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept until
+                // they commit:
+                // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
+                let over = if job.is_some() {
+                    crate::offscreen::over_job(state, renderer, pane, &window, scale)
+                } else {
+                    None
+                };
+                // Holding only what it captures this pass: popups that closed give
+                // their capture back while the pane goes on warping.
+                // `keyed::tests::a_warped_pane_whose_popups_close_gives_their_capture_back`.
+                let kinds: &[crate::keyed::Kind] = if over.is_some() {
+                    &[crate::keyed::Kind::Pane, crate::keyed::Kind::Over]
+                } else {
+                    &[crate::keyed::Kind::Pane]
+                };
+                let (panes, pool) = (&mut state.panes, &mut state.pool);
+                if let Some(held) = panes.get_mut(pane) {
+                    held.captures_mut().keep(kinds, pool);
+                }
+                if let Some(job) = job {
+                    // Already drawn from exactly this: no frame (`offscreen::kept`,
+                    // `state::tests::real_client::a_capture_whose_surface_tree_has_not_committed_is_not_drawn_again`).
+                    if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
+                        let commit =
+                            warp_commit(state, pane, crate::keyed::Kind::Pane, shape, false);
+                        self.warps
+                            .push((window.clone(), texture, program, id, commit));
+                    } else {
+                        jobs.push((job, Then::Warp(window.clone(), program, pane, shape)));
+                    }
+                }
+                if let Some((job, part)) = over {
+                    if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
+                        let commit =
+                            warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
+                        self.overs
+                            .push((window, texture, program, id, commit, part));
+                    } else {
+                        jobs.push((job, Then::Over(window, program, pane, shape, part)));
+                    }
+                }
+                continue;
+            }
+            release(state);
+        }
+
+        // Every list is built, from the slots as the chains left them: draw
+        // them all, on one carrier, and place what they made
+        // (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
+        for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
+            match then {
+                Then::Warp(window, program, pane, shape) => {
+                    let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
+                    self.warps.push((window, texture, program, id, commit));
+                }
+                Then::Over(window, program, pane, shape, part) => {
+                    let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
+                    self.overs
+                        .push((window, texture, program, id, commit, part));
+                }
+            }
+        }
+    }
+
+    fn sweep(&mut self) {
+        // A slot no rule wanted this pass gives its targets back, and the
+        // pool deletes what was given back, once a pass and not in each
+        // draw (Ruling 17).
+        // `effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`.
+        let state = &mut *self.state;
+        state.store.sweep(self.pass, &mut state.pool);
+        state.pool.sweep(self.renderer);
     }
 }
 
@@ -795,8 +922,6 @@ enum Then {
         Shape,
         crate::warp::UnitRect,
     ),
-    /// A slot's self input, for its chain to read (Ruling 16).
-    Slot(crate::effect::plan::Owner, Slot),
 }
 
 /// The commit `pane`'s `kind` of warp carries this pass, its own or its
@@ -1406,8 +1531,8 @@ pub(crate) fn shape_hash(content: [f32; 4], radii: [f32; 4]) -> u64 {
 }
 
 /// Which of `prepare`'s two run phases a slot's chain runs in (Ruling 17):
-/// a whole pane's self chain in the later one, since its capture is to walk
-/// what the inner phase made (Task 25), and every other in the first.
+/// a whole pane's self chain in the later one, since its capture walks what
+/// the inner phase made ([`inner_pieces`]), and every other in the first.
 /// `tests::only_a_whole_panes_self_chain_runs_in_the_later_phase`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Nest {
@@ -1886,6 +2011,41 @@ pub(crate) fn slot_ready(
     pane: crate::pane::PaneId,
 ) -> impl Fn(PaneSlot, Slot) -> bool + '_ {
     move |part, slot| slots.is_ready(&crate::effect::plan::Owner::Pane(pane, part), slot)
+}
+
+/// A warped pane's capture: every slot ready this pass, in the flat path's
+/// order. `tests::a_warped_panes_capture_walks_its_client_slot`.
+pub(crate) fn capture_pieces(slots: &Slots, pane: crate::pane::PaneId) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    pane_walk(&mut pieces, &slot_ready(slots, pane), |into, piece| {
+        into.push(piece);
+    });
+    pieces
+}
+
+/// A whole pane's self capture: its inner parts' results, never its own
+/// `pane` slots, which would read the last pass's result of the effect being
+/// run. `tests::a_whole_panes_capture_walks_its_inner_slots_and_not_its_own`.
+pub(crate) fn inner_pieces(slots: &Slots, pane: crate::pane::PaneId) -> Vec<Piece> {
+    let ready = slot_ready(slots, pane);
+    let mut pieces = Vec::new();
+    pane_walk(
+        &mut pieces,
+        &|part, slot| part != PaneSlot::Pane && ready(part, slot),
+        |into, piece| into.push(piece),
+    );
+    pieces
+}
+
+/// Whether a run phase has a chain to run: a wanted slot whose bound chain
+/// runs in `nest`. One that has none binds no carrier (Ruling 17).
+/// `tests::a_run_phase_with_no_chain_of_its_own_binds_nothing`.
+pub(crate) fn runs_in(slots: &Slots, chains: &crate::effect::plan::Chains, nest: Nest) -> bool {
+    slots.wants().any(|(owner, _, key)| {
+        chains
+            .get(key)
+            .is_some_and(|chain| Nest::of(owner, chain.tier) == nest)
+    })
 }
 
 /// Whether a pane drawn over `drawn` reaches `screen` once grown by `reach`
@@ -3755,25 +3915,67 @@ fn cursor(
 /// sat under the titlebar and were cut at the window's edge.
 /// `state::tests::a_warped_panes_capture_holds_no_popups`,
 /// `tests::a_warped_panes_popups_are_in_front_of_it`.
+///
+/// **With its slots** (Ruling 17): every slot ready this pass, walked as the
+/// flat path walks them ([`capture_pieces`]), each result placed over its
+/// part in the capture, so a blurred window stays blurred while it is
+/// warped. `prepare` builds this only once the chains have run
+/// (`tests::a_warped_panes_capture_walks_its_client_slot`,
+/// `tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
 pub(crate) fn flat_window_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     window: &Window,
     scale: f64,
+    slots: &Slots,
 ) -> Vec<Element> {
-    flat_window_elements_at(state, renderer, window, scale, (0, 0).into())
+    let pieces = state
+        .panes
+        .id_of(window)
+        .map_or_else(|| PANE_ORDER.to_vec(), |pane| capture_pieces(slots, pane));
+    flat_pane(
+        state,
+        renderer,
+        window,
+        scale,
+        (0, 0).into(),
+        slots,
+        &pieces,
+    )
 }
 
 /// [`flat_window_elements`] with the pane's corner at `at`, in the target's
 /// physical pixels ([`pane_drawing_at`]): a whole pane's self capture,
-/// padded by its chain's reach (`offscreen::part_job`).
-/// `tests::a_pane_drawn_at_the_pad_has_its_client_inside_it`.
+/// padded by its chain's reach (`offscreen::part_job`), holding its inner
+/// parts' results and never its own ([`inner_pieces`]).
+/// `tests::a_pane_drawn_at_the_pad_has_its_client_inside_it`,
+/// `tests::a_whole_panes_capture_walks_its_inner_slots_and_not_its_own`.
 pub(crate) fn flat_window_elements_at(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     window: &Window,
     scale: f64,
     at: Point<i32, Physical>,
+    slots: &Slots,
+) -> Vec<Element> {
+    let pieces = state
+        .panes
+        .id_of(window)
+        .map_or_else(|| PANE_ORDER.to_vec(), |pane| inner_pieces(slots, pane));
+    flat_pane(state, renderer, window, scale, at, slots, &pieces)
+}
+
+/// One pane drawn flat at its own size, its corner at `at`, walking
+/// `pieces`: what both captures of a pane are drawn from.
+/// `tests::a_warped_panes_capture_walks_its_client_slot`.
+fn flat_pane(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    scale: f64,
+    at: Point<i32, Physical>,
+    slots: &Slots,
+    pieces: &[Piece],
 ) -> Vec<Element> {
     let mut elements = Vec::new();
     let Some(Flat { outer, insets, .. }) = flat(state, window) else {
@@ -3795,63 +3997,109 @@ pub(crate) fn flat_window_elements_at(
 
     // Asked before the walk, which holds the state.
     let rounded = pane.and_then(|pane| clipped(state, pane));
+    let radii = pane
+        .and_then(|pane| declared_rounding(state, pane))
+        .map(|effect| effect.radii());
 
-    // The same `PANE_ORDER` a flat window goes through, so a tilted window
-    // carries its layers in the order it would have had standing still. A
+    // The same walk a flat window goes through, so a tilted window carries its
+    // layers and its slots in the order it would have had standing still. A
     // second sequence of calls here is how a deformed window would come to have
     // its `above` layer underneath its client.
-    pane_pieces(&mut elements, |elements, piece| match piece {
-        Piece::Layers(depth) => {
-            if let Some(pane) = pane {
-                chrome(state, renderer, elements, None, pane, depth, drawing);
-            }
-        }
-        Piece::Slot(..) => {}
-        // A style's rounding, drawn here as on the flat path, so a deformed
-        // window keeps its corners: each surface through the clipped
-        // programs, at real size, cut to what the capture holds of the client
-        // (`tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`).
-        Piece::Client => {
-            // **#232.** This path drew the raw surface at `origin`, nothing
-            // taken off, so a client with client-side shadows (its window
-            // geometry has a non-zero offset) had its picture shifted away
-            // from its frame in every captured draw: warps, genies, close
-            // fades (`pane_job`), and tilted `sol.present` presentations.
-            // The same `window_surface_origin` the flat path (`elements`)
-            // already used, so the two cannot drift apart again.
-            // `state::tests::window_surface_origin_matches_a_csd_clients_shadow_offset`.
-            let surface_origin = window_surface_origin(origin, window, scale);
-            let surfaces = client_piece(renderer, window, surface_origin, output_scale);
-            match &rounded {
-                Some((effect, programs)) => {
-                    // `origin` for the room, `surface_origin` for the tree:
-                    // the frame's content area does not move when the tree
-                    // is shifted to re-place a CSD client's shadow, so the
-                    // two anchors `capture_clip` takes must not be collapsed
-                    // into one (`tests::a_shifted_tree_does_not_shrink_the_room_its_client_is_cut_to`).
-                    let clip = capture_clip(
-                        origin,
-                        Size::<i32, Logical>::from((
-                            outer.w - insets.horizontal(),
-                            outer.h - insets.vertical(),
-                        ))
-                        .to_physical_precise_round(scale),
-                        surface_origin,
-                        window.geometry().to_physical_precise_round(scale),
-                        crate::pass::physical_radii(*effect, scale),
+    for &piece in pieces {
+        match piece {
+            Piece::Layers(depth) => {
+                if let Some(pane) = pane {
+                    chrome(
+                        state,
+                        renderer,
+                        &mut elements,
+                        Some(slots),
+                        pane,
+                        depth,
+                        drawing,
                     );
-                    elements.extend(surfaces.into_iter().map(|surface| {
-                        Element::Clipped2(crate::clip::Clipped::new(
-                            surface,
-                            clip,
-                            programs.clone(),
-                        ))
-                    }));
                 }
-                None => elements.extend(surfaces.into_iter().map(Element::Window2)),
+            }
+            // A slot's result over its part at rest, unfaded: the client's
+            // hole for the client, the pane's outer rectangle for the rest,
+            // as the flat path's masks are at a zoom of one
+            // (`tests::a_warped_panes_capture_walks_its_client_slot`).
+            Piece::Slot(part, slot) => {
+                let Some(pane) = pane else {
+                    continue;
+                };
+                let mask = match part {
+                    PaneSlot::Client => crate::effect::mask::client_mask(
+                        present::logical(
+                            (
+                                drawing.rect.loc.x + f64::from(insets.left),
+                                drawing.rect.loc.y + f64::from(insets.top),
+                            ),
+                            (
+                                f64::from((outer.w - insets.horizontal()).max(1)),
+                                f64::from((outer.h - insets.vertical()).max(1)),
+                            ),
+                        ),
+                        radii,
+                    ),
+                    _ => crate::effect::mask::pane_mask(drawing.rect, radii),
+                };
+                elements.extend(slot_element(
+                    state,
+                    slots,
+                    &crate::effect::plan::Owner::Pane(pane, part),
+                    slot,
+                    mask,
+                    scale,
+                    1.0,
+                ));
+            }
+            // A style's rounding, drawn here as on the flat path, so a deformed
+            // window keeps its corners: each surface through the clipped
+            // programs, at real size, cut to what the capture holds of the client
+            // (`tests::in_a_capture_a_client_is_clipped_to_what_the_capture_holds_of_it`).
+            Piece::Client => {
+                // **#232.** This path drew the raw surface at `origin`, nothing
+                // taken off, so a client with client-side shadows (its window
+                // geometry has a non-zero offset) had its picture shifted away
+                // from its frame in every captured draw: warps, genies, close
+                // fades (`pane_job`), and tilted `sol.present` presentations.
+                // The same `window_surface_origin` the flat path (`elements`)
+                // already used, so the two cannot drift apart again.
+                // `state::tests::window_surface_origin_matches_a_csd_clients_shadow_offset`.
+                let surface_origin = window_surface_origin(origin, window, scale);
+                let surfaces = client_piece(renderer, window, surface_origin, output_scale);
+                match &rounded {
+                    Some((effect, programs)) => {
+                        // `origin` for the room, `surface_origin` for the tree:
+                        // the frame's content area does not move when the tree
+                        // is shifted to re-place a CSD client's shadow, so the
+                        // two anchors `capture_clip` takes must not be collapsed
+                        // into one (`tests::a_shifted_tree_does_not_shrink_the_room_its_client_is_cut_to`).
+                        let clip = capture_clip(
+                            origin,
+                            Size::<i32, Logical>::from((
+                                outer.w - insets.horizontal(),
+                                outer.h - insets.vertical(),
+                            ))
+                            .to_physical_precise_round(scale),
+                            surface_origin,
+                            window.geometry().to_physical_precise_round(scale),
+                            crate::pass::physical_radii(*effect, scale),
+                        );
+                        elements.extend(surfaces.into_iter().map(|surface| {
+                            Element::Clipped2(crate::clip::Clipped::new(
+                                surface,
+                                clip,
+                                programs.clone(),
+                            ))
+                        }));
+                    }
+                    None => elements.extend(surfaces.into_iter().map(Element::Window2)),
+                }
             }
         }
-    });
+    }
     elements
 }
 
@@ -6466,5 +6714,196 @@ pub(crate) mod tests {
         let mut order = vec![("a", 0.0_f32), ("nan", f32::NAN), ("b", 0.0)];
         by_depth(&mut order);
         assert_eq!(names(&order), vec!["a", "nan", "b"]);
+    }
+
+    /// **A warped pane's capture walks its slots**: the pieces
+    /// `flat_window_elements` builds from have the client's `replace` in the
+    /// client's place, as the flat path's do. (`flat_window_elements` is
+    /// concrete on `GlesRenderer`, so the order it walks is the testable half.)
+    #[test]
+    fn a_warped_panes_capture_walks_its_client_slot() {
+        use crate::effect::plan::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::Slot;
+        let pane = crate::pane::PaneId::from_raw(1);
+        let mut slots = Slots::default();
+        slots.mark_ready(Owner::Pane(pane, PaneSlot::Client), Slot::Replace);
+        let pieces = super::capture_pieces(&slots, pane);
+        assert!(
+            pieces.contains(&super::Piece::Slot(PaneSlot::Client, Slot::Replace)),
+            "{pieces:?}"
+        );
+        assert!(
+            !pieces.contains(&super::Piece::Client),
+            "the bare client is still in the capture"
+        );
+    }
+
+    /// **A whole pane's self capture walks its inner results, not its own**:
+    /// a `pane` effect reads the client's blur, and never its own last output.
+    #[test]
+    fn a_whole_panes_capture_walks_its_inner_slots_and_not_its_own() {
+        use crate::effect::plan::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::Slot;
+        let pane = crate::pane::PaneId::from_raw(1);
+        let mut slots = Slots::default();
+        slots.mark_ready(Owner::Pane(pane, PaneSlot::Client), Slot::Replace);
+        slots.mark_ready(Owner::Pane(pane, PaneSlot::Pane), Slot::Behind);
+        let pieces = super::inner_pieces(&slots, pane);
+        assert!(
+            pieces.contains(&super::Piece::Slot(PaneSlot::Client, Slot::Replace)),
+            "{pieces:?}"
+        );
+        assert!(
+            !pieces.contains(&super::Piece::Slot(PaneSlot::Pane, Slot::Behind)),
+            "a pane's own slot is in its own capture: {pieces:?}"
+        );
+    }
+
+    /// `prepare`'s phases, recorded: what ran in which order, and what the
+    /// warp's capture walked when its job was built.
+    struct Recorder {
+        pane: crate::pane::PaneId,
+        did: Vec<String>,
+        walked: Vec<super::Piece>,
+    }
+
+    impl super::Phases for Recorder {
+        fn compile(&mut self) {
+            self.did.push("compile".to_owned());
+        }
+        fn resolve(&mut self) -> crate::effect::plan::Slots {
+            use crate::effect::plan::{Owner, PaneSlot, Slots};
+            use crate::effect::rules::{Origin, RuleKey, Slot};
+            self.did.push("resolve".to_owned());
+            let mut slots = Slots::default();
+            slots.want(
+                Owner::Pane(self.pane, PaneSlot::Client),
+                Slot::Replace,
+                RuleKey {
+                    origin: Origin::User,
+                    index: 0,
+                    generation: 1,
+                },
+            );
+            slots
+        }
+        fn captures(&mut self, _slots: &crate::effect::plan::Slots, nest: super::Nest) {
+            self.did.push(format!("captures {nest:?}"));
+        }
+        fn chains(&mut self, slots: &mut crate::effect::plan::Slots, nest: super::Nest) {
+            use crate::effect::plan::{Owner, PaneSlot};
+            use crate::effect::rules::Slot;
+            self.did.push(format!("chains {nest:?}"));
+            // The client's chain ran this pass: its result is ready now.
+            if nest == super::Nest::Inner {
+                slots.mark_ready(Owner::Pane(self.pane, PaneSlot::Client), Slot::Replace);
+            }
+        }
+        fn warps(&mut self, slots: &crate::effect::plan::Slots) {
+            self.did.push("warps".to_owned());
+            self.walked = super::capture_pieces(slots, self.pane);
+        }
+        fn sweep(&mut self) {
+            self.did.push("sweep".to_owned());
+        }
+    }
+
+    /// **`prepare` compiles first, and builds the warp and `over` jobs only
+    /// after the chains have run** (Ruling 17; spec C14 for the first half):
+    /// a warped pane's capture is built from a walk that already holds this
+    /// pass's slot results, so its element list and its keyed `Inputs` carry
+    /// the result's element, and a wanted effect has compiled before any slot
+    /// resolves, so it is never absent from the first frame for want of one.
+    #[test]
+    fn prepare_compiles_first_and_builds_the_warps_after_the_chains() {
+        use crate::effect::plan::PaneSlot;
+        use crate::effect::rules::Slot;
+        let mut recorder = Recorder {
+            pane: crate::pane::PaneId::from_raw(1),
+            did: Vec::new(),
+            walked: Vec::new(),
+        };
+        let _ = super::effect_phases(&mut recorder);
+        assert_eq!(
+            recorder.did,
+            [
+                "compile",
+                "resolve",
+                "captures Inner",
+                "chains Inner",
+                "captures Whole",
+                "chains Whole",
+                "warps",
+                "sweep"
+            ]
+        );
+        assert!(
+            recorder
+                .walked
+                .contains(&super::Piece::Slot(PaneSlot::Client, Slot::Replace)),
+            "the warp's capture was built before the client's chain ran: {:?}",
+            recorder.walked
+        );
+        assert!(
+            !recorder.walked.contains(&super::Piece::Client),
+            "the bare client is in the warp's capture"
+        );
+    }
+
+    /// **A run phase with no chain of its own binds no carrier** (Ruling
+    /// 17): a client's self chain runs in the inner phase, so the whole-pane
+    /// phase has nothing to run and binds nothing, and with no slot neither
+    /// does.
+    #[test]
+    fn a_run_phase_with_no_chain_of_its_own_binds_nothing() {
+        use crate::effect::plan::{Chains, Owner, PaneSlot, Slots};
+        use crate::effect::rules::{Origin, RuleKey, Slot};
+        let place = crate::effect::host::tests::scratch("render-phase-binds");
+        crate::effect::host::tests::folder(
+            &place,
+            "tint",
+            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            &[(
+                "effect.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            )],
+        );
+        let mut host = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(place.clone()),
+            place.join("none"),
+        ));
+        host.want("rules", ["tint".to_owned()]);
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua
+            .load(r#"{ { match = "*", part = "client", slot = "replace", effect = "tint" } }"#)
+            .eval()
+            .expect("the test's Lua");
+        let tree = crate::effect::tree::Tree::from_lua(&value)
+            .expect("readable")
+            .expect("a value");
+        let rule = crate::effect::rules::parse(&tree)
+            .expect("parses")
+            .remove(0);
+        let key = RuleKey {
+            origin: Origin::User,
+            index: 0,
+            generation: 1,
+        };
+        let mut chains = Chains::default();
+        chains.insert(key, Chains::bind(&mut host, &rule).expect("binds"));
+        let mut slots = Slots::default();
+        assert!(!super::runs_in(&slots, &chains, super::Nest::Inner));
+        assert!(!super::runs_in(&slots, &chains, super::Nest::Whole));
+        slots.want(
+            Owner::Pane(crate::pane::PaneId::from_raw(1), PaneSlot::Client),
+            Slot::Replace,
+            key,
+        );
+        assert!(super::runs_in(&slots, &chains, super::Nest::Inner));
+        assert!(
+            !super::runs_in(&slots, &chains, super::Nest::Whole),
+            "the whole-pane phase binds a carrier to run nothing"
+        );
+        let _ = std::fs::remove_dir_all(place);
     }
 }

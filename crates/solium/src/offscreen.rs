@@ -114,9 +114,15 @@ pub(crate) enum HeldIn {
 /// self input: drawn from the elements its part is drawn from, moved so the
 /// part's corner is at `(pad, pad)`, and keyed on them, so it is drawn again
 /// only when the part commits (Ruling 16). `None` when the part has nothing
-/// to draw, as a client with no buffer yet.
+/// to draw, as a client with no buffer yet. A whole pane's holds its inner
+/// parts' results ready in `slots` (Ruling 17).
 /// `state::tests::real_client::the_self_capture_is_padded_by_the_effects_reach`,
-/// `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`.
+/// `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`,
+/// `render::tests::a_whole_panes_capture_walks_its_inner_slots_and_not_its_own`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one part's capture: whose, which slot, of what, at what scale and pad, with what the walk holds"
+)]
 pub(crate) fn part_job(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -125,6 +131,7 @@ pub(crate) fn part_job(
     source: PartSource<'_>,
     scale: f64,
     pad: i32,
+    slots: &crate::effect::plan::Slots,
 ) -> Option<Job> {
     let size = part_size(state, &source, scale, pad)?;
     let corner: Point<i32, Physical> = (pad, pad).into();
@@ -141,7 +148,7 @@ pub(crate) fn part_job(
             )?]
         }
         PartSource::Pane(window) => {
-            crate::render::flat_window_elements_at(state, renderer, window, scale, corner)
+            crate::render::flat_window_elements_at(state, renderer, window, scale, corner, slots)
         }
         PartSource::Surface(id, output) => {
             vec![crate::render::scripted_instance(
@@ -310,19 +317,23 @@ impl std::fmt::Debug for Job {
 /// holds it — and because a capture with nowhere to keep its target would be
 /// back to allocating one a frame, which is a case worth not having rather
 /// than one worth handling.
+///
+/// With every slot `slots` holds ready, so a blurred window is captured
+/// blurred (Ruling 17, `render::tests::a_warped_panes_capture_walks_its_client_slot`).
 pub(crate) fn pane_job(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     pane: PaneId,
     window: &Window,
     scale: f64,
+    slots: &crate::effect::plan::Slots,
 ) -> Option<Job> {
     let outer = crate::render::flat(state, window)?.outer;
 
     // Built at the origin rather than at the window's position: the texture is
     // the window's own space, and where it ends up on screen is the warp's
     // business.
-    let elements = crate::render::flat_window_elements(state, renderer, window, scale);
+    let elements = crate::render::flat_window_elements(state, renderer, window, scale, slots);
     if elements.is_empty() {
         tracing::warn!("a warped window had nothing to draw offscreen");
         return None;
@@ -404,11 +415,11 @@ pub(crate) fn draw<T>(
 ) -> Vec<(T, GlesTexture, Id, CommitCounter)> {
     // Nothing captured this pass, which is every pass of an unstyled,
     // unwarped desktop: no carrier bound, no framebuffer released, no context
-    // made current, as before captures went through the pool. Only targets
-    // given back are swept, and `sweep` touches GL only when there are some.
+    // made current, as before captures went through the pool. The pool is
+    // swept once, at the end of `prepare`, not here: up to three draws a pass
+    // (Ruling 17, `render::tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
     // `render::tests::a_pane_neither_warped_nor_styled_wants_no_capture`.
     if jobs.is_empty() {
-        state.pool.sweep(renderer);
         return Vec::new();
     }
     let mut done = Vec::with_capacity(jobs.len());
@@ -483,7 +494,6 @@ pub(crate) fn draw<T>(
     // that renders into an EGL surface nothing binds 0 again, and every later
     // frame would land in a texture nobody shows. See `release_framebuffer`.
     crate::warp::release_framebuffer(renderer);
-    state.pool.sweep(renderer);
     done
 }
 

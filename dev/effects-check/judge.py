@@ -5,6 +5,13 @@
   judge.py same A B FX FY FW FH [TOL]     exit 0 if every channel is within TOL (0)
   judge.py edges A FX FY FW FH            print the region's edge energy: the sum of
                                           |difference| between horizontal neighbours
+  judge.py sharpness A FX FY FW FH        print the region's gradient energy: the sum
+                                          of squared differences between horizontal
+                                          and between vertical neighbours. A blur
+                                          lowers it even where it only widens a step,
+                                          which leaves `edges` unchanged: a step of
+                                          height H spread over n pixels sums to H
+                                          either way, and to H*H/n squared
   judge.py trace FILE FIELD               print the number of pass records in a
                                           SOLIUM_TRACE file whose FIELD is non-zero,
                                           and the field's total
@@ -100,6 +107,13 @@ def main(argv):
         a = read(argv[2])
         box = region(a[0], a[1], *argv[3:7])
         print(sum(abs(row[i] - row[i + 3]) for row in pixels(a, box) for i in range(len(row) - 3)))
+        return 0
+    if what == "sharpness":
+        a = read(argv[2])
+        rows = list(pixels(a, region(a[0], a[1], *argv[3:7])))
+        across = sum((row[i] - row[i + 3]) ** 2 for row in rows for i in range(len(row) - 3))
+        down = sum((p - q) ** 2 for upper, lower in zip(rows, rows[1:]) for p, q in zip(upper, lower))
+        print(across + down)
         return 0
     if what == "trace":
         values = [record.get(argv[3], 0) for record in passes(argv[2])]

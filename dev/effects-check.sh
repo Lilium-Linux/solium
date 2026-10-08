@@ -28,6 +28,10 @@
 #   fail      rules naming an effect that will not compile, in every slot of
 #             every part of a window: at rest the frame is the one with no
 #             rules
+#   tilt      the player blurred through a rule, then held at 6 degrees, then
+#             pulled into the bottom of the screen by a genie: blurred flat,
+#             still blurred while tilted and while it genies, against the
+#             same run with no rule
 #
 # The player is ffplay's testsrc2, or a kitty printing the time when ffplay is
 # missing.
@@ -312,7 +316,55 @@ section_fail() {
         || fail "fail: a failing effect changed what was drawn"
 }
 
-all=(overlay t0 blur none fail)
+# tilt  the player blurred through a rule and warped, so what is drawn is
+#       its pane's capture, which walks its slots once the chains have run
+#       (Ruling 17): held at 6 degrees from 4.5 s (super+t), then pulled into
+#       the bottom of the screen over 3 s from 6.5 s (super+m, as the shipped
+#       genie). Frames at 4 s (flat), 6 s (tilted) and 8 s (half way through
+#       the genie), each judged against the same frame of a run with no rule
+#       by its gradient energy inside the player (`judge sharpness`; `edges`
+#       sums a widened step to its height, so it barely moves where the
+#       genie squeezes the colour bars together): under half, flat, tilted
+#       and in the genie. Built before the chains, the warp draws the bare
+#       client, and the tilted and genied frames are as sharp as with no rule.
+section_tilt() {
+    local name
+    for name in tilt-off tilt-on; do
+        local extra=()
+        [[ "$name" = tilt-on ]] && extra=(BLUR=player)
+        SECTION_EFFECTS="$root/crates/solium/effects/blur" \
+            run_scene "$name" tilt.lua "${extra[@]}" GENIE_MS=3000 \
+            SOLIUM_TRIGGER_AT=4500:super+t,6500:super+m \
+            SOLIUM_CAPTURE_AT=4000 SOLIUM_CAPTURE_FRAMES=3 SOLIUM_CAPTURE_INTERVAL=2000 || return
+        static_window
+        sleep 1.5
+        player effects-check-player
+        wait_frames 3 || return
+        stop
+    done
+    local off=("$out/tilt-off"/f-*) on=("$out/tilt-on"/f-*)
+    judge differs "${on[0]}" "${on[1]}" 720px 120px 400px 260px >/dev/null \
+        || { fail "tilt: the player did not turn at super+t, so nothing was tested"; return; }
+    judge differs "${on[1]}" "${on[2]}" 680px 80px 440px 200px >/dev/null \
+        || { fail "tilt: the player did not move at super+m, so nothing was tested"; return; }
+    # Inside the player by more than a 6-degree turn moves its border, and
+    # in the genie inside its upper part, which is still wide half way: the
+    # player's own pixels, never its edge against the background.
+    local at sharp soft box frame=(flat tilted genie)
+    for at in 0 1 2; do
+        box=(720px 120px 400px 260px)
+        (( at == 2 )) && box=(680px 80px 440px 200px)
+        sharp="$(judge sharpness "${off[$at]}" "${box[@]}")"
+        soft="$(judge sharpness "${on[$at]}" "${box[@]}")"
+        if (( soft * 2 < sharp )); then
+            pass "tilt: ${frame[$at]}, the player's gradient energy fell from $sharp to $soft"
+        else
+            fail "tilt: ${frame[$at]}, the player is not blurred ($sharp -> $soft)"
+        fi
+    done
+}
+
+all=(overlay t0 blur none fail tilt)
 sections=("$@")
 [[ ${#sections[@]} -gt 0 ]] || sections=("${all[@]}")
 
