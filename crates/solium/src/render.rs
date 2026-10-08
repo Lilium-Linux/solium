@@ -324,6 +324,17 @@ pub(crate) enum WarpPiece {
 
 pub(crate) const WARP_ORDER: [WarpPiece; 2] = [WarpPiece::Over, WarpPiece::Pane];
 
+impl WarpPiece {
+    /// Its place in [`WARP_ORDER`]: what a pane's per-piece state is kept
+    /// by (`effect::geometry::Meshes`).
+    fn index(self) -> usize {
+        WARP_ORDER
+            .iter()
+            .position(|piece| *piece == self)
+            .unwrap_or_default()
+    }
+}
+
 /// The part of a pane's unit square its popups cover: their rectangle,
 /// relative to the client's corner at `client_corner` in the pane, over the
 /// pane's `outer` size. `tests::the_popups_part_is_their_rectangle_over_the_pane`.
@@ -453,7 +464,7 @@ pub(crate) fn plan_warp(
         pane,
         &frame,
         aimed,
-        crate::warp::UnitRect::WHOLE,
+        (WarpPiece::Pane, crate::warp::UnitRect::WHOLE),
         scale,
     );
     let route = match gridded {
@@ -490,11 +501,12 @@ enum Gridded {
     Refused,
 }
 
-/// A present geometry's grid over `part`, built once a pass (not once per
-/// output) in global logical pixels through the effect's `mesh`, and kept on
-/// the pane while nothing it depends on moves
+/// A present geometry's grid for a piece of the pane over its `part`, built
+/// once a pass (not once per output) in global logical pixels through the
+/// effect's `mesh`, and kept on the pane while nothing it depends on moves
 /// (`effect::geometry::tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`).
-/// A refusal is logged once and counted in the trace. In a debug build,
+/// A refusal is logged once a piece and counted in the trace each pass
+/// (`state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`). In a debug build,
 /// when `SOLIUM_GEOMETRY_ORACLE` names the effect, the grid is the Rust
 /// genie's instead, the oracle `dev/effects-check.sh genie` compares the
 /// folder with; a release build has neither the branch nor the oracle.
@@ -503,7 +515,7 @@ fn present_grid(
     pane: crate::pane::PaneId,
     frame: &present::Frame,
     aimed: present::Aimed,
-    part: crate::warp::UnitRect,
+    (piece, part): (WarpPiece, crate::warp::UnitRect),
     scale: f64,
 ) -> Gridded {
     use crate::effect::geometry::{Ask, MeshKey, mesh, turned, unpacked};
@@ -584,12 +596,12 @@ fn present_grid(
         .cloned();
     match built {
         Ok(grid) => {
-            meshes.said = false;
+            meshes.built(piece.index());
             Gridded::Grid(grid)
         }
         Err(refusal) => {
             crate::pacing::mesh_refused();
-            if !std::mem::replace(&mut meshes.said, true) {
+            if meshes.say_refused(piece.index()) {
                 tracing::warn!(
                     effect = loaded.name(),
                     ?refusal,
@@ -598,6 +610,31 @@ fn present_grid(
             }
             Gridded::Refused
         }
+    }
+}
+
+/// What a warped pane's popups are drawn through under a present geometry:
+/// their own grid, over their `part`; refused, what the geometry's `failed`
+/// says, the identity grid of their part (`Some(None)`, drawn undeformed)
+/// under `"flat"` and nothing of them (`None`) under `"hide"`; and drawn
+/// undeformed once the folder was reloaded under `on_reload = "flat"`, as
+/// the pane is.
+/// `state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`.
+pub(crate) fn over_grid(
+    state: &mut Solium,
+    pane: crate::pane::PaneId,
+    frame: &present::Frame,
+    aimed: present::Aimed,
+    part: crate::warp::UnitRect,
+    scale: f64,
+) -> Option<Option<crate::warp::Grid>> {
+    match present_grid(state, pane, frame, aimed, (WarpPiece::Over, part), scale) {
+        Gridded::Grid(grid) => Some(Some(grid)),
+        Gridded::Undeformed => Some(None),
+        Gridded::Refused => match present_route(aimed.effect, true) {
+            Route::Hidden => None,
+            _ => Some(None),
+        },
     }
 }
 
@@ -1079,8 +1116,8 @@ impl Phases for Gpu<'_> {
                 // they commit:
                 // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
                 // Under a present geometry their part has a grid of its own,
-                // and a grid refused drops the popups' warp for the pass and
-                // keeps the pane's.
+                // and a grid refused follows the geometry's `failed`: the
+                // popups undeformed, or none of them, the pane's warp kept.
                 let over = if job.is_some() {
                     crate::offscreen::over_job(state, renderer, pane, &window, scale)
                 } else {
@@ -1088,10 +1125,8 @@ impl Phases for Gpu<'_> {
                 };
                 let over = match (over, aimed) {
                     (Some((job, part)), Some(aimed)) => {
-                        match present_grid(state, pane, &frame, aimed, part, scale) {
-                            Gridded::Grid(grid) => Some((job, part, Some(grid))),
-                            _ => None,
-                        }
+                        over_grid(state, pane, &frame, aimed, part, scale)
+                            .map(|grid| (job, part, grid))
                     }
                     (over, _) => over.map(|(job, part)| (job, part, None)),
                 };

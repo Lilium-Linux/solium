@@ -434,10 +434,11 @@ on moves: the effect, its params, the part, the grid, the axis, the
 progress, the seed, the window's and the target's rectangles, the monitor.
 A grid that is refused draws the window by the present's `failed`
 (`effects.present.failed`, `"flat"` unless you change it: the window
-undeformed; or `"hide"`), said once in Solium's log. A folder a reload
-finds changed while a present plays draws it flat for the rest of the
-move, or on the version it began with under `on_reload = "keep"`; a reload
-that leaves the folder as it was changes nothing.
+undeformed; or `"hide"`), and so does a refused grid of its open menus,
+which reach past the window: each is said once a present in Solium's log.
+A folder a reload finds changed while a present plays draws it flat for
+the rest of the move, or on the version it began with under `on_reload =
+"keep"`; a reload that leaves the folder as it was changes nothing.
 
 The shipped [`genie`](genie/README.md) is a whole one in a page of Lua: it
 works out how far each row has gone, once (each column, when the window is

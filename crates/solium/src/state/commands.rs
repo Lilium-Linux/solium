@@ -153,7 +153,11 @@ impl Solium {
             }
         };
         if let Some(held) = self.panes.get_mut(pane) {
-            held.meshes_mut().pinned = (on_reload == PresentReload::Keep).then_some(loaded);
+            let meshes = held.meshes_mut();
+            meshes.pinned = (on_reload == PresentReload::Keep).then_some(loaded);
+            // A present of its own: what it refuses is said again
+            // (`tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
+            meshes.begin();
         }
         Some(present::Deform {
             effect: geometry(id, params),

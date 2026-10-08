@@ -10501,6 +10501,72 @@ end)"#,
         );
     }
 
+    /// **A present refused for its popups alone is said once, and its
+    /// popups follow `failed`**: a mesh finite over the window and NaN past
+    /// its bottom edge warps the pane and is refused for a menu below it.
+    /// Over two passes the refusal is warned of once, though the pane's own
+    /// grid builds in each, and the popups are drawn undeformed (the
+    /// identity grid of their part) under `"flat"`, and not at all under
+    /// `"hide"`.
+    #[test]
+    fn a_present_refused_for_its_popups_alone_is_said_once() {
+        use crate::warp::UnitRect;
+        fx2_fixture!(fixture, "present-popups");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let to = below(&fixture, pane);
+        let below_the_window = UnitRect {
+            u0: 0.25,
+            v0: 0.75,
+            u1: 0.75,
+            v1: 1.5,
+        };
+        for (failed, drawn) in [("flat", Some(None)), ("hide", None)] {
+            present_deform(
+                &mut fixture,
+                pane,
+                &format!(
+                    "{{ effect = 'nan-past', progress = 0.5, failed = '{failed}', to = {to} }}"
+                ),
+            );
+            let outer = fixture.state.pane_outer_of(pane).expect("on screen");
+            let warned = |fixture: &Fixture| {
+                fixture
+                    .state
+                    .panes
+                    .get(pane)
+                    .map(|held| held.meshes().warned)
+            };
+            let before = warned(&fixture);
+            for pass in 0..2 {
+                assert!(
+                    matches!(
+                        planned(&mut fixture, pane),
+                        crate::render::Planned::Warp { grid: Some(_), .. }
+                    ),
+                    "{failed}, pass {pass}: the pane's own grid was refused"
+                );
+                let (frame, aimed) =
+                    crate::render::warp_of(&fixture.state, pane, outer).expect("warped");
+                let aimed = aimed.expect("aimed");
+                let over = crate::render::over_grid(
+                    &mut fixture.state,
+                    pane,
+                    &frame,
+                    aimed,
+                    below_the_window,
+                    1.0,
+                );
+                assert_eq!(over, drawn, "{failed}, pass {pass}: the popups");
+            }
+            assert_eq!(
+                warned(&fixture).zip(before).map(|(now, then)| now - then),
+                Some(1),
+                "{failed}: the popups' refusal was not said once"
+            );
+        }
+    }
+
     /// **A rule on `focused` follows the keyboard**: two windows, the rule's
     /// slot moves with the focus.
     #[test]

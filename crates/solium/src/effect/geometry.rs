@@ -233,12 +233,46 @@ pub(crate) struct Meshes {
     last: Vec<(MeshKey, crate::warp::Grid)>,
     /// `state::tests::real_client::a_reload_mid_present_follows_on_reload`.
     pub(crate) pinned: Option<std::rc::Rc<super::host::Loaded>>,
-    /// Whether a refusal has been logged since the last grid built, so a
-    /// pane's refused mesh is said once and not every pass.
-    pub(crate) said: bool,
+    /// Per piece ([`crate::render::WARP_ORDER`]'s), whether its refusal has
+    /// been said since its grid last built or the present began.
+    said: [bool; crate::render::WARP_ORDER.len()],
+    /// How many refusals were said, for a test to count.
+    #[cfg(test)]
+    pub(crate) warned: u32,
 }
 
 impl Meshes {
+    /// Whether to say that piece `piece`'s grid was refused: the first
+    /// time since that piece's grid last built or the present began, so a
+    /// refused mesh is said once a pane and not every pass, and its popups'
+    /// refusal is not said again because the pane's own grid built.
+    /// `state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`.
+    pub(crate) fn say_refused(&mut self, piece: usize) -> bool {
+        let first = self
+            .said
+            .get_mut(piece)
+            .is_some_and(|said| !std::mem::replace(said, true));
+        #[cfg(test)]
+        if first {
+            self.warned += 1;
+        }
+        first
+    }
+
+    /// Piece `piece`'s grid built: a later refusal of it is said again
+    /// (`state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
+    pub(crate) fn built(&mut self, piece: usize) {
+        if let Some(said) = self.said.get_mut(piece) {
+            *said = false;
+        }
+    }
+
+    /// A new present began: whatever it refuses is said again
+    /// (`state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
+    pub(crate) fn begin(&mut self) {
+        self.said = Default::default();
+    }
+
     /// The grid for `key`: the one built for it last, or `build`'s, kept,
     /// the oldest of the pane's pieces' grids given up for it.
     /// `tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`.
