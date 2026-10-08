@@ -10501,6 +10501,47 @@ end)"#,
         );
     }
 
+    /// **A geometry with a frag presents before it compiled**: its version
+    /// waits for the next `prepare`'s compile, and a present made before
+    /// then carries the id that version runs under, not none, so once it
+    /// compiled the window is drawn through its grid.
+    #[test]
+    fn a_geometry_with_a_frag_presents_before_it_compiled() {
+        fx2_fixture!(fixture, "present-pending");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'mesh-frag', progress = 0.5, to = {to} }}"),
+        );
+        assert!(
+            fixture.state.effects.has_pending("mesh-frag")
+                && fixture.state.effects.effect("mesh-frag").is_none(),
+            "the premise: its frag waits for a compile: {:?}",
+            fixture.state.effects.problems()
+        );
+        let geometry = geometry_of(&fixture, pane).expect("a geometry");
+        assert_ne!(
+            geometry.effect,
+            crate::effect::host::EffectId::NONE,
+            "a version still compiling was presented as no effect"
+        );
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        assert_eq!(Some(geometry.effect), fixture.state.effects.id("mesh-frag"));
+        assert!(
+            matches!(
+                planned(&mut fixture, pane),
+                crate::render::Planned::Warp { grid: Some(_), .. }
+            ),
+            "not drawn through its grid once it compiled"
+        );
+    }
+
     /// **A present refused for its popups alone is said once, and its
     /// popups follow `failed`**: a mesh finite over the window and NaN past
     /// its bottom edge warps the pane and is refused for a menu below it.

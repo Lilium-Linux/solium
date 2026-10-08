@@ -84,7 +84,15 @@ impl Solium {
             .on_reload
             .unwrap_or(self.effect_settings.present.on_reload);
         self.effects.add_wanted("present", [name.to_owned()]);
-        let found = self.effects.id(name).zip(self.effects.effect(name));
+        // The newest version: one still waiting for its frag to compile is
+        // drawn under the id it runs under from the next `prepare`, which
+        // compiles it first; else the one that runs
+        // (`tests::real_client::a_geometry_with_a_frag_presents_before_it_compiled`).
+        let found = self.effects.upcoming(name);
+        let running = self
+            .effects
+            .effect(name)
+            .filter(|_| !self.effects.has_pending(name));
         // The axis, once, from where the window is drawn and where its
         // target is now: `"auto"` (and none) the side the target lies on,
         // kept for the whole flight.
@@ -113,7 +121,7 @@ impl Solium {
             failed,
             on_reload,
         };
-        let Some((id, loaded)) = found else {
+        let Some(id) = found else {
             tracing::warn!(
                 effect = name,
                 "no geometry effect by that name loaded, drawing the window by its `failed`"
@@ -123,23 +131,24 @@ impl Solium {
                 anchor,
             });
         };
+        // Bound against the version it is drawn with.
+        let (file, bound) = self
+            .effects
+            .latest(name)
+            .map(|loaded| (loaded.dir().join("effect.lua"), loaded.bind(&deform.params)))?;
         // Its own problems, said again for this present or mended by it.
         let label = format!("present:{name}");
         self.effects.clear_problems_of(&label);
-        let file = loaded.dir().join("effect.lua");
-        let packed = loaded
-            .bind(&deform.params)
-            .map_err(|problem| problem.message)
-            .and_then(|bound| {
-                for warning in &bound.warnings {
-                    self.effects.push_problem(Problem::warning(
-                        &label,
-                        &file,
-                        format!("sol.present: {}", warning.message),
-                    ));
-                }
-                geometry::packed(&bound.params, self.effect_settings.limits.params)
-            });
+        let packed = bound.map_err(|problem| problem.message).and_then(|bound| {
+            for warning in &bound.warnings {
+                self.effects.push_problem(Problem::warning(
+                    &label,
+                    &file,
+                    format!("sol.present: {}", warning.message),
+                ));
+            }
+            geometry::packed(&bound.params, self.effect_settings.limits.params)
+        });
         let params = match packed {
             Ok(params) => params,
             Err(message) => {
@@ -154,7 +163,9 @@ impl Solium {
         };
         if let Some(held) = self.panes.get_mut(pane) {
             let meshes = held.meshes_mut();
-            meshes.pinned = (on_reload == PresentReload::Keep).then_some(loaded);
+            // A version still compiling is not pinned: the id answers for
+            // it once it runs.
+            meshes.pinned = running.filter(|_| on_reload == PresentReload::Keep);
             // A present of its own: what it refuses is said again
             // (`tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
             meshes.begin();

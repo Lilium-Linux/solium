@@ -1236,7 +1236,10 @@ impl<P: Clone> Host<P> {
         self.asked.is_empty() && self.slots.values().all(|slot| slot.pending.is_none())
     }
 
-    /// The running version's id. `tests::a_new_version_is_a_new_generation`.
+    /// The running version's id, for a test to compare with what a present
+    /// carries ([`Self::upcoming`] is what one is given).
+    /// `tests::a_new_version_is_a_new_generation`.
+    #[cfg(test)]
     pub(crate) fn id(&self, name: &str) -> Option<EffectId> {
         self.slots
             .get(name)
@@ -1245,6 +1248,26 @@ impl<P: Clone> Host<P> {
                 index: slot.index,
                 generation: slot.generation,
             })
+    }
+
+    /// The id the newest version of `name` ([`Self::latest`]) is drawn
+    /// under: a pending one's, the id it takes once it compiled, at the top
+    /// of the next `prepare` and before any grid is built (Ruling 7); else
+    /// the running one's. A geometry presented on a cold start, or after a
+    /// reload, before its frag compiled is drawn from that pass on, not by
+    /// its `failed`, and is not ended by its own version swapping in.
+    /// `state::tests::real_client::a_geometry_with_a_frag_presents_before_it_compiled`.
+    pub(crate) fn upcoming(&self, name: &str) -> Option<EffectId> {
+        let slot = self.slots.get(name)?;
+        let generation = match (&slot.pending, &slot.current) {
+            (Some(_), _) => slot.generation.checked_add(1)?,
+            (None, Some(_)) => slot.generation,
+            (None, None) => return None,
+        };
+        Some(EffectId {
+            index: slot.index,
+            generation,
+        })
     }
 
     /// The version an id names, while it is the one that runs.
