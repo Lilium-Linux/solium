@@ -26,6 +26,243 @@ use crate::warp::UnitRect;
 /// be used. `settings::tests::the_engines_keys_read_with_their_defaults_and_bounds`.
 pub(crate) const PARAMS_MAX: usize = 64;
 
+/// A geometry or pixels effect's numeric params, in their sorted order: a
+/// number, an integer as its number, a boolean as 0 or 1, a `vec4` as four.
+/// An inline array, so a geometry can ride `present::Frame`, which is `Copy`.
+/// `tests::params_pack_up_to_their_limit_and_lerp_only_like_with_like`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Params {
+    len: u8,
+    values: [f32; PARAMS_MAX],
+}
+
+/// Empty (an array past 32 has no derived `Default`).
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            values: [0.0; PARAMS_MAX],
+        }
+    }
+}
+
+impl Params {
+    /// The numbers, at most `limit` of them (`effects.limits.params`); more
+    /// is `Err` with how many, for a problem naming the key.
+    /// `tests::params_pack_up_to_their_limit_and_lerp_only_like_with_like`.
+    pub(crate) fn pack(numbers: &[f32], limit: usize) -> Result<Self, usize> {
+        if numbers.len() > limit.min(PARAMS_MAX) {
+            return Err(numbers.len());
+        }
+        let mut params = Self::default();
+        let len = u8::try_from(numbers.len()).map_err(|_| numbers.len())?;
+        params
+            .values
+            .get_mut(..numbers.len())
+            .ok_or(numbers.len())?
+            .copy_from_slice(numbers);
+        params.len = len;
+        Ok(params)
+    }
+
+    pub(crate) fn as_slice(&self) -> &[f32] {
+        self.values.get(..usize::from(self.len)).unwrap_or(&[])
+    }
+
+    /// Each lerped toward `other`'s when both hold as many; `other`'s
+    /// otherwise (another effect's params do not blend with these).
+    /// `tests::params_pack_up_to_their_limit_and_lerp_only_like_with_like`.
+    pub(crate) fn lerp(self, other: Self, t: f64) -> Self {
+        if self.len != other.len {
+            return other;
+        }
+        let mut params = self;
+        for (mine, theirs) in params
+            .values
+            .iter_mut()
+            .zip(other.values)
+            .take(usize::from(self.len))
+        {
+            #[expect(clippy::cast_possible_truncation, reason = "a param, as stored")]
+            let blended = (f64::from(*mine) + (f64::from(theirs) - f64::from(*mine)) * t) as f32;
+            *mine = blended;
+        }
+        params
+    }
+}
+
+/// Bound params packed for a geometry: refused, saying why, for a word
+/// (a present's params blend between two presents, and a word cannot) or
+/// more numbers than `limit`, `effects.limits.params`, never cut.
+/// `tests::params_pack_up_to_their_limit_and_lerp_only_like_with_like`.
+pub(crate) fn packed(bound: &[(String, Value)], limit: usize) -> Result<Params, String> {
+    let mut numbers = Vec::with_capacity(bound.len());
+    for (name, value) in bound {
+        #[expect(clippy::cast_possible_truncation, reason = "a param, stored as f32")]
+        #[expect(clippy::cast_precision_loss, reason = "a param, far below 2^24")]
+        match value {
+            Value::Number(number) => numbers.push(*number as f32),
+            Value::Int(int) => numbers.push(*int as f32),
+            Value::Bool(yes) => numbers.push(if *yes { 1.0 } else { 0.0 }),
+            Value::Vec4(four) => numbers.extend(four.iter().map(|each| *each as f32)),
+            Value::Word(_) => {
+                return Err(format!(
+                    "its param `{name}` is a word, and a `sol.present` blends its params between two presents, which a word cannot"
+                ));
+            }
+        }
+    }
+    Params::pack(&numbers, limit).map_err(|count| {
+        format!(
+            "its params are {count} numbers once packed, more than `effects.limits.params` ({limit}); none is cut"
+        )
+    })
+}
+
+/// Packed params named again, by `defaults`' names and kinds (the effect's
+/// params at their defaults, in the same sorted order): what a `mesh`'s `t`
+/// is told. A number is the `f32` it was stored as, widened (Ruling 19); a
+/// boolean is true from 0.5, so a blend between two crosses half way.
+/// `tests::params_pack_up_to_their_limit_and_lerp_only_like_with_like`.
+pub(crate) fn unpacked(defaults: &[(String, Value)], params: &Params) -> Vec<(String, Value)> {
+    let mut numbers = params.as_slice().iter().map(|each| f64::from(*each));
+    let mut named = Vec::with_capacity(defaults.len());
+    for (name, default) in defaults {
+        let value = match default {
+            Value::Number(_) => numbers.next().map(Value::Number),
+            #[expect(clippy::cast_possible_truncation, reason = "an int param, rounded")]
+            Value::Int(_) => numbers.next().map(|each| Value::Int(each.round() as i64)),
+            Value::Bool(_) => numbers.next().map(|each| Value::Bool(each >= 0.5)),
+            Value::Vec4(_) => {
+                let four: Vec<f64> = numbers.by_ref().take(4).collect();
+                match four[..] {
+                    [a, b, c, d] => Some(Value::Vec4([a, b, c, d])),
+                    _ => None,
+                }
+            }
+            Value::Word(_) => Some(default.clone()),
+        };
+        named.push((name.clone(), value.unwrap_or_else(|| default.clone())));
+    }
+    named
+}
+
+/// Everything a pane's grid depends on (Ruling 19), each float as its bits,
+/// so a key is equal only to the same numbers: the grid is built again when
+/// any differs. `tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MeshKey {
+    effect: super::host::EffectId,
+    params: Params,
+    part: [u64; 4],
+    cols: u32,
+    rows: u32,
+    axis: Axis,
+    direction: i8,
+    seed: u64,
+    progress: u64,
+    from: [u64; 4],
+    to: [u64; 4],
+    /// `t.monitor` and `t.scale`, which a `mesh` may read too.
+    monitor: [u64; 4],
+    scale: u64,
+}
+
+impl MeshKey {
+    /// The key of `ask` for `effect` and its packed `params`, over a grid of
+    /// `cols` by `rows`.
+    pub(crate) fn new(
+        effect: super::host::EffectId,
+        params: Params,
+        ask: &Ask<'_>,
+        cols: u32,
+        rows: u32,
+    ) -> Self {
+        let rect = |r: Rect| [r.x.to_bits(), r.y.to_bits(), r.w.to_bits(), r.h.to_bits()];
+        #[expect(clippy::cast_possible_truncation, reason = "a direction, -1, 0 or 1")]
+        let direction = ask.direction.signum() as i8;
+        Self {
+            effect,
+            params,
+            part: [
+                ask.part.u0.to_bits(),
+                ask.part.v0.to_bits(),
+                ask.part.u1.to_bits(),
+                ask.part.v1.to_bits(),
+            ],
+            cols,
+            rows,
+            axis: ask.axis,
+            direction,
+            seed: ask.seed.to_bits(),
+            progress: ask.progress.to_bits(),
+            from: rect(ask.from),
+            to: rect(ask.to.unwrap_or(ask.from)),
+            monitor: rect(ask.monitor),
+            scale: ask.scale.to_bits(),
+        }
+    }
+
+    /// A key at `progress` toward `to`, everything else fixed.
+    #[cfg(test)]
+    pub(crate) fn for_test(progress: f64, to: Rect) -> Self {
+        let ask = Ask {
+            progress,
+            clamped: progress,
+            to: Some(to),
+            ..tests::ask()
+        };
+        Self::new(
+            super::host::EffectId::for_test(1),
+            Params::default(),
+            &ask,
+            1,
+            1,
+        )
+    }
+}
+
+/// A pane's last grids and their keys, one per warp piece (the pane and its
+/// popups), and the version a `sol.present` geometry began with, pinned
+/// while `effects.present.on_reload = "keep"` holds it.
+/// `tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`.
+#[derive(Debug, Default)]
+pub(crate) struct Meshes {
+    last: Vec<(MeshKey, crate::warp::Grid)>,
+    /// `state::tests::real_client::a_reload_mid_present_follows_on_reload`.
+    pub(crate) pinned: Option<std::rc::Rc<super::host::Loaded>>,
+    /// Whether a refusal has been logged since the last grid built, so a
+    /// pane's refused mesh is said once and not every pass.
+    pub(crate) said: bool,
+}
+
+impl Meshes {
+    /// The grid for `key`: the one built for it last, or `build`'s, kept,
+    /// the oldest of the pane's pieces' grids given up for it.
+    /// `tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`.
+    pub(crate) fn get_or_build(
+        &mut self,
+        key: MeshKey,
+        build: impl FnOnce() -> Result<crate::warp::Grid, Refusal>,
+    ) -> Result<&crate::warp::Grid, Refusal> {
+        let at = match self.last.iter().position(|(held, _)| *held == key) {
+            Some(at) => at,
+            None => {
+                let grid = build()?;
+                // One grid per piece a warped pane draws, its own and its
+                // popups' (`render::WARP_ORDER`): kept most recent first.
+                self.last.truncate(crate::render::WARP_ORDER.len() - 1);
+                self.last.insert(0, (key, grid));
+                0
+            }
+        };
+        self.last
+            .get(at)
+            .map(|(_, grid)| grid)
+            .ok_or(Refusal::Count { wanted: 0, got: 0 })
+    }
+}
+
 /// Why a `mesh` call's grid is not drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Refusal {
@@ -76,10 +313,6 @@ pub(crate) struct Ask<'a> {
 /// One `mesh` call once a pass, under the per-frame budget, checked.
 /// `tests::a_mesh_that_writes_a_nan_or_too_few_points_or_too_far_is_refused`,
 /// `tests::a_mesh_that_runs_forever_is_stopped_by_its_budget`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 28's grids call it once a pass")
-)]
 pub(crate) fn mesh(
     sandbox: &Sandbox,
     ask: &Ask<'_>,
@@ -337,10 +570,6 @@ pub(crate) fn turned(grid: GridSpec, axis: Axis) -> (u32, u32) {
 /// over the window's half-size; vertical on a tie; `down` when the target's
 /// centre is inside, the window's edge included.
 /// `tests::auto_picks_the_side_the_target_lies_on`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 28's sol.present resolves auto through it")
-)]
 pub(crate) fn auto_axis(from: Rect, to: Rect) -> Axis {
     let (cx, cy) = (from.x + from.w / 2.0, from.y + from.h / 2.0);
     let (tx, ty) = (to.x + to.w / 2.0, to.y + to.h / 2.0);
@@ -1135,6 +1364,158 @@ pub(crate) mod tests {
             at(-105.0, -5.0),
             Axis::Up,
             "past the corner on the diagonal, above"
+        );
+    }
+
+    /// The shipped genie's grid from `rect` toward `to` at `progress`, with
+    /// `spread` as the Rust genie widens its `f32`: what
+    /// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it` projects.
+    pub(crate) fn genie_grid(
+        rect: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+        to: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
+        progress: f32,
+        spread: f32,
+    ) -> crate::warp::Grid {
+        let genie = shipped_genie();
+        let (cols, rows) = super::turned(
+            solium_effects::spec::GridSpec::Turning {
+                along: 48,
+                across: 8,
+            },
+            Axis::Down,
+        );
+        let params = [(
+            "spread".to_owned(),
+            solium_effects::spec::Value::Number(f64::from(spread)),
+        )];
+        let ask = Ask {
+            progress: f64::from(progress),
+            clamped: f64::from(progress),
+            direction: -1.0,
+            axis: Axis::Down,
+            from: crate::present::for_effects(rect),
+            to: Some(crate::present::for_effects(to)),
+            part: UnitRect::WHOLE,
+            seed: 0.0,
+            monitor: Rect::new(0.0, 0.0, 3840.0, 1080.0),
+            scale: 1.0,
+            params: &params,
+        };
+        crate::warp::Grid {
+            cols,
+            rows,
+            part: UnitRect::WHOLE,
+            points: mesh(&genie, &ask, cols, rows).expect("a grid"),
+        }
+    }
+
+    /// **A mesh is not rebuilt when neither progress nor an anchor changed**,
+    /// and is when either does; a second piece's grid (a pane's popups) is
+    /// kept beside the first, so the two do not rebuild each other every
+    /// pass.
+    #[test]
+    fn a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed() {
+        let mut meshes = super::Meshes::default();
+        let mut built = 0;
+        let key = super::MeshKey::for_test(0.5, Rect::new(0.0, 0.0, 10.0, 10.0));
+        let grid = || crate::warp::Grid {
+            cols: 1,
+            rows: 1,
+            part: UnitRect::WHOLE,
+            points: vec![0.0; 8],
+        };
+        for _ in 0..2 {
+            let _ = meshes.get_or_build(key, || {
+                built += 1;
+                Ok(grid())
+            });
+        }
+        assert_eq!(built, 1);
+        let _ = meshes.get_or_build(
+            super::MeshKey::for_test(0.6, Rect::new(0.0, 0.0, 10.0, 10.0)),
+            || {
+                built += 1;
+                Ok(grid())
+            },
+        );
+        let _ = meshes.get_or_build(
+            super::MeshKey::for_test(0.6, Rect::new(1.0, 0.0, 10.0, 10.0)),
+            || {
+                built += 1;
+                Ok(grid())
+            },
+        );
+        assert_eq!(built, 3);
+        // Two pieces in turn, each pass: built once each.
+        let over = super::MeshKey::for_test(0.6, Rect::new(2.0, 0.0, 10.0, 10.0));
+        let pane = super::MeshKey::for_test(0.6, Rect::new(1.0, 0.0, 10.0, 10.0));
+        for _ in 0..3 {
+            for key in [pane, over] {
+                let _ = meshes.get_or_build(key, || {
+                    built += 1;
+                    Ok(grid())
+                });
+            }
+        }
+        assert_eq!(built, 4, "the pane and its popups rebuilt each other");
+        // A refusal keeps nothing, and is asked again.
+        let refused = super::MeshKey::for_test(0.7, Rect::new(1.0, 0.0, 10.0, 10.0));
+        for _ in 0..2 {
+            assert_eq!(
+                meshes.get_or_build(refused, || {
+                    built += 1;
+                    Err(Refusal::NotFinite)
+                }),
+                Err(Refusal::NotFinite)
+            );
+        }
+        assert_eq!(built, 6);
+    }
+
+    /// **Params pack up to their limit and lerp only like with like**: a
+    /// boolean is 0 or 1 and a `vec4` four numbers; past the limit, or a
+    /// word, is refused naming why; two sets of as many lerp and of another
+    /// count take the destination's; named again by the defaults' kinds.
+    #[test]
+    fn params_pack_up_to_their_limit_and_lerp_only_like_with_like() {
+        use solium_effects::spec::Value;
+        let bound = [
+            ("a".to_owned(), Value::Number(1.5)),
+            ("b".to_owned(), Value::Bool(true)),
+            ("c".to_owned(), Value::Vec4([0.0, 0.25, 0.5, 1.0])),
+            ("d".to_owned(), Value::Int(3)),
+        ];
+        let params = super::packed(&bound, 8).expect("seven numbers under eight");
+        assert_eq!(params.as_slice(), [1.5, 1.0, 0.0, 0.25, 0.5, 1.0, 3.0]);
+        assert_eq!(super::unpacked(&bound, &params), bound);
+        let refused = super::packed(&bound, 6).expect_err("seven over six");
+        assert!(
+            refused.contains("7 numbers") && refused.contains("effects.limits.params"),
+            "{refused}"
+        );
+        let word = [("mode".to_owned(), Value::Word("fold".to_owned()))];
+        assert!(
+            super::packed(&word, 8).is_err_and(|why| why.contains("`mode` is a word")),
+            "a word was packed"
+        );
+        let other = super::Params::pack(&[3.5, 0.0, 1.0, 1.25, 1.5, 2.0, 5.0], 8).expect("packs");
+        let half = params.lerp(other, 0.5);
+        assert_eq!(half.as_slice(), [2.5, 0.5, 0.5, 0.75, 1.0, 1.5, 4.0]);
+        assert_eq!(
+            super::unpacked(&bound, &half)[1],
+            ("b".to_owned(), Value::Bool(true)),
+            "a boolean half way is true"
+        );
+        let fewer = super::Params::pack(&[9.0], 8).expect("packs");
+        assert_eq!(
+            params.lerp(fewer, 0.25),
+            fewer,
+            "another count blends nothing"
+        );
+        assert_eq!(
+            super::Params::pack(&[0.0; 65], 64),
+            Err(65),
+            "never past PARAMS_MAX"
         );
     }
 

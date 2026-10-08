@@ -530,6 +530,12 @@ pub(crate) struct Pane {
     /// pane is not captured on
     /// (`keyed::tests::a_pane_that_stops_warping_gives_the_texture_back`).
     captures: crate::keyed::Captures,
+    /// The grids a `sol.present` geometry last drew this pane through, by
+    /// key, built once a pass in `render::prepare` and kept while nothing
+    /// they depend on moves, and the version a present pinned. Left with the
+    /// pane, as its captures are.
+    /// `effect::geometry::tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`.
+    meshes: crate::effect::geometry::Meshes,
     /// The size limits of this pane's client that the layouts were last told
     /// about (#115). Not what the snapshot reads -- that asks the client, so it
     /// is never behind -- but what `Solium::notice_limits` compares with, so
@@ -612,6 +618,7 @@ impl Pane {
             drawn: crate::present::Slot::default(),
             managed: true,
             captures: crate::keyed::Captures::default(),
+            meshes: crate::effect::geometry::Meshes::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
             shrinking: None,
@@ -644,6 +651,7 @@ impl Pane {
             drawn: crate::present::Slot::default(),
             managed: true,
             captures: crate::keyed::Captures::default(),
+            meshes: crate::effect::geometry::Meshes::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
             shrinking: None,
@@ -899,6 +907,16 @@ impl Pane {
     /// to them. There is nothing to read.
     pub(crate) const fn captures_mut(&mut self) -> &mut crate::keyed::Captures {
         &mut self.captures
+    }
+
+    /// This pane's grids, and the version a present pinned. See the field.
+    pub(crate) fn meshes(&self) -> &crate::effect::geometry::Meshes {
+        &self.meshes
+    }
+
+    /// The same, to build a grid into or pin a version on.
+    pub(crate) fn meshes_mut(&mut self) -> &mut crate::effect::geometry::Meshes {
+        &mut self.meshes
     }
 
     /// Say what is drawn around this pane's client.

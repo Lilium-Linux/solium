@@ -278,6 +278,12 @@ SOLIUM_RECAPTURE=always
     as before captures were kept until what they show changes. For measuring
     the difference on one build.
 
+SOLIUM_GEOMETRY_ORACLE=<effect>
+    Debug builds only: the name of a geometry effect, `genie`, whose grid
+    is built by Solium's Rust genie instead of its folder's `mesh`, for
+    comparing the two on one build in `dev/effects-check.sh genie`. A
+    release build does not read it.
+
 SOLIUM_PACING_CLOCKS=off
     With `SOLIUM_PACING`, do not start the thread that samples the GPU's
     clocks (NVML, or i915's sysfs). For checking that sampling them does not

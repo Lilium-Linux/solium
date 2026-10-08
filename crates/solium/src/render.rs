@@ -262,18 +262,31 @@ impl Drawn {
 /// (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
 #[derive(Default)]
 pub(crate) struct Prepared {
-    warps: Vec<(Window, GlesTexture, crate::warp::Program, Id, CommitCounter)>,
-    overs: Vec<(
-        Window,
-        GlesTexture,
-        crate::warp::Program,
-        Id,
-        CommitCounter,
-        crate::warp::UnitRect,
-    )>,
+    warps: Vec<Warped>,
+    overs: Vec<Warped>,
+    /// Windows a refused `sol.present` geometry hides this pass
+    /// (`effects.present.failed = "hide"`): nothing of them is drawn.
+    /// `tests::a_refused_present_follows_its_failed_policy`.
+    hidden: Vec<Window>,
     /// Every rule resolved once this pass ([`build_slots`]), so every output
     /// and every screencopy places from the same answer.
     pub(crate) slots: crate::effect::plan::Slots,
+}
+
+/// One warp `prepare` made: the capture drawn through it, the program, the id
+/// and commit its element carries, the part of the pane's unit square the
+/// capture covers, and the grid a geometry effect placed over that part this
+/// pass (`None`: the part where it is, as a tilt draws it).
+/// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+#[derive(Clone, Debug)]
+pub(crate) struct Warped {
+    window: Window,
+    texture: GlesTexture,
+    program: crate::warp::Program,
+    id: Id,
+    commit: CommitCounter,
+    part: crate::warp::UnitRect,
+    grid: Option<crate::warp::Grid>,
 }
 
 /// What a warp's mesh is a function of, in global space, so one comparison
@@ -340,6 +353,252 @@ pub(crate) enum Route {
     /// The flat path, its client rounded where it is if its style says so
     /// (`tests::a_style_with_a_radius_is_drawn_inline`).
     Flat,
+    /// Nothing of it: a refused `sol.present` geometry under
+    /// `failed = "hide"`, no capture job, no warp, no element
+    /// (`tests::a_refused_present_follows_its_failed_policy`).
+    Hidden,
+}
+
+/// Where a pane presented through a geometry goes: the warp, unless its mesh
+/// was refused (or its folder is missing), when it follows its `failed`,
+/// `effects.present.failed` or the deform's own: `Flat`, the window
+/// undeformed, or `Hidden`. `tests::a_refused_present_follows_its_failed_policy`.
+pub(crate) fn present_route(geometry: present::Geometry, refused: bool) -> Route {
+    use crate::effect::settings::PresentFailed;
+    match (refused, geometry.failed) {
+        (false, _) => Route::Warp,
+        (true, PresentFailed::Flat) => Route::Flat,
+        (true, PresentFailed::Hide) => Route::Hidden,
+    }
+}
+
+/// The version a pane's present geometry draws from: the one its id names
+/// while it runs, else, under `on_reload = "keep"`, the one the present
+/// pinned; `None` once its folder was reloaded under `"flat"`, which draws
+/// the window flat for the rest of the transform, as an anchor that
+/// resolves to nothing does.
+/// `state::tests::real_client::a_reload_mid_present_follows_on_reload`.
+#[cfg(test)]
+pub(crate) fn present_source(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+) -> Option<std::rc::Rc<crate::effect::host::Loaded>> {
+    let outer = state.pane_outer_of(pane)?;
+    let geometry = state.drawn(pane, outer).deform?.effect;
+    source_of(state, pane, geometry)
+}
+
+/// [`present_source`], for a geometry already in hand.
+fn source_of(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+    geometry: present::Geometry,
+) -> Option<std::rc::Rc<crate::effect::host::Loaded>> {
+    use crate::effect::settings::PresentReload;
+    state.effects.by_id(geometry.effect).or_else(|| {
+        (geometry.on_reload == PresentReload::Keep)
+            .then(|| state.panes.get(pane)?.meshes().pinned.clone())
+            .flatten()
+    })
+}
+
+/// What `prepare` does with a pane this pass, before anything is captured.
+/// `state::tests::real_client::a_present_deform_is_a_file`.
+#[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one a pane a pass, matched at once and never stored"
+)]
+pub(crate) enum Planned {
+    /// Nothing of it: a refused present geometry under `failed = "hide"`.
+    Hidden,
+    /// The flat path: not warped, or a present geometry that is refused, or
+    /// whose folder was reloaded, on a frame with no matrix.
+    Flat,
+    /// Warped: its frame, what its deform is aimed at, and the grid a
+    /// present geometry placed (`None` for a tilt alone, or a refused
+    /// geometry on a tilted frame, drawn undeformed).
+    Warp {
+        frame: present::Frame,
+        aimed: Option<present::Aimed>,
+        grid: Option<crate::warp::Grid>,
+    },
+}
+
+/// [`warp_of`], and a present geometry's grid built once a pass: refused,
+/// the window follows its `failed` (undeformed, as an unresolved anchor is,
+/// still tilted if it is; or nothing of it), and with its folder reloaded
+/// under `on_reload = "flat"` it is undeformed. Asked with no renderer.
+/// `tests::a_refused_present_follows_its_failed_policy`,
+/// `state::tests::real_client::a_present_deform_is_a_file`,
+/// `state::tests::real_client::effects_present_is_the_default_a_deform_overrides`.
+pub(crate) fn plan_warp(
+    state: &mut Solium,
+    pane: crate::pane::PaneId,
+    outer: Rectangle<i32, Logical>,
+    scale: f64,
+) -> Planned {
+    let Some((frame, aimed)) = warp_of(state, pane, outer) else {
+        return Planned::Flat;
+    };
+    let Some(aimed) = aimed else {
+        return Planned::Warp {
+            frame,
+            aimed: None,
+            grid: None,
+        };
+    };
+    let gridded = present_grid(
+        state,
+        pane,
+        &frame,
+        aimed,
+        crate::warp::UnitRect::WHOLE,
+        scale,
+    );
+    let route = match gridded {
+        Gridded::Grid(grid) => {
+            return Planned::Warp {
+                frame,
+                aimed: Some(aimed),
+                grid: Some(grid),
+            };
+        }
+        Gridded::Refused => present_route(aimed.effect, true),
+        Gridded::Undeformed => Route::Flat,
+    };
+    match route {
+        Route::Hidden => Planned::Hidden,
+        _ if frame.matrix.is_identity() => Planned::Flat,
+        _ => Planned::Warp {
+            frame,
+            aimed: None,
+            grid: None,
+        },
+    }
+}
+
+/// What a present geometry's grid came to this pass.
+#[derive(Debug)]
+enum Gridded {
+    /// Its grid, over the part asked for.
+    Grid(crate::warp::Grid),
+    /// No source: its folder was reloaded mid-flight under `on_reload =
+    /// "flat"`. The window undeformed.
+    Undeformed,
+    /// Refused, or its folder missing: what its `failed` says.
+    Refused,
+}
+
+/// A present geometry's grid over `part`, built once a pass (not once per
+/// output) in global logical pixels through the effect's `mesh`, and kept on
+/// the pane while nothing it depends on moves
+/// (`effect::geometry::tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`).
+/// A refusal is logged once and counted in the trace. In a debug build,
+/// when `SOLIUM_GEOMETRY_ORACLE` names the effect, the grid is the Rust
+/// genie's instead, the oracle `dev/effects-check.sh genie` compares the
+/// folder with; a release build has neither the branch nor the oracle.
+fn present_grid(
+    state: &mut Solium,
+    pane: crate::pane::PaneId,
+    frame: &present::Frame,
+    aimed: present::Aimed,
+    part: crate::warp::UnitRect,
+    scale: f64,
+) -> Gridded {
+    use crate::effect::geometry::{Ask, MeshKey, mesh, turned, unpacked};
+    let geometry = aimed.effect;
+    if geometry.effect == crate::effect::host::EffectId::NONE {
+        return Gridded::Refused;
+    }
+    let Some(loaded) = source_of(state, pane, geometry) else {
+        return Gridded::Undeformed;
+    };
+    let (from, to) = (
+        present::for_effects(frame.rect),
+        present::for_effects(aimed.to),
+    );
+    #[cfg(debug_assertions)]
+    if crate::dev::geometry_oracle().as_deref() == Some(loaded.name()) {
+        let spread = unpacked(loaded.defaults(), &geometry.params)
+            .into_iter()
+            .find_map(|(name, value)| match (name.as_str(), value) {
+                ("spread", solium_effects::spec::Value::Number(spread)) => Some(spread),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        #[expect(clippy::cast_possible_truncation, reason = "the Rust genie's own f32s")]
+        let deform = solium_effects::Deform::Genie {
+            progress: geometry.progress as f32,
+            spread: spread as f32,
+            axis: geometry.axis,
+        };
+        return Gridded::Grid(crate::warp::oracle_grid(frame.rect, aimed.to, deform, part));
+    }
+    let monitor = state
+        .pane_outer_of(pane)
+        .and_then(|slot| state.output_of(slot))
+        .and_then(|output| state.space.output_geometry(&output))
+        .map_or(from, |area| present::for_effects(area.to_f64()));
+    let (cols, rows) = turned(
+        loaded
+            .spec()
+            .grid
+            .unwrap_or(solium_effects::spec::GridSpec::Fixed { cols: 1, rows: 1 }),
+        geometry.axis,
+    );
+    // A `sol.present` geometry measures how far the window is pulled into
+    // its target: a leaving's progress, so `t.direction` is -1.
+    let ask = Ask {
+        progress: geometry.progress,
+        clamped: geometry.progress.clamp(0.0, 1.0),
+        direction: -1.0,
+        axis: geometry.axis,
+        from,
+        to: Some(to),
+        part,
+        seed: geometry.seed,
+        monitor,
+        scale,
+        params: &[],
+    };
+    let key = MeshKey::new(geometry.effect, geometry.params, &ask, cols, rows);
+    let Some(held) = state.panes.get_mut(pane) else {
+        return Gridded::Undeformed;
+    };
+    let meshes = held.meshes_mut();
+    let built = meshes
+        .get_or_build(key, || {
+            let params = unpacked(loaded.defaults(), &geometry.params);
+            let ask = Ask {
+                params: &params,
+                ..ask
+            };
+            mesh(loaded.sandbox(), &ask, cols, rows).map(|points| crate::warp::Grid {
+                cols,
+                rows,
+                part,
+                points,
+            })
+        })
+        .cloned();
+    match built {
+        Ok(grid) => {
+            meshes.said = false;
+            Gridded::Grid(grid)
+        }
+        Err(refusal) => {
+            crate::pacing::mesh_refused();
+            if !std::mem::replace(&mut meshes.said, true) {
+                tracing::warn!(
+                    effect = loaded.name(),
+                    ?refusal,
+                    "a present's mesh was refused; the window is drawn by its `failed`"
+                );
+            }
+            Gridded::Refused
+        }
+    }
 }
 
 /// Warp a pane only when it is deformed **and** there is a program to warp it
@@ -391,41 +650,30 @@ pub(crate) fn wants_warp(state: &Solium, pane: crate::pane::PaneId) -> bool {
 }
 
 impl Prepared {
-    /// Lend the texture captured for `window`, the program to draw it
-    /// through, and the id and commit its warp carries, if there is one.
+    /// Lend the warp captured for `window`: the texture to draw through it,
+    /// the program, the id and commit it carries, and its grid.
     ///
     /// Lent rather than taken: with more than one monitor `elements` runs once
     /// per output, and a texture removed by the first one would leave a
     /// deformed window undrawn on every other screen. `GlesTexture` is a
     /// handle, so the clone is a refcount, and the program is GL names.
-    fn warp(
-        &self,
-        window: &Window,
-    ) -> Option<(GlesTexture, crate::warp::Program, Id, CommitCounter)> {
-        self.warps.iter().find(|(each, ..)| each == window).map(
-            |(_, texture, program, id, commit)| (texture.clone(), *program, id.clone(), *commit),
-        )
+    fn warp(&self, window: &Window) -> Option<&Warped> {
+        self.warps.iter().find(|each| each.window == *window)
     }
 
     /// Lend the capture of `window`'s popups, for the warp drawn in front of
     /// its own, with the part of the pane's unit square it covers. Lent for
     /// `warp`'s reason. `None` when it has no popups open.
     /// `dev/present-check.sh`'s `menu` case draws it.
-    fn over(
-        &self,
-        window: &Window,
-    ) -> Option<(
-        GlesTexture,
-        crate::warp::Program,
-        Id,
-        CommitCounter,
-        crate::warp::UnitRect,
-    )> {
-        self.overs.iter().find(|(each, ..)| each == window).map(
-            |(_, texture, program, id, commit, part)| {
-                (texture.clone(), *program, id.clone(), *commit, *part)
-            },
-        )
+    fn over(&self, window: &Window) -> Option<&Warped> {
+        self.overs.iter().find(|each| each.window == *window)
+    }
+
+    /// Whether nothing of `window` is drawn this pass: a refused present
+    /// geometry under `failed = "hide"`.
+    /// `tests::a_refused_present_follows_its_failed_policy`.
+    fn hidden(&self, window: &Window) -> bool {
+        self.hidden.contains(window)
     }
 }
 
@@ -503,12 +751,14 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         drawn: crate::effect::store::Drawn::default(),
         warps: Vec::new(),
         overs: Vec::new(),
+        hidden: Vec::new(),
         pass: 0,
     };
     let slots = effect_phases(&mut gpu);
     Prepared {
         warps: gpu.warps,
         overs: gpu.overs,
+        hidden: gpu.hidden,
         slots,
     }
 }
@@ -560,15 +810,9 @@ struct Gpu<'a> {
     /// Each self input this pass, kept or drawn: what the chains read
     /// (`effect::store::tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`).
     drawn: crate::effect::store::Drawn,
-    warps: Vec<(Window, GlesTexture, crate::warp::Program, Id, CommitCounter)>,
-    overs: Vec<(
-        Window,
-        GlesTexture,
-        crate::warp::Program,
-        Id,
-        CommitCounter,
-        crate::warp::UnitRect,
-    )>,
+    warps: Vec<Warped>,
+    overs: Vec<Warped>,
+    hidden: Vec<Window>,
     /// The store's pass, set by `resolve`.
     pass: u64,
 }
@@ -578,6 +822,7 @@ impl std::fmt::Debug for Gpu<'_> {
         f.debug_struct("Gpu")
             .field("warps", &self.warps.len())
             .field("overs", &self.overs.len())
+            .field("hidden", &self.hidden.len())
             .field("pass", &self.pass)
             .finish_non_exhaustive()
     }
@@ -790,7 +1035,16 @@ impl Phases for Gpu<'_> {
             // A deformed window with no warp program takes the flat path below
             // instead of being captured for a warp that cannot be drawn:
             // `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
-            let warp = warp_of(state, pane, outer);
+            let scale = state.scale_of(outer);
+            let (warp, grid) = match plan_warp(state, pane, outer, scale) {
+                Planned::Hidden => {
+                    self.hidden.push(window);
+                    release(state);
+                    continue;
+                }
+                Planned::Flat => (None, None),
+                Planned::Warp { frame, aimed, grid } => (Some((frame, aimed)), grid),
+            };
             let program = if warp.is_some() {
                 state.programs.warp(renderer)
             } else {
@@ -814,7 +1068,6 @@ impl Phases for Gpu<'_> {
                 continue;
             }
             if let (Route::Warp, Some(program), Some((frame, aimed))) = (routed, program, warp) {
-                let scale = state.scale_of(outer);
                 // What its mesh is drawn from, in global space: the warp's commit
                 // moves when this does, as well as when its capture is redrawn.
                 // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
@@ -825,10 +1078,22 @@ impl Phases for Gpu<'_> {
                 // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept until
                 // they commit:
                 // `state::tests::real_client::a_commit_on_a_popup_makes_the_popups_capture_stale`.
+                // Under a present geometry their part has a grid of its own,
+                // and a grid refused drops the popups' warp for the pass and
+                // keeps the pane's.
                 let over = if job.is_some() {
                     crate::offscreen::over_job(state, renderer, pane, &window, scale)
                 } else {
                     None
+                };
+                let over = match (over, aimed) {
+                    (Some((job, part)), Some(aimed)) => {
+                        match present_grid(state, pane, &frame, aimed, part, scale) {
+                            Gridded::Grid(grid) => Some((job, part, Some(grid))),
+                            _ => None,
+                        }
+                    }
+                    (over, _) => over.map(|(job, part)| (job, part, None)),
                 };
                 // Holding only what it captures this pass: popups that closed give
                 // their capture back while the pane goes on warping.
@@ -848,20 +1113,34 @@ impl Phases for Gpu<'_> {
                     if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
                         let commit =
                             warp_commit(state, pane, crate::keyed::Kind::Pane, shape, false);
-                        self.warps
-                            .push((window.clone(), texture, program, id, commit));
+                        self.warps.push(Warped {
+                            window: window.clone(),
+                            texture,
+                            program,
+                            id,
+                            commit,
+                            part: crate::warp::UnitRect::WHOLE,
+                            grid,
+                        });
                     } else {
-                        jobs.push((job, Then::Warp(window.clone(), program, pane, shape)));
+                        jobs.push((job, Then::Warp(window.clone(), program, pane, shape, grid)));
                     }
                 }
-                if let Some((job, part)) = over {
+                if let Some((job, part, grid)) = over {
                     if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
                         let commit =
                             warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
-                        self.overs
-                            .push((window, texture, program, id, commit, part));
+                        self.overs.push(Warped {
+                            window,
+                            texture,
+                            program,
+                            id,
+                            commit,
+                            part,
+                            grid,
+                        });
                     } else {
-                        jobs.push((job, Then::Over(window, program, pane, shape, part)));
+                        jobs.push((job, Then::Over(window, program, pane, shape, part, grid)));
                     }
                 }
                 continue;
@@ -874,14 +1153,29 @@ impl Phases for Gpu<'_> {
         // (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
         for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
             match then {
-                Then::Warp(window, program, pane, shape) => {
+                Then::Warp(window, program, pane, shape, grid) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
-                    self.warps.push((window, texture, program, id, commit));
+                    self.warps.push(Warped {
+                        window,
+                        texture,
+                        program,
+                        id,
+                        commit,
+                        part: crate::warp::UnitRect::WHOLE,
+                        grid,
+                    });
                 }
-                Then::Over(window, program, pane, shape, part) => {
+                Then::Over(window, program, pane, shape, part, grid) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
-                    self.overs
-                        .push((window, texture, program, id, commit, part));
+                    self.overs.push(Warped {
+                        window,
+                        texture,
+                        program,
+                        id,
+                        commit,
+                        part,
+                        grid,
+                    });
                 }
             }
         }
@@ -914,13 +1208,22 @@ fn shown(state: &Solium, pane: crate::pane::PaneId) -> bool {
 /// the part of the pane they cover as well.
 #[derive(Debug)]
 enum Then {
-    Warp(Window, crate::warp::Program, crate::pane::PaneId, Shape),
+    /// The pane's own warp, and its grid.
+    Warp(
+        Window,
+        crate::warp::Program,
+        crate::pane::PaneId,
+        Shape,
+        Option<crate::warp::Grid>,
+    ),
+    /// Its popups', over their part, and its grid.
     Over(
         Window,
         crate::warp::Program,
         crate::pane::PaneId,
         Shape,
         crate::warp::UnitRect,
+        Option<crate::warp::Grid>,
     ),
 }
 
@@ -1823,7 +2126,7 @@ pub(crate) fn capture_clip(
 pub(crate) fn wanted_capture(route: Route) -> Option<crate::keyed::Kind> {
     match route {
         Route::Warp => Some(crate::keyed::Kind::Pane),
-        Route::Flat => None,
+        Route::Flat | Route::Hidden => None,
     }
 }
 
@@ -3001,30 +3304,23 @@ pub(crate) fn stacked(
 }
 
 /// A warp's mesh on one screen, over `part` of the pane's unit square: the
-/// frame and its deform's target, both in global space, moved onto the screen
-/// together. `tests::a_genie_on_the_second_monitor_lands_on_its_target`,
+/// frame and the grid a geometry placed, both in global space, moved onto the
+/// screen together; with no grid, the part where the frame puts it.
+/// `tests::a_genie_on_the_second_monitor_lands_on_its_target`,
 /// `tests::a_genie_on_the_first_monitor_is_unchanged`.
 pub(crate) fn warp_mesh_on(
     screen: Rectangle<i32, Logical>,
     frame: &present::Frame,
-    aimed: Option<present::Aimed>,
+    grid: Option<&crate::warp::Grid>,
     part: crate::warp::UnitRect,
     scale: f64,
 ) -> Option<crate::warp::Mesh> {
     let shift = Point::<f64, Logical>::from((-f64::from(screen.loc.x), -f64::from(screen.loc.y)));
-    let onto = |rect: Rectangle<f64, Logical>| Rectangle::new(rect.loc + shift, rect.size);
-    let aimed = aimed.map(|aimed| present::Aimed {
-        to: onto(aimed.to),
-        ..aimed
-    });
-    crate::warp::mesh_part(
-        onto(frame.rect),
-        part,
-        frame.matrix,
-        aimed,
-        frame.pivot,
-        scale,
-    )
+    let rect = Rectangle::new(frame.rect.loc + shift, frame.rect.size);
+    match grid {
+        Some(grid) => crate::warp::mesh_grid(grid, shift, rect, frame.matrix, frame.pivot, scale),
+        None => crate::warp::mesh_part(rect, part, frame.matrix, frame.pivot, scale),
+    }
 }
 
 /// Draw panes, in the order given.
@@ -3204,6 +3500,11 @@ fn panes(
         let Some(window) = window else {
             continue;
         };
+        // A refused present geometry under `failed = "hide"`: nothing of it
+        // this pass (`tests::a_refused_present_follows_its_failed_policy`).
+        if prepared.hidden(&window) {
+            continue;
+        }
 
         // The application has painted and the scene is fading off it. Pushed
         // before the frame and before the client, so it is above both: what is
@@ -3231,17 +3532,25 @@ fn panes(
         // that resolves to nothing leaves `aimed` empty, and a window with no
         // matrix then takes the flat path below as if it had never asked for
         // an effect.
+        // Its grid is the one `prepare` built this pass, once for every
+        // output (`present_grid`).
         let aimed = state.aimed_at_for(pane, frame.deform);
         if (!frame.matrix.is_identity() || aimed.is_some())
-            && let Some((texture, program, id, commit)) = prepared.warp(&window)
+            && let Some(warped) = prepared.warp(&window)
             && let Some(pane_mesh) = warp_mesh_on(
                 screen,
                 &drawn_global,
-                aimed,
+                warped.grid.as_ref(),
                 crate::warp::UnitRect::WHOLE,
                 scale,
             )
         {
+            let (texture, program, id, commit) = (
+                warped.texture.clone(),
+                warped.program,
+                warped.id.clone(),
+                warped.commit,
+            );
             // The pane's own mesh first: it can fail (a vertex behind the
             // viewer), and then nothing of the warp is pushed and the pane
             // falls through to the flat path below, as before. A popups' mesh
@@ -3253,18 +3562,22 @@ fn panes(
             for piece in WARP_ORDER {
                 match piece {
                     WarpPiece::Over => {
-                        if let Some((over_texture, over_program, over_id, over_commit, part)) =
-                            prepared.over(&window)
-                            && let Some(mesh) =
-                                warp_mesh_on(screen, &drawn_global, aimed, part, scale)
+                        if let Some(over) = prepared.over(&window)
+                            && let Some(mesh) = warp_mesh_on(
+                                screen,
+                                &drawn_global,
+                                over.grid.as_ref(),
+                                over.part,
+                                scale,
+                            )
                         {
                             elements.push(Element::Warped(crate::warp::Warp::new(
-                                over_id,
-                                over_commit,
-                                over_texture,
+                                over.id.clone(),
+                                over.commit,
+                                over.texture.clone(),
                                 mesh,
                                 frame.opacity,
-                                over_program,
+                                over.program,
                             )));
                         }
                     }
@@ -5168,17 +5481,24 @@ pub(crate) mod tests {
         );
     }
 
+    /// The Rust genie's grid at progress 1 from `frame` toward `to`, global:
+    /// what these tests build their grid with since a geometry is a folder
+    /// (its Lua is held to this grid by
+    /// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it`).
     fn genie_to(
+        frame: &crate::present::Frame,
         to: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
-    ) -> crate::present::Aimed {
-        crate::present::Aimed {
-            effect: solium_effects::Deform::Genie {
+    ) -> crate::warp::Grid {
+        crate::warp::oracle_grid(
+            frame.rect,
+            to,
+            solium_effects::Deform::Genie {
                 progress: 1.0,
                 spread: 1.4,
                 axis: solium_effects::Axis::Down,
             },
-            to,
-        }
+            crate::warp::UnitRect::WHOLE,
+        )
     }
 
     /// **A genie on the second monitor lands on its target**: at progress 1 the
@@ -5190,11 +5510,14 @@ pub(crate) mod tests {
             (2100, 100).into(),
             (800, 600).into(),
         ));
-        let aimed = genie_to(crate::present::logical((2800.0, 1000.0), (120.0, 24.0)));
+        let grid = genie_to(
+            &frame,
+            crate::present::logical((2800.0, 1000.0), (120.0, 24.0)),
+        );
         let mesh = super::warp_mesh_on(
             screen,
             &frame,
-            Some(aimed),
+            Some(&grid),
             crate::warp::UnitRect::WHOLE,
             1.25,
         )
@@ -5220,21 +5543,54 @@ pub(crate) mod tests {
             (180, 100).into(),
             (800, 600).into(),
         ));
-        let aimed = genie_to(crate::present::logical((880.0, 1000.0), (120.0, 24.0)));
+        let grid = genie_to(
+            &frame,
+            crate::present::logical((880.0, 1000.0), (120.0, 24.0)),
+        );
         let on = super::warp_mesh_on(
             screen,
             &frame,
-            Some(aimed),
+            Some(&grid),
             crate::warp::UnitRect::WHOLE,
             1.25,
         )
         .expect("a mesh");
-        let direct = crate::warp::mesh(frame.rect, frame.matrix, Some(aimed), frame.pivot, 1.25)
-            .expect("a mesh");
+        let direct = crate::warp::mesh_grid(
+            &grid,
+            (0.0, 0.0).into(),
+            frame.rect,
+            frame.matrix,
+            frame.pivot,
+            1.25,
+        )
+        .expect("a mesh");
         let pairs = on.vertices().iter().zip(direct.vertices());
         assert!(
             pairs.clone().count() > 0 && pairs.into_iter().all(|(a, b)| a.x == b.x && a.y == b.y)
         );
+    }
+
+    /// **A refused present follows its `failed`** (`effects.present.failed`,
+    /// or the deform's own): `"flat"` draws the window undeformed, `"hide"`
+    /// draws nothing of it and wants no capture; a mesh that was not refused
+    /// is warped.
+    #[test]
+    fn a_refused_present_follows_its_failed_policy() {
+        use crate::effect::settings::PresentFailed;
+        let geometry = crate::present::Geometry::for_test;
+        assert_eq!(
+            super::present_route(geometry(PresentFailed::Flat), true),
+            super::Route::Flat
+        );
+        assert_eq!(
+            super::present_route(geometry(PresentFailed::Hide), true),
+            super::Route::Hidden
+        );
+        assert_eq!(
+            super::present_route(geometry(PresentFailed::Hide), false),
+            super::Route::Warp
+        );
+        assert_eq!(super::wanted_capture(super::Route::Hidden), None);
     }
 
     /// **#133: what a tiled client's surfaces become on their way to the

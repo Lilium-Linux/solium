@@ -922,10 +922,9 @@ fn a_deform_at_rest_is_aimed_at_nothing() {
         state.clock.now(),
     ));
     let genie = |progress| crate::present::Deform {
-        effect: solium_effects::Deform::Genie {
+        effect: crate::present::Geometry {
             progress,
-            spread: 1.4,
-            axis: solium_effects::Axis::Down,
+            ..crate::present::Geometry::for_test(crate::effect::settings::PresentFailed::Flat)
         },
         anchor: crate::present::Anchor::Rect(crate::present::logical((10.0, 10.0), (120.0, 24.0))),
     };
@@ -9687,11 +9686,9 @@ end)"#,
         let pane = state.panes.id_of(&window).expect("a pane for the window");
         let dock = state.surfaces.named("dock").expect("the dock is declared");
         let deform = crate::present::Deform {
-            effect: solium_effects::Deform::Genie {
-                progress: 0.5,
-                spread: 1.4,
-                axis: solium_effects::Axis::Down,
-            },
+            effect: crate::present::Geometry::for_test(
+                crate::effect::settings::PresentFailed::Flat,
+            ),
             anchor: crate::present::Anchor::Surface(dock),
         };
         let to = state
@@ -10019,6 +10016,340 @@ end)"#,
             "the rules were refused: {:?}",
             fixture.state.effects.problems()
         );
+    }
+
+    /// The fixture's effects looked for in the test folders
+    /// (`tests/fixtures/effects/`) and then the shipped ones.
+    fn fixture_effects(state: &mut Solium) {
+        let fixtures = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/effects"
+        ));
+        state.effects = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(fixtures),
+            crate::assets::effects(),
+        ));
+    }
+
+    /// A copy of the shipped `effects/genie/` in a scratch folder the
+    /// fixture's effects read first: its folder.
+    fn scratch_genie(fixture: &mut Fixture) -> std::path::PathBuf {
+        let place = crate::effect::host::tests::scratch(&format!("fx2-{}", fixture.label));
+        let genie = crate::assets::effects().join("genie");
+        let copy = place.join("genie");
+        std::fs::create_dir_all(&copy).expect("a scratch folder");
+        for entry in std::fs::read_dir(&genie).expect("the shipped genie") {
+            let entry = entry.expect("an entry");
+            std::fs::copy(entry.path(), copy.join(entry.file_name())).expect("copied");
+        }
+        fixture.state.effects = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(place.clone()),
+            crate::assets::effects(),
+        ));
+        fixture.scratch = Some(place);
+        copy
+    }
+
+    /// `sol.present(<pane>, ...)` through `Solium::apply`, at once, as after
+    /// `sol.animate({ duration = 0 })`: a deform, a rect, or both.
+    fn present_now(
+        fixture: &mut Fixture,
+        pane: crate::pane::PaneId,
+        deform: Option<&str>,
+        rect: Option<(f64, f64, f64, f64)>,
+    ) {
+        let command = crate::script::Command::Present {
+            id: pane.get(),
+            rect: rect.map(|(x, y, w, h)| crate::script::Rect { x, y, w, h }),
+            opacity: None,
+            matrix: None,
+            deform: deform.map(crate::script::deform_for_test),
+            z: 0.0,
+            pivot: (0.5, 0.5),
+            animation: crate::script::AnimationSpec {
+                duration: std::time::Duration::ZERO,
+                easing: crate::present::Curve::OutCubic,
+            },
+        };
+        fixture.state.apply(crate::script::Outcome {
+            commands: vec![command],
+            ..Default::default()
+        });
+    }
+
+    /// `sol.present(<pane>, { deform = <lua> })`, at once.
+    fn present_deform(fixture: &mut Fixture, pane: crate::pane::PaneId, lua: &str) {
+        present_now(fixture, pane, Some(lua), None);
+    }
+
+    /// The geometry a pane's present asked for.
+    fn geometry_of(
+        fixture: &Fixture,
+        pane: crate::pane::PaneId,
+    ) -> Option<crate::present::Geometry> {
+        fixture
+            .state
+            .panes
+            .get(pane)
+            .and_then(crate::present::target_of)
+            .and_then(|frame| frame.deform)
+            .map(|deform| deform.effect)
+    }
+
+    /// What `prepare` would do with a pane this pass.
+    fn planned(fixture: &mut Fixture, pane: crate::pane::PaneId) -> crate::render::Planned {
+        let outer = fixture.state.pane_outer_of(pane).expect("a pane on screen");
+        crate::render::plan_warp(&mut fixture.state, pane, outer, 1.0)
+    }
+
+    /// `{ x = .., y = .., w = 64, h = 32 }` well below a pane's middle, as
+    /// Lua.
+    fn below(fixture: &Fixture, pane: crate::pane::PaneId) -> String {
+        let outer = fixture.state.pane_outer_of(pane).expect("a pane on screen");
+        format!(
+            "{{ x = {}, y = {}, w = 64, h = 32 }}",
+            outer.loc.x + outer.size.w / 2 - 32,
+            outer.loc.y + outer.size.h + 200
+        )
+    }
+
+    /// **A `sol.present` deform names an effect folder**: `genie` with
+    /// `axis = "auto"` toward a rect below the window is the folder's id,
+    /// pulled down, and `prepare` warps it through the folder's grid, 8 by
+    /// 48; a folder nobody has is a problem, carries no effect, and the
+    /// window is drawn undeformed (`effects.present.failed`'s default).
+    #[test]
+    fn a_present_deform_is_a_file() {
+        fx2_fixture!(fixture, "present-file");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'genie', axis = 'auto', progress = 0.5, to = {to} }}"),
+        );
+        let geometry = geometry_of(&fixture, pane).expect("a geometry");
+        assert_eq!(geometry.axis, solium_effects::Axis::Down);
+        assert_eq!(Some(geometry.effect), fixture.state.effects.id("genie"));
+        match planned(&mut fixture, pane) {
+            crate::render::Planned::Warp {
+                grid: Some(grid), ..
+            } => assert_eq!((grid.cols, grid.rows), (8, 48)),
+            other => panic!("not warped through the folder's grid: {other:?}"),
+        }
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'nothing-here', progress = 0.5, to = {to} }}"),
+        );
+        assert_eq!(
+            geometry_of(&fixture, pane).map(|geometry| geometry.effect),
+            Some(crate::effect::host::EffectId::NONE)
+        );
+        assert!(
+            fixture
+                .state
+                .effects
+                .problems()
+                .iter()
+                .any(|problem| problem.effect == "nothing-here"),
+            "{:?}",
+            fixture.state.effects.problems()
+        );
+        assert!(
+            matches!(planned(&mut fixture, pane), crate::render::Planned::Flat),
+            "an unknown folder was not drawn undeformed"
+        );
+    }
+
+    /// **`auto` is kept for the whole flight**: aimed at a window drawn to
+    /// its right, the genie is pulled right, and stays so once that window
+    /// is drawn below it, while the anchor itself follows it.
+    #[test]
+    fn auto_is_kept_for_the_whole_flight() {
+        fx2_fixture!(fixture, "auto-kept");
+        let (pane, target) = side_by_side_windows(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let outer = fixture.state.pane_outer_of(pane).expect("on screen");
+        let (x, y, w, h) = (
+            f64::from(outer.loc.x),
+            f64::from(outer.loc.y),
+            f64::from(outer.size.w),
+            f64::from(outer.size.h),
+        );
+        present_now(
+            &mut fixture,
+            target,
+            None,
+            Some((x + w + 400.0, y + h / 2.0, 100.0, 50.0)),
+        );
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!(
+                "{{ effect = 'genie', axis = 'auto', progress = 0.5, to = {{ window = {} }} }}",
+                target.get()
+            ),
+        );
+        assert_eq!(
+            geometry_of(&fixture, pane).map(|geometry| geometry.axis),
+            Some(solium_effects::Axis::Right)
+        );
+        present_now(
+            &mut fixture,
+            target,
+            None,
+            Some((x + w / 2.0 - 50.0, y + h + 100.0, 100.0, 50.0)),
+        );
+        let deform = fixture
+            .state
+            .panes
+            .get(pane)
+            .and_then(crate::present::target_of)
+            .and_then(|frame| frame.deform);
+        let aimed = fixture
+            .state
+            .aimed_at_for(pane, deform)
+            .expect("the window is aimed at");
+        assert!(
+            aimed.to.loc.y > y + h,
+            "the anchor did not follow its window: {:?}",
+            aimed.to
+        );
+        assert_eq!(
+            aimed.effect.axis,
+            solium_effects::Axis::Right,
+            "auto was picked again"
+        );
+    }
+
+    /// **`effects.limits.params` is how many numbers a present may pack**: a
+    /// geometry with twelve params is refused at the default 8, with a
+    /// problem naming the key, and presents under `limits = { params = 16 }`
+    /// with all twelve, none cut.
+    #[test]
+    fn a_geometry_effect_with_twelve_params_presents_under_a_raised_limit() {
+        fx2_fixture!(fixture, "twelve-params");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let deform = format!(
+            "{{ effect = 'twelve', progress = 0.5, to = {} }}",
+            below(&fixture, pane)
+        );
+        present_deform(&mut fixture, pane, &deform);
+        assert!(
+            geometry_of(&fixture, pane).is_none(),
+            "twelve params packed under a limit of 8"
+        );
+        assert!(
+            fixture
+                .state
+                .effects
+                .problems()
+                .iter()
+                .any(|problem| problem.message.contains("effects.limits.params")),
+            "{:?}",
+            fixture.state.effects.problems()
+        );
+        apply_effects_lua(&mut fixture.state, "{ limits = { params = 16 } }");
+        present_deform(&mut fixture, pane, &deform);
+        assert_eq!(
+            geometry_of(&fixture, pane).map(|geometry| geometry.params.as_slice().len()),
+            Some(12),
+            "the params were cut"
+        );
+        assert!(
+            fixture
+                .state
+                .effects
+                .problems()
+                .iter()
+                .all(|problem| !problem.message.contains("effects.limits.params")),
+            "the present that packed did not mend the problem"
+        );
+    }
+
+    /// **`effects.present` reaches a present, and a deform overrides it**:
+    /// with `present = { failed = "hide" }` a deform that says nothing
+    /// carries `Hide`, and its refused mesh draws nothing of the window; one
+    /// that says `failed = "flat"` carries `Flat`, and is drawn undeformed.
+    #[test]
+    fn effects_present_is_the_default_a_deform_overrides() {
+        use crate::effect::settings::PresentFailed;
+        fx2_fixture!(fixture, "present-policy");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let to = below(&fixture, pane);
+        apply_effects_lua(&mut fixture.state, "{ present = { failed = 'hide' } }");
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'fail-mesh', progress = 0.5, to = {to} }}"),
+        );
+        assert_eq!(
+            geometry_of(&fixture, pane).map(|geometry| geometry.failed),
+            Some(PresentFailed::Hide)
+        );
+        assert!(
+            matches!(planned(&mut fixture, pane), crate::render::Planned::Hidden),
+            "a refused mesh under hide was drawn"
+        );
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'fail-mesh', progress = 0.5, failed = 'flat', to = {to} }}"),
+        );
+        assert_eq!(
+            geometry_of(&fixture, pane).map(|geometry| geometry.failed),
+            Some(PresentFailed::Flat)
+        );
+        assert!(
+            matches!(planned(&mut fixture, pane), crate::render::Planned::Flat),
+            "a refused mesh under flat was not drawn undeformed"
+        );
+    }
+
+    /// **A reload mid-present follows `on_reload`**: with the default
+    /// `"flat"` a present whose folder changed has no source for its grid,
+    /// and is drawn flat; with `"keep"` its grid comes from the version it
+    /// began with.
+    #[test]
+    fn a_reload_mid_present_follows_on_reload() {
+        for (on_reload, kept) in [("flat", false), ("keep", true)] {
+            fx2_fixture!(fixture, "present-reload");
+            let (pane, _) = one_window(&mut fixture);
+            let folder = scratch_genie(&mut fixture);
+            let to = below(&fixture, pane);
+            present_deform(
+                &mut fixture,
+                pane,
+                &format!(
+                    "{{ effect = 'genie', progress = 0.5, on_reload = '{on_reload}', to = {to} }}"
+                ),
+            );
+            assert!(
+                crate::render::present_source(&fixture.state, pane).is_some(),
+                "the premise: the present draws from its folder"
+            );
+            let file = folder.join("effect.lua");
+            let edited = std::fs::read_to_string(&file).expect("read") + "-- edited\n";
+            std::fs::write(&file, edited).expect("edited");
+            fixture.state.effects.reload();
+            assert_eq!(
+                crate::render::present_source(&fixture.state, pane).is_some(),
+                kept,
+                "{on_reload}"
+            );
+            assert_eq!(
+                matches!(
+                    planned(&mut fixture, pane),
+                    crate::render::Planned::Warp { grid: Some(_), .. }
+                ),
+                kept,
+                "{on_reload}"
+            );
+        }
     }
 
     /// **A rule on `focused` follows the keyboard**: two windows, the rule's

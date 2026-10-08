@@ -384,6 +384,33 @@ pub(crate) fn recapture_always() -> bool {
     })
 }
 
+/// The geometry effect whose grid the Rust genie builds instead of its
+/// file, `SOLIUM_GEOMETRY_ORACLE`, read once: for comparing the two on one
+/// build in `dev/effects-check.sh genie` only. A debug build's knob alone,
+/// so no release or packaged binary can draw an effect from Rust (Rulings
+/// 19, 23). `tests::the_geometry_oracle_is_named_by_its_effect`.
+#[cfg(debug_assertions)]
+pub(crate) fn geometry_oracle() -> Option<String> {
+    thread_local! {
+        static DECIDED: std::cell::OnceCell<Option<String>> = const { std::cell::OnceCell::new() };
+    }
+    DECIDED.with(|decided| {
+        decided
+            .get_or_init(|| oracle_named(std::env::var("SOLIUM_GEOMETRY_ORACLE").ok().as_deref()))
+            .clone()
+    })
+}
+
+/// `SOLIUM_GEOMETRY_ORACLE`'s value as an effect's name: trimmed, and none
+/// when empty. `tests::the_geometry_oracle_is_named_by_its_effect`.
+#[cfg(debug_assertions)]
+fn oracle_named(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
 /// Whether to show the Developer Tweaks panel.
 ///
 /// `--debug-mode` anywhere in the arguments, so it composes with the backend
@@ -398,6 +425,19 @@ pub(crate) fn debug_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// **The geometry oracle is named by its effect**, trimmed; unset or
+    /// empty names none.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn the_geometry_oracle_is_named_by_its_effect() {
+        assert_eq!(
+            super::oracle_named(Some(" genie ")),
+            Some("genie".to_owned())
+        );
+        assert_eq!(super::oracle_named(Some("")), None);
+        assert_eq!(super::oracle_named(None), None);
+    }
+
     use super::FenceWait;
 
     /// **The wait stays on unless it is switched off**, by a word that says

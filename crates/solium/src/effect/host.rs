@@ -332,14 +332,30 @@ pub(crate) trait Compiler {
 /// An effect version: which folder, and which load of it. A reload that
 /// changes it gives a new generation, and an old id resolves to nothing.
 /// `tests::a_new_version_is_a_new_generation`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 28's geometry names its effect by id")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct EffectId {
     index: u32,
     generation: u32,
+}
+
+impl EffectId {
+    /// The id of no effect: a `sol.present` geometry whose folder is
+    /// missing carries it, and [`Host::by_id`] answers nothing for it, since
+    /// a slot's index starts at 1, so the geometry follows its `failed`
+    /// (`state::tests::real_client::a_present_deform_is_a_file`).
+    pub(crate) const NONE: Self = Self {
+        index: 0,
+        generation: 0,
+    };
+
+    /// An id a test makes up, naming no slot of any host.
+    #[cfg(test)]
+    pub(crate) const fn for_test(index: u32) -> Self {
+        Self {
+            index,
+            generation: u32::MAX,
+        }
+    }
 }
 
 /// A program asked for and not compiled yet, and whose log it would be.
@@ -568,10 +584,6 @@ impl<P: Clone> Host<P> {
     /// `origin` wants `names` as well as what it wanted: `sol.present`'s, so
     /// a second genie does not drop the first's effect mid-flight.
     /// `tests::present_wants_accumulate_until_a_reload`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 28's sol.present wants its genie through it")
-    )]
     pub(crate) fn add_wanted(
         &mut self,
         origin: &'static str,
@@ -589,6 +601,9 @@ impl<P: Clone> Host<P> {
     pub(crate) fn reload(&mut self) {
         self.programs.retain(|_, program| program.is_ok());
         self.wanted.remove("present");
+        // And what binding them said (`present:<name>`), for the same reason
+        // (`tests::present_wants_accumulate_until_a_reload`).
+        self.clear_problems_prefixed("present:");
         self.settle_wanted(true);
     }
 
@@ -1152,10 +1167,6 @@ impl<P: Clone> Host<P> {
 
     /// The version of `name` that runs, if one compiled.
     /// `tests::a_broken_effect_on_a_cold_start_is_absent_not_fatal`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 28's grids look an effect up")
-    )]
     pub(crate) fn effect(&self, name: &str) -> Option<Rc<Loaded<P>>> {
         self.slots.get(name).and_then(|slot| slot.current.clone())
     }
@@ -1200,10 +1211,6 @@ impl<P: Clone> Host<P> {
     }
 
     /// The running version's id. `tests::a_new_version_is_a_new_generation`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 28's geometry names its effect by id")
-    )]
     pub(crate) fn id(&self, name: &str) -> Option<EffectId> {
         self.slots
             .get(name)
@@ -1216,10 +1223,6 @@ impl<P: Clone> Host<P> {
 
     /// The version an id names, while it is the one that runs.
     /// `tests::a_new_version_is_a_new_generation`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 28's geometry names its effect by id")
-    )]
     pub(crate) fn by_id(&self, id: EffectId) -> Option<Rc<Loaded<P>>> {
         self.slots
             .values()
@@ -2532,10 +2535,23 @@ pub(crate) mod tests {
             host.has_pending("a") && host.has_pending("b"),
             "the second genie dropped the first's effect"
         );
+        host.push_problem(super::Problem::error(
+            "present:a",
+            Path::new("a"),
+            None,
+            "sol.present: too many params".to_owned(),
+        ));
         host.reload();
         assert!(
             !host.has_pending("a") && host.effect("a").is_none(),
             "a reload keeps sol.present's names"
+        );
+        assert!(
+            host.problems()
+                .iter()
+                .all(|each| each.effect != "present:a"),
+            "a reload keeps what binding a present said: {:?}",
+            host.problems()
         );
         let _ = std::fs::remove_dir_all(place);
     }

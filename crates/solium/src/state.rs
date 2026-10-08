@@ -1666,7 +1666,24 @@ impl Solium {
         deform: Option<present::Deform>,
     ) -> Option<present::Aimed> {
         let deform = deform.filter(|deform| !deform.effect.is_at_rest())?;
-        let to = match deform.anchor {
+        let to = self.anchor_rect(pane, deform.anchor)?;
+        Some(present::Aimed {
+            effect: deform.effect,
+            to,
+        })
+    }
+
+    /// Where `anchor` is drawn now, for `pane`'s deform: a rect where it is,
+    /// a pane where it is drawn, a surface's instance on the pane's own
+    /// monitor; `None` when it names nothing. What [`Self::aimed_at_for`]
+    /// resolves each frame, and `axis = "auto"` reads once
+    /// (`tests::real_client::auto_is_kept_for_the_whole_flight`).
+    pub(crate) fn anchor_rect(
+        &self,
+        pane: crate::pane::PaneId,
+        anchor: present::Anchor,
+    ) -> Option<Rectangle<f64, Logical>> {
+        Some(match anchor {
             present::Anchor::Rect(rect) => rect,
             present::Anchor::Pane(id) => {
                 let other = self.panes.by_script_id(id)?;
@@ -1687,10 +1704,6 @@ impl Solium {
                 let area = surface.area_on(&output, geometry, primary.as_ref())?;
                 self.carried(id, &output, area).to_f64()
             }
-        };
-        Some(present::Aimed {
-            effect: deform.effect,
-            to,
         })
     }
 

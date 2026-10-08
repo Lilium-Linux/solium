@@ -125,7 +125,7 @@
 ---One row of `sol.problems()`: something broken in an effect, a rule or the
 ---configuration, and where.
 ---@class sol.Problem
----@field effect string The effect's name, `"config"` for the configuration, `"rules"` for a rule of `sol.effects`, or `"settings"` for the engine's own keys beside them, at its effect's file and line when the effect is what failed.
+---@field effect string The effect's name, `"config"` for the configuration, `"rules"` for a rule of `sol.effects`, `"settings"` for the engine's own keys beside them, or `"present:<name>"` for a `sol.present` deform's params, at its effect's file and line when the effect is what failed.
 ---@field file string The file the problem is in.
 ---@field line? integer Its line in that file, where one is known.
 ---@field column? integer Its column, where the compiler gave one.
@@ -200,12 +200,20 @@
 ---@field z? number Draw order and nothing else: higher is in front, equal keeps the stacking order, 0 is the default. Input still follows the rect.
 ---@field deform? sol.Deform A deformation of the window's mesh.
 
----A deformation, named by effect. Its other keys are that effect's parameters.
+---A deformation, named by effect. Its other keys are that effect's params,
+---bound and checked by the effect (an unknown one, or one of the wrong kind,
+---is named by `sol.problems()` and the window drawn undeformed); numbers,
+---booleans and four numbers, at most `effects.limits.params` numbers once
+---packed (a word param cannot blend between two presents and is refused).
 ---@class sol.Deform
----@field effect "genie" The effect, from `crates/effects`. An unknown one is logged and the window drawn undeformed.
+---@field effect string An effect folder's name, `"genie"` shipped; your copy in `~/.config/solium/effects/` is used instead. It must have a `mesh`. One nobody has is named by `sol.problems()`, and the window is drawn by `failed`.
 ---@field to { window: integer }|{ surface: string }|sol.Rect What the window is pulled into or drawn out of. A window or a surface is followed as it moves; a rect stays where it is. A surface on several monitors is the one on the window's own monitor.
----@field axis? "down"|"up"|"left"|"right" For the genie: which edge leads.
----@field spread? number For the genie: how much of the window is in motion at once. 0 is rigid.
+---@field axis? "auto"|"down"|"up"|"left"|"right" Which edge leads, the mesh's `t.axis`. `"auto"`, also when it is left out: the side the target lies on, picked when the window starts to move and kept for the flight.
+---@field progress? number How far into `to`, the mesh's `t.progress`: 1, all the way, when it is left out, which is what one animates towards; 0 is the window where it is. `t.direction` is -1 for a present.
+---@field seed? number A number in [0, 1) for the mesh's `t.seed`; 0 when it is left out.
+---@field failed? "flat"|"hide" This present's own: what it draws when its mesh is refused or its folder is missing, the window undeformed or nothing of it; `effects.present.failed`'s when it is left out.
+---@field on_reload? "flat"|"keep" This present's own: when its folder is reloaded while it plays, drawn flat for the rest of the move, or on the version it began with; `effects.present.on_reload`'s when it is left out.
+---@field spread? number The genie's param: how much of the window is in motion at once. 0 is rigid.
 
 ---Where `sol.place` puts a window.
 ---@class sol.PlaceOptions: sol.Rect

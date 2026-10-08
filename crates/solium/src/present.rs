@@ -155,17 +155,78 @@ pub(crate) enum Anchor {
     Surface(crate::scripted::SurfaceId),
 }
 
+/// A geometry effect on a pane's frame: which folder (by id: a reload that
+/// changes it draws the window flat for the rest of this transform, as an
+/// unresolved anchor does, unless `on_reload` keeps the version it began
+/// with), how far, its params, its axis, resolved once when it was
+/// presented, its seed, and what it draws when it cannot be drawn
+/// (`failed`): `effects.present` and the call's `deform`.
+/// `state::tests::real_client::a_present_deform_is_a_file`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Geometry {
+    pub(crate) effect: crate::effect::host::EffectId,
+    pub(crate) progress: f64,
+    pub(crate) params: crate::effect::geometry::Params,
+    pub(crate) axis: solium_effects::Axis,
+    pub(crate) seed: f64,
+    pub(crate) failed: crate::effect::settings::PresentFailed,
+    pub(crate) on_reload: crate::effect::settings::PresentReload,
+}
+
+impl Geometry {
+    /// At rest when it has not started: progress 0 or below, which the
+    /// load-time contract makes the window where it is for every geometry
+    /// file (`effect::geometry::at_rest`).
+    /// `state::tests::a_deform_at_rest_is_aimed_at_nothing`.
+    pub(crate) fn is_at_rest(self) -> bool {
+        self.progress <= 0.0
+    }
+
+    fn at_rest(self) -> Self {
+        Self {
+            progress: 0.0,
+            ..self
+        }
+    }
+
+    /// Progress and params lerp when both name as many params; the effect,
+    /// the axis, the seed, the policies and, for another effect's params,
+    /// the params are the destination's.
+    /// `tests::an_anchor_does_not_blend_halfway`.
+    fn mix(self, other: Self, t: f64) -> Self {
+        let params = self.params.lerp(other.params, t);
+        Self {
+            progress: self.progress + (other.progress - self.progress) * t,
+            params,
+            ..other
+        }
+    }
+
+    /// A geometry under way, naming no effect, with `failed` as given.
+    #[cfg(test)]
+    pub(crate) fn for_test(failed: crate::effect::settings::PresentFailed) -> Self {
+        Self {
+            effect: crate::effect::host::EffectId::for_test(1),
+            progress: 0.5,
+            params: crate::effect::geometry::Params::default(),
+            axis: solium_effects::Axis::Down,
+            seed: 0.0,
+            failed,
+            on_reload: crate::effect::settings::PresentReload::Flat,
+        }
+    }
+}
+
 /// A deformation a rectangle cannot express, and what it is aimed at.
 ///
-/// The shape itself lives in `solium-effects`, which is a crate precisely so
-/// that adding *fold*, *curl* or *page-turn* is a file with unit tests and a
-/// preview slider rather than another arm of an enum in here. What stays on
-/// this side is the half that needs a compositor: the anchor, and resolving it
-/// every frame.
+/// The shape itself is an effect folder's `mesh` (`effects/genie/` ships),
+/// named by id in a [`Geometry`], and run once a pass in `render::prepare`.
+/// What stays on this side is the half that needs a compositor: the anchor,
+/// and resolving it every frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Deform {
-    /// The named vertex function and its parameters.
-    pub(crate) effect: solium_effects::Deform,
+    /// The geometry effect, how far, and its params.
+    pub(crate) effect: Geometry,
     /// Where it is pulling the window to, or out of.
     pub(crate) anchor: Anchor,
 }
@@ -177,7 +238,7 @@ pub(crate) struct Deform {
 /// one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Aimed {
-    pub(crate) effect: solium_effects::Deform,
+    pub(crate) effect: Geometry,
     /// The far end of the morph, in logical coordinates, this frame.
     pub(crate) to: Rectangle<f64, Logical>,
 }
@@ -207,7 +268,8 @@ impl Deform {
 
     /// Blend towards another deform.
     ///
-    /// The parameters blend; the anchor does not. There is no identity half
+    /// The progress and the params blend ([`Geometry`]'s own rule); the
+    /// anchor does not. There is no identity half
     /// way between one dock icon and another, and a rectangle interpolated
     /// between two of them is a place neither of them is — which is the
     /// snapshot problem back again, wearing a blend. The destination's anchor
@@ -793,6 +855,13 @@ pub(crate) fn presented(pane: &Pane) -> bool {
     .unwrap_or(false)
 }
 
+/// Where a pane's transform is headed, for a test to read what a present
+/// asked for.
+#[cfg(test)]
+pub(crate) fn target_of(pane: &Pane) -> Option<Frame> {
+    with_slot(pane, |slot| slot.map(|transform| transform.target())).flatten()
+}
+
 /// Whether a pane holds a transform at all. A window at rest holds none, and
 /// is drawn as a plain element, which is what lets a fullscreen game or video
 /// be scanned out directly once its change has landed.
@@ -1320,11 +1389,10 @@ mod tests {
     /// into another is two transforms, which a script can already write.
     #[test]
     fn an_anchor_does_not_blend_halfway() {
-        let genie = |progress: f32, pane: u64| Deform {
-            effect: solium_effects::Deform::Genie {
+        let genie = |progress: f64, pane: u64| Deform {
+            effect: Geometry {
                 progress,
-                spread: 1.0,
-                axis: solium_effects::Axis::Down,
+                ..Geometry::for_test(crate::effect::settings::PresentFailed::Flat)
             },
             anchor: Anchor::Pane(pane),
         };
@@ -1343,12 +1411,9 @@ mod tests {
         let clearing = Deform::blend(Some(genie(1.0, 3)), None, 0.5);
         assert_eq!(clearing.map(|deform| deform.anchor), Some(Anchor::Pane(3)));
         assert_eq!(
-            clearing.map(|deform| deform.effect),
-            Some(solium_effects::Deform::Genie {
-                progress: 0.5,
-                spread: 1.0,
-                axis: solium_effects::Axis::Down,
-            })
+            clearing.map(|deform| deform.effect.progress),
+            Some(0.5),
+            "half way back to rest"
         );
     }
 

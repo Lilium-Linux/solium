@@ -167,19 +167,23 @@ preview without touching the renderer.
 
 ### So are the shapes
 
-`crates/effects` is the same crate again for the other half of a transform: the
-vertex deformations a rectangle and a matrix cannot express — a genie, and
-whatever fold, curl or page turn comes next. Same empty `[dependencies]`, same
-unit tests, same wasm preview with live sliders, and the same reason.
+The other half of a transform, the vertex deformations a rectangle and a
+matrix cannot express — a genie, and whatever fold, curl or page turn comes
+next — are effect folders: a geometry effect's `mesh`, Lua, called once a
+pass (below). `crates/effects` keeps the first of them, the genie, as Rust
+(`Deform::Genie`), with its unit tests and its wasm preview, as the oracle
+the shipped `effects/genie/` is held to within 10⁻⁹, and the compositor
+reaches it only in tests and, through `SOLIUM_GEOMETRY_ORACLE`, a debug
+build: no release binary draws an effect from Rust.
 
-It has a second reason the animation engine does not, and it is the harder one:
+It has a reason the animation engine does not, and it is the harder one:
 **the damage tracker needs a deformed window's bounding box before anything is
-drawn, and a shader cannot tell it one.** So a vertex function stays CPU-side
-and parametric — a name and some numbers, never user code. A *fragment* effect
-could one day be code a style supplies, because a bad one is a wrong picture
-and a bad damage rect is a corrupt screen; today there is one, rounded
-corners, and its shader is compiled into the crate. See
-`docs/design/2026-09-12-panes-and-effects-design.md`.
+drawn, and a shader cannot tell it one.** So a vertex function stays CPU-side,
+its grid checked (the count, every number finite, every point inside a box
+around the pane's monitor) before a vertex of it is drawn, and the warp's
+bounds are those points'. A *fragment* effect can be a file of its own,
+because a bad one is a wrong picture and a bad damage rect is a corrupt
+screen. See `docs/design/2026-09-12-panes-and-effects-design.md`.
 
 The split with the compositor is the anchor. A deformation morphs between two
 rectangles, and the far one is named rather than given: `deform = { effect =
@@ -187,16 +191,22 @@ rectangles, and the far one is named rather than given: `deform = { effect =
 `Solium::aimed_at_for` resolves on the frame that draws it, and `to = { surface =
 name }` aims at a `sol.surface` scene the same way: at its instance on the
 window's own monitor, not on the one the pointer is on. Both ends are in global
-space and are moved onto each screen together, so a genie on a monitor that is
-not at the origin lands where it was aimed (#143). A rectangle read out of a
-Lua table when the binding was pressed aims at where a dock icon was half a
-second ago, which is the stale-copy failure the anchors planned in
-`docs/shell-boundary.md` are meant to rule out for a hosted dock.
-`crates/effects` never sees the identity — it has no idea what a pane is, which
-is what keeps it testable without a session.
+space, and so is the grid the `mesh` writes, moved onto each screen with the
+frame, so a genie on a monitor that is not at the origin lands where it was
+aimed (#143). A rectangle read out of a Lua table when the binding was pressed
+aims at where a dock icon was half a second ago, which is the stale-copy
+failure the anchors planned in `docs/shell-boundary.md` are meant to rule out
+for a hosted dock. The effect never sees the identity, only the rectangles it
+resolved to, in `t.from` and `t.to`.
 
-`Deform::from_name` is what scripts bind to, exactly as `Curve::from_name` is,
-and `script::shipped` checks the shipped Lua against both.
+`sol.present`'s `deform` names a folder, which the effect host resolves where
+the command is applied (`present::Geometry`: the effect's id, the progress, its
+params packed into numbers so a present can blend them, its axis, picked once
+for `"auto"`, and what it draws when it cannot be drawn); `render::prepare`
+builds each warped pane's grid once a pass, not once per output, and keeps it
+on the pane while nothing it depends on moves, and `warp::mesh_grid` projects
+it. `script::shipped` checks every effect the shipped Lua names is a shipped
+folder, as it checks every curve against `Curve::from_name`.
 
 ### Fragment programs and captures
 

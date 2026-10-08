@@ -6,10 +6,9 @@ way in rather than shrinking. Played backwards, the same file draws a window
 out of its target. It is a geometry effect, a `mesh` and nothing else: it
 moves the window's picture and leaves its pixels as they are.
 
-Nothing plays a geometry folder yet: the genie on `super+m` and in the
-Developer tweaks is still drawn by the Rust genie this file is held to
-(below), until `sol.present` names folders. What follows is what the
-folder does once it is played.
+`super+m` plays it, and so does the Developer tweaks panel's genie, through
+`sol.present`: `deform = { effect = "genie", axis = "down", spread = 1.4,
+to = … }`.
 
 | Param | Default | What it does |
 |---|---|---|

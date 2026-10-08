@@ -35,7 +35,7 @@ use smithay::{
         utils::CommitCounter,
         utils::OpaqueRegions,
     },
-    utils::{Buffer as BufferCoords, Physical, Rectangle, Scale, Size, Transform},
+    utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform},
 };
 
 use crate::mat4::Mat4;
@@ -171,6 +171,44 @@ impl UnitRect {
     };
 }
 
+/// A grid of points over `part` of a pane's unit square, in global logical
+/// pixels: `(cols + 1) × (rows + 1)` of them, x and y each, row by row from
+/// the top-left, as a geometry effect's `mesh` writes them
+/// (`effect::geometry::mesh`). What [`mesh_grid`] projects.
+/// `tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Grid {
+    pub(crate) cols: u32,
+    pub(crate) rows: u32,
+    pub(crate) part: UnitRect,
+    pub(crate) points: Vec<f64>,
+}
+
+impl Grid {
+    /// `part` of `rect` where it is: one cell, the rectangle's own corners,
+    /// which is every flat and every tilted window's grid.
+    /// `tests::the_whole_part_is_the_whole_mesh`.
+    fn identity(rect: Rectangle<f64, smithay::utils::Logical>, part: UnitRect) -> Self {
+        let from = crate::present::for_effects(rect);
+        let mut points = Vec::with_capacity(8);
+        for (u, v) in [
+            (part.u0, part.v0),
+            (part.u1, part.v0),
+            (part.u0, part.v1),
+            (part.u1, part.v1),
+        ] {
+            let (x, y) = from.at(u, v);
+            points.extend_from_slice(&[x, y]);
+        }
+        Self {
+            cols: 1,
+            rows: 1,
+            part,
+            points,
+        }
+    }
+}
+
 /// [`mesh_part`] over the whole pane, which is the mesh as it was before parts:
 /// the tests' way of saying "the whole window".
 /// `tests::the_whole_part_is_the_whole_mesh`.
@@ -178,34 +216,26 @@ impl UnitRect {
 pub(crate) fn mesh(
     rect: Rectangle<f64, smithay::utils::Logical>,
     matrix: Mat4,
-    deform: Option<crate::present::Aimed>,
     pivot: (f32, f32),
     scale: f64,
 ) -> Option<Mesh> {
-    mesh_part(rect, UnitRect::WHOLE, matrix, deform, pivot, scale)
+    mesh_part(rect, UnitRect::WHOLE, matrix, pivot, scale)
 }
 
-/// Cut `part` of a rectangle into a mesh and project it, about `pivot`.
-///
-/// The deform moves points around inside the window's own space; the matrix
-/// then places that in 3D. Both are optional and they compose, which is what
-/// lets a genie happen to a window that is also tilted.
+/// Cut `part` of a rectangle into a mesh and project it, about `pivot`: the
+/// identity grid, the rectangle where it is, through [`mesh_grid`]. A
+/// geometry effect's own grid goes to [`mesh_grid`] itself.
 ///
 /// `pivot` is a fraction of `rect`, not pixels: `(0.5, 0.5)` is its centre and
 /// `(0.0, 0.0)` its top-left corner. It is the one point the matrix leaves
 /// alone, which is what separates a card flipping on its own spine from a card
 /// flipping about the middle of itself.
 ///
-/// The deform arrives with its anchor already resolved to a rectangle — see
-/// `present::Anchor` — because the thing it is aimed at moves, and the frame
-/// being drawn is the only moment its position is known.
-///
 /// `part` is a piece of the rectangle's unit square, [`UnitRect::WHOLE`] for
 /// the whole window: each point lands where the whole window's mesh puts it --
-/// the same rect, matrix, pivot and deform -- and the texture's 0..1 runs
-/// across the part, so a texture of the part alone is drawn through it. A part
-/// past the window is extrapolated, not clamped: the rect and the deform place
-/// points past the unit square by the same functions as inside it.
+/// the same rect, matrix and pivot -- and the texture's 0..1 runs across the
+/// part, so a texture of the part alone is drawn through it. A part past the
+/// window is extrapolated, not clamped.
 /// `tests::a_part_of_the_pane_lands_where_the_whole_pane_puts_those_points`;
 /// the whole part is the mesh before parts bit for bit,
 /// `tests::the_whole_part_is_the_whole_mesh`.
@@ -217,17 +247,44 @@ pub(crate) fn mesh_part(
     rect: Rectangle<f64, smithay::utils::Logical>,
     part: UnitRect,
     matrix: Mat4,
-    deform: Option<crate::present::Aimed>,
     pivot: (f32, f32),
     scale: f64,
 ) -> Option<Mesh> {
-    // The two ends of the morph, in the plain numbers the effects crate takes.
-    let from = crate::present::for_effects(rect);
-    let morph = deform.map(|deform| (deform.effect, crate::present::for_effects(deform.to)));
-    // One cell unless a deform asks for more: a matrix alone is exact at the
-    // corners, because a projective map takes straight edges to straight
-    // edges and the per-vertex `q` carries the rest.
-    let (columns, rows) = morph.map_or((1, 1), |(effect, _)| effect.segments());
+    mesh_grid(
+        &Grid::identity(rect, part),
+        Point::from((0.0, 0.0)),
+        rect,
+        matrix,
+        pivot,
+        scale,
+    )
+}
+
+/// Project a grid of points, each moved by `shift` (global to the screen's
+/// logical space), through `matrix` about `pivot` of `rect` (the window's
+/// rectangle on that screen), and cut it into triangles: what a geometry
+/// effect's `mesh` placed (`effect::geometry::mesh`), drawn.
+///
+/// The grid places points around inside the window's own space; the matrix
+/// then places that in 3D. They compose, which is what lets a genie happen
+/// to a window that is also tilted. Each point's texture coordinate is where
+/// it is in the grid, `(c / cols, r / rows)`, across the part's capture.
+/// `tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+///
+/// Returns `None` when the grid has not as many points as its size says, or
+/// any vertex lands at or behind the viewer, as [`mesh_part`] does.
+pub(crate) fn mesh_grid(
+    grid: &Grid,
+    shift: Point<f64, smithay::utils::Logical>,
+    rect: Rectangle<f64, smithay::utils::Logical>,
+    matrix: Mat4,
+    pivot: (f32, f32),
+    scale: f64,
+) -> Option<Mesh> {
+    let (columns, rows) = (grid.cols.max(1), grid.rows.max(1));
+    if grid.points.len() != crate::effect::sandbox::numbers(columns, rows) {
+        return None;
+    }
     // The point the matrix turns about, and the point the projection is
     // measured from. `(0.5, 0.5)` is the rect's centre, which is what this
     // computed before `pivot` existed and is what every flat window still
@@ -240,24 +297,23 @@ pub(crate) fn mesh_part(
     #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
     let scale32 = scale as f32;
 
-    let mut grid = Vec::with_capacity(((columns + 1) * (rows + 1)) as usize);
+    let mut corners = Vec::with_capacity(grid.points.len() / 2);
     for row in 0..=rows {
         let along_v = f64::from(row) / f64::from(rows);
-        let v = part.v0 + (part.v1 - part.v0) * along_v;
         for column in 0..=columns {
             let along_u = f64::from(column) / f64::from(columns);
-            let u = part.u0 + (part.u1 - part.u0) * along_u;
-            let (x, y) = match morph {
-                Some((effect, to)) => effect.place(from, to, u, v),
-                None => from.at(u, v),
-            };
+            let at = 2 * (row as usize * (columns as usize + 1) + column as usize);
+            let (x, y) = (
+                grid.points.get(at)? + shift.x,
+                grid.points.get(at + 1)? + shift.y,
+            );
             #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
             let offset = (((x - centre_x) as f32), ((y - centre_y) as f32));
             let (projected_x, projected_y, w) = matrix.project_with_w(offset.0, offset.1, 0.0)?;
             #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
             let (origin_x, origin_y) = ((centre_x * scale) as f32, (centre_y * scale) as f32);
             #[expect(clippy::cast_possible_truncation, reason = "unit square floats")]
-            grid.push(Corner {
+            corners.push(Corner {
                 x: origin_x + projected_x * scale32,
                 y: origin_y + projected_y * scale32,
                 u: along_u as f32,
@@ -270,7 +326,11 @@ pub(crate) fn mesh_part(
     // Two triangles per cell. Indices would save a third of the upload, but
     // this is a few thousand floats a frame at most and a flat list is one
     // less thing to get wrong.
-    let at = |column: u32, row: u32| grid.get((row * (columns + 1) + column) as usize).copied();
+    let at = |column: u32, row: u32| {
+        corners
+            .get((row * (columns + 1) + column) as usize)
+            .copied()
+    };
     let mut vertices = Vec::with_capacity((columns * rows * 6) as usize);
     for row in 0..rows {
         for column in 0..columns {
@@ -289,6 +349,41 @@ pub(crate) fn mesh_part(
         }
     }
     Some(Mesh { vertices })
+}
+
+/// The Rust genie's grid: `deform` placed at every point of its own grid
+/// (`Deform::segments`) over `part`, from `from` toward `to`, global
+/// logical. The oracle the `genie` folder is held to, in the tests and,
+/// through `SOLIUM_GEOMETRY_ORACLE`, in a debug build only (Rulings 19, 23):
+/// a release build has no code that draws an effect from Rust.
+/// `tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn oracle_grid(
+    from: Rectangle<f64, smithay::utils::Logical>,
+    to: Rectangle<f64, smithay::utils::Logical>,
+    deform: solium_effects::Deform,
+    part: UnitRect,
+) -> Grid {
+    let (from, to) = (
+        crate::present::for_effects(from),
+        crate::present::for_effects(to),
+    );
+    let (cols, rows) = deform.segments();
+    let mut points = Vec::with_capacity(crate::effect::sandbox::numbers(cols, rows));
+    for row in 0..=rows {
+        let v = part.v0 + (part.v1 - part.v0) * (f64::from(row) / f64::from(rows));
+        for column in 0..=cols {
+            let u = part.u0 + (part.u1 - part.u0) * (f64::from(column) / f64::from(cols));
+            let (x, y) = deform.place(from, to, u, v);
+            points.extend_from_slice(&[x, y]);
+        }
+    }
+    Grid {
+        cols,
+        rows,
+        part,
+        points,
+    }
 }
 
 impl Element for Warp {
@@ -472,8 +567,8 @@ mod tests {
         let rect = Rectangle::<f64, Logical>::new((40.0, 90.0).into(), (200.0, 100.0).into());
         let turn = Mat4::rotate_z(std::f32::consts::FRAC_PI_2);
 
-        let centred = mesh(rect, turn, None, (0.5, 0.5), 1.0).expect("a mesh");
-        let cornered = mesh(rect, turn, None, (0.0, 0.0), 1.0).expect("a mesh");
+        let centred = mesh(rect, turn, (0.5, 0.5), 1.0).expect("a mesh");
+        let cornered = mesh(rect, turn, (0.0, 0.0), 1.0).expect("a mesh");
 
         // Vertex 0 is (u, v) = (0, 0): the rect's top-left, at (40, 90).
         let (cx, cy) = (cornered.vertices[0].x, cornered.vertices[0].y);
@@ -494,7 +589,7 @@ mod tests {
         // `(1.0, 0.0)` is the top-right corner, at (240, 90). Read the pair the
         // other way round and the pivot is (40, 190) instead -- the mistake a
         // square window would hide.
-        let top_right = mesh(rect, turn, None, (1.0, 0.0), 1.0).expect("a mesh");
+        let top_right = mesh(rect, turn, (1.0, 0.0), 1.0).expect("a mesh");
         // Vertex 1 is (u, v) = (1, 0): the rect's top-right.
         let (tx, ty) = (top_right.vertices[1].x, top_right.vertices[1].y);
         assert!(
@@ -522,8 +617,7 @@ mod tests {
     #[test]
     fn the_default_pivot_is_the_centre_it_replaced() {
         let rect = Rectangle::<f64, Logical>::new((40.0, 70.0).into(), (300.0, 200.0).into());
-        let through =
-            mesh(rect, Mat4::scale(-1.0, -1.0, 1.0), None, (0.5, 0.5), 1.0).expect("a mesh");
+        let through = mesh(rect, Mat4::scale(-1.0, -1.0, 1.0), (0.5, 0.5), 1.0).expect("a mesh");
 
         // Vertices 0 and 2 are (u, v) = (0, 0) and (1, 1): the rect's top-left
         // at (40, 70) and its bottom-right at (340, 270), which it exchanges.
@@ -548,7 +642,7 @@ mod tests {
         // centre therefore pins the pivot there whatever matrix a window
         // carries -- which is the one thing this test is about. The finiteness
         // check is along for the ride.
-        let turned = mesh(rect, Mat4::rotate_y(0.3), None, (0.5, 0.5), 1.0).expect("a mesh");
+        let turned = mesh(rect, Mat4::rotate_y(0.3), (0.5, 0.5), 1.0).expect("a mesh");
         let (mut sum_x, mut sum_y) = (0.0_f32, 0.0_f32);
         for corner in &turned.vertices {
             assert!(corner.x.is_finite() && corner.y.is_finite());
@@ -569,22 +663,94 @@ mod tests {
     fn the_whole_part_is_the_whole_mesh() {
         use super::{UnitRect, mesh_part};
         let rect = Rectangle::<f64, Logical>::new((40.0, 90.0).into(), (200.0, 100.0).into());
-        let whole = mesh(rect, Mat4::rotate_y(0.3), None, (0.5, 0.5), 1.0).expect("a mesh");
-        let part = mesh_part(
-            rect,
-            UnitRect::WHOLE,
-            Mat4::rotate_y(0.3),
-            None,
-            (0.5, 0.5),
-            1.0,
-        )
-        .expect("a mesh");
+        let whole = mesh(rect, Mat4::rotate_y(0.3), (0.5, 0.5), 1.0).expect("a mesh");
+        let part =
+            mesh_part(rect, UnitRect::WHOLE, Mat4::rotate_y(0.3), (0.5, 0.5), 1.0).expect("a mesh");
         assert!(
             whole
                 .vertices
                 .iter()
                 .zip(&part.vertices)
                 .all(|(a, b)| a.x == b.x && a.y == b.y && a.u == b.u && a.v == b.v && a.q == b.q)
+        );
+    }
+
+    /// **A Lua grid lands where the Rust genie put it**: the folder's grid
+    /// through `mesh_grid`, against the Rust genie's grid through the same,
+    /// through `rotate_y(0.3)` about a pivot of (1, 0), on a screen at
+    /// x = 1920, which the shift moves both onto: every vertex within 1e-3
+    /// physical px.
+    #[test]
+    fn a_lua_grid_lands_where_the_rust_genie_put_it() {
+        let rect = Rectangle::new((2020.0, 100.0).into(), (800.0, 600.0).into());
+        let to = Rectangle::new((2520.0, 1040.0).into(), (64.0, 32.0).into());
+        let shift = (-1920.0, 0.0).into();
+        let on_screen = Rectangle::new((100.0, 100.0).into(), (800.0, 600.0).into());
+        let rust = solium_effects::Deform::Genie {
+            progress: 0.37,
+            spread: 1.4,
+            axis: solium_effects::Axis::Down,
+        };
+        let oracle = super::oracle_grid(rect, to, rust, super::UnitRect::WHOLE);
+        let expected = super::mesh_grid(
+            &oracle,
+            shift,
+            on_screen,
+            Mat4::rotate_y(0.3),
+            (1.0, 0.0),
+            1.0,
+        )
+        .expect("a mesh");
+        let grid = crate::effect::geometry::tests::genie_grid(rect, to, 0.37, 1.4);
+        assert_eq!((grid.cols, grid.rows), (oracle.cols, oracle.rows));
+        let got = super::mesh_grid(
+            &grid,
+            shift,
+            on_screen,
+            Mat4::rotate_y(0.3),
+            (1.0, 0.0),
+            1.0,
+        )
+        .expect("a mesh");
+        assert_eq!(expected.vertices().len(), got.vertices().len());
+        for (a, b) in expected.vertices().iter().zip(got.vertices()) {
+            assert!(
+                (a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3,
+                "{a:?} {b:?}"
+            );
+        }
+        // Moved onto the screen: the first point is the window's top-left
+        // at progress 0.37 (the top row has not started), 100 px in.
+        let flat = super::mesh_grid(&grid, shift, on_screen, Mat4::IDENTITY, (0.5, 0.5), 1.0)
+            .expect("a mesh");
+        assert!(
+            (flat.vertices()[0].x - 100.0).abs() < 1e-3,
+            "{:?}",
+            flat.vertices()[0]
+        );
+    }
+
+    /// **A grid short of its points draws nothing**, rather than a mesh
+    /// that reads past what was written.
+    #[test]
+    fn a_grid_short_of_its_points_draws_nothing() {
+        let rect = Rectangle::<f64, Logical>::new((0.0, 0.0).into(), (100.0, 100.0).into());
+        let short = super::Grid {
+            cols: 2,
+            rows: 2,
+            part: super::UnitRect::WHOLE,
+            points: vec![0.0; 16],
+        };
+        assert!(
+            super::mesh_grid(
+                &short,
+                (0.0, 0.0).into(),
+                rect,
+                Mat4::IDENTITY,
+                (0.5, 0.5),
+                1.0
+            )
+            .is_none()
         );
     }
 
@@ -595,7 +761,7 @@ mod tests {
         use super::{UnitRect, mesh_part};
         let rect = Rectangle::<f64, Logical>::new((40.0, 90.0).into(), (200.0, 100.0).into());
         let turn = Mat4::rotate_y(0.3);
-        let whole = mesh(rect, turn, None, (0.5, 0.5), 1.0).expect("a mesh");
+        let whole = mesh(rect, turn, (0.5, 0.5), 1.0).expect("a mesh");
         let right = mesh_part(
             rect,
             UnitRect {
@@ -605,7 +771,6 @@ mod tests {
                 v1: 1.0,
             },
             turn,
-            None,
             (0.5, 0.5),
             1.0,
         )
@@ -628,7 +793,6 @@ mod tests {
                 v1: 1.4,
             },
             Mat4::IDENTITY,
-            None,
             (0.5, 0.5),
             1.0,
         )

@@ -244,6 +244,13 @@ number is a fine value for a fractional param; and a value outside `min` and
 `max` is clamped, with a warning. A function of the params, such as `reach`,
 is called with the params as they were bound.
 
+A geometry effect played by `sol.present` packs its params into numbers (a
+number, a whole one, a boolean as 0 or 1, four numbers as four), so a
+present can blend them between two presents: at most
+`effects.limits.params` of them (8 unless you change it, up to 64), and no
+word param. One with more, or a word, is named on the overlay and the
+window drawn undeformed; nothing is cut.
+
 ### Stages
 
 A many-pass effect lists its passes in `stages`, each a table that begins
@@ -418,7 +425,18 @@ it. These 36 calls have `load_ms` between them,
 and the fastest must take no more than the 2 ms a frame gives, or every
 frame would stop it. One that fails any of this is refused, and named on
 the overlay and by `solium --check` at the line its `mesh` is on.
-Geometry effects are loaded and checked; no configuration plays one yet.
+
+`sol.present` plays one: `deform = { effect = "genie", to = …, progress =
+0.5 }` names the folder, its params beside it, and how far the window is
+pulled into `to` (`t.direction` is −1). Its grid is built once a frame
+whatever the number of monitors, and again only when something it depends
+on moves: the effect, its params, the part, the grid, the axis, the
+progress, the seed, the window's and the target's rectangles, the monitor.
+A grid that is refused draws the window by the present's `failed`
+(`effects.present.failed`, `"flat"` unless you change it: the window
+undeformed; or `"hide"`), said once in Solium's log; a folder reloaded
+while a present plays draws it flat for the rest of the move, or on the
+version it began with under `on_reload = "keep"`.
 
 The shipped [`genie`](genie/README.md) is a whole one in a page of Lua: it
 works out how far each row has gone, once (each column, when the window is

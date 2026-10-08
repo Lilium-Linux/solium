@@ -292,6 +292,9 @@ struct Counters {
     /// Effect chains run in this pass, a self effect's only when its part
     /// committed. `tests::effect_runs_are_counted_and_written`.
     effect_runs: Cell<u32>,
+    /// Present geometries whose mesh was refused in this pass, each drawn by
+    /// its `failed`. `tests::refused_meshes_are_counted_and_written`.
+    meshes_refused: Cell<u32>,
     /// This pass's GPU time, when it came before the pass ended, as a timer
     /// with no extension answers.
     /// `tests::a_gpu_time_in_before_its_pass_ends_goes_out_with_it`.
@@ -353,6 +356,7 @@ thread_local! {
             parked_at: Cell::new(0),
             captures: Cell::new(0),
             effect_runs: Cell::new(0),
+            meshes_refused: Cell::new(0),
             early: Cell::new(None),
             clocks: Cell::new(None),
             labels: RefCell::new(Vec::new()),
@@ -636,6 +640,15 @@ impl Counters {
         }
     }
 
+    /// One present geometry's mesh was refused, inside a measured pass only,
+    /// as a capture is counted. `tests::refused_meshes_are_counted_and_written`.
+    fn mesh_refused(&self) {
+        if self.live.get() {
+            self.meshes_refused
+                .set(self.meshes_refused.get().saturating_add(1));
+        }
+    }
+
     /// Hold a due report until its pass's GPU time is in.
     fn park(&self, line: Line, pass: u64) {
         if let Ok(mut held) = self.parked.try_borrow_mut() {
@@ -859,6 +872,7 @@ impl Counters {
                 r#"{{"pass":{},"t_ns":{},"total_us":{},"deadline_us":{},"monitor":{},"missed":{},"#,
                 r#""tick_us":{},"prep_us":{},"census_us":{},"qml_us":{},"elements_us":{},"gles_us":{},"#,
                 r#""commit_us":{},"settle_us":{},"loose_us":{},"captures":{},"effect_runs":{},"#,
+                r#""meshes_refused":{},"#,
                 r#""panes":{},"drew":{},"#,
                 r#""scenes":{},"animating":{},"rendered":{},"built":{},"rebound":{},"qml":{},"#,
                 r#""clocks":"{}","gpu_mhz":{},"mem_mhz":{},"pstate":{}"#
@@ -880,6 +894,7 @@ impl Counters {
             phase(Phase::Loose),
             self.captures.get(),
             self.effect_runs.get(),
+            self.meshes_refused.get(),
             self.panes_seen.get(),
             self.drew.get(),
             self.scenes.get(),
@@ -932,6 +947,7 @@ pub(crate) fn frame() -> Frame {
         counters.drew.set(0);
         counters.captures.set(0);
         counters.effect_runs.set(0);
+        counters.meshes_refused.set(0);
         for slot in &counters.scene_spent {
             slot.set((0, 0));
         }
@@ -1324,6 +1340,12 @@ pub(crate) fn captured() {
 /// `tests::effect_runs_are_counted_and_written`.
 pub(crate) fn effect_ran() {
     COUNTERS.with(Counters::effect_ran);
+}
+
+/// A present geometry's mesh was refused in this pass (`render::present_grid`).
+/// `tests::refused_meshes_are_counted_and_written`.
+pub(crate) fn mesh_refused() {
+    COUNTERS.with(Counters::mesh_refused);
 }
 
 /// A pass's GPU time, from the backend's timer.
@@ -2396,6 +2418,22 @@ mod tests {
         );
     }
 
+    /// **A refused mesh is counted in the pass record**, inside a measured
+    /// pass only, as a run is.
+    #[test]
+    fn refused_meshes_are_counted_and_written() {
+        let counters = counters();
+        counters.live.set(false);
+        counters.mesh_refused();
+        counters.live.set(true);
+        counters.mesh_refused();
+        let record = counters.pass_record(1, ms(5), false);
+        assert!(
+            record.contains(r#""meshes_refused":1,"#),
+            "one refusal is not in {record}"
+        );
+    }
+
     /// **Phases are exclusive: a nested one does not also count in its
     /// parent.**
     ///
@@ -2993,6 +3031,7 @@ mod tests {
             parked_at: std::cell::Cell::new(0),
             captures: std::cell::Cell::new(0),
             effect_runs: std::cell::Cell::new(0),
+            meshes_refused: std::cell::Cell::new(0),
             early: std::cell::Cell::new(None),
             clocks: std::cell::Cell::new(None),
             labels: std::cell::RefCell::new(Vec::new()),

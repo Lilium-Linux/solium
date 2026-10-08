@@ -35,14 +35,33 @@ fn newly_unwatched_paths(
 }
 
 impl Solium {
-    /// Turn what a script aimed at into what the compositor holds.
+    /// Turn what a script aimed at into what the compositor holds: the
+    /// anchor, and the effect folder through the host, its params bound and
+    /// packed, its axis resolved once, its seed and policies.
     ///
     /// The one place a surface's *name* becomes a [`crate::scripted::SurfaceId`]
     /// — which is what makes an anchor `Copy` and a `Frame` still cheap to
     /// blend. A name nobody has declared loses the effect and not the window,
     /// the same failure an anchor that stops resolving already has, and it says
     /// so once rather than every frame.
-    fn aimed(&self, deform: &crate::script::Deform) -> Option<present::Deform> {
+    ///
+    /// The folder is wanted (`"present"`, added to what earlier presents
+    /// want, so a second genie naming another effect does not drop the
+    /// first's mid-flight) and loaded at once. One nobody has carries no
+    /// effect ([`crate::effect::host::EffectId::NONE`]) and is drawn by its
+    /// `failed`, undeformed by default; params that do not bind, or pack past
+    /// `effects.limits.params`, are a problem on the overlay and the window
+    /// is drawn undeformed. `tests::real_client::a_present_deform_is_a_file`,
+    /// `tests::real_client::a_geometry_effect_with_twelve_params_presents_under_a_raised_limit`,
+    /// `tests::real_client::effects_present_is_the_default_a_deform_overrides`.
+    fn aimed(
+        &mut self,
+        pane: crate::pane::PaneId,
+        deform: &crate::script::DeformSpec,
+    ) -> Option<present::Deform> {
+        use crate::effect::geometry;
+        use crate::effect::host::{EffectId, Problem};
+        use crate::effect::settings::PresentReload;
         let anchor = match &deform.aim {
             crate::script::Aim::Rect(rect) => {
                 present::Anchor::Rect(present::logical((rect.x, rect.y), (rect.w, rect.h)))
@@ -59,8 +78,85 @@ impl Solium {
                 }
             },
         };
+        let name = deform.effect.as_str();
+        let failed = deform.failed.unwrap_or(self.effect_settings.present.failed);
+        let on_reload = deform
+            .on_reload
+            .unwrap_or(self.effect_settings.present.on_reload);
+        self.effects.add_wanted("present", [name.to_owned()]);
+        let found = self.effects.id(name).zip(self.effects.effect(name));
+        // The axis, once, from where the window is drawn and where its
+        // target is now: `"auto"` (and none) the side the target lies on,
+        // kept for the whole flight.
+        let axis = match deform.axis.as_deref() {
+            Some(word) if word != "auto" => {
+                solium_effects::Axis::from_name(word).unwrap_or_default()
+            }
+            _ => {
+                let drawn = self
+                    .pane_outer_of(pane)
+                    .map(|outer| self.drawn(pane, outer).rect);
+                drawn.zip(self.anchor_rect(pane, anchor)).map_or_else(
+                    solium_effects::Axis::default,
+                    |(from, to)| {
+                        geometry::auto_axis(present::for_effects(from), present::for_effects(to))
+                    },
+                )
+            }
+        };
+        let geometry = |effect, params| present::Geometry {
+            effect,
+            progress: deform.progress,
+            params,
+            axis,
+            seed: deform.seed.unwrap_or(0.0),
+            failed,
+            on_reload,
+        };
+        let Some((id, loaded)) = found else {
+            tracing::warn!(
+                effect = name,
+                "no geometry effect by that name loaded, drawing the window by its `failed`"
+            );
+            return Some(present::Deform {
+                effect: geometry(EffectId::NONE, geometry::Params::default()),
+                anchor,
+            });
+        };
+        // Its own problems, said again for this present or mended by it.
+        let label = format!("present:{name}");
+        self.effects.clear_problems_of(&label);
+        let file = loaded.dir().join("effect.lua");
+        let packed = loaded
+            .bind(&deform.params)
+            .map_err(|problem| problem.message)
+            .and_then(|bound| {
+                for warning in &bound.warnings {
+                    self.effects.push_problem(Problem::warning(
+                        &label,
+                        &file,
+                        format!("sol.present: {}", warning.message),
+                    ));
+                }
+                geometry::packed(&bound.params, self.effect_settings.limits.params)
+            });
+        let params = match packed {
+            Ok(params) => params,
+            Err(message) => {
+                self.effects.push_problem(Problem::error(
+                    &label,
+                    &file,
+                    None,
+                    format!("sol.present: {message}"),
+                ));
+                return None;
+            }
+        };
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.meshes_mut().pinned = (on_reload == PresentReload::Keep).then_some(loaded);
+        }
         Some(present::Deform {
-            effect: deform.effect,
+            effect: geometry(id, params),
             anchor,
         })
     }
@@ -188,7 +284,11 @@ impl Solium {
                     pivot,
                     animation,
                 } => {
-                    let Some(pane) = self.panes.by_script_id(id) else {
+                    let Some(pane_id) = self.panes.by_script_id(id).map(Pane::id) else {
+                        continue;
+                    };
+                    let deform = deform.and_then(|deform| self.aimed(pane_id, &deform));
+                    let Some(pane) = self.panes.get(pane_id) else {
                         continue;
                     };
                     let outer = self.pane_outer(pane);
@@ -205,7 +305,7 @@ impl Solium {
                         // own rectangle. See `Frame::zoom`.
                         zoom: Frame::zoom_of(rect, outer),
                         opacity: opacity.unwrap_or(1.0),
-                        deform: deform.and_then(|deform| self.aimed(&deform)),
+                        deform,
                         // Both arrive resolved: `script::depth_from` and
                         // `script::pivot_from` hold the defaults, so a table
                         // mentioning neither key produces them there rather
