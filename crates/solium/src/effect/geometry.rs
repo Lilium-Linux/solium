@@ -182,7 +182,10 @@ fn checked(
 /// where it is, on all four axes and in every direction (+1 arriving, −1
 /// leaving, 0 resizing), within 1e-9; at progress 1 it writes a valid grid.
 /// `tests::a_geometry_file_that_moves_the_window_at_progress_zero_is_refused_at_load`,
-/// `tests::a_file_that_moves_the_window_arriving_is_refused_at_load`.
+/// `tests::a_file_that_moves_the_window_arriving_is_refused_at_load`,
+/// `tests::a_file_that_moves_the_window_resizing_is_refused_at_load`,
+/// `tests::a_file_that_moves_the_window_on_one_axis_is_refused_at_load`,
+/// `tests::a_file_whose_grid_at_progress_one_is_not_finite_is_refused_at_load`.
 ///
 /// Its 24 calls share one load budget (Ruling 4's 100 ms for a load-time
 /// call), so a load holds the thread no longer than one such call
@@ -615,6 +618,55 @@ pub(crate) mod tests {
     /// A grid of one cell, as the checks at load are given it.
     const ONE: solium_effects::spec::GridSpec =
         solium_effects::spec::GridSpec::Fixed { cols: 1, rows: 1 };
+
+    /// **A file that moves the window resizing is refused too**: a size
+    /// change runs with direction 0, and lands at rest as an open does.
+    #[test]
+    fn a_file_that_moves_the_window_resizing_is_refused_at_load() {
+        let lua = "return { api = 1, grid = { 1, 1 }, mesh = function(t, cols, rows, out)
+            local n, shift = 0, (t.direction == 0) and 1 or 0
+            for r = 0, rows do for c = 0, cols do local u, v = sol_grid(t, c, r)
+            out[n + 1], out[n + 2], n = t.from.x + u * t.from.w + shift, t.from.y + v * t.from.h, n + 2 end end end }";
+        let (resizing, place) = loaded("resizing", lua);
+        assert_eq!(at_rest(&resizing, ONE, &[]), Err(Refusal::MovesAtRest));
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A file that moves the window on one axis alone is refused**, on
+    /// each of the four: a genie pulled left must rest where one pulled
+    /// down does.
+    #[test]
+    fn a_file_that_moves_the_window_on_one_axis_is_refused_at_load() {
+        let lua = "moves_on = nil return { api = 1, grid = { 1, 1 }, mesh = function(t, cols, rows, out)
+            local n, shift = 0, (t.axis == moves_on) and 1 or 0
+            for r = 0, rows do for c = 0, cols do local u, v = sol_grid(t, c, r)
+            out[n + 1], out[n + 2], n = t.from.x + u * t.from.w, t.from.y + v * t.from.h + shift, n + 2 end end end }";
+        let (sandbox, place) = loaded("one-axis", lua);
+        assert_eq!(at_rest(&sandbox, ONE, &[]), Ok(()), "it moves on no axis");
+        for (name, _) in Axis::all() {
+            sandbox.lua().globals().set("moves_on", name).expect("set");
+            assert_eq!(
+                at_rest(&sandbox, ONE, &[]),
+                Err(Refusal::MovesAtRest),
+                "moving on {name} alone passed"
+            );
+        }
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A file whose grid at progress 1 is not finite is refused at
+    /// load**: progress 1 is called as well as 0, and checked as every
+    /// frame's call is.
+    #[test]
+    fn a_file_whose_grid_at_progress_one_is_not_finite_is_refused_at_load() {
+        let lua = "return { api = 1, grid = { 1, 1 }, mesh = function(t, cols, rows, out)
+            local n, off = 0, (t.progress == 1) and 0/0 or 0
+            for r = 0, rows do for c = 0, cols do local u, v = sol_grid(t, c, r)
+            out[n + 1], out[n + 2], n = t.from.x + u * t.from.w + off, t.from.y + v * t.from.h, n + 2 end end end }";
+        let (sandbox, place) = loaded("far-end", lua);
+        assert_eq!(at_rest(&sandbox, ONE, &[]), Err(Refusal::NotFinite));
+        let _ = std::fs::remove_dir_all(place);
+    }
 
     /// A flat file whose `mesh` first calls `wait(ms)`, a Rust function
     /// that sleeps: a call that takes as long as a test wants, on any
