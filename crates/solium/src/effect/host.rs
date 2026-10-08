@@ -1254,15 +1254,26 @@ fn refused_at_rest<P>(loaded: &Loaded<P>) -> Option<Problem> {
         .grid
         .unwrap_or(GridSpec::Fixed { cols: 1, rows: 1 });
     let refusal = geometry::at_rest(loaded.sandbox(), grid, loaded.defaults()).err()?;
+    Some(at_rest_problem(loaded, refusal))
+}
+
+/// What a refusal at load says, and where.
+/// `tests::a_mesh_too_slow_for_a_frame_is_a_problem_at_its_mesh`.
+fn at_rest_problem<P>(loaded: &Loaded<P>, refusal: Refusal) -> Problem {
     let file = loaded.dir().join("effect.lua");
     let line = loaded.sandbox().mesh_line();
     let message = match refusal {
         Refusal::Error { line, message } => {
-            return Some(Problem::error(loaded.name(), &file, line, message));
+            return Problem::error(loaded.name(), &file, line, message);
         }
         Refusal::Budget => format!(
-            "its mesh ran past its budget ({} ms) at progress 0 or 1, and was stopped",
+            "its mesh ran past the {} ms its checks at load have (progress 0 and 1, every axis and direction), and was stopped",
             Budget::LOAD.time.as_millis()
+        ),
+        Refusal::Slow { took } => format!(
+            "its mesh takes {:.1} ms a call; a frame gives it {} ms",
+            took.as_secs_f64() * 1000.0,
+            Budget::MESH.as_millis()
         ),
         Refusal::Count { wanted, got } => {
             format!("its mesh wrote {got} numbers, where its grid has {wanted}: x and y for each point")
@@ -1274,7 +1285,7 @@ fn refused_at_rest<P>(loaded: &Loaded<P>) -> Option<Problem> {
         }
         Refusal::MovesAtRest => "its mesh moves the window at progress 0: at rest a geometry draws the window where it is, arriving, leaving and resizing".to_owned(),
     };
-    Some(Problem::error(loaded.name(), &file, line, message))
+    Problem::error(loaded.name(), &file, line, message)
 }
 
 /// A configuration error as a problem: the first `<file>.lua:<line>:` in it
@@ -2182,6 +2193,33 @@ pub(crate) mod tests {
         assert_eq!(problem.line, Some(7), "{problem:?}");
         assert!(problem.message.contains("progress 0"), "{problem:?}");
         assert!(problem.file.ends_with("mover/effect.lua"), "{problem:?}");
+    }
+
+    /// **A refusal at load says why, at its `mesh`'s line**: a mesh too
+    /// slow for a frame says how long a call took and what a frame gives;
+    /// one the load budget stopped says it was the checks' budget.
+    #[test]
+    fn a_mesh_too_slow_for_a_frame_is_a_problem_at_its_mesh() {
+        let place = scratch("slow-problem");
+        let dir = folder(&place, "flat", crate::effect::geometry::tests::FLAT, &[]);
+        let loaded = super::Loaded::<u32>::load("flat", &dir).expect("loads");
+        let slow = super::at_rest_problem(
+            &loaded,
+            super::Refusal::Slow {
+                took: std::time::Duration::from_micros(3400),
+            },
+        );
+        assert_eq!(
+            slow.message,
+            "its mesh takes 3.4 ms a call; a frame gives it 2 ms"
+        );
+        assert_eq!(slow.line, Some(1), "{slow:?}");
+        let stopped = super::at_rest_problem(&loaded, super::Refusal::Budget);
+        assert!(
+            stopped.message.contains("100 ms its checks at load have"),
+            "{stopped:?}"
+        );
+        let _ = std::fs::remove_dir_all(place);
     }
 
     /// **`sol.present`'s names accumulate until a reload**: a second genie

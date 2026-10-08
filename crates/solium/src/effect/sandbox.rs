@@ -48,11 +48,8 @@ impl Budget {
         time: Duration::from_millis(100),
         memory: 16 << 20,
     };
-    /// A per-frame `mesh` call.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Task 28's grids call mesh once a pass")
-    )]
+    /// A per-frame `mesh` call, which the fastest of the checks at load
+    /// must fit too (`geometry::tests::a_mesh_too_slow_for_a_frame_is_refused_at_load`).
     pub(crate) const MESH: Duration = Duration::from_millis(2);
 }
 
@@ -280,9 +277,10 @@ impl Sandbox {
     /// Call the effect's `mesh` under `limit` with the reused `t` and `out`
     /// (made once, kept in the registry), and read `out` back. `fill` writes
     /// this call's fields into `t`. A call once a pass has
-    /// [`Budget::MESH`], and the checks at load the load budget, since a
-    /// version refused there stays refused until a reload, where a stop once
-    /// a pass is rebuilt after the frame (Ruling 4). `out` is emptied before
+    /// [`Budget::MESH`], and the checks at load share one load budget, since
+    /// a version refused there stays refused until a reload, where a stop
+    /// once a pass is rebuilt after the frame (Ruling 4;
+    /// `geometry::tests::the_checks_at_load_share_one_budget`). `out` is emptied before
     /// each call, so a short write after a full one is short
     /// (`geometry::tests::the_out_table_is_cleared_between_calls`), and
     /// nothing is sized by the grid beyond what a state can hold, so a grid

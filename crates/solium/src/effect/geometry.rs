@@ -10,7 +10,7 @@
 //! and a file is held at load to drawing the window where it is at progress
 //! 0 (`tests::a_geometry_file_that_moves_the_window_at_progress_zero_is_refused_at_load`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use solium_effects::spec::{GridSpec, Value};
 use solium_effects::{Axis, Rect};
@@ -38,6 +38,11 @@ pub(crate) enum Refusal {
     TooBig,
     /// At progress 0 the window is not where it is.
     MovesAtRest,
+    /// At load, the fastest of the checks' calls took `took`, more than a
+    /// frame gives a `mesh` ([`Budget::MESH`]).
+    Slow {
+        took: Duration,
+    },
 }
 
 /// What one `mesh` call is told.
@@ -176,15 +181,26 @@ fn checked(
 /// The load-time contract: at progress 0 the file draws the window exactly
 /// where it is, on all four axes and in every direction (+1 arriving, −1
 /// leaving, 0 resizing), within 1e-9; at progress 1 it writes a valid grid.
-/// Under the load budget, as every call at load is (Ruling 4).
 /// `tests::a_geometry_file_that_moves_the_window_at_progress_zero_is_refused_at_load`,
 /// `tests::a_file_that_moves_the_window_arriving_is_refused_at_load`.
+///
+/// Its 24 calls share one load budget (Ruling 4's 100 ms for a load-time
+/// call), so a load holds the thread no longer than one such call
+/// (`tests::the_checks_at_load_share_one_budget`); and a version whose
+/// fastest call is longer than a frame gives a `mesh` is refused, since
+/// every frame would stop it. The fastest, because one call is slow when
+/// the machine is busy, and 24 are slow only when the file is
+/// (`tests::a_mesh_too_slow_for_a_frame_is_refused_at_load`).
 pub(crate) fn at_rest(
     sandbox: &Sandbox,
     grid: GridSpec,
     params: &[(String, Value)],
 ) -> Result<(), Refusal> {
     let from = Rect::new(100.0, 100.0, 400.0, 300.0);
+    let mut clock = Checks {
+        deadline: Instant::now() + Budget::LOAD.time,
+        fastest: None,
+    };
     for (_, axis) in Axis::all() {
         let (cols, rows) = turned(grid, axis);
         for direction in [1.0, -1.0, 0.0] {
@@ -201,7 +217,7 @@ pub(crate) fn at_rest(
                 scale: 1.0,
                 params,
             };
-            let points = checked(sandbox, &ask, cols, rows, Budget::LOAD.time)?;
+            let points = clock.call(sandbox, &ask, cols, rows)?;
             let mut at = points.as_chunks::<2>().0.iter();
             for r in 0..=rows {
                 for c in 0..=cols {
@@ -219,10 +235,52 @@ pub(crate) fn at_rest(
             }
             ask.progress = 1.0;
             ask.clamped = 1.0;
-            checked(sandbox, &ask, cols, rows, Budget::LOAD.time)?;
+            clock.call(sandbox, &ask, cols, rows)?;
         }
     }
-    Ok(())
+    clock.slow().map_or(Ok(()), Err)
+}
+
+/// The clock of [`at_rest`]'s calls: the one deadline they share, and the
+/// fastest of them so far.
+#[derive(Debug)]
+struct Checks {
+    deadline: Instant,
+    fastest: Option<Duration>,
+}
+
+impl Checks {
+    /// One call under what is left of the deadline, timed. A call the
+    /// deadline stops is refused as too slow for a frame when every call
+    /// before it was, and as stopped otherwise
+    /// (`tests::the_checks_at_load_share_one_budget`).
+    fn call(
+        &mut self,
+        sandbox: &Sandbox,
+        ask: &Ask<'_>,
+        cols: u32,
+        rows: u32,
+    ) -> Result<Vec<f64>, Refusal> {
+        let started = Instant::now();
+        let left = self.deadline.saturating_duration_since(started);
+        if left.is_zero() {
+            return Err(self.slow().unwrap_or(Refusal::Budget));
+        }
+        let result = checked(sandbox, ask, cols, rows, left);
+        if matches!(result, Err(Refusal::Budget)) {
+            return Err(self.slow().unwrap_or(Refusal::Budget));
+        }
+        let took = started.elapsed();
+        self.fastest = Some(self.fastest.map_or(took, |fastest| fastest.min(took)));
+        result
+    }
+
+    /// Refused as too slow for a frame, if the fastest call was.
+    fn slow(&self) -> Option<Refusal> {
+        self.fastest
+            .filter(|&took| took > Budget::MESH)
+            .map(|took| Refusal::Slow { took })
+    }
 }
 
 /// A grid's columns and rows for an axis: a turning grid runs `along` the
@@ -553,4 +611,72 @@ pub(crate) mod tests {
         );
         let _ = std::fs::remove_dir_all(place);
     }
+
+    /// A grid of one cell, as the checks at load are given it.
+    const ONE: solium_effects::spec::GridSpec =
+        solium_effects::spec::GridSpec::Fixed { cols: 1, rows: 1 };
+
+    /// A flat file whose `mesh` first calls `wait(ms)`, a Rust function
+    /// that sleeps: a call that takes as long as a test wants, on any
+    /// machine.
+    fn waiting(name: &str, ms: u64) -> (Sandbox, std::path::PathBuf) {
+        let lua = format!(
+            "return {{ api = 1, grid = {{ 1, 1 }}, mesh = function(t, cols, rows, out)
+            wait({ms})
+            local n = 0 for r = 0, rows do for c = 0, cols do local u, v = sol_grid(t, c, r)
+            out[n + 1], out[n + 2], n = t.from.x + u * t.from.w, t.from.y + v * t.from.h, n + 2 end end end }}"
+        );
+        let place = scratch(&format!("geometry-{name}"));
+        let dir = folder(&place, name, &lua, &[]);
+        let mut sandbox = Sandbox::new(name, &dir.join("effect.lua")).expect("a sandbox");
+        let wait = sandbox
+            .lua()
+            .create_function(|_, ms: u64| {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                Ok(())
+            })
+            .expect("a function");
+        sandbox.lua().globals().set("wait", wait).expect("set");
+        sandbox.load_effect().expect("loads");
+        (sandbox, place)
+    }
+
+    /// **A mesh too slow for a frame is refused at load**: every frame would
+    /// stop it, and Ruling 4's rebuild would then load the folder again
+    /// after each one, with nothing on the overlay. A call of 3 ms is past
+    /// the 2 ms a frame gives.
+    #[test]
+    fn a_mesh_too_slow_for_a_frame_is_refused_at_load() {
+        let (sandbox, place) = waiting("slow", 3);
+        match at_rest(&sandbox, ONE, &[]) {
+            Err(Refusal::Slow { took }) => {
+                assert!(took >= std::time::Duration::from_millis(3), "{took:?}");
+            }
+            other => panic!("a 3 ms mesh was not refused as slow: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **The checks at load share one budget**: 24 calls of 20 ms each are
+    /// stopped at the load budget's 100 ms, not run for 480, so a load holds
+    /// the compositor's thread no longer than one load-time call; and since
+    /// every call before the stop was too slow for a frame, that is the
+    /// refusal.
+    #[test]
+    fn the_checks_at_load_share_one_budget() {
+        let (sandbox, place) = waiting("slower", 20);
+        let started = std::time::Instant::now();
+        let refused = at_rest(&sandbox, ONE, &[]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(refused, Err(Refusal::Slow { took }) if took >= std::time::Duration::from_millis(20)),
+            "{refused:?}"
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
 }
