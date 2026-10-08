@@ -5,8 +5,9 @@
 //! A call is told `t`, one table per effect state reused every call, which
 //! carries every param beside the engine's fields ([`super::sandbox`]'s
 //! `reused`): `tests::every_param_reaches_t`. What it wrote is refused when
-//! it is not a whole grid of finite numbers within four monitors of the
-//! pane's (`tests::a_mesh_that_writes_a_nan_or_too_few_points_or_too_far_is_refused`),
+//! it is not a whole grid of finite numbers inside a box four monitors wide
+//! and high around the pane's
+//! (`tests::a_mesh_that_writes_a_nan_or_too_few_points_or_too_far_is_refused`),
 //! and a file is held at load to drawing the window where it is at progress
 //! 0 (`tests::a_geometry_file_that_moves_the_window_at_progress_zero_is_refused_at_load`).
 
@@ -34,7 +35,8 @@ pub(crate) enum Refusal {
         got: usize,
     },
     NotFinite,
-    /// A point past four monitors' width or height around the pane's.
+    /// A point outside the box four monitors wide and high centred on the
+    /// pane's monitor.
     TooBig,
     /// At progress 0 the window is not where it is.
     MovesAtRest,
@@ -167,7 +169,9 @@ fn checked(
     if points.iter().any(|point| !point.is_finite()) {
         return Err(Refusal::NotFinite);
     }
-    // Four monitors' width and height around the pane's monitor.
+    // A box four monitors wide and high centred on the pane's monitor, one
+    // and a half of it beyond each edge:
+    // `tests::the_box_is_four_monitors_wide_and_high_around_the_panes_monitor`.
     let (mx, my, mw, mh) = (ask.monitor.x, ask.monitor.y, ask.monitor.w, ask.monitor.h);
     let inside = points.as_chunks::<2>().0.iter().all(|&[x, y]| {
         x >= mx - 1.5 * mw && x <= mx + 2.5 * mw && y >= my - 1.5 * mh && y <= my + 2.5 * mh
@@ -731,4 +735,42 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(place);
     }
 
+    /// **The box is four monitors wide and four high, centred on the pane's
+    /// monitor**: one and a half of it beyond each of its edges, on a
+    /// monitor away from the origin.
+    #[test]
+    fn the_box_is_four_monitors_wide_and_high_around_the_panes_monitor() {
+        let (sandbox, place) = loaded(
+            "edges",
+            "px, py = 0, 0 return { api = 1, grid = { 1, 1 }, mesh = function(t, cols, rows, out)
+                for i = 1, 8, 2 do out[i], out[i + 1] = px, py end end }",
+        );
+        let asked = Ask {
+            monitor: Rect::new(1920.0, 100.0, 2560.0, 1440.0),
+            ..ask()
+        };
+        let (left, right, top, bottom) = (-1920.0, 8320.0, -2060.0, 3700.0);
+        let (x, y) = (3200.0, 820.0);
+        for (px, py, inside) in [
+            (left, y, true),
+            (left - 1.0, y, false),
+            (right, y, true),
+            (right + 1.0, y, false),
+            (x, top, true),
+            (x, top - 1.0, false),
+            (x, bottom, true),
+            (x, bottom + 1.0, false),
+        ] {
+            let globals = sandbox.lua().globals();
+            globals.set("px", px).expect("set");
+            globals.set("py", py).expect("set");
+            let got = mesh(&sandbox, &asked, 1, 1);
+            if inside {
+                assert!(got.is_ok(), "({px}, {py}) is inside: {got:?}");
+            } else {
+                assert_eq!(got, Err(Refusal::TooBig), "({px}, {py}) is outside");
+            }
+        }
+        let _ = std::fs::remove_dir_all(place);
+    }
 }
