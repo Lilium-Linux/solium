@@ -291,12 +291,39 @@ impl Checks {
 }
 
 /// A grid's columns and rows for an axis: a turning grid runs `along` the
-/// sweep, as `Deform::segments` does. `tests::the_grid_turns_with_the_axis` (Task 27).
+/// sweep, as `Deform::segments` does. `tests::the_grid_turns_with_the_axis`.
 pub(crate) fn turned(grid: GridSpec, axis: Axis) -> (u32, u32) {
     match grid {
         GridSpec::Fixed { cols, rows } => (cols.max(1), rows.max(1)),
         GridSpec::Turning { along, across } if axis.horizontal() => (along.max(1), across.max(1)),
         GridSpec::Turning { along, across } => (across.max(1), along.max(1)),
+    }
+}
+
+/// The side of `from` that `to`'s centre lies on, for `axis = "auto"`,
+/// picked once when a flight starts: the larger of the two offsets, each
+/// over the window's half-size; vertical on a tie; `down` when the target's
+/// centre is inside. `tests::auto_picks_the_side_the_target_lies_on`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task 28's sol.present resolves auto through it")
+)]
+pub(crate) fn auto_axis(from: Rect, to: Rect) -> Axis {
+    let (cx, cy) = (from.x + from.w / 2.0, from.y + from.h / 2.0);
+    let (tx, ty) = (to.x + to.w / 2.0, to.y + to.h / 2.0);
+    let (dx, dy) = (
+        (tx - cx) / (from.w / 2.0).max(1.0),
+        (ty - cy) / (from.h / 2.0).max(1.0),
+    );
+    if dx.abs() <= 1.0 && dy.abs() <= 1.0 {
+        return Axis::Down;
+    }
+    if dy.abs() >= dx.abs() {
+        if dy >= 0.0 { Axis::Down } else { Axis::Up }
+    } else if dx > 0.0 {
+        Axis::Right
+    } else {
+        Axis::Left
     }
 }
 
@@ -772,5 +799,64 @@ pub(crate) mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **`auto` picks the side the target lies on**: below is down, above is
+    /// up, right is right, left is left; a target inside, down; a tie, the
+    /// vertical side.
+    #[test]
+    fn auto_picks_the_side_the_target_lies_on() {
+        let window = Rect::new(100.0, 100.0, 400.0, 200.0);
+        let at = |x: f64, y: f64| super::auto_axis(window, Rect::new(x, y, 10.0, 10.0));
+        assert_eq!(at(295.0, 900.0), Axis::Down);
+        assert_eq!(at(295.0, -500.0), Axis::Up);
+        assert_eq!(at(1500.0, 195.0), Axis::Right);
+        assert_eq!(at(-900.0, 195.0), Axis::Left);
+        assert_eq!(at(295.0, 195.0), Axis::Down, "inside");
+        assert_eq!(
+            at(495.0, 295.0),
+            Axis::Down,
+            "on the diagonal, the vertical side"
+        );
+        // The corner above is still inside; past it, on the same diagonal,
+        // the tie itself: below and right is down, above and left is up.
+        assert_eq!(
+            at(695.0, 395.0),
+            Axis::Down,
+            "past the corner on the diagonal, below"
+        );
+        assert_eq!(
+            at(-105.0, -5.0),
+            Axis::Up,
+            "past the corner on the diagonal, above"
+        );
+    }
+
+    /// **The grid turns with the axis** as `Deform::segments` does; a fixed
+    /// grid does not.
+    #[test]
+    fn the_grid_turns_with_the_axis() {
+        use solium_effects::spec::GridSpec;
+        for (_, axis) in Axis::all() {
+            let rust = solium_effects::Deform::Genie {
+                progress: 1.0,
+                spread: 1.0,
+                axis,
+            };
+            assert_eq!(
+                super::turned(
+                    GridSpec::Turning {
+                        along: 48,
+                        across: 8
+                    },
+                    axis
+                ),
+                rust.segments()
+            );
+            assert_eq!(
+                super::turned(GridSpec::Fixed { cols: 1, rows: 1 }, axis),
+                (1, 1)
+            );
+        }
     }
 }
