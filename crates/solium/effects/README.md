@@ -288,7 +288,10 @@ Each effect runs in a Lua of its own, apart from your configuration and from
 every other effect, with `math`, `table` and `string` and the base functions
 that reach nothing outside it. There is no `sol`, `io`, `os`, `require`,
 `load`, `loadfile` or `dofile`, no `pcall` or `xpcall`, no `collectgarbage`
-and no `string.dump`. `print` writes a debug line to Solium's log, naming the
+and no `string.dump`, and no patterns: `string.find`, `string.match`,
+`string.gmatch` and `string.gsub` are not there, because matching one runs
+inside a single call that nothing can stop, and some patterns take longer
+than any frame. `print` writes a debug line to Solium's log, naming the
 effect. A metatable may not have a `__gc` finaliser, because a finaliser runs
 where nothing can stop it. Two functions of Solium's are there before your
 file runs: `sol_phase(u, v, axis)`, how far through a sweep along `axis`
@@ -297,11 +300,14 @@ window is, 0 leading and 1 following; and `sol_grid(t, c, r)`, the window's
 `(u, v)` at point `(c, r)` of a `mesh`'s grid ([below](#writing-a-mesh)).
 
 Every call into an effect, running `effect.lua` or a function of its params,
-has 100 ms, a `mesh` call 2 ms, and its Lua 16 MiB. A call runs at full
-speed, with nothing counting its instructions, and one that runs longer is
-stopped where it is, as one that holds more is. An effect stopped by the
-clock runs nothing more in that Lua: after the frame Solium loads it again
-from its folder, if the folder has not changed since it was loaded, and
+has 100 ms, a `mesh` call in a frame 2 ms, and the checks a `mesh` is put
+through when it loads ([below](#writing-a-mesh)) 100 ms between them; its
+Lua has 16 MiB. A call runs at full speed, with nothing counting its
+instructions. One that runs longer is stopped at its next Lua instruction,
+so a call into the `string` or `table` library runs to its end first; one
+that asks for more memory is stopped there. An effect stopped by the clock
+runs nothing more in that Lua: after the frame Solium loads it again from
+its folder, if the folder has not changed since it was loaded, and
 otherwise at the next reload. A Lua error is reported at its file and line.
 
 ## Writing a `.frag`
@@ -383,22 +389,25 @@ given as `along` and `across` runs `along` the way the window is pulled.
 | `t.from`, `t.to` | the window's rectangle, and the one it is pulled toward (its own when there is none), each `{ x, y, w, h }` |
 | `t.monitor` | the window's monitor's rectangle |
 | `t.part` | the part of the window's unit square the grid covers, `{ u0, v0, u1, v1 }`, which can reach past it for a shadow or a popup; `sol_grid` reads it |
-| `t.seed`, `t.scale` | a random number fixed for the effect; the monitor's scale |
+| `t.seed`, `t.scale` | a number in [0, 1) fixed for one transition; the monitor's scale |
 | `t.cols`, `t.rows` | the grid's size, as the call is given it |
 | `t.<param>` | each param: a number, a boolean, a table of four numbers, or a word as a string |
 
 `t` and `out` are the same two tables at every call, so a frame makes no
 garbage, and `out` is emptied before each. What `mesh` wrote is checked
 before a point of it is drawn: the right count of numbers, every one
-finite, and none further than four monitors' width or height from the
-window's monitor. A grid that fails, a Lua error, or a call its 2 ms
-stopped is refused, and the window is not drawn through it.
+finite, and every point inside a box four monitors wide and four high,
+centred on the window's monitor (one and a half monitors beyond each of its
+edges). A grid that fails, a Lua error, or a call its 2 ms stopped is
+refused, and the window is not drawn through it.
 
 When the effect loads, `mesh` is called at progress 0 and 1, on all four
 axes, arriving, leaving and resizing, and at progress 0 it must put every
 point exactly where the window is, within 10⁻⁹ of a pixel: an effect starts
-and ends with the window at rest. One that does not is refused, and named
-on the overlay and by `solium --check` at the line its `mesh` is on.
+and ends with the window at rest. These 24 calls have 100 ms between them,
+and the fastest must take no more than the 2 ms a frame gives, or every
+frame would stop it. One that fails any of this is refused, and named on
+the overlay and by `solium --check` at the line its `mesh` is on.
 Geometry effects are loaded and checked; no configuration plays one yet.
 
 ## The shipped folders

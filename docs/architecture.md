@@ -417,12 +417,16 @@ assigns planes from, and direct scanout stays
 A geometry effect's `mesh` is Lua called once a pass (`effect::geometry`),
 on the effect's own sandbox, with one `t` and one `out` kept in its registry
 and reused every call, so a pass allocates nothing in Lua; what it wrote is
-checked (the count, every number finite, no point past four monitors around
-the pane's) before a vertex of it is drawn. At load the file is called at
-progress 0 and 1, on every axis and in every direction, and refused unless
-it draws the window exactly where it is at rest, at its `mesh`'s line on the
-overlay and in `--check`. A version with nothing to compile, a geometry file
-alone, is current as soon as it loads.
+checked (the count, every number finite, every point inside a box four
+monitors wide and high centred on the pane's) before a vertex of it is
+drawn. At load the file is called at
+progress 0 and 1, on every axis and in every direction, 24 calls sharing one
+100 ms budget, and refused unless it draws the window exactly where it is at
+rest and the fastest of those calls fits the 2 ms a frame gives (the
+fastest, since one call is slow when the machine is busy and all of them
+only when the file is), at its `mesh`'s line on the overlay and in
+`--check`. A version with nothing to compile, a geometry file alone, is
+current as soon as it loads.
 
 Every call into an effect's Lua runs against a deadline, and none of them
 under a count hook: Lua 5.4 takes its slow path on every instruction while
@@ -437,7 +441,13 @@ back to a count hook set for it alone. A call stopped either way poisons its
 state, since mlua 0.12.1 leaves the error in the stopped frame's locals, and
 `Solium::settle` loads it again from its unchanged folder after the frame
 (`Host::revive`), keeping its programs and its id, so a stop caused by a
-busy machine costs the panes of one pass and not the rest of the session.
+busy machine costs the panes of one pass and not the rest of the session. A
+folder changed since it loaded, or a rebuild that fails (said on the
+overlay), is not tried again until a reload reads it. The watchdog sends a
+call past its due its signal again every budget until it returns, so a stop
+whose hook a stale signal's took off is not lost. The clock stops Lua
+between instructions, never inside one call into Lua's own library, so the
+sandbox has no pattern functions, whose backtracking can outlast any frame.
 
 ### The arrangements are a crate too
 
