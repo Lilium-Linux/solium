@@ -47,6 +47,7 @@
   .row { display:flex; gap:8px; align-items:center; }
   .row label { color:var(--dim); }
   #status { color:var(--dim); min-height:3em; }
+  .note { color:var(--dim); margin:0; }
   #config { width:100%; background:#0a0b0e; color:var(--text); resize:vertical;
             border:1px solid var(--line); border-radius:3px; padding:8px;
             font:11px/1.5 monospace; }
@@ -56,6 +57,8 @@
 <canvas id="stage" width="800" height="450"></canvas>
 
 <aside>
+  <p class="note">This is the Rust genie, <code>Deform::Genie</code>: the oracle the
+    shipped <code>effects/genie/</code> folder is held to, point for point, within 1e-9.</p>
   <div class="field"><label for="effect">effect</label><select id="effect"></select></div>
   <div class="field"><label for="axis">axis</label><select id="axis"></select></div>
 

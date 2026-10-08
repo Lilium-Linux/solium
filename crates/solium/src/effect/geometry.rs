@@ -801,6 +801,152 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(place);
     }
 
+    /// The shipped `effects/genie/`, loaded as the compositor loads it.
+    fn shipped_genie() -> Sandbox {
+        let file = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/effects/genie/effect.lua"
+        ));
+        let mut sandbox = Sandbox::new("genie", file).expect("a sandbox");
+        sandbox.load_effect().expect("the shipped genie loads");
+        sandbox
+    }
+
+    /// **The genie folder matches `Deform::Genie` on all four axes**, grid
+    /// included, within 1e-9, the late start of the rows furthest from the
+    /// target included. Every number handed to Lua is the `f32` Rust
+    /// computes from, widened (Ruling 19).
+    #[test]
+    fn the_genie_folder_matches_deform_genie_on_all_four_axes() {
+        let genie = shipped_genie();
+        let (from, to) = (
+            Rect::new(100.0, 50.0, 800.0, 600.0),
+            Rect::new(600.0, 1000.0, 64.0, 32.0),
+        );
+        for (_, axis) in Axis::all() {
+            for spread in [0.0_f32, 0.5, 1.4, 4.0] {
+                for progress in [0.0_f32, 0.13, 0.37, 0.5, 0.99, 1.0, 1.1, -0.2] {
+                    let rust = solium_effects::Deform::Genie {
+                        progress,
+                        spread,
+                        axis,
+                    };
+                    let (cols, rows) = super::turned(
+                        solium_effects::spec::GridSpec::Turning {
+                            along: 48,
+                            across: 8,
+                        },
+                        axis,
+                    );
+                    assert_eq!(
+                        (cols, rows),
+                        rust.segments(),
+                        "the turned grid is Deform::segments"
+                    );
+                    let params = [(
+                        "spread".to_owned(),
+                        solium_effects::spec::Value::Number(f64::from(spread)),
+                    )];
+                    let ask = Ask {
+                        progress: f64::from(progress),
+                        clamped: f64::from(progress).clamp(0.0, 1.0),
+                        direction: -1.0,
+                        axis,
+                        from,
+                        to: Some(to),
+                        part: UnitRect::WHOLE,
+                        seed: 0.0,
+                        monitor: Rect::new(0.0, 0.0, 2560.0, 1440.0),
+                        scale: 1.0,
+                        params: &params,
+                    };
+                    let lua = mesh(&genie, &ask, cols, rows).expect("a grid");
+                    let mut index = 0;
+                    for r in 0..=rows {
+                        for c in 0..=cols {
+                            let (x, y) = rust.place(
+                                from,
+                                to,
+                                f64::from(c) / f64::from(cols),
+                                f64::from(r) / f64::from(rows),
+                            );
+                            assert!(
+                                (lua[index] - x).abs() <= 1e-9
+                                    && (lua[index + 1] - y).abs() <= 1e-9,
+                                "{axis:?} spread {spread} progress {progress} at ({c}, {r}): lua ({}, {}) rust ({x}, {y})",
+                                lua[index],
+                                lua[index + 1]
+                            );
+                            index += 2;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Past the window**: a part of (−0.1, −0.1)–(1.1, 1.1) and one of
+    /// (0.8, 0.8)–(1.4, 1.3) land where `mesh_part`'s Rust genie puts them.
+    #[test]
+    fn the_genie_folder_matches_past_the_window() {
+        let genie = shipped_genie();
+        let (from, to) = (
+            Rect::new(100.0, 50.0, 800.0, 600.0),
+            Rect::new(600.0, 1000.0, 64.0, 32.0),
+        );
+        for part in [
+            UnitRect {
+                u0: -0.1,
+                v0: -0.1,
+                u1: 1.1,
+                v1: 1.1,
+            },
+            UnitRect {
+                u0: 0.8,
+                v0: 0.8,
+                u1: 1.4,
+                v1: 1.3,
+            },
+        ] {
+            let rust = solium_effects::Deform::Genie {
+                progress: 0.37,
+                spread: 1.4,
+                axis: Axis::Down,
+            };
+            let params = [(
+                "spread".to_owned(),
+                solium_effects::spec::Value::Number(f64::from(1.4_f32)),
+            )];
+            let ask = Ask {
+                progress: f64::from(0.37_f32),
+                clamped: f64::from(0.37_f32),
+                direction: -1.0,
+                axis: Axis::Down,
+                from,
+                to: Some(to),
+                part,
+                seed: 0.0,
+                monitor: Rect::new(0.0, 0.0, 2560.0, 1440.0),
+                scale: 1.0,
+                params: &params,
+            };
+            let lua = mesh(&genie, &ask, 8, 48).expect("a grid");
+            let mut index = 0;
+            for r in 0..=48_u32 {
+                for c in 0..=8_u32 {
+                    let u = part.u0 + (part.u1 - part.u0) * (f64::from(c) / 8.0);
+                    let v = part.v0 + (part.v1 - part.v0) * (f64::from(r) / 48.0);
+                    let (x, y) = rust.place(from, to, u, v);
+                    assert!(
+                        (lua[index] - x).abs() <= 1e-9 && (lua[index + 1] - y).abs() <= 1e-9,
+                        "part {part:?} at ({c}, {r})"
+                    );
+                    index += 2;
+                }
+            }
+        }
+    }
+
     /// **`auto` picks the side the target lies on**: below is down, above is
     /// up, right is right, left is left; a target inside, down; a tie, the
     /// vertical side.

@@ -410,8 +410,15 @@ frame would stop it. One that fails any of this is refused, and named on
 the overlay and by `solium --check` at the line its `mesh` is on.
 Geometry effects are loaded and checked; no configuration plays one yet.
 
+The shipped [`genie`](genie/README.md) is a whole one in a page of Lua: it
+works out how far each row has gone, once (each column, when the window is
+pulled sideways), then places every point from the window's own `(u, v)`,
+so a `t.part` reaching past the window bends whatever lies beyond it with
+the window.
+
 ## The shipped folders
 
 | Folder | What it is |
 |---|---|
 | [`blur`](blur/README.md) | a dual Kawase blur, `passes` halvings and as many doublings back at `offset` texels; its input is the backdrop, so until xray a rule gives it `source = "self"` |
+| [`genie`](genie/README.md) | the window pulled into its target like a sheet through a letterbox, the edge nearest the target first, `spread` drawing the tail out behind it; a geometry effect, held to Solium's Rust genie within 10⁻⁹ |
