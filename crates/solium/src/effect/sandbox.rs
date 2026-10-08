@@ -1,6 +1,7 @@
 //! One locked-down Lua per effect (Ruling 4).
 //!
-//! `math`, `table` and `string`, and nothing that reaches a file, the
+//! `math`, `table` and `string` (without its pattern functions:
+//! `tests::a_pattern_cannot_run`), and nothing that reaches a file, the
 //! configuration, the compositor or another effect:
 //! `tests::effect_lua_reaches_no_sol_io_os_package_or_files`. `pcall` and
 //! `xpcall` go with the file functions, because each would catch the
@@ -483,6 +484,12 @@ fn harden(lua: &Lua, effect: &str, file: &Path) -> mlua::Result<()> {
     }
     let string: Table = globals.raw_get("string")?;
     string.raw_set("dump", LuaValue::Nil)?;
+    // A pattern can backtrack for longer than any frame inside one library
+    // call, where no clock can stop it, and no effect needs one
+    // (`tests::a_pattern_cannot_run`).
+    for name in ["find", "match", "gmatch", "gsub"] {
+        string.raw_set(name, LuaValue::Nil)?;
+    }
     // Lua 5.4 runs `__gc` in a GC step a Rust allocation triggers and in
     // `lua_close`, outside any hooked call, where no budget stops a loop; and
     // it marks a table for finalisation only if `__gc` is in its metatable
@@ -1185,6 +1192,30 @@ mod tests {
         "#;
         let (mut sandbox, place) = sandbox("reach", probe);
         sandbox.load_effect().expect("nothing reachable");
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A pattern cannot run**: Lua matches one inside a single library
+    /// call, where no clock can stop it, and a pattern can backtrack for
+    /// longer than any frame (this one, 2^22 ways, ran 219 ms against a
+    /// 2 ms budget, and each `a?` more doubles it). `string.find`,
+    /// `match`, `gmatch` and `gsub` are not there, so it fails at once, at
+    /// its line, as a call of nothing.
+    #[test]
+    fn a_pattern_cannot_run() {
+        let lua = "assert(string.match == nil and string.gmatch == nil and string.gsub == nil)
+            local found = string.find(string.rep('a', 22), string.rep('a?', 22) .. string.rep('a', 22))
+            return { api = 1, frag = 'effect.frag' }";
+        let (mut sandbox, place) = sandbox("patterns", lua);
+        let started = Instant::now();
+        let problem = sandbox.load_effect().expect_err("refused");
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(problem.message.contains("'find'"), "{problem:?}");
+        assert_eq!(problem.line, Some(2), "{problem:?}");
         let _ = std::fs::remove_dir_all(place);
     }
 
