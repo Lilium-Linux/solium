@@ -808,6 +808,7 @@ mod tests {
                     format: Format::Rgba16f,
                     uses: Vec::new(),
                     input: None,
+                    per_part: false,
                 }],
                 inputs: vec!["self".to_owned()],
                 params: Vec::new(),
@@ -883,6 +884,7 @@ mod tests {
                 format: Format::Rgba8,
                 uses: uses.iter().map(|each| (*each).to_owned()).collect(),
                 input: None,
+                per_part: false,
             }],
         };
         let mut lib = |_: &str, _: &[(String, Value)]| -> Result<Binding, String> {
@@ -899,6 +901,7 @@ mod tests {
                         format: Format::Rgba8,
                         uses: vec!["p".to_owned(), "q".to_owned(), "o".to_owned()],
                         input: None,
+                        per_part: false,
                     },
                 ],
                 inputs: vec!["self".to_owned()],

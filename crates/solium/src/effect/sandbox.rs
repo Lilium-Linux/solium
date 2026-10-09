@@ -415,6 +415,7 @@ impl Sandbox {
                     format: Format::Rgba8,
                     uses: Vec::new(),
                     input: None,
+                    per_part: false,
                 })
                 .collect());
         }
@@ -928,7 +929,7 @@ fn params(value: &LuaValue) -> Result<Vec<(String, ParamSpec)>, String> {
 const KINDS: [&str; 6] = ["pass", "repeat", "save", "get", "use", "state"];
 /// The keys each kind takes besides its list part; a `use` takes the used
 /// effect's params, and `save` and `get` none.
-const PASS_KEYS: [&str; 4] = ["scale", "format", "uses", "input"];
+const PASS_KEYS: [&str; 5] = ["scale", "format", "uses", "input", "per_part"];
 const REPEAT_KEYS: [&str; 2] = ["over", "as"];
 const STATE_KEYS: [&str; 4] = ["format", "scale", "depends", "stages"];
 
@@ -1091,11 +1092,17 @@ fn format_of(named: &[(String, LuaValue)]) -> Result<Format, String> {
     }
 }
 
-/// `{ "pass", "<file>.frag", scale =, format =, uses =, input = }`
-/// (`tests::stages_are_read_and_a_typo_in_one_is_refused`).
+/// `{ "pass", "<file>.frag", scale =, format =, uses =, input =, per_part = }`
+/// (`tests::stages_are_read_and_a_typo_in_one_is_refused`,
+/// `tests::a_pass_may_be_marked_per_part`).
 fn pass(list: &[LuaValue], named: &[(String, LuaValue)]) -> Result<Stage, String> {
     let frag = second("pass", list, "frag")?;
     refuse_other_keys("pass", named, &PASS_KEYS)?;
+    let per_part = match key(named, "per_part") {
+        None => false,
+        Some(LuaValue::Boolean(yes)) => *yes,
+        Some(_) => return Err("`per_part` is true or false".to_owned()),
+    };
     Ok(Stage::Pass {
         frag,
         scale: scale_of(named)?,
@@ -1107,6 +1114,7 @@ fn pass(list: &[LuaValue], named: &[(String, LuaValue)]) -> Result<Stage, String
         input: key(named, "input")
             .map(|value| word(value, "input"))
             .transpose()?,
+        per_part,
     })
 }
 
@@ -1713,6 +1721,45 @@ mod tests {
             matches!(&stages[1], Stage::State { body, .. } if body.len() == 1),
             "{stages:?}"
         );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A pass may be marked `per_part = true`**, so it runs for each part
+    /// alone whatever its `.frag` reads (Ruling F30); unmarked, it is not,
+    /// and `per_part` is true or false.
+    #[test]
+    fn a_pass_may_be_marked_per_part() {
+        let (mut reader, place) = sandbox(
+            "per-part",
+            "return { api = 1, inputs = { 'backdrop' },
+                stages = { { 'pass', 'a.frag', per_part = true }, { 'pass', 'b.frag' } } }",
+        );
+        let spec = reader.load_effect().expect("loads");
+        let stages = reader.stages(&spec, &[]).expect("read");
+        assert!(
+            matches!(&stages[0], Stage::Pass { per_part: true, .. }),
+            "{stages:?}"
+        );
+        assert!(
+            matches!(
+                &stages[1],
+                Stage::Pass {
+                    per_part: false,
+                    ..
+                }
+            ),
+            "{stages:?}"
+        );
+        let _ = std::fs::remove_dir_all(place);
+        let (mut number, place) = sandbox(
+            "per-part-number",
+            "return { api = 1, stages = { { 'pass', 'a.frag', per_part = 1 } } }",
+        );
+        let spec = number
+            .load_effect()
+            .expect("loads: stages are read at bind");
+        let problem = number.stages(&spec, &[]).expect_err("refused");
+        assert!(problem.message.contains("per_part"), "{problem:?}");
         let _ = std::fs::remove_dir_all(place);
     }
 

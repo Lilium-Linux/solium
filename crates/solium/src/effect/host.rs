@@ -1001,10 +1001,12 @@ impl<P: Clone> Host<P> {
             return Err(errors);
         }
         let mut keys = Vec::with_capacity(asks.len());
+        let mut own = Vec::with_capacity(asks.len());
         for (effect, frag, sources) in asks {
+            own.push(glsl::reads_any(&sources.user, &glsl::PER_PART));
             keys.push(self.request(&effect, &frag, glsl::PASS_VERTEX, sources));
         }
-        let mut at = keys.iter();
+        let mut at = keys.iter().zip(&own);
         for step in plans.iter_mut().flat_map(|plan| {
             plan.steps.iter_mut().chain(
                 plan.states
@@ -1012,8 +1014,12 @@ impl<P: Clone> Host<P> {
                     .flat_map(|state| state.steps.iter_mut()),
             )
         }) {
-            if let Some(key) = at.next() {
+            if let Some((key, reads_per_part)) = at.next() {
                 step.key = *key;
+                // A step whose `.frag` reads a name only a part has is the
+                // part's own, as one its stage marks is (Ruling F30,
+                // `tests::a_bound_step_knows_whether_it_reads_a_per_part_name`).
+                step.per_part |= *reads_per_part;
             }
         }
         keys.sort_unstable();
@@ -3214,5 +3220,81 @@ pub(crate) mod tests {
             Some(mine)
         );
         let _ = std::fs::remove_dir_all(user);
+    }
+
+    /// Each step's `per_part` in `name`'s configured plan, bound by `host`.
+    fn per_part_of(host: &mut super::Host<u32>, name: &str) -> Vec<bool> {
+        host.bind(name, &[]).expect("binds").plans[0]
+            .steps
+            .iter()
+            .map(|step| step.per_part)
+            .collect()
+    }
+
+    /// **A bound step knows whether it reads a per-part name** (Ruling F30):
+    /// `tint-shape`'s one pass reads `sol_shape`, so it is the part's own;
+    /// none of `kawase`'s is, nor of `blur-tint`'s (kawase, then tint); and
+    /// a pass its stage marks `per_part = true` is, whatever it reads.
+    #[test]
+    fn a_bound_step_knows_whether_it_reads_a_per_part_name() {
+        let fixtures = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/effects"
+        ));
+        let mut host: super::Host<u32> = super::Host::new(Library::with(None, fixtures.to_owned()));
+        host.want(
+            "rules",
+            [
+                "tint-shape".to_owned(),
+                "kawase".to_owned(),
+                "blur-tint".to_owned(),
+            ],
+        );
+        assert_eq!(per_part_of(&mut host, "tint-shape"), [true]);
+        assert_eq!(per_part_of(&mut host, "kawase"), [false; 6]);
+        assert_eq!(per_part_of(&mut host, "blur-tint"), [false; 7]);
+        let place = scratch("marked-per-part");
+        folder(
+            &place,
+            "marked",
+            "return { api = 1, inputs = { 'backdrop' }, stages = { { 'pass', 'effect.frag', per_part = true } } }",
+            &[("effect.frag", FRAG)],
+        );
+        let mut host = host_with(&place);
+        host.want("rules", ["marked".to_owned()]);
+        assert_eq!(
+            per_part_of(&mut host, "marked"),
+            [true],
+            "marked, reading no per-part name"
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A bound `blur-tint` splits after its blur** (Ruling F30): kawase's
+    /// six passes are the memo, and the tint, the size of what it reads,
+    /// is the suffix reading the last of them as `memo:5`; with
+    /// `Split::Longest` the tint joins the memo and the suffix is empty.
+    #[test]
+    fn a_bound_blur_then_tint_splits_after_its_blur() {
+        use solium_effects::stage::{Feed, Split, memo_name, split_memo};
+        let fixtures = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/effects"
+        ));
+        let mut host: super::Host<u32> = super::Host::new(Library::with(None, fixtures.to_owned()));
+        host.want("rules", ["blur-tint".to_owned()]);
+        let bound = host.bind("blur-tint", &[]).expect("binds");
+        let memo = split_memo(&bound.plans[0], Split::Resize);
+        assert_eq!(memo.prefix.as_ref().map(|p| p.steps.len()), Some(6));
+        let tint: Vec<(&str, &Feed)> = memo
+            .suffix
+            .steps
+            .iter()
+            .map(|step| (step.effect.as_str(), &step.first))
+            .collect();
+        assert_eq!(tint, [("tint", &Feed::Input(memo_name(5)))]);
+        let longest = split_memo(&bound.plans[0], Split::Longest);
+        assert_eq!(longest.prefix.map(|p| p.steps.len()), Some(7));
+        assert!(longest.suffix.steps.is_empty());
     }
 }

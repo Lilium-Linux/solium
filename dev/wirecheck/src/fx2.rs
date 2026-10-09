@@ -243,6 +243,7 @@ fn pass(frag: &str, scale: f64, uses: &[&str]) -> Stage {
         format: Format::Rgba8,
         uses: uses.iter().map(|name| (*name).to_owned()).collect(),
         input: None,
+        per_part: false,
     }
 }
 

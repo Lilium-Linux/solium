@@ -55,6 +55,9 @@ pub enum Stage {
         format: Format,
         uses: Vec<String>,
         input: Option<String>,
+        /// `per_part = true`: never memoised, whatever the frag reads
+        /// (Ruling F30, `tests::a_pass_marked_per_part_stays_in_the_suffix`).
+        per_part: bool,
     },
     /// `body` once for each number in `over`, with `p_<as_name>` set to it
     /// (`tests::repeat_runs_its_stages_n_times_with_p_jump_set`).
@@ -124,6 +127,11 @@ pub struct Step {
     pub uniforms: Vec<(String, Value)>,
     /// The program's content key: 0 until the host sets it at bind (Task 9).
     pub key: u64,
+    /// Whether the pass is the part's own: its stage says `per_part = true`,
+    /// or its `.frag` reads a name only a part has (`glsl::PER_PART`), which
+    /// the host finds at bind, beside `key`. What ends a memo's prefix
+    /// (`tests::a_step_reading_a_per_part_name_ends_the_prefix`).
+    pub per_part: bool,
 }
 
 /// A state's own steps. A `Feed::Step` in them is one of these steps, a
@@ -286,6 +294,258 @@ impl Plan {
             slots.push(slot);
         }
         (slots, held.len())
+    }
+
+    /// Chained content keys: `keys()[k]` covers the first input and steps
+    /// `0..=k` (each one's program, uniforms, size, format and feeds), so two
+    /// plans that begin alike share their keys as far as they agree, and two
+    /// steps with one key draw the same pixels from the same inputs.
+    /// `tests::the_keys_are_chained_so_a_shared_head_has_one_key`.
+    pub fn keys(&self) -> Vec<u64> {
+        let mut last = glsl::content_hash(&[self.first_input.as_bytes()]);
+        self.steps
+            .iter()
+            .map(|step| {
+                let text = format!(
+                    "{last}{:?}",
+                    (
+                        step.key,
+                        &step.uniforms,
+                        &step.size,
+                        step.format,
+                        &step.first,
+                        &step.uses
+                    )
+                );
+                last = glsl::content_hash(&[text.as_bytes()]);
+                last
+            })
+            .collect()
+    }
+
+    /// The whole plan's key: its last chained key, or its first input's
+    /// when it has no step.
+    /// `tests::the_prefix_key_is_its_steps_and_not_the_suffixs`.
+    pub fn key(&self) -> u64 {
+        self.keys()
+            .last()
+            .copied()
+            .unwrap_or_else(|| glsl::content_hash(&[self.first_input.as_bytes()]))
+    }
+
+    /// Steps `0..=last` alone: what a memo of step `last`'s result runs.
+    /// `tests::the_keys_are_chained_so_a_shared_head_has_one_key`.
+    pub fn upto(&self, last: usize) -> Plan {
+        Plan {
+            steps: self
+                .steps
+                .iter()
+                .take(last.saturating_add(1))
+                .cloned()
+                .collect(),
+            states: self.states.clone(),
+            reads: self.reads,
+            first_input: self.first_input.clone(),
+        }
+    }
+}
+
+/// Whether a step writes a target the size of its first input, as a tint
+/// or a colour matrix does.
+/// `tests::a_trailing_same_size_step_stays_per_part`.
+fn same_size(step: &Step) -> bool {
+    match &step.size {
+        Size::Scaled { of, scale } => *of == step.first && (*scale - 1.0).abs() < f64::EPSILON,
+        Size::Like(of) => *of == step.first,
+    }
+}
+
+/// One prefix result the suffix reads (or, with an empty suffix, the
+/// memo's result): its step, its input name there, and its size as a share
+/// of the padded box.
+/// `tests::a_suffix_step_sized_from_the_prefix_is_sized_from_the_padded_box_at_its_scale`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Export {
+    pub step: usize,
+    pub name: String,
+    pub scale: f64,
+}
+
+/// A plan split for the memo (Ruling F30).
+/// `tests::glass_rect_splits_after_its_blur`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Memo {
+    /// The steps that read only the backdrop, run once per monitor and cut.
+    pub prefix: Option<Plan>,
+    /// The rest, run per part, reading the prefix's results as `memo:<k>`.
+    pub suffix: Plan,
+    pub exports: Vec<Export>,
+}
+
+/// How far a memo's prefix runs (`effects.memo.split`, Ruling F30): to its
+/// last step that changes size, as far as it reads only the backdrop, or
+/// not at all.
+/// `tests::the_split_policy_chooses_how_far_the_prefix_runs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Split {
+    #[default]
+    Resize,
+    Longest,
+    Off,
+}
+
+/// A prefix result's input name in the suffix.
+/// `tests::glass_rect_splits_after_its_blur`.
+pub fn memo_name(step: usize) -> String {
+    format!("memo:{step}")
+}
+
+/// Prefix step `k`'s result as the suffix reads it: the input `memo:<k>`,
+/// exported once, at its share of the box.
+/// `tests::glass_rect_splits_after_its_blur`.
+fn export(k: usize, scales: &[f64], exports: &mut Vec<Export>) -> Feed {
+    if !exports.iter().any(|each| each.step == k) {
+        exports.push(Export {
+            step: k,
+            name: memo_name(k),
+            scale: scales.get(k).copied().unwrap_or(1.0),
+        });
+    }
+    Feed::Input(memo_name(k))
+}
+
+/// A suffix step's feed: a prefix step's result is its export, a later
+/// step's moves down by the `len` steps of the prefix, and an input or a
+/// state is itself.
+/// `tests::glass_rect_splits_after_its_blur`.
+fn renumber(feed: &Feed, len: usize, scales: &[f64], exports: &mut Vec<Export>) -> Feed {
+    match feed {
+        Feed::Step(k) if *k < len => export(*k, scales, exports),
+        Feed::Step(k) => Feed::Step(k - len),
+        other => other.clone(),
+    }
+}
+
+/// Split `plan` into the longest run of steps from its start that read only
+/// the backdrop or earlier such steps, read no state, and are no part's own
+/// (`Step::per_part`), cut back to its last step that changes size under
+/// `Split::Resize`, and the rest; under `Split::Off` the whole plan is the
+/// suffix. Pure: it knows no effect.
+/// `tests::the_split_policy_chooses_how_far_the_prefix_runs`,
+/// `tests::a_blur_over_the_backdrop_is_all_prefix_and_its_suffix_is_empty`,
+/// `tests::glass_rect_splits_after_its_blur`,
+/// `tests::a_step_reading_a_per_part_name_ends_the_prefix`,
+/// `tests::a_step_reading_self_or_a_state_ends_the_prefix`,
+/// `tests::a_plan_rebound_to_self_is_never_split`,
+/// `tests::a_trailing_same_size_step_stays_per_part`,
+/// `tests::a_plan_with_no_resizing_step_has_no_prefix`.
+pub fn split_memo(plan: &Plan, split: Split) -> Memo {
+    let whole = || Memo {
+        prefix: None,
+        suffix: plan.clone(),
+        exports: Vec::new(),
+    };
+    if split == Split::Off || plan.first_input != "backdrop" {
+        return whole();
+    }
+    let mut len = 0;
+    for (index, step) in plan.steps.iter().enumerate() {
+        let shared = std::iter::once(&step.first)
+            .chain(step.uses.iter().map(|(_, feed)| feed))
+            .all(|feed| match feed {
+                Feed::Input(name) => name == "backdrop",
+                Feed::Step(k) => *k < index,
+                Feed::State(_) => false,
+            });
+        if !shared || step.per_part {
+            break;
+        }
+        len = index + 1;
+    }
+    // A trailing step the size of what it reads (a tint, a colour matrix)
+    // costs per pixel it writes: per part it covers only the parts, holds no
+    // monitor-sized result per distinct value, and re-runs alone when only
+    // its uniforms move. What is worth sharing ends at the last resize,
+    // unless the configuration asks for the longest prefix
+    // (`tests::a_trailing_same_size_step_stays_per_part`).
+    while split == Split::Resize && len > 0 && plan.steps.get(len - 1).is_some_and(same_size) {
+        len -= 1;
+    }
+    if len == 0 {
+        return whole();
+    }
+    let (shared, rest) = plan.steps.split_at(len);
+    // Each prefix step's size as a share of the box: the product of the
+    // scales from the backdrop to it; a `Like` step is its feed's
+    // (`tests::a_suffix_step_sized_from_the_prefix_is_sized_from_the_padded_box_at_its_scale`).
+    let mut scales: Vec<f64> = Vec::with_capacity(len);
+    for step in shared {
+        let of = |feed: &Feed| match feed {
+            Feed::Step(k) => scales.get(*k).copied().unwrap_or(1.0),
+            Feed::Input(_) | Feed::State(_) => 1.0,
+        };
+        let scale = match &step.size {
+            Size::Scaled { of: feed, scale } => of(feed) * scale,
+            Size::Like(feed) => of(feed),
+        };
+        scales.push(scale);
+    }
+    let share = |k: usize| scales.get(k).copied().unwrap_or(1.0);
+    let backdrop = || Feed::Input("backdrop".to_owned());
+    let mut exports: Vec<Export> = Vec::new();
+    let mut steps = Vec::with_capacity(rest.len());
+    for step in rest {
+        let mut step = step.clone();
+        step.size = match &step.size {
+            Size::Scaled {
+                of: Feed::Step(k),
+                scale,
+            } if *k < len => Size::Scaled {
+                of: backdrop(),
+                scale: share(*k) * scale,
+            },
+            Size::Like(Feed::Step(k)) if *k < len => Size::Scaled {
+                of: backdrop(),
+                scale: share(*k),
+            },
+            Size::Scaled { of, scale } => Size::Scaled {
+                of: renumber(of, len, &scales, &mut exports),
+                scale: *scale,
+            },
+            Size::Like(of) => Size::Like(renumber(of, len, &scales, &mut exports)),
+        };
+        step.first = renumber(&step.first, len, &scales, &mut exports);
+        step.uses = step
+            .uses
+            .iter()
+            .map(|(name, feed)| (name.clone(), renumber(feed, len, &scales, &mut exports)))
+            .collect();
+        steps.push(step);
+    }
+    if steps.is_empty() {
+        export(len - 1, &scales, &mut exports);
+    }
+    let first_input = match steps.first().map(|step| &step.first) {
+        Some(Feed::Input(name)) => name.clone(),
+        _ => plan.first_input.clone(),
+    };
+    Memo {
+        prefix: Some(Plan {
+            steps: shared.to_vec(),
+            states: Vec::new(),
+            reads: Reads {
+                backdrop: true,
+                ..Reads::default()
+            },
+            first_input: "backdrop".to_owned(),
+        }),
+        suffix: Plan {
+            steps,
+            states: plan.states.clone(),
+            reads: plan.reads,
+            first_input,
+        },
+        exports,
     }
 }
 
@@ -550,6 +810,7 @@ impl Flattener<'_> {
                     format,
                     uses,
                     input,
+                    per_part,
                 } => {
                     if self.count >= MOST_STEPS {
                         return Err(format!(
@@ -622,6 +883,7 @@ impl Flattener<'_> {
                         uses: bound,
                         uniforms,
                         key: 0,
+                        per_part: *per_part,
                     });
                     last = Feed::Step(out.len() - 1);
                 }
@@ -804,7 +1066,10 @@ pub fn chain(links: Vec<Plan>) -> Plan {
 
 #[cfg(test)]
 mod tests {
-    use super::{Binding, Depends, Feed, Format, Size, Stage, chain, flatten};
+    use super::{
+        Binding, Depends, Export, Feed, Format, Plan, Reads, Size, Split, Stage, Step, chain,
+        flatten, memo_name, split_memo,
+    };
     use crate::spec::Value;
 
     fn pass(frag: &str, scale: f64) -> Stage {
@@ -814,6 +1079,7 @@ mod tests {
             format: Format::Rgba8,
             uses: Vec::new(),
             input: None,
+            per_part: false,
         }
     }
 
@@ -824,6 +1090,7 @@ mod tests {
             format: Format::Rgba8,
             uses: uses.iter().map(|name| (*name).to_owned()).collect(),
             input: None,
+            per_part: false,
         }
     }
 
@@ -1018,6 +1285,7 @@ mod tests {
                         format: Format::Rgba8,
                         uses: vec!["sharp".to_owned()],
                         input: None,
+                        per_part: false,
                     },
                 ],
                 inputs: vec!["backdrop".to_owned()],
@@ -1057,6 +1325,7 @@ mod tests {
                         format: Format::Rgba8,
                         uses: vec!["field".to_owned()],
                         input: None,
+                        per_part: false,
                     },
                 ],
                 inputs: vec!["self".to_owned()],
@@ -1561,6 +1830,7 @@ mod tests {
                         format: Format::Rgba8,
                         uses: vec!["sharp".to_owned()],
                         input: None,
+                        per_part: false,
                     },
                 ],
                 inputs: vec!["self".to_owned()],
@@ -1613,5 +1883,364 @@ mod tests {
             super::Plan::slots(&steps, &sizes),
             (vec![0, 1, 0, 2, 3, 4, 2], 5)
         );
+    }
+
+    /// A flattened plan from `(frag, first, uses, per_part)`, each step at
+    /// scale 1 unless its frag is `down*` (0.5) or `up*` (like the input of
+    /// the down step it undoes), its key its frag's hash.
+    #[expect(
+        clippy::type_complexity,
+        reason = "each step's four parts, written out where the tests list them"
+    )]
+    fn plan(steps: &[(&str, Feed, &[(&str, Feed)], bool)]) -> Plan {
+        let mut downs: Vec<Feed> = Vec::new();
+        let steps = steps
+            .iter()
+            .map(|(frag, first, uses, per_part)| {
+                let size = if frag.starts_with("down") {
+                    downs.push(first.clone());
+                    Size::Scaled {
+                        of: first.clone(),
+                        scale: 0.5,
+                    }
+                } else if frag.starts_with("up") {
+                    Size::Like(downs.pop().unwrap_or(Feed::Input("backdrop".to_owned())))
+                } else {
+                    Size::Scaled {
+                        of: first.clone(),
+                        scale: 1.0,
+                    }
+                };
+                Step {
+                    effect: "test".to_owned(),
+                    frag: (*frag).to_owned(),
+                    signature: crate::glsl::Signature {
+                        host: crate::glsl::Host::Pass,
+                        params: Vec::new(),
+                        uses: uses.iter().map(|(n, _)| (*n).to_owned()).collect(),
+                        known: Vec::new(),
+                    },
+                    size,
+                    format: Format::Rgba8,
+                    first: first.clone(),
+                    uses: uses
+                        .iter()
+                        .map(|(n, f)| ((*n).to_owned(), f.clone()))
+                        .collect(),
+                    uniforms: Vec::new(),
+                    key: crate::glsl::content_hash(&[frag.as_bytes()]),
+                    per_part: *per_part,
+                }
+            })
+            .collect();
+        Plan {
+            steps,
+            states: Vec::new(),
+            reads: Reads {
+                backdrop: true,
+                ..Reads::default()
+            },
+            first_input: "backdrop".to_owned(),
+        }
+    }
+
+    fn backdrop() -> Feed {
+        Feed::Input("backdrop".to_owned())
+    }
+
+    /// **A blur over the backdrop is all prefix, and its suffix is empty**:
+    /// the memo is the whole blur, and its result the last step's.
+    #[test]
+    fn a_blur_over_the_backdrop_is_all_prefix_and_its_suffix_is_empty() {
+        let blur = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("down2", Feed::Step(0), &[], false),
+            ("down3", Feed::Step(1), &[], false),
+            ("up1", Feed::Step(2), &[], false),
+            ("up2", Feed::Step(3), &[], false),
+            ("up3", Feed::Step(4), &[], false),
+        ]);
+        let memo = split_memo(&blur, Split::Resize);
+        assert_eq!(memo.prefix.as_ref().map(|p| p.steps.len()), Some(6));
+        assert!(memo.suffix.steps.is_empty());
+        assert_eq!(
+            memo.exports,
+            vec![Export {
+                step: 5,
+                name: memo_name(5),
+                scale: 1.0
+            }]
+        );
+    }
+
+    /// **`glass-rect` splits after its blur**: the refraction reads the
+    /// shape, so it is the suffix, reading the blur's result as `memo:3`
+    /// under its own name `soft` and the sharp backdrop as itself.
+    #[test]
+    fn glass_rect_splits_after_its_blur() {
+        let glass = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("down2", Feed::Step(0), &[], false),
+            ("up1", Feed::Step(1), &[], false),
+            ("up2", Feed::Step(2), &[], false),
+            (
+                "refract",
+                Feed::Step(3),
+                &[("sharp", backdrop()), ("soft", Feed::Step(3))],
+                true,
+            ),
+        ]);
+        let memo = split_memo(&glass, Split::Resize);
+        assert_eq!(memo.prefix.as_ref().map(|p| p.steps.len()), Some(4));
+        let refract = &memo.suffix.steps[0];
+        assert_eq!(refract.first, Feed::Input(memo_name(3)));
+        assert_eq!(
+            refract.uses,
+            vec![
+                ("sharp".to_owned(), backdrop()),
+                ("soft".to_owned(), Feed::Input(memo_name(3)))
+            ]
+        );
+        assert_eq!(
+            memo.exports.iter().map(|e| e.step).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert!(memo.suffix.reads.backdrop, "the suffix's tier stays T2");
+    }
+
+    /// **A step reading a per-part name ends the prefix**, even if every
+    /// step after it could have been shared.
+    #[test]
+    fn a_step_reading_a_per_part_name_ends_the_prefix() {
+        let tinted = plan(&[
+            ("tint-shape", backdrop(), &[], true),
+            ("down1", Feed::Step(0), &[], false),
+        ]);
+        let memo = split_memo(&tinted, Split::Resize);
+        assert!(memo.prefix.is_none());
+        assert_eq!(memo.suffix, tinted);
+    }
+
+    /// **A step reading `self` or a state is never in the prefix**, under
+    /// `Split::Longest` too, which keeps a trailing step the size of what it
+    /// reads and so cuts nothing back.
+    #[test]
+    fn a_step_reading_self_or_a_state_ends_the_prefix() {
+        let own = plan(&[
+            ("down1", backdrop(), &[], false),
+            (
+                "mix",
+                Feed::Step(0),
+                &[("self", Feed::Input("self".to_owned()))],
+                false,
+            ),
+        ]);
+        let stated = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("read", Feed::Step(0), &[("field", Feed::State(0))], false),
+        ]);
+        for split in [Split::Resize, Split::Longest] {
+            assert_eq!(
+                split_memo(&own, split).prefix.map(|p| p.steps.len()),
+                Some(1),
+                "{split:?}"
+            );
+            assert_eq!(
+                split_memo(&stated, split).prefix.map(|p| p.steps.len()),
+                Some(1),
+                "{split:?}"
+            );
+        }
+    }
+
+    /// **A plan whose first input is rebound to `self` is never split**: it
+    /// is T1, a capture of the part ([FX2] Ruling 14).
+    #[test]
+    fn a_plan_rebound_to_self_is_never_split() {
+        let mut own = plan(&[("down1", backdrop(), &[], false)]);
+        own.first_input = "self".to_owned();
+        assert!(split_memo(&own, Split::Resize).prefix.is_none());
+    }
+
+    /// **A suffix step sized from a prefix step is sized from the padded box
+    /// at that step's scale**: a pass over the second down step of a blur is
+    /// a quarter of the box each way, whatever the monitor's size.
+    #[test]
+    fn a_suffix_step_sized_from_the_prefix_is_sized_from_the_padded_box_at_its_scale() {
+        let quarter = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("down2", Feed::Step(0), &[], false),
+            ("tint-shape", Feed::Step(1), &[], true),
+        ]);
+        let memo = split_memo(&quarter, Split::Resize);
+        let (sizes, _) = memo.suffix.sizes((400, 200));
+        assert_eq!(sizes, vec![(100, 50)]);
+        assert_eq!(
+            memo.exports,
+            vec![Export {
+                step: 1,
+                name: memo_name(1),
+                scale: 0.25
+            }]
+        );
+    }
+
+    /// **The prefix's key is its own steps and not the suffix's**, so frost
+    /// and glass with one blur share a memo; and a param of the blur moves
+    /// it.
+    #[test]
+    fn the_prefix_key_is_its_steps_and_not_the_suffixs() {
+        let blur = || {
+            vec![
+                ("down1", backdrop(), &[][..], false),
+                ("up1", Feed::Step(0), &[][..], false),
+            ]
+        };
+        let mut a = blur();
+        a.push(("tint-shape", Feed::Step(1), &[], true));
+        let mut b = blur();
+        b.push(("refract", Feed::Step(1), &[], true));
+        let (a, b) = (
+            split_memo(&plan(&a), Split::Resize),
+            split_memo(&plan(&b), Split::Resize),
+        );
+        assert_eq!(
+            a.prefix.as_ref().map(Plan::key),
+            b.prefix.as_ref().map(Plan::key)
+        );
+        let mut offset = plan(&blur());
+        offset.steps[0]
+            .uniforms
+            .push(("offset".to_owned(), crate::spec::Value::Number(2.0)));
+        assert_ne!(
+            split_memo(&offset, Split::Resize).prefix.map(|p| p.key()),
+            a.prefix.map(|p| p.key())
+        );
+    }
+
+    /// **A trailing step the size of what it reads stays per part**: frost's
+    /// tint after its blur is the suffix, reading the blur as `memo:3`, so
+    /// a frost at any tint shares one blur (*Review log* finding 3).
+    #[test]
+    fn a_trailing_same_size_step_stays_per_part() {
+        let frost = |tint: f64| {
+            let mut frost = plan(&[
+                ("down1", backdrop(), &[], false),
+                ("down2", Feed::Step(0), &[], false),
+                ("up1", Feed::Step(1), &[], false),
+                ("up2", Feed::Step(2), &[], false),
+                ("tint", Feed::Step(3), &[], false),
+            ]);
+            frost.steps[4]
+                .uniforms
+                .push(("tint".to_owned(), crate::spec::Value::Number(tint)));
+            split_memo(&frost, Split::Resize)
+        };
+        let (light, dark) = (frost(0.08), frost(0.12));
+        assert_eq!(light.prefix.as_ref().map(|p| p.steps.len()), Some(4));
+        assert_eq!(light.suffix.steps.len(), 1);
+        assert_eq!(light.suffix.steps[0].first, Feed::Input(memo_name(3)));
+        assert_eq!(
+            light.prefix.as_ref().map(Plan::key),
+            dark.prefix.as_ref().map(Plan::key),
+            "two tints, two blurs"
+        );
+        assert_ne!(light.suffix, dark.suffix);
+    }
+
+    /// **A plan with no step that changes size has no prefix**: a tint over
+    /// the backdrop alone is per part, never a monitor-sized pass.
+    #[test]
+    fn a_plan_with_no_resizing_step_has_no_prefix() {
+        let tint = plan(&[("tint", backdrop(), &[], false)]);
+        assert!(split_memo(&tint, Split::Resize).prefix.is_none());
+    }
+
+    /// **The keys are chained**: two plans that begin alike share their keys
+    /// as far as they agree, and the plan up to a step is keyed as that step;
+    /// the same step after another head is another result, keyed apart.
+    #[test]
+    fn the_keys_are_chained_so_a_shared_head_has_one_key() {
+        let a = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("up1", Feed::Step(0), &[], false),
+            ("down2", Feed::Step(1), &[], false),
+        ]);
+        let b = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("up1", Feed::Step(0), &[], false),
+            ("down3", Feed::Step(1), &[], false),
+        ]);
+        let (ka, kb) = (a.keys(), b.keys());
+        assert_eq!(ka[..2], kb[..2]);
+        assert_ne!(ka[2], kb[2]);
+        assert_eq!(a.upto(1).key(), ka[1]);
+        assert_eq!(a.key(), ka[2]);
+        let c = plan(&[
+            ("down3", backdrop(), &[], false),
+            ("up1", Feed::Step(0), &[], false),
+        ]);
+        assert_ne!(c.keys()[1], ka[1], "one up pass after two other downs");
+    }
+
+    /// **A pass marked `per_part = true` stays in the suffix**, whatever it
+    /// reads: a folder's opt-out of the memo (finding 4).
+    #[test]
+    fn a_pass_marked_per_part_stays_in_the_suffix() {
+        let mut vignette = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("up1", Feed::Step(0), &[], false),
+        ]);
+        vignette.steps[1].per_part = true;
+        assert_eq!(
+            split_memo(&vignette, Split::Resize)
+                .prefix
+                .map(|p| p.steps.len()),
+            Some(1)
+        );
+    }
+
+    /// **`effects.memo.split` chooses how far the prefix runs** (amended
+    /// 2026-10-08, configurable): `Resize` stops at the last resize (frost's
+    /// tint per part), `Longest` keeps the trailing tint in the memo (its
+    /// suffix empty, one export), `Off` never splits; a tint over the
+    /// backdrop alone is a monitor-sized prefix only under `Longest`.
+    #[test]
+    fn the_split_policy_chooses_how_far_the_prefix_runs() {
+        let frost = plan(&[
+            ("down1", backdrop(), &[], false),
+            ("down2", Feed::Step(0), &[], false),
+            ("up1", Feed::Step(1), &[], false),
+            ("up2", Feed::Step(2), &[], false),
+            ("tint", Feed::Step(3), &[], false),
+        ]);
+        assert_eq!(
+            split_memo(&frost, Split::Resize)
+                .prefix
+                .map(|p| p.steps.len()),
+            Some(4)
+        );
+        let longest = split_memo(&frost, Split::Longest);
+        assert_eq!(longest.prefix.as_ref().map(|p| p.steps.len()), Some(5));
+        assert!(longest.suffix.steps.is_empty());
+        assert_eq!(
+            longest.exports,
+            vec![Export {
+                step: 4,
+                name: memo_name(4),
+                scale: 1.0
+            }]
+        );
+        let off = split_memo(&frost, Split::Off);
+        assert!(off.prefix.is_none());
+        assert_eq!(off.suffix, frost);
+        let tint = plan(&[("tint", backdrop(), &[], false)]);
+        assert_eq!(
+            split_memo(&tint, Split::Longest)
+                .prefix
+                .map(|p| p.steps.len()),
+            Some(1)
+        );
+        assert!(split_memo(&tint, Split::Resize).prefix.is_none());
     }
 }

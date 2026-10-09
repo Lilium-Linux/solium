@@ -193,6 +193,50 @@ pub(crate) const VOCABULARY: [&str; 22] = [
     "noise",
 ];
 
+/// The prelude names a pass run once over a whole monitor cannot know,
+/// because they are a part's (its box, its shape, its own pixels, its
+/// transition): a step whose `.frag` reads one is never memoised (Ruling F30).
+/// `tests::every_prelude_name_is_per_part_or_monitor_wide`.
+pub const PER_PART: [&str; 13] = [
+    "sol_content",
+    "sol_to_content",
+    "sol_to_uv",
+    "sol_box_px",
+    "sol_radii",
+    "sol_sdf",
+    "sol_shape",
+    "sol_self",
+    "sol_old",
+    "sol_progress",
+    "sol_clamped",
+    "sol_direction",
+    "sol_seed",
+];
+
+/// The prelude names a pass over a whole monitor may read: in a memo
+/// `sol_size` and `uv` are the monitor's, not a part's padded box. Every
+/// prelude name is in exactly one of the two lists.
+/// `tests::every_prelude_name_is_per_part_or_monitor_wide`.
+pub const MONITOR_WIDE: [&str; 11] = [
+    "sol_effect",
+    "sol_tex",
+    "sol_tex_sampler",
+    "sol_tex_box",
+    "sol_tex_clamp",
+    "sol_texel",
+    "sol_size",
+    "sol_time",
+    "sol_sdf_rrect",
+    "sol_hash",
+    "sol_noise",
+];
+
+/// Whether `user` reads any of `names` as an identifier, outside comments.
+/// `tests::per_part_names_are_found_outside_comments`.
+pub fn reads_any(user: &str, names: &[&str]) -> bool {
+    identifiers(&uncommented(user)).any(|word| names.contains(&word))
+}
+
 /// A known texture's sampler, declared only while a pass uses it.
 /// `tests::a_name_missing_from_uses_reads_transparent_and_has_0`.
 pub fn sampler(name: &str) -> String {
@@ -262,7 +306,9 @@ pub struct Lint {
 }
 
 /// `text` with every comment blanked, newlines kept, so line numbers hold.
-/// `tests::lint_skips_comments`.
+/// A block comment leaves one space, as GLSL reads it, so the names either
+/// side of one stay two names.
+/// `tests::lint_skips_comments`, `tests::per_part_names_are_found_outside_comments`.
 fn uncommented(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -278,6 +324,7 @@ fn uncommented(text: &str) -> String {
             }
             ('/', Some('*')) => {
                 chars.next();
+                out.push(' ');
                 let mut last = ' ';
                 for rest in chars.by_ref() {
                     if rest == '\n' {
@@ -570,8 +617,9 @@ pub fn content_hash(parts: &[&[u8]]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Host, LINE_PROBE, PASS_VERTEX, ParamKind, Signature, assemble, compile_log, content_hash,
-        kind_of, line_probe, line_shift, lint, prelude,
+        Host, LINE_PROBE, MONITOR_WIDE, PASS_VERTEX, PER_PART, ParamKind, Signature, VOCABULARY,
+        assemble, compile_log, content_hash, kind_of, line_probe, line_shift, lint, prelude,
+        reads_any,
     };
     use crate::spec::Severity;
 
@@ -872,6 +920,62 @@ mod tests {
                 ("tex_size", super::Glsl::Vec2),
                 ("input_to_geo", super::Glsl::Mat3)
             ]
+        );
+    }
+
+    /// **A per-part name is found as an identifier, never inside a comment
+    /// or as part of a longer name**; a comment between two names parts
+    /// them, as GLSL reads it.
+    #[test]
+    fn per_part_names_are_found_outside_comments() {
+        assert!(reads_any(
+            "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * sol_shape(uv); }",
+            &PER_PART
+        ));
+        assert!(!reads_any(
+            "// sol_shape is not read here\nvec4 sol_effect(vec2 uv) { return sol_tex(uv); }",
+            &PER_PART
+        ));
+        assert!(!reads_any(
+            "/* sol_sdf */ vec4 sol_effect(vec2 uv) { return sol_tex(uv); }",
+            &PER_PART
+        ));
+        assert!(!reads_any(
+            "vec4 sol_effect(vec2 uv) { float sol_shaped = 1.0; return sol_tex(uv) * sol_shaped; }",
+            &PER_PART
+        ));
+        assert!(reads_any(
+            "vec4 sol_effect(vec2 uv) { return/**/sol_shape(uv) * sol_tex(uv); }",
+            &PER_PART
+        ));
+    }
+
+    /// **Every prelude name is classified, exactly once**: a part's own
+    /// (`PER_PART`, with the inputs `self` and `old`) or one a pass over a
+    /// whole monitor may read (`MONITOR_WIDE`). The two lists are the
+    /// prelude's vocabulary between them, so a name added to the prelude
+    /// later (the morph track's B8 adds `sol_anchor_share`) fails here until
+    /// someone says which it is, and is never memoised by default.
+    #[test]
+    fn every_prelude_name_is_per_part_or_monitor_wide() {
+        let bare = |names: &[&'static str]| -> std::collections::BTreeSet<&'static str> {
+            names
+                .iter()
+                .map(|name| name.trim_start_matches("sol_"))
+                .collect()
+        };
+        let (per_part, wide) = (bare(&PER_PART), bare(&MONITOR_WIDE));
+        assert!(
+            per_part.is_disjoint(&wide),
+            "{:?}",
+            per_part.intersection(&wide).collect::<Vec<_>>()
+        );
+        let classified: std::collections::BTreeSet<&str> = per_part.union(&wide).copied().collect();
+        let mut prelude: std::collections::BTreeSet<&str> = VOCABULARY.iter().copied().collect();
+        prelude.extend(["self", "old"]);
+        assert_eq!(
+            classified, prelude,
+            "a prelude name is per part or monitor-wide, never neither"
         );
     }
 }
