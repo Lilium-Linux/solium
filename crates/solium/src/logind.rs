@@ -1384,10 +1384,19 @@ mod tests {
         let bus = StandIn::new(5_000_000, false);
         let logind = begin(&bus, Some("true"), true);
         let mut state = solium_with(logind);
+        // `state.logind.holding()`, not `bus.inhibitor_held()`: the fake
+        // `Inhibit` pushes onto `held` as it builds its reply, which is
+        // before Solium's own `Inhibit` call on its own, separate connection
+        // has returned and `settle` has drained the `Event::Inhibitor` it
+        // posts. Under load, that gap is wide enough that the rest of this
+        // test ran against a `state.logind.inhibitor` that was still `None`,
+        // so `locked(true)` had nothing to release and the real fd outlived
+        // it -- a second, independent cause of the flakiness #225 was filed
+        // against, this one in the precondition rather than in `listen()`.
         assert!(
             soon(|| {
                 settle(&mut state);
-                bus.inhibitor_held()
+                state.logind.holding()
             }),
             "the initial inhibitor was never taken"
         );
@@ -1408,8 +1417,18 @@ mod tests {
         // The presentation-accurate moment: `lock.rs`'s `confirm_lock` calls
         // this the instant it sends `locked`.
         state.logind.locked(true);
+        // Dropping `state.logind.inhibitor` closes Solium's own end at once,
+        // but `on_sleep_imminent` (above, inside the `soon` before this one)
+        // also forked `lock.command` itself: the child inherits a duplicate
+        // of every open fd until it execs, and close_on_exec_above_stdio
+        // (launch.rs) only marks that duplicate close-on-exec in the gap
+        // between fork and exec, not before it. Under load, this process not
+        // yet having been scheduled far enough to reach its own exec is
+        // enough to still see the fd held immediately after this returns --
+        // a bare, un-retried assert here was a second, independent cause of
+        // the flakiness #225 was filed against.
         assert!(
-            !bus.inhibitor_held(),
+            soon(|| !bus.inhibitor_held()),
             "the inhibitor outlived the confirmed lock"
         );
     }
@@ -1452,9 +1471,12 @@ mod tests {
         let bus = StandIn::new(300_000, false);
         let logind = begin(&bus, Some("true"), true);
         let mut state = solium_with(logind);
+        // `state.logind.holding()`: see the same precondition in
+        // `prepare_for_sleep_locks_before_the_inhibitor_is_released` for why
+        // `bus.inhibitor_held()` is not enough here either.
         assert!(soon(|| {
             settle(&mut state);
-            bus.inhibitor_held()
+            state.logind.holding()
         }));
 
         // #225's own title: this is the test that failed once under a full,
