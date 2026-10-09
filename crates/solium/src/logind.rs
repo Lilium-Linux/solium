@@ -74,6 +74,17 @@
 //! the other, so a test can tell a real fd was released — Solium closing its
 //! end — from one that is merely unused, the same guarantee the real logind
 //! depends on.
+//!
+//! The fake bus also routes `Lock` and `PrepareForSleep` the way a real one
+//! does: only to a connection whose own `AddMatch` asked for it
+//! (`Driver::add_match` records each connection's rules, in the test module).
+//! A test waits for that subscription before sending, rather than for a
+//! connection merely existing, so it tests whether a truly subscribed
+//! listener hears a signal, not whether a sleep happened to be long enough.
+//! #225's own regression tests go further still: an armed `Trap` sends the
+//! signal from inside the matching `AddMatch` call itself, before that call
+//! replies, landing it in the exact window `listen` must not drop it in,
+//! deterministically rather than by racing for it.
 
 use std::{
     collections::VecDeque,
@@ -654,12 +665,23 @@ fn wait_for_session(session_path: &SessionPath) -> Option<OwnedObjectPath> {
     }
 }
 
-/// The persistent listener: connects once, resolves the session, subscribes
+/// The persistent listener: connects, starts reading its own
+/// `MessageIterator` before anything else, resolves the session, subscribes
 /// to `Lock` and `PrepareForSleep`, and then only ever reads — every call
 /// this module makes, including the first `Inhibit` (`Logind::begin` asks for
 /// it through [`Logind::request_inhibitor`] like any other), is a thread of
 /// its own. See the module documentation for why listening and calling are
 /// kept apart.
+///
+/// The iterator is built right after `connect`, before `resolve_session` and
+/// `add_match`, rather than after them: a real bus routes a signal to a
+/// connection the instant a matching `AddMatch` is registered on it, which
+/// is before the call that registered it can have replied, let alone before
+/// a second `add_match` and this iterator after it. A `Lock` or
+/// `PrepareForSleep` delivered in that window used to have nothing on this
+/// connection subscribed to read it yet, and was dropped for good, not
+/// merely delayed (#225, `a_lock_sent_while_add_match_is_in_flight_is_not_lost`,
+/// `a_prepare_for_sleep_sent_while_add_match_is_in_flight_is_not_lost`).
 fn listen(address: Option<String>, events: Events, session_path: SessionPath) {
     let connection = match connect(address.as_deref()) {
         Ok(connection) => connection,
@@ -672,6 +694,8 @@ fn listen(address: Option<String>, events: Events, session_path: SessionPath) {
             return;
         }
     };
+    let messages = zbus::blocking::MessageIterator::from(&connection);
+
     let path = match resolve_session(&connection) {
         Ok(path) => path,
         Err(err) => {
@@ -696,7 +720,12 @@ fn listen(address: Option<String>, events: Events, session_path: SessionPath) {
         tracing::warn!(?err, "could not hear logind's PrepareForSleep signal");
     }
 
-    for message in zbus::blocking::MessageIterator::from(&connection) {
+    // `messages` has no match rule of its own, so it also sees the method
+    // replies to `resolve_session` and both `add_match` calls above, now that
+    // it exists before them: those carry no `interface`/`member` header
+    // field at all, so the guard below already drops them exactly like
+    // everything else this module never asked for.
+    for message in messages {
         let Ok(message) = message else {
             continue;
         };
@@ -748,17 +777,85 @@ mod tests {
     /// What the stand-in heard, as `member args`.
     type Heard = Arc<Mutex<Vec<String>>>;
 
+    /// The match rules one connection has registered with `AddMatch`, in
+    /// registration order, exactly as the rule string arrived: what
+    /// `StandIn::broadcast` and `StandIn::wait_for_subscription` check
+    /// against, so a signal is routed (and waited for) the way a real bus
+    /// would, instead of being fired at every connection regardless of
+    /// whether it ever asked for it.
+    type Rules = Arc<Mutex<Vec<String>>>;
+
+    /// A one-shot, deliberately mistimed delivery: `Driver::add_match` fires
+    /// this the moment it sees a rule naming [`Trap::on_member`], down the
+    /// very connection that rule arrived on, *before* that `AddMatch` call
+    /// replies. That is the exact window #225's race lives in -- a real bus
+    /// may route the signal the instant the match rule is registered, which
+    /// is earlier than a reply can possibly reach the caller -- so a test
+    /// armed with a `Trap` reproduces it every time, rather than racing for
+    /// it. Used by `a_lock_sent_while_add_match_is_in_flight_is_not_lost`
+    /// and `a_prepare_for_sleep_sent_while_add_match_is_in_flight_is_not_lost`.
+    #[derive(Clone, Copy)]
+    enum Trap {
+        Lock,
+        PrepareForSleep(bool),
+    }
+
+    impl Trap {
+        /// The `AddMatch` rule this trap waits for: a substring of the rule
+        /// string, the same check [`StandIn::subscribed`] makes.
+        fn on_member(self) -> &'static str {
+            match self {
+                Trap::Lock => "Lock",
+                Trap::PrepareForSleep(_) => "PrepareForSleep",
+            }
+        }
+
+        fn message(self) -> zbus::message::Message {
+            match self {
+                Trap::Lock => lock_message(),
+                Trap::PrepareForSleep(asleep) => prepare_for_sleep_message(asleep),
+            }
+        }
+    }
+
     /// `org.freedesktop.DBus`, just enough to let a `blocking::Connection`
     /// finish its handshake and register match rules: `session.rs`'s own
     /// `StandInDriver` needs exactly this much and no more.
-    struct Driver;
+    ///
+    /// Unlike a no-op `AddMatch`, this one records every rule its connection
+    /// registers into `rules`, so the rest of the stand-in can tell a
+    /// connection that has subscribed to a signal from one that merely
+    /// exists, and fires an armed `trap` (see [`Trap`]) before replying.
+    struct Driver {
+        rules: Rules,
+        trap: Arc<Mutex<Option<Trap>>>,
+    }
 
     #[zbus::interface(name = "org.freedesktop.DBus")]
     impl Driver {
         fn hello(&self) -> String {
             ":1.1".to_owned()
         }
-        fn add_match(&self, _rule: String) {}
+
+        async fn add_match(&self, rule: String, #[zbus(connection)] connection: &zbus::Connection) {
+            let fire = {
+                let mut slot = self.trap.lock().expect("the trap");
+                match *slot {
+                    Some(trap) if rule.contains(&format!("member='{}'", trap.on_member())) => {
+                        slot.take()
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(trap) = fire {
+                // #225: sent from inside the handler for this very
+                // `AddMatch`, before the call replies -- the window
+                // production's `listen()` used to create its
+                // `MessageIterator` too late to catch.
+                let _ = connection.send(&trap.message()).await;
+            }
+            self.rules.lock().expect("the rules").push(rule);
+        }
     }
 
     /// `org.freedesktop.login1.Manager`: resolves to [`SESSION_PATH`] always,
@@ -833,6 +930,25 @@ mod tests {
         }
     }
 
+    /// logind's `Lock`, on the session path, as if `loginctl lock-session` or
+    /// a lid switch had just asked for it. Its own function, rather than a
+    /// closure inline at each call site, so `StandIn::send_lock` and
+    /// `Trap::message` build the exact same message.
+    fn lock_message() -> zbus::message::Message {
+        Message::signal(SESSION_PATH, SESSION_INTERFACE, "Lock")
+            .and_then(|builder| builder.sender(":1.50"))
+            .and_then(|builder| builder.build(&()))
+            .expect("a Lock signal")
+    }
+
+    /// `PrepareForSleep`, on the manager path. See [`lock_message`].
+    fn prepare_for_sleep_message(asleep: bool) -> zbus::message::Message {
+        Message::signal(MANAGER_PATH, MANAGER_INTERFACE, "PrepareForSleep")
+            .and_then(|builder| builder.sender(":1.50"))
+            .and_then(|builder| builder.build(&(asleep,)))
+            .expect("a PrepareForSleep signal")
+    }
+
     /// A private bus standing in for logind: never the real system bus, and
     /// nothing on it but this test's own fakes. Modelled on `session.rs`'s own
     /// `StandIn` and `screensaver.rs`'s `StandInBus`, but keeping every
@@ -845,11 +961,23 @@ mod tests {
         heard: Heard,
         held: Arc<Mutex<Vec<UnixStream>>>,
         directory: PathBuf,
-        connections: Arc<Mutex<Vec<zbus::blocking::Connection>>>,
+        connections: Arc<Mutex<Vec<(zbus::blocking::Connection, Rules)>>>,
     }
 
     impl StandIn {
         fn new(max_delay_micros: u64, refuses_inhibit: bool) -> Self {
+            Self::build(max_delay_micros, refuses_inhibit, None)
+        }
+
+        /// Like [`StandIn::new`], but every connection's `Driver` is armed
+        /// with `trap` (see [`Trap`]): used only by the #225 regression
+        /// tests, which need the signal sent from inside a specific
+        /// `AddMatch` call rather than from `broadcast`.
+        fn new_trapping(max_delay_micros: u64, refuses_inhibit: bool, trap: Trap) -> Self {
+            Self::build(max_delay_micros, refuses_inhibit, Some(trap))
+        }
+
+        fn build(max_delay_micros: u64, refuses_inhibit: bool, trap: Option<Trap>) -> Self {
             static NEXT: AtomicU32 = AtomicU32::new(0);
             let directory = std::env::temp_dir().join(format!(
                 "solium-logind-test-{}-{}",
@@ -864,6 +992,7 @@ mod tests {
             let heard = Heard::default();
             let held = Arc::new(Mutex::new(Vec::new()));
             let connections = Arc::new(Mutex::new(Vec::new()));
+            let trap = Arc::new(Mutex::new(trap));
             {
                 let heard = heard.clone();
                 let held = held.clone();
@@ -876,13 +1005,21 @@ mod tests {
                         let heard = heard.clone();
                         let held = held.clone();
                         let connections = connections.clone();
+                        let rules = Rules::default();
+                        let trap = trap.clone();
                         std::thread::spawn(move || {
                             let Ok(connection) =
                                 zbus::blocking::connection::Builder::async_io_unix_stream(stream)
                                     .server(zbus::Guid::generate())
                                     .expect("a server guid")
                                     .p2p()
-                                    .serve_at(DBUS_PATH, Driver)
+                                    .serve_at(
+                                        DBUS_PATH,
+                                        Driver {
+                                            rules: rules.clone(),
+                                            trap,
+                                        },
+                                    )
                                     .expect("serving the driver")
                                     .serve_at(
                                         MANAGER_PATH,
@@ -903,7 +1040,7 @@ mod tests {
                             connections
                                 .lock()
                                 .expect("the connections")
-                                .push(connection.clone());
+                                .push((connection.clone(), rules));
                             connection.closed();
                         });
                     }
@@ -918,23 +1055,68 @@ mod tests {
             }
         }
 
-        /// Send `signal` down every connection Solium has made so far,
-        /// waiting for at least one. A one-off caller (`Inhibit`,
-        /// `SetLockedHint`) that is not the listener either has not read
-        /// enough to notice, or has already closed, and `send` on a closed
-        /// connection is simply ignored -- it is the listener's own
-        /// `MessageIterator`, not this send, that must succeed.
-        fn broadcast(&self, build: impl Fn() -> zbus::message::Message) {
+        /// Whether some connection's recorded rules would have the bus route
+        /// `interface`/`member` to it: a plain substring check, not a real
+        /// match-rule parse, but exact for the one shape `add_match` ever
+        /// builds (`type='signal',sender='…',interface='…',member='…'`, with
+        /// `interface` always written immediately before `member`).
+        fn subscribed(rules: &Rules, interface: &str, member: &str) -> bool {
+            let needle = format!("interface='{interface}',member='{member}'");
+            rules
+                .lock()
+                .expect("the rules")
+                .iter()
+                .any(|rule| rule.contains(needle.as_str()))
+        }
+
+        /// Every connection currently subscribed to `interface`/`member`.
+        fn subscribers(&self, interface: &str, member: &str) -> Vec<zbus::blocking::Connection> {
+            self.connections
+                .lock()
+                .expect("the connections")
+                .iter()
+                .filter(|(_, rules)| Self::subscribed(rules, interface, member))
+                .map(|(connection, _)| connection.clone())
+                .collect()
+        }
+
+        /// Block until some connection has registered a match rule for
+        /// `interface`/`member` -- the listener's own `AddMatch`, in every
+        /// test that waits for this before sending a signal, so the send
+        /// tests whether a truly subscribed listener hears it, not whether a
+        /// sleep happened to be long enough.
+        fn wait_for_subscription(&self, interface: &str, member: &str) {
+            let subscribed = soon(|| !self.subscribers(interface, member).is_empty());
+            assert!(
+                subscribed,
+                "nothing ever subscribed to interface='{interface}',member='{member}'"
+            );
+        }
+
+        /// Send `signal` down every connection subscribed to
+        /// `interface`/`member`, waiting for at least one -- the same
+        /// routing a real bus does, which is exactly what #225's race
+        /// depends on. A one-off caller (`Inhibit`, `SetLockedHint`) never
+        /// calls `AddMatch` at all, so it is never among them.
+        fn broadcast(
+            &self,
+            interface: &str,
+            member: &str,
+            build: impl Fn() -> zbus::message::Message,
+        ) {
             let deadline = Instant::now() + WITHIN;
             loop {
-                let live = self.connections.lock().expect("the connections").clone();
-                if !live.is_empty() {
-                    for connection in live {
+                let subscribers = self.subscribers(interface, member);
+                if !subscribers.is_empty() {
+                    for connection in subscribers {
                         let _ = connection.send(&build());
                     }
                     return;
                 }
-                assert!(Instant::now() < deadline, "Solium never connected");
+                assert!(
+                    Instant::now() < deadline,
+                    "nothing ever subscribed to interface='{interface}',member='{member}'"
+                );
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
@@ -942,21 +1124,13 @@ mod tests {
         /// logind's `Lock`, on the session path, as if `loginctl lock-session`
         /// or a lid switch had just asked for it.
         fn send_lock(&self) {
-            self.broadcast(|| {
-                Message::signal(SESSION_PATH, SESSION_INTERFACE, "Lock")
-                    .and_then(|builder| builder.sender(":1.50"))
-                    .and_then(|builder| builder.build(&()))
-                    .expect("a Lock signal")
-            });
+            self.broadcast(SESSION_INTERFACE, "Lock", lock_message);
         }
 
         /// `PrepareForSleep`, on the manager path.
         fn send_prepare_for_sleep(&self, asleep: bool) {
-            self.broadcast(|| {
-                Message::signal(MANAGER_PATH, MANAGER_INTERFACE, "PrepareForSleep")
-                    .and_then(|builder| builder.sender(":1.50"))
-                    .and_then(|builder| builder.build(&(asleep,)))
-                    .expect("a PrepareForSleep signal")
+            self.broadcast(MANAGER_INTERFACE, "PrepareForSleep", move || {
+                prepare_for_sleep_message(asleep)
             });
         }
 
@@ -1086,6 +1260,10 @@ mod tests {
         let logind = begin(&bus, Some(&format!("touch {}", mark.display())), false);
         let mut state = solium_with(logind);
 
+        // Wait for the listener to have actually subscribed, rather than
+        // just connected: otherwise this test would be racing the same gap
+        // #225 lives in, instead of testing what happens once it is closed.
+        bus.wait_for_subscription(SESSION_INTERFACE, "Lock");
         bus.send_lock();
         // `Lock` is heard asynchronously; `settle` is what turns it into a
         // process, so poll both until the marker exists.
@@ -1094,6 +1272,35 @@ mod tests {
             mark.exists()
         });
         assert!(seen, "the locker never ran");
+        let _ = std::fs::remove_file(&mark);
+    }
+
+    /// #225: a `Lock` a real bus sends the instant the listener's `AddMatch`
+    /// for it is registered -- before that call has even replied -- must
+    /// still run the locker. The `Trap` fires from inside that exact
+    /// `AddMatch`, so this reaches the production race deterministically
+    /// instead of by timing: against the unfixed `listen()`, which created
+    /// its `MessageIterator` only after both `add_match` calls returned,
+    /// this failed every time, not now and then.
+    /// `a_lock_sent_while_add_match_is_in_flight_is_not_lost`.
+    #[test]
+    fn a_lock_sent_while_add_match_is_in_flight_is_not_lost() {
+        let bus = StandIn::new_trapping(5_000_000, false, Trap::Lock);
+        let mark = marker();
+        let logind = begin(&bus, Some(&format!("touch {}", mark.display())), false);
+        let mut state = solium_with(logind);
+
+        // No `send_lock()` here: the stand-in already sent `Lock` on its own,
+        // from inside `Driver::add_match`, the moment `begin` made it that
+        // far.
+        let seen = soon(|| {
+            settle(&mut state);
+            mark.exists()
+        });
+        assert!(
+            seen,
+            "a Lock sent while AddMatch was still in flight was lost"
+        );
         let _ = std::fs::remove_file(&mark);
     }
 
@@ -1177,14 +1384,27 @@ mod tests {
         let bus = StandIn::new(5_000_000, false);
         let logind = begin(&bus, Some("true"), true);
         let mut state = solium_with(logind);
+        // `state.logind.holding()`, not `bus.inhibitor_held()`: the fake
+        // `Inhibit` pushes onto `held` as it builds its reply, which is
+        // before Solium's own `Inhibit` call on its own, separate connection
+        // has returned and `settle` has drained the `Event::Inhibitor` it
+        // posts. Under load, that gap is wide enough that the rest of this
+        // test ran against a `state.logind.inhibitor` that was still `None`,
+        // so `locked(true)` had nothing to release and the real fd outlived
+        // it -- a second, independent cause of the flakiness #225 was filed
+        // against, this one in the precondition rather than in `listen()`.
         assert!(
             soon(|| {
                 settle(&mut state);
-                bus.inhibitor_held()
+                state.logind.holding()
             }),
             "the initial inhibitor was never taken"
         );
 
+        // As in `a_lock_signal_runs_the_configured_locker_once`: wait for the
+        // subscription itself, not just for the unrelated inhibitor request
+        // to have gone through on its own, separate connection.
+        bus.wait_for_subscription(MANAGER_INTERFACE, "PrepareForSleep");
         bus.send_prepare_for_sleep(true);
         assert!(
             soon(|| {
@@ -1197,10 +1417,46 @@ mod tests {
         // The presentation-accurate moment: `lock.rs`'s `confirm_lock` calls
         // this the instant it sends `locked`.
         state.logind.locked(true);
+        // Dropping `state.logind.inhibitor` closes Solium's own end at once,
+        // but `on_sleep_imminent` (above, inside the `soon` before this one)
+        // also forked `lock.command` itself: the child inherits a duplicate
+        // of every open fd until it execs, and close_on_exec_above_stdio
+        // (launch.rs) only marks that duplicate close-on-exec in the gap
+        // between fork and exec, not before it. Under load, this process not
+        // yet having been scheduled far enough to reach its own exec is
+        // enough to still see the fd held immediately after this returns --
+        // a bare, un-retried assert here was a second, independent cause of
+        // the flakiness #225 was filed against.
         assert!(
-            !bus.inhibitor_held(),
+            soon(|| !bus.inhibitor_held()),
             "the inhibitor outlived the confirmed lock"
         );
+    }
+
+    /// #225, for `PrepareForSleep`: the same mistimed delivery as
+    /// `a_lock_sent_while_add_match_is_in_flight_is_not_lost`, since
+    /// `listen()` registers this `AddMatch` the exact same way, and just as
+    /// late. `before_sleep` must be on here -- unlike that test -- since
+    /// `on_sleep_imminent` only runs the locker at all when it is.
+    /// `a_prepare_for_sleep_sent_while_add_match_is_in_flight_is_not_lost`.
+    #[test]
+    fn a_prepare_for_sleep_sent_while_add_match_is_in_flight_is_not_lost() {
+        let bus = StandIn::new_trapping(5_000_000, false, Trap::PrepareForSleep(true));
+        let mark = marker();
+        let logind = begin(&bus, Some(&format!("touch {}", mark.display())), true);
+        let mut state = solium_with(logind);
+
+        // No `send_prepare_for_sleep()` here either: see
+        // `a_lock_sent_while_add_match_is_in_flight_is_not_lost`.
+        let seen = soon(|| {
+            settle(&mut state);
+            mark.exists()
+        });
+        assert!(
+            seen,
+            "a PrepareForSleep sent while AddMatch was still in flight was lost"
+        );
+        let _ = std::fs::remove_file(&mark);
     }
 
     /// A locker that never locks — nothing ever calls [`Logind::locked`] —
@@ -1215,11 +1471,17 @@ mod tests {
         let bus = StandIn::new(300_000, false);
         let logind = begin(&bus, Some("true"), true);
         let mut state = solium_with(logind);
+        // `state.logind.holding()`: see the same precondition in
+        // `prepare_for_sleep_locks_before_the_inhibitor_is_released` for why
+        // `bus.inhibitor_held()` is not enough here either.
         assert!(soon(|| {
             settle(&mut state);
-            bus.inhibitor_held()
+            state.logind.holding()
         }));
 
+        // #225's own title: this is the test that failed once under a full,
+        // parallel run, by sending before the listener had subscribed.
+        bus.wait_for_subscription(MANAGER_INTERFACE, "PrepareForSleep");
         bus.send_prepare_for_sleep(true);
         let released = soon(|| {
             settle(&mut state);
