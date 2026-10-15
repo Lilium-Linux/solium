@@ -23,6 +23,7 @@
 //! deliberately narrow: a handle, a render call, some setters. Everything Qt is
 //! behind the C ABI.
 
+pub(crate) mod buffers;
 pub(crate) mod hosted;
 pub(crate) mod keys;
 pub(crate) mod paint;
@@ -93,6 +94,8 @@ mod ffi {
             stride: c_int,
             modifier: c_ulonglong,
             fourcc: c_uint,
+            buffer_width: c_int,
+            buffer_height: c_int,
             width: c_int,
             height: c_int,
             scale: f64,
@@ -1077,7 +1080,9 @@ pub(crate) struct Rendered<'a> {
 /// A live QML scene.
 pub(crate) struct Scene {
     scene: *mut ffi::Scene,
-    /// Device pixels — the size of the image the compositor uploads.
+    /// Device pixels — the size of the image the compositor uploads, and on
+    /// the GPU path the size of the corner of its buffer the scene is drawn
+    /// into, which can be smaller than the buffer (`qml::buffers`).
     size: (i32, i32),
     /// Device pixels per logical one.
     scale: f64,
@@ -1276,14 +1281,12 @@ impl Scene {
         target: target::Target,
         initial: Option<&str>,
     ) -> Result<Self> {
-        // A GPU scene's pixel size is the buffer's, and it is fixed at
-        // allocation: the texture is exactly as big as the dmabuf, and
-        // `solium_qml_scene_resize` refuses a pixel-size change on one rather
-        // than silently swapping the texture for a paint device and moving the
-        // scene back onto the CPU. A caller that allocated one size and asked
-        // for another would hear about it a frame later, from the host, in a
-        // warning about resizing — nowhere near the mistake. So it is answered
-        // here, where the two sizes are both in scope.
+        // A GPU scene is built on a buffer exactly its size (the host's
+        // constructor takes one size for both); it is given room to grow only
+        // by a rebind (`qml::buffers`). A caller that allocated one size and
+        // asked for another would hear about it a frame later, from the host,
+        // in a warning about resizing — nowhere near the mistake. So it is
+        // answered here, where the two sizes are both in scope.
         no_frame_in_flight("building a GPU scene");
         if (target.width, target.height) != (width, height) {
             return Err(anyhow!(
@@ -1340,11 +1343,12 @@ impl Scene {
 
     /// A GPU scene of `width` by `height` device pixels, buffer and all.
     ///
-    /// A dmabuf cannot grow, so a size change means a new buffer — but only the
-    /// buffer. [`Scene::rebind_sized`] is how a surface changes size on this
-    /// path; this is only how it gets its first one. `solium_qml_scene_resize`
-    /// still refuses a pixel-size change, because it has no buffer to change it
-    /// to and falling through would swap the texture for a paint device and move
+    /// A dmabuf cannot grow, so a size past the buffer's means a new buffer —
+    /// but only the buffer. [`Scene::rebind_sized`] is how a surface outgrows
+    /// one on this path, and [`Scene::resize`] how it changes size within one;
+    /// this is only how it gets its first. `solium_qml_scene_resize` still
+    /// refuses a size past the buffer, because it has no buffer to change to
+    /// and falling through would swap the texture for a paint device and move
     /// the scene back onto the CPU behind the caller's back.
     ///
     /// Fails on a backend that set no allocator — the nested one — which is the
@@ -1360,7 +1364,8 @@ impl Scene {
         Self::gpu(qml_path, width, height, target, initial)
     }
 
-    /// Move this scene onto a different buffer, keeping everything above it.
+    /// Move this scene onto a different buffer, keeping everything above it,
+    /// and draw it at `width` by `height` into that buffer's top-left corner.
     ///
     /// The QML object tree survives, which is the point: rebuilding it restarts
     /// every animation inside the scene, and a pane's scene is resized on every
@@ -1389,10 +1394,11 @@ impl Scene {
         if self.target.is_none() {
             return Err(anyhow!("a software scene has no buffer to rebind"));
         }
-        // Answered here rather than a frame later in a host warning about a
-        // texture that is the wrong size, for the same reason `gpu` answers it:
-        // this is where both sizes are in scope.
-        if (target.width, target.height) != (width, height) {
+        // Answered here rather than in a host warning, for the same reason
+        // `gpu` answers it: this is where both sizes are in scope. A buffer
+        // larger than the scene is the point (`qml::buffers`); a smaller one
+        // cannot hold it.
+        if width <= 0 || height <= 0 || width > target.width || height > target.height {
             return Err(anyhow!(
                 "a {width}x{height} scene cannot render into a {}x{} buffer",
                 target.width,
@@ -1413,6 +1419,8 @@ impl Scene {
                 stride,
                 c_ulonglong::from(modifier),
                 c_uint::from(fourcc),
+                target.width,
+                target.height,
                 width,
                 height,
                 scale,
@@ -1435,19 +1443,41 @@ impl Scene {
         Ok(())
     }
 
-    /// Move this scene onto a fresh buffer of `width` by `height` device pixels.
+    /// Move this scene onto a fresh buffer of `buffer` device pixels, drawn
+    /// at `width` by `height` in its top-left corner.
     ///
     /// [`Scene::rebind`] with the allocation done for it, the same way
     /// [`Scene::gpu_sized`] stands in for [`Scene::gpu`]. A caller that wants a
     /// differently sized scene has no business knowing what GBM is — see
-    /// `ALLOCATOR`.
-    fn rebind_sized(&mut self, width: i32, height: i32, scale: f64) -> Result<()> {
+    /// `ALLOCATOR`. How big a buffer to ask for is `qml::buffers`'.
+    fn rebind_sized(
+        &mut self,
+        buffer: (i32, i32),
+        width: i32,
+        height: i32,
+        scale: f64,
+    ) -> Result<()> {
         hosted::touched();
         let gbm = allocator().ok_or_else(|| {
             anyhow!("this backend has no GBM device, so it cannot resize a GPU scene")
         })?;
-        let target = target::allocate(gbm, width, height)?;
+        let target = target::allocate(gbm, buffer.0, buffer.1)?;
         self.rebind(target, width, height, scale)
+    }
+
+    /// The size of the buffer this scene draws into, on the GPU path: at
+    /// least [`Self::size`], which is the corner of it the scene is drawn in.
+    fn buffer_size(&self) -> Option<(i32, i32)> {
+        self.target
+            .as_ref()
+            .map(|target| (target.width, target.height))
+    }
+
+    /// Which allocation the buffer is, on the GPU path: what tells a picture
+    /// drawn into this buffer from one drawn into another
+    /// (`paint::Sampled::buffer`).
+    fn buffer_id(&self) -> Option<u64> {
+        self.target.as_ref().map(|target| target.id)
     }
 
     /// The buffer this scene renders into, on the GPU path.
@@ -1505,14 +1535,21 @@ impl Scene {
     /// The alternative — laying out in device pixels — makes every hardcoded
     /// size in every QML file mean something different per monitor.
     ///
-    /// On a GPU scene only `scale` can change here: the pixel size is the
-    /// buffer's and this call has no buffer to change it to. The host refuses a
-    /// pixel-size change rather than fall through. [`Scene::rebind_sized`] is
-    /// the other half.
+    /// On a GPU scene the size can change up to the buffer's, the scene drawn
+    /// into its top-left corner (`qml::buffers`), and no further: this call
+    /// has no larger buffer to change to, so a size past it changes nothing
+    /// here and the host would refuse it too. [`Scene::rebind_sized`] is the
+    /// other half.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn resize(&mut self, width: i32, height: i32, scale: f64) {
         let scale = if scale > 0.0 { scale } else { 1.0 };
         if width <= 0 || height <= 0 {
+            return;
+        }
+        if self
+            .buffer_size()
+            .is_some_and(|buffer| width > buffer.0 || height > buffer.1)
+        {
             return;
         }
         if self.size == (width, height) && (self.scale - scale).abs() < f64::EPSILON {

@@ -287,9 +287,10 @@ enum Backing {
     /// uploads, band by band.
     Memory(Option<MemoryRenderBuffer>),
     /// Drawn by Qt into a dmabuf we allocated, which the compositor samples. A
-    /// window resize is a new buffer, which [`Gpu`] answers by rebinding rather
-    /// than by rebuilding the scene: a frame rebuilt on every frame of a resize
-    /// is a frame whose own animations never advance.
+    /// window resize draws into the buffer the scene has, or onto a larger one
+    /// it is rebound to once it outgrows that (`qml::buffers`), and never
+    /// rebuilds the scene: a frame rebuilt on every frame of a resize is a
+    /// frame whose own animations never advance.
     Gpu(Gpu),
 }
 
@@ -1881,12 +1882,13 @@ impl LayerScene {
             // renders and the backing is what holds the result.
             let Self { scene, backing, .. } = this;
             match backing {
-                // A window resize is a *rebind* here and not a rebuild, which
-                // is the whole point of `Gpu`: a decoration is sized from an
-                // animating rectangle for the length of every window
-                // animation, and a scene rebuilt once per frame is a scene
-                // whose own animations restart once per frame and therefore
-                // never advance. `Gpu` does it.
+                // A window resize is drawn into the buffer the scene has, or a
+                // *rebind* onto a larger one (`qml::buffers`), and never a
+                // rebuild, which is the whole point of `Gpu`: a decoration is
+                // sized from an animating rectangle for the length of every
+                // window animation, and a scene rebuilt once per frame is a
+                // scene whose own animations restart once per frame and
+                // therefore never advance. `Gpu` does it.
                 Backing::Gpu(gpu) => gpu
                     .element(scene, renderer, size, scale, placement)
                     .map(Element::Screen),

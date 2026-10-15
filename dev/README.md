@@ -1317,8 +1317,10 @@ Five things worth knowing about the GPU path on a TTY:
   comes out upside down. `host.cpp` calls
   `QQuickRenderTarget::setMirrorVertically` (`mirror_for_the_compositor`) on
   every GPU render target for that reason — the one a scene starts with, and
-  the ones `solium_qml_scene_resize` and `solium_qml_scene_rebind` build again,
-  which are easy to miss.
+  the ones `solium_qml_scene_resize` and `solium_qml_scene_rebind` build again
+  (`place_in_buffer`), which are easy to miss. With the mirror, a scene drawn
+  smaller than its buffer (`qml::buffers`) lands in the buffer's top-left
+  corner as a top-down reader sees it, the corner the compositor samples.
 
   Do not try to correct it on the compositor's side. Smithay's `y_inverted`
   texture flag negates the texture matrix's y row without the matching

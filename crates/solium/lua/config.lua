@@ -464,6 +464,17 @@ local defaults = {
     --                   then SOLIUM_QML, then SOLIUM_QML_GPU override this.
     --   probe_timeout   how long the trial may take, in milliseconds, before
     --                   it is killed and QML renders in software.
+    --   buffers         on the GPU, how big the buffer a scene (a window's
+    --                   frame, a bar, the wallpaper) is drawn into is. Each
+    --                   side is rounded up to a whole number of `step`
+    --                   pixels (0 to 1024), so a window being resized draws
+    --                   its frame into the buffer it has until it outgrows
+    --                   it, rather than into a new one on every frame; 0
+    --                   gives every size a buffer exactly its size, a new
+    --                   one at every size, which costs a few milliseconds a
+    --                   frame through a resize. Once a size has held, a
+    --                   buffer `shrink` steps or more larger than its scene
+    --                   on a side (2 to 64) is replaced by a snug one.
     --
     -- Read when the compositor starts; a reload does not change it, because
     -- Qt cannot change scene graph once started. The last log line that
@@ -472,6 +483,7 @@ local defaults = {
     qml = {
         renderer = "auto",
         probe_timeout = 5000,
+        buffers = { step = 128, shrink = 2 },
     },
 
     -- The monitors.
