@@ -8303,6 +8303,33 @@ mod tests {
         );
     }
 
+    /// **The shipped configuration runs a moving window's effects on every
+    /// pass** (`effects.motion_hz = 0`, 2026-10-16), and that is the Rust
+    /// default too: the glass is read where the window is on every frame of
+    /// a glide, a drag or a resize, and a lower rate is a choice made in
+    /// `config.lua` for a weak GPU. The same parity
+    /// `the_shipped_configuration_s_lock_table_matches_the_rust_default`
+    /// holds for `lock`.
+    #[test]
+    fn the_shipped_configuration_runs_a_moving_windows_effects_on_every_pass() {
+        let Some((directory, scripts)) =
+            shipped_init_with_user("solium-script-test-motion-hz-default", "return {}")
+        else {
+            return;
+        };
+        let settings = scripts.effect_settings_at_load();
+        let _ = std::fs::remove_dir_all(&directory);
+        let Some(Ok(settings)) = settings else {
+            panic!("the shipped init.lua handed over no effects settings: {settings:?}");
+        };
+        let default = crate::effect::settings::Settings::default().motion_hz;
+        assert!(
+            settings.motion_hz.abs() < f64::EPSILON && default.abs() < f64::EPSILON,
+            "the shipped effects.motion_hz is {} and the Rust default {default}, not both 0",
+            settings.motion_hz
+        );
+    }
+
     /// The shipped `config.lua` and `init.lua` tell the session and start
     /// autostart, and `--check` knows both keys. Shipped files only: the
     /// entry points `package.path` at them, past the developer's own
@@ -8381,6 +8408,7 @@ mod tests {
             crate::qml::renderer::Configured {
                 renderer: Some("auto".to_owned()),
                 probe_timeout: Some(crate::qml::renderer::PROBE_TIMEOUT),
+                buffers: Some(crate::qml::buffers::Buffers::default()),
             }
         );
         let shipped = std::fs::read_to_string(crate::assets::lua().join("init.lua"))
@@ -8408,7 +8436,6 @@ mod tests {
     /// old-key test above does and with the same guard on a real
     /// `~/.config/solium`, which would otherwise answer first.
     #[test]
-                buffers: Some(crate::qml::buffers::Buffers::default()),
     fn the_shipped_configuration_leaves_the_cursor_to_the_environment() {
         let Some(own) = Scripts::user_config_dir() else {
             return;

@@ -434,10 +434,12 @@ reads the clock once, at the top of `resolve`, where it also plans every
 pane's warp (`render::plan_warps`; the `warps` phase takes those plans), and
 the places, the warps and `elements`' walk are all measured at that instant
 (`Prepared::now`). A suffix whose key moved only with its part's place or
-size runs at most `effects.motion_hz` times a second (60 by default; 0
-on every pass), its last result drawn where the part is between, each place
-on a tick of its own phase so windows that glide together do not run
-together (`effect::store::T2State::waits`). A warped pane's capture holds its slots, with one
+size runs again on every pass by default, so the glass is exact on every
+frame of a glide, a drag or a resize. `effects.motion_hz` (0 by default; 10
+to 1000) caps it for a weak GPU: at most that many runs a second, its last
+result drawn where the part is between, each place on a tick of its own
+phase so windows that glide together do not run together
+(`effect::store::T2State::waits`). A warped pane's capture holds its slots, with one
 exception: under `effects.xray.warped = "drawn"`, the default, a `behind` T2
 slot is drawn beneath the warp instead (`effect::beneath`), through the same
 mesh, each fragment sampling the memo or the suffix's result where it is on
@@ -811,8 +813,6 @@ why it is made before Qt starts; `dev/README.md`, *QML on the GPU*, has how to
 force either one. See `docs/spikes/2026-09-04-qml-in-compositor.md` for the
 original measurement and the two Qt traps it hides.
 
-**A bar reserves its height whether it is a client or hosted.** The work area
-is what every layer surface's exclusive zone and every hosted surface's
 A dmabuf cannot change size, so a GPU scene is given a buffer with room to
 grow (`qml.buffers`: each side a whole number of steps, 128 pixels unless
 configured) and is drawn at its real size into the buffer's top-left corner,
@@ -824,6 +824,8 @@ holding another monitor's picture of a window across two scales is not drawn
 over. `dev/wirecheck`'s "a scene in a buffer larger than itself" holds Qt to
 drawing the corner one to one.
 
+**A bar reserves its height whether it is a client or hosted.** The work area
+is what every layer surface's exclusive zone and every hosted surface's
 `reserve` leave of a monitor, so windows are placed beside a bar, never under
 it. A hosted surface's reserve is apart from its size: a whole-monitor shell
 reserves only its bar's edge (`docs/shell-boundary.md`, "Room of its own").
