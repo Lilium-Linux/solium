@@ -740,6 +740,7 @@ control has shown can fail.
 | `WIRECHECK_REBUILD_ON_RESIZE` | rebuild the scene on a resize instead of rebinding it — the resize control above |
 | `WIRECHECK_STOP_THE_CLOCK` | stop ticking from the rebind onward — the animation control above |
 | `WIRECHECK_KEEP_RESIZED_SCENE` | do not free the resized scene, so the teardown control reaches C-1 |
+| `WIRECHECK_TIME_RESIZE` | after case 8b, time the shipped glass bar (`panes/glass/Frame.qml`, 1150x850) through a 300-frame drag a pixel a frame, on a buffer per size and under `qml.buffers`' default (`crates/solium/src/qml/buffers.rs`, included by path): new buffers and a frame's p50, p95 and max, printed and not judged. A frame is what `Gpu::refresh` spends on a miss |
 | `WIRECHECK_ONLY=fx0`, `fx2`, `fx3` | runs only the FX0 cases (11b to 11f), only FX2's (12a onwards), or only FX3's (13a onwards), with no Qt started; that is how the Surface Pro 7 runs them from a copied binary |
 | `WIRECHECK_FX0_CROSS` | with `WIRECHECK_ONLY=fx0`, also runs the fence control above |
 | `WIRECHECK_RESTORE_EARLY=0` | skip the restore after `scene_new_gpu` |
