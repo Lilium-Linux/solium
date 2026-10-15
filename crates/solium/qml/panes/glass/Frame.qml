@@ -13,11 +13,10 @@
 // busy screen its frames
 // (`decoration::tests::a_focus_change_draws_the_glass_bar_once`).
 //
-// **Nor is it drawn again at every size** while the window's size keeps
-// changing: at most `resizeHz` times a second, its picture stretched to the
-// window between (`Solium/Layer.qml`). A bar drawn at every step of a drag,
-// on every window the drag resized, cost the 260 Hz TTY trace of 2026-10-15
-// its frames (`decoration::tests::a_layer_is_drawn_again_for_a_new_size_at_most_resize_hz_times_a_second`).
+// **It is drawn at every size** while the window's size keeps changing, and
+// never stretched: it declares no `resizeHz` (`Solium/Layer.qml`). A new size
+// draws into the buffer the bar already has, which is why that is cheap
+// (`qml::buffers`; `decoration::tests::the_glass_bars_numbers_change_what_it_draws`).
 //
 // The numbers to change are under "The look" below, beside the two in
 // `Pane.qml`, the corners and the bar's height, and the shade's in
@@ -51,11 +50,6 @@ Item {
     // --- The look ----------------------------------------------------------
     // The application's icon, in logical pixels.
     property int iconSize: 16
-
-    // How often, at most, the bar is drawn again for a new size while the
-    // window's size keeps changing, in times a second (5 to 1000; 0 draws it
-    // at every size). Read by the compositor.
-    property real resizeHz: 30
 
     // Whether the icon is on show: an id set, room for it, and an icon the
     // theme has for that id. What the tests read.

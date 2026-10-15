@@ -6203,8 +6203,11 @@ mod tests {
     }
 
     /// **The glass bar's numbers are its to change**: its `iconSize` the room
-    /// its title is left, on a pane 120 wide; and its `resizeHz`, read as
-    /// the compositor reads it
+    /// its title is left, on a pane 120 wide. It declares no `resizeHz`, so
+    /// it is drawn at every size of a window changing size, never stretched
+    /// (2026-10-16: since a size step no longer allocates a buffer, see
+    /// `qml::buffers::tests::a_scene_growing_a_pixel_a_frame_is_rebound_once_a_step`);
+    /// read as the compositor reads it
     /// (`tests::a_layer_is_drawn_again_for_a_new_size_at_most_resize_hz_times_a_second`).
     /// The shade's are the `shade` effect's params, in `effects.lua`.
     #[test]
@@ -6221,25 +6224,54 @@ mod tests {
                 !narrow.layers[0].scene.get_bool("roomForTitle"),
                 "a larger icon leaves the title no room at 120"
             );
-            assert!((narrow.layers[0].resize_hz() - 30.0).abs() < f64::EPSILON);
+            assert!(
+                narrow.layers[0].resize_hz().abs() < f64::EPSILON,
+                "the glass bar is held at {} a second",
+                narrow.layers[0].resize_hz()
+            );
         });
     }
 
     /// **A layer is drawn again for a new size at most `resizeHz` times a
-    /// second** while its pane's size keeps changing: the glass bar, at its
-    /// 30, through a second of a drag that widens its pane on every frame of
-    /// a 260 Hz monitor, is drawn about 30 times and not 260, its picture
+    /// second** while its pane's size keeps changing: the glass bar, told
+    /// `resizeHz = 30` (a user style's knob; the shipped bar declares none),
+    /// through a second of a drag that widens its pane on every frame of a
+    /// 260 Hz monitor, is drawn about 30 times and not 260, its picture
     /// stretched between; at its last size within a thirtieth of a second of
     /// the drag stopping, and not again after; and at once, at the pane's
     /// size, when it has something new to draw (a focus change). At
-    /// `resizeHz = 0` it is drawn at every size, as every layer was.
+    /// `resizeHz = 0`, the bar as shipped, it is drawn at every size.
     #[test]
     fn a_layer_is_drawn_again_for_a_new_size_at_most_resize_hz_times_a_second() {
         use std::time::Duration;
         on_the_qt_thread(|| {
-            let Some(mut decoration) = glass(400, 268) else {
+            if crate::qml::on_gpu() {
                 return;
+            }
+            // The shipped glass style, its bar declaring `resizeHz: 30` as a
+            // user's copy of it might.
+            let shipped = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/qml/panes/glass"));
+            let read = |file: &str| {
+                std::fs::read_to_string(shipped.join(file)).expect("a shipped glass file")
             };
+            let frame = read("Frame.qml");
+            let held = frame.replacen(
+                "    id: frame\n",
+                "    id: frame\n    property real resizeHz: 30\n",
+                1,
+            );
+            assert_ne!(held, frame, "the glass bar's root has no `id: frame` line");
+            let dir = fixture(
+                "resize-hz",
+                &[
+                    ("Pane.qml", &read("Pane.qml")),
+                    ("Frame.qml", &held),
+                    ("effects.lua", &read("effects.lua")),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the copied style loads");
+            let mut decoration = Decoration::from_style(&style, 400, 268).expect("it builds");
+            assert!((decoration.layers[0].resize_hz() - 30.0).abs() < f64::EPSILON);
             let values = Values::default();
             let insets = decoration.insets;
             decoration.tell(&look_with(&values, true), 400, 300);
@@ -6306,6 +6338,7 @@ mod tests {
             );
             let every = drag(&mut decoration, 4000);
             assert_eq!(every, 250, "at resizeHz 0");
+            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 

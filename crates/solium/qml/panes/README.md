@@ -515,8 +515,9 @@ loses the keyboard and takes it away as the window gets it back, 240 ms on
 frame and runs nothing for it, and once it has faded out nothing is held or
 drawn for it, so the window being typed in costs nothing for it. The bar draws
 one new picture per focus change, with nothing in it animated, and while the
-window's size keeps changing it is drawn again at most `resizeHz` times a
-second, 30, stretched with the window between.
+window's size keeps changing it is drawn at every size, never stretched: it
+declares no `resizeHz`, and a new size draws into the buffer it already has
+rather than a new one.
 `tests/scenarios/pane-glass-drawn.lua` reads the bar off its pixels, and
 wirecheck's case 13j the shade's.
 
@@ -532,7 +533,6 @@ Its numbers, each a line to change in a copy of the folder,
 | `Pane.qml` | `client.radius`: the window's corners, in logical pixels | `16` |
 | `Pane.qml` | `insets.bottom`: the bar's height | `Theme.titlebarHeight`, 32 |
 | `Frame.qml` | `iconSize`: the application's icon, in logical pixels | `16` |
-| `Frame.qml` | `resizeHz`: how often, at most, the bar is drawn again for a new size while the window's size keeps changing, in times a second; 0 at every size | `30` |
 | `effects.lua` | the shade's `width`: how far in it reaches, in pixels, fading to nothing there | `12` |
 | `effects.lua` | the shade's `strength`: how opaque it is at the window's very edge, 0 for no shade | `0.5` |
 | `effects.lua` | the shade's `color` | `{ 0, 0, 0, 1 }` |
