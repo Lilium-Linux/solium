@@ -329,9 +329,17 @@ struct SoliumQmlScene
      * `qml::hosted::tests::a_let_go_takes_the_focus_from_a_field_inside_the_container_that_wants_the_keyboard`. */
     QMetaObject::Connection focus_watch;
     QImage image;
-    /* Device pixels: the size of the image the compositor uploads. */
+    /* Device pixels: the size of the image the compositor uploads, and on
+     * the GPU path the size the scene is drawn at, into the top-left corner
+     * of its buffer. */
     int width = 0;
     int height = 0;
+    /* GPU scenes only: the size of the buffer itself, at least width by
+     * height. A scene is given a buffer with room to grow (`qml::buffers`),
+     * so a new size usually draws into the buffer it has, and the compositor
+     * samples only the width-by-height corner of it. See place_in_buffer. */
+    int buffer_width = 0;
+    int buffer_height = 0;
     /* Device pixels per logical one. See solium_qml_scene_resize. */
     double scale = 1.0;
     /* Whether the scene has changed since it was last rendered. */
@@ -1045,8 +1053,10 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_with(const char *qml_path, int w
 static bool import_dmabuf_texture(SoliumQmlScene *scene, int dmabuf_fd, int stride,
                                   unsigned long long modifier, unsigned int fourcc)
 {
-    const int width = scene->width;
-    const int height = scene->height;
+    // The buffer's size, which the EGLImage has to state, and not the
+    // scene's, which can be smaller: see place_in_buffer.
+    const int width = scene->buffer_width;
+    const int height = scene->buffer_height;
 
     // Resolved once per process; the entry points do not depend on the display
     // they are later called with.
@@ -1221,6 +1231,68 @@ static bool import_dmabuf_texture(SoliumQmlScene *scene, int dmabuf_fd, int stri
 static void mirror_for_the_compositor(QQuickRenderTarget *target)
 {
     target->setMirrorVertically(true);
+}
+
+/*
+ * Draw a GPU scene at `width` by `height` device pixels, at `scale`, into the
+ * top-left corner of the buffer it is on, which can be larger.
+ *
+ * Why the buffer can be larger: a dmabuf cannot change size, so a scene on a
+ * buffer exactly its own size needs a new one at every size it is drawn at,
+ * and a window frame is sized from its window on every frame of a drag on
+ * its edge. That was a GBM allocation, two imports and a render-target swap
+ * per frame, 2.5 ms at p50 on the 260 Hz TTY trace of 2026-10-15. So the
+ * compositor allocates with room to grow (`qml::buffers`) and a new size is
+ * drawn here, into the buffer the scene has.
+ *
+ * How it lands in the corner, one to one: the render target is declared at
+ * the *scene's* size over the larger texture. Qt sizes its viewport, its
+ * scissor and its depth-stencil buffer from the target's declared pixel size,
+ * and derives its projection from that size over the device pixel ratio, so
+ * everything about the frame is what it was on a buffer exactly the scene's
+ * size: the scene's logical rect maps onto exactly width by height pixels,
+ * and anything it draws past its own bounds is clipped there. The viewport's
+ * origin is the texture's first row (GL's bottom-left), which the mirror
+ * (mirror_for_the_compositor) makes the scene's top, so the scene is the
+ * top-left corner as the compositor reads the buffer, and the rest is not
+ * touched: Qt neither draws nor clears outside the corner.
+ *
+ * Not the whole buffer as the target, which is the first thing tried
+ * (2026-10-16): Qt's projection rect is the target's pixel size over the
+ * ratio *rounded to whole logical pixels* (a QSize), so on a 293-pixel
+ * buffer at scale 2 a logical pixel came out 293/147 device pixels and a
+ * 192-pixel scene lost its last column and row. Measured by
+ * `dev/wirecheck`'s "a scene in a buffer larger than itself", which reads
+ * the corner back byte for byte at scales 1, 1.25 and 2.
+ *
+ * The target is set again whenever it changes, the texture, the size or the
+ * ratio: Qt then makes the framebuffer and depth-stencil wrappers again, at
+ * a fraction of a new buffer's cost, and nothing else.
+ */
+static void place_in_buffer(SoliumQmlScene *scene, int width, int height, double scale,
+                            bool new_texture)
+{
+    const bool changed =
+        new_texture || scene->width != width || scene->height != height || scene->scale != scale;
+    scene->width = width;
+    scene->height = height;
+    scene->scale = scale;
+
+    // Logical geometry, device-sized target, ratio between them: see the long
+    // comment in solium_qml_scene_resize for why it is that way round.
+    const int logical_width = qMax(1, qRound(width / scale));
+    const int logical_height = qMax(1, qRound(height / scale));
+    size_window(scene, logical_width, logical_height);
+    size_root(scene, logical_width, logical_height);
+
+    if (changed) {
+        QQuickRenderTarget target =
+            QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
+        target.setDevicePixelRatio(scale);
+        mirror_for_the_compositor(&target);
+        scene->window->setRenderTarget(target);
+    }
+    scene->dirty = true;
 }
 
 /*
@@ -1424,9 +1496,12 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     scene->gpu = true;
     scene->width = width;
     scene->height = height;
-    // Built at 1x like a software scene; resize supplies the real ratio. The
-    // buffer's pixel size is fixed, so for a GPU scene only the *scale* can
-    // change afterwards — see solium_qml_scene_resize.
+    // Built on a buffer exactly its size. A buffer's pixel size is fixed, so
+    // a GPU scene can afterwards be drawn at any size up to it, and a larger
+    // one needs solium_qml_scene_rebind: see place_in_buffer.
+    scene->buffer_width = width;
+    scene->buffer_height = height;
+    // Built at 1x like a software scene; resize supplies the real ratio.
     scene->scale = 1.0;
 
     scene->control = new QQuickRenderControl();
@@ -1456,6 +1531,7 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     // buffer during eglCreateImageKHR, so the caller's fd is only borrowed for
     // the length of this call. Holding it here would be a second owner of a
     // lifetime the compositor already tracks through its Dmabuf.
+    // At the scene's size, which here is the buffer's too: see place_in_buffer.
     QQuickRenderTarget target =
         QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
     target.setDevicePixelRatio(scene->scale);
@@ -1644,34 +1720,26 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
         return;
     }
 
-    // A GPU scene draws into a buffer the compositor allocated, so its pixel
-    // size is not this function's to change: the texture is exactly as big as
-    // the dmabuf. Falling through would replace the texture target with a paint
-    // device and move the scene silently back onto the CPU, still rendering,
-    // still looking fine — into an image nobody uploads, while the compositor
-    // keeps sampling a texture frozen on its last frame.
+    // A GPU scene draws into a buffer the compositor allocated, so it can be
+    // drawn at any size up to that buffer's and at no size past it: the
+    // texture is exactly as big as the dmabuf. Falling through would replace
+    // the texture target with a paint device and move the scene silently back
+    // onto the CPU, still rendering, still looking fine — into an image nobody
+    // uploads, while the compositor keeps sampling a texture frozen on its last
+    // frame.
     //
-    // A scale-only change is fine and does happen: the same buffer, laid out
-    // for a different monitor ratio.
+    // Within the buffer, a new size or a new ratio is drawn into its top-left
+    // corner (place_in_buffer): the size a window frame changes on every frame
+    // of a drag, and a monitor's ratio.
     if (scene->gpu) {
-        if (width != scene->width || height != scene->height) {
-            qWarning("solium_qml_scene_resize cannot change a GPU scene's pixel "
-                     "size (%dx%d to %dx%d): it has no buffer to change it to. "
+        if (width > scene->buffer_width || height > scene->buffer_height) {
+            qWarning("solium_qml_scene_resize cannot draw a GPU scene at %dx%d on its "
+                     "%dx%d buffer: it has no larger buffer to change to. "
                      "Use solium_qml_scene_rebind with one.",
-                     scene->width, scene->height, width, height);
+                     width, height, scene->buffer_width, scene->buffer_height);
             return;
         }
-        scene->scale = scale;
-        const int logical_width = qMax(1, qRound(width / scale));
-        const int logical_height = qMax(1, qRound(height / scale));
-        size_window(scene, logical_width, logical_height);
-        size_root(scene, logical_width, logical_height);
-        QQuickRenderTarget target =
-            QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
-        target.setDevicePixelRatio(scale);
-        mirror_for_the_compositor(&target);
-        scene->window->setRenderTarget(target);
-        scene->dirty = true;
+        place_in_buffer(scene, width, height, scale, false);
         return;
     }
 
@@ -1713,12 +1781,13 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
 /*
  * Point a GPU scene at a different buffer, and change nothing else.
  *
- * The scale-only branch of solium_qml_scene_resize above already does
- * everything a resize needs except swapping the texture underneath it. This is
- * that branch with a new buffer put under it, and it is a separate entry point
- * rather than a fall-through of resize because it takes a buffer and resize
- * cannot: the compositor allocates, and there is nothing in a
- * (width, height, scale) call for this function to allocate from.
+ * The GPU branch of solium_qml_scene_resize above already does everything a
+ * resize needs except swapping the texture underneath it (place_in_buffer).
+ * This is that branch with a new buffer put under it, and it is a separate
+ * entry point rather than a fall-through of resize because it takes a buffer
+ * and resize cannot: the compositor allocates, and there is nothing in a
+ * (width, height, scale) call for this function to allocate from. The buffer
+ * can be larger than the scene, which is drawn into its top-left corner.
  *
  * Why it is worth the entry point at all is in host.h: the alternative is
  * rebuilding the scene, and a rebuilt scene is a new object tree whose
@@ -1729,13 +1798,19 @@ extern "C" void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int he
  */
 extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, int stride,
                                         unsigned long long modifier, unsigned int fourcc,
-                                        int width, int height, double scale)
+                                        int buffer_width, int buffer_height, int width,
+                                        int height, double scale)
 {
-    if (scene == nullptr || !scene->gpu || scene->control == nullptr || width <= 0 ||
-        height <= 0 || stride <= 0 || dmabuf_fd < 0) {
+    if (scene == nullptr || !scene->gpu || scene->control == nullptr || buffer_width <= 0 ||
+        buffer_height <= 0 || stride <= 0 || dmabuf_fd < 0) {
         qWarning("solium_qml_scene_rebind: not a GPU scene, or %dx%d stride=%d fd=%d is not a "
                  "buffer",
-                 width, height, stride, dmabuf_fd);
+                 buffer_width, buffer_height, stride, dmabuf_fd);
+        return false;
+    }
+    if (width <= 0 || height <= 0 || width > buffer_width || height > buffer_height) {
+        qWarning("solium_qml_scene_rebind: a %dx%d scene does not fit a %dx%d buffer",
+                 width, height, buffer_width, buffer_height);
         return false;
     }
     if (scale <= 0.0) {
@@ -1758,12 +1833,12 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     // and still drawing, which is the difference between a dropped frame and a
     // black window.
     //
-    // The size goes on the scene *before* the import and comes back off if it
-    // fails, because import_dmabuf_texture sizes the EGLImage from
-    // scene->width and scene->height. Setting them afterwards would import the
-    // new buffer at the *old* size, and nothing is obliged to notice: an fd
-    // carries no dimensions, so EGL_WIDTH and EGL_HEIGHT are the only thing
-    // that says how many rows the image has.
+    // The buffer's size goes on the scene *before* the import and comes back
+    // off if it fails, because import_dmabuf_texture sizes the EGLImage from
+    // scene->buffer_width and scene->buffer_height. Setting them afterwards
+    // would import the new buffer at the *old* size, and nothing is obliged to
+    // notice: an fd carries no dimensions, so EGL_WIDTH and EGL_HEIGHT are the
+    // only thing that says how many rows the image has.
     //
     // The display and context are saved for the same reason and it is not
     // symmetry: a successful import overwrites scene->egl_display and
@@ -1776,18 +1851,18 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
     const GLuint previous_texture = scene->texture;
     const EGLDisplay previous_display = scene->egl_display;
     const EGLContext previous_context = scene->egl_context;
-    const int previous_width = scene->width;
-    const int previous_height = scene->height;
+    const int previous_width = scene->buffer_width;
+    const int previous_height = scene->buffer_height;
     scene->egl_image = EGL_NO_IMAGE_KHR;
     scene->texture = 0;
-    scene->width = width;
-    scene->height = height;
+    scene->buffer_width = buffer_width;
+    scene->buffer_height = buffer_height;
 
     if (!import_dmabuf_texture(scene, dmabuf_fd, stride, modifier, fourcc)) {
         scene->egl_image = previous_image;
         scene->texture = previous_texture;
-        scene->width = previous_width;
-        scene->height = previous_height;
+        scene->buffer_width = previous_width;
+        scene->buffer_height = previous_height;
         qWarning("solium_qml_scene_rebind: the new buffer would not import, "
                  "staying on the old one");
         release_the_thread(scene);
@@ -1823,22 +1898,10 @@ extern "C" bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, in
         }
     }
 
-    scene->scale = scale;
-
-    // Logical geometry, device-sized target, ratio between them — identical to
-    // the scale-only branch of solium_qml_scene_resize, and see the long
-    // comment there for why it is that way round.
-    const int logical_width = qMax(1, qRound(width / scale));
-    const int logical_height = qMax(1, qRound(height / scale));
-    size_window(scene, logical_width, logical_height);
-    size_root(scene, logical_width, logical_height);
-
-    QQuickRenderTarget target =
-        QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
-    target.setDevicePixelRatio(scale);
-    mirror_for_the_compositor(&target);
-    scene->window->setRenderTarget(target);
-    scene->dirty = true;
+    // The scene at its size in the corner of the new buffer, as a resize
+    // within the buffer it had would have drawn it, with the new texture
+    // under it.
+    place_in_buffer(scene, width, height, scale, true);
 
     // Nothing current on the way out, which is what building a GPU scene and
     // freeing one both promise. The three entry points a caller with no

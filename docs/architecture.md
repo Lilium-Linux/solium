@@ -813,6 +813,17 @@ original measurement and the two Qt traps it hides.
 
 **A bar reserves its height whether it is a client or hosted.** The work area
 is what every layer surface's exclusive zone and every hosted surface's
+A dmabuf cannot change size, so a GPU scene is given a buffer with room to
+grow (`qml.buffers`: each side a whole number of steps, 128 pixels unless
+configured) and is drawn at its real size into the buffer's top-left corner,
+which is all the compositor samples (`qml/buffers.rs`, `place_in_buffer` in
+`qml/host.cpp`). A window frame being resized draws into the buffer it has
+and is given a new one only when it outgrows it, or, once its size holds,
+when the buffer has become `shrink` steps larger than it; a buffer still
+holding another monitor's picture of a window across two scales is not drawn
+over. `dev/wirecheck`'s "a scene in a buffer larger than itself" holds Qt to
+drawing the corner one to one.
+
 `reserve` leave of a monitor, so windows are placed beside a bar, never under
 it. A hosted surface's reserve is apart from its size: a whole-monitor shell
 reserves only its bar's edge (`docs/shell-boundary.md`, "Room of its own").

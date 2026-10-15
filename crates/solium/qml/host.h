@@ -164,10 +164,12 @@ int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd);
  * every frame of every window animation. A scene rebuilt per resize does not
  * animate slowly; it never advances.
  *
- * `width` and `height` are device pixels and must match the new buffer;
- * `scale` is how many of those make a logical one, as in
- * solium_qml_scene_resize. `dmabuf_fd` is borrowed for the call, exactly as it
- * is by solium_qml_scene_new_gpu.
+ * `buffer_width` and `buffer_height` are the new buffer's size in device
+ * pixels; `width` and `height` the scene's, which may be smaller, and the
+ * scene is drawn into the buffer's top-left corner at that size (the rest is
+ * not the compositor's to sample). `scale` is how many device pixels make a
+ * logical one, as in solium_qml_scene_resize. `dmabuf_fd` is borrowed for the
+ * call, exactly as it is by solium_qml_scene_new_gpu.
  *
  * Returns false and leaves the scene on its previous buffer on failure, so a
  * surface whose resize failed keeps drawing last frame's picture.
@@ -177,7 +179,8 @@ int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd);
  * renderer to restore never has to know which of the three it just called. */
 bool solium_qml_scene_rebind(SoliumQmlScene *scene, int dmabuf_fd, int stride,
                              unsigned long long modifier, unsigned int fourcc,
-                             int width, int height, double scale);
+                             int buffer_width, int buffer_height, int width, int height,
+                             double scale);
 
 /*
  * Load `qml_path` into a scene rendering at `width` x `height`.
@@ -220,9 +223,9 @@ void solium_qml_scene_free(SoliumQmlScene *scene);
  * full size. See the comment on the definition: getting this the wrong way
  * round gives either half-size text or blurry chrome.
  *
- * On a GPU scene only `scale` may change here: the pixel size is the buffer's,
- * and this function has no buffer to change it to. Pass one to
- * solium_qml_scene_rebind instead. */
+ * On a GPU scene the size may change up to its buffer's, and the scene is
+ * drawn into the buffer's top-left corner at it; past that this function has
+ * no buffer to change to. Pass one to solium_qml_scene_rebind instead. */
 void solium_qml_scene_resize(SoliumQmlScene *scene, int width, int height, double scale);
 
 /*

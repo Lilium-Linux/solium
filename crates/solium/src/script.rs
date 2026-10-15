@@ -4408,6 +4408,38 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     ),
                 },
             }
+            // How a GPU scene's buffer is sized (`qml::buffers`): a key left
+            // out keeps its default, and a table out of bounds, or with a key
+            // that is not a whole number, keeps both.
+            // `tests::a_configured_qml_renderer_is_read_before_qt_starts`.
+            match options.get::<Value>("buffers") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::Table(buffers)) => {
+                    let whole = |key: &str, default: i32| match buffers.get::<Value>(key) {
+                        Ok(Value::Nil) | Err(_) => Some(default),
+                        Ok(value) => value.as_i32(),
+                    };
+                    let step = whole("step", crate::qml::buffers::STEP);
+                    let shrink = whole("shrink", crate::qml::buffers::SHRINK);
+                    match step
+                        .zip(shrink)
+                        .and_then(|(step, shrink)| crate::qml::buffers::Buffers::new(step, shrink))
+                    {
+                        Some(policy) => configured.buffers = Some(policy),
+                        None => tracing::warn!(
+                            ?step,
+                            ?shrink,
+                            "qml.buffers.step is a whole number of pixels from 0 to 1024 and \
+                             qml.buffers.shrink a whole number of steps from 2 to 64; keeping \
+                             the defaults"
+                        ),
+                    }
+                }
+                Ok(other) => tracing::warn!(
+                    buffers = ?other,
+                    "qml.buffers is a table, {{ step = , shrink = }}; keeping the defaults"
+                ),
+            }
             lua.set_app_data(configured);
             Ok(())
         })?,
@@ -7925,8 +7957,33 @@ mod tests {
             crate::qml::renderer::Configured {
                 renderer: Some("software".to_owned()),
                 probe_timeout: Some(Duration::from_millis(1500)),
+                buffers: None,
             }
         );
+        // `qml.buffers`, each key on its own, the other left at its default.
+        let buffers = |step, shrink| crate::qml::buffers::Buffers::new(step, shrink);
+        for (source, wanted) in [
+            (
+                "sol.qml({ buffers = { step = 256, shrink = 3 } })",
+                buffers(256, 3),
+            ),
+            (
+                "sol.qml({ buffers = { step = 0 } })",
+                buffers(0, crate::qml::buffers::SHRINK),
+            ),
+            (
+                "sol.qml({ buffers = { shrink = 5 } })",
+                buffers(crate::qml::buffers::STEP, 5),
+            ),
+            // Out of bounds, or not whole numbers: warned about, and the
+            // defaults kept.
+            ("sol.qml({ buffers = { step = 2000 } })", None),
+            ("sol.qml({ buffers = { shrink = 1 } })", None),
+            ("sol.qml({ buffers = { step = 64.5 } })", None),
+            ("sol.qml({ buffers = 128 })", None),
+        ] {
+            assert_eq!(configured(source).buffers, wanted, "{source}");
+        }
         // Said nothing, three ways.
         for source in ["", "sol.qml(nil)", "sol.qml({})"] {
             assert_eq!(
@@ -8351,6 +8408,7 @@ mod tests {
     /// old-key test above does and with the same guard on a real
     /// `~/.config/solium`, which would otherwise answer first.
     #[test]
+                buffers: Some(crate::qml::buffers::Buffers::default()),
     fn the_shipped_configuration_leaves_the_cursor_to_the_environment() {
         let Some(own) = Scripts::user_config_dir() else {
             return;

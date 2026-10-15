@@ -366,6 +366,7 @@
 ---@class sol.QmlOptions
 ---@field renderer? "auto"|"gpu"|"software" `"auto"` tries the GPU in a child process first.
 ---@field probe_timeout? integer Milliseconds the GPU trial may take.
+---@field buffers? { step?: integer, shrink?: integer } On the GPU, how big the buffer a QML scene is drawn into is: each side rounded up to a whole number of `step` pixels (0 to 1024; 0 is a buffer exactly the scene's size, a new one at every size; default 128), so a window being resized draws its frame into the buffer it has until it outgrows it; once a size has held, a buffer `shrink` steps or more larger than its scene on a side (2 to 64; default 2) is replaced by a snug one.
 
 ---Telling systemd and D-Bus that Solium is the session. A key left out, or
 ---one of the wrong kind, keeps the default.

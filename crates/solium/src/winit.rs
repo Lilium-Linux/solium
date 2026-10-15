@@ -406,10 +406,11 @@ pub(crate) fn run() -> Result<()> {
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
-    crate::qml::renderer::decide(
-        crate::qml::renderer::Entry::Nested,
-        &scripts.as_ref().map(Scripts::qml).unwrap_or_default(),
-    );
+    let qml = scripts.as_ref().map(Scripts::qml).unwrap_or_default();
+    crate::qml::renderer::decide(crate::qml::renderer::Entry::Nested, &qml);
+    // How a GPU scene's buffer is sized, before any scene is built:
+    // `qml.buffers` (`qml::buffers`), read here as the renderer is.
+    crate::qml::buffers::configure(qml.buffers.unwrap_or_default());
     // Nested, the session this window is in keeps its own environment: this
     // tells nobody unless `SOLIUM_SESSION_BUS` names a bus. See `session.rs`.
     let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
