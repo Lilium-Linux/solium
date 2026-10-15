@@ -171,7 +171,7 @@ tier is fixed when the rules are applied: a reload is what changes it.
 
 | Tier | What the chain reads | What it costs | In this build |
 |---|---|---|---|
-| T0 | nothing of the frame: only `shape` and its own states (a border, a glow, a gradient) | no capture. It runs once, and again only when its params or the part's size change, whatever the window draws under it; while the part keeps changing size (a drag on its edge), at most `effects.motion_hz` times a second, its last result stretched over the part between. Its `sol_tex` reads a transparent texel | runs |
+| T0 | nothing of the frame: only `shape` and its own states (a border, a glow, a gradient) | no capture. It runs once, and again only when its params or the part's size change, whatever the window draws under it: on every pass the part changes size (a drag on its edge), unless `effects.motion_hz` caps how many times a second (its last result stretched over the part between). Its `sol_tex` reads a transparent texel | runs |
 | T1 | the part's own pixels: `self`, or its first input given `source = "self"` | a capture of the part, padded by the chain's `reach` or its `bleed`, whichever is further, drawn again only when the part commits. The chain runs again only then, or when its params or the part's size change; otherwise its last result is placed as it was | runs |
 | T2 | the `backdrop`, what is behind the part, from xray: a sharp picture of the layers below the part's own, per monitor (`effects.xray`) | xray is drawn only on a monitor a T2 part is on, and again only when what is in it changes. The chain's start that reads only the backdrop (a blur) runs once per monitor and is shared (*The memo*); the rest runs per part, at the part's own size, again only when the part moves, its params change or xray is redrawn. A plain blur runs nothing per part: each part is a crop of the shared result | runs |
 | T3 | the live backdrop, with `source = "live"` or `"auto"` | | refused, naming X4.1 |
@@ -196,12 +196,15 @@ captured, run or read behind the lock.
 A T2 part reads the backdrop where it is drawn, on every pass. Through a
 glide or a drag (a relayout, `sol.place`, `sol.present` with a rectangle) a
 plain blur only moves its crop of the shared result and runs nothing, and a
-chain with steps of its own per part runs them again as its box moves, and
-not at rest: at most `effects.motion_hz` times a second (60 unless you
-change it; 0 on every pass), its last result drawn where the part is between,
-so what shows through it lags where the part is by at most that long's worth
-of its motion, and is where it is again within one tick of its stopping. A
-backdrop redrawn under it, or its params changed, runs it at once. Under a warp (a tilt, a genie, an open or close that
+chain with steps of its own per part runs them again on every pass its box
+moves, and not at rest, so what shows through it is where the part is on
+every frame. `effects.motion_hz` (0, every pass, unless you change it) is a
+cap for a weak GPU: at 10 to 1000 the steps run at most that many times a
+second, the last result drawn where the part is between, so what shows
+through lags where the part is by up to that long's worth of its motion (at
+60 on a 260 Hz monitor, about four frames) and is where it is again within
+one tick of its stopping. A backdrop redrawn under it, or its params
+changed, runs it at once either way. Under a warp (a tilt, a genie, an open or close that
 warps) the part's `behind` slot is drawn beneath the warp, through the same
 mesh, each pixel reading the backdrop under it on the screen, and the
 window's own picture keeps a hole in the part's shape there, so what is

@@ -42,10 +42,11 @@ pub(crate) struct Settings {
     /// an unwanted one is kept and what they may hold.
     /// `script::tests::sol_effects_reads_xray_and_memo`.
     pub(crate) memo: crate::effect::memo::MemoConfig,
-    /// `effects.motion_hz` (amended 2026-10-15, the 260 Hz TTY trace): how
-    /// many times a second, at most, an effect's steps for a part run again
-    /// while only the part's place or size moves them, a T0 chain's on its
-    /// size and a T2 suffix's on its place and size; 0 on every pass.
+    /// `effects.motion_hz` (amended 2026-10-15, the 260 Hz TTY trace; 0 by
+    /// default since 2026-10-16): how many times a second, at most, an
+    /// effect's steps for a part run again while only the part's place or
+    /// size moves them, a T0 chain's on its size and a T2 suffix's on its
+    /// place and size; 0 on every pass.
     /// `render::run_slots`, `render::run_t2`,
     /// `effect::store::tests::a_moving_parts_suffix_runs_at_most_motion_hz_times_a_second`,
     /// `effect::store::tests::a_resized_parts_t0_chain_runs_at_most_motion_hz_times_a_second`.
@@ -66,11 +67,18 @@ impl Default for Settings {
     }
 }
 
-/// `effects.motion_hz` unless a configuration says otherwise: a moving
-/// window's glass and a resized one's shade run again 60 times a second,
-/// which a 60 Hz monitor would show anyway, and not on every frame of a
-/// 260 Hz one. `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
-const MOTION_HZ_DEFAULT: f64 = 60.0;
+/// `effects.motion_hz` unless a configuration says otherwise: 0, so a
+/// moving window's glass and a resized one's shade run again on every pass
+/// they moved on, and what shows through the glass is where the window is on
+/// every frame. A cap (60 was the default until 2026-10-16) drew the last
+/// result where the window had moved to, which on a 260 Hz monitor is about
+/// four frames of a backdrop read at the old place: the glass visibly trailed
+/// its window, for a saving of some 0.15 ms of GPU a run at p50 (0.3 ms at
+/// p95) on that machine, whose missed frames came from QML and not from
+/// effects. A cap is for a GPU too weak to run every pass.
+/// `tests::the_engines_keys_read_with_their_defaults_and_bounds`,
+/// `script::tests::the_shipped_configuration_runs_a_moving_windows_effects_on_every_pass`.
+const MOTION_HZ_DEFAULT: f64 = 0.0;
 
 /// What `effects.motion_hz` may be besides 0: below 10 what a window shows
 /// through its glass would trail it for over a tenth of a second, and above
@@ -472,10 +480,13 @@ mod tests {
             (super::PresentFailed::Flat, super::PresentReload::Flat)
         );
         assert!(
-            (none.motion_hz - 60.0).abs() < f64::EPSILON,
-            "60 unless said"
+            none.motion_hz.abs() < f64::EPSILON,
+            "0, on every pass, unless said"
         );
-        for (lua, hz) in [("{ motion_hz = 0 }", 0.0), ("{ motion_hz = 144.5 }", 144.5)] {
+        for (lua, hz) in [
+            ("{ motion_hz = 60 }", 60.0),
+            ("{ motion_hz = 144.5 }", 144.5),
+        ] {
             let read = super::parse(&tree(lua)).expect(lua).motion_hz;
             assert!((read - hz).abs() < f64::EPSILON, "{lua}: {read}");
         }
