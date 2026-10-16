@@ -325,42 +325,55 @@ impl Follow {
     }
 }
 
-/// The colour a pane shows where its client's picture does not reach, as
-/// straight (not premultiplied) RGBA bytes; `None` draws nothing there, so what
-/// is beneath the window shows.
+/// What a pane shows where its client's picture does not reach.
 ///
 /// `resize.background`, read by [`background_named`]. Only a fill that does
 /// not stretch leaves anything uncovered, and only while a picture is smaller
 /// than its rectangle: a glide that shrinks a window whose client has answered,
 /// a drag that grows one whose client has not, a degenerate buffer (#125).
 /// `script::tests::the_shipped_resize_setting_reaches_the_compositor`.
-pub(crate) type Background = Option<[u8; 4]>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Background {
+    /// The picture's own edge, stretched out over what it does not reach: the
+    /// last column beside it, the last row under it, the corner at a corner.
+    /// `"edge"`, the default. See `crate::edge`.
+    Edge,
+    /// A colour, as straight (not premultiplied) RGBA bytes: `"#rrggbb"` or
+    /// `"#rrggbbaa"`.
+    Colour([u8; 4]),
+    /// Nothing, so what is beneath the window shows: `"none"`.
+    None,
+}
 
-/// The shipped `resize.background`: `#1c1c1c`, opaque.
+/// The shipped `resize.background`: the picture's own edge.
 ///
-/// **A colour, and not the frame, fills the gap.** A style's frame is QML with
-/// a hole where the client goes, and a style may draw nothing in it at all --
-/// `top`, the default, draws only its titlebar band, and a bare window has no
-/// frame -- so a frame cannot be relied on to cover the client's rectangle. A
-/// solid under the client's rectangle works under every style, costs one
-/// element per uncovered strip, and only while there is a strip.
-///
-/// **This shade** is the shipped theme's darkest surface (`Theme.qml`'s
-/// `surfaceInactive`), so on the default desktop the gap reads as part of the
-/// window rather than as a hole through it to the wallpaper. Not read from the
-/// theme, for `remains::FILL`'s reason: there is no channel from a style's QML
-/// to the compositor for its colours. A style that wants its own `behind`
-/// layer to show there sets `background = "none"`.
-pub(crate) const BACKGROUND: Background = Some([0x1c, 0x1c, 0x1c, 0xff]);
+/// **What a window shows while it is behind its rectangle should look like the
+/// window.** A colour was the default until 2026-10-16 -- the shipped theme's
+/// darkest surface, `#1c1c1c` -- and it was a grey band down every seam a tiled
+/// drag moved faster than its applications drew, and the only visible thing on
+/// a transparent terminal. Hyprland stretches the picture's own edge over the
+/// gap instead (its `render:expand_undersized_textures`), so a window that is
+/// behind reads as one with more of its own background, and a transparent one
+/// stays transparent. A style that wants its own `behind` layer to show there
+/// sets `background = "none"`; a colour is still one setting away.
+pub(crate) const BACKGROUND: Background = Background::Edge;
 
-/// Read `resize.background`: `"#rrggbb"`, `"#rrggbbaa"`, or `"none"`.
+/// The colour [`Background::Edge`] falls back to where there is no edge to
+/// stretch -- a picture with no texture yet, or one turned by a buffer
+/// transform this does not follow: the shipped theme's darkest surface
+/// (`Theme.qml`'s `surfaceInactive`), the colour that was the default before.
+pub(crate) const EDGE_FALLBACK: [u8; 4] = [0x1c, 0x1c, 0x1c, 0xff];
+
+/// Read `resize.background`: `"edge"`, `"#rrggbb"`, `"#rrggbbaa"`, or `"none"`.
 ///
-/// The outer `None` is a word that is none of those, so the caller can name it
-/// and keep the default rather than guess; `Some(None)` is `"none"`.
-/// `tests::a_background_is_a_colour_or_none_or_not_one`.
+/// `None` is a word that is none of those, so the caller can name it and keep
+/// the default rather than guess.
+/// `tests::a_background_is_the_edge_a_colour_or_none_or_not_one`.
 pub(crate) fn background_named(name: &str) -> Option<Background> {
-    if name == "none" {
-        return Some(None);
+    match name {
+        "none" => return Some(Background::None),
+        "edge" => return Some(Background::Edge),
+        _ => {}
     }
     let digits = name.strip_prefix('#')?;
     if !matches!(digits.len(), 6 | 8) || !digits.is_ascii() {
@@ -371,7 +384,7 @@ pub(crate) fn background_named(name: &str) -> Option<Background> {
             .get(at..at + 2)
             .and_then(|pair| u8::from_str_radix(pair, 16).ok())
     };
-    Some(Some([
+    Some(Background::Colour([
         byte(0)?,
         byte(2)?,
         byte(4)?,
@@ -2293,23 +2306,24 @@ mod tests {
         assert_eq!(Fill::default(), Fill::Anchor);
     }
 
-    /// **`resize.background` is a colour, `none`, or not one.**
+    /// **`resize.background` is the edge, a colour, `none`, or not one.**
     #[test]
-    fn a_background_is_a_colour_or_none_or_not_one() {
-        use super::{BACKGROUND, Settings, background_named};
-        assert_eq!(background_named("none"), Some(None));
+    fn a_background_is_the_edge_a_colour_or_none_or_not_one() {
+        use super::{BACKGROUND, Background, Settings, background_named};
+        assert_eq!(background_named("none"), Some(Background::None));
+        assert_eq!(background_named("edge"), Some(Background::Edge));
         assert_eq!(
             background_named("#1c2b3a"),
-            Some(Some([0x1c, 0x2b, 0x3a, 0xff])),
+            Some(Background::Colour([0x1c, 0x2b, 0x3a, 0xff])),
             "six digits are opaque"
         );
         assert_eq!(
             background_named("#1C2B3A80"),
-            Some(Some([0x1c, 0x2b, 0x3a, 0x80])),
+            Some(Background::Colour([0x1c, 0x2b, 0x3a, 0x80])),
             "eight carry their alpha"
         );
         for not_one in [
-            "", "#", "1c2b3a", "#1c2b3", "#1c2b3g", "#1c2b3a8", "black", "#ééé",
+            "", "#", "1c2b3a", "#1c2b3", "#1c2b3g", "#1c2b3a8", "black", "#ééé", "Edge",
         ] {
             assert_eq!(background_named(not_one), None, "{not_one:?}");
         }
@@ -2318,7 +2332,7 @@ mod tests {
             BACKGROUND,
             "the default is the one `config.lua` ships"
         );
-        assert_eq!(background_named("#1c1c1c"), Some(BACKGROUND));
+        assert_eq!(background_named("edge"), Some(BACKGROUND));
     }
 
     /// **A glide pins the edges it does not move (#233).** The two ends of a

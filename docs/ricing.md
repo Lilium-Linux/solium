@@ -2279,8 +2279,11 @@ does meanwhile: `"anchor"`, the default, keeps it at its own size against the
 edges that are not moving, so text never changes size; `"crop"` keeps it at
 the window's top-left instead; `"stretch"` scales it to fill, which is smooth
 but draws text up to twice as wide while the application catches up.
-`resize.background` is what shows where the picture does not reach, `"none"`
-to see through. `resize.patience` is how long, in milliseconds (250 by
+`resize.background` is what shows where the picture does not reach:
+`"edge"`, the default, stretches the picture's own edge over it, so a window
+that is behind looks like it has more of its own background and a transparent
+one stays transparent, as in Hyprland; a colour fills it instead, and `"none"`
+lets you see through. `resize.patience` is how long, in milliseconds (250 by
 default), the picture waits for the application once a change is over -- past
 a drag's release, and past a glide's landing, where it keeps to the edges the
 glide did not move -- before the window is shown at the size the application
@@ -2308,7 +2311,7 @@ as `focus.modes` does for focus; a mode it does not name takes `resize.fill`:
 return {
     resize = {
         fill = "crop",
-        background = "#000000",
+        background = "edge",
         patience = 400,
         tell_hz = 0,
         follow = "app",

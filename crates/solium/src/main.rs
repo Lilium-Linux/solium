@@ -25,6 +25,7 @@ mod cursor;
 mod decoration;
 mod dev;
 mod drawing;
+mod edge;
 mod effect;
 mod explicit_sync;
 mod focus;

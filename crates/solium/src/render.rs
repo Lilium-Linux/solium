@@ -101,6 +101,9 @@ render_elements! {
     /// rectangle, so it stops where the client's corners do (#233). See
     /// [`background_strips`] and `crate::clip::ClippedSolid`.
     ClippedSolid = crate::clip::ClippedSolid,
+    /// A piece of a window's own edge, stretched over what its picture does
+    /// not reach (`resize.background = "edge"`). See `crate::edge`.
+    Edge = crate::edge::Edge,
     /// An effect's result in its slot, cut by its part's mask. See
     /// `crate::effect::element`.
     Effect = crate::effect::element::EffectElement,
@@ -6666,27 +6669,37 @@ fn panes(
         // the client: a picture smaller than its rectangle under a fill that
         // does not stretch (#233), cut at the client's corners when the
         // client is. See [`background_strips`].
+        let strips = background_strips(
+            state.resizing.background,
+            &placed,
+            real.size,
+            // The pane's background where the client's picture does not
+            // reach: it stands in for the client, so it fades with it (#296).
+            frame.client_alpha(),
+            scale,
+            rounded.as_ref().map(|(effect, _)| *effect),
+        );
         let mut background = state
             .panes
             .get(pane)
             .map(|held| {
-                background_elements(
-                    held,
-                    background_strips(
-                        state.resizing.background,
-                        &placed,
-                        real.size,
-                        // The pane's background where the client's picture does
-                        // not reach: it stands in for the client, so it fades
-                        // with it (#296).
-                        frame.client_alpha(),
-                        scale,
-                        rounded.as_ref().map(|(effect, _)| *effect),
-                    ),
-                    rounded.as_ref().map(|(_, programs)| programs),
-                )
+                background_elements(held, strips, rounded.as_ref().map(|(_, programs)| programs))
             })
             .unwrap_or_default();
+        // Under `"edge"`, the default, the picture's own edge stretched over
+        // the same strips instead, built once the client's elements are, when
+        // its picture has been imported for this frame: `crate::edge`. The
+        // solids above are what it falls back to.
+        let edging = state.resizing.background == crate::resizing::Background::Edge;
+        let edge_ids = state.panes.get(pane).map(|held| held.edges().clone());
+        let picture_at = Rectangle::new(
+            placed.origin.to_physical_precise_round(scale),
+            Size::from((
+                f64::from(real.size.w) * placed.fit.factor.x,
+                f64::from(real.size.h) * placed.fit.factor.y,
+            ))
+            .to_physical_precise_round(scale),
+        );
         // With its slots: what is ready this pass goes around the pieces it
         // belongs to, and with none the walk is `PANE_ORDER`
         // (`tests::with_no_slots_the_pane_walk_is_pane_order`).
@@ -6774,7 +6787,21 @@ fn panes(
                     }));
                     // Cut at the same corners: `background_strips` gave them
                     // this clip, taken to the output's pixels.
-                    elements.append(&mut background);
+                    edge_or_background(
+                        elements,
+                        &mut background,
+                        edging.then(|| {
+                            edges(
+                                renderer,
+                                &window,
+                                strips,
+                                picture_at,
+                                edge_ids.as_ref(),
+                                alpha,
+                                Some(programs),
+                            )
+                        }),
+                    );
                     return;
                 }
                 // Cut to the tile when there is anything to cut, and a surface
@@ -6786,9 +6813,53 @@ fn panes(
                 }));
                 // Later in the list is further back: behind the client, in
                 // front of the style's `behind` layers, which follow.
-                elements.append(&mut background);
+                edge_or_background(
+                    elements,
+                    &mut background,
+                    edging.then(|| {
+                        edges(
+                            renderer,
+                            &window,
+                            strips,
+                            picture_at,
+                            edge_ids.as_ref(),
+                            alpha,
+                            None,
+                        )
+                    }),
+                );
             }
         });
+    }
+}
+
+/// A pane's edge pieces (`crate::edge`), or nothing when the pane has no
+/// strips, no identities, or a picture whose edge cannot be stretched.
+fn edges(
+    renderer: &GlesRenderer,
+    window: &Window,
+    strips: Option<Strips>,
+    picture: Rectangle<i32, Physical>,
+    ids: Option<&[Id; crate::edge::PIECES]>,
+    alpha: f32,
+    programs: Option<&crate::pass::ClipPrograms>,
+) -> Option<Vec<Element>> {
+    let strips = strips?;
+    let pieces = crate::edge::elements(renderer, window, &strips, picture, ids?, alpha, programs)?;
+    Some(pieces.into_iter().map(Element::Edge).collect())
+}
+
+/// Behind the client: its own edge stretched, when that was asked for and
+/// could be drawn, and the solid strips otherwise -- which under `"edge"` are
+/// its fallback colour.
+fn edge_or_background(
+    elements: &mut Vec<Element>,
+    background: &mut Vec<Element>,
+    edges: Option<Option<Vec<Element>>>,
+) {
+    match edges.flatten() {
+        Some(mut edges) => elements.append(&mut edges),
+        None => elements.append(background),
     }
 }
 
@@ -7805,12 +7876,18 @@ pub(crate) fn uncovered(
 
 /// `resize.background` as the premultiplied colour a strip of it is drawn in,
 /// at a frame's `opacity`; `None` for `"none"`, which draws no strip at all.
+/// `"edge"` stretches the picture's own edge instead (`crate::edge`), and this
+/// is the colour it falls back to where there is none it can stretch.
 /// `tests::the_background_is_drawn_in_its_configured_colour`.
 pub(crate) fn background_colour(
     background: crate::resizing::Background,
     opacity: f32,
 ) -> Option<[f32; 4]> {
-    let [red, green, blue, alpha] = background?;
+    let [red, green, blue, alpha] = match background {
+        crate::resizing::Background::Colour(colour) => colour,
+        crate::resizing::Background::Edge => crate::resizing::EDGE_FALLBACK,
+        crate::resizing::Background::None => return None,
+    };
     let alpha = f32::from(alpha) / 255.0 * opacity;
     let channel = |value: u8| f32::from(value) / 255.0 * alpha;
     Some([channel(red), channel(green), channel(blue), alpha])
@@ -10051,15 +10128,23 @@ pub(crate) mod tests {
         }
 
         /// **`resize.background` is the colour the strips are drawn in**,
-        /// premultiplied, at the frame's opacity; `none` draws none.
+        /// premultiplied, at the frame's opacity; `none` draws none, and
+        /// `edge` falls back to the colour that was the default before it.
         #[test]
         fn the_background_is_drawn_in_its_configured_colour() {
-            assert_eq!(background_colour(None, 1.0), None);
+            use crate::resizing::Background;
             assert_eq!(
-                background_colour(Some([255, 0, 51, 255]), 1.0),
+                background_colour(Background::Edge, 1.0),
+                Some([28.0 / 255.0, 28.0 / 255.0, 28.0 / 255.0, 1.0]),
+                "the edge's fallback is #1c1c1c"
+            );
+            assert_eq!(background_colour(Background::None, 1.0), None);
+            assert_eq!(
+                background_colour(Background::Colour([255, 0, 51, 255]), 1.0),
                 Some([1.0, 0.0, 0.2, 1.0])
             );
-            let Some([red, green, _, alpha]) = background_colour(Some([255, 255, 0, 255]), 0.5)
+            let Some([red, green, _, alpha]) =
+                background_colour(Background::Colour([255, 255, 0, 255]), 0.5)
             else {
                 panic!("a colour is drawn");
             };
@@ -10113,7 +10198,7 @@ pub(crate) mod tests {
             let rounded = Effect::rounded(Corners::all(12.0));
             let strips = |scale, rounding| {
                 crate::render::background_strips(
-                    Some([0x1c, 0x1c, 0x1c, 0xff]),
+                    crate::resizing::Background::Colour([0x1c, 0x1c, 0x1c, 0xff]),
                     &placed,
                     committed,
                     1.0,
@@ -10218,7 +10303,7 @@ pub(crate) mod tests {
                 None,
                 std::time::Duration::ZERO,
             );
-            let colour = Some([0x10, 0x20, 0x30, 0xff]);
+            let colour = crate::resizing::Background::Colour([0x10, 0x20, 0x30, 0xff]);
             let elements = crate::render::background_elements(
                 &pane,
                 crate::render::background_strips(colour, &placed, committed, 1.0, 1.0, None),
@@ -10251,7 +10336,14 @@ pub(crate) mod tests {
             assert!(
                 crate::render::background_elements(
                     &pane,
-                    crate::render::background_strips(None, &placed, committed, 1.0, 1.0, None),
+                    crate::render::background_strips(
+                        crate::resizing::Background::None,
+                        &placed,
+                        committed,
+                        1.0,
+                        1.0,
+                        None,
+                    ),
                     None,
                 )
                 .is_empty(),
