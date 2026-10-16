@@ -50,6 +50,35 @@ pub(crate) enum Change {
     Maximize,
 }
 
+/// Tell a toplevel whether a layout tiles it: xdg-shell's four `tiled_*`
+/// states, all or none, in its pending state, so they go out with its next
+/// configure. A toolkit draws no shadow, no rounded corner and no resize border
+/// on an edge that is tiled, which is right for every edge of a tile: each
+/// meets a neighbour or the edge of the screen. The layout says which windows
+/// are tiles (`sol.place`, `tile`); this only tells the client so. Nothing for
+/// an X11 window, which has no such state.
+/// `a_tiled_window_is_told_it_is_tiled_and_a_floated_one_is_not`.
+fn tile_window(window: &Window, tiled: bool) {
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+    let Some(toplevel) = window.toplevel() else {
+        return;
+    };
+    toplevel.with_pending_state(|pending| {
+        for edge in [
+            State::TiledLeft,
+            State::TiledRight,
+            State::TiledTop,
+            State::TiledBottom,
+        ] {
+            if tiled {
+                pending.states.set(edge);
+            } else {
+                pending.states.unset(edge);
+            }
+        }
+    });
+}
+
 /// Whether this window is fullscreen or maximised, as the compositor last
 /// decided it: in the pending state, which is what `Solium::toggle_maximize`
 /// and the fullscreen requests write.
@@ -421,6 +450,13 @@ impl Solium {
         // A client is moved and resized for real, and the space is told,
         // because the space is the authority for a mapped window.
         if let Some(window) = self.panes.get(pane).and_then(Pane::client).cloned() {
+            // And told whether the layout tiles it, before the size it is
+            // offered below: the configure that carries one carries both.
+            match standing {
+                Standing::Tile | Standing::Within(_) => tile_window(&window, true),
+                Standing::Free => tile_window(&window, false),
+                Standing::Kept => {}
+            }
             if !leaving && self.offers_size(pane, &window, client, now) {
                 size_window(&window, client);
             }

@@ -14960,6 +14960,91 @@ end)"#,
         );
     }
 
+    /// **A window a layout tiles is told it is tiled, on all four edges, and
+    /// one it floats is told it is not** (xdg-shell's `tiled_*` states), as a
+    /// tiling compositor tells it: a toolkit then draws no shadow, no rounded
+    /// corner and no resize border where its edge meets a neighbour or the
+    /// screen. Hyprland sends all four in every configure of a tiled drag;
+    /// Solium sent none. `tiling.lua` places a tile with `sol.place`,
+    /// `floating.lua` a floating window with `tile = false`.
+    #[test]
+    fn a_tiled_window_is_told_it_is_tiled_and_a_floated_one_is_not() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (0, 0), false);
+        state.sync_panes();
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        let edges = |window: &Window| {
+            window.toplevel().map(|toplevel| {
+                toplevel.with_pending_state(|pending| {
+                    [
+                        State::TiledLeft,
+                        State::TiledRight,
+                        State::TiledTop,
+                        State::TiledBottom,
+                    ]
+                    .map(|edge| pending.states.contains(edge))
+                })
+            })
+        };
+        let place = |state: &mut Solium, outer, standing| {
+            let was = state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle");
+            state.move_pane(
+                pane,
+                outer,
+                was,
+                AnimationSpec {
+                    duration: Duration::ZERO,
+                    ..AnimationSpec::default()
+                },
+                Duration::ZERO,
+                standing,
+            );
+        };
+        assert_eq!(
+            edges(&window),
+            Some([false; 4]),
+            "the premise: placed by nobody"
+        );
+        place(&mut state, at(0, 0, 400, 300), Standing::Tile);
+        assert_eq!(
+            edges(&window),
+            Some([true; 4]),
+            "a tile is tiled on every edge"
+        );
+        place(&mut state, at(100, 100, 300, 200), Standing::Free);
+        assert_eq!(
+            edges(&window),
+            Some([false; 4]),
+            "and a window the layout floats is tiled on none"
+        );
+        place(
+            &mut state,
+            at(0, 0, 300, 200),
+            Standing::Within(at(0, 0, 400, 300)),
+        );
+        assert_eq!(
+            edges(&window),
+            Some([true; 4]),
+            "a window centred inside its tile is still the layout's tile"
+        );
+    }
+
     /// **`resize.sync = 0` moves each pane to the layout's rectangle at
     /// once**, as the bridge always did: told on every frame, drawn at its
     /// slot.
