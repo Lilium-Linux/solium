@@ -577,6 +577,10 @@ pub(crate) struct Pane {
     /// Read by `render::background_elements`:
     /// `render::tests::fitting::the_background_is_drawn_where_the_picture_does_not_reach`.
     background: [smithay::backend::renderer::element::Id; 4],
+    /// The same for the pieces `resize.background = "edge"` stretches the
+    /// picture's own edge over, the default: `crate::edge::pieces`, at most
+    /// `crate::edge::PIECES`. Read by `crate::edge::elements`.
+    edges: [smithay::backend::renderer::element::Id; crate::edge::PIECES],
 }
 
 /// A window going back from fullscreen or maximised, for as long as it is
@@ -636,6 +640,7 @@ impl Pane {
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            edges: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         }
     }
 
@@ -670,6 +675,7 @@ impl Pane {
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            edges: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         }
     }
 
@@ -732,6 +738,14 @@ impl Pane {
     /// [`Self::background`].
     pub(crate) const fn background(&self) -> &[smithay::backend::renderer::element::Id; 4] {
         &self.background
+    }
+
+    /// The identities of the pieces of its own edge this pane's picture is
+    /// stretched over. See [`Self::edges`].
+    pub(crate) const fn edges(
+        &self,
+    ) -> &[smithay::backend::renderer::element::Id; crate::edge::PIECES] {
+        &self.edges
     }
 
     pub(crate) const fn id(&self) -> PaneId {

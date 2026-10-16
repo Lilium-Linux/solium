@@ -1116,12 +1116,17 @@ local defaults = {
         fill = "anchor",
 
         -- What shows in the part of a window its picture does not cover
-        -- under "anchor", "crop" or "scene": "#rrggbb", or "#rrggbbaa" with
-        -- an alpha. The default is the theme's darkest grey, so the gap reads
-        -- as part of the window. "none" draws nothing there, so what is
-        -- behind the window -- or a style's own `behind` layer -- shows.
-        -- Anything else is named in the log and the default kept.
-        background = "#1c1c1c",
+        -- under "anchor", "crop" or "scene". "edge", the default, stretches
+        -- the picture's own edge over it -- its last column beside it, its
+        -- last row under it -- so a window whose application is behind looks
+        -- like it has more of its own background, and a transparent one
+        -- stays transparent, as Hyprland does it. "#rrggbb", or "#rrggbbaa"
+        -- with an alpha, fills it with a colour instead (the theme's darkest
+        -- grey, "#1c1c1c", was the default before). "none" draws nothing
+        -- there, so what is behind the window -- or a style's own `behind`
+        -- layer -- shows. Anything else is named in the log and the default
+        -- kept.
+        background = "edge",
 
         -- How long, in milliseconds, a window's picture waits at the
         -- rectangle a change gave it for its application to draw at that

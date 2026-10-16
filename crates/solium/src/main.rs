@@ -22,6 +22,7 @@ mod commit;
 mod cursor;
 mod decoration;
 mod dev;
+mod edge;
 mod effect;
 mod focus;
 mod folder;

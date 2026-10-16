@@ -4206,7 +4206,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     Some(background) => resize.background = background,
                     None => tracing::warn!(
                         background = %name,
-                        "resize.background is \"#rrggbb\", \"#rrggbbaa\" or \"none\"; \
+                        "resize.background is \"edge\", \"#rrggbb\", \"#rrggbbaa\" or \"none\"; \
                          keeping the default"
                     ),
                 }
@@ -9986,7 +9986,7 @@ mod tests {
                 "return { resize = { fill = \"crop\", background = \"#10203080\" } }",
                 Settings {
                     fill: Fill::Crop,
-                    background: Some([0x10, 0x20, 0x30, 0x80]),
+                    background: crate::resizing::Background::Colour([0x10, 0x20, 0x30, 0x80]),
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
                     follow: Follow::App,
@@ -9998,7 +9998,7 @@ mod tests {
                 "return { resize = { background = \"none\" } }",
                 Settings {
                     fill: Fill::Anchor,
-                    background: None,
+                    background: crate::resizing::Background::None,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
                     follow: Follow::App,
@@ -10017,6 +10017,17 @@ mod tests {
                     sync: SYNC,
                     overlap: true,
                 },
+            ),
+            (
+                "return { resize = { background = \"#1c1c1c\" } }",
+                Settings {
+                    background: crate::resizing::Background::Colour([0x1c, 0x1c, 0x1c, 0xff]),
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { background = \"edge\" } }",
+                Settings::default(),
             ),
             ("return { resize = { patience = 600 } }", waits(600)),
             ("return { resize = { patience = 0 } }", waits(0)),
@@ -10144,17 +10155,17 @@ mod tests {
                 [
                     Some(Settings {
                         fill: Fill::Anchor,
-                        background: None,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                     Some(Settings {
                         fill: Fill::Anchor,
-                        background: None,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                     Some(Settings {
                         fill: Fill::Stretch,
-                        background: None,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                 ],

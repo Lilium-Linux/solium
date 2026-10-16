@@ -797,9 +797,10 @@ function sol.client_sizes(options) end
 ---window's top-left whichever edge moves; `"stretch"` scales it to fill;
 ---`"scene"` draws the window's QML scene, which today reaches only a window
 ---resized before its application painted, and is `"anchor"` elsewhere.
----`background`: `"#rrggbb"`, `"#rrggbbaa"` or `"none"`, what shows where the
----picture does not reach (default `"#1c1c1c"`). Another value is logged and
----the default kept. `patience`: how long, in milliseconds from 0 to 5000, a
+---`background`: what shows where the picture does not reach: `"edge"` (the
+---default: the picture's own edge, stretched), `"#rrggbb"`, `"#rrggbbaa"` or
+---`"none"`. Another value is logged and the default kept. `patience`: how
+---long, in milliseconds from 0 to 5000, a
 ---picture waits for its application once a change is over -- after a drag's
 ---release, a fullscreen or maximise glide's landing, or a layout glide's
 ---landing, while it stays against the edges the glide did not move (default
