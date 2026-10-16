@@ -14774,11 +14774,20 @@ end)"#,
             self.pump();
         }
 
-        /// Where each pane is drawn.
+        /// Where each pane is drawn: its frame as the renderer resolves it,
+        /// transform and all, and not only the rectangle under it -- a glide
+        /// the layout starts at every move is drawn instead of that.
         fn drawn(&self) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
             let of = |pane| {
                 let held = self.state.panes.get(pane).expect("the pane is here");
-                self.state.pane_geometry(held)
+                let rect = self
+                    .state
+                    .drawn_at(held, self.state.pane_outer(held), self.state.clock.now())
+                    .rect;
+                Rectangle::new(
+                    (rect.loc.x.round() as i32, rect.loc.y.round() as i32).into(),
+                    (rect.size.w.round() as i32, rect.size.h.round() as i32).into(),
+                )
             };
             (of(self.panes.0), of(self.panes.1))
         }
