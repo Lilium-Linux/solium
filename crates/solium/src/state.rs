@@ -1494,8 +1494,18 @@ impl Solium {
         // ends this the moment the client answers -- with what it was asked for
         // or with anything else -- and on a deadline if it answers nothing.
         // See `crate::resizing`.
+        //
+        // **Unless the window follows its application** (`resize.follow`, the
+        // default): then a floating drag draws it at the size its client last
+        // drew, against the edges the drag is not moving, so the rectangle and
+        // the picture agree on every frame and the edge trails the pointer
+        // instead. The same pinning the end of a drag lands on (`land_on`), so
+        // the #113 shake cannot come back: the edges nobody is dragging stay
+        // where they are. See `crate::resizing::Follow`.
         if self.holding_resize(pane.id()) {
-            return pane.slot();
+            return self
+                .followed_drag(pane, window)
+                .unwrap_or_else(|| pane.slot());
         }
         // A client that has mapped and not yet answered the size it was asked
         // for has a window of no size at all. Taking the space's word for that

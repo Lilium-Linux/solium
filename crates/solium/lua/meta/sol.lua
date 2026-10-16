@@ -805,11 +805,14 @@ function sol.client_sizes(options) end
 ---landing, while it stays against the edges the glide did not move (default
 ---250). `tell_hz`: how often, at most, a window whose edge is being dragged
 ---is told its new size, in times a second from 1 to 1000; 0 (the default) tells
----it on every frame the drag moves. Each call sets all four, a key left out at
----its default. `init.lua` calls this with `config.resize`, and `modes.lua`
+---it on every frame the drag moves. `follow`: what a floating window is drawn
+---at while its edge is dragged, `"app"` (the default: the size its application
+---has drawn, against the edges not moving) or `"pointer"` (the drag's own
+---rectangle, with `fill` covering the difference). Each call sets all five, a
+---key left out at its default. `init.lua` calls this with `config.resize`, and `modes.lua`
 ---again with a mode's own fill from `config.resize.modes` whenever the mode
 ---changes, when that table names any mode.
----@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number }
+---@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number, follow?: "app"|"pointer" }
 ---@return nil
 function sol.resize(options) end
 

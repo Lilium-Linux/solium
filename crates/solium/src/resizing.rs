@@ -283,6 +283,48 @@ impl Fill {
     }
 }
 
+/// What a window being dragged by an edge is drawn at: `resize.follow`.
+///
+/// **The question is which of two things the window's edge belongs to while
+/// the drag runs ahead of its application.** The application is told each new
+/// size and answers a few milliseconds later, so for those milliseconds the
+/// pointer and the picture disagree, and one of them has to be the window.
+///
+/// Measured nested on 2026-10-16 and seen side by side, zoomed in on the
+/// corner being dragged: with the pointer's rectangle, every client showed a
+/// band of `resize.background` where the window had run ahead of its picture,
+/// and its picture cut off where the window had shrunk past it. KWin draws the
+/// window at the size its application has drawn and shows neither, with the
+/// edge a frame behind the pointer. Hyprland draws its border at the pointer's
+/// rectangle and leaves the gap. `state::tests::real_client::a_dragged_window_follows_its_application_unless_told_otherwise`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Follow {
+    /// The window is drawn at the size its application last drew, against the
+    /// edges the drag is not moving, decoration and all: never a gap and never
+    /// a cut, with the edge trailing the pointer by the application's own
+    /// drawing time. The default. A floating drag only: the panes a tiled drag
+    /// moves share their edges, and drawn each at its own application's size
+    /// they would gap and overlap along the seam.
+    #[default]
+    App,
+    /// The window is drawn at the rectangle the drag asks for, from the first
+    /// frame, and `resize.fill` decides how its application's picture goes
+    /// into it until the two agree: the edge exactly under the pointer.
+    Pointer,
+}
+
+impl Follow {
+    /// Read `resize.follow`: `"app"` or `"pointer"`. `None` for anything else,
+    /// so the caller can name the word and keep the default.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        match name {
+            "app" => Some(Self::App),
+            "pointer" => Some(Self::Pointer),
+            _ => None,
+        }
+    }
+}
+
 /// The colour a pane shows where its client's picture does not reach, as
 /// straight (not premultiplied) RGBA bytes; `None` draws nothing there, so what
 /// is beneath the window shows.
@@ -355,6 +397,10 @@ pub(crate) struct Settings {
     /// (`Hold::new`), as `patience` is.
     /// `tests::a_drag_tells_its_client_on_every_frame_unless_capped`.
     pub(crate) tell: Duration,
+    /// `resize.follow`: what a window being dragged is drawn at. [`Follow::App`]
+    /// unless configured. Read at every frame, so a reload takes effect on the
+    /// next one.
+    pub(crate) follow: Follow,
 }
 
 impl Default for Settings {
@@ -364,6 +410,7 @@ impl Default for Settings {
             background: BACKGROUND,
             patience: PATIENCE,
             tell: EVERY_FRAME,
+            follow: Follow::App,
         }
     }
 }

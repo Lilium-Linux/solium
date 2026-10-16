@@ -1367,7 +1367,13 @@ glide did not move -- before the window is shown at the size the application
 has. `resize.tell_hz` is how often, at most, the application is told its new
 size while you drag an edge: 0, the default, on every frame the drag moves, so
 its picture is never more than its own drawing time behind the edge; a number
-caps it at that many times a second (10 was the fixed rate before). `resize.modes`
+caps it at that many times a second (10 was the fixed rate before).
+`resize.follow` is what a floating window is drawn at while you drag its edge:
+`"app"`, the default, draws it at the size its application has drawn, against
+the edges you are not moving, so its frame always wraps its content and nothing
+is ever cut off or left uncovered, as in KWin; `"pointer"` draws it exactly
+where the pointer is and lets `resize.fill` cover the difference, as in
+Hyprland. `resize.modes`
 gives a mode a fill of its own, for every size change while it is in charge,
 as `focus.modes` does for focus; a mode it does not name takes `resize.fill`:
 
@@ -1378,6 +1384,7 @@ return {
         background = "#000000",
         patience = 400,
         tell_hz = 0,
+        follow = "app",
         modes = { scrolling = "stretch" },
     },
 }

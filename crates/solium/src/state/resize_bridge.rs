@@ -209,6 +209,35 @@ impl Solium {
         self.held_hold(pane).is_some() || self.answering_for(pane).is_some()
     }
 
+    /// Where a floating drag draws its window when the window follows its
+    /// application (`resize.follow = "app"`): the size the client last
+    /// committed, against the edges the drag is not moving
+    /// (`resizing::Hold::anchored`), so what is drawn and what the client drew
+    /// are the same rectangle on every frame.
+    ///
+    /// `None` -- the drag's own rectangle, the slot -- under `"pointer"`, for a
+    /// pane no floating drag holds (a tiled drag's panes share their edges, and
+    /// drawn each at its own client's size they would gap and overlap along the
+    /// seam), and for a client that has no size yet.
+    pub(crate) fn followed_drag(
+        &self,
+        pane: &Pane,
+        window: &Window,
+    ) -> Option<Rectangle<i32, Logical>> {
+        if self.resizing.follow != crate::resizing::Follow::App {
+            return None;
+        }
+        let held = self
+            .resize_hold
+            .as_ref()
+            .filter(|held| held.pane == pane.id() && &held.window == window)?;
+        let committed = window.geometry().size;
+        if committed.w <= 0 || committed.h <= 0 {
+            return None;
+        }
+        Some(held.hold.anchored(pane.slot(), committed))
+    }
+
     /// This pane's entry in [`Self::answering`], if a fullscreen or maximise
     /// change is holding it until its client answers.
     fn answering_for(&self, pane: crate::pane::PaneId) -> Option<&crate::resizing::Held> {
