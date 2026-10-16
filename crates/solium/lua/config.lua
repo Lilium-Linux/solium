@@ -1154,10 +1154,24 @@ local defaults = {
         -- the pointer is, and `fill` above decides what covers the difference
         -- until the application catches up -- as Hyprland does. A floating
         -- window only: the windows a tiled drag moves share their edges, so
-        -- they follow the pointer whatever this says. Anything else is named
+        -- they move together, as `sync` below says. Anything else is named
         -- in the log and the default kept.
         -- `a_dragged_window_follows_its_application_unless_told_otherwise`.
         follow = "app",
+
+        -- How long, in milliseconds, the windows a layout's drag moves --
+        -- the two sides of a tiled seam -- wait for one another's
+        -- applications. Each is told its new size at once, and a window whose
+        -- application has drawn it is held at its old place until the others
+        -- have too, so the seam moves as one: every frame shows each window
+        -- drawn for the seam it is shown at, with no gap and nothing cut off.
+        -- This is the longest one slow application holds the others up for;
+        -- past it they move anyway and `fill` covers the difference. 0 moves
+        -- each window to the pointer at once, as a floating drag under
+        -- `follow = "pointer"` is. 0 to 5000; anything else is named in the
+        -- log and the default kept.
+        -- `a_seam_moves_once_both_of_its_clients_have_drawn`.
+        sync = 200,
 
         -- A fill of its own for a mode (the names `modes.register` uses),
         -- for every size change made while that mode is in charge: its

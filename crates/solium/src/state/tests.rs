@@ -7984,6 +7984,7 @@ end)"#,
     /// the last throttled interval of travel have nowhere else to come from.
     fn paused_frame(state: &mut Solium, now: Duration) {
         state.flush_resize(now);
+        state.settle_round(now);
         state.settle_resize_hold(now);
         state.settle_resize_bridge(now);
     }
@@ -8003,6 +8004,11 @@ end)"#,
             $state
                 .decorations
                 .set_style(&mut $state.panes, Some("none".to_string()));
+            // The bridge's own mechanics, a pane told on every frame and drawn
+            // at its slot: what `resize.sync = 0` keeps. Rounds have tests of
+            // their own, `a_seam_moves_once_both_of_its_clients_have_drawn`
+            // and those after it.
+            $state.resizing.sync = Duration::ZERO;
             let ($conn, mut $queue, mut $client) = connect(&mut $display, &mut $state);
             let $qh = $queue.handle();
         };
@@ -14607,6 +14613,373 @@ end)"#,
             Some((340, 200)),
             "and what is sent is the rectangle of the frame that sent it, \
              not a stale one the throttle had been sitting on"
+        );
+    }
+
+    /// Two windows side by side, 400x300 each, the seam between them at
+    /// x = 400: what every round test drags.
+    struct Seam {
+        display: Display<Solium>,
+        state: Solium,
+        conn: Connection,
+        queue: wayland_client::EventQueue<Client>,
+        client: Client,
+        qh: QueueHandle<Client>,
+        left: (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            xdg_surface::XdgSurface,
+        ),
+        right: (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            xdg_surface::XdgSurface,
+        ),
+        panes: (crate::pane::PaneId, crate::pane::PaneId),
+    }
+
+    impl Seam {
+        fn new() -> Self {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+            let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+            let qh = queue.handle();
+            let left = open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            let right = open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            commit_buffer(&client, &qh, &left.2, 400, 300);
+            commit_buffer(&client, &qh, &right.2, 400, 300);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.map_stacked(left.0.clone(), (0, 0), false);
+            state.map_stacked(right.0.clone(), (400, 0), false);
+            state.sync_panes();
+            let panes = (
+                state
+                    .panes
+                    .id_of(&left.0)
+                    .expect("the left window has a pane"),
+                state
+                    .panes
+                    .id_of(&right.0)
+                    .expect("the right window has a pane"),
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+            Self {
+                display,
+                state,
+                conn,
+                queue,
+                client,
+                qh,
+                left,
+                right,
+                panes,
+            }
+        }
+
+        fn pump(&mut self) {
+            pump(
+                &mut self.display,
+                &mut self.state,
+                &self.conn,
+                &self.qh,
+                &mut self.queue,
+                &mut self.client,
+            );
+        }
+
+        /// The drag on the left window's right edge.
+        fn request(&self) -> ResizeRequest {
+            ResizeRequest {
+                window: self.left.0.clone(),
+                wanted: at(0, 0, 400, 300),
+                edge_at: (400.0, 300.0),
+                edges: ResizeEdge::Right,
+            }
+        }
+
+        /// A frame of the drag that put the seam at `x`: both panes moved
+        /// by the layout, then the rest of `settle_resize`.
+        fn seam_at(&mut self, x: i32, now: Duration) {
+            let request = self.request();
+            self.state.arm_resize_gesture(&request);
+            for (pane, outer) in [
+                (self.panes.0, at(0, 0, x, 300)),
+                (self.panes.1, at(x, 0, 800 - x, 300)),
+            ] {
+                let was = self
+                    .state
+                    .pane_outer_of(pane)
+                    .expect("a mapped pane has a rectangle");
+                self.state.move_pane(
+                    pane,
+                    outer,
+                    was,
+                    AnimationSpec {
+                        duration: Duration::ZERO,
+                        ..AnimationSpec::default()
+                    },
+                    now,
+                    Standing::Tile,
+                );
+            }
+            self.state.resize_gesture = None;
+            self.state.drop_resize_hold_for(&request.window);
+            paused_frame(&mut self.state, now);
+        }
+
+        /// A frame with no motion in it.
+        fn frame(&mut self, now: Duration) {
+            paused_frame(&mut self.state, now);
+        }
+
+        /// One side's client acknowledging the last configure it was sent
+        /// and drawing at `width`.
+        fn answer(&mut self, right: bool, width: i32) {
+            let (xdg, surface) = if right {
+                (self.right.3.clone(), self.right.2.clone())
+            } else {
+                (self.left.3.clone(), self.left.2.clone())
+            };
+            let id = wayland_client::Proxy::id(&xdg);
+            let serial = self
+                .client
+                .surface_configures
+                .iter()
+                .rev()
+                .find(|(to, _)| *to == id)
+                .map(|&(_, serial)| serial)
+                .expect("that window was configured");
+            xdg.ack_configure(serial);
+            commit_buffer(&self.client, &self.qh, &surface, width, 300);
+            self.pump();
+        }
+
+        /// Where each pane is drawn.
+        fn drawn(&self) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
+            let of = |pane| {
+                let held = self.state.panes.get(pane).expect("the pane is here");
+                self.state.pane_geometry(held)
+            };
+            (of(self.panes.0), of(self.panes.1))
+        }
+
+        /// The size each client has committed, as far as the compositor has
+        /// applied it.
+        fn committed(&self) -> (Size<i32, Logical>, Size<i32, Logical>) {
+            (self.left.0.geometry().size, self.right.0.geometry().size)
+        }
+
+        /// The widths each client has been told, in order: a configure that
+        /// only changes a state -- the release taking `resizing` away -- is
+        /// not a new width, and is not counted again.
+        fn told(&self, right: bool) -> Vec<i32> {
+            let id = wayland_client::Proxy::id(if right { &self.right.1 } else { &self.left.1 });
+            let mut widths: Vec<i32> = self
+                .client
+                .configures
+                .iter()
+                .filter(|(to, _, _)| *to == id)
+                .map(|&(_, width, _)| width)
+                .collect();
+            widths.dedup();
+            widths
+        }
+    }
+
+    /// **A seam moves once both of its clients have drawn (`resize.sync`).**
+    ///
+    /// Both panes are told their new sizes together, and drawn where they
+    /// were until both have answered: the left one's answer, in first, is
+    /// held back rather than shown against a seam its neighbour has not
+    /// reached, and both land in the same pass once the right one's is in.
+    /// Moved at once instead, the frame between the two answers draws the
+    /// left window's new picture cut by the old seam and the right window's
+    /// old picture short of the new one -- the grey band of 2026-10-16.
+    #[test]
+    fn a_seam_moves_once_both_of_its_clients_have_drawn() {
+        let mut seam = Seam::new();
+        assert_eq!(
+            seam.state.resizing.sync,
+            crate::resizing::SYNC,
+            "the premise: the default"
+        );
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "both sides are told their new size in the same round"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "and both are drawn where their pictures are until they answer"
+        );
+
+        seam.answer(false, 450);
+        assert_eq!(
+            seam.committed().0,
+            Size::from((400, 300)),
+            "the left client's answer is held back while the right one's is not in"
+        );
+        seam.frame(Duration::from_millis(16));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "a frame with one answer in still draws the old seam"
+        );
+
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        assert_eq!(
+            seam.committed(),
+            (Size::from((450, 300)), Size::from((350, 300))),
+            "with both answers in, both are applied together"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "and both panes move to the new seam in the same pass"
+        );
+    }
+
+    /// **A slow client holds a seam up for `resize.sync` and no longer.**
+    /// Past it the round ends with whatever is in: the answered side is
+    /// applied, and both are drawn at their new rectangles, the slow one's
+    /// old picture fitted into its own as the bridge always fitted one.
+    #[test]
+    fn a_seam_waits_for_a_slow_client_no_longer_than_resize_sync() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.pump();
+        seam.answer(false, 450);
+        seam.frame(Duration::from_millis(199));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "inside `resize.sync` the seam waits for its slow side"
+        );
+        seam.frame(Duration::from_millis(200));
+        assert_eq!(
+            seam.committed().0,
+            Size::from((450, 300)),
+            "at `resize.sync` the answer that is in is applied"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "and the seam moves without its slow side"
+        );
+    }
+
+    /// **A seam that moves on during a round is told in the next one**,
+    /// never mid-round: a client told twice before its neighbour answered
+    /// once would answer a seam the neighbour is never shown at.
+    #[test]
+    fn a_seam_moved_during_a_round_is_told_in_the_next() {
+        let mut seam = Seam::new();
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "the second frame's seam waits for the first round"
+        );
+        seam.answer(false, 450);
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450, 470], vec![350, 330]),
+            "the round that ends starts the next, from where the seam has got to"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "drawn where the round that ended put them"
+        );
+    }
+
+    /// **A seam let go of during a round ends where it was let go**: the
+    /// release waits for the round under way like any other move, and the
+    /// gesture ends once the last round's answers are in.
+    #[test]
+    fn a_seam_let_go_of_mid_round_ends_where_it_was_let_go() {
+        let mut seam = Seam::new();
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.state.release_resize(&seam.left.0);
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "the release does not tell anybody past the round under way"
+        );
+        seam.answer(false, 450);
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        seam.pump();
+        seam.answer(false, 470);
+        seam.answer(true, 330);
+        seam.frame(Duration::from_millis(48));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 470, 300), at(470, 0, 330, 300)),
+            "the gesture ends where the seam was let go"
+        );
+        assert!(
+            !seam.state.holding_resize(seam.panes.0) && !seam.state.holding_resize(seam.panes.1),
+            "and once both answers are in, nothing is held any more"
+        );
+    }
+
+    /// **`resize.sync = 0` moves each pane to the layout's rectangle at
+    /// once**, as the bridge always did: told on every frame, drawn at its
+    /// slot.
+    #[test]
+    fn with_resize_sync_zero_a_seam_is_drawn_where_the_layout_put_it_at_once() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::ZERO;
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450, 470], vec![350, 330]),
+            "every frame tells both sides"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 470, 300), at(470, 0, 330, 300)),
+            "and both are drawn at the layout's rectangles straight away"
         );
     }
 
