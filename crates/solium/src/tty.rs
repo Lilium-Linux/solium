@@ -2407,8 +2407,14 @@ fn handle_input(
         }
     }
 
-    // Input changes what is on screen, and the vblank has no way to know that.
-    state.render();
+    // Input changes what is on screen, and the vblank has no way to know that,
+    // so it asks for a frame -- drawn by the loop once this pass's input is all
+    // in and `settle_resize` has sent its configures, not here. Drawn here, the
+    // first motion after a flip drew the whole frame before the loop got to
+    // `settle_resize`, and the client heard where an edge was dragged that much
+    // later: a frame of the glass style is 2.5 to 6.5 ms in the 2026-10-16 TTY
+    // trace. This wiring needs a GPU, and no test reaches it.
+    state.solium.redraw = true;
 }
 
 /// What a device got, for the log -- the issue's own "log what each device
