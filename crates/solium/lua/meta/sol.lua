@@ -811,10 +811,14 @@ function sol.client_sizes(options) end
 ---rectangle, with `fill` covering the difference). `sync`: how long, in
 ---milliseconds from 0 to 5000, the windows a layout's drag moves wait for one
 ---another's applications, so a seam moves as one (default 200; 0 moves each
----at once). Each call sets all six, a key left out at its default. `init.lua` calls this with `config.resize`, and `modes.lua`
+---at once). `overlap`: whether a window being resized is told to draw its
+---next size as soon as a frame showing its last starts to be drawn (default
+---true; false waits for the screen). Each call sets all seven, a key left out
+---at its default. `init.lua` calls this with `config.resize`, and
+---`modes.lua`
 ---again with a mode's own fill from `config.resize.modes` whenever the mode
 ---changes, when that table names any mode.
----@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number, follow?: "app"|"pointer", sync?: number }
+---@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number, follow?: "app"|"pointer", sync?: number, overlap?: boolean }
 ---@return nil
 function sol.resize(options) end
 

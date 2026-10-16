@@ -825,6 +825,25 @@ pub(crate) fn run() -> Result<()> {
             pace.deadline(frame_interval(output), || output.name());
         }
 
+        // A window being resized may draw its next size now, while this frame
+        // of its last is drawn: `Solium::send_resize_frames_on`, as on the
+        // hardware.
+        if wanted && pictures {
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let lit: Vec<Output> = state
+                .space
+                .outputs()
+                .filter(|each| !state.power.is_off(each))
+                .cloned()
+                .collect();
+            for each in &lit {
+                state.send_resize_frames_on(each, wall, frame_interval(each));
+            }
+            let _ = state.display_handle.flush_clients();
+        }
+
         // The renderer borrow must end before submit(), so rendering happens in
         // its own scope and only two flags escape.
         // Before the output buffer is bound: this pass binds framebuffers of

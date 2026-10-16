@@ -4255,6 +4255,17 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     }
                 }
             }
+            // And whether a window being resized is told to draw its next
+            // size while its last is still being drawn: true or false, under
+            // the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            match options.get::<Value>("overlap") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::Boolean(overlap)) => resize.overlap = overlap,
+                Ok(value) => tracing::warn!(
+                    value = describe(&value),
+                    "resize.overlap is true or false; keeping the default"
+                ),
+            }
             // What a window being dragged is drawn at: the size its
             // application has drawn, or the pointer's rectangle. Under the same
             // contract. `the_shipped_resize_setting_reaches_the_compositor`.
@@ -9956,6 +9967,7 @@ mod tests {
                     tell: EVERY_FRAME,
                     follow: Follow::App,
                     sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
@@ -9967,6 +9979,7 @@ mod tests {
                     tell: EVERY_FRAME,
                     follow: Follow::App,
                     sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
@@ -9978,6 +9991,7 @@ mod tests {
                     tell: EVERY_FRAME,
                     follow: Follow::App,
                     sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
@@ -9989,6 +10003,7 @@ mod tests {
                     tell: EVERY_FRAME,
                     follow: Follow::App,
                     sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
@@ -10000,6 +10015,7 @@ mod tests {
                     tell: EVERY_FRAME,
                     follow: Follow::App,
                     sync: SYNC,
+                    overlap: true,
                 },
             ),
             ("return { resize = { patience = 600 } }", waits(600)),
@@ -10014,6 +10030,17 @@ mod tests {
             ("return { resize = { sync = 5001 } }", syncs(200)),
             ("return { resize = { sync = -1 } }", syncs(200)),
             ("return { resize = { sync = \"long\" } }", syncs(200)),
+            (
+                "return { resize = { overlap = false } }",
+                Settings {
+                    overlap: false,
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { overlap = \"no\" } }",
+                Settings::default(),
+            ),
             ("return { resize = { tell_hz = 30 } }", tells(30.0)),
             ("return { resize = { tell_hz = 1000 } }", tells(1000.0)),
             ("return { resize = { tell_hz = 0 } }", Settings::default()),

@@ -1602,6 +1602,13 @@ impl State {
                 continue;
             };
             let output = screen.output.clone();
+            // A window being resized may draw its next size now, while this
+            // frame of its last is drawn, rather than at this frame's flip:
+            // `Solium::send_resize_frames_on`. Out to it at once, since the
+            // drawing below is exactly the time it is meant to have.
+            self.solium
+                .send_resize_frames_on(&output, wall_clock(), frame_interval(&output));
+            let _ = self.solium.display_handle.flush_clients();
             let area = self
                 .solium
                 .space
