@@ -7402,6 +7402,9 @@ end)"#,
         #[test]
         fn an_edge_drag_takes_a_window_its_change_is_holding() {
             let mut desk = Desk::new("dragged", SCRIPT);
+            // The pointer's rectangle is how this test sees which hold has the
+            // window; the default draws it at its client's size.
+            desk.state.resizing.follow = crate::resizing::Follow::Pointer;
             assert!(desk.state.trigger("super+f"));
             desk.pump();
             desk.answer(1920, 1080);
@@ -8022,6 +8025,110 @@ end)"#,
         );
     }
 
+    /// **The window follows its application while an edge is dragged, unless
+    /// `resize.follow` says the pointer.**
+    ///
+    /// Zoomed in on the corner of a fast drag on 2026-10-16, every client
+    /// showed a band of `resize.background` where the window had run ahead of
+    /// its picture, and its picture cut where the window had shrunk past it.
+    /// KWin shows neither: it draws the window at the size its application has
+    /// drawn. Here that is the default, pinned to the edges the drag is not
+    /// moving -- a top-left drag keeps the bottom-right corner where it is, so
+    /// the #113 shake cannot come back -- and the client is still told the
+    /// size the pointer asked for.
+    #[test]
+    fn a_dragged_window_follows_its_application_unless_told_otherwise() {
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        // See the #99 test: a Qt scene in a process holding a libwayland
+        // connection of its own aborts the whole test binary.
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+        let qh = queue.handle();
+        let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        let before = state
+            .pane_outer_of(pane)
+            .expect("a mapped pane has a rectangle");
+        let painted = window.geometry().size;
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configures.clear();
+
+        // The top-left corner, 20 right and 12 down.
+        let wanted = Rectangle::new(
+            (before.loc.x + 20, before.loc.y + 12).into(),
+            (before.size.w - 20, before.size.h - 12).into(),
+        );
+        let drag = |state: &mut Solium| {
+            state.begin_resize(&window);
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                edge_at: payload_edge(wanted, ResizeEdge::TopLeft),
+                edges: ResizeEdge::TopLeft,
+            });
+            state.settle_resize();
+        };
+        drag(&mut state);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_eq!(
+            window.geometry().size,
+            painted,
+            "the fixture's client never draws the new size, which is the moment \
+             this test is about"
+        );
+        let id = wayland_client::Proxy::id(&toplevel);
+        assert!(
+            client
+                .configures
+                .iter()
+                .any(|(to, w, h)| to == &id && (*w, *h) == (wanted.size.w, wanted.size.h)),
+            "the client is told the size the pointer asked for; got {:?}",
+            client.configures
+        );
+        assert_eq!(
+            state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle"),
+            before,
+            "drawn at the size its client has drawn, with the bottom-right corner \
+             it was not dragged by where it was: nothing uncovered, nothing cut"
+        );
+
+        // Told the pointer, the same drag draws the pointer's rectangle.
+        state.release_resize(&window);
+        state.resizing.follow = crate::resizing::Follow::Pointer;
+        drag(&mut state);
+        assert_eq!(
+            state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle"),
+            wanted,
+            "under `follow = \"pointer\"` the window is the rectangle being dragged"
+        );
+    }
+
     /// **This is issue #113, through the compositor rather than beside it.**
     ///
     /// A top-left drag, on the first frame, with a real client that has
@@ -8053,6 +8160,10 @@ end)"#,
         state
             .decorations
             .set_style(&mut state.panes, Some("none".to_string()));
+        // The pointer's rectangle is what this test is about: see
+        // `a_dragged_window_follows_its_application_unless_told_otherwise` for
+        // the default, which draws the window at its client's size instead.
+        state.resizing.follow = crate::resizing::Follow::Pointer;
 
         let (conn, event_queue, client) = connect(&mut display, &mut state);
         let qh = event_queue.handle();
@@ -8182,6 +8293,9 @@ end)"#,
         state
             .decorations
             .set_style(&mut state.panes, Some("none".to_string()));
+        // The pointer's rectangle is what this test measures the insets
+        // against; the default draws the window at its client's size.
+        state.resizing.follow = crate::resizing::Follow::Pointer;
 
         let (conn, event_queue, client) = connect(&mut display, &mut state);
         let qh = event_queue.handle();
@@ -36037,6 +36151,11 @@ end)
                     desk.install("require(\"touch\")");
                     let _touch = desk.client.seat_touch(&desk.qh);
                     desk.pump();
+                    // These measure the rectangle the finger asks for before
+                    // the client answers, which is what a window is drawn at
+                    // under `resize.follow = "pointer"`; the default draws it
+                    // at its client's size.
+                    desk.state.resizing.follow = crate::resizing::Follow::Pointer;
                     run(&mut desk, &opened, window, before);
                 });
             }

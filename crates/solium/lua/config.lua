@@ -1386,6 +1386,19 @@ local defaults = {
         -- `a_drag_tells_its_client_on_every_frame_unless_capped`.
         tell_hz = 0,
 
+        -- What a window is drawn at while you drag its edge. "app", the
+        -- default, draws it at the size its application has drawn, against
+        -- the edges you are not moving: its frame always wraps its content,
+        -- with no gap and nothing cut off, and the edge is a frame or so
+        -- behind the pointer -- as KWin does. "pointer" draws it exactly where
+        -- the pointer is, and `fill` above decides what covers the difference
+        -- until the application catches up -- as Hyprland does. A floating
+        -- window only: the windows a tiled drag moves share their edges, so
+        -- they follow the pointer whatever this says. Anything else is named
+        -- in the log and the default kept.
+        -- `a_dragged_window_follows_its_application_unless_told_otherwise`.
+        follow = "app",
+
         -- A fill of its own for a mode (the names `modes.register` uses),
         -- for every size change made while that mode is in charge: its
         -- drags, its glides, and a fullscreen glide begun in it. A mode with

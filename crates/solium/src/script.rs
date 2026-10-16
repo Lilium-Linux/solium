@@ -5690,6 +5690,20 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     }
                 }
             }
+            // What a window being dragged is drawn at: the size its
+            // application has drawn, or the pointer's rectangle. Under the same
+            // contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            if let Ok(Value::String(name)) = options.get::<Value>("follow")
+                && let Ok(name) = name.to_str()
+            {
+                match crate::resizing::Follow::named(&name) {
+                    Some(follow) => resize.follow = follow,
+                    None => tracing::warn!(
+                        follow = %name,
+                        "resize.follow is \"app\" or \"pointer\"; keeping the default"
+                    ),
+                }
+            }
             // And how often a window being dragged is told its new size: 0 on
             // every frame, or at most that many times a second. Under the
             // same contract. `the_shipped_resize_setting_reaches_the_compositor`,
@@ -12581,7 +12595,7 @@ mod tests {
     /// `resizing::PATIENCE_MAX`, anything else keeping the quarter second.
     #[test]
     fn the_shipped_resize_setting_reaches_the_compositor() {
-        use crate::resizing::{BACKGROUND, EVERY_FRAME, Fill, PATIENCE, Settings};
+        use crate::resizing::{BACKGROUND, EVERY_FRAME, Fill, Follow, PATIENCE, Settings};
         let waits = |millis| Settings {
             patience: std::time::Duration::from_millis(millis),
             ..Settings::default()
@@ -12598,6 +12612,7 @@ mod tests {
                     background: BACKGROUND,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
+                    follow: Follow::App,
                 },
             ),
             (
@@ -12607,6 +12622,7 @@ mod tests {
                     background: BACKGROUND,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
+                    follow: Follow::App,
                 },
             ),
             (
@@ -12616,6 +12632,7 @@ mod tests {
                     background: Some([0x10, 0x20, 0x30, 0x80]),
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
+                    follow: Follow::App,
                 },
             ),
             (
@@ -12625,6 +12642,7 @@ mod tests {
                     background: None,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
+                    follow: Follow::App,
                 },
             ),
             (
@@ -12634,6 +12652,7 @@ mod tests {
                     background: BACKGROUND,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
+                    follow: Follow::App,
                 },
             ),
             ("return { resize = { patience = 600 } }", waits(600)),
@@ -12653,6 +12672,21 @@ mod tests {
             ("return { resize = { tell_hz = -1 } }", Settings::default()),
             (
                 "return { resize = { tell_hz = \"fast\" } }",
+                Settings::default(),
+            ),
+            (
+                "return { resize = { follow = \"pointer\" } }",
+                Settings {
+                    follow: Follow::Pointer,
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { follow = \"app\" } }",
+                Settings::default(),
+            ),
+            (
+                "return { resize = { follow = \"edge\" } }",
                 Settings::default(),
             ),
         ] {
