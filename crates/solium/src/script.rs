@@ -12645,7 +12645,7 @@ mod tests {
             (
                 "return {}",
                 Settings {
-                    fill: Fill::Anchor,
+                    fill: Fill::Crop,
                     background: BACKGROUND,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
@@ -12681,7 +12681,7 @@ mod tests {
             (
                 "return { resize = { background = \"none\" } }",
                 Settings {
-                    fill: Fill::Anchor,
+                    fill: Fill::Crop,
                     background: crate::resizing::Background::None,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
@@ -12693,7 +12693,7 @@ mod tests {
             (
                 "return { resize = { fill = \"hold\", background = \"dark\" } }",
                 Settings {
-                    fill: Fill::Anchor,
+                    fill: Fill::Crop,
                     background: BACKGROUND,
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
@@ -12721,10 +12721,11 @@ mod tests {
             ("return { resize = { patience = \"long\" } }", waits(250)),
             ("return { resize = { sync = 0 } }", syncs(0)),
             ("return { resize = { sync = 50 } }", syncs(50)),
+            ("return { resize = { sync = 200 } }", syncs(200)),
             ("return { resize = { sync = 5000 } }", syncs(5000)),
-            ("return { resize = { sync = 5001 } }", syncs(200)),
-            ("return { resize = { sync = -1 } }", syncs(200)),
-            ("return { resize = { sync = \"long\" } }", syncs(200)),
+            ("return { resize = { sync = 5001 } }", syncs(0)),
+            ("return { resize = { sync = -1 } }", syncs(0)),
+            ("return { resize = { sync = \"long\" } }", syncs(0)),
             (
                 "return { resize = { overlap = false } }",
                 Settings {
@@ -12827,23 +12828,23 @@ mod tests {
         // At load (floating), then tiling, then scrolling.
         for (resize, expected) in [
             (
-                r#"{ fill = "crop", modes = { tiling = "stretch" } }"#,
-                [fill(Fill::Crop), fill(Fill::Stretch), fill(Fill::Crop)],
+                r#"{ fill = "anchor", modes = { tiling = "stretch" } }"#,
+                [fill(Fill::Anchor), fill(Fill::Stretch), fill(Fill::Anchor)],
             ),
             (
-                r#"{ modes = { floating = "stretch", scrolling = "crop" } }"#,
-                [fill(Fill::Stretch), fill(Fill::Anchor), fill(Fill::Crop)],
+                r#"{ modes = { floating = "stretch", scrolling = "anchor" } }"#,
+                [fill(Fill::Stretch), fill(Fill::Crop), fill(Fill::Anchor)],
             ),
             (
                 r#"{ background = "none", modes = { scrolling = "stretch" } }"#,
                 [
                     Some(Settings {
-                        fill: Fill::Anchor,
+                        fill: Fill::Crop,
                         background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                     Some(Settings {
-                        fill: Fill::Anchor,
+                        fill: Fill::Crop,
                         background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
@@ -12857,9 +12858,9 @@ mod tests {
             (
                 r#"{ patience = 600, modes = { tiling = "stretch" } }"#,
                 [
-                    patient(Fill::Anchor),
+                    patient(Fill::Crop),
                     patient(Fill::Stretch),
-                    patient(Fill::Anchor),
+                    patient(Fill::Crop),
                 ],
             ),
             // `tell_hz` goes over with every switch, as the patience does: a
@@ -12867,12 +12868,12 @@ mod tests {
             (
                 r#"{ tell_hz = 30, modes = { tiling = "stretch" } }"#,
                 [
-                    capped(Fill::Anchor),
+                    capped(Fill::Crop),
                     capped(Fill::Stretch),
-                    capped(Fill::Anchor),
+                    capped(Fill::Crop),
                 ],
             ),
-            ("{}", [fill(Fill::Anchor), None, None]),
+            ("{}", [fill(Fill::Crop), None, None]),
         ] {
             let Some((directory, mut scripts)) = shipped_init_with_user(
                 "solium-script-test-resize-modes",

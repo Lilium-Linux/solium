@@ -10035,9 +10035,9 @@ pub(crate) mod tests {
         ///
         /// A live trace caught clients committing `524x1` mid-drag, which the
         /// bridge drew at the pane's full height, 342x. Under the default fill
-        /// it is a one-pixel strip at the top of the pane -- at the bottom
-        /// when the drag pulls the top edge -- and the background is the
-        /// rest.
+        /// it is a one-pixel strip at the top of the pane, whichever edge the
+        /// drag pulls, and the background is the rest; `anchor` keeps it at
+        /// the bottom when the drag pulls the top edge.
         #[test]
         fn a_one_pixel_buffer_is_not_stretched_across_its_pane() {
             let client = logical(0.0, 0.0, 524.0, 342.0);
@@ -10065,8 +10065,13 @@ pub(crate) mod tests {
                     (false, true)
                 )
                 .offset,
+                Point::from((0.0, 0.0)),
+                "a pulled top edge still has it at the top"
+            );
+            assert_eq!(
+                fit(client, AT_REST, sliver, false, Fill::Anchor, (false, true)).offset,
                 Point::from((0.0, 341.0)),
-                "a pulled top edge keeps it against the bottom"
+                "anchored, a pulled top edge keeps it against the bottom"
             );
         }
 
