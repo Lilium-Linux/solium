@@ -852,6 +852,16 @@ pub(crate) fn run() -> Result<()> {
         // configuration once, so a pill it moves to the caret is in this
         // frame: `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
         state.settle_text_input();
+        // **Out to the clients now, not after the frame.** A drag's new size was
+        // decided just above and sat in the clients' buffers until the frame was
+        // drawn, so every configure carried a pointer position that much older
+        // by the time it arrived -- as did every input event this pass delivered.
+        // Measured nested on 2026-10-16 with a client that reads each configure
+        // the moment it arrives: 3.5 ms from the pointer to the configure, 2.1 ms
+        // with this, Hyprland 1.9 ms through the same host. On a monitor it is the
+        // render time of whichever pass drew. The flush at the end of the pass
+        // still sends what drawing adds: the frame callbacks.
+        let _ = state.display_handle.flush_clients();
         // And a Wayland client waiting on an X11 client's clipboard. Here
         // because this is where a loop handle exists; see `settle_selection`.
         crate::xwayland::settle_selection(&mut state, &loop_handle);

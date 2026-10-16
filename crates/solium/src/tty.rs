@@ -875,6 +875,16 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // And a Wayland client waiting on an X11 client's clipboard, as
             // the nested loop serves it (#362); see `settle_selection`.
             crate::xwayland::settle_selection(&mut state.solium, &state.handle);
+            // **Out to the clients now, not after the frame.** A drag's new size was
+            // decided just above and sat in the clients' buffers until the frame was
+            // drawn, so every configure carried a pointer position that much older
+            // by the time it arrived -- as did every input event this pass delivered.
+            // Measured nested on 2026-10-16 with a client that reads each configure
+            // the moment it arrives: 3.5 ms from the pointer to the configure, 2.1 ms
+            // with this, Hyprland 1.9 ms through the same host. On a monitor it is the
+            // render time of whichever pass drew. The flush at the end of the pass
+            // still sends what drawing adds: the frame callbacks.
+            let _ = state.solium.display_handle.flush_clients();
             // Only when a screen can be drawn: one waiting on its flip, or
             // resting after a pass that queued nothing on it, is drawn by
             // the flip or the end of its rest, which ask for the pass
