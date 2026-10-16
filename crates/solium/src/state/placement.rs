@@ -916,6 +916,12 @@ impl Solium {
         // `released` is reasserted because `arm_resize_gesture` rearms the
         // bridge's holds before the sweep and a floating hold arriving during it
         // missed that: its deadline must stop for the same reason theirs did.
+        // A pane a live drag moves is being resized by it, and its client is
+        // told so before the configure below goes out: see
+        // `Solium::mark_resizing`. Not once the button is up.
+        if released.is_none() {
+            self.mark_resizing(window);
+        }
         let carried = self
             .resize_hold
             .take_if(|held| held.pane == pane && &held.window == window)

@@ -3046,6 +3046,9 @@ mod real_client {
         /// same order: all four `tiled_*` states, for #228. Read through
         /// [`tiled_sent`].
         tiled: Vec<(wayland_client::backend::ObjectId, bool)>,
+        /// The states each of those configures carried, in the same order:
+        /// what says `resizing` while a drag holds the window.
+        configure_states: Vec<(wayland_client::backend::ObjectId, Vec<u32>)>,
 
         /// The monitor, the lock manager and the clipboard, for
         /// `lock_focus`: the only tests that need a surface to lock a
@@ -3877,7 +3880,8 @@ mod real_client {
                     .all(|edge| states.contains(&(edge as u32)));
                     let id = wayland_client::Proxy::id(toplevel);
                     state.tiled.push((id.clone(), tiled));
-                    state.configures.push((id, width, height));
+                    state.configures.push((id.clone(), width, height));
+                    state.configure_states.push((id, states));
                 }
                 xdg_toplevel::Event::Close => {
                     state.closes.push(wayland_client::Proxy::id(toplevel));
@@ -7922,6 +7926,99 @@ end)"#,
             said(&state),
             "none",
             "the window took back what it said, and is still read as a game"
+        );
+    }
+
+    /// **A window being dragged is told so: the xdg-shell `resizing` state,
+    /// on every configure of the drag, and gone at the release.**
+    ///
+    /// GTK, Qt, Chromium and foot read it, and KWin and Hyprland both set it
+    /// for the length of a drag; Solium never did. The release takes it off so
+    /// the last configure a client hears is an ordinary one.
+    #[test]
+    fn a_dragged_window_is_told_it_is_resizing_until_the_release() {
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        // See the #99 test: a Qt scene in a process holding a libwayland
+        // connection of its own aborts the whole test binary.
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+        let qh = queue.handle();
+        let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        let before = state
+            .pane_outer_of(pane)
+            .expect("a mapped pane has a rectangle");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configure_states.clear();
+        let id = wayland_client::Proxy::id(&toplevel);
+        let resizing = xdg_toplevel::State::Resizing as u32;
+        let states = |client: &Client| -> Vec<Vec<u32>> {
+            client
+                .configure_states
+                .iter()
+                .filter(|(sent_to, _)| sent_to == &id)
+                .map(|(_, states)| states.clone())
+                .collect()
+        };
+
+        state.begin_resize(&window);
+        for step in 1..=3 {
+            let wanted = Rectangle::new(
+                before.loc,
+                (before.size.w + 10 * step, before.size.h).into(),
+            );
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                edge_at: payload_edge(wanted, ResizeEdge::Right),
+                edges: ResizeEdge::Right,
+            });
+            state.settle_resize();
+        }
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let during = states(&client);
+        assert!(
+            !during.is_empty() && during.iter().all(|sent| sent.contains(&resizing)),
+            "every configure of a live drag says the window is being resized; \
+             got {during:?}"
+        );
+
+        client.configure_states.clear();
+        state.release_resize(&window);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let after = states(&client);
+        assert!(
+            after.last().is_some_and(|sent| !sent.contains(&resizing)),
+            "the release's configure is an ordinary one again; got {after:?}"
         );
     }
 
