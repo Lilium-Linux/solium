@@ -1413,6 +1413,18 @@ local defaults = {
         -- `a_seam_moves_once_both_of_its_clients_have_drawn`.
         sync = 200,
 
+        -- Whether a window being resized is told to draw its next size the
+        -- moment a frame showing its last one starts to be drawn, rather than
+        -- once that frame has reached the screen. Most applications -- Qt and
+        -- GTK among them -- draw a new size only when told they may draw, so
+        -- with this they draw it while the compositor is still drawing the
+        -- last one, instead of one after the other, and a window can follow
+        -- its edge on every refresh of a fast monitor. false waits for the
+        -- screen, as every other window does. Anything else is named in the
+        -- log and the default kept.
+        -- `a_window_being_resized_is_told_to_draw_again_when_its_frame_starts`.
+        overlap = true,
+
         -- A fill of its own for a mode (the names `modes.register` uses),
         -- for every size change made while that mode is in charge: its
         -- drags, its glides, and a fullscreen glide begun in it. A mode with

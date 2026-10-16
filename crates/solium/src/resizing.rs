@@ -408,6 +408,13 @@ pub(crate) struct Settings {
     /// before. Read at every frame.
     /// `a_seam_moves_once_both_of_its_clients_have_drawn`.
     pub(crate) sync: Duration,
+    /// `resize.overlap`: whether a window being resized is told it may draw
+    /// its next size as soon as a frame showing its last one starts to be
+    /// drawn, rather than once that frame has reached the screen
+    /// (`Solium::send_resize_frames_on`). True unless configured. Read at
+    /// every frame.
+    /// `a_window_being_resized_is_told_to_draw_again_when_its_frame_starts`.
+    pub(crate) overlap: bool,
 }
 
 impl Default for Settings {
@@ -419,6 +426,7 @@ impl Default for Settings {
             tell: EVERY_FRAME,
             follow: Follow::App,
             sync: SYNC,
+            overlap: true,
         }
     }
 }

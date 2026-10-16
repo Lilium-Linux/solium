@@ -2297,7 +2297,10 @@ Hyprland. `resize.sync` is how long, in milliseconds (200 by default), the
 windows a tiled drag moves wait for one another's applications: each is told
 its new size at once, and one whose application has drawn it stays where it
 was until the others have too, so a seam moves as one, with no gap and nothing
-cut off; 0 moves each window to the pointer at once. `resize.modes`
+cut off; 0 moves each window to the pointer at once. `resize.overlap` (true by
+default) tells a window being resized it may draw its next size as soon as a
+frame showing its last starts to be drawn, so the application draws while the
+compositor does instead of after it; false waits for the screen. `resize.modes`
 gives a mode a fill of its own, for every size change while it is in charge,
 as `focus.modes` does for focus; a mode it does not name takes `resize.fill`:
 
@@ -2310,6 +2313,7 @@ return {
         tell_hz = 0,
         follow = "app",
         sync = 200,
+        overlap = true,
         modes = { scrolling = "stretch" },
     },
 }

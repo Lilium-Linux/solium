@@ -23135,6 +23135,80 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 );
             }
 
+            /// **A window being resized is told it may draw again as soon as a
+            /// frame showing it starts to be drawn** (`resize.overlap`), not
+            /// only once that frame reaches the screen, so its application
+            /// draws its next size while the compositor draws its last. A
+            /// window nobody is resizing is not told then -- it waits for the
+            /// refresh, as before -- and neither is anything with the setting
+            /// off.
+            #[test]
+            fn a_window_being_resized_is_told_to_draw_again_when_its_frame_starts() {
+                let mut session = Session::with_monitors(1);
+                let (window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let (_other, _toplevel, other, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let output = session.output(0);
+                session.state.space.refresh();
+                let ask = |session: &mut Session, surface: &wl_surface::WlSurface| {
+                    surface.frame(&session.app.qh, FrameDone);
+                    surface.commit();
+                    session.app.pump(&mut session.display, &mut session.state);
+                };
+                let done = |session: &mut Session| {
+                    session.app.pump(&mut session.display, &mut session.state);
+                    session.app.client.frames_done
+                };
+                let refresh = Duration::from_millis(16);
+
+                ask(&mut session, &surface);
+                ask(&mut session, &other);
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(done(&mut session), 0, "nobody is being resized");
+
+                let pane = session
+                    .state
+                    .panes
+                    .id_of(&window)
+                    .expect("the window has a pane");
+                let size = window.geometry().size;
+                session.state.resize_hold = Some(crate::resizing::Held {
+                    window: window.clone(),
+                    pane,
+                    hold: crate::resizing::Hold::new(
+                        ResizeEdge::BottomRight,
+                        size,
+                        Rectangle::new((0, 0).into(), size),
+                        Duration::ZERO,
+                        None,
+                        crate::resizing::PATIENCE,
+                        crate::resizing::EVERY_FRAME,
+                    ),
+                });
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "the window being resized is told, and the other is not"
+                );
+
+                ask(&mut session, &surface);
+                session.state.resizing.overlap = false;
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "and with resize.overlap off, nobody is"
+                );
+            }
+
             /// **A window on a dark monitor is told to draw once a second, and
             /// not every frame.** A lit monitor's refresh tells it nothing any
             /// more; the dark pass tells it at most once per
