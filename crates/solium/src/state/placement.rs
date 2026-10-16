@@ -634,7 +634,16 @@ impl Solium {
             present::release(held);
             return;
         }
+        // **Except a pane a live drag's rounds pace** (`resize.sync`): it is
+        // drawn where its last round put it, and a glide aimed at the slot
+        // would draw it where the pointer is instead -- the whole of what the
+        // rounds are there to stop. `crate::state::round`,
+        // `a_seam_moves_once_both_of_its_clients_have_drawn`.
         if let Some(held) = self.panes.get(pane).filter(|_| !leaving) {
+            if self.resize_gesture.is_some() && self.seam_shown_of(held).is_some() {
+                present::release(held);
+                return;
+            }
             let start = present::frame(held, was, now);
             present::from(
                 held,
