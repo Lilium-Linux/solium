@@ -841,6 +841,16 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // configuration once, so a pill it moves to the caret is in this
             // frame: `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
             state.solium.settle_text_input();
+            // **Out to the clients now, not after the frame.** A drag's new size was
+            // decided just above and sat in the clients' buffers until the frame was
+            // drawn, so every configure carried a pointer position that much older
+            // by the time it arrived -- as did every input event this pass delivered.
+            // Measured nested on 2026-10-16 with a client that reads each configure
+            // the moment it arrives: 3.5 ms from the pointer to the configure, 2.1 ms
+            // with this, Hyprland 1.9 ms through the same host. On a monitor it is the
+            // render time of whichever pass drew. The flush at the end of the pass
+            // still sends what drawing adds: the frame callbacks.
+            let _ = state.solium.display_handle.flush_clients();
             if state.solium.redraw || state.animating {
                 state.render();
             }
