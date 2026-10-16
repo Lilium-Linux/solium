@@ -5690,6 +5690,28 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     }
                 }
             }
+            // And how long the windows a layout's drag moves wait for one
+            // another's applications: milliseconds, 0 to `resizing::SYNC_MAX`,
+            // under the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            match options.get::<Value>("sync") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => {
+                    let most = crate::resizing::SYNC_MAX.as_secs_f64() * 1000.0;
+                    match number(&value)
+                        .filter(|millis| (0.0..=most).contains(millis))
+                        .and_then(|millis| {
+                            std::time::Duration::try_from_secs_f64(millis / 1000.0).ok()
+                        }) {
+                        Some(sync) => resize.sync = sync,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            most_ms = most,
+                            "resize.sync is a number of milliseconds from 0 to most_ms; \
+                             keeping the default"
+                        ),
+                    }
+                }
+            }
             // What a window being dragged is drawn at: the size its
             // application has drawn, or the pointer's rectangle. Under the same
             // contract. `the_shipped_resize_setting_reaches_the_compositor`.
@@ -12595,9 +12617,13 @@ mod tests {
     /// `resizing::PATIENCE_MAX`, anything else keeping the quarter second.
     #[test]
     fn the_shipped_resize_setting_reaches_the_compositor() {
-        use crate::resizing::{BACKGROUND, EVERY_FRAME, Fill, Follow, PATIENCE, Settings};
+        use crate::resizing::{BACKGROUND, EVERY_FRAME, Fill, Follow, PATIENCE, SYNC, Settings};
         let waits = |millis| Settings {
             patience: std::time::Duration::from_millis(millis),
+            ..Settings::default()
+        };
+        let syncs = |millis| Settings {
+            sync: std::time::Duration::from_millis(millis),
             ..Settings::default()
         };
         let tells = |hz: f64| Settings {
@@ -12613,6 +12639,7 @@ mod tests {
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
                     follow: Follow::App,
+                    sync: SYNC,
                 },
             ),
             (
@@ -12623,6 +12650,7 @@ mod tests {
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
                     follow: Follow::App,
+                    sync: SYNC,
                 },
             ),
             (
@@ -12633,6 +12661,7 @@ mod tests {
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
                     follow: Follow::App,
+                    sync: SYNC,
                 },
             ),
             (
@@ -12643,6 +12672,7 @@ mod tests {
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
                     follow: Follow::App,
+                    sync: SYNC,
                 },
             ),
             (
@@ -12653,6 +12683,7 @@ mod tests {
                     patience: PATIENCE,
                     tell: EVERY_FRAME,
                     follow: Follow::App,
+                    sync: SYNC,
                 },
             ),
             ("return { resize = { patience = 600 } }", waits(600)),
@@ -12661,6 +12692,12 @@ mod tests {
             ("return { resize = { patience = 5001 } }", waits(250)),
             ("return { resize = { patience = -1 } }", waits(250)),
             ("return { resize = { patience = \"long\" } }", waits(250)),
+            ("return { resize = { sync = 0 } }", syncs(0)),
+            ("return { resize = { sync = 50 } }", syncs(50)),
+            ("return { resize = { sync = 5000 } }", syncs(5000)),
+            ("return { resize = { sync = 5001 } }", syncs(200)),
+            ("return { resize = { sync = -1 } }", syncs(200)),
+            ("return { resize = { sync = \"long\" } }", syncs(200)),
             ("return { resize = { tell_hz = 30 } }", tells(30.0)),
             ("return { resize = { tell_hz = 1000 } }", tells(1000.0)),
             ("return { resize = { tell_hz = 0 } }", Settings::default()),

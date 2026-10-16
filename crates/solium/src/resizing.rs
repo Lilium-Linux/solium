@@ -401,6 +401,13 @@ pub(crate) struct Settings {
     /// unless configured. Read at every frame, so a reload takes effect on the
     /// next one.
     pub(crate) follow: Follow,
+    /// `resize.sync`: how long the windows a layout's drag moves together wait
+    /// for one another's applications, so the seam between them moves as one
+    /// (`Solium::settle_round`). [`SYNC`] unless configured, within
+    /// `0..=SYNC_MAX`; zero draws each at the layout's rectangle at once, as
+    /// before. Read at every frame.
+    /// `a_seam_moves_once_both_of_its_clients_have_drawn`.
+    pub(crate) sync: Duration,
 }
 
 impl Default for Settings {
@@ -411,9 +418,32 @@ impl Default for Settings {
             patience: PATIENCE,
             tell: EVERY_FRAME,
             follow: Follow::App,
+            sync: SYNC,
         }
     }
 }
+
+/// How long the windows a tiled drag moves wait for one another's
+/// applications by default: a fifth of a second.
+///
+/// A seam is two windows and two applications, and each is drawn with the
+/// picture its own application last committed. Moved the moment the pointer
+/// moves, the two are only ever right together when both applications happen
+/// to have caught up: otherwise one tile's picture stops short of the seam
+/// (`resize.background` shows) and the other's is cut by it. So a drag's
+/// windows move in rounds instead: each is told its new size at once, and a
+/// picture that answers is held back until the others have answered too, so
+/// the frame that shows the new seam shows every window drawn for it.
+///
+/// This is the longest one slow application holds the rest up for: long
+/// enough for every toolkit measured on 2026-10-16 to answer a step of a fast
+/// drag (GTK, Qt and Electron in 2 to 15 ms), and short enough that one which
+/// has stopped answering costs a jerk rather than a frozen seam.
+pub(crate) const SYNC: Duration = Duration::from_millis(200);
+
+/// The most `resize.sync` may be, for the reason [`PATIENCE_MAX`] gives.
+/// `script::tests::the_shipped_resize_setting_reaches_the_compositor`.
+pub(crate) const SYNC_MAX: Duration = Duration::from_secs(5);
 
 /// `resize.tell_hz` as the interval [`Settings::tell`] holds: 0 is every
 /// frame, and anything from 1 to [`TELL_HZ_MAX`] is that many times a second

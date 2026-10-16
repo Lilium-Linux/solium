@@ -119,6 +119,12 @@ impl Solium {
         // paused drag is what every drag is for the moment before the button
         // comes up.
         self.flush_resize(now);
+        // Under `resize.sync` the bridge's panes are told in rounds rather
+        // than on every frame, and drawn where their last round put them:
+        // end the round under way if its answers are all in, and start the
+        // next. Before the bridge settles, which waits on what this tells.
+        // See `crate::state::round`.
+        self.settle_round(now);
         // Whether or not the pointer moved this frame: a hold outlives the
         // gesture by however long the client takes to answer the last
         // configure, and something has to be watching for that answer.
@@ -1021,8 +1027,16 @@ impl Solium {
             else {
                 continue;
             };
-            let tell = held.hold.release(slot, committed, now);
-            size_window(&client, tell);
+            // Under `resize.sync` the last size goes out in a round like
+            // every other, so the pane does not answer it ahead of its
+            // neighbour: the patience starts here, and `settle_round` tells.
+            // `a_seam_moves_once_both_of_its_clients_have_drawn`.
+            if self.resizing.sync.is_zero() {
+                let tell = held.hold.release(slot, committed, now);
+                size_window(&client, tell);
+            } else {
+                held.hold.rearm(Some(now));
+            }
         }
         self.redraw = true;
     }
@@ -1060,10 +1074,19 @@ impl Solium {
     /// throttle swallowed. A hold whose slot it has already sent answers `None`
     /// and costs a comparison.
     pub(super) fn flush_resize(&mut self, now: Duration) {
+        // Under `resize.sync` a round is what tells the bridge's panes, and a
+        // flush in between would tell one of them a size its neighbour has not
+        // been told. `crate::state::round`.
+        let rounds = self.syncing();
         let held: Vec<(Window, crate::pane::PaneId)> = self
             .resize_hold
             .iter()
-            .chain(self.resize_bridge.iter().flat_map(|bridge| &bridge.panes))
+            .chain(
+                self.resize_bridge
+                    .iter()
+                    .filter(|_| !rounds)
+                    .flat_map(|bridge| &bridge.panes),
+            )
             .map(|held| (held.window.clone(), held.pane))
             .collect();
         for (window, pane) in held {
@@ -1201,6 +1224,12 @@ impl Solium {
                 continue;
             }
             let committed = crate::resizing::answer(&window);
+            // Under `resize.sync`, a pane whose slot has moved past what it was
+            // last told is waiting for its round, and one in the round under
+            // way is waiting for the round to end: settling it on the answer
+            // to an older round would let go of it before it hears its last.
+            let slot = self.panes.get(pane).map(Pane::slot);
+            let in_round = self.in_round(pane);
             let Some(held) = self
                 .resize_bridge
                 .as_mut()
@@ -1208,6 +1237,9 @@ impl Solium {
             else {
                 continue;
             };
+            if !self.resizing.sync.is_zero() && (in_round || slot != Some(held.hold.asked())) {
+                continue;
+            }
             match held.hold.settle(committed, now) {
                 // Still being dragged, or the client has not answered the last
                 // configure yet. The layout's rectangle stays authoritative.
