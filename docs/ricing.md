@@ -2284,9 +2284,12 @@ to see through. `resize.patience` is how long, in milliseconds (250 by
 default), the picture waits for the application once a change is over -- past
 a drag's release, and past a glide's landing, where it keeps to the edges the
 glide did not move -- before the window is shown at the size the application
-has. `resize.modes` gives a mode a fill of its own, for every size change
-while it is in charge, as `focus.modes` does for focus; a mode it does not
-name takes `resize.fill`:
+has. `resize.tell_hz` is how often, at most, the application is told its new
+size while you drag an edge: 0, the default, on every frame the drag moves, so
+its picture is never more than its own drawing time behind the edge; a number
+caps it at that many times a second (10 was the fixed rate before). `resize.modes`
+gives a mode a fill of its own, for every size change while it is in charge,
+as `focus.modes` does for focus; a mode it does not name takes `resize.fill`:
 
 ```lua
 return {
@@ -2294,6 +2297,7 @@ return {
         fill = "crop",
         background = "#000000",
         patience = 400,
+        tell_hz = 0,
         modes = { scrolling = "stretch" },
     },
 }

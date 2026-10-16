@@ -1374,6 +1374,18 @@ local defaults = {
         -- `a_longer_patience_keeps_a_landed_glides_picture_where_it_was_for_longer`.
         patience = 250,
 
+        -- How often, at most, the application is told its new size while you
+        -- drag an edge, in times a second. 0, the default, tells it on every
+        -- frame the drag moves -- as often as your monitor refreshes -- so
+        -- its picture is never more than its own drawing time behind the
+        -- edge. A number caps it: 10 was the fixed rate before, and an
+        -- application that cannot keep up with every frame may like fewer,
+        -- though GTK, Qt, Chromium and Firefox all simply draw the newest
+        -- size and skip the rest. 1 to 1000; anything else is named in the
+        -- log and the default kept.
+        -- `a_drag_tells_its_client_on_every_frame_unless_capped`.
+        tell_hz = 0,
+
         -- A fill of its own for a mode (the names `modes.register` uses),
         -- for every size change made while that mode is in charge: its
         -- drags, its glides, and a fullscreen glide begun in it. A mode with

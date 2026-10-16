@@ -945,6 +945,7 @@ impl Solium {
                     now,
                     released,
                     self.resizing.patience,
+                    self.resizing.tell,
                 ),
                 true,
             ),

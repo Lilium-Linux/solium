@@ -8431,7 +8431,7 @@ end)"#,
     /// the ones at the end of a gesture, because people stop moving before
     /// they let go. The flush is the half `move_pane` cannot do: it is only
     /// reached from a frame that carried a motion, so the offers made in
-    /// the last `TELL_EVERY` of travel have nowhere else to come from.
+    /// the last throttled interval of travel have nowhere else to come from.
     fn paused_frame(state: &mut Solium, now: Duration) {
         state.flush_resize(now);
         state.settle_resize_hold(now);
@@ -15768,11 +15768,80 @@ end)"#,
         );
     }
 
+    /// **A drag tells its client on every frame it moves, by default.**
+    ///
+    /// The same six frames as the capped test below, with no
+    /// `resize.tell_hz` configured: six offers, six configures. Told a tenth of
+    /// a second apart, every client measured on 2026-10-16 -- kitty, Dolphin,
+    /// a GTK4 window and Firefox -- answered within 13 ms and still trailed
+    /// the pointer by 150 px and more, because the interval was the lag.
+    #[test]
+    fn a_tiled_drag_configures_on_every_frame_it_moves_by_default() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configures.clear();
+
+        let request = ResizeRequest {
+            window: window.clone(),
+            wanted: at(400, 300, 300, 200),
+            edge_at: (700.0, 500.0),
+            edges: ResizeEdge::Right,
+        };
+        state.begin_resize(&window);
+        for (millis, width) in [
+            (0, 300),
+            (16, 302),
+            (32, 304),
+            (48, 306),
+            (64, 308),
+            (80, 310),
+        ] {
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, width, 200),
+                Duration::from_millis(millis),
+            );
+        }
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_eq!(
+            client.configures.len(),
+            6,
+            "six frames of a drag that moved each time are six configures when \
+             nothing caps them; got {:?}",
+            client.configures
+        );
+    }
+
     /// **Issue #123, the rate half: a tiled drag configured its client once
     /// per frame.**
     ///
-    /// `crate::resizing::TELL_EVERY` is consulted by `Hold::dragged` and by
-    /// nothing else, and until now a tiled pane had no hold — so `move_pane`
+    /// The throttle — a capped `resize.tell_hz` since every frame became the
+    /// default — is consulted by `Hold::dragged` and by nothing else, and
+    /// until now a tiled pane had no hold — so `move_pane`
     /// sent a configure on every frame of every drag, which is sixty a
     /// second. `resizing.rs` says in its own words why that fails: a client
     /// that cannot render at that rate does not try, it falls behind, and
@@ -15785,6 +15854,10 @@ end)"#,
     #[test]
     fn a_tiled_drag_configures_on_the_throttle_and_not_once_per_frame() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -15843,7 +15916,7 @@ end)"#,
         assert_eq!(
             client.configures.len(),
             1,
-            "six frames of a claimed drag inside one `TELL_EVERY` must be \
+            "six frames of a claimed drag inside one capped interval must be \
              one configure, not six: the first offer goes out on the frame \
              it is decided and the rest wait. Got {:?}",
             client.configures
@@ -16077,6 +16150,10 @@ end)"#,
     #[test]
     fn a_pane_pushed_aside_by_another_panes_drag_is_configured_at_once() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (dragged, dragged_toplevel, _dragged_surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         let (beside, beside_toplevel, _beside_surface) =
@@ -16581,7 +16658,7 @@ end)"#,
     /// `Hold::dragged` is reached from `move_pane` and from `hold_resize`,
     /// and `settle_resize` reaches either only on a frame whose
     /// `pending_resize` carried a motion. So the offers a drag makes inside
-    /// its last `TELL_EVERY` are written into the pane's slot, drawn from
+    /// its last throttled interval are written into the pane's slot, drawn from
     /// the pane's slot, and never put on the wire: the client sits at a size
     /// up to a tenth of a second stale while the pane is drawn where the
     /// pointer is, and the bridge between the two is the visible gap.
@@ -16599,6 +16676,10 @@ end)"#,
     #[test]
     fn a_drag_that_pauses_still_tells_its_client_where_it_stopped() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -17321,7 +17402,7 @@ end)"#,
     /// the floating hold. Each direction built a fresh `Hold` with a fresh
     /// `told`, and a fresh hold is told immediately by design — so an
     /// alternating handler restored the sixty configures a second
-    /// `TELL_EVERY` exists to remove. Carrying the hold across the boundary
+    /// a capped `resize.tell_hz` exists to impose. Carrying the hold across the boundary
     /// is what stops that: it is the same client in the same gesture.
     ///
     /// The fixture has no scripts, so `trigger_resize` returns false and
@@ -17330,6 +17411,10 @@ end)"#,
     #[test]
     fn a_layout_changing_its_mind_does_not_buy_a_configure_each_way() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
