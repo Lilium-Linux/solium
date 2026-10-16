@@ -987,6 +987,12 @@ pub(crate) struct Solium {
     /// `Window` kept here is a client kept alive.
     resize_ended: Option<(Window, Duration)>,
 
+    /// Every window a live edge drag has told it is being resized: the
+    /// xdg-shell `resizing` state, set on the dragged window when the drag
+    /// begins and on each pane a tiled drag moves, and taken off them all at
+    /// the release (`Solium::mark_resizing`, `Solium::unmark_resizing`).
+    resizing_marked: Vec<Window>,
+
     /// What `config.lua` said about resizing. See [`crate::resizing::Fill`].
     pub(crate) resizing: crate::resizing::Settings,
 
@@ -1412,6 +1418,7 @@ impl Solium {
             resize_bridge: None,
             resize_gesture: None,
             resize_ended: None,
+            resizing_marked: Vec::new(),
             resizing: crate::resizing::Settings::default(),
             fullscreen_covers: crate::stack::Covers::default(),
             redraw: true,

@@ -4,6 +4,18 @@
 
 use super::*;
 
+/// Sends the cleared `resizing` state to every window a drag marked once the
+/// release that cleared it returns, whichever way it returns: the release's own
+/// configures go out first and already carry it, so this only reaches a window
+/// they skipped. See `Solium::mark_resizing`.
+struct Unmarked(Vec<Window>);
+
+impl Drop for Unmarked {
+    fn drop(&mut self) {
+        Solium::send_unmarked(&self.0);
+    }
+}
+
 impl Solium {
     /// Act on a resize an edge drag asked for.
     ///
@@ -526,7 +538,59 @@ impl Solium {
         }
         // Whatever gesture that record belonged to, it is not this one.
         self.resize_ended = None;
+        self.mark_resizing(window);
         self.pane_outer_of(self.panes.id_of(window)?)
+    }
+
+    /// Tell a window's client that a live drag is resizing it: the xdg-shell
+    /// `resizing` state, carried by every configure until the release.
+    ///
+    /// The state says the size is the drag's -- a maximum, still moving -- and
+    /// KWin and Hyprland both set it for the length of a drag; Solium never
+    /// did. Toolkits read it (GTK, Qt, Chromium and foot), and on 2026-10-16,
+    /// nested with one recorded drag, it took a little off every one of them:
+    /// a GTK4 window 70 to 64 px behind the pointer, foot 34 to 28, Dolphin 48
+    /// to 44.
+    ///
+    /// Set on the pending state, so it goes out with the next configure the
+    /// drag sends rather than with one of its own. An X11 window has no such
+    /// state and is left alone.
+    pub(super) fn mark_resizing(&mut self, window: &Window) {
+        if self.resizing_marked.iter().any(|marked| marked == window) {
+            return;
+        }
+        let Some(toplevel) = window.toplevel() else {
+            return;
+        };
+        toplevel.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Resizing);
+        });
+        self.resizing_marked.push(window.clone());
+    }
+
+    /// Take the `resizing` state off every window the drag marked, at its
+    /// release. The release's own configures carry the change; one that sends
+    /// none for a window -- a pane the drag stopped moving -- sends it here.
+    fn unmark_resizing(&mut self) {
+        for window in std::mem::take(&mut self.resizing_marked) {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| {
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                });
+            }
+        }
+    }
+
+    /// Send the cleared state to any marked window the release did not
+    /// configure itself. Smithay sends nothing when nothing has changed.
+    fn send_unmarked(windows: &[Window]) {
+        for window in windows {
+            if window.alive()
+                && let Some(toplevel) = window.toplevel()
+            {
+                toplevel.send_pending_configure();
+            }
+        }
     }
 
     /// Let go of a hold without reconciling anything.
@@ -763,6 +827,11 @@ impl Solium {
     /// behind, and one configure.
     pub(crate) fn release_resize(&mut self, window: &Window) {
         let now = self.clock.now();
+        // The drag is over for every window it was resizing, before any of the
+        // configures below goes out, so the last one each client hears says so.
+        let marked = self.resizing_marked.clone();
+        self.unmark_resizing();
+        let _unmarked = Unmarked(marked);
         // **Written down first, and unconditionally.** There may be no hold yet
         // — a press, a motion and this release inside one dispatch batch all
         // run before the frame that creates one — and a release that went
