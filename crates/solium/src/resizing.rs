@@ -118,31 +118,35 @@ use crate::{
     render::ratio,
 };
 
-/// How often a client is told its new size while an edge is being dragged.
+/// How often, at most, a client is told its new size while an edge is being
+/// dragged: `resize.tell_hz`, as an interval. **Zero, the default, tells it on
+/// every frame the drag moves.**
 ///
-/// A configure per frame is sixty a second, and a client that cannot render at
-/// that rate does not try: it falls behind, and the window stutters against the
-/// pointer rather than following it. That was true before this module existed —
-/// `settle_resize` already coalesced a mouse's thousand reports a second down
-/// to one per frame for exactly that reason — and one per frame is still more
-/// than Firefox can answer.
+/// This was a fixed tenth of a second, on the grounds that a configure per
+/// frame is more than a client can answer, so it falls behind and the window
+/// stutters against the pointer. That stopped being true at #113 and #123: the
+/// bridge draws the rectangle being dragged from the first frame whatever the
+/// client has done, so the rate no longer moves the window at all. All it
+/// governs is how stale the client's picture is when it lands -- and at a tenth
+/// of a second, that was the whole of the lag. Measured on 2026-10-16, nested,
+/// one recorded 1 kHz drag into kitty, Dolphin, a GTK4 window and Firefox:
+/// each answered a configure in 4 to 13 ms, and each trailed the pointer by
+/// 146 to 179 px on average here, against 50 to 66 px under Hyprland, which
+/// tells a client every refresh, and 24 to 60 px under KWin, which tells it on
+/// every pointer report. Told every frame, the same four trailed it by 53 to
+/// 66 px. A client that cannot keep up does not queue the backlog: GTK, Qt,
+/// Chromium and Firefox all draw the newest size they have been told and skip
+/// the rest.
 ///
-/// Throttling is only safe *because* the bridge exists. Without it, the window
-/// on screen would be whatever the client last answered, so asking less often
-/// would mean moving less often, and the drag would visibly step. With the
-/// bridge the drag is smooth regardless of when the client is asked, so the
-/// only thing the interval governs is how much stretch has accumulated by the
-/// time the client answers — and at 100 ms of an ordinary drag that is a few
-/// percent, which is not visible.
-///
-/// **Not deferred to the end of the gesture**, which was the other candidate
-/// and is what "one configure per drag" would give. A slow drag across a
-/// monitor would then run the bridge up to three or four times and the window
-/// would be a smear for the whole of it. Ten configures a second is a rate
-/// every client keeps up with and it keeps the stretch invisible; the win over
-/// per-frame — sixty renders down to ten — is most of what deferring would
-/// have bought anyway.
-const TELL_EVERY: Duration = Duration::from_millis(100);
+/// `settle_resize` still coalesces a mouse's thousand reports a second into
+/// one per frame, so every frame is the most this sends. A number keeps the
+/// old behaviour within reach for a client that does choke: see
+/// [`Settings::tell`].
+pub(crate) const EVERY_FRAME: Duration = Duration::ZERO;
+
+/// The most `resize.tell_hz` may be, in times a second. Past a thousand it is
+/// faster than any mouse reports, so every frame is what it means anyway.
+pub(crate) const TELL_HZ_MAX: f64 = 1000.0;
 
 /// How long the pane keeps the rectangle the drag ended on, waiting for the
 /// client to answer the last configure: the shipped `resize.patience`
@@ -345,6 +349,12 @@ pub(crate) struct Settings {
     /// by each when it is made (`Hold::new`) or asked (`Solium::resize_pins`).
     /// [`PATIENCE`] unless configured, within `0..=PATIENCE_MAX`.
     pub(crate) patience: Duration,
+    /// `resize.tell_hz`: the least time between two configures a live drag
+    /// sends one client, as an interval -- [`EVERY_FRAME`] unless configured,
+    /// which is every frame the drag moves. Read by each hold when it is made
+    /// (`Hold::new`), as `patience` is.
+    /// `tests::a_drag_tells_its_client_on_every_frame_unless_capped`.
+    pub(crate) tell: Duration,
 }
 
 impl Default for Settings {
@@ -353,8 +363,22 @@ impl Default for Settings {
             fill: Fill::default(),
             background: BACKGROUND,
             patience: PATIENCE,
+            tell: EVERY_FRAME,
         }
     }
+}
+
+/// `resize.tell_hz` as the interval [`Settings::tell`] holds: 0 is every
+/// frame, and anything from 1 to [`TELL_HZ_MAX`] is that many times a second
+/// at most. `None` for anything else, which the caller names in the log.
+pub(crate) fn tell_every(hz: f64) -> Option<Duration> {
+    if hz == 0.0 {
+        return Some(EVERY_FRAME);
+    }
+    if !(1.0..=TELL_HZ_MAX).contains(&hz) {
+        return None;
+    }
+    Duration::try_from_secs_f64(1.0 / hz).ok()
 }
 
 /// A live edge drag, and the window whose pane's slot it has taken charge of.
@@ -423,8 +447,12 @@ pub(crate) struct Hold {
     /// Only its size is ever compared against a client's answer, because a
     /// client answers with a size and has no say in where it is put.
     asked: Rectangle<i32, Logical>,
-    /// When it was sent, for [`TELL_EVERY`].
+    /// When it was sent, for [`Self::tell`].
     told: Duration,
+    /// The least time between two configures while the drag is live:
+    /// `resize.tell_hz` when the hold was made, [`EVERY_FRAME`] unless
+    /// configured.
+    tell: Duration,
     /// When the pointer let go, if it has. [`Self::patience`] runs from here.
     released: Option<Duration>,
     /// How long it waits past `released` for an answer: `resize.patience`
@@ -464,18 +492,20 @@ pub(crate) struct Hold {
     declined: Option<Size<i32, Logical>>,
     /// How many configures have gone out since the client last said anything.
     ///
-    /// Zero means it has answered everything it has been told, one is the
-    /// ordinary in-flight state of a client that is keeping up, and anything
-    /// more is silence across a whole [`TELL_EVERY`]. [`SILENCE`] is what reads
-    /// it and the whole of why.
-    ///
-    /// **Counted rather than timed**, and the count is the more direct of the
-    /// two: the throttle already spaces configures an interval apart, so
-    /// counting them counts intervals, and a duration would have to be threaded
-    /// through `Solium::resize_fill` into the renderer to be read at the one
-    /// place that asks. A release is deliberately not counted — see
-    /// [`Self::release`].
+    /// Zero means it has answered everything it has been told. For the trace:
+    /// what reads silence is [`Self::silent`], which is timed, because at a
+    /// configure every frame a count says how many frames went by and not
+    /// whether a client has stopped. A release is deliberately not counted —
+    /// see [`Self::release`].
     unanswered: u32,
+    /// When the oldest configure the client has not answered went out, or
+    /// `None` when it has answered them all. [`SILENCE`] runs from here.
+    waiting_since: Option<Duration>,
+    /// Whether the client has left a configure unanswered for a whole
+    /// [`SILENCE`], as of the last [`Self::settle`] -- which runs every frame,
+    /// so the renderer reads a verdict at most a frame old without being
+    /// handed a clock.
+    silent: bool,
 }
 
 /// How far a client's answer may miss the size it was offered and still count
@@ -526,7 +556,7 @@ const ROUNDING: i32 = 20;
 /// having.
 const CELL: i32 = 24;
 
-/// How many configures a client may leave unanswered before it is judged
+/// How long a client may leave a configure unanswered before it is judged
 /// against the ask the drag has reached rather than the one it last replied to.
 ///
 /// [`Hold::refused`] has to weigh the pair `render.rs` is actually stretching
@@ -542,19 +572,21 @@ const CELL: i32 = 24;
 /// shipped once already.
 ///
 /// **Judging the live ask the moment it moves is the other wrong answer**, and
-/// it is the expensive one. The throttle sends a whole [`TELL_EVERY`] of travel
-/// in one step and the answer comes a frame or two later, so a client that is
-/// keeping up is an interval behind for those frames — every interval, on every
-/// drag. That would read as a refusal once per interval and put one frame of
-/// [`Fill::Anchor`]'s deliberately uncovered strip on screen each time: the band
-/// of background [`ROUNDING`] exists to keep off a terminal's drags, back at
-/// ten hertz instead of for the whole gesture.
+/// it is the expensive one. The answer to a configure comes a frame or two
+/// after it, so a client that is keeping up is always that far behind the ask.
+/// That would read as a refusal on every frame and put [`Fill::Anchor`]'s
+/// deliberately uncovered strip on screen each time: the band of background
+/// [`ROUNDING`] exists to keep off a terminal's drags.
 ///
-/// So the unit is the throttle's own. **One** unanswered configure is the
-/// ordinary state of a client that is keeping up, and **two** means a whole
-/// interval went by with nothing said at all — which is not a client that is a
-/// frame behind, and the ask it is not answering is the live one.
-const SILENCE: u32 = 2;
+/// **Timed, not counted.** This was two configures when they went out a tenth
+/// of a second apart, which made two of them a tenth of a second of silence.
+/// At a configure every frame two of them are two frames, which every client
+/// is behind by all the time; so it is the time itself now -- a tenth of a
+/// second, the benefit of the doubt a client always had -- measured from the
+/// oldest configure it has not answered. A configured `resize.tell_hz` slower
+/// than ten a second is waited out whole, as it was.
+/// `tests::silence_is_a_tenth_of_a_second_whatever_the_rate`.
+const SILENCE: Duration = Duration::from_millis(100);
 
 /// Whether `given` is near enough to `asked` to be a rounding. See [`ROUNDING`].
 fn rounds(asked: Size<i32, Logical>, given: Size<i32, Logical>) -> bool {
@@ -588,7 +620,8 @@ impl Hold {
     /// **`patience` is an argument for the same reason**: every creation site
     /// says how long its hold waits once released, which outside the tests is
     /// the configured `resize.patience` (#233), so none can wait out a
-    /// constant the user set otherwise.
+    /// constant the user set otherwise. **And `tell`**, how often the client
+    /// may be told while the drag is live: `resize.tell_hz`.
     pub(crate) const fn new(
         edges: ResizeEdge,
         client: Size<i32, Logical>,
@@ -596,12 +629,14 @@ impl Hold {
         now: Duration,
         released: Option<Duration>,
         patience: Duration,
+        tell: Duration,
     ) -> Self {
         Self {
             edges,
             since: client,
             asked,
             told: now,
+            tell,
             released,
             patience,
             declined: None,
@@ -620,6 +655,8 @@ impl Hold {
             // only where nobody looks is one refactor away from being wrong
             // where somebody does.
             unanswered: 1,
+            waiting_since: Some(now),
+            silent: false,
         }
     }
 
@@ -664,13 +701,26 @@ impl Hold {
     /// guard at screen x 0 is one frame of exactly that. Destroying the hold
     /// and building a fresh one across that boundary threw away
     /// [`Self::told`], so each flip bought an unthrottled configure in each
-    /// direction and a handler that alternated restored the sixty a second
-    /// [`TELL_EVERY`] exists to remove. It is the same client, the same
+    /// direction and a handler that alternated escaped a capped
+    /// `resize.tell_hz` altogether. It is the same client, the same
     /// gesture and the same throttle; only the edges are the other authority's
     /// to name, because a tiled pane's moved edge is its own and a floating
     /// one's is the pointer's. See [`moved_edges`].
     pub(crate) const fn retargeted(&mut self, edges: ResizeEdge) {
         self.edges = edges;
+    }
+
+    /// Whether the client has gone quiet, as of `now`, for [`Self::refused`] --
+    /// which the renderer asks without a clock, so every call that has one
+    /// leaves the verdict here: [`Self::settle`] on every frame, and an offer.
+    ///
+    /// A configured interval longer than [`SILENCE`] is waited out whole: a
+    /// client told every half second is not silent a tenth of a second into
+    /// the half. `tests::silence_is_a_tenth_of_a_second_whatever_the_rate`.
+    fn listen(&mut self, now: Duration) {
+        self.silent = self
+            .waiting_since
+            .is_some_and(|since| now.saturating_sub(since) >= SILENCE.max(self.tell));
     }
 
     /// Notice whatever the client has said since it was last spoken to.
@@ -690,9 +740,10 @@ impl Hold {
         }
         self.since = client;
         // It has spoken, so whatever it was told before this is answered for
-        // and the count of intervals it has been silent for starts again. See
-        // [`SILENCE`].
+        // and its silence, if it was silent, is over. See [`SILENCE`].
         self.unanswered = 0;
+        self.waiting_since = None;
+        self.silent = false;
         if client == self.asked.size {
             // It took what it was offered, so whatever it declined earlier in
             // this gesture it is tracking now: a drag that went under Firefox's
@@ -718,6 +769,7 @@ impl Hold {
         throttled: bool,
     ) -> Option<Rectangle<i32, Logical>> {
         self.note(client);
+        self.listen(now);
         if wanted == self.asked {
             return None;
         }
@@ -731,25 +783,24 @@ impl Hold {
         // the throttle swallow it would leave `asked` naming a size the client
         // was never told, and `settle` would then wait out `PATIENCE` for an
         // answer that cannot come and end the gesture with a snap.
-        if throttled && self.released.is_none() && now.saturating_sub(self.told) < TELL_EVERY {
+        // [`EVERY_FRAME`], the default, never waits: `settle_resize` already
+        // holds a drag to one offer a frame.
+        if throttled && self.released.is_none() && now.saturating_sub(self.told) < self.tell {
             return None;
         }
         self.asked = wanted;
         self.told = now;
-        // One more the client owes an answer to. Saturating because the only
-        // thing a count this large could do is wrap back under [`SILENCE`] and
-        // hand a silent client its stretch back, and a hold that has sent four
-        // billion configures has been alive for thirteen years.
-        //
-        // **Configures, not intervals**, and those are the same number only on
-        // the throttled path. [`Self::placed`] arrives here with `throttled`
-        // false — a reload, a workspace switch, a pane shoved aside by someone
-        // else's drag — so a burst of them can reach [`SILENCE`] without a
-        // whole [`TELL_EVERY`] having passed. That is the safe direction: it
-        // weighs a quiet client against the live ask sooner, which is the
-        // verdict that stops a runaway stretch rather than the one that opens
-        // an uncovered strip. Worth knowing before anyone reads this as a clock.
+        // One more the client owes an answer to, for the trace. Saturating,
+        // because a hold that has sent four billion configures has been alive
+        // for thirteen years.
         self.unanswered = self.unanswered.saturating_add(1);
+        // The oldest unanswered ask is the one [`SILENCE`] runs from, so a
+        // newer ask does not restart it: a client told every frame would
+        // otherwise never be silent at all.
+        if self.waiting_since.is_none() {
+            self.waiting_since = Some(now);
+        }
+        self.listen(now);
         // `declined` is deliberately *not* cleared here. A new offer is not an
         // answer: what is on screen is still whatever the client last chose for
         // itself, and resuming the stretch on the strength of having asked
@@ -763,7 +814,8 @@ impl Hold {
     ///
     /// `wanted` is the client rectangle the drag is asking for this frame — the
     /// pane has already taken it; this only decides whether the client hears
-    /// about it yet. See [`TELL_EVERY`] for why not every frame.
+    /// about it yet, which is at once unless `resize.tell_hz` caps it. See
+    /// [`EVERY_FRAME`].
     pub(crate) fn dragged(
         &mut self,
         wanted: Rectangle<i32, Logical>,
@@ -776,8 +828,8 @@ impl Hold {
     /// Something that is **not** the drag moved this pane. Returns the
     /// rectangle to tell the client, whatever the throttle would have said.
     ///
-    /// [`TELL_EVERY`] is a live gesture's own rate limit and it has no business
-    /// swallowing anybody else's single configure. A config reload, a
+    /// `resize.tell_hz` is a live gesture's own rate limit and it has no
+    /// business swallowing anybody else's single configure. A config reload, a
     /// `modes.use` from a keybinding, a workspace switch and `rescue_offscreen`
     /// all reach `Solium::move_pane`, and one of them landing on a pane that
     /// happens to be mid-bridge — or inside the quarter second a released
@@ -802,10 +854,11 @@ impl Hold {
     ///
     /// Unconditional, whatever the throttle would have said — and unconditional
     /// even when it repeats [`Self::asked`], because a release is also where a
-    /// pane's *position* is reconciled for an X11 client. Wherever
-    /// [`TELL_EVERY`] happened to land, the last thing the client hears has to
-    /// be the rectangle the gesture actually ended on, or the window settles at
-    /// the last throttled size and the final few pixels of the drag are lost.
+    /// pane's *position* is reconciled for an X11 client. Wherever a capped
+    /// `resize.tell_hz` happened to land, the last thing the client hears has
+    /// to be the rectangle the gesture actually ended on, or the window settles
+    /// at the last throttled size and the final few pixels of the drag are
+    /// lost.
     ///
     /// **Not counted against [`SILENCE`]**, though it is a configure like any
     /// other. What that count is for is an ask running away from a client that
@@ -830,6 +883,7 @@ impl Hold {
     /// Where this hold stands. See [`Settle`].
     pub(crate) fn settle(&mut self, client: Size<i32, Logical>, now: Duration) -> Settle {
         self.note(client);
+        self.listen(now);
         let Some(released) = self.released else {
             // The pointer is still down. The drag owns the rectangle for as
             // long as that lasts, whatever the client has or has not said.
@@ -938,14 +992,14 @@ impl Hold {
     /// and then says nothing again pins this verdict at the moment of that
     /// answer while the drag — and the rectangle `render.rs` is stretching the
     /// client's buffer into — walks away from it. Once the client has been
-    /// silent through a whole [`TELL_EVERY`] the live ask is what it is not
+    /// silent through a whole [`SILENCE`] the live ask is what it is not
     /// answering, and that is the pair to weigh. [`SILENCE`] is the whole of
     /// why it is not weighed sooner: for a frame or two after every configure,
     /// a client that is keeping up perfectly well looks exactly like one that
     /// has stopped.
     pub(crate) fn refused(&self) -> bool {
         self.declined.is_some_and(|answered| {
-            let judged = if self.unanswered >= SILENCE {
+            let judged = if self.silent {
                 self.asked.size
             } else {
                 answered
@@ -1230,7 +1284,7 @@ pub(crate) mod trace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fill, Hold, PATIENCE, Settle, TELL_EVERY, factor, moved_edges};
+    use super::{EVERY_FRAME, Fill, Hold, PATIENCE, Settle, factor, moved_edges, tell_every};
     use smithay::{
         reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
         utils::{Logical, Rectangle, Size},
@@ -1247,6 +1301,12 @@ mod tests {
     const fn ms(millis: u64) -> std::time::Duration {
         std::time::Duration::from_millis(millis)
     }
+
+    /// A `resize.tell_hz` of ten: the fixed rate drags were told at before
+    /// every frame became the default, and the cap most of the tests below
+    /// exercise, because what a throttle does with the offers it holds back
+    /// is the subtle half and only a cap has any to hold.
+    const TELL_EVERY: std::time::Duration = ms(100);
 
     /// A client rectangle of this size at one fixed origin.
     ///
@@ -1272,7 +1332,7 @@ mod tests {
         asked: Rectangle<i32, Logical>,
         now: std::time::Duration,
     ) -> Hold {
-        Hold::new(edges, client, asked, now, None, PATIENCE)
+        Hold::new(edges, client, asked, now, None, PATIENCE, TELL_EVERY)
     }
 
     /// The arithmetic of issue #113, and the bridge that makes the fix
@@ -1484,7 +1544,132 @@ mod tests {
         );
     }
 
-    /// The client is asked at [`TELL_EVERY`], not at the frame rate.
+    /// **Every frame the drag moves, unless `resize.tell_hz` caps it.**
+    ///
+    /// The default sends each offer on the frame it is made, which is what
+    /// keeps a client's picture at most its own drawing time behind the
+    /// pointer: told a tenth of a second apart, kitty, Dolphin, GTK and Firefox
+    /// trailed it by 150 to 190 px on a quick drag, every one of them answering
+    /// in 4 to 13 ms. A cap holds offers back as it always did; what it does
+    /// with them is the rest of this module's tests.
+    #[test]
+    fn a_drag_tells_its_client_on_every_frame_unless_capped() {
+        let mut free = Hold::new(
+            ResizeEdge::Right,
+            size(400, 300),
+            want(410, 300),
+            ms(0),
+            None,
+            PATIENCE,
+            EVERY_FRAME,
+        );
+        // Four milliseconds is a frame at 260 Hz.
+        for (at, width) in [(4, 420), (8, 430), (12, 440), (16, 450)] {
+            assert_eq!(
+                free.dragged(want(width, 300), size(400, 300), ms(at)),
+                Some(want(width, 300)),
+                "uncapped, every frame's offer goes out on that frame"
+            );
+        }
+        // The same frames under a cap of ten a second: held back until the
+        // interval is up, then the newest of them.
+        let mut capped = dragging(ResizeEdge::Right, size(400, 300), want(410, 300), ms(0));
+        for (at, width) in [(4, 420), (8, 430), (12, 440), (16, 450)] {
+            assert_eq!(
+                capped.dragged(want(width, 300), size(400, 300), ms(at)),
+                None
+            );
+        }
+        assert_eq!(
+            capped.dragged(want(460, 300), size(400, 300), TELL_EVERY),
+            Some(want(460, 300))
+        );
+        // What `resize.tell_hz` turns into.
+        assert_eq!(tell_every(0.0), Some(EVERY_FRAME));
+        assert_eq!(tell_every(10.0), Some(TELL_EVERY));
+        assert_eq!(tell_every(1000.0), Some(ms(1)));
+        for refused in [-1.0, 0.5, 1000.5, f64::NAN] {
+            assert_eq!(tell_every(refused), None, "{refused} is not a rate");
+        }
+    }
+
+    /// **Silence is a tenth of a second whatever the rate.**
+    ///
+    /// It was two configures when they went out a tenth of a second apart. Told
+    /// every frame, a client that is keeping up is always a frame or two behind
+    /// the ask, so a count of two would call every terminal silent and take its
+    /// configured stretch away on every drag. Timed from the oldest ask it has
+    /// not answered, a tenth of a second is the benefit of the doubt it always
+    /// had -- and a cap slower than that is waited out whole.
+    #[test]
+    fn silence_is_a_tenth_of_a_second_whatever_the_rate() {
+        // A terminal answers a cell short, which is a rounding, and then says
+        // nothing while it is told a new width every four milliseconds.
+        let mut hold = Hold::new(
+            ResizeEdge::Right,
+            size(400, 300),
+            want(420, 300),
+            ms(0),
+            None,
+            PATIENCE,
+            EVERY_FRAME,
+        );
+        assert_eq!(hold.settle(size(412, 292), ms(4)), Settle::Waiting);
+        assert!(!hold.refused());
+        let mut at = ms(4);
+        let mut width = 420;
+        while at < ms(100) {
+            at += ms(4);
+            width += 10;
+            hold.dragged(want(width, 300), size(412, 292), at);
+            assert_eq!(hold.settle(size(412, 292), at), Settle::Waiting);
+            assert!(
+                !hold.refused(),
+                "{at:?} after it last spoke, two dozen configures in, is not yet                  silence: a client told every frame is always a frame behind"
+            );
+        }
+        // A tenth of a second past the first ask it has not answered.
+        at += ms(16);
+        width += 40;
+        hold.dragged(want(width, 300), size(412, 292), at);
+        assert_eq!(hold.settle(size(412, 292), at), Settle::Waiting);
+        assert!(
+            hold.refused(),
+            "a tenth of a second without a word while the pane ran away from it              by {}px is not a client that is keeping up",
+            width - 412
+        );
+        assert_eq!(hold.fill(Fill::Stretch), Fill::Anchor);
+
+        // Under a cap of two a second the whole interval is waited out.
+        let slow = std::time::Duration::from_millis(500);
+        let mut capped = Hold::new(
+            ResizeEdge::Right,
+            size(400, 300),
+            want(420, 300),
+            ms(0),
+            None,
+            PATIENCE,
+            slow,
+        );
+        assert_eq!(capped.settle(size(412, 292), ms(4)), Settle::Waiting);
+        assert_eq!(
+            capped.dragged(want(900, 300), size(412, 292), slow),
+            Some(want(900, 300))
+        );
+        assert_eq!(
+            capped.settle(size(412, 292), slow + ms(400)),
+            Settle::Waiting
+        );
+        assert!(
+            !capped.refused(),
+            "four tenths into a half-second interval is not silence"
+        );
+        assert_eq!(capped.settle(size(412, 292), slow * 2), Settle::Waiting);
+        assert!(capped.refused());
+    }
+
+    /// Under a capped `resize.tell_hz`, the client is asked at that rate, not
+    /// at the frame rate.
     #[test]
     fn the_client_is_not_asked_more_often_than_the_throttle_allows() {
         let mut hold = dragging(ResizeEdge::Right, size(400, 300), want(410, 300), ms(0));
@@ -1811,6 +1996,7 @@ mod tests {
             ms(16),
             Some(ms(12)),
             PATIENCE,
+            TELL_EVERY,
         );
         // The client answers nothing at all, which is what the deadline is for.
         assert_eq!(hold.settle(size(400, 300), ms(20)), Settle::Waiting);
@@ -1845,6 +2031,7 @@ mod tests {
                 ms(16),
                 Some(released),
                 patience,
+                TELL_EVERY,
             )
         };
         let mut longer = held(ms(600));
@@ -2060,6 +2247,7 @@ mod tests {
             ms(0),
             None,
             PATIENCE,
+            TELL_EVERY,
         );
         assert_eq!(hold.pins(), (false, false));
         assert_eq!(
@@ -2105,6 +2293,7 @@ mod tests {
             ms(0),
             Some(ms(0)),
             PATIENCE,
+            TELL_EVERY,
         );
         // Well past the deadline: this hold would adopt on the next look.
         assert_eq!(
@@ -2120,6 +2309,7 @@ mod tests {
             ms(0),
             Some(ms(0)),
             PATIENCE,
+            TELL_EVERY,
         );
         hold.rearm(None);
         assert_eq!(

@@ -55,8 +55,8 @@ impl Solium {
     /// Coalescing is the *rate* the client is asked at, not the rate the
     /// window moves at. Since #113 those are two different numbers:
     /// `hold_resize` puts the pane where the drag says on every one of these
-    /// calls, and `crate::resizing::TELL_EVERY` decides which of them the
-    /// client hears about.
+    /// calls, and `resize.tell_hz` decides which of them the client hears
+    /// about: every one, unless it is capped (`crate::resizing::EVERY_FRAME`).
     ///
     /// Returns whether anything was resized.
     pub(crate) fn settle_resize(&mut self) -> bool {
@@ -228,6 +228,7 @@ impl Solium {
             now,
             Some(lands),
             self.resizing.patience,
+            self.resizing.tell,
         );
         self.answering.retain(|held| held.pane != pane);
         self.answering.push(crate::resizing::Held {
@@ -673,8 +674,7 @@ impl Solium {
         // so it keeps its throttle, its `asked`, and whether it has refused
         // anything. Rebuilding instead reset `Hold::told`, which handed every
         // flip a free configure in each direction; a handler that alternated
-        // therefore restored the sixty a second `crate::resizing::TELL_EVERY`
-        // exists to remove.
+        // therefore escaped a capped `resize.tell_hz` altogether.
         //
         // Taken and not copied: leaving it in the bridge would make two things
         // answer `holding_resize` for one pane with two different opinions
@@ -734,6 +734,7 @@ impl Solium {
                             now,
                             released,
                             self.resizing.patience,
+                            self.resizing.tell,
                         )
                     }
                 };
@@ -866,8 +867,9 @@ impl Solium {
     /// Send the configure the throttle is still sitting on, once its interval
     /// has passed.
     ///
-    /// **`crate::resizing::TELL_EVERY` is a rate, and a rate needs a trailing
-    /// edge.** `Hold::dragged` is reached from `move_pane` and from
+    /// **A capped `resize.tell_hz` is a rate, and a rate needs a trailing
+    /// edge.** Uncapped, which is the default, this sends nothing the frame's
+    /// own offer has not already sent. `Hold::dragged` is reached from `move_pane` and from
     /// `hold_resize`, and `settle_resize` reaches either only on a frame whose
     /// `pending_resize` carried a motion. So the offers a drag makes in the
     /// last interval before it stops moving were recorded in the pane's slot,

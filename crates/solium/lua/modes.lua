@@ -139,7 +139,7 @@ end
 -- for every mode. `init.lua` hands `config.resize` over before any mode is
 -- known, which is all a configuration with no `resize.modes` entry needs, so
 -- nothing is handed over again for one; with an entry, the mode's own fill
--- goes over with the background and the patience -- each call sets every key
+-- goes over with the background, the patience and `tell_hz` -- each call sets every key
 -- -- whenever the mode changes, and once below at this file's top level, for
 -- the reason `apply_focus_mode` gives.
 -- `each_mode_fits_a_resize_by_its_own_fill_or_the_one_for_every_mode`.
@@ -154,6 +154,7 @@ local function apply_resize_mode(name)
         fill = own ~= nil and own or resize.fill,
         background = resize.background,
         patience = resize.patience,
+        tell_hz = resize.tell_hz,
     })
 end
 

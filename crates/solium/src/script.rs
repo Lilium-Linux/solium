@@ -4233,6 +4233,22 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     }
                 }
             }
+            // And how often a window being dragged is told its new size: 0 on
+            // every frame, or at most that many times a second. Under the
+            // same contract. `the_shipped_resize_setting_reaches_the_compositor`,
+            // `resize_tell_hz_is_every_frame_or_a_rate`.
+            match options.get::<Value>("tell_hz") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match number(&value).and_then(crate::resizing::tell_every) {
+                    Some(tell) => resize.tell = tell,
+                    None => tracing::warn!(
+                        value = describe(&value),
+                        most = crate::resizing::TELL_HZ_MAX,
+                        "resize.tell_hz is 0 (every frame) or a number of times a second \
+                         from 1 to most; keeping the default"
+                    ),
+                },
+            }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Resize(resize));
             })
@@ -9881,9 +9897,13 @@ mod tests {
     /// `resizing::PATIENCE_MAX`, anything else keeping the quarter second.
     #[test]
     fn the_shipped_resize_setting_reaches_the_compositor() {
-        use crate::resizing::{BACKGROUND, Fill, PATIENCE, Settings};
+        use crate::resizing::{BACKGROUND, EVERY_FRAME, Fill, PATIENCE, Settings};
         let waits = |millis| Settings {
             patience: std::time::Duration::from_millis(millis),
+            ..Settings::default()
+        };
+        let tells = |hz: f64| Settings {
+            tell: std::time::Duration::from_secs_f64(1.0 / hz),
             ..Settings::default()
         };
         for (user, wanted) in [
@@ -9893,6 +9913,7 @@ mod tests {
                     fill: Fill::Anchor,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
                 },
             ),
             (
@@ -9901,6 +9922,7 @@ mod tests {
                     fill: Fill::Stretch,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
                 },
             ),
             (
@@ -9909,6 +9931,7 @@ mod tests {
                     fill: Fill::Crop,
                     background: Some([0x10, 0x20, 0x30, 0x80]),
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
                 },
             ),
             (
@@ -9917,6 +9940,7 @@ mod tests {
                     fill: Fill::Anchor,
                     background: None,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
                 },
             ),
             (
@@ -9925,6 +9949,7 @@ mod tests {
                     fill: Fill::Anchor,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
                 },
             ),
             ("return { resize = { patience = 600 } }", waits(600)),
@@ -9933,6 +9958,19 @@ mod tests {
             ("return { resize = { patience = 5001 } }", waits(250)),
             ("return { resize = { patience = -1 } }", waits(250)),
             ("return { resize = { patience = \"long\" } }", waits(250)),
+            ("return { resize = { tell_hz = 30 } }", tells(30.0)),
+            ("return { resize = { tell_hz = 1000 } }", tells(1000.0)),
+            ("return { resize = { tell_hz = 0 } }", Settings::default()),
+            (
+                "return { resize = { tell_hz = 1001 } }",
+                Settings::default(),
+            ),
+            ("return { resize = { tell_hz = 0.5 } }", Settings::default()),
+            ("return { resize = { tell_hz = -1 } }", Settings::default()),
+            (
+                "return { resize = { tell_hz = \"fast\" } }",
+                Settings::default(),
+            ),
         ] {
             let Some((directory, mut scripts)) =
                 shipped_init_with_user("solium-script-test-resize", user)
@@ -9986,6 +10024,13 @@ mod tests {
                 ..Settings::default()
             })
         };
+        let capped = |fill: Fill| {
+            Some(Settings {
+                fill,
+                tell: std::time::Duration::from_secs_f64(1.0 / 30.0),
+                ..Settings::default()
+            })
+        };
         // At load (floating), then tiling, then scrolling.
         for (resize, expected) in [
             (
@@ -10022,6 +10067,16 @@ mod tests {
                     patient(Fill::Anchor),
                     patient(Fill::Stretch),
                     patient(Fill::Anchor),
+                ],
+            ),
+            // `tell_hz` goes over with every switch, as the patience does: a
+            // switch that dropped it would put the drag back to every frame.
+            (
+                r#"{ tell_hz = 30, modes = { tiling = "stretch" } }"#,
+                [
+                    capped(Fill::Anchor),
+                    capped(Fill::Stretch),
+                    capped(Fill::Anchor),
                 ],
             ),
             ("{}", [fill(Fill::Anchor), None, None]),

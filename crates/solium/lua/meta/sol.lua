@@ -803,11 +803,13 @@ function sol.client_sizes(options) end
 ---picture waits for its application once a change is over -- after a drag's
 ---release, a fullscreen or maximise glide's landing, or a layout glide's
 ---landing, while it stays against the edges the glide did not move (default
----250). Each call sets all three, a key left out at its default. `init.lua`
----calls this with `config.resize`, and `modes.lua` again with a mode's own
----fill from `config.resize.modes` whenever the mode changes, when that table
----names any mode.
----@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number }
+---250). `tell_hz`: how often, at most, a window whose edge is being dragged
+---is told its new size, in times a second from 1 to 1000; 0 (the default) tells
+---it on every frame the drag moves. Each call sets all four, a key left out at
+---its default. `init.lua` calls this with `config.resize`, and `modes.lua`
+---again with a mode's own fill from `config.resize.modes` whenever the mode
+---changes, when that table names any mode.
+---@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number }
 ---@return nil
 function sol.resize(options) end
 
