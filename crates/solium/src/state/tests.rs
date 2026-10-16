@@ -8005,9 +8005,11 @@ end)"#,
                 .decorations
                 .set_style(&mut $state.panes, Some("none".to_string()));
             // The bridge's own mechanics, a pane told on every frame and drawn
-            // at its slot: what `resize.sync = 0` keeps. Rounds have tests of
-            // their own, `a_seam_moves_once_both_of_its_clients_have_drawn`
-            // and those after it.
+            // at its slot: `resize.sync = 0`, the default, said here so a
+            // change of default cannot change what these tests are about.
+            // Rounds have tests of their own,
+            // `a_seam_moves_once_both_of_its_clients_have_drawn` and those
+            // after it.
             $state.resizing.sync = Duration::ZERO;
             let ($conn, mut $queue, mut $client) = connect(&mut $display, &mut $state);
             let $qh = $queue.handle();
@@ -9844,12 +9846,14 @@ end)"#,
     /// Before #233 the rest of the glide stretched that answer across the
     /// rectangle the glide had reached, glyphs up to twice as wide: no hold
     /// meant no `resize.fill`, and no fill meant a stretch. Now every pane is
-    /// fitted by the configured fill, the default draws the answer 1:1, and
-    /// the glide's own two ends say which edge it stands against: the right,
-    /// so the gap is on the left, where the window is still on its way in.
+    /// fitted by the configured fill, which draws the answer 1:1, and under
+    /// `anchor` the glide's own two ends say which edge it stands against:
+    /// the right, so the gap is on the left, where the window is still on
+    /// its way in. (`crop`, the default, has it at the left throughout.)
     #[test]
     fn a_glide_that_shrinks_a_window_draws_its_answer_at_its_own_size() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, surface, pane, tile) = filled_tile(
             &mut display,
             &mut state,
@@ -9919,8 +9923,10 @@ end)"#,
     ///
     /// The full-width window shrunk to the right half again, by a 240 ms
     /// glide, and a client slower than that: the glide lands with the old,
-    /// full-width picture still the only one. Through the glide it stood
-    /// against the right edge, cut on the left, where the window was moving.
+    /// full-width picture still the only one. Through the glide it stood,
+    /// anchored, against the right edge, cut on the left, where the window
+    /// was moving. (`crop`, the default, keeps it at the left throughout, so
+    /// it has nothing to jump back from.)
     /// The transform is retired the pass it lands, and with nothing left to
     /// say which edge stood still the picture went back to the top-left: the
     /// whole of the window's contents jumped by half a screen at the moment
@@ -9930,6 +9936,7 @@ end)"#,
     #[test]
     fn a_glide_that_lands_before_its_client_answers_keeps_its_picture_where_it_was() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, _surface, pane, tile) = filled_tile(
             &mut display,
             &mut state,
@@ -14190,7 +14197,7 @@ end)"#,
     /// client's.**
     ///
     /// A window under a titlebar has its top edge dragged down by 100. Its
-    /// client has not answered, so under the default fill its 300-tall
+    /// client has not answered, so under `anchor` its 300-tall
     /// picture stays against the bottom edge, which is standing still, and
     /// the top 100 of it is cut away -- under the titlebar that came down
     /// with the edge. The hit test inverted the fit without its cut, so a
@@ -14200,6 +14207,7 @@ end)"#,
     #[test]
     fn a_press_on_what_an_anchored_picture_cuts_away_is_not_the_clients() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, _toplevel, surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -14238,7 +14246,7 @@ end)"#,
         assert_eq!(
             state.resize_fill(pane),
             crate::resizing::Fill::Anchor,
-            "the default fill"
+            "the premise: the anchored fill"
         );
         assert_eq!(
             state.resize_pins(pane),
@@ -14827,11 +14835,7 @@ end)"#,
     #[test]
     fn a_seam_moves_once_both_of_its_clients_have_drawn() {
         let mut seam = Seam::new();
-        assert_eq!(
-            seam.state.resizing.sync,
-            crate::resizing::SYNC,
-            "the premise: the default"
-        );
+        seam.state.resizing.sync = Duration::from_millis(200);
         seam.state.begin_resize(&seam.left.0);
         seam.seam_at(450, Duration::ZERO);
         seam.pump();
@@ -14910,6 +14914,7 @@ end)"#,
     #[test]
     fn a_seam_moved_during_a_round_is_told_in_the_next() {
         let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
         seam.state.begin_resize(&seam.left.0);
         seam.seam_at(450, Duration::ZERO);
         seam.seam_at(470, Duration::from_millis(16));
@@ -14941,6 +14946,7 @@ end)"#,
     #[test]
     fn a_seam_let_go_of_mid_round_ends_where_it_was_let_go() {
         let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
         seam.state.begin_resize(&seam.left.0);
         seam.seam_at(450, Duration::ZERO);
         seam.seam_at(470, Duration::from_millis(16));
@@ -22831,16 +22837,17 @@ end)
         /// client has not drawn at the new size yet. Before #233 its
         /// half-width picture was stretched across the rectangle the glide
         /// had reached, its text up to twice as wide behind the fade. Under
-        /// the default fill the old picture is drawn at its own size against
+        /// `anchor` the old picture is drawn at its own size against
         /// the right edge, and the strip the neighbour has grown into is
         /// `resize.background`'s, behind the fading window; once the client
         /// answers, its new, wider picture stands against that edge too, cut
         /// on the left until the glide gets there, so the neighbour's contents
-        /// do not move at all. `crop` keeps the picture at the rectangle's
-        /// left, going with the moving edge instead.
+        /// do not move at all. `crop`, the default, keeps the picture at the
+        /// rectangle's left, going with the moving edge instead.
         #[test]
         fn a_neighbour_growing_into_a_closed_windows_tile_keeps_its_picture_against_its_far_edge() {
             let mut desk = Desk::new();
+            desk.state.resizing.fill = crate::resizing::Fill::Anchor;
             let (dying, others) = closing_scene(&mut desk, "tiling");
             for opened in others.iter().chain([&dying]) {
                 desk.answer(opened);

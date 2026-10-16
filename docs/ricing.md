@@ -1355,10 +1355,12 @@ is on the next frame. An app id is what `sol.windows()` calls `app_id`.
 While any window changes size — an edge or a seam you drag, a layout gliding
 it to a new tile, a fullscreen or maximise glide — its application is a frame
 or more behind the rectangle on screen. `resize.fill` decides what its picture
-does meanwhile: `"anchor"`, the default, keeps it at its own size against the
-edges that are not moving, so text never changes size; `"crop"` keeps it at
-the window's top-left instead; `"stretch"` scales it to fill, which is smooth
-but draws text up to twice as wide while the application catches up.
+does meanwhile: `"crop"`, the default, keeps it at its own size from the
+window's top-left, so text never changes size and the window beside a seam you
+drag keeps its picture against the seam, as in Hyprland; `"anchor"` keeps it
+against the edges that are not moving instead; `"stretch"` scales it to fill,
+which is smooth but draws text up to twice as wide while the application
+catches up.
 `resize.background` is what shows where the picture does not reach:
 `"edge"`, the default, stretches the picture's own edge over it, so a window
 that is behind looks like it has more of its own background and a transparent
@@ -1376,26 +1378,27 @@ caps it at that many times a second (10 was the fixed rate before).
 the edges you are not moving, so its frame always wraps its content and nothing
 is ever cut off or left uncovered, as in KWin; `"pointer"` draws it exactly
 where the pointer is and lets `resize.fill` cover the difference, as in
-Hyprland. `resize.sync` is how long, in milliseconds (200 by default), the
-windows a tiled drag moves wait for one another's applications: each is told
-its new size at once, and one whose application has drawn it stays where it
-was until the others have too, so a seam moves as one, with no gap and nothing
-cut off; 0 moves each window to the pointer at once. `resize.overlap` (true by
-default) tells a window being resized it may draw its next size as soon as a
-frame showing its last starts to be drawn, so the application draws while the
-compositor does instead of after it; false waits for the screen. `resize.modes`
+Hyprland. `resize.sync` is how long, in milliseconds, the windows a tiled
+drag moves wait for one another's applications: 0, the default, moves each to
+the pointer at once; a number moves them in rounds, each told its new size at
+once and one whose application has drawn it held where it was until the others
+have too, so a seam moves as one but at the slower application's pace.
+`resize.overlap` (true by default) tells a window being resized it may draw its
+next size as soon as a frame showing its last starts to be drawn, so the
+application draws while the compositor does instead of after it; false waits
+for the screen. `resize.modes`
 gives a mode a fill of its own, for every size change while it is in charge,
 as `focus.modes` does for focus; a mode it does not name takes `resize.fill`:
 
 ```lua
 return {
     resize = {
-        fill = "crop",
+        fill = "anchor",
         background = "edge",
         patience = 400,
         tell_hz = 0,
         follow = "app",
-        sync = 200,
+        sync = 0,
         overlap = true,
         modes = { scrolling = "stretch" },
     },

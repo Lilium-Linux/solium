@@ -792,9 +792,9 @@ function sol.client_sizes(options) end
 ---edge or seam drag, a layout's glide, a fullscreen or maximise glide -- and
 ---what fills the part it does not cover.
 ---
----`fill`: `"anchor"` (the default) draws the picture at its own size against
----the edges that are not moving, cut to the window; `"crop"` the same from the
----window's top-left whichever edge moves; `"stretch"` scales it to fill;
+---`fill`: `"crop"` (the default) draws the picture at its own size from the
+---window's top-left whichever edge moves, cut to the window; `"anchor"` the
+---same against the edges that are not moving; `"stretch"` scales it to fill;
 ---`"scene"` draws the window's QML scene, which today reaches only a window
 ---resized before its application painted, and is `"anchor"` elsewhere.
 ---`background`: what shows where the picture does not reach: `"edge"` (the
@@ -811,11 +811,11 @@ function sol.client_sizes(options) end
 ---has drawn, against the edges not moving) or `"pointer"` (the drag's own
 ---rectangle, with `fill` covering the difference). `sync`: how long, in
 ---milliseconds from 0 to 5000, the windows a layout's drag moves wait for one
----another's applications, so a seam moves as one (default 200; 0 moves each
----at once). `overlap`: whether a window being resized is told to draw its
----next size as soon as a frame showing its last starts to be drawn (default
----true; false waits for the screen). Each call sets all seven, a key left out
----at its default. `init.lua` calls this with `config.resize`, and
+---another's applications, so a seam moves as one (default 0: each follows the
+---pointer at once). `overlap`: whether a window being resized is told to draw
+---its next size as soon as a frame showing its last starts to be drawn
+---(default true; false waits for the screen). Each call sets all seven, a key
+---left out at its default. `init.lua` calls this with `config.resize`, and
 ---`modes.lua`
 ---again with a mode's own fill from `config.resize.modes` whenever the mode
 ---changes, when that table names any mode.

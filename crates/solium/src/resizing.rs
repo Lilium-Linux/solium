@@ -202,7 +202,8 @@ pub(crate) enum Fill {
     /// momentarily soft, and what niri does.
     Stretch,
     /// The picture at its own size, against the edges the change does not
-    /// move, and cut to the rectangle. The default since #233.
+    /// move, and cut to the rectangle. The default from #233 until
+    /// 2026-10-17, when [`Fill::Crop`] took over.
     ///
     /// **Never scaled.** A buffer is drawn at the size its client drew it, so
     /// a glyph is the same width and height on every frame of a glide or a
@@ -219,7 +220,12 @@ pub(crate) enum Fill {
     /// when the near one moves alone -- [`Hold::pins`] for a drag, [`pins`]
     /// between the two ends of a glide -- and the top-left otherwise, which
     /// includes a rectangle that moves both of an axis' edges or neither.
-    #[default]
+    ///
+    /// **Which is wrong for a seam.** The window right of a dragged seam has
+    /// its left edge moving alone, so its picture stays against its right
+    /// edge and the gap opens at the seam, between the two windows, exactly
+    /// where the eye is: next to Hyprland's seam on 2026-10-17 it read as the
+    /// window lagging the pointer. See [`Fill::Crop`].
     Anchor,
     /// The picture at its own size, at the rectangle's top-left, whichever
     /// edge moves, and cut to the rectangle.
@@ -232,6 +238,15 @@ pub(crate) enum Fill {
     /// left-aligned page -- a terminal's prompt, an editor's gutter -- stays
     /// at the window's own left edge, where the client's next picture will put
     /// it too.
+    ///
+    /// **The default since 2026-10-17, and Hyprland's.** On a tiled seam it
+    /// is the whole difference between the seam looking tight and looking
+    /// late: the window right of the seam keeps its picture against the seam
+    /// as it moves, so what is cut or stretched out (`resize.background`, the
+    /// picture's own edge by default) is along the far edge, away from the
+    /// seam. Side by side, nested, with Firefox and kitty: no gap at the seam
+    /// while it moves left, where the still-edge pin left one of 10 to 17 px.
+    #[default]
     Crop,
     /// Draw the pane's QML scene over the client until it arrives.
     ///
@@ -416,9 +431,9 @@ pub(crate) struct Settings {
     pub(crate) follow: Follow,
     /// `resize.sync`: how long the windows a layout's drag moves together wait
     /// for one another's applications, so the seam between them moves as one
-    /// (`Solium::settle_round`). [`SYNC`] unless configured, within
-    /// `0..=SYNC_MAX`; zero draws each at the layout's rectangle at once, as
-    /// before. Read at every frame.
+    /// (`Solium::settle_round`). [`SYNC`] -- zero, each drawn at the layout's
+    /// rectangle at once -- unless configured, within `0..=SYNC_MAX`. Read at
+    /// every frame.
     /// `a_seam_moves_once_both_of_its_clients_have_drawn`.
     pub(crate) sync: Duration,
     /// `resize.overlap`: whether a window being resized is told it may draw
@@ -445,22 +460,21 @@ impl Default for Settings {
 }
 
 /// How long the windows a tiled drag moves wait for one another's
-/// applications by default: a fifth of a second.
+/// applications by default: not at all.
 ///
 /// A seam is two windows and two applications, and each is drawn with the
-/// picture its own application last committed. Moved the moment the pointer
-/// moves, the two are only ever right together when both applications happen
-/// to have caught up: otherwise one tile's picture stops short of the seam
-/// (`resize.background` shows) and the other's is cut by it. So a drag's
-/// windows move in rounds instead: each is told its new size at once, and a
-/// picture that answers is held back until the others have answered too, so
-/// the frame that shows the new seam shows every window drawn for it.
-///
-/// This is the longest one slow application holds the rest up for: long
-/// enough for every toolkit measured on 2026-10-16 to answer a step of a fast
-/// drag (GTK, Qt and Electron in 2 to 15 ms), and short enough that one which
-/// has stopped answering costs a jerk rather than a frozen seam.
-pub(crate) const SYNC: Duration = Duration::from_millis(200);
+/// picture its own application last committed. Rounds (`state::round`) move
+/// them together: each is told its new size at once, and a picture that
+/// answers is held back until the others have answered too, so every frame
+/// shows each window drawn for the seam it is shown at. The price is that the
+/// seam moves at the slower application's pace, in steps, behind the pointer --
+/// and on 2026-10-16, next to Hyprland's seam on the pointer every frame, that
+/// read as lag ("Hyprland doing it softly without any lag"). So by default the
+/// windows follow the pointer at once, as Hyprland's do, and what a picture
+/// does not reach is its own edge stretched ([`BACKGROUND`]); a configured
+/// `resize.sync` turns rounds on, and is the longest one slow application then
+/// holds the others up for.
+pub(crate) const SYNC: Duration = Duration::ZERO;
 
 /// The most `resize.sync` may be, for the reason [`PATIENCE_MAX`] gives.
 /// `script::tests::the_shipped_resize_setting_reaches_the_compositor`.
@@ -2219,7 +2233,7 @@ mod tests {
         assert_eq!(Fill::named("hold"), None);
         assert_eq!(Fill::named("Stretch"), None);
         assert_eq!(Fill::named(""), None);
-        assert_eq!(Fill::default(), Fill::Anchor);
+        assert_eq!(Fill::default(), Fill::Crop);
     }
 
     /// **`resize.background` is the edge, a colour, `none`, or not one.**
