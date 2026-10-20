@@ -57,8 +57,10 @@ const BTN_RIGHT: u32 = 0x111;
 /// window from in there would re-enter the keyboard and deadlock.
 #[derive(Clone, Debug)]
 enum Action {
-    /// A key combination a script has claimed.
-    Bound(String),
+    /// A key combination a script has claimed, and whether the key that
+    /// pressed it is one that repeats while held, which is what decides
+    /// whether a binding that asked to repeat can. See [`key_repeats`].
+    Bound { combo: String, repeats: bool },
     /// A backend request: switch VT, or stop.
     Backend(Request),
     /// A key for the scene holding the keyboard.
@@ -166,6 +168,12 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
     };
 
     let pressed = key_state == KeyState::Pressed;
+    // Any key, pressed or let go, ends a held binding's repeat: its own key
+    // coming up, and any other, because the newest key is the one that would
+    // repeat, and Shift under a held volume key is not the combination that is
+    // repeating. A press that is itself a repeating binding starts its own
+    // below. `tests::held::a_repeat_stops_at_the_next_key_pressed_or_let_go`.
+    state.held_binding = None;
     // Before the filter, so a binding that turns the screens off is pressed
     // with them on and leaves them off. See [`wakes`], and
     // `a_binding_that_turns_the_screens_off_leaves_them_off_when_it_is_let_go`.
@@ -234,8 +242,10 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
     state.keyboard_changed();
 
     match bound {
-        Some(Some(Action::Bound(combo))) => {
-            state.trigger(&combo);
+        Some(Some(Action::Bound { combo, repeats })) => {
+            if state.trigger(&combo) && repeats {
+                state.hold_binding(combo);
+            }
         }
         Some(Some(Action::Backend(request))) => {
             tracing::info!(?request, "backend request from a key");
@@ -279,6 +289,13 @@ fn press(
     // can spawn a terminal in one line -- so leaving bindings live
     // would turn the lock screen into a menu of ways past it.
     //
+    // Except a binding that asked to be, with `locked` (#224): the
+    // volume, brightness and media keys, which are no way past anything.
+    // No binding that did not ask fires, and none at all while the
+    // keyboard is sealed; and what one that asked does is held to the rule
+    // in `script::with_pending`, which refuses whatever it asks of a window.
+    // `state::tests::real_client::lock_focus::held::a_binding_allowed_while_locked_fires_at_the_lock_and_no_other_does`.
+    //
     // What is forwarded reaches a lock surface or nothing. This line
     // used to say so while it was not true: a window opening or
     // closing, a menu grab or a script could each hand the keyboard to
@@ -292,6 +309,12 @@ fn press(
     // is the last line: it drops the key if the keyboard is on
     // anything the gate would have refused, or held by any grab.
     if locked {
+        if !sealed && let Some(combo) = allowed_at_the_lock(state, modifiers, &handle) {
+            return FilterResult::Intercept(Some(Action::Bound {
+                combo,
+                repeats: key_repeats(&handle),
+            }));
+        }
         return if sealed {
             FilterResult::Intercept(None)
         } else {
@@ -341,7 +364,10 @@ fn press(
             KeyPolicy::NoBindings => None,
         };
         return FilterResult::Intercept(Some(match binding {
-            Some(combo) => Action::Bound(combo),
+            Some(combo) => Action::Bound {
+                combo,
+                repeats: key_repeats(&handle),
+            },
             None => Action::Scene(scene_key(&handle, modifiers, true)),
         }));
     }
@@ -391,7 +417,10 @@ fn press(
         // The spelling that matched, not the modified one: the handler
         // is found by the same lookup, and `super+shift+1` has no
         // entry under `super+shift+exclam`.
-        FilterResult::Intercept(Some(Action::Bound(combo)))
+        FilterResult::Intercept(Some(Action::Bound {
+            combo,
+            repeats: key_repeats(&handle),
+        }))
     } else if state.script_grab {
         // A mode owns input: keys it did not bind are swallowed rather
         // than leaking to whatever is underneath it.
@@ -422,10 +451,6 @@ fn press(
 /// `tests::a_held_modifier_does_not_repeat_into_the_scene`,
 /// `tests::a_held_group_toggle_does_not_repeat_into_the_scene`,
 /// `tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`.
-#[expect(
-    unsafe_code,
-    reason = "asking smithay's xkb keymap whether a key repeats"
-)]
 fn scene_key(
     handle: &smithay::input::keyboard::KeysymHandle<'_>,
     modifiers: &ModifiersState,
@@ -438,16 +463,7 @@ fn scene_key(
         _ => sym,
     };
     let code = handle.raw_code();
-    // The ISO lock, latch and group keysyms never repeat, whatever key they
-    // are on: `grp:alt_space_toggle` puts `ISO_Next_Group` on space, which
-    // the keymap says repeats.
-    // `tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`.
-    let repeats = !(0xfe01..=0xfe0f).contains(&sym.raw())
-        && handle.xkb().lock().is_ok_and(|held| {
-            // SAFETY: the keymap is borrowed for this one call, under the
-            // lock, and nothing of it outlives the `Xkb` it belongs to.
-            unsafe { held.keymap() }.key_repeats(code)
-        });
+    let repeats = key_repeats(handle);
     crate::qml::hosted::SceneKey {
         pressed,
         qt_key: crate::qml::keys::qt_key(named, &xkb::keysym_to_utf8(named)),
@@ -457,6 +473,53 @@ fn scene_key(
         repeats,
         code: code.raw(),
     }
+}
+
+/// The binding a press at the lock screen fires: the one it would fire with
+/// the session unlocked, tried under both of [`combos_for`]'s names as there,
+/// and only if that binding asked to fire at the lock (#224). One that did
+/// not ask is not passed over for one that did under the other name: the key
+/// does at the lock what it does at the desktop, or nothing.
+fn allowed_at_the_lock(
+    state: &Solium,
+    modifiers: &ModifiersState,
+    handle: &smithay::input::keyboard::KeysymHandle<'_>,
+) -> Option<String> {
+    let scripts = state.scripts.as_ref()?;
+    let combo = combos_for(
+        modifiers,
+        handle.modified_sym(),
+        handle.raw_latin_sym_or_raw_current_sym(),
+    )
+    .into_iter()
+    .find(|combo| scripts.has_binding(combo))?;
+    scripts
+        .binding_options(&combo)
+        .is_some_and(|asked| asked.locked)
+        .then_some(combo)
+}
+
+/// Whether the key pressed is one that repeats while held, as the keymap says
+/// and every Wayland client asks it: no modifier does, nor a group toggle.
+/// What a scene is told, and what decides whether a binding that asked to
+/// repeat can (#224).
+///
+/// The ISO lock, latch and group keysyms never repeat, whatever key they are
+/// on: `grp:alt_space_toggle` puts `ISO_Next_Group` on space, which the keymap
+/// says repeats.
+/// `tests::a_held_group_toggle_on_space_does_not_repeat_into_the_scene`.
+#[expect(
+    unsafe_code,
+    reason = "asking smithay's xkb keymap whether a key repeats"
+)]
+fn key_repeats(handle: &smithay::input::keyboard::KeysymHandle<'_>) -> bool {
+    let code = handle.raw_code();
+    !(0xfe01..=0xfe0f).contains(&handle.modified_sym().raw())
+        && handle.xkb().lock().is_ok_and(|held| {
+            // SAFETY: the keymap is borrowed for this one call, under the
+            // lock, and nothing of it outlives the `Xkb` it belongs to.
+            unsafe { held.keymap() }.key_repeats(code)
+        })
 }
 
 /// The key combinations the compositor keeps for itself, whatever else happens.
@@ -3119,5 +3182,238 @@ mod tests {
                 "йц, then ctrl+a, then у: the selection replaced"
             );
         });
+    }
+
+    /// **#224: a held key repeats its binding, when the binding asks.**
+    ///
+    /// Every binding here counts its runs and leaves the count as the status,
+    /// so the status says how many times the handler ran. Every keyboard is
+    /// `us,ru` with Russian active, as the issue asks: a volume key is the same
+    /// key on either, and a letter is not.
+    mod held {
+        use super::{Key, Q, SHIFT, SUPER, Solium, with_keyboard};
+        use smithay::backend::input::KeyState;
+        use smithay::input::keyboard::Keysym;
+        use std::time::Duration;
+
+        fn press(state: &mut Solium, code: u32) {
+            super::super::keyboard(
+                state,
+                Key {
+                    code,
+                    state: KeyState::Pressed,
+                },
+            );
+        }
+
+        fn release(state: &mut Solium, code: u32) {
+            super::super::keyboard(
+                state,
+                Key {
+                    code,
+                    state: KeyState::Released,
+                },
+            );
+        }
+
+        fn ms(count: u64) -> Duration {
+            Duration::from_millis(count)
+        }
+
+        /// The volume-up key, as this keymap has it.
+        fn volume_up(state: &mut Solium) -> u32 {
+            crate::keymap::keycode_of(state, Keysym::XF86_AudioRaiseVolume)
+                .expect("us,ru has a volume-up key")
+                .raw()
+        }
+
+        /// How long a key is held before it repeats, and how long between
+        /// repeats, as the keyboard says.
+        fn timing(state: &Solium) -> (Duration, Duration) {
+            let delay = u64::try_from(state.keyboard.repeat_delay).unwrap_or(600);
+            let rate = u64::try_from(state.keyboard.repeat_rate).unwrap_or(25);
+            (ms(delay), ms(1000 / rate))
+        }
+
+        /// A configuration binding `combo` to a handler that counts, with
+        /// `options` as the rest of the call.
+        fn counting(combo: &str, options: &str) -> String {
+            format!(
+                "n = 0\nsol.bind({combo:?}, function() n = n + 1; sol.status(tostring(n)) end{options})\n"
+            )
+        }
+
+        /// How many times the counting handler ran, read from Lua.
+        fn runs(state: &Solium) -> String {
+            state
+                .scripts
+                .as_ref()
+                .map(|scripts| scripts.evaluate("return tostring(n)"))
+                .unwrap_or_default()
+        }
+
+        /// **A held binding marked `repeating` runs again at the keyboard's
+        /// rate**: at the press, not again before the delay, once after it and
+        /// again an interval on, and not once the key is let go.
+        #[test]
+        fn a_held_binding_marked_repeating_runs_again_at_the_keyboards_rate() {
+            let script = counting("XF86AudioRaiseVolume", ", { repeating = true }");
+            with_keyboard("held-volume", "us,ru", 1, &script, |state| {
+                let volume = volume_up(state);
+                press(state, volume);
+                let start = state.clock.now();
+                let (delay, interval) = timing(state);
+                let pressed = runs(state);
+                state.repeat_binding(start + delay / 2);
+                let before = runs(state);
+                state.repeat_binding(start + delay + ms(1));
+                state.repeat_binding(start + delay + interval + ms(2));
+                let held = runs(state);
+                release(state, volume);
+                state.repeat_binding(start + delay + interval * 3);
+                assert_eq!(
+                    (pressed, before, held, runs(state)),
+                    ("1".into(), "1".into(), "3".into(), "3".into()),
+                    "(runs at the press, before the delay, after it and an interval on, \
+                     after the release)"
+                );
+            });
+        }
+
+        /// **A repeat the loop notices late runs once, not once for every
+        /// interval it missed.** A volume key held through a stall would
+        /// otherwise jump by however many steps the stall was long.
+        #[test]
+        fn a_repeat_noticed_late_runs_once_and_does_not_catch_up() {
+            let script = counting("XF86AudioRaiseVolume", ", { repeating = true }");
+            with_keyboard("held-late", "us,ru", 1, &script, |state| {
+                let volume = volume_up(state);
+                press(state, volume);
+                let start = state.clock.now();
+                let (delay, interval) = timing(state);
+                state.repeat_binding(start + delay + interval * 5);
+                let late = runs(state);
+                state.repeat_binding(start + delay + interval * 5 + interval / 2);
+                let soon = runs(state);
+                state.repeat_binding(start + delay + interval * 6 + ms(1));
+                assert_eq!(
+                    (late, soon, runs(state)),
+                    ("2".into(), "2".into(), "3".into()),
+                    "(five intervals late, half an interval after that, a whole one after it)"
+                );
+                release(state, volume);
+            });
+        }
+
+        /// **A letter binding repeats with Russian active**: `super+q` held on
+        /// the key Russian calls `й`, which is the name it fires under.
+        #[test]
+        fn a_held_letter_binding_repeats_while_russian_is_active() {
+            let script = counting("super+q", ", { repeating = true }");
+            with_keyboard("held-letter", "us,ru", 1, &script, |state| {
+                press(state, SUPER);
+                press(state, Q);
+                let start = state.clock.now();
+                let (delay, _) = timing(state);
+                state.repeat_binding(start + delay + ms(1));
+                let held = runs(state);
+                release(state, Q);
+                release(state, SUPER);
+                assert_eq!(
+                    held, "2",
+                    "super+й held on Russian runs super+q at the press and again at the delay"
+                );
+            });
+        }
+
+        /// **A binding that does not ask to repeat runs once**, however long
+        /// its key is held: the default is what every binding did before.
+        #[test]
+        fn a_held_binding_not_marked_repeating_runs_once_however_long_it_is_held() {
+            let script = counting("XF86AudioRaiseVolume", "");
+            with_keyboard("held-once", "us,ru", 1, &script, |state| {
+                let volume = volume_up(state);
+                press(state, volume);
+                let start = state.clock.now();
+                let (delay, interval) = timing(state);
+                for step in 1..=4 {
+                    state.repeat_binding(start + delay + interval * step + ms(1));
+                }
+                release(state, volume);
+                assert_eq!(runs(state), "1", "a binding without `repeating` repeated");
+            });
+        }
+
+        /// **A repeat stops at the next key, pressed or let go**, though its
+        /// own key is still down: the newest key is the one that would repeat,
+        /// and Shift pressed under a held volume key is a different
+        /// combination from the one that is repeating.
+        #[test]
+        fn a_repeat_stops_at_the_next_key_pressed_or_let_go() {
+            let script = counting("XF86AudioRaiseVolume", ", { repeating = true }");
+            with_keyboard("held-interrupted", "us,ru", 1, &script, |state| {
+                let volume = volume_up(state);
+                press(state, volume);
+                let start = state.clock.now();
+                let (delay, interval) = timing(state);
+                state.repeat_binding(start + delay + ms(1));
+                let held = runs(state);
+                press(state, SHIFT);
+                state.repeat_binding(start + delay + interval + ms(2));
+                release(state, SHIFT);
+                state.repeat_binding(start + delay + interval * 2 + ms(3));
+                release(state, volume);
+                assert_eq!(
+                    (held, runs(state)),
+                    ("2".into(), "2".into()),
+                    "(runs while held alone, runs once Shift went down and up under it)"
+                );
+            });
+        }
+
+        /// **A repeating binding whose handler fails is not run again**: an
+        /// error twenty-five times a second says nothing the first did not.
+        #[test]
+        fn a_repeating_binding_whose_handler_fails_is_not_run_again() {
+            let script = "n = 0\n\
+                sol.bind(\"XF86AudioRaiseVolume\", function() n = n + 1; error(\"no mixer\") end, \
+                { repeating = true })\n";
+            with_keyboard("held-failing", "us,ru", 1, script, |state| {
+                let volume = volume_up(state);
+                press(state, volume);
+                let start = state.clock.now();
+                let (delay, interval) = timing(state);
+                state.repeat_binding(start + delay + ms(1));
+                state.repeat_binding(start + delay + interval + ms(2));
+                release(state, volume);
+                assert_eq!(
+                    runs(state),
+                    "1",
+                    "a handler that failed at the press ran again"
+                );
+            });
+        }
+
+        /// **A keyboard set not to repeat does not repeat its bindings
+        /// either**: a rate of zero is how `sol.keyboard` turns repeat off.
+        #[test]
+        fn a_keyboard_that_does_not_repeat_does_not_repeat_its_bindings() {
+            let script = counting("XF86AudioRaiseVolume", ", { repeating = true }");
+            with_keyboard("held-no-rate", "us,ru", 1, &script, |state| {
+                state.keyboard.repeat_rate = 0;
+                let volume = volume_up(state);
+                press(state, volume);
+                let start = state.clock.now();
+                let delay = ms(u64::try_from(state.keyboard.repeat_delay).unwrap_or(600));
+                state.repeat_binding(start + delay + ms(1));
+                state.repeat_binding(start + delay * 3);
+                release(state, volume);
+                assert_eq!(
+                    runs(state),
+                    "1",
+                    "a keyboard with no repeat repeated a binding"
+                );
+            });
+        }
     }
 }

@@ -711,6 +711,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             SessionEvent::PauseSession => {
                 tracing::info!("session paused");
                 state.active = false;
+                // A key held when the VT switched away comes up on another
+                // VT, where we never hear it, so a binding repeating on it
+                // stops here.
+                state.solium.held_binding = None;
                 // Every device has to be handed back, and each one has to be
                 // handed back by us. libinput keeps polling fds the kernel has
                 // revoked otherwise, and the DRM device keeps a master lock
@@ -864,6 +868,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
             let now = state.solium.clock.now();
             state.solium.repeat_scene_key(now);
+            // And a held binding that asked to repeat, on the same check
+            // (#224). `input::tests::held`.
+            state.solium.repeat_binding(now);
             // A screen that is off has no vblank to pace its windows, so they
             // are told here instead, throttled. See `power.rs`.
             state.solium.send_dark_frames(wall_clock());

@@ -331,6 +331,10 @@ pub(crate) struct Snapshot {
     /// `sol.problems()`:
     /// `tests::a_broken_effect_reaches_sol_problems_with_its_file_and_line`.
     pub(crate) problems: Vec<ProblemRow>,
+    /// Whether the session is locked. A binding run while it is -- one that
+    /// asked to be, with `locked` -- may not act on windows; see
+    /// [`Command::reaches_past_the_lock`].
+    pub(crate) locked: bool,
 }
 
 /// One problem, as `sol.problems()` hands it over: an effect, a rule or the
@@ -665,6 +669,65 @@ pub(crate) enum Command {
     Startup(Result<crate::warm::FirstFrame, String>),
 }
 
+impl Command {
+    /// Whether this would reach past the lock screen: act on a window or a
+    /// workspace, or end the session, which is how someone would get to the
+    /// desktop underneath a lock (see `input::escape`, which refuses
+    /// Ctrl+Alt+Backspace there for the same reason). A binding allowed at the
+    /// lock may not ask for any of it (#224); everything else it may, which is
+    /// what a volume, brightness or media key needs.
+    ///
+    /// Every variant named, with no catch-all, so that a command added later
+    /// is decided here rather than allowed by default.
+    pub(crate) fn reaches_past_the_lock(&self) -> bool {
+        match self {
+            Self::Present { .. }
+            | Self::Group { .. }
+            | Self::PresentGroup { .. }
+            | Self::ClearGroup { .. }
+            | Self::Clear { .. }
+            | Self::PresentFrom { .. }
+            | Self::Focus { .. }
+            | Self::Warp(_)
+            | Self::ToggleFullscreen { .. }
+            | Self::ToggleMaximize { .. }
+            | Self::Place { .. }
+            | Self::Unplace { .. }
+            | Self::Close { .. }
+            | Self::Workspaces(_)
+            | Self::Quit => true,
+            // `sol.act`'s verbs on windows and workspaces; `apps.launch` is a
+            // spawn, and `folder` opens one.
+            Self::Act { action, .. } => {
+                action.starts_with("windows.") || action.starts_with("workspaces.")
+            }
+            Self::Decoration { .. }
+            | Self::PaneValues(_)
+            | Self::Reload
+            | Self::Monitors(_)
+            | Self::Keyboard(_)
+            | Self::Surface(_)
+            | Self::SurfaceGone(_)
+            | Self::Spawn { .. }
+            | Self::FolderTrust { .. }
+            | Self::Loading(_)
+            | Self::ClientSizes(_)
+            | Self::Resize(_)
+            | Self::Fullscreen(_)
+            | Self::Idle(_)
+            | Self::AutoReload(_)
+            | Self::Input(_)
+            | Self::Lock(_)
+            | Self::X11(_)
+            | Self::FocusMode { .. }
+            | Self::Power { .. }
+            | Self::Cursor(_)
+            | Self::Effects { .. }
+            | Self::Startup(_) => false,
+        }
+    }
+}
+
 /// What moved the keyboard, as the `focus` event tells it and
 /// `sol.focus_source()` answers (#220). A policy hangs off it: the shipped
 /// one takes the pointer along for a key and not for a click
@@ -900,6 +963,9 @@ struct Pending {
     /// makes is told with, and what `sol.focus_source()` says. See
     /// [`FocusSource`].
     source: FocusSource,
+    /// Whether the handler running now is a binding fired at the lock screen,
+    /// so that what it asks of a window is refused. See [`with_pending`].
+    at_the_lock: bool,
 }
 
 /// What a script handed the host to hold while the Lua state is replaced.
@@ -1275,6 +1341,22 @@ struct Carried(Keep);
 pub(crate) struct Binding {
     pub(crate) combo: String,
     pub(crate) note: Option<String>,
+    /// What else it asked for. See [`BindingOptions`].
+    pub(crate) repeating: bool,
+    pub(crate) locked: bool,
+}
+
+/// What a binding asked for besides its handler: the table form of
+/// `sol.bind`'s third argument (#224). Both are off unless asked for, which is
+/// what every binding was before there was a table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BindingOptions {
+    /// While its key is held, the handler runs again at the keyboard's repeat
+    /// delay and rate. `input::tests::held`.
+    pub(crate) repeating: bool,
+    /// It also fires while the session is locked, where nothing it does may
+    /// reach a window. `state::tests::real_client::lock_focus::held`.
+    pub(crate) locked: bool,
 }
 
 /// A setting a configuration wrote that nothing reads.
@@ -1329,16 +1411,47 @@ impl Scripts {
         let mut names: Vec<Binding> = bindings
             .pairs::<String, Value>()
             .filter_map(Result::ok)
-            .map(|(combo, _)| Binding {
-                note: sources
-                    .as_ref()
-                    .and_then(|sources| sources.get::<Option<String>>(combo.clone()).ok())
-                    .flatten(),
-                combo,
+            .map(|(combo, _)| {
+                let asked = self.binding_options(&combo).unwrap_or_default();
+                Binding {
+                    note: sources
+                        .as_ref()
+                        .and_then(|sources| sources.get::<Option<String>>(combo.clone()).ok())
+                        .flatten(),
+                    combo,
+                    repeating: asked.repeating,
+                    locked: asked.locked,
+                }
             })
             .collect();
         names.sort_by(|left, right| left.combo.cmp(&right.combo));
         names
+    }
+
+    /// What the binding for `combo` asked for, or `None` when nothing binds
+    /// it. Side-effect free, as [`Self::has_binding`] is, for the same reason:
+    /// the key filter asks it.
+    pub(crate) fn binding_options(&self, combo: &str) -> Option<BindingOptions> {
+        if !self.has_binding(combo) {
+            return None;
+        }
+        let asked = self
+            .lua
+            .globals()
+            .get::<Table>("sol")
+            .and_then(|sol| sol.get::<Table>("_binding_options"))
+            .and_then(|options| options.get::<Option<Table>>(normalise_combo(combo)))
+            .ok()
+            .flatten();
+        let flag = |name: &str| {
+            asked
+                .as_ref()
+                .is_some_and(|asked| asked.get::<bool>(name).unwrap_or(false))
+        };
+        Some(BindingOptions {
+            repeating: flag("repeating"),
+            locked: flag("locked"),
+        })
     }
 
     /// Bindings a script deliberately took away.
@@ -1367,6 +1480,9 @@ impl Scripts {
             .map(|(combo, note)| Binding {
                 combo,
                 note: Some(note),
+                // Gone, so it asks for nothing.
+                repeating: false,
+                locked: false,
             })
             .collect();
         gone.sort_by(|left, right| left.combo.cmp(&right.combo));
@@ -2135,9 +2251,11 @@ impl Scripts {
         snapshot: Snapshot,
         call: impl FnOnce(&Lua, &Table) -> mlua::Result<bool>,
     ) -> Outcome {
+        let at_the_lock = source == FocusSource::Binding && snapshot.locked;
         self.lua.set_app_data(snapshot);
         self.lua.set_app_data(Pending {
             source,
+            at_the_lock,
             ..Pending::default()
         });
         start_clock(&self.lua);
@@ -2778,6 +2896,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // does *not* have, which is how `sol.unbind` reports a shipped binding
     // somebody deliberately took away. See `Scripts::bindings`.
     sol.set("_binding_sources", lua.create_table()?)?;
+    // What each binding asked for beyond its handler, keyed as `_bindings` is,
+    // and only for one that asked for something. See `sol.bind` and
+    // `Scripts::binding_options`.
+    sol.set("_binding_options", lua.create_table()?)?;
     // Settings a configuration wrote that the defaults do not define. Filled by
     // `lua/config.lua`, whose `merge` is the only thing that knows both halves
     // of that comparison, and read by `solium --check`. See `sol.unknown`.
@@ -4955,14 +5077,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // (#117), and a replacement nobody can see is indistinguishable from a key
     // that mysteriously stopped working. Shipped bindings pass nothing, so
     // `--check` stays a plain list until a configuration has something to say.
+    //
+    // Or the third argument is a table, which holds the note and what else the
+    // binding asks for (#224): `repeating`, `locked`. What a binding asks for
+    // is replaced with it, so a later call that asks for nothing asks for
+    // nothing -- a configuration rebinding a shipped repeating key to launch
+    // something does not inherit the repeat.
     sol.set(
         "bind",
         lua.create_function(
-            |lua, (combo, handler, note): (String, mlua::Function, Option<String>)| {
+            |lua, (combo, handler, said): (String, mlua::Function, Option<Value>)| {
+                let (note, asked) = binding_note_and_options(said)?;
                 let sol: Table = lua.globals().get("sol")?;
                 let bindings: Table = sol.get("_bindings")?;
                 let combo = normalise_combo(&combo);
                 bindings.set(combo.clone(), handler)?;
+                let options: Table = sol.get("_binding_options")?;
+                if asked == BindingOptions::default() {
+                    options.set(combo.clone(), Value::Nil)?;
+                } else {
+                    let table = lua.create_table()?;
+                    table.set("repeating", asked.repeating)?;
+                    table.set("locked", asked.locked)?;
+                    options.set(combo.clone(), table)?;
+                }
                 if let Some(note) = note {
                     let sources: Table = sol.get("_binding_sources")?;
                     sources.set(combo, note)?;
@@ -5009,6 +5147,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let bindings: Table = sol.get("_bindings")?;
             let combo = normalise_combo(&combo);
             bindings.set(combo.clone(), Value::Nil)?;
+            let options: Table = sol.get("_binding_options")?;
+            options.set(combo.clone(), Value::Nil)?;
             if let Some(note) = note {
                 let sources: Table = sol.get("_binding_sources")?;
                 sources.set(combo, note)?;
@@ -5192,7 +5332,24 @@ fn declared_workspaces(declared: &Table) -> mlua::Result<crate::models::workspac
 fn with_pending(lua: &Lua, f: impl FnOnce(&mut Pending)) -> mlua::Result<()> {
     match lua.app_data_mut::<Pending>() {
         Some(mut pending) => {
+            let before = pending.commands.len();
             f(&mut pending);
+            // A binding fired at the lock screen, which it asked to be with
+            // `locked` (#224), may not reach past it: what it asks of a window
+            // or a workspace, or to end the session, is taken back and is an
+            // error its handler can catch. Here, where every `sol` function
+            // hands its commands over, so that no function can be the one
+            // that forgot. `state::tests::real_client::lock_focus::held::a_binding_allowed_while_locked_cannot_act_on_windows`.
+            if pending.at_the_lock
+                && pending.commands[before..]
+                    .iter()
+                    .any(Command::reaches_past_the_lock)
+            {
+                pending.commands.truncate(before);
+                return Err(mlua::Error::runtime(
+                    "a binding at the lock screen cannot act on windows or end the session",
+                ));
+            }
             Ok(())
         }
         // Reachable only if a script squirrels a `sol` function away and calls
@@ -6115,6 +6272,76 @@ pub(crate) fn normalise_combo(combo: &str) -> String {
     canonical
 }
 
+/// `sol.bind`'s third argument: nothing, a note, or a table holding the note
+/// and what else the binding asks for (#224).
+///
+/// Anything else in the table is refused rather than ignored, as a setting
+/// nothing reads is: a binding asking for something it does not get looks
+/// exactly like one that is broken. `repeat` is Lua's own keyword, so the
+/// one way to write it is `["repeat"]`, and its refusal names the spelling
+/// that works. `binding_options::an_option_a_binding_does_not_have_is_refused_by_name`.
+fn binding_note_and_options(said: Option<Value>) -> mlua::Result<(Option<String>, BindingOptions)> {
+    let table = match said {
+        None | Some(Value::Nil) => return Ok((None, BindingOptions::default())),
+        Some(Value::String(note)) => {
+            return Ok((Some(note.to_str()?.to_owned()), BindingOptions::default()));
+        }
+        Some(Value::Table(table)) => table,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "sol.bind: the third argument is a note or a table of options, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let mut note = None;
+    let mut asked = BindingOptions::default();
+    for pair in table.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let key = match &key {
+            Value::String(key) => key.to_str()?.to_owned(),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "sol.bind: an option is named by a word, not by a {}",
+                    other.type_name()
+                )));
+            }
+        };
+        let flag = |value: &Value| match value {
+            Value::Boolean(flag) => Ok(*flag),
+            other => Err(mlua::Error::runtime(format!(
+                "sol.bind: `{key}` is true or false, not {}",
+                other.type_name()
+            ))),
+        };
+        match key.as_str() {
+            "note" => match value {
+                Value::String(text) => note = Some(text.to_str()?.to_owned()),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "sol.bind: `note` is text, not {}",
+                        other.type_name()
+                    )));
+                }
+            },
+            "repeating" => asked.repeating = flag(&value)?,
+            "locked" => asked.locked = flag(&value)?,
+            "repeat" => {
+                return Err(mlua::Error::runtime(
+                    "sol.bind: a binding that repeats while held is `repeating = true`",
+                ));
+            }
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "sol.bind: there is no option `{other}`; a binding takes `note`, \
+                     `repeating` and `locked`"
+                )));
+            }
+        }
+    }
+    Ok((note, asked))
+}
+
 // The generated reference pages check their sources against the code here.
 // Declared right above the tests, never higher: two tests read this file's
 // production code as everything before its first `#[cfg(test)]`.
@@ -6197,6 +6424,7 @@ mod tests {
         assert!(!scripts.has_binding("super+tab"));
 
         let snapshot = Snapshot {
+            locked: false,
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
                 id: 7,
@@ -8811,6 +9039,7 @@ mod tests {
     /// A snapshot with nothing in it, for the tests that only want a call made.
     fn empty_snapshot() -> Snapshot {
         Snapshot {
+            locked: false,
             keyboard: crate::keymap::State::initial(),
             windows: Vec::new(),
             monitors: Vec::new(),
@@ -9295,6 +9524,7 @@ mod tests {
     /// One 1600x900 screen and three windows on it, for the reload test.
     fn one_screen(windows: &[u64]) -> Snapshot {
         Snapshot {
+            locked: false,
             keyboard: crate::keymap::State::initial(),
             windows: windows
                 .iter()
@@ -19276,5 +19506,99 @@ mod directions {
             ),
             "every bad call is an error, and none asks for a warp"
         );
+    }
+}
+
+/// `sol.bind`'s options (#224): the third argument is a note, or a table that
+/// holds the note and what else the binding asks for.
+#[cfg(test)]
+mod binding_options {
+    use super::Scripts;
+
+    /// `text` loaded as a configuration of its own, or what refused it.
+    fn load(name: &str, text: &str) -> anyhow::Result<Scripts> {
+        let directory = std::env::temp_dir().join(format!(
+            "solium-binding-options-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(&entry, text).expect("writing the test script");
+        let loaded = Scripts::load(&entry);
+        let _ = std::fs::remove_dir_all(&directory);
+        loaded
+    }
+
+    /// **A binding takes its note and what it asks for as one table**, a
+    /// plain note as it always has, and a binding bound again with nothing
+    /// asked asks for nothing: the later call wins whole.
+    #[test]
+    fn a_binding_takes_its_note_and_what_it_asks_for_as_a_table() {
+        let scripts = load(
+            "table",
+            r#"
+            local function nothing() end
+            sol.bind("XF86AudioRaiseVolume", nothing,
+                { note = "laptop keys", repeating = true, locked = true })
+            sol.bind("XF86AudioMute", nothing, { locked = true })
+            sol.bind("super+q", nothing, "a plain note")
+            sol.bind("super+w", nothing)
+            sol.bind("XF86AudioLowerVolume", nothing, { repeating = true, locked = true })
+            sol.bind("XF86AudioLowerVolume", nothing)
+            "#,
+        )
+        .expect("loading the bindings");
+        let reported: Vec<(String, Option<String>, bool, bool)> = scripts
+            .bindings()
+            .into_iter()
+            .map(|binding| {
+                (
+                    binding.combo,
+                    binding.note,
+                    binding.repeating,
+                    binding.locked,
+                )
+            })
+            .collect();
+        let row = |combo: &str, note: Option<&str>, repeating, locked| {
+            (combo.to_owned(), note.map(str::to_owned), repeating, locked)
+        };
+        assert_eq!(
+            reported,
+            vec![
+                row("super+q", Some("a plain note"), false, false),
+                row("super+w", None, false, false),
+                row("xf86audiolowervolume", None, false, false),
+                row("xf86audiomute", None, false, true),
+                row("xf86audioraisevolume", Some("laptop keys"), true, true),
+            ],
+            "(combination, note, repeating, locked)"
+        );
+    }
+
+    /// **An option a binding does not have is refused, by name**, and so is
+    /// one that is not true or false. `repeat` is Lua's own word and can only
+    /// be written as `["repeat"]`, which is the likeliest slip of all, so its
+    /// refusal names the spelling that works.
+    #[test]
+    fn an_option_a_binding_does_not_have_is_refused_by_name() {
+        for (case, options, says) in [
+            ("repeat", r#"{ ["repeat"] = true }"#, "repeating"),
+            ("unknown", "{ loud = true }", "loud"),
+            ("not-a-boolean", r#"{ repeating = "yes" }"#, "repeating"),
+            ("note-not-text", "{ note = 3 }", "note"),
+        ] {
+            let error = load(
+                case,
+                &format!("sol.bind(\"super+q\", function() end, {options})\n"),
+            )
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+            assert!(
+                error.contains(says),
+                "{case}: the configuration was not refused naming {says:?}: {error:?}"
+            );
+        }
     }
 }

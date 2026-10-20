@@ -554,6 +554,13 @@ pub(crate) fn run() -> Result<()> {
             }
             WinitEvent::Focus(focused) => {
                 tracing::info!(focused, "nested window focus changed");
+                // A key held as the nested window lost focus comes up in
+                // another window, where we never hear it, so a binding
+                // repeating on it stops here. The nested equivalent of a VT
+                // switch.
+                if !focused {
+                    state.held_binding = None;
+                }
             }
             _ => {}
         });
@@ -1174,6 +1181,9 @@ pub(crate) fn run() -> Result<()> {
         // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
         let now = state.clock.now();
         state.repeat_scene_key(now);
+        // And a held binding that asked to repeat, on the same check (#224).
+        // `input::tests::held`.
+        state.repeat_binding(now);
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!(?err, "flushing clients failed");
         }

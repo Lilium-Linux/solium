@@ -483,6 +483,7 @@ impl Solium {
             windows,
             monitors,
             apps,
+            locked: self.lock.is_some(),
             keyboard: self.keyboard.clone(),
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
