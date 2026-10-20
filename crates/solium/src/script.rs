@@ -6648,6 +6648,16 @@ mod tests {
     /// and would fail open when somebody forgot. The same guard, for the same
     /// reason, as `a_user_file_using_the_old_key_still_chooses_a_style`.
     fn shipped_init_with_user(name: &str, user: &str) -> Option<(std::path::PathBuf, Scripts)> {
+        let (directory, loaded) = shipped_init_and_user(name, user)?;
+        Some((directory, loaded.expect("loading the shipped init.lua")))
+    }
+
+    /// [`shipped_init_with_user`], with what the load answered, for a test of
+    /// a `user.lua` that should be refused.
+    fn shipped_init_and_user(
+        name: &str,
+        user: &str,
+    ) -> Option<(std::path::PathBuf, anyhow::Result<Scripts>)> {
         let own = Scripts::user_config_dir()?;
         if let Ok(entries) = std::fs::read_dir(&own)
             && entries
@@ -6668,8 +6678,8 @@ mod tests {
         let config = directory.join("init.lua");
         std::fs::copy(&shipped, &config).ok()?;
 
-        let scripts = Scripts::load(&config).expect("loading the shipped init.lua");
-        Some((directory, scripts))
+        let loaded = Scripts::load(&config);
+        Some((directory, loaded))
     }
 
     /// Every spawn a key produced, as `(program, args)`.
@@ -6795,6 +6805,96 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A list in `config.bindings` can ask to repeat and to fire at the
+    /// lock** (#224), with the named fields beside the command and not in it;
+    /// and a binding there replaces the shipped one whole, so a volume key
+    /// rebound as a string asks for nothing.
+    #[test]
+    fn a_user_file_binding_can_ask_to_repeat_and_to_fire_at_the_lock() {
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-user-binding-options",
+            r#"
+            return {
+                bindings = {
+                    ["XF86AudioRaiseVolume"] = {
+                        "fixture-mixer", "up", repeating = true, locked = true,
+                    },
+                    ["XF86AudioLowerVolume"] = "fixture-mixer down",
+                    ["super+f5"] = { "fixture-browser" },
+                },
+            }
+            "#,
+        ) else {
+            return;
+        };
+
+        let raised = scripts.key("xf86audioraisevolume", empty_snapshot());
+        assert_eq!(
+            spawns(&raised),
+            vec![("fixture-mixer".to_owned(), vec!["up".to_owned()])],
+            "the options became part of the command line"
+        );
+        let asked = |combo: &str| {
+            scripts
+                .bindings()
+                .into_iter()
+                .find(|binding| binding.combo == combo)
+                .map(|binding| (binding.repeating, binding.locked))
+        };
+        assert_eq!(
+            [
+                asked("xf86audioraisevolume"),
+                asked("xf86audiolowervolume"),
+                asked("super+f5"),
+            ],
+            [
+                Some((true, true)),
+                Some((false, false)),
+                Some((false, false))
+            ],
+            "(repeating, locked) for: the list that asked, the string that replaced a \
+             shipped repeating key, the list that asked for nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **An option a `config.bindings` list does not have is refused**, naming
+    /// the binding, as a binding of any other wrong shape is: one that asks for
+    /// something it does not get looks exactly like one that is broken.
+    #[test]
+    fn a_user_file_binding_with_an_option_it_does_not_have_is_refused() {
+        for (case, entry, says) in [
+            (
+                "repeat",
+                r#"{ "fixture-mixer", ["repeat"] = true }"#,
+                "repeating",
+            ),
+            ("unknown", r#"{ "fixture-mixer", loud = true }"#, "loud"),
+            (
+                "not-a-boolean",
+                r#"{ "fixture-mixer", locked = "yes" }"#,
+                "locked",
+            ),
+        ] {
+            let Some((directory, loaded)) = shipped_init_and_user(
+                &format!("solium-script-test-user-binding-refused-{case}"),
+                &format!("return {{ bindings = {{ [\"super+f5\"] = {entry} }} }}\n"),
+            ) else {
+                return;
+            };
+            let error = loaded
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_default();
+            assert!(
+                error.contains("super+f5") && error.contains(says),
+                "{case}: not refused naming the binding and {says:?}: {error:?}"
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+        }
     }
 
     /// **`open.motion` and `open.scale` decide the open animation.**
@@ -12897,6 +12997,72 @@ mod shipped {
                  {bound:?}, modified spelling first"
             );
         }
+    }
+
+    /// **The held volume and brightness keys repeat, and the laptop keys fire
+    /// at the lock -- and nothing else that ships does either** (#224).
+    ///
+    /// Mute, the media keys and Print do not repeat: a toggle or a skip
+    /// repeating at 25 a second is a key that cannot be pressed once. Print
+    /// does not fire at the lock, which has nothing on screen worth keeping.
+    /// The second half is the one that matters most: every binding allowed at
+    /// the lock is one more thing a lock screen does, so the list of them is
+    /// pinned whole, and a shipped binding that starts firing there fails this
+    /// until it is added on purpose.
+    #[test]
+    fn the_held_volume_keys_repeat_and_only_the_laptop_keys_fire_at_the_lock() {
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let directory = std::env::temp_dir().join("solium-shipped-binding-options");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("creating the entry directory");
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\ndofile({shipped:?} .. \"/init.lua\")\n"
+            ),
+        )
+        .expect("writing the entry point");
+        let scripts = Scripts::load(&entry).expect("loading the shipped init.lua");
+        let bindings = scripts.bindings();
+        let with = |asked: fn(&super::Binding) -> bool| -> Vec<&str> {
+            bindings
+                .iter()
+                .filter(|binding| asked(binding))
+                .map(|binding| binding.combo.as_str())
+                .collect()
+        };
+        assert_eq!(
+            with(|binding| binding.repeating),
+            vec![
+                "shift+xf86audiolowervolume",
+                "shift+xf86audioraisevolume",
+                "xf86audiolowervolume",
+                "xf86audioraisevolume",
+                "xf86monbrightnessdown",
+                "xf86monbrightnessup",
+            ],
+            "the shipped bindings that repeat while held"
+        );
+        assert_eq!(
+            with(|binding| binding.locked),
+            vec![
+                "shift+xf86audiolowervolume",
+                "shift+xf86audioraisevolume",
+                "xf86audiolowervolume",
+                "xf86audiomicmute",
+                "xf86audiomute",
+                "xf86audionext",
+                "xf86audiopause",
+                "xf86audioplay",
+                "xf86audioprev",
+                "xf86audioraisevolume",
+                "xf86monbrightnessdown",
+                "xf86monbrightnessup",
+            ],
+            "the shipped bindings that fire at the lock"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// **Every key a shipped script binds can be pressed on a `us` keyboard.**

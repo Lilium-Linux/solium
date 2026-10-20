@@ -597,6 +597,9 @@ keyboard = {
 },
 ```
 
+A held key whose binding asks to repeat, such as volume up, repeats at the same
+rate, and a rate of 0 stops that too.
+
 The locks can be set too, and Num Lock on at login is the usual one:
 
 ```lua
@@ -1414,6 +1417,23 @@ A string is a command line split on spaces; a list is one already split, for an
 argument with a space in it; a function is anything else, with the whole `sol`
 API in scope; `false` removes a shipped binding outright.
 
+A list can also say how its key behaves
+([#224](https://github.com/Lilium-Linux/solium/issues/224)). `repeating = true`
+runs it again while the key is held, at the keyboard's own repeat delay and
+rate, as the shipped volume and brightness keys do; `locked = true` lets it fire
+at the lock screen as well, as those and the media keys do:
+
+```lua
+["XF86AudioRaiseVolume"] = { "pamixer", "-i", "5", repeating = true, locked = true },
+```
+
+A binding here replaces the shipped one whole, so a volume key you rebind
+repeats only if your list says so. At the lock screen a binding may run
+programs and change the keyboard, but not touch a window or a workspace, or
+end the session. A function from your own `init.lua` asks the same through
+`sol.bind`'s third argument, `{ repeating = true, locked = true }`; see the
+[Lua API](https://lilium-linux.github.io/solium/generated/reference/lua-api.html).
+
 A combination you bind belongs to the compositor from then on, and while the
 session is unlocked the application with the keyboard never receives it. So
 binding a plain key such as `escape`, `f1` or `return` takes that key from
@@ -1432,6 +1452,7 @@ removed:
 ```
     super+b                     config.bindings
     super+q                     config.bindings, replacing a shipped binding
+    xf86audioraisevolume        config.bindings, replacing a shipped binding (repeats while held, fires at the lock)
   1 binding(s) removed by the configuration:
     super+g                     config.bindings
 ```
