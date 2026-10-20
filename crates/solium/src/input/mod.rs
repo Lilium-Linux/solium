@@ -1293,6 +1293,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                 return;
             }
             Chrome::Resize(edges) if button_state == ButtonState::Pressed => {
+                if resize::busy(state) {
+                    state.swallowed.insert(button);
+                    return;
+                }
                 // `pane_chrome` does not report a resize border without a
                 // window to resize, so this is that guarantee restated rather
                 // than a case that happens.
@@ -1366,6 +1370,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         // a client takes to answer. A quadrant drag begun from the stale
         // rectangle jumps the edge nobody is dragging by the unanswered delta,
         // which is issue #113 arriving by the other gesture.
+        if dragging && button == BTN_RIGHT && resize::busy(state) {
+            state.swallowed.insert(button);
+            return;
+        }
         if dragging
             && button == BTN_RIGHT
             && let Some((window, _)) = state.window_under(location)

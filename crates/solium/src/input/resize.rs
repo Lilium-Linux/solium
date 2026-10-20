@@ -136,6 +136,19 @@ pub(crate) fn cursor(edges: ResizeEdge) -> CursorIcon {
     }
 }
 
+/// The resize hold/bridge processes one active operation. Reject another
+/// start before it can reconcile that owner's hold or overwrite its request.
+/// Ordinary pointer/client input remains independent of this ownership.
+pub(crate) fn busy(state: &Solium) -> bool {
+    state.pending_resize.is_some()
+        || super::touch::resizing(state)
+        || state.seat.get_pointer().is_some_and(|pointer| {
+            pointer
+                .with_grab(|_, grab| grab.is::<ResizeGrab>())
+                .unwrap_or(false)
+        })
+}
+
 /// Resizes a window with the pointer until the button is released.
 pub(crate) struct ResizeGrab {
     start_data: GrabStartData<Solium>,

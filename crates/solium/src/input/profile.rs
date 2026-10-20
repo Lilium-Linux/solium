@@ -67,13 +67,6 @@ pub(crate) struct Profile {
     /// Pressing a pointer button on a window focuses it.
     pub(crate) click_to_focus: bool,
 
-    /// Touching a window focuses it.
-    ///
-    /// Separate from `click_to_focus` on purpose: on a touch-first device the
-    /// tap that dismisses a mode should not also focus whatever happened to be
-    /// underneath it.
-    pub(crate) touch_to_focus: bool,
-
     /// Moving the pointer over a window focuses it.
     ///
     /// The default on a desktop, and what every tiling compositor people
@@ -111,7 +104,6 @@ impl Profile {
             FormFactor::Desktop => Self {
                 form_factor,
                 click_to_focus: true,
-                touch_to_focus: true,
                 focus_follows_mouse: true,
                 drag_modifier: DragModifier::Logo,
                 natural_scroll: false,
@@ -120,7 +112,6 @@ impl Profile {
             FormFactor::Laptop => Self {
                 form_factor,
                 click_to_focus: true,
-                touch_to_focus: true,
                 focus_follows_mouse: true,
                 drag_modifier: DragModifier::Logo,
                 // Trackpads are gesture surfaces, and every other trackpad on
@@ -131,8 +122,6 @@ impl Profile {
             FormFactor::Tablet | FormFactor::Phone => Self {
                 form_factor,
                 click_to_focus: true,
-                // A tap in a mode belongs to the mode, not to what is below it.
-                touch_to_focus: false,
                 // There is no pointer to follow.
                 focus_follows_mouse: false,
                 drag_modifier: DragModifier::Logo,
@@ -194,14 +183,6 @@ impl Default for Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_touch_first_profile_does_not_focus_on_tap() {
-        // The distinction this seam exists for: on a phone, the tap that leaves
-        // a mode must not focus what was underneath.
-        assert!(!Profile::for_form_factor(FormFactor::Phone).touch_to_focus);
-        assert!(Profile::for_form_factor(FormFactor::Desktop).touch_to_focus);
-    }
 
     #[test]
     fn drag_modifiers_accept_the_names_people_use() {

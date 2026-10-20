@@ -509,6 +509,8 @@ pub(crate) struct Solium {
     pub(crate) touches: std::collections::HashMap<i32, crate::input::touch::Contact>,
     /// A final client release needs a frame even after its slot has gone.
     pub(crate) touch_frame_pending: bool,
+    /// Latest backend touch time, whose epoch is independent of our clock.
+    pub(crate) touch_time: u32,
     /// Observations queued until touch routing has released the seat lock.
     pub(crate) touch_events: Vec<crate::script::TouchEvent>,
     /// What became of the `sol.act`s the dispatch being applied ran, told to
@@ -1283,6 +1285,7 @@ impl Solium {
             scene_press: None,
             touches: std::collections::HashMap::new(),
             touch_frame_pending: false,
+            touch_time: 0,
             touch_events: Vec::new(),
             settled_attempts: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),

@@ -43,6 +43,21 @@ pub(crate) struct TouchEvent {
     pub(crate) x: f64,
     pub(crate) y: f64,
     pub(crate) output: String,
+    pub(crate) target: &'static str,
+    pub(crate) window: Option<u64>,
+    pub(crate) control: bool,
+    pub(crate) edges: Option<&'static str>,
+    pub(crate) time: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum TouchAction {
+    Capture,
+    Move(u64),
+    Resize(
+        u64,
+        smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    ),
 }
 
 /// A rectangle as a script sees it: plain numbers, no coordinate-space types.
@@ -498,6 +513,14 @@ pub(crate) enum Command {
     /// Take the pointer somewhere: `sol.warp` (#220). Carried out once every
     /// command of the dispatch has been applied; the last one asked for wins.
     Warp(Warp),
+    Touch {
+        slot: i32,
+        action: TouchAction,
+    },
+    Click {
+        x: f64,
+        y: f64,
+    },
     /// Send a window fullscreen on the monitor it is on, or bring it back
     /// from fullscreen: what the client itself would ask for, asked on its
     /// behalf. `sol.toggle_fullscreen`, and `super+f` (#150).
@@ -697,6 +720,8 @@ impl Command {
             | Self::ClearGroup { .. }
             | Self::Clear { .. }
             | Self::PresentFrom { .. }
+            | Self::Touch { .. }
+            | Self::Click { .. }
             | Self::Focus { .. }
             | Self::Warp(_)
             | Self::ToggleFullscreen { .. }
@@ -1903,7 +1928,7 @@ impl Scripts {
         })
     }
 
-    /// Raw touch is observed after routing, outside the seat's input lock.
+    /// Down runs before delivery so Lua can capture; always outside seat locks.
     pub(crate) fn touch(&mut self, event: TouchEvent, snapshot: Snapshot) -> Outcome {
         self.dispatch_as(FocusSource::Touch, snapshot, move |lua, _| {
             let table = lua.create_table()?;
@@ -1912,6 +1937,11 @@ impl Scripts {
             table.set("x", event.x)?;
             table.set("y", event.y)?;
             table.set("output", event.output)?;
+            table.set("target", event.target)?;
+            table.set("window", event.window)?;
+            table.set("control", event.control)?;
+            table.set("edges", event.edges)?;
+            table.set("time", event.time)?;
             call_listeners(lua, "touch", table)
         })
     }
@@ -4704,6 +4734,54 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     pending.animation.easing = easing;
                 }
                 pending.animated = true;
+            })
+        })?,
+    )?;
+
+    sol.set(
+        "touch",
+        lua.create_function(|lua, (slot, options): (i32, Table)| {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
+            let action: String = options.get("action")?;
+            let action = match action.as_str() {
+                "capture" => TouchAction::Capture,
+                "move" => TouchAction::Move(options.get("window")?),
+                "resize" => {
+                    let edges: String = options.get("edges")?;
+                    let edges = match edges.as_str() {
+                        "top" => ResizeEdge::Top,
+                        "bottom" => ResizeEdge::Bottom,
+                        "left" => ResizeEdge::Left,
+                        "right" => ResizeEdge::Right,
+                        "top_left" => ResizeEdge::TopLeft,
+                        "top_right" => ResizeEdge::TopRight,
+                        "bottom_left" => ResizeEdge::BottomLeft,
+                        "bottom_right" => ResizeEdge::BottomRight,
+                        _ => return Err(mlua::Error::runtime("sol.touch: invalid resize edges")),
+                    };
+                    TouchAction::Resize(options.get("window")?, edges)
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "sol.touch: action must be capture, move or resize",
+                    ));
+                }
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Touch { slot, action })
+            })
+        })?,
+    )?;
+    sol.set(
+        "click",
+        lua.create_function(|lua, (x, y): (f64, f64)| {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(mlua::Error::runtime(
+                    "sol.click: coordinates must be finite",
+                ));
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Click { x, y })
             })
         })?,
     )?;
