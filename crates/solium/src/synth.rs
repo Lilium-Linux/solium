@@ -197,6 +197,7 @@ impl smithay::backend::input::PointerAxisEvent<Synthetic> for Axis {
 pub(crate) struct Touch {
     at: Point<f64, Logical>,
     time: u64,
+    slot: u32,
 }
 
 #[cfg(test)]
@@ -212,7 +213,7 @@ impl Event<Synthetic> for Touch {
 #[cfg(test)]
 impl smithay::backend::input::TouchEvent<Synthetic> for Touch {
     fn slot(&self) -> smithay::backend::input::TouchSlot {
-        Some(0).into()
+        Some(self.slot).into()
     }
 }
 
@@ -237,6 +238,12 @@ impl smithay::backend::input::TouchDownEvent<Synthetic> for Touch {}
 
 #[cfg(test)]
 impl smithay::backend::input::TouchUpEvent<Synthetic> for Touch {}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchMotionEvent<Synthetic> for Touch {}
+
+#[cfg(test)]
+impl smithay::backend::input::TouchFrameEvent<Synthetic> for Touch {}
 
 impl InputBackend for Synthetic {
     type Device = SynthDevice;
@@ -264,8 +271,14 @@ impl InputBackend for Synthetic {
     type TouchUpEvent = Touch;
     #[cfg(not(test))]
     type TouchUpEvent = UnusedEvent;
+    #[cfg(test)]
+    type TouchMotionEvent = Touch;
+    #[cfg(not(test))]
     type TouchMotionEvent = UnusedEvent;
     type TouchCancelEvent = UnusedEvent;
+    #[cfg(test)]
+    type TouchFrameEvent = Touch;
+    #[cfg(not(test))]
     type TouchFrameEvent = UnusedEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
@@ -496,19 +509,74 @@ pub(crate) fn send_touch(
     at: (f64, f64),
     time: u64,
 ) {
+    touch_down(state, region, 0, at, time);
+    touch_frame(state, region);
+    touch_up(state, region, 0, time + 1);
+    touch_frame(state, region);
+}
+
+#[cfg(test)]
+pub(crate) fn touch_down(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    slot: u32,
+    at: (f64, f64),
+    time: u64,
+) {
     let at = Point::from(at) - region.loc.to_f64();
     crate::input::handle::<Synthetic>(
         state,
         region,
         InputEvent::TouchDown {
-            event: Touch { at, time },
+            event: Touch { at, time, slot },
         },
     );
+}
+
+#[cfg(test)]
+pub(crate) fn touch_motion(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    slot: u32,
+    at: (f64, f64),
+    time: u64,
+) {
+    let at = Point::from(at) - region.loc.to_f64();
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::TouchMotion {
+            event: Touch { at, time, slot },
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn touch_up(state: &mut Solium, region: Rectangle<i32, Logical>, slot: u32, time: u64) {
     crate::input::handle::<Synthetic>(
         state,
         region,
         InputEvent::TouchUp {
-            event: Touch { at, time: time + 1 },
+            event: Touch {
+                at: (0.0, 0.0).into(),
+                time,
+                slot,
+            },
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn touch_frame(state: &mut Solium, region: Rectangle<i32, Logical>) {
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::TouchFrame {
+            event: Touch {
+                at: (0.0, 0.0).into(),
+                time: 0,
+                slot: 0,
+            },
         },
     );
 }

@@ -2749,7 +2749,7 @@ mod real_client {
     use wayland_client::protocol::{
         wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
         wl_data_offer, wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm,
-        wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
+        wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
     };
     use wayland_client::{Connection, Dispatch, QueueHandle};
     use wayland_protocols::ext::idle_notify::v1::client::{
@@ -3002,9 +3002,15 @@ mod real_client {
         /// [`Self::seat_pointer`]: a button a window was never told went
         /// down must not be told it came up either.
         buttons: Vec<(u32, bool)>,
+        /// Raw wl_touch events, preserving slot ids, coordinates and frames.
+        touches: Vec<wl_touch::Event>,
     }
 
     impl Client {
+        fn seat_touch(&self, qh: &QueueHandle<Self>) -> wl_touch::WlTouch {
+            self.seat.as_ref().expect("wl_seat bound").get_touch(qh, ())
+        }
+
         /// The seat's pointer, asked for now: only the tests that read what
         /// reached a window's pointer have one.
         fn seat_pointer(&self, qh: &QueueHandle<Self>) -> wl_pointer::WlPointer {
@@ -3012,6 +3018,19 @@ mod real_client {
                 .as_ref()
                 .expect("wl_seat bound")
                 .get_pointer(qh, ())
+        }
+    }
+
+    impl Dispatch<wl_touch::WlTouch, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _touch: &wl_touch::WlTouch,
+            event: wl_touch::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            state.touches.push(event);
         }
     }
 
@@ -31254,6 +31273,71 @@ end)
                     (other.pane, other.pane, opened.pane),
                     "(the window with the keyboard with the pointer on the shell button, \
                      dragged off it onto the window, and moved on the window after the release)"
+                );
+            }
+
+            /// Two fingers retain independent slots and surface-local positions
+            /// through the actual input dispatcher and the wl_touch wire (#181).
+            #[test]
+            fn two_synthetic_fingers_reach_a_client_with_motion_and_frames() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(crate::pane::Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state.space.map_element(window, (100, 100), false);
+                desk.state.space.refresh();
+                // Finish the opening transition before targeting the client,
+                // as window_under_a_scene does for pointer and touch routing.
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                assert!(desk.state.touch_under((110.0, 112.0).into()).is_some());
+                let _touch = desk.client.seat_touch(&desk.qh);
+                desk.pump();
+                let region = region(&desk);
+                crate::synth::touch_down(&mut desk.state, region, 0, (110.0, 112.0), 10);
+                crate::synth::touch_down(&mut desk.state, region, 1, (125.0, 128.0), 11);
+                crate::synth::touch_frame(&mut desk.state, region);
+                crate::synth::touch_motion(&mut desk.state, region, 1, (130.0, 135.0), 12);
+                crate::synth::touch_frame(&mut desk.state, region);
+                crate::synth::touch_up(&mut desk.state, region, 0, 13);
+                crate::synth::touch_up(&mut desk.state, region, 1, 14);
+                crate::synth::touch_frame(&mut desk.state, region);
+                desk.pump();
+                let seen: Vec<_> = desk
+                    .client
+                    .touches
+                    .iter()
+                    .map(|event| match event {
+                        wl_touch::Event::Down {
+                            id, surface, x, y, ..
+                        } => {
+                            assert_eq!(surface, &opened.surface);
+                            ("down", *id, *x, *y)
+                        }
+                        wl_touch::Event::Motion { id, x, y, .. } => ("motion", *id, *x, *y),
+                        wl_touch::Event::Up { id, .. } => ("up", *id, 0.0, 0.0),
+                        wl_touch::Event::Frame => ("frame", -1, 0.0, 0.0),
+                        _ => ("unexpected", -1, 0.0, 0.0),
+                    })
+                    .collect();
+                assert_eq!(
+                    seen,
+                    [
+                        ("down", 0, 10.0, 12.0),
+                        ("down", 1, 25.0, 28.0),
+                        ("frame", -1, 0.0, 0.0),
+                        ("motion", 1, 30.0, 35.0),
+                        ("frame", -1, 0.0, 0.0),
+                        ("up", 0, 0.0, 0.0),
+                        ("up", 1, 0.0, 0.0),
+                        ("frame", -1, 0.0, 0.0),
+                    ]
                 );
             }
 
