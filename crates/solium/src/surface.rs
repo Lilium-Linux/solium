@@ -100,7 +100,7 @@ impl Raster {
         self.over(area.size, area.to_f64())
     }
 
-    /// [`Self::of`] for a scene laid out at `laid_out` logical pixels and
+    /// `Self::of` for a scene laid out at `laid_out` logical pixels and
     /// drawn over `drawn`: its size in device pixels at `scale`, and the
     /// drawn corner in the target's physical pixels at `place`.
     /// `ShellSurface::element_over`.
@@ -557,7 +557,7 @@ impl ShellSurface {
 
     /// The software path, unchanged: Qt rasterises into a `QImage` at
     /// `scale` and the compositor uploads it, placed at `position`
-    /// ([`Raster::of`]).
+    /// ([`Raster::over`]).
     fn in_memory(
         &mut self,
         renderer: &mut GlesRenderer,

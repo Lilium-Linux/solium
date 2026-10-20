@@ -425,7 +425,7 @@ pub(crate) fn present_source(
     source_of(state, pane, geometry)
 }
 
-/// [`present_source`], for a geometry already in hand.
+/// `present_source`, for a geometry already in hand.
 fn source_of(
     state: &Solium,
     pane: crate::pane::PaneId,
