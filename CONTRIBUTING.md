@@ -4,6 +4,9 @@ Thank you for wanting to help. This file says how work gets into Solium: where
 it goes, how to build and check it, how to write the commits, and the design
 rules a change is judged against.
 
+Working with a coding agent? [AGENTS.md](AGENTS.md) is the short version of
+this file and of the documents it points to, written for agents to read first.
+
 Report security problems privately, not as issues: see [SECURITY.md](SECURITY.md).
 Everyone taking part is expected to follow the [code of
 conduct](CODE_OF_CONDUCT.md).

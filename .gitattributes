@@ -22,7 +22,9 @@
 # Decision records, with the evidence that settled them.
 /docs/spikes            export-ignore
 
-# Setting up a clone.
+# Setting up a clone, and the instructions coding agents read in one.
+/AGENTS.md              export-ignore
+/CLAUDE.md              export-ignore
 /dev/setup.sh           export-ignore
 /dev/hooks              export-ignore
 
