@@ -945,6 +945,16 @@ this and pressing `super+shift+r` is enough -- no replug, no restart. The
 running compositor logs what each device got, name and all. Every option is
 on `sol.InputOptions` in editor completion.
 
+Bind a touchscreen to its monitor with `input.touchscreen = { output = "eDP-1" }`,
+or a tablet with `input.tablet_tool = { output = "DP-2" }`. Use the monitor's
+connector name from `sol.monitors()`. A `devices` entry such as
+`{ name = "ELAN Touchscreen", output = "eDP-1" }` overrides the type's binding
+for that panel. When `output` is unset, Solium uses libinput's udev `WL_OUTPUT`
+binding; when the selected connector is absent or no binding exists, it uses
+the first screen. Removing the setting on reload restores the device's own
+binding. This setting affects absolute positions only; mice and touchpads
+ignore it.
+
 **This replaced `SOLIUM_FORM_FACTOR`'s natural scroll.** The environment
 variable used to guess "a laptop has a touchpad" for the whole machine at
 once; a device's own type now answers that directly, so a desktop with a USB

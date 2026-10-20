@@ -695,8 +695,18 @@ local defaults = {
         -- tap), no natural scroll (a wheel is not a surface).
         mouse = {},
         keyboard = {},
-        touchscreen = {},
-        tablet_tool = {},
+        touchscreen = {
+            -- Bind absolute positions to this monitor's connector name.
+            -- Unset, use libinput's udev WL_OUTPUT binding; if neither names
+            -- a connected monitor, use the first screen. Removing an override
+            -- on reload restores that device binding. Relative devices such
+            -- as mice and touchpads ignore output.
+            -- output = "eDP-1",
+        },
+        tablet_tool = {
+            -- Same connector binding and fallback as touchscreen.output.
+            -- output = "DP-2",
+        },
         tablet_pad = {},
         switch = {},
 
@@ -716,6 +726,8 @@ local defaults = {
         --         { name = "SynPS/2 Synaptics", tap = false, natural_scroll = false },
         --         -- A mouse, by its usb id, slowed down.
         --         { vendor = 0x046d, product = 0xc52b, accel_speed = -0.3 },
+        --         -- One touchscreen panel, overriding its type's output.
+        --         { name = "ELAN Touchscreen", output = "eDP-1" },
         --     },
         devices = {},
     },

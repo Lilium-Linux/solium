@@ -1199,6 +1199,18 @@ fn usb_id_field(row: &Table, key: &str) -> mlua::Result<Option<u32>> {
 /// wrong does not fail the rest of the table.
 /// `sol_input_warns_on_an_unrecognised_option_value_and_keeps_it_unset`.
 fn settings_from_table(table: &Table, context: &str) -> mlua::Result<InputSettings> {
+    let output = match table.get::<Value>("output")? {
+        Value::Nil => None,
+        Value::String(text) => Some(text.to_str()?.to_owned()),
+        other => {
+            tracing::warn!(
+                context,
+                value = describe(&other),
+                "input.output: a connector name string; leaving it unset"
+            );
+            None
+        }
+    };
     let bool_field = |key: &str| -> mlua::Result<Option<bool>> {
         Ok(match table.get::<Value>(key)? {
             Value::Nil => None,
@@ -1307,6 +1319,7 @@ fn settings_from_table(table: &Table, context: &str) -> mlua::Result<InputSettin
     };
 
     Ok(InputSettings {
+        output,
         tap: bool_field("tap")?,
         tap_button_map,
         drag: bool_field("drag")?,
@@ -7853,6 +7866,7 @@ mod tests {
             kind: DeviceKind::Touchpad,
             vendor: None,
             product: None,
+            output: None,
         };
         let mouse = DeviceInfo {
             id: "mouse".into(),
@@ -7860,6 +7874,7 @@ mod tests {
             kind: DeviceKind::Mouse,
             vendor: None,
             product: None,
+            output: None,
         };
         assert_eq!(config.resolve(&touchpad).tap, Some(true));
         assert_eq!(config.resolve(&touchpad).natural_scroll, Some(true));
@@ -7901,6 +7916,7 @@ mod tests {
             kind: DeviceKind::Touchpad,
             vendor: None,
             product: None,
+            output: None,
         });
         assert_eq!(
             resolved.natural_scroll,
@@ -7912,6 +7928,64 @@ mod tests {
             Some(true),
             "the override named nothing about tap, so the touchpad default stands"
         );
+    }
+
+    #[test]
+    fn an_absolute_devices_output_in_user_lua_reaches_the_input_settings() {
+        let (directory, mut scripts) = shipped_init_with_user(
+            "solium-script-test-input-output",
+            r#"return { input = {
+                touchscreen = { output = "eDP-1" },
+                tablet_tool = { output = "DP-2" },
+                devices = { { name = "External", output = "HDMI-A-1" } },
+            } }"#,
+        )
+        .expect("shipped initialization");
+        let config = input_config(scripts.startup()).expect("init calls sol.input");
+        let mut panel = DeviceInfo {
+            id: "panel".into(),
+            name: "Panel".into(),
+            kind: DeviceKind::Touchscreen,
+            vendor: None,
+            product: None,
+            output: None,
+        };
+        assert_eq!(config.resolve(&panel).output.as_deref(), Some("eDP-1"));
+        panel.kind = DeviceKind::TabletTool;
+        assert_eq!(config.resolve(&panel).output.as_deref(), Some("DP-2"));
+        panel.name = "External tablet".into();
+        assert_eq!(config.resolve(&panel).output.as_deref(), Some("HDMI-A-1"));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn an_absolute_devices_output_of_the_wrong_type_is_logged_and_kept_unset() {
+        let log = logged_while(|| {
+            let (directory, mut scripts) = shipped_init_with_user(
+                "solium-script-test-input-output-invalid",
+                "return { input = { touchscreen = { output = 3 } } }",
+            )
+            .expect("shipped initialization");
+            let config = input_config(scripts.startup()).expect("init calls sol.input");
+            let panel = DeviceInfo {
+                id: "panel".into(),
+                name: "Panel".into(),
+                kind: DeviceKind::Touchscreen,
+                vendor: None,
+                product: None,
+                output: Some("eDP-1".into()),
+            };
+            let settings = config.resolve(&panel);
+            assert_eq!(settings.output, None);
+            assert_eq!(
+                crate::input::devices::bound_output(&panel, &settings),
+                Some("eDP-1"),
+                "invalid configuration preserves the device binding"
+            );
+            let _ = std::fs::remove_dir_all(directory);
+        });
+        assert!(log.contains("input.output"), "{log}");
+        assert!(log.contains("touchscreen"), "{log}");
     }
 
     /// **A value of the wrong shape for its field is named in the log and
@@ -7934,6 +8008,7 @@ mod tests {
             kind: DeviceKind::Mouse,
             vendor: None,
             product: None,
+            output: None,
         };
         assert_eq!(
             config.resolve(&mouse).accel_profile,

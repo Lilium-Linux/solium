@@ -30941,6 +30941,7 @@ end)
                         kind: crate::input::devices::DeviceKind::Mouse,
                         vendor: None,
                         product: None,
+                        output: None,
                     },
                     crate::input::devices::Report::test_applied(&["natural_scroll"]),
                 );
