@@ -1,853 +1,194 @@
 # Architecture
 
+Solium is a standalone Wayland compositor. Rust provides window state,
+protocols and rendering primitives; Lua provides policy; QML provides window
+frames and hosted desktop scenes. Effects are user-editable Lua and GLSL
+folders. A separate desktop environment is not required.
+
+This page describes the current implementation. [Known limitations](gaps.md)
+covers incomplete behavior; the [roadmap](roadmap.md) covers future work.
+
 ## The one idea
 
-Mission Control, the iOS app-switcher card stack, the iPadOS thumbnail grid,
-macOS dock hover-peek, and the iOS icon→window genie look like five features.
-They are one operation:
+A window's layout geometry and its presentation are separate. Overview,
+layout transitions and a genie transform all place a window's texture somewhere
+other than its layout rectangle and animate between the two.
 
-> place a window's texture somewhere other than its real geometry, and animate
-> between the two
-
-- **Overview** — every window scaled onto a grid
-- **App switcher** — every window in a row, scrubable
-- **Peek** — one window scaled at a cursor position
-- **Genie** — one window interpolating between an icon rect and its own rect
-- **Tiling / scrolling** — the same, ending at a layout slot instead of a thumbnail
-
-Implementing these separately is why compositors end up with modes that animate
-inconsistently. Solium builds the operation once and expresses every mode as a
-script over it. **If a new mode needs new Rust, the transform layer is missing
-something** — that is the test.
+Lua composes these primitives into modes. **If a new mode needs new Rust, the
+transform layer is missing something:** extend the generic primitive rather
+than hardcoding the mode. Floating, tiling, scrolling and overview ship as Lua
+modules; their geometry calculations use the layout crate.
 
 ## Layers
 
-```
-┌──────────────────────────────────────────────┐
-│  Scripts: modes, layouts, gestures           │  Lua
-├──────────────────────────────────────────────┤
-│  Script API: enumerate, transform, bind      │  Rust
-├──────────────────────────────────────────────┤
-│  Panes: what the compositor calls a window   │  Rust
-├──────────────────────────────────────────────┤
-│  Presentation transform + animation clock    │  Rust
-├──────────────────────────────────────────────┤
-│  Render: Smithay's GlesRenderer (GLES2)      │  Rust
-├──────────────────────────────────────────────┤
-│  Smithay: protocols, input, backends         │  crate
-└──────────────────────────────────────────────┘
-```
-
-Beside the stack, three crates hold the arithmetic and depend on nothing:
-`crates/animation` (curves and springs), `crates/effects` (deformations and
-fragment effects) and `crates/layout` (where windows go). Each is described
-below.
-
-### A window is a pane, not a client's surface
-
-The compositor does not work with `smithay::desktop::Window` directly. It works
-with a **pane**: an identity and a slot, whose *content* is a QML scene the
-compositor draws, a mapped client, or the remains of one on its way out.
-
-The reason is that a window's life should begin when the user asks for the
-application, not when the application's client happens to connect. Everything
-that follows from that — the slot reserved immediately, the other windows moving
-aside, being able to close it while it is still loading, the application's
-content simply appearing inside it — is impossible while the compositor's idea
-of a window *is* the client's, because that type requires a surface to exist.
-
-A pane keeps its id and its slot across all three kinds of content. **Adoption**
-is the point: when a client belonging to a launch we started maps a toplevel, the
-toplevel becomes that pane's content. Nothing is created, nothing is replaced,
-and nothing else in the compositor notices — a decoration keyed by pane id
-carries its animation straight through the handover.
-
-**Panes are how the compositor answers every interaction at once.** The
-application catches up inside that answer; the compositor never waits for it
-first. Opening reserves the window's slot, frame and all, before the program
-has even started. Resizing makes the rectangle being dragged the truth, and the
-client's last picture fills it until the client redraws. Closing reflows the
-other windows the moment the close is asked for, while the window fades where
-it stood and the application decides whether it can go -- and if it says no, a
-layout puts it back (#128, and `docs/modes.md` for the events). A feature that
-has to wait for a client before anything on screen responds is the one this
-design exists to rule out.
-
-A client is matched to its pane by an activation token first and by walking up
-from its process id second. The token is what survives a launcher that forks and
-exits; the process walk is the fast path for everything that does not. A window
-whose pane is older than the launch's is never matched by its token: that is an
-application keeping one instance, answering the launch with a window it already
-had. The launch's pane dissolves instead, the window stays where it lives, and
-the scripts hear `activate` (#177, and `docs/modes.md`).
-
-What a program Solium starts inherits is decided in `launch.rs` (#175). Its
-environment is the one Solium was started with: noted at the top of `main`
-(`launch::remember`), before Qt, EGL or any library they load writes into it,
-and taken whole rather than scrubbed name by name. `Solium::spawn`
-(`state/open.rs`) then sets only the session's own variables:
-`WAYLAND_DISPLAY`; `DISPLAY`, naming Solium's Xwayland or removed when there
-is none; `XDG_CURRENT_DESKTOP`, which is `Lilium` unless the session named
-one; `XDG_SESSION_TYPE` when it is unset; and the activation token, as
-`XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`. In the child, every
-descriptor above stdio is marked close-on-exec by one `close_range`
-(`close_on_exec_above_stdio`), and the descriptors Xwayland and Qt's eglfs
-would otherwise pass on are marked the same way (`xwayland.rs`, `host.cpp`).
-The compositor's own Qt takes no input method from the session
-(`qml::keep_input_methods_out` removes `QT_IM_MODULE` and `QT_IM_MODULES`),
-while the programs it starts keep the user's.
-
-`Space` has not gone away and is not going to. It stays underneath as the
-authority on stacking and damage for a mapped client, because that bookkeeping
-is worth keeping and not worth rewriting. `Panes` is the view *over* it, and
-`sync_panes` is the single place the two are reconciled — so they cannot drift
-apart at any of the sites that map or unmap.
-
-QML is not a special case bolted on here. A pane whose content is a scene is as
-ordinary as one whose content is a client, which is what makes a loading window,
-a placeholder for an application that died, and a surface the compositor draws
-for its own reasons one mechanism instead of three.
-
-The design and the order the migration went in are recorded in
-`docs/spikes/2026-09-06-window-provider.md`.
-
-### Presentation transform
-
-Every window carries a target rect, an opacity, a 4×4 matrix turned about a
-pivot, an optional deformation and a depth, which the renderer uses **instead
-of** its real geometry, plus an animation driving the current value toward the
-target. Rounded corners are not part of it: they belong to the pane style, and
-are drawn by a fragment program (below).
-
-Rules:
-
-- **Transforms never change real geometry.** Leaving a mode restores the layout
-  exactly, because the layout was never touched.
-- **Input hit-testing follows the transform's rectangle and opacity**, or a
-  window in overview is clickable where it was, not where it is drawn. The
-  depth and the matrix are drawing only: a window raised over its neighbour, or
-  tilted, is still clicked where its rectangle is, and one faded to nothing is
-  not clicked at all.
-- **One animation clock**, ticked from the render loop. Not per window, not per
-  subsystem, not per script.
-
-### The animation engine is a separate crate
-
-`crates/animation` holds the curves, the springs and the timing, and depends on
-nothing — no Wayland, no renderer, no Solium. That is not tidiness:
-
-> **An animation you can only judge by launching a compositor is an animation
-> nobody tunes.**
-
-There will be many animations and many settings for them, so the engine has to
-be usable outside the thing it animates. `dev/preview` compiles it to
-WebAssembly and embeds it in a page that animates plain boxes through the
-scenarios the compositor has — opening, overview, the switcher, a drag, a
-maximise — with curve, duration and spring settings live.
-
-That page stays a *test harness* rather than a mockup. Recreating the
-compositor's chrome in it would be a second copy of the design with the same
-drift problem as a second copy of the curves, and motion is easier to judge
-without decoration.
-
-The engine is *called* from that page rather than reimplemented in it. A copy of
-the curves in JavaScript would drift the first time either side changed, and the
-drift would be invisible because the page would still animate plausibly. The
-wasm and native answers are checked against each other instead of assumed.
-
-The page owns the geometry — where a window starts and ends — because that is
-layout and belongs to the compositor and its scripts. The engine only ever
-answers "how far along?", which is exactly the split inside the compositor: it
-reports progress, and the caller interpolates.
-
-The compositor keeps only the part that needs a compositor: which rectangle a
-window is travelling between. `Curve::from_name` is what scripts bind to, so a
-curve added to the engine is immediately available to every mode and to the
-preview without touching the renderer.
-
-### So are the shapes
-
-The other half of a transform, the vertex deformations a rectangle and a
-matrix cannot express — a genie, and whatever fold, curl or page turn comes
-next — are effect folders: a geometry effect's `mesh`, Lua, called once a
-pass (below). `crates/effects` keeps the first of them, the genie, as Rust
-(`Deform::Genie`), with its unit tests and its wasm preview, as the oracle
-the shipped `effects/genie/` is held to within 10⁻⁹, and the compositor
-reaches it only in tests and, through `SOLIUM_GEOMETRY_ORACLE`, a debug
-build: no release binary draws an effect from Rust.
-
-It has a reason the animation engine does not, and it is the harder one:
-**the damage tracker needs a deformed window's bounding box before anything is
-drawn, and a shader cannot tell it one.** So a vertex function stays CPU-side,
-its grid checked (the count, every number finite, every point inside a box
-around the pane's monitor) before a vertex of it is drawn, and the warp's
-bounds are those points'. A *fragment* effect can be a file of its own,
-because a bad one is a wrong picture and a bad damage rect is a corrupt
-screen. See `docs/design/2026-09-12-panes-and-effects-design.md`.
-
-The split with the compositor is the anchor. A deformation morphs between two
-rectangles, and the far one is named rather than given: `deform = { effect =
-"genie", to = { window = id } }` carries an *identity*, which
-`Solium::aimed_at_for` resolves on the frame that draws it, and `to = { surface =
-name }` aims at a `sol.surface` scene the same way: at its instance on the
-window's own monitor, not on the one the pointer is on. Both ends are in global
-space, and so is the grid the `mesh` writes, moved onto each screen with the
-frame, so a genie on a monitor that is not at the origin lands where it was
-aimed (#143). A rectangle read out of a Lua table when the binding was pressed
-aims at where a dock icon was half a second ago, which is the stale-copy
-failure the anchors planned in `docs/shell-boundary.md` are meant to rule out
-for a hosted dock. The effect never sees the identity, only the rectangles it
-resolved to, in `t.from` and `t.to`.
-
-`sol.present`'s `deform` names a folder, which the effect host resolves where
-the command is applied (`present::Geometry`: the effect's id, the progress, its
-params packed into numbers so a present can blend them, its axis, picked once
-for `"auto"`, and what it draws when it cannot be drawn); `render::prepare`
-builds each warped pane's grid once a pass, not once per output, at the top
-of `resolve` (`render::plan_warps`), and keeps it
-on the pane while nothing it depends on moves, and `warp::mesh_grid` projects
-it. `script::shipped` checks every effect the shipped Lua names is a shipped
-folder, as it checks every curve against `Curve::from_name`.
-
-### Fragment programs and captures
-
-A pane style can round the client itself, with `client.radius` in its
-`Pane.qml`. That is neither a transform nor QML: the client's pixels are the
-application's, so the compositor draws them through a fragment program of its
-own. `crates/effects/src/fragment.rs` says what an effect reads — nothing, each
-surface where it is, the node's own pixels, or what is beneath it — and keeps
-the shaders as source text. Rounding reads each surface where it is: `clip.rs`
-wraps every surface of the client, in its own place, and draws it through a
-program (compiled in `pass.rs`, between frames) that takes the surface's own
-coordinates into the client's rectangle and cuts the corners there. So a
-rounded window costs no extra pass and no copy of the window; a subsurface is
-cut only where its corner is the client's; the edge is one screen pixel wide at
-any zoom; and a window that is tilted or pulled by a genie keeps its corners,
-because its capture draws its client the same way.
-
-A rounded window that fades in or out is faded surface by surface, with no
-picture of it taken: where a subsurface overlaps its parent (a player's video
-over its window, say) the two show through each other while the window is
-translucent. An opaque window looks as it always did. A fullscreen window has
-no frame, so it is drawn square and its surfaces stay candidates for direct
-scanout; a maximised one keeps its corners.
-
-A capture is what a warp draws: a target from the renderer's pool (`pool.rs`),
-made once with its own framebuffer object and kept by the pane (`keyed.rs`) for
-as long as the window keeps its size. `render::prepare` builds every capture's
-elements first, then binds a 1x1 carrier once and draws each capture into its
-target, a frame each, so nothing that draws a capture can run Qt.
-
-A capture records what it was drawn from (each element's id, commit, geometry,
-source, alpha and transform) and is drawn again only when that changes, keeping
-one id for life and moving its commit only when redrawn. So a still window's
-capture costs no pass and no damage, and one whose client is painting pays a
-pass a commit. `SOLIUM_RECAPTURE=always` draws every capture on every pass, as
-before.
-
-A warp, a pane's capture drawn through a mesh, carries that capture's id and a
-commit of its own, which moves when the capture is redrawn or the mesh's shape
-changes (its rectangle, matrix, pivot, scale, or the target its deform is aimed
-at). So a window held still at a tilt is neither captured again nor damaged by
-its warp, and the warp is drawn once per damage rectangle, under a scissor,
-never whole: the whole mesh drawn over the copy already in the buffer would
-blend its translucent edge twice (`dev/wirecheck` case 11g).
-
-A warped window's popups are not in its capture. They are a capture of their
-own, at the rectangle they cover, which may reach past the window, and are
-drawn as a second warp in front of the window's: the same matrix, pivot and
-deform, meshed over their part of the window's rectangle, with an id and a
-commit of their own. So a menu stays whole and on top of its window's frame
-during a tilt or a genie, is captured again when it commits, and gives its
-texture back when it closes, though the window goes on warping.
-
-The texture is the cost. Every visible warped window keeps one, which is why
-`render::prepare` captures no pane that no monitor shows; a rounded window
-keeps none. What is beneath a node, the input a blur would need, is named in
-`fragment.rs` and nothing constructs it yet; rounded corners are the one effect
-there is.
-
-### Effect folders load in two phases
-
-An effect is a folder of Lua and GLSL a user can copy and change
-(`crates/solium/effects/README.md`), and it loads in two phases, because a
-configuration reload has no renderer and `render::prepare` is the first place
-the compositor holds a GL context between frames. At config load, with no
-GPU, `effect::host::Host` reads every folder the configuration wants, runs its
-`effect.lua` in a Lua of its own (`effect/sandbox.rs`), flattens its stages
-into one plan for its defaults and one for each `fallback` rung
-(`solium_effects::stage`), lints every pass's shader and hashes the folder;
-one whose hash has not changed keeps everything, and is only bound again when
-an effect it uses or falls back to changed, so the programs that effect's old
-version compiled are deleted between frames. At the top of the next
-`prepare` the host compiles what changed, in raw GL from three source strings
-(`effect/gl.rs`: a prelude, the user's file untouched, an epilogue), so the
-driver's log names the user's own line, which smithay's program API would
-drop. Programs are keyed by the hash of what they compile, so two effects
-with the same program share it, and a version swaps in only once all of its
-programs compiled: one that fails leaves the version that ran. Before its
-first compile, `prepare` asks the GPU once, with a 1×1 target, whether it
-renders into `rgba16f` (`pool::formats`); from then a plan drawing into a
-format the GPU lacks is dropped at bind, so the effect starts at its first
-rung that runs, and until then every rung is kept. With no effect wanted,
-`prepare` asks the host one question and touches no GL.
-
-Rules (`sol.effects`) are bound at config load the same way, GPU-free:
-`Solium::apply_effects` wants every effect they name, binds every link with
-its params into one chained plan per rule (`effect::plan::Chains`), and
-refuses a tier this build cannot run; one rule that fails keeps the whole set
-out and the rules that ran stay, with the problem on the overlay. The host
-holds the programs the bound rules run, and gives them back when a set
-replaces them; a set refused leaves nothing to compile. A reload reads the folders before the scripts run, so the
-rules bind against the folders as they now are, and the probe's first answer
-binds them again after the frame (`Solium::settle`), since rules bound before
-it kept every rung.
-
-A pane style's rules come from its `effects.lua`, read by `style::rules_of`
-in an effect's sandbox, once per folder and content, and carried on each
-pane's `Decoration` with their generation, so a bare pane has none.
-`Solium::apply_style_rules` wants their effects and binds them when the style
-is applied (each `sol.pane`, a reload, the probe's rebind), never in
-`prepare`; unlike the user's set they bind one by one, a rule that cannot
-leaving its slot empty, and a file that does not run keeps the rules that
-ran, its problems under `style:<folder>`.
-
-Once a pass, `render::prepare` resolves every rule, after the effects compile
-and before any capture is built (`render::build_slots`): for every part of
-each pane a monitor shows (the cull its captures make), each scripted
-surface's instance on each output and each client layer surface, the last
-matching rule per slot, kept in `Prepared.slots` (`effect::plan::Slots`) so
-every output and every screencopy places from one answer. A window's facts
-(`Solium::window_facts`) are gathered only for the keys some rule reads, and a
-slot is wanted only when its rule's chain is bound, since binding is the
-config load's and never a frame's. With no rules, neither the user's nor any
-pane style's, nothing is resolved and no fact is gathered.
-
-Each output then walks a pane's pieces with its slots (`render::pane_walk`):
-the pane's `front` and `behind` around its layers and client, under its
-popups; the client's around the client, its `replace` in the client's place;
-a layer's, and the titlebar's around the style's `bar` layer, through
-`Decoration::layer_elements`' hook; the popups' around the popups; and a
-layer surface's or a scripted surface's just over and under it
-(`render::stacked_walk`). A slot is drawn only once its result is ready, so a
-wanted slot whose chain failed or has not run draws the part (`replace`) or
-nothing (`behind`, `front`), and with no rules the walk is `PANE_ORDER`'s.
-A result is placed over its part grown by its reach and cut by the part's
-mask, unless its rule asks for the alpha or its chain reads `shape`; the
-off-screen cull grows a pane by the furthest its results reach. A slot is
-ready once its chain has run, below.
-
-A slot whose chain reads its part's own pixels (T1) captures the part each
-pass (`render::self_inputs`, `offscreen::part_job`): the client's own surface
-tree, unrounded, since the mask rounds the result; the popups; one of the
-style's layers at its canvas; the whole pane; a scripted surface's instance;
-or a layer surface. The part's corner sits at the chain's reach, rounded up
-to a whole pixel on the part's monitor, so the capture holds what the chain
-reads around it, and the capture is keyed as a warp's is, so a still part is
-captured once and again only when it commits. Every wanted slot's padded box,
-the part inside it and its radii, is recorded whatever its tier
-(`render::record_boxes`), for the runs. A slot's capture and its chain's
-targets live in `effect::store::Store` on `Solium`: made when a slot is first
-wanted, made afresh when another rule fills it, and given back by the sweep
-at the end of `prepare` once no rule wants it. A titlebar rule whose chain
-reads `self` is refused when it binds: a region's own pixels are a crop of
-the layer that draws it, which waits for P15.
-
-A plan is run by `effect/run.rs`, in raw GL like the programs: each step is
-drawn into a pooled target in a frame opened on the carrier, reading
-`sol_tex` on texture unit 0 and the textures it `uses` on the next, at most
-eight in all, and puts back what smithay expects to find. States run first,
-and nothing waits on the CPU between steps, since one context's reads come
-after its writes; only the last step's fence goes back to the caller. Before
-it draws, a run asks the host for every program: one not compiled yet leaves
-the part as if no effect were configured that pass and latches nothing, and
-one that failed, or a GL error after the run, fails the chain for good. A
-chain's targets are held from one run to the next: a step draws into a target
-an earlier step of its size and format drew into, once no later step reads
-what that one holds (`stage::Plan::slots`), so a jump flood of eight passes
-holds two and a second run of the same size makes nothing; and a state is
-made again only when what it `depends` on moves (`run::Keys`: the params'
-hash, the self capture's commit, the shape), when its size does, or when a
-state it reads was made again. The effects' GPU time is one region a run
-phase, `gpu_effects_us` in the trace; wirecheck runs plans on their own
-(cases 12d to 12g and 12l to 12q).
-
-`prepare` goes in phases (`render::effect_phases`, over a `render::Phases`
-the tests drive with no GPU): compile what is pending; resolve the slots;
-capture and run every part but a whole pane; capture a whole pane, whose
-capture walks the results the first phase made and never its own, and run
-its chains; and only then build and draw the warps, so a warped window's
-capture walks the same slots as the flat path, in the same order, with this
-pass's results in them. A blurred window stays blurred while it tilts or
-genies, and a chain that re-ran makes the warp's capture stale while a result
-placed again does not (`dev/effects-check.sh tilt`). The store and the pool
-are swept once, at the end. Each run phase binds one carrier, and none when
-none of its chains is wanted (`render::run_slots`, through a
-`render::Runner`). A self chain runs, its part's capture as its first input, only when that capture
-was redrawn this pass, its params changed or its padded box's size did
-(`effect::store::SlotState::needs_run`); otherwise its last result is placed
-again with the same id and commit, so nothing under it is damaged. With
-`SOLIUM_RECAPTURE=always` every capture is redrawn, so every chain runs every
-pass. A run's result is the slot's `Ready`, drawn through the masked program.
-A chain that fails is latched and said once, and its part is drawn as if no
-rule named it; one whose program has not compiled yet is drawn the same for
-that pass and latches nothing. `effect_runs` in the trace counts the runs. A chain
-that reads nothing of the frame (T0, `Tier::Generated`: only `shape` and its
-states) captures nothing: its first input is the pool's one 1x1 transparent
-texture (`pool::Pool::blank`), its input never counts as redrawn
-(`render::input_redrawn`), so it runs on its first pass and again only when
-its params or its padded box's size change, and it runs in the first phase
-whatever its part. `dev/effects-check.sh t0` shows one behind a window.
-
-So three tiers run: T0, T1 (`Tier::Own`, a capture of the part) and T2 (the
-backdrop from xray), the tier read from the bound chain's flattened plan when
-the rules are applied (`effect::rules::tier`); the live backdrop (T3) is
-refused at bind by `rules::runnable`, naming X4.1, so a rule that cannot run
-yet is a problem and not a slot drawn empty.
-
-T2 adds two phases to `prepare`, after `resolve` and before any capture or
-chain (Ruling F31): `scenes` renders each hosted scene a wanted xray cut
-holds at the size and scale `elements` will ask for, and `xray` draws each
-wanted cut (`offscreen::xray_job`, a keyed capture of the layers below a
-part's band, kept until what it holds differs) and runs each wanted memo
-over a cut redrawn since it last ran (`render::run_xray`). `resolve` records
-one `T2Place` per monitor a T2 part's padded box overlaps (its box in that
-monitor's xray pixels and its own, a `BoxMap` into the monitor-sized
-textures, the size the suffix runs at), and `want_t2` wants each place's cut
-and asks `effect::memo::Memos::admit_pass` once for every place's memos under
-`effects.memo.budget_mib`; a cut or a memo nobody reads this pass is not
-built. In the inner nest each place then runs its chain's suffix at the
-part's own size (or its whole plan, when its memos were not held), only when
-its `memo::T2Key` moved, or, with an empty suffix, places a crop of the memo
-and runs nothing; the walk places each monitor's result there
-(`Slots::at_on`). The split (`stage::split_memo`) is derived from the bound
-plan by `BoundChain::split`, by `effects.memo.split` or a rule's
-`memo = false`. While the session is locked `build_slots` wants no slot of
-the session at all, so nothing of it is captured, run or read behind the
-lock.
-
-A T2 place is measured where the part is drawn this pass (Ruling F37,
-`render::measured`): at rest from the layout's rectangle, through a glide or
-a drag from the rectangle the walk draws it at, so a plain blur's crop moves
-with the window and a suffix runs again on each pass its box moves. The pass
-reads the clock once, at the top of `resolve`, where it also plans every
-pane's warp (`render::plan_warps`; the `warps` phase takes those plans), and
-the places, the warps and `elements`' walk are all measured at that instant
-(`Prepared::now`). A suffix whose key moved only with its part's place or
-size runs at most `effects.motion_hz` times a second (60 by default; 0
-on every pass), its last result drawn where the part is between, each place
-on a tick of its own phase so windows that glide together do not run
-together (`effect::store::T2State::waits`). A warped pane's capture holds its slots, with one
-exception: under `effects.xray.warped = "drawn"`, the default, a `behind` T2
-slot is drawn beneath the warp instead (`effect::beneath`), through the same
-mesh, each fragment sampling the memo or the suffix's result where it is on
-the monitor and cut by the part's shape at the mesh's texture coordinates,
-and the capture keeps a hole there (`beneath::Hole`, blended `ZERO,
-ONE_MINUS_SRC_ALPHA`) so the pane's lower layers do not cover it. Its place
-is the bounds of the part's cells of the mesh. The capture is one picture
-for every monitor, so it holes the part only while every place has its
-texture that pass, and the slot is skipped otherwise. `"rest"` keeps the
-slot in the capture at the pane's resting rectangle.
-`dev/effects-check.sh motion` holds, glides and genies a window over bars no
-two places of which look alike, and wirecheck case 13i pins the beneath
-draw and the hole on the GPU.
-
-`dev/effects-check.sh blur` blurs a video player's own pixels through a rule
-and shows a still window's chain run only on the passes that captured it.
-
-A rule with a `fade` eases its slot in and out as it comes and goes
-(`effect::fade`): `build_slots` steps each slot through `Solium::slot_fades`
-at the pass's instant, so a slot whose rule has just matched is wanted from
-opacity 0, and one whose rule has stopped is still wanted, its result drawn
-as it is at a falling opacity, until it reaches 0 and is wanted no more. The
-opacity is the walk's (`Slots::opacity`, multiplied in `slot_element` and in
-a beneath draw's alpha), and nothing is run for it; a pass a fade moves asks
-for the next. The glass style's shade is one: a T0 `shade` in front of the
-pane, matching `focused = false`.
-
-The first desktop frame waits for what it shows (spec C14: nothing pops in
-after it). Once a pass, at the end of `prepare`, `render::hold_first_frame`
-asks `warm::Warm` whether to hold, given `Solium::first_frame_ready`: today
-`Solium::effects_ready`, every program asked compiled (`Host::ready`) and
-every xray cut ever wanted built once (`Xrays::ready`); milestone 1's
-warm-up list adds its own terms to the same predicate. While it holds,
-`elements` draws only the clear colour and the next pass is asked for;
-`prepare` runs as always behind it, so programs compile, scenes render and
-cuts build. Once a frame is let through it never holds again, so a hotplug,
-a lock and a reload draw at once. `sol.startup{ first_frame = { hold,
-max_ms, on_reload } }` (`startup.first_frame` in `config.lua`) says whether
-it holds (`true`); the longest it does (2000 ms, 0 to 10000, 0 never
-holding), after which whatever is late is drawn as it is and named in the
-log; and whether each successful reload arms it again (`false`)
-(`warm::tests::the_hold_is_capped_at_max_ms`,
-`warm::tests::hold_and_on_reload_are_obeyed`). With no effects nothing is
-pending, and the first frame is drawn at once.
-
-Every way an effect fails leaves its part drawn: a Lua error or a lint keeps
-the set out at load, and a program that will not compile, a run that fails
-on the GPU and a self input never captured leave the slot wanted and never
-ready, which the walk draws as no slot
-(`state::tests::real_client::every_failure_leaves_the_part_drawn`, and
-`every_failure_leaves_layer_and_scripted_surfaces_drawn` for the surfaces;
-`dev/effects-check.sh fail` on screen). With no rules none of this runs:
-`build_slots` gathers no fact and wants no slot, no self input is captured,
-no chain runs and nothing is compiled, and a window takes the path it took
-before effects existed. A fullscreen window with no rule is not warped
-(`render::warp_of`, `prepare`'s warp condition), wants no capture and walks
-`PANE_ORDER`, so `panes` builds the surface elements smithay's DRM compositor
-assigns planes from, and direct scanout stays
-(`state::tests::real_client::a_fullscreen_window_with_no_rule_takes_todays_path`;
-`dev/effects-check.sh none`, whose trace has no capture and no run).
-
-### Geometry files, and the clock every effect call runs against
-
-A geometry effect's `mesh` is Lua called once a pass (`effect::geometry`),
-on the effect's own sandbox, with one `t` and one `out` kept in its registry
-and reused every call, so a pass allocates nothing in Lua; what it wrote is
-checked (the count, every number finite, every point inside a box four
-monitors wide and high centred on the pane's) before a vertex of it is
-drawn. At load the file is called at
-progress 0 and 1, on every axis and in every direction, and at rest over a
-part of the window too, 36 calls sharing one
-load budget (`effects.sandbox.load_ms`, 100 ms by default; the sandbox's
-memory is `effects.sandbox.memory_mib`, both in `effect::settings` with the
-engine's other keys), and refused unless it draws the window exactly where it is at
-rest and the fastest of those calls fits the 2 ms a frame gives (the
-fastest, since one call is slow when the machine is busy and all of them
-only when the file is), at its `mesh`'s line on the overlay and in
-`--check`. A version with nothing to compile, a geometry file alone, is
-current as soon as it loads.
-
-Every call into an effect's Lua runs against a deadline, and none of them
-under a count hook: Lua 5.4 takes its slow path on every instruction while
-one is set, which doubles a genie's call. So `effect::watch` keeps one
-watchdog thread that waits for each call's deadline and sends a call still
-running a real-time signal, on its own thread; the handler arms a hook with
-`lua_sethook` there, the one Lua call a signal handler may make, as `lua.c`
-stops a script on Ctrl-C. The watchdog never touches a Lua itself: from
-another thread it would walk the running call's frames while an unwinding
-error frees them. Where the signal is taken by something else, a call falls
-back to a count hook set for it alone. A call stopped either way poisons its
-state, since mlua 0.12.1 leaves the error in the stopped frame's locals, and
-`Solium::settle` loads it again from its unchanged folder after the frame
-(`Host::revive`), keeping its programs and its id, so a stop caused by a
-busy machine costs the panes of one pass and not the rest of the session. A
-folder changed since it loaded, or a rebuild that fails (said on the
-overlay), is not tried again until a reload reads it. The watchdog sends a
-call past its due its signal again every budget until it returns, so a stop
-whose hook a stale signal's took off is not lost. The clock stops Lua
-between instructions, never inside one call into Lua's own library, so the
-sandbox has no pattern functions, whose backtracking can outlast any frame.
-
-### The arrangements are a crate too
-
-`crates/layout` is the third engine crate with nothing in `[dependencies]`:
-where each window goes, given how many there are and how much room. It holds
-master-stack, the tiling tree, the scrolling strip and the grid overview lays
-windows out on, and scripts reach them as `sol.layout.master_stack`, `.tree`,
-`.scroller`, `.strip`, `.scrolling`, `.scroll_to` and `.grid`. The preview page
-arranges its boxes with the same code.
-
-So "modes are scripts" has a precise meaning. The Lua decides which
-arrangement, when, and for which windows, and keeps what it decided; the
-arithmetic of each arrangement is Rust, tested without a session, and no
-script has to derive it again.
-
-### And a transform names a selection
-
-`present::Frame` says how *one* pane is drawn. `group::Shift` says how a **named
-set** of things is drawn — windows, `sol.surface` surfaces, whole monitors —
-and the two compose: a member is drawn at its own transform plus every selection
-it is in.
-
-That is one mechanism rather than three. A whole-screen effect is a selection
-that is an output; a set of windows moving as one is a named set; and a
-workspace is its windows plus its own background, which is why the workspace
-slide stops leaving the wallpaper behind. Nothing in the compositor knows what a
-wallpaper is; it travels because `workspaces.lua` put it in the selection.
-
-Two decisions worth knowing:
-
-**Membership lives on the group**, not in a table keyed by `PaneId` beside the
-panes. A group owns its members and its own in-flight transform and both leave
-when it does, so a selection naming a window that has closed resolves to nothing
-and costs a `u64`. That is the same rule `Pane` follows for its frame, its
-timers and its capture buffer.
-
-**A node in no selection pays nothing.** `Shift::apply` on an identity shift
-returns the frame it was given, and the first thing anything asks is whether any
-selection exists at all. A compositor that routed every window through new
-arithmetic to support a group nobody declared would have made every frame worse.
-
-### One stacking order, one hit test
-
-`stack.rs` is the one list of what is drawn over what on a monitor, topmost
-first: `overlay`, then a fullscreen window when one covers the bars, then
-`top`, the windows, `bottom` and `background`. At each layer a client's layer
-surfaces are over a script's `sol.surface` scenes, because the client was
-installed on purpose. The renderer draws in that order and every hit test above
-or below the windows asks in it, so what is on top is what is clicked (#141,
-#142). `fullscreen.covers = "none"` keeps the bars over a fullscreen window.
-
-A script's scene is on top only where its own items take the point. When a hit
-test reaches a `sol.surface` band, the compositor asks that scene's live item
-tree, which answers `Hit::Nothing`, `Hit::Hover` or `Hit::Press`
-(`qml/hosted.rs`). `topmost_above` passes what the event asks for:
-`Asking::Hover` for motion, `Asking::Press` for a button or the wheel. So a
-strip that takes only hover leaves presses to the window under it (#173).
-While a scene holds a press it took, or holds a `Grab`, no client has the
-pointer (`surface_at` in `state/hit_test.rs`), and a press anywhere is the
-grab's to take or to be dismissed by (`claim_under`). A touch never lands on a
-scene (`touch_under`; see #181 under [Form factors](#form-factors)).
-`docs/shell-boundary.md`, "What a hosted shell is given", has the behaviour.
-
-Among the windows, one predicate says whether a window is under a point:
-`owns`, in `state/hit_test.rs` — on a screen that draws it, and inside what it
-paints there. `Solium::window_under` asks it from Rust and `sol.window_at` from
-Lua, and both look through what is left of a window whose client has gone.
-
-**The renderer is GLES, and the code says so.** Scaling and cross-fading
-textures is unremarkable work that GLES2 does well, and Smithay has no Vulkan
-renderer to choose instead. Drawing does not stay behind Smithay's generic
-`Renderer` and `Frame` traits, because three things it needs are not on them:
-
-- drawing a texture through four independent corners, for perspective and the
-  genie (`warp.rs`, with its program and draw in raw GL in `warp/gl.rs`; the
-  program is compiled once, between frames, in `pass.rs`, and if it does not
-  compile a deformed window is drawn flat rather than not at all);
-- fragment programs of Solium's own, for rounded corners (`clip.rs`, drawing
-  each surface through the programs `pass.rs` compiles from the GLSL ES source
-  kept in `crates/effects`);
-- effect programs from user folders, compiled from three source strings and
-  failing with the driver's log (`effect/gl.rs`), and run with several
-  textures a pass (`effect/run.rs`), none of which smithay's program API
-  gives;
-- the EGL context and fence that QML on the GPU shares with Qt (`qml/paint.rs`,
-  `surface.rs`).
-
-So the render elements are typed on `GlesRenderer` (`render.rs`). What stays
-free of any renderer is the arithmetic: `present.rs` and the animation, effects
-and layout crates depend on no renderer, and the effects crate carries the
-rounded-corner shader only as source text. A Vulkan backend would need its own
-element set, warp, pass programs and QML import, which makes it a port rather
-than a swap; the [Vulkan spike](spikes/2026-08-27-vulkan-on-smithay.md) lists
-the pieces. The one reason left to pay for that is compute shaders. Explicit
-sync ([#59](https://github.com/Lilium-Linux/solium/issues/59)) is a protocol
-Smithay offers on GLES too, and Smithay's multi-GPU renderer
-([#63](https://github.com/Lilium-Linux/solium/issues/63)) is built on GLES.
-
-### Hosted scenes
-
-`scripted.rs` keeps what scripts declare with `sol.surface`, and builds one
-live instance of a surface on each monitor it is on, as the monitor is
-placed; an instance goes with its monitor. A surface declared again writes its
-changed properties into the live scene instead of rebuilding it (#161).
-`surface.rs` is one hosted scene: a QML file, the area it was placed in, and
-its pointer events. `qml/hosted.rs` is the compositor's half of what a scene
-and the compositor say to each other: properties written in place, the
-monitor the instance is on, the models' rows, pointer events, what the
-scene's items claim at a point, its reserve, its grabs, its keyboard wants
-and the keys it is told, and the actions it sends with `Solium.send`, whose
-data `json.rs` reads. `qml/keys.rs` puts the compositor's buttons, modifiers
-and keys in Qt's terms.
-
-`state/hosted.rs` reads what the scenes report, once a pass (`settle_scenes`),
-and applies it. A reserve goes into the work area (`reserved_on`, which
-`work_area_on` in `state/monitors.rs` adds to the layer-shell zones) and
-re-flows the layout once (#162). A `Grab` is held or dismissed
-(`settle_grabs`, `dismiss_hosted_grab`). The keyboard is held for a scene, its
-keys are delivered and repeated at the keymap's rate, and it is given back
-(`settle_keyboard`, `deliver_scene_key`, `repeat_scene_key`,
-`end_keyboard_hold`) (#163). The actions the scenes sent go to the `surface`
-listeners, each in a dispatch of its own (`settle_actions`), and `sol.act`'s
-verbs become the commands that do them (`act`); `state/commands.rs` tells each
-attempt's `done` once the dispatch that ran it is applied.
-`docs/shell-boundary.md`, "What a hosted shell is given", has the behaviour.
-
-### Scripting
-
-Lua, and **modes really are scripts** — `lua/overview.lua` is overview, and the
-compositor contains no code that knows what overview is. The proof is that the
-Rust that used to implement it was deleted, not wrapped.
-
-The keyboard pill is the same claim for something drawn.
-`lua/keyboard_indicator.lua` is the policy and reads `keyboard.indicator`,
-which no Rust names. It draws with `qml/Solium/KeyboardPill.qml`, through
-`KeyboardPillLayer` (`qml/Solium/KeyboardPillLayer.qml`), which every shipped
-pane style adds, or on an overlay `sol.surface` (`qml/indicator/keyboard.qml`),
-and taking `require("keyboard_indicator")` out of `init.lua` takes the pill
-away. Its tests are scenarios: Lua files in `crates/solium/tests/scenarios/`,
-played by `scenario.rs` under `cargo test`. So a feature written as
-configuration is tested without Rust that knows about it.
-
-The boundary is one module, `script.rs`, and it is shaped so a mode never
-learns a window is a Wayland surface:
-
-- **Reads are a snapshot.** Windows, work area and cursor are built fresh per
-  dispatch and handed to Lua by value.
-- **Writes are commands.** `sol.present` queues; the compositor drains the queue
-  after the handler returns. A script cannot mutate the compositor directly, so
-  its idea of a window's geometry cannot drift from the compositor's — and no
-  borrow of compositor state is alive while Lua runs, which is what stops a
-  script re-entering the seat mid-dispatch and deadlocking.
-- **Ids, not indices.** A window's id is stable for its lifetime and never
-  reused, so a script holding one across frames cannot address a different
-  window with it.
-- **The compositor does not know what modes exist.** A script names itself with
-  `sol.status`. The compositor keeps and logs that name and draws nothing
-  with it; a hosted shell reads it as `Solium.status`.
-
-**No compositor config key per mode.** That is how a mode set becomes closed.
-
-### What the compositor publishes
-
-The models scenes read are built from the compositor's own state (`models/`),
-so nothing is mirrored. Each model is diffed by key (`models/diff.rs`) and
-sent to Qt as one batch, every row's values written before any row is
-announced (`qml/rows.cpp`), once a frame, in `render.rs` just before
-`qml::tick`. Four exist today: the monitors, read as `Solium.monitor` and
-`Monitors` (`models/monitors.rs`); the windows, read as `Windows`
-(`models/windows.rs`); the workspaces Lua declares with `sol.workspaces`,
-read as `Workspaces` (`models/workspaces.rs`); and the keyboard, read as the
-`Keyboard` singleton (`models/keyboard.rs`).
-
-`text_input.rs` answers `zwp_text_input_v3` itself, not through Smithay's
-module, which discards every request while no input method runs. It keeps only
-which field is live and its caret, and publishes that as `sol.text_input()` and
-`sol.on("text_input")` in the global space, and as `caret` in a pane's own
-space; it draws nothing. `keyboard_change.rs` tells the configuration
-(`sol.on("keyboard")`) and the scenes (`Keyboard.changed(what)`) when the
-layout, Caps Lock or Num Lock really changes. It never fires for ordinary
-typing, and does not tell the configuration while the session is locked. Every
-decoration layer is also handed `values` from `sol.pane_values`, a general
-channel from Lua that the compositor does not interpret, and a layer whose root
-says `dormant` is not drawn, and in software lets go of its image
-(`LayerScene::sleeps` in `decoration.rs`).
+| Layer | Responsibility | Main sources |
+|---|---|---|
+| Configuration | Bindings, modes, workspaces, shell policy | `crates/solium/lua/` |
+| Desktop UI | Frames, wallpaper, preview shell, reusable QML types | `crates/solium/qml/` |
+| Effect definitions | Geometry and fragment effects | `crates/solium/effects/` |
+| Compositor | Protocols, state, input, script API, scene hosting, frame scheduling | `crates/solium/src/` |
+| Reusable calculations | Animation, layout, deformation and effect formats | `crates/animation/`, `crates/layout/`, `crates/effects/` |
+| External probes | Protocol checks from a separate Wayland client | `crates/wl-probe/`, `dev/` |
+
+The animation, layout and effects crates keep calculations independent of the
+compositor. They do not choose desktop policy.
+
+## A window is a pane, not a client's surface
+
+A pane has a stable identity and a layout slot. Its content can be a QML scene,
+a mapped client or the retained picture of a closing window. The pane can exist
+before an application connects, so launching reserves its place immediately.
+When the matching client maps, it takes over the same pane.
+
+Launch matching uses activation tokens and process ancestry. Relaunching an
+existing single-instance application activates its existing window and removes
+the unused launch pane. X11 launch adoption still has an open limitation; see
+[gaps](gaps.md#session-and-reliability).
+
+Resizing follows the requested rectangle while the client's last buffer fills
+it. Closing can release the layout slot while the old picture animates out.
+An application that refuses to close must be restored; this path still has
+known issues. The architecture aims to respond immediately without requiring a
+client to redraw first.
+
+Smithay's `Space` retains mapped-client stacking and damage bookkeeping.
+`sync_panes` reconciles it with the pane view. See `pane.rs`, `state/open.rs`,
+`launch.rs` and `state/` for lifecycle handling.
+
+## Configuration and scripting
+
+The shipped `lua/init.lua` loads configuration, modes and the preview shell.
+`~/.config/solium/user.lua` supplies overrides; `config.lua` documents defaults.
+Lua reads compositor snapshots and issues commands through `script.rs`.
+Commands request changes; subsequent state and events report the result.
+
+Presentation commands work on stable window IDs and selections. Arrangements
+come from `crates/layout`; Lua decides when to apply them. Configuration reload
+keeps existing layout state where supported, and a failed load keeps the
+previous configuration. `solium --check` validates loading and declared QML
+scenes without starting a session.
+
+The [configuration guide](ricing.md) covers usage. The API's source reference
+is [meta/sol.lua](../crates/solium/lua/meta/sol.lua).
+
+## Presentation, animation and input
+
+`present.rs` represents presentation separately from layout geometry.
+`crates/animation` supplies curves and springs, including initial velocity for
+momentum. `crates/effects` supplies mesh/deformation calculations. Animations,
+QML animations and QML timers share the compositor clock.
+
+One stacking order serves rendering and pointer targeting. `render::drawn_on`
+decides which output draws a window; `state/hit_test.rs` owns the hit test;
+`focus.rs` owns keyboard focus changes. Hosted scenes take input only where
+their live item trees claim it, with explicit pointer grabs and keyboard
+requests. This lets windows remain interactive beneath unused shell regions.
+
+Touch currently reaches client surfaces. Frame controls, hosted scenes and
+other compositor UI do not yet have complete touch handling; this is a
+capability gap, not another presentation mode.
+
+## Rendering
+
+Solium uses Smithay's concrete `GlesRenderer`. DRM sessions use hardware
+outputs; the winit backend draws a nested compositor window. This is a GLES
+implementation, not a renderer-independent backend or a Vulkan compositor.
+
+Ordinary surfaces use the direct element path where possible. Rounded corners
+are per-surface fragment programs and do not require a window capture.
+Mesh transforms use cached captures of the window's surface tree. A capture
+keeps a stable identity and is redrawn when its inputs change. Popups have
+separate captures so they can extend beyond the window while following its
+transform. `render.rs`, `clip.rs`, `warp/`, `capture.rs` and `pool.rs` contain
+these paths.
+
+User effects load from folders in two phases: Lua definitions at configuration
+load, then GL programs when a render context is available. Shipped effects
+include blur, glass, shade and genie. Backdrop effects and capture-based effects
+have different costs; [the effects reference](../crates/solium/effects/README.md)
+documents the stages, sources, caching, budgets and fallback behavior.
+
+GLES-specific code includes mesh drawing, surface fragment programs, user
+effect passes and Qt's EGL/dmabuf imports. Another renderer would require a
+port of these pieces. The [Vulkan spike](spikes/2026-08-27-vulkan-on-smithay.md)
+records the earlier investigation; it is not the current implementation.
+
+## Hosted scenes and models
+
+Qt Quick runs inside the compositor through a C ABI shim and
+`QQuickRenderControl`. There is one QML engine, but each scene has its own
+`QQuickWindow` and scene graph. Shared engine state makes a common theme and
+live compositor data available; it does not make cross-scene reparenting work.
+
+On hardware, a child-process startup probe selects GPU rendering when it
+succeeds. Qt renders into GBM-allocated buffers imported as dmabufs. Software
+rendering uploads changed images instead; it is also the nested default.
+The render loop advances Qt with the compositor clock. Qt's poll descriptors
+and timers join the compositor event loop so an idle desktop can wake for a
+QML update without continuous redraw.
+
+`sol.surface` creates hosted scenes, optionally per monitor. Scene size and
+reserved work area are separate: a full-monitor scene can reserve just a bar's
+edge. `import Solium` exposes attached properties, input/grab types and models.
+Published data includes monitors, windows, workspaces, keyboard and pointer
+state, applications (`Apps`) and desktop-folder entries (`Folder`). Keyed model
+updates are batched into Qt before the scene renders.
+
+The bundled preview uses these APIs for its bar, dock, search and desktop
+icons. Users can disable it or select another hosted shell. External
+`wlr-layer-shell` clients remain supported, but have the protocol limitations
+listed in [gaps](gaps.md#external-shells-and-desktop-tools).
+[Shell hosting and integration](shell-boundary.md) is the detailed API guide.
+
+## Backends and session services
+
+Nested development uses winit inside an existing desktop. Hardware sessions
+use DRM, libseat and libinput. XWayland supplies X11 compatibility. Native
+protocol handlers live in `state/` and the corresponding protocol modules.
+
+The installed session wrapper integrates with systemd, D-Bus and XDG autostart.
+Logind Lock and PrepareForSleep handling can run the configured locker; an
+external locker uses session-lock. Configure `lock.command`: a native preview
+lock screen is not shipped yet. Idle notifications, inhibitors and monitor
+power are distinct from locking.
+
+Programs launched by Solium inherit the environment saved before Qt modifies
+it, with the session's display and activation variables added. The current
+fallback desktop identifier is still `Lilium`; it is a legacy session/portal
+integration name, not a dependency on a desktop environment. The full setup is
+in [session integration](shell-boundary.md#how-the-rest-of-the-desktop-starts).
 
 ## Design rules
 
-Carried from the Hyprland-fork post-mortem. Each one cost real time to learn.
+- **One authority for each state.** Models expose compositor state rather than
+  maintaining another window manager beside it.
+- **One clock.** Window animation, QML animation and timers use compositor time.
+- **Geometry and pixels stay together.** An animation must not use independently
+  updated copies of a scene's geometry.
+- **Commands are not state.** A request is followed by the resulting state/event.
+- **Generic primitives, editable policy.** Modes belong in Lua, window frames
+  in QML and effects in Lua/GLSL. Rust supplies the mechanism.
+- **A protocol has one concern.** A difficult interface name often signals
+  unrelated responsibilities.
+- **Window-coupled UI is hosted.** Decorations share the compositor's state and
+  scheduling. Ordinary desktop applications may run as separate clients.
 
-**One authority for any piece of state.** Two models of window state — the
-compositor's and a mirror in a helper process — produced a deadlock where a
-decoration was required to learn the geometry that decided whether to create a
-decoration.
-
-**Geometry the compositor animates against must arrive with the frame that shows
-it.** Never a side channel. A dock icon rect sent whenever the shell chooses and
-applied whenever it arrives is a mirror, and mirrors drift. For a hosted dock
-the plan is that there is nothing to send: its QML names an icon, and the
-compositor reads where it is from the same engine after layout. If the dock is
-a layer-shell surface committing frames, its icon rects ride along with that
-commit and are applied atomically with it. Neither is built yet.
-
-**Commands are not state.** `focus_window` is a verb; the resulting focus change
-comes back through the event stream, not as a reply.
-
-**A protocol carries one concern.** When a name is hard to choose, the interface
-is doing too much.
-
-**In-process for anything window-coupled.** Decorations, the animation engine,
-the bar and mode overlays run inside the compositor. Notifications, settings
-UI, launcher and media controls are ordinary clients — none of them touch
-window geometry.
-
-### One design system, one engine
-
-**Decided 2026-09-05.** The compositor hosts a single QML engine, and every
-surface the desktop draws is a scene in it: window decorations, and a hosted
-shell's bar, dock and launcher. The ones that are themed import one
-`Solium.Theme` singleton; the fallback pointer and the default wallpaper keep
-fixed colours.
-
-The requirement that forces this is not "consistent styling" — it is that an
-object must be able to *move* from the dock into a titlebar. Two processes
-painting their own pixels cannot do that; the best available would be a fake.
-It is not built, and one engine does not make it a reparent: every scene has a
-`QQuickWindow` of its own, so each is its own scene graph. The plan is a flight
-or a morph, a third, live instance of the same component drawn over both ends
-while they are hidden; one engine is what lets that instance be the component
-itself. See `docs/shell-boundary.md`.
-
-### Chrome is QML, hosted in-process
-
-**Decided 2026-09-04.** The bar and window decorations are authored in QML and
-rendered by Qt's scene graph *inside the compositor process* — the model KWin
-uses for Aurorae. Out-of-process was tried in the Hyprland fork and measured at
-~15 fps and 39% CPU, with the process boundary as the ceiling.
-
-Concretely: a C ABI shim (`crates/solium/qml/host.cpp`), `QQuickRenderControl`
-with no visible window, and animations driven by **the compositor's clock**
-through an animation driver the render loop advances. That last part is not a
-detail — QML animating off Qt's own timer would drift against every window
-transform beside it, which is the same mistake as having two animation clocks.
-A QML `Timer` rides that clock too whenever anything else animates, so between
-frames the event loop that serves Qt advances it, rather than going around it.
-That is `qml/wake.rs`: Qt's own poll set is one descriptor in the compositor's
-event loop, which turns readable when Qt's next timer is due or a descriptor Qt
-waits on is ready. Qt is then served on the compositor's clock (`qml::drain`),
-and a scene that changed asks for one frame and no more.
-
-Beside `host.cpp` are three files that register native types under the same
-`Solium` URI as the shipped QML module, so one `import Solium` reaches both:
-`attached.cpp`, the attached `Solium` object (`Solium.monitor`,
-`Solium.input`, `Solium.keyboard`, `Solium.surface.reserve`) and the `Grab`
-type; `rows.cpp`, the list model that applies the keyed row batches Rust
-sends; and `keyboard.cpp`, the `Keyboard` singleton. `attached.h`, `rows.h`
-and `keyboard.h` declare `Q_OBJECT` types, so `build.rs` runs Qt's moc on them
-(`MOC_HEADERS`; `QT_MOC` names moc when it is not found). `dev/wirecheck`
-compiles the same files from its own `build.rs`, with its own copy of that
-list, so a new header that declares a `Q_OBJECT` type goes into both lists,
-and a new file beside `host.cpp` into both builds.
-
-No Qt QPA plugin available here will adopt the compositor's EGL context, so
-the GPU route runs the other way round: the compositor allocates a buffer
-through GBM and Qt's OpenGL scene graph renders into it as an imported dmabuf.
-That is the default wherever a trial render in a child process passes at
-startup. Where it does not, Qt's *software* scene graph renders into a memory
-buffer that is uploaded instead — chrome is small and only re-uploaded when Qt
-reports it changed. Qt fixes the choice for the life of the process, which is
-why it is made before Qt starts; `dev/README.md`, *QML on the GPU*, has how to
-force either one. See `docs/spikes/2026-09-04-qml-in-compositor.md` for the
-original measurement and the two Qt traps it hides.
-
-**A bar reserves its height whether it is a client or hosted.** The work area
-is what every layer surface's exclusive zone and every hosted surface's
-`reserve` leave of a monitor, so windows are placed beside a bar, never under
-it. A hosted surface's reserve is apart from its size: a whole-monitor shell
-reserves only its bar's edge (`docs/shell-boundary.md`, "Room of its own").
-And a fullscreen window covers the `top` layer, bars included, unless
-`fullscreen.covers` says otherwise.
+See [contribution rules](../CONTRIBUTING.md#rules-learned-the-hard-way) for the
+review criteria behind these boundaries.
 
 ## Form factors
 
-One compositor, one layout engine, different input profiles and default modes.
-Only the input profile is chosen today: `SOLIUM_FORM_FACTOR` sets click and
-touch focus, focus-follows-mouse, the drag modifier and natural scrolling
-(`input/profile.rs`). Every form factor starts floating, and there is no app
-switcher, no peek and no compositor gesture yet. Touch reaches a client's
-window (checked with Firefox on a Surface Pro 7), but nothing the compositor
-draws reacts to it: frame buttons, a hosted shell's scenes, overview and the
-screen edges ([#181](https://github.com/Lilium-Linux/solium/issues/181)).
-Gestures are E7 ([#7](https://github.com/Lilium-Linux/solium/issues/7)), after
-v0.1.0. The table is the intent, for E7:
+The goal is one compositor for desktop, laptop, tablet and phone, with different
+configuration and input profiles. `SOLIUM_FORM_FACTOR` currently selects input
+defaults; it does not supply a complete phone or tablet experience.
 
-| | Primary input | Default mode, intended |
-|---|---|---|
-| Desktop | pointer + keyboard | floating or tiling |
-| Laptop | trackpad gestures | tiling with overview |
-| Tablet | touch | scrolling with app switcher |
-| Phone | touch | one window, switcher on gesture |
-
-The form factor selects defaults and an input profile. It does not fork the
-codebase, and it must not fork the animation engine.
+Client touch input exists, but compositor touch interaction, configurable
+gestures and gesture-driven modes remain open. Cross-scene flights, morphs and
+live icon anchors are also planned rather than implemented. See the
+[roadmap](roadmap.md) for these directions.
 
 ## Non-goals
 
-- **Hyprland plugin compatibility.** Abandoned deliberately. The aim is a
-  compositor complete enough not to need plugins; a plugin protocol can come
-  later on its own terms.
-- **Reusing the Hyprland fork's code.** The ideas carried over; the code did not.
-- **An out-of-process shell painting window decorations.** Tried, measured,
-  rejected: ~15 fps at 39% CPU after optimisation, and the process boundary was
-  the ceiling.
+- Hyprland plugin compatibility or reuse of the old fork's implementation.
+- A separate process painting Solium's window decorations.
+- A different compositor or animation engine for each device class.

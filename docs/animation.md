@@ -111,14 +111,10 @@ fullscreen = { animate = { duration = 260, easing = "outCubic" }, instant = { ap
 maximize   = { animate = { duration = 220, easing = "outCubic" }, instant = { app_id = {} } },
 ```
 
-These are the numbers `config.lua` really has. The block used to print `open` as
-200 / `outCubic` / 0.92 and to carry a `dock = { morph = ... }` line, and #117
-deleted both from `config.lua` for the same reason: nothing read either of them.
-`open.lua` held 220 / `outBack` / 0.88 as local constants, so the advertised
-numbers described an animation nobody had ever seen, and the script's won when
-the two were wired together — those are what the animation was tuned against.
-There is no dock, so `dock.morph` configured a component that does not exist,
-and `--check` now reports that spelling as an unrecognised key.
+These defaults come from `config.lua`. Each mode reads its motion settings
+and passes them to the shared animation engine. The old `dock.morph` setting
+was unused and has been removed; `--check` rejects it. The preview dock exists,
+but its live-anchor and launch-morph integration is still planned.
 
 So changing how tiling feels is one line in `~/.config/solium/user.lua`:
 

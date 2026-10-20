@@ -25,7 +25,7 @@
 Name:           solium
 Version:        0.0.0~git%{commitdate}.%{commit}
 Release:        1%{?dist}
-Summary:        Wayland compositor of Lilium DE, configured in Lua, with QML chrome
+Summary:        Configurable Wayland compositor with Lua scripting and QML scenes
 # GPL-3.0-only for the code, CC-BY-SA-4.0 for the wallpaper: dev/install-check.sh
 # asserts every .license file installed names a licence listed here.
 License:        GPL-3.0-only AND CC-BY-SA-4.0
@@ -75,7 +75,7 @@ Recommends:     xdg-desktop-portal-wlr
 Recommends:     foot
 
 %description
-Solium is the Wayland compositor of Lilium DE, written in Rust on Smithay and
+Solium is a standalone Wayland compositor, written in Rust on Smithay and
 configured in Lua. Its window frames, its wallpaper and the desktop shell it
 hosts are QML running inside the compositor.
 

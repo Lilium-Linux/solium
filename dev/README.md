@@ -17,6 +17,14 @@ The keys that ship are the
 [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
 page, made from what `solium --check` prints.
 
+Choose a task:
+
+- [Build](#building) and [run the gate](#the-gate).
+- [Run nested](#running-it-nested) and [start test clients](#running-programs-inside-solium).
+- [Capture frames](#capturing-a-frame) and [drive a run](#driving-it-without-a-keyboard).
+- [Find checks](#checks), [GPU diagnostics](#qml-on-the-gpu) and [hardware-run instructions](#running-it-on-a-tty-as-a-real-session).
+- [Install](#installing-it) or [build a Fedora package](#a-fedora-package).
+
 ## Building
 
 `dev/setup.sh`, run once after cloning, checks what this section needs: Rust
@@ -1208,10 +1216,10 @@ keyboard at all — which is how the first run of this backend ended in a reboot
 
 Two more things stand between you and that: if libinput reports no input
 devices within twenty seconds, Solium stops on its own rather than hold a
-display nobody can talk to; and from another VT, `pkill -x solium` always ends
-it. The first `SIGTERM` stops it cleanly. A Solium that cannot stop, because
+display nobody can talk to; and from another VT, identify the PID of the Solium session you started
+(for example with `ps -u "$USER" -o pid,args`) and send `kill -TERM <pid>`. The first `SIGTERM` stops it cleanly. A Solium that cannot stop, because
 something inside it has stopped answering, ends itself five seconds later
-(`session.stop_timeout`), or at once on a second `pkill -x solium`.
+(`session.stop_timeout`), or at once on a second `kill -TERM <pid>` to that same process.
 
 That second one is worth a qualification, because it is a last-resort escape
 and you are reading it before taking a VT. It holds because Solium's handlers
@@ -1223,7 +1231,7 @@ on the GPU it holds only because Solium sets `QT_QPA_NO_SIGNAL_HANDLER` before
 starting Qt — without it eglfs installs its own `SIGTERM` handler, and the
 process then neither dies nor cleanly survives. See *QML on the GPU*. On a
 build that predates that, or one where `QT_QPA_PLATFORM` was set from outside,
-reach for `pkill -9 -x solium`.
+use `kill -KILL <pid>` for that same session only.
 
 **Reading what happened.** A session started with `--tty` as its first
 argument writes to `~/.local/state/solium/session.log` (under

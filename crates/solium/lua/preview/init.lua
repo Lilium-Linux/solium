@@ -1,7 +1,7 @@
 -- The preview shell: the compositor's own showcase, built as configuration
--- on the public API (docs/shell-boundary.md), nothing more. Today it is one
--- piece, the bottom bar, `qml/preview/Shell.qml`; see docs/ricing.md for what
--- it shows and what is still to come.
+-- on the public API (docs/shell-boundary.md). It includes the bottom bar,
+-- top dock, quick search and desktop icons. See docs/ricing.md for the
+-- configuration and remaining desktop features.
 --
 -- `preview = false` in `user.lua` turns the whole thing off. Short of that,
 -- this only ever fills in a default: a `shell.scene` named in `user.lua`, or

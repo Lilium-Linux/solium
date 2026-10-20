@@ -20,7 +20,7 @@
 
 # Shells and QML
 
-- [Where Solium ends and Lilium begins](shell-boundary.md)
+- [Shell hosting and integration](shell-boundary.md)
 - [Pane styles](generated/repo/crates/solium/qml/panes/README.md)
 
 # Reference
@@ -48,10 +48,10 @@
 
 # Status
 
-- [Where it stands](status.md)
+- [Project status](status.md)
   - [Roadmap](roadmap.md)
-  - [Everything not built yet](gaps.md)
-  - [The road to a public preview](beta.md)
+  - [Known limitations](gaps.md)
+  - [Public preview criteria](beta.md)
 
 # Design records
 

@@ -1,4 +1,4 @@
-//! Solium — the Wayland compositor of Lilium DE.
+//! Solium — a configurable Wayland compositor with Lua scripting and QML scenes.
 //!
 //! See `docs/architecture.md`. Layout and presentation are deliberately not in
 //! the protocol handlers; every mode is a transform over window textures.

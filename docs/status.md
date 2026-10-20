@@ -1,34 +1,52 @@
-# Where it stands
+# Project status
 
-Solium is alpha. It runs on hardware and is being readied for daily use, but
-the trial on real hardware that decides whether it is ready has not happened
-yet, and it is not yet anyone's daily desktop. What is being worked on, and in
-what order, lives on GitHub rather than in these pages, because it changes
-daily:
+**Solium is alpha.** It runs as a nested compositor and as a hardware session.
+The planned v0.1.0 is a public preview, with readiness determined by testing
+and the remaining daily-use issues rather than a release date.
 
-- The [`daily-drive` label](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20state%3Aopen%20label%3Adaily-drive)
-  is the list of what matters most: the issues that stop an application being
-  used at all, first.
-- The [project board](https://github.com/orgs/Lilium-Linux/projects/2) shows
-  which of them are being worked on, waiting for review, or done.
+This documentation snapshot was checked against `stage` on 2026-10-20.
+Use the [project board](https://github.com/orgs/Lilium-Linux/projects/2) for
+work in progress and the
+[`daily-drive` queue](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20is%3Aopen%20label%3Adaily-drive)
+for current daily-use priorities.
 
-It has been checked on the hardware at commit `dfc95ce`, on a desktop with an
-NVIDIA RTX 3070 and on a Microsoft Surface Pro 7 (Intel Ice Lake), both on
-Fedora 44. QML on the GPU, animations, the screens going off when idle,
-`swaylock`, and the Caps Lock and layout pill all work there. On the Surface
-Pro 7 the screen also went off when the lid closed, though Solium has no lid
-handling of its own. Touch reaches applications, but not what Solium draws
-([#181](https://github.com/Lilium-Linux/solium/issues/181)).
+## Implemented
 
-The first release, v0.1.0, will be a preview release, cut only once the
-desktop is daily-drivable (the `daily-drive` label), the native preview shell
-is written (a bar at the bottom, a dock at the top, quick search, desktop
-icons, widgets with real data and a native lock screen), and there are
-packages: the point where it is ready for an open beta. [The road to a public
-preview](beta.md) is that road.
+- Floating, dwindle tiling, scrolling and overview; workspaces and layouts per
+  monitor, with animated presentation and XWayland support.
+- Reloadable Lua configuration, QML frames and hosted desktop scenes, plus
+  effect folders written in Lua and GLSL.
+- A default preview shell with a bottom bar, top dock, application/window
+  search and live desktop icons. It can be disabled or replaced.
+- Multiple outputs, hotplug, scaling and screen power; keyboard layouts,
+  per-device libinput settings and cursor themes.
+- Session-lock with external lockers, idle inhibition, logind lock/sleep
+  handling and installed-session integration with systemd and XDG autostart.
+- Checkout installation and a Fedora 44 RPM build script.
 
-The pages in this section are the longer view:
+Implemented features can still have correctness and compatibility issues.
+[Known limitations](gaps.md) names affected workflows, including IMEs,
+clipboard managers, compositor touch, explicit sync, multi-GPU and portals.
 
-- [Roadmap](roadmap.md): the epics, in the order they depend on each other.
-- [Everything not built yet](gaps.md): the whole list of what is missing.
-- [The road to a public preview](beta.md): what has to be true first.
+## Validation and remaining risk
+
+Earlier hardware checks at commit `dfc95ce` covered an NVIDIA RTX 3070 desktop
+and a Microsoft Surface Pro 7 with Intel Ice Lake graphics, both on Fedora 44.
+Those checks observed QML GPU rendering, animation, idle screen-off, swaylock
+and the keyboard indicator. They are evidence for that revision and those
+machines, not certification of current `stage` or other hardware.
+
+Long hardware soaks, suspend/resume and real application use still need to
+establish reliability. Nested tests cover compositor behavior but cannot prove
+device input, GPU pacing or power-management behavior. A crash can end the
+whole session.
+
+## Where to go next
+
+| Need | Page |
+|---|---|
+| Try it | [README setup](../README.md#building) |
+| Understand compatibility | [Known limitations](gaps.md) |
+| Understand future work | [Roadmap](roadmap.md) |
+| Check release requirements | [Public preview criteria](beta.md) |
+| Help develop it | [Contributing](../CONTRIBUTING.md) |

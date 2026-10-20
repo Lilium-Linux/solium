@@ -160,7 +160,7 @@ SOLIUM_LOGIND_BUS=<address>
 ## Hosting a shell
 
 A shell is loaded as configuration, with `shell = { scene = ... }`; see
-[Where Solium ends and Lilium begins](../../docs/shell-boundary.md). These
+[Shell hosting and integration](../../docs/shell-boundary.md). These
 change that for one run, and `dev/run-shell.sh` sets both.
 
 SOLIUM_SHELL_SCENE=<file.qml>
