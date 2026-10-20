@@ -1061,6 +1061,20 @@ impl Decoration {
         }
     }
 
+    /// Whether a control claims the finger's point. Pointer hover is separate:
+    /// another mouse may be over a different button while this finger drags.
+    pub(crate) fn touch_claims(&self, x: f64, y: f64) -> bool {
+        self.layers.iter().any(|layer| {
+            layer
+                .scene
+                .hit(
+                    x + f64::from(layer.bleed.left),
+                    y + f64::from(layer.bleed.top),
+                )
+                .claims(crate::qml::hosted::Asking::Press)
+        })
+    }
+
     /// Fingers use the layer's own scene coordinates, including its bleed,
     /// just as the pointer does.
     pub(crate) fn touch(&mut self, x: f64, y: f64, event: &crate::qml::hosted::SceneTouch) {

@@ -29,6 +29,12 @@ use crate::state::Solium;
 /// Drags a window with the pointer until the button is released.
 pub(crate) struct MoveGrab {
     start_data: GrabStartData<Solium>,
+    drag: MoveDrag,
+}
+
+/// Position maths shared by the pointer and each independently held finger.
+#[derive(Clone, Debug)]
+pub(crate) struct MoveDrag {
     window: Window,
     /// Pointer-to-window-origin offset, captured when the grab starts.
     ///
@@ -43,12 +49,33 @@ impl MoveGrab {
         window: Window,
         window_location: Point<i32, Logical>,
     ) -> Self {
-        let offset = window_location.to_f64() - start_data.location;
+        let drag = MoveDrag::new(window, window_location, start_data.location);
+        Self { start_data, drag }
+    }
+}
+
+impl MoveDrag {
+    pub(crate) fn new(
+        window: Window,
+        window_location: Point<i32, Logical>,
+        from: Point<f64, Logical>,
+    ) -> Self {
         Self {
-            start_data,
             window,
-            offset,
+            offset: window_location.to_f64() - from,
         }
+    }
+
+    pub(crate) fn to(&self, state: &mut Solium, at: Point<f64, Logical>) {
+        let location = (at + self.offset).to_i32_round();
+        // Keep the stacking order alone: dragging does not restack.
+        state
+            .space
+            .map_element(self.window.clone(), location, false);
+    }
+
+    pub(crate) fn finish(&self, state: &mut Solium, at: Point<f64, Logical>) {
+        state.pending_drop = Some((self.window.clone(), at.x, at.y));
     }
 }
 
@@ -68,9 +95,7 @@ impl PointerGrab<Solium> for MoveGrab {
         // cursor.
         handle.motion(data, None, event);
 
-        let location = (event.location + self.offset).to_i32_round();
-        // `false` keeps the stacking order alone — a drag should not restack.
-        data.space.map_element(self.window.clone(), location, false);
+        self.drag.to(data, event.location);
     }
 
     fn relative_motion(
@@ -103,7 +128,7 @@ impl PointerGrab<Solium> for MoveGrab {
             // and the compositor would stop, holding the screen. `input::handle`
             // picks this up once the grab has returned.
             let at = handle.current_location();
-            data.pending_drop = Some((self.window.clone(), at.x, at.y));
+            self.drag.finish(data, at);
             // `true` restores focus to whatever is under the cursor now: the
             // window was dragged out from under the pointer, and leaving focus
             // where the drag started would strand it.

@@ -139,6 +139,12 @@ pub(crate) fn cursor(edges: ResizeEdge) -> CursorIcon {
 /// Resizes a window with the pointer until the button is released.
 pub(crate) struct ResizeGrab {
     start_data: GrabStartData<Solium>,
+    drag: ResizeDrag,
+}
+
+/// A resize's geometry, shared by independently captured pointer and touch.
+#[derive(Clone, Debug)]
+pub(crate) struct ResizeDrag {
     window: Window,
     edges: ResizeEdge,
     /// The window's rectangle when the drag began.
@@ -189,15 +195,30 @@ impl ResizeGrab {
         began: Rectangle<i32, Logical>,
         laid_out: LaidOut,
     ) -> Self {
-        let from = start_data.location;
+        let drag = ResizeDrag::new(window, edges, began, laid_out, start_data.location);
+        Self { start_data, drag }
+    }
+}
+
+impl ResizeDrag {
+    pub(crate) fn new(
+        window: Window,
+        edges: ResizeEdge,
+        began: Rectangle<i32, Logical>,
+        laid_out: LaidOut,
+        from: Point<f64, Logical>,
+    ) -> Self {
         Self {
-            start_data,
             window,
             edges,
             began,
             laid_out,
             from,
         }
+    }
+
+    pub(crate) fn finish(&self, state: &mut Solium) {
+        state.release_resize(&self.window);
     }
 }
 
@@ -521,15 +542,8 @@ pub(crate) fn drag_rect(
     limited(resized(began, edges, from, now), edges, least, most)
 }
 
-impl PointerGrab<Solium> for ResizeGrab {
-    fn motion(
-        &mut self,
-        data: &mut Solium,
-        handle: &mut PointerInnerHandle<'_, Solium>,
-        _focus: Option<(WlSurface, Point<f64, Logical>)>,
-        event: &MotionEvent,
-    ) {
-        handle.motion(data, None, event);
+impl ResizeDrag {
+    pub(crate) fn to(&self, data: &mut Solium, location: Point<f64, Logical>) {
         // Recorded, not applied. A layout may want this to move a seam rather
         // than change one window's size, and asking it from in here would call
         // a script while the seat holds the pointer's lock — the deadlock the
@@ -545,7 +559,7 @@ impl PointerGrab<Solium> for ResizeGrab {
         // (#113); `edge_at` is where the layout's *seam* should go, and it is
         // built from the layout's own rectangle rather than from `wanted`,
         // which is in the client's space and already floored. The layout used
-        // to be handed `event.location` here, which is the whole of #124. See
+        // to be handed `location` here, which is the whole of #124. See
         // [`dragged_edge`].
         //
         // `wanted` is held to what the client accepts before anything reads
@@ -556,14 +570,27 @@ impl PointerGrab<Solium> for ResizeGrab {
             self.began,
             self.edges,
             self.from,
-            event.location,
+            location,
         );
         data.pending_resize = Some(crate::state::ResizeRequest {
             window: self.window.clone(),
             wanted,
-            edge_at: dragged_edge(self.laid_out, self.edges, self.from, event.location),
+            edge_at: dragged_edge(self.laid_out, self.edges, self.from, location),
             edges: self.edges,
         });
+    }
+}
+
+impl PointerGrab<Solium> for ResizeGrab {
+    fn motion(
+        &mut self,
+        data: &mut Solium,
+        handle: &mut PointerInnerHandle<'_, Solium>,
+        _focus: Option<(WlSurface, Point<f64, Logical>)>,
+        event: &MotionEvent,
+    ) {
+        handle.motion(data, None, event);
+        self.drag.to(data, event.location);
     }
 
     fn relative_motion(
@@ -691,7 +718,7 @@ impl PointerGrab<Solium> for ResizeGrab {
     /// where the pointer is would deadlock here — see `Solium::pending_drop`
     /// for the version of that lesson that cost a frozen compositor.
     fn unset(&mut self, data: &mut Solium) {
-        data.release_resize(&self.window);
+        self.drag.finish(data);
     }
 }
 

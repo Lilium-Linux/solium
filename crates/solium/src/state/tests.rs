@@ -31501,6 +31501,235 @@ end)
                 );
             }
 
+            fn with_touch_window(
+                framed: bool,
+                run: impl FnOnce(&mut Desk, &Opened, Window, Rectangle<i32, Logical>) + Send + 'static,
+            ) {
+                crate::qml::qt_test::on_the_qt_thread(move || {
+                    crate::qml::start().expect("Qt starts");
+                    let mut desk = Desk::new();
+                    let opened = desk.open_surface();
+                    let window = desk
+                        .state
+                        .panes
+                        .get(opened.pane)
+                        .and_then(Pane::client)
+                        .cloned()
+                        .expect("client");
+                    let _buffer = super::super::commit_buffer(
+                        &desk.client,
+                        &desk.qh,
+                        &opened.surface,
+                        400,
+                        300,
+                    );
+                    desk.pump();
+                    desk.state
+                        .space
+                        .map_element(window.clone(), (100, 100), false);
+                    desk.state.space.refresh();
+                    if framed {
+                        desk.state
+                            .decorations
+                            .set_style(&mut desk.state.panes, Some("top".into()));
+                        desk.state
+                            .decorations
+                            .insert(&mut desk.state.panes, opened.pane, 400, 300);
+                        let values = crate::decoration::Values::default();
+                        let decoration = desk
+                            .state
+                            .panes
+                            .get_mut(opened.pane)
+                            .and_then(Pane::decoration_mut)
+                            .expect("shipped frame");
+                        decoration.tell_as_a_frame_would(
+                            &crate::decoration::Look {
+                                title: "touch",
+                                app_id: "",
+                                focused: true,
+                                pointer_inside: false,
+                                caret: None,
+                                values: &values,
+                            },
+                            400,
+                            332,
+                        );
+                        assert!(!decoration.rendered_layers().is_empty());
+                    }
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    let before = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    run(&mut desk, &opened, window, before);
+                });
+            }
+
+            #[test]
+            fn a_finger_on_a_border_resizes_the_window_through_client_commit() {
+                with_touch_window(false, |desk, opened, _, before| {
+                    let region = region(desk);
+                    let at = (
+                        f64::from(before.loc.x + before.size.w - 1),
+                        f64::from(before.loc.y + before.size.h / 2),
+                    );
+                    assert!(
+                        matches!(desk.state.chrome_under(at.into()), Some(under) if matches!(under.chrome, crate::state::Chrome::Resize(_)))
+                    );
+                    crate::synth::touch_down(&mut desk.state, region, 0, at, 10_000);
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (at.0 + 100.0, at.1),
+                        20_000,
+                    );
+                    crate::synth::touch_up(&mut desk.state, region, 0, 30_000);
+                    desk.state.settle_resize();
+                    let wanted =
+                        Rectangle::new(before.loc, (before.size.w + 100, before.size.h).into());
+                    assert_eq!(
+                        desk.state.pane_outer_of(opened.pane),
+                        Some(wanted),
+                        "finger moves the held outer rectangle before the client answers"
+                    );
+                    let _buffer = super::super::commit_buffer(
+                        &desk.client,
+                        &desk.qh,
+                        &opened.surface,
+                        wanted.size.w,
+                        wanted.size.h,
+                    );
+                    desk.pump();
+                    desk.state.settle_resize();
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(wanted));
+                    assert!(
+                        desk.state.resize_hold.is_none(),
+                        "the client's answer reconciles the hold"
+                    );
+                });
+            }
+
+            #[test]
+            fn a_finger_moves_a_titlebar_while_the_pointer_hovers_a_button() {
+                with_touch_window(true, |desk, opened, window, before| {
+                    let region = region(desk);
+                    move_pointer(
+                        &mut desk.state,
+                        (
+                            f64::from(before.loc.x + before.size.w) - 18.5,
+                            f64::from(before.loc.y) + 16.0,
+                        ),
+                        10_000,
+                    );
+                    let at = (
+                        f64::from(before.loc.x) + 100.0,
+                        f64::from(before.loc.y) + 16.0,
+                    );
+                    let origin = desk
+                        .state
+                        .space
+                        .element_location(&window)
+                        .expect("window origin");
+                    crate::synth::touch_down(&mut desk.state, region, 0, at, 20_000);
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (at.0 + 100.0, at.1 + 50.0),
+                        30_000,
+                    );
+                    crate::synth::touch_up(&mut desk.state, region, 0, 40_000);
+                    assert_eq!(
+                        desk.state.space.element_location(&window),
+                        Some(origin + Point::from((100, 50)))
+                    );
+                    assert!(!desk.state.seat.get_pointer().expect("pointer").is_grabbed());
+                    desk.ask();
+                    assert!(!desk.client.closes.contains(&opened.toplevel.id()));
+                });
+            }
+
+            #[test]
+            fn a_finger_on_a_tiled_seam_moves_the_seam() {
+                with_touch_window(false, |desk, opened, _, _| {
+                    let other = desk.open_surface();
+                    desk.arrange("tiling", "");
+                    desk.answer(opened);
+                    desk.answer(&other);
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    let mut panes = [
+                        (opened.pane, desk.placed(opened.pane)),
+                        (other.pane, desk.placed(other.pane)),
+                    ];
+                    panes.sort_by_key(|(_, area)| area.loc.x);
+                    let (left, a) = panes[0];
+                    let (right, b) = panes[1];
+                    let at = (
+                        f64::from(a.loc.x + a.size.w - 1),
+                        f64::from(a.loc.y + a.size.h / 2),
+                    );
+                    assert!(
+                        matches!(desk.state.chrome_under(at.into()), Some(under) if under.pane == left && matches!(under.chrome, crate::state::Chrome::Resize(_)))
+                    );
+                    let region = region(desk);
+                    crate::synth::touch_down(&mut desk.state, region, 0, at, 10_000);
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (at.0 + 100.0, at.1),
+                        20_000,
+                    );
+                    desk.state.settle_resize();
+                    crate::synth::touch_up(&mut desk.state, region, 0, 30_000);
+                    desk.state.settle_resize();
+                    let (after_a, after_b) = (desk.placed(left), desk.placed(right));
+                    assert_eq!(after_a.size.w, a.size.w + 100);
+                    assert_eq!(after_b.loc.x, b.loc.x + 100);
+                    assert_eq!(after_a.loc.x, a.loc.x);
+                    assert_eq!(after_b.loc.x + after_b.size.w, b.loc.x + b.size.w);
+                });
+            }
+
+            #[test]
+            fn a_touch_resize_never_grabs_the_pointer_and_ends_when_its_finger_lifts() {
+                with_touch_window(false, |desk, opened, _, before| {
+                    let region = region(desk);
+                    let at = (
+                        f64::from(before.loc.x + before.size.w - 1),
+                        f64::from(before.loc.y + before.size.h / 2),
+                    );
+                    crate::synth::touch_down(&mut desk.state, region, 0, at, 10_000);
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (at.0 + 100.0, at.1),
+                        20_000,
+                    );
+                    desk.state.settle_resize();
+                    let wanted = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    assert_eq!(wanted.size.w, before.size.w + 100);
+                    assert!(!desk.state.seat.get_pointer().expect("pointer").is_grabbed());
+                    move_pointer(&mut desk.state, (1100.0, 800.0), 30_000);
+                    desk.state.settle_resize();
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(wanted));
+                    crate::synth::touch_up(&mut desk.state, region, 0, 40_000);
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (at.0 + 200.0, at.1),
+                        50_000,
+                    );
+                    move_pointer(&mut desk.state, (1200.0, 900.0), 60_000);
+                    desk.state.settle_resize();
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(wanted));
+                });
+            }
+
             // Keep the entire Wayland fixture on Qt's executor: a scene and
             // its destructor must run on the thread that owns QGuiApplication.
             fn with_real_touch_scene(

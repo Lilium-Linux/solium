@@ -6,8 +6,10 @@
 use smithay::{
     backend::input::TouchSlot,
     input::touch::{DownEvent, MotionEvent, UpEvent},
-    utils::{Logical, Point, SERIAL_COUNTER},
+    utils::{Logical, Point, SERIAL_COUNTER, Serial},
 };
+
+use super::{grab::MoveDrag, resize::ResizeDrag};
 
 use crate::{
     pane::{Pane, PaneId},
@@ -22,6 +24,8 @@ pub(crate) enum TouchTarget {
     Grab(ScenePress),
     Scene(ScenePress),
     Frame(PaneId),
+    Move(MoveDrag),
+    Resize(ResizeDrag),
     Client,
     Swallowed,
 }
@@ -33,7 +37,7 @@ pub(crate) struct Contact {
     location: Point<f64, Logical>,
 }
 
-fn target(state: &mut Solium, location: Point<f64, Logical>) -> TouchTarget {
+fn target(state: &mut Solium, location: Point<f64, Logical>, serial: Serial) -> TouchTarget {
     if state.lock.is_some() {
         return TouchTarget::Lock;
     }
@@ -70,9 +74,39 @@ fn target(state: &mut Solium, location: Point<f64, Logical>) -> TouchTarget {
     // A client's layer above the windows occludes their frames too.
     if !state.client_above(location)
         && let Some(under) = state.chrome_under(location)
-        && matches!(under.chrome, Chrome::Frame)
     {
-        return TouchTarget::Frame(under.pane);
+        match under.chrome {
+            Chrome::Frame => {
+                let control = state
+                    .panes
+                    .get(under.pane)
+                    .and_then(Pane::decoration)
+                    .is_some_and(|decoration| {
+                        decoration.touch_claims(under.local.x, under.local.y)
+                    });
+                if let Some(window) = under.window {
+                    state.focus_window(&window, serial, crate::script::FocusSource::Touch);
+                    if !control && let Some(geometry) = state.real_geometry(&window) {
+                        return TouchTarget::Move(MoveDrag::new(window, geometry.loc, location));
+                    }
+                }
+                return TouchTarget::Frame(under.pane);
+            }
+            Chrome::Resize(edges) => {
+                if let Some(window) = under.window {
+                    state.focus_window(&window, serial, crate::script::FocusSource::Touch);
+                    // Reconcile an earlier hold before freezing either base,
+                    // in the same order as the pointer's resize grab.
+                    let began = state.begin_resize(&window).unwrap_or(under.outer);
+                    let laid_out = state
+                        .pane_laid_out(&window)
+                        .unwrap_or(super::resize::LaidOut(began));
+                    return TouchTarget::Resize(ResizeDrag::new(
+                        window, edges, began, laid_out, location,
+                    ));
+                }
+            }
+        }
     }
     if let Some((output, surface, area)) = state.surface_claiming(false, location, Asking::Press) {
         return TouchTarget::Scene(ScenePress {
@@ -85,8 +119,8 @@ fn target(state: &mut Solium, location: Point<f64, Logical>) -> TouchTarget {
 }
 
 pub(crate) fn down(state: &mut Solium, slot: TouchSlot, location: Point<f64, Logical>, time: u32) {
-    let target = target(state, location);
     let serial = SERIAL_COUNTER.next_serial();
+    let target = target(state, location, serial);
     match &target {
         TouchTarget::Client | TouchTarget::Lock => {
             let under = state.touch_under(location);
@@ -278,6 +312,21 @@ fn deliver(
                 }
             }
         }
+        TouchTarget::Move(drag) => match kind {
+            TouchKind::Motion => drag.to(state, location),
+            TouchKind::Up => {
+                drag.finish(state, location);
+                if let Some((window, x, y)) = state.pending_drop.take() {
+                    state.trigger_drop(&window, x, y);
+                }
+            }
+            TouchKind::Down | TouchKind::Cancel => {}
+        },
+        TouchTarget::Resize(drag) => match kind {
+            TouchKind::Motion => drag.to(state, location),
+            TouchKind::Up | TouchKind::Cancel => drag.finish(state),
+            TouchKind::Down => {}
+        },
         TouchTarget::Client | TouchTarget::Lock | TouchTarget::Swallowed => {}
     }
     state.redraw = true;
