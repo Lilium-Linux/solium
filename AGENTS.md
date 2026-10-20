@@ -55,6 +55,10 @@ cannot do it itself.
 | format | `cargo fmt --all` |
 | build the documentation site | `dev/docs.sh` |
 
+The gate also builds the documentation site as CI publishes it, so a doc
+comment that links a renamed or test-only function fails it: link only what a
+normal build compiles, and name the rest in backticks.
+
 In the image, cargo runs inside `podman run`; dev/README.md, "Building", has
 the line. One test can fail under load
 ([#176](https://github.com/Lilium-Linux/solium/issues/176)); dev/README.md,
@@ -119,6 +123,17 @@ Most review findings are one of these.
 - **Keys work under any layout.** A change to key handling is tested with a
   `us,ru` keymap switched to Russian, where `super+q` arrives as
   `super+Cyrillic_shorti`.
+- **QML is designed for the GPU.** Scenes render on the GPU by default, and
+  software is the fallback for machines whose GPU check fails. Design an
+  effect, a scene or a performance change for the GPU path first.
+- **One compositor for every form factor.** Phones, tablets, laptops and
+  desktops run the same binary. What differs between them, such as a launch
+  animation, a gesture or a bar, is configuration over generic primitives,
+  never a code path of its own (docs/architecture.md, "Form factors").
+- **Ready on the first frame.** The desktop is shown once its scenes and their
+  data are ready, within a bounded wait (`startup.first_frame`), so nothing
+  pops in after login. A new scene on the desktop joins that wait rather than
+  appearing later.
 - **Decide, do not defer.** Nothing ships switched off "until it is decided",
   and nothing half-finished is kept "for later": finish it, or remove it with
   its tests and its documentation.
