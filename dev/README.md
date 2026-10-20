@@ -99,11 +99,16 @@ runs is what is checked out.
 ### The gate
 
 `dev/gate.sh` checks the formatting with `cargo fmt --check`, then runs clippy
-with warnings denied, the tests and a build, then two checks on the built
-binaries that nothing else reaches: `solium --check`, which loads the Lua
-configuration and builds the scenes it declares, and `dev/wirecheck`, which
-drives the QML GPU path against the machine's own render node. Run
-`cargo fmt --all` first if the formatting step fails. It runs cargo natively
+with warnings denied, the tests and a build, then three checks that nothing
+else reaches: `solium --check`, which loads the Lua configuration and builds
+the scenes it declares; `dev/docs.sh`, which builds the documentation site as
+CI publishes it, with every intra-doc link resolved and every link in the book
+checked; and `dev/wirecheck`, which drives the QML GPU path against the
+machine's own render node. Run `cargo fmt --all` first if the formatting step
+fails. The documentation step runs in the same image, with the same jobs, CPUs
+and podman arguments as the build; a doc comment linking a function that was
+since renamed or made test-only fails there, which is how the published site
+stopped updating for two weeks in October 2026 (#265). It runs cargo natively
 unless told otherwise:
 
 | Variable | Effect |

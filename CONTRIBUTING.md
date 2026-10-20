@@ -62,9 +62,11 @@ dev/gate.sh
 
 It checks the formatting (`cargo fmt --check`; `cargo fmt --all` fixes it),
 then runs clippy with every warning denied, the tests, a build, then
-`solium --check` (the Lua configuration loads) and `dev/wirecheck` (the QML GPU
-path against your machine's render node, skipped if there is none). It exits
-non-zero if anything fails, and a pull request is expected to pass it.
+`solium --check` (the Lua configuration loads), `dev/docs.sh` (the
+documentation site builds, every doc link resolves, as CI publishes it) and
+`dev/wirecheck` (the QML GPU path against your machine's render node, skipped
+if there is none). It exits non-zero if anything fails, and a pull request is
+expected to pass it.
 
 It runs cargo natively. On Fedora without the development packages, it can
 build in an image of your Fedora release instead (`FEDORA_VERSION` in
@@ -251,8 +253,8 @@ proposing a helper process.
 
 The docs are also a website, <https://lilium-linux.github.io/solium/>, built
 with [mdBook](https://rust-lang.github.io/mdBook/) and published from `stage`
-by `.github/workflows/docs.yml`. Every pull request builds it as well, so a
-broken link inside it fails CI.
+by `.github/workflows/docs.yml`. Every pull request builds it as well, and so
+does `dev/gate.sh`, so a broken link inside it fails CI and the gate.
 
 ```sh
 dev/docs.sh             # build it into target/book, and check its links

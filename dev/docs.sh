@@ -33,6 +33,9 @@
 #                                   used when this is not set.
 #   SOLIUM_DOCS_PODMAN_ARGS=<args>  extra arguments for `podman run`.
 #   SOLIUM_DOCS_JOBS=<n>            cargo -j<n>.
+#   SOLIUM_DOCS_CPUS=<list>         pin the build to these CPUs (a taskset
+#                                   list, e.g. 14,15), as dev/gate.sh's
+#                                   SOLIUM_GATE_CPUS does.
 #   SOLIUM_DOCS_PORT=<port>         the port --serve listens on; 3000.
 #   SOLIUM_DOCS_REV=<commit>        the commit the pages' line links point at:
 #                                   GITHUB_SHA in CI, and the checkout's HEAD
@@ -68,7 +71,7 @@ serve=""
 for argument in "$@"; do
     case "$argument" in
         --serve) serve=1 ;;
-        -h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "docs.sh: unknown argument $argument (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -103,6 +106,7 @@ if [[ -n "$image" && -z "${SOLIUM_DOCS_INSIDE:-}" ]]; then
         -e HOME=/tmp -e SOLIUM_DOCS_INSIDE=1 \
         -e SOLIUM_DOCS_TOOLS="$tools" -e SOLIUM_DOCS_PORT="$port" \
         -e SOLIUM_DOCS_JOBS="${SOLIUM_DOCS_JOBS:-}" -e SOLIUM_DOCS_REV="$rev" \
+        -e SOLIUM_DOCS_CPUS="${SOLIUM_DOCS_CPUS:-}" \
         -e SOLIUM_DOCS_FILES="$files" \
         -e CARGO_HOME="$cargo_home" -e RUSTUP_HOME="$rustup_home" \
         -e PATH="$cargo_home/bin:/usr/local/bin:/usr/bin:/bin" \
@@ -117,6 +121,9 @@ polite=(nice -n 19)
 if command -v ionice >/dev/null 2>&1; then
     polite+=(ionice -c 3)
 fi
+if [[ -n "${SOLIUM_DOCS_CPUS:-}" ]]; then
+    polite+=(taskset -c "$SOLIUM_DOCS_CPUS")
+fi
 jobs=()
 if [[ -n "${SOLIUM_DOCS_JOBS:-}" ]]; then
     jobs=(-j "$SOLIUM_DOCS_JOBS")
@@ -126,7 +133,10 @@ fail() { echo "DOCS FAILED: $*" >&2; exit 1; }
 command -v python3 >/dev/null || fail "python3 is not installed"
 
 echo "compositor..."
-"${polite[@]}" cargo build -p solium "${jobs[@]}" || fail "cargo build -p solium"
+# The whole workspace, as dev/gate.sh builds it, so in the gate this finds it
+# built. `-p solium` would select other features of the shared dependencies,
+# and so build all of them, and the compositor, a second time.
+"${polite[@]}" cargo build "${jobs[@]}" || fail "cargo build"
 
 echo "rustdoc..."
 # A doc link that resolves to nothing is an error, as a broken link in the book
