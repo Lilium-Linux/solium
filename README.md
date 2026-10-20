@@ -208,6 +208,9 @@ podman build -t solium-build:fc44 -f dev/Containerfile dev/
 SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 dev/gate.sh
 ```
 
+In a clone, `dev/setup.sh` checks all of this for you, builds the image when
+the packages are missing, and installs the project's git hooks.
+
 `dev/gate.sh` builds and runs every check; [dev/README.md](dev/README.md#building)
 has the plain `podman run` for a build on its own, and
 [CONTRIBUTING.md](CONTRIBUTING.md) has the rest of what a change needs.

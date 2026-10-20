@@ -1,0 +1,12 @@
+#!/bin/sh
+# Strip AI co-author trailers and "generated with" footers from a commit
+# message: Solium's history carries no AI attribution (AGENTS.md, "Commits and
+# pull requests"). dev/setup.sh installs it; a clone's hooks are shared by all
+# of its worktrees.
+msg="$1"
+tmp="$msg.solium-strip.$$"
+grep -viE '^[[:space:]]*co-authored-by:.*(claude|codex|openai|copilot|chatgpt|gpt-[0-9]|gemini|anthropic|cursor agent)' "$msg" \
+  | grep -viE '(🤖[[:space:]]*)?generated (with|by) \[?(claude|codex|copilot|chatgpt)' > "$tmp" || true
+# Drop trailing blank lines left behind.
+awk 'NF{for(;b>0;b--)print "";print;next}{b++}' "$tmp" > "$msg"
+rm -f "$tmp"

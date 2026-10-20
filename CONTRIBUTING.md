@@ -4,6 +4,9 @@ Thank you for wanting to help. This file says how work gets into Solium: where
 it goes, how to build and check it, how to write the commits, and the design
 rules a change is judged against.
 
+Working with a coding agent? [AGENTS.md](AGENTS.md) is the short version of
+this file and of the documents it points to, written for agents to read first.
+
 Report security problems privately, not as issues: see [SECURITY.md](SECURITY.md).
 Everyone taking part is expected to follow the [code of
 conduct](CODE_OF_CONDUCT.md).
@@ -35,6 +38,10 @@ conduct](CODE_OF_CONDUCT.md).
    The maintainer merges; please do not merge your own pull request.
 
 ## Building
+
+After cloning, run `dev/setup.sh` once. It checks Rust and the packages below,
+builds the Fedora build image when they are missing (see *The gate*), installs
+the project's git hooks, and says what to install when it cannot do it itself.
 
 The README's [Building](README.md#building) section lists the packages for
 each distribution. In short: Rust 1.88 or newer (edition 2024), a C++17
@@ -100,6 +107,9 @@ reproduces the bug.
   issue it belongs to: `#115: the layouts take each window's own floor`. A
   follow-up from review says so: `#115 review: small corrections`.
 - The body says why. The diff already says what.
+- No AI attribution: no `Co-Authored-By` trailer naming an AI tool, and no
+  "Generated with" footer, in commits or pull requests. The `commit-msg` hook
+  `dev/setup.sh` installs strips them from commits.
 - Comments describe the code as it is, not how it got there. A comment that
   stops being true when the code changes is changed with it.
 

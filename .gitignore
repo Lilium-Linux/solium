@@ -31,6 +31,12 @@ __pycache__/
 .env.*
 *.local.*
 
+# Coding agents' per-user settings and plan workspaces. AGENTS.md and
+# CLAUDE.md are the project's own and are committed.
+.claude/settings.local.json
+.superpowers/
+docs/superpowers/
+
 # Editors and operating systems.
 .idea/
 .vscode/
