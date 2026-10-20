@@ -1,4 +1,6 @@
-<img src="docs/brand/logotype.svg" width="160" alt="Solium">
+<p align="center">
+  <img src="docs/brand/logotype.svg" width="320" alt="Solium">
+</p>
 
 # Solium
 
