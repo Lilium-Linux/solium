@@ -49,6 +49,23 @@ use std::collections::HashMap;
 
 use smithay::backend::input::{Device as BackendDevice, DeviceCapability};
 use smithay::reexports::input::{AccelProfile, DeviceConfigResult, ScrollMethod, TapButtonMap};
+use smithay::utils::{Logical, Rectangle};
+
+/// The screen an absolute device measures its positions against (#42).
+/// A missing or disconnected connector falls back to the first screen.
+pub(crate) fn absolute_region<'a>(
+    wanted: Option<&str>,
+    screens: impl IntoIterator<Item = (&'a str, Rectangle<i32, Logical>)>,
+) -> Option<Rectangle<i32, Logical>> {
+    let mut first = None;
+    for (name, region) in screens {
+        if wanted == Some(name) {
+            return Some(region);
+        }
+        first.get_or_insert(region);
+    }
+    first
+}
 
 /// What kind of device libinput handed us, by capability.
 ///
@@ -510,6 +527,41 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An absolute device lands on its named connector, with the first screen
+    /// as the fallback when no connected connector matches (#42).
+    #[test]
+    fn an_absolute_device_lands_on_the_screen_it_names_else_the_first() {
+        use smithay::utils::Rectangle;
+
+        let screens = [
+            ("DP-2", Rectangle::new((0, 0).into(), (2560, 1440).into())),
+            (
+                "eDP-1",
+                Rectangle::new((0, 1440).into(), (1920, 1080).into()),
+            ),
+        ];
+        assert_eq!(
+            super::absolute_region(Some("eDP-1"), screens),
+            Some(screens[1].1),
+            "bound to the laptop panel"
+        );
+        assert_eq!(
+            super::absolute_region(None, screens),
+            Some(screens[0].1),
+            "bound to nothing"
+        );
+        assert_eq!(
+            super::absolute_region(Some("HDMI-A-1"), screens),
+            Some(screens[0].1),
+            "bound to a screen that is not connected"
+        );
+        assert_eq!(
+            super::absolute_region(Some("DP-2"), []),
+            None,
+            "no screens at all"
+        );
+    }
 
     /// A device no test ever has to open an evdev node for: capabilities set
     /// by hand, a name and a usb id given up front. Stands in for
