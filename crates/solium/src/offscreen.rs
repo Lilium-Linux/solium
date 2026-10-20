@@ -404,7 +404,7 @@ pub(crate) fn over_job(
 
 /// One monitor's xray cut: `source`'s entries drawn at their places, the
 /// monitor's corner at (0, 0), at its scale times `xray.scale`, keyed on
-/// what it is drawn from so it is redrawn only when that differs ([fx0]
+/// what it is drawn from so it is redrawn only when that differs (\[fx0\]
 /// Ruling 9). Each entry is drawn by `render::stacked_elements`, as
 /// `render::elements` draws it; an xray holds no pane (Ruling F29), the
 /// one entry a pass's `Prepared` is read for, so none is handed in.

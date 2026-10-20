@@ -174,7 +174,7 @@ impl<P> Loaded<P> {
         Self::load_with(name, dir, Caps::default())
     }
 
-    /// [`Self::load`], its Lua made with `caps` (`effects.sandbox`):
+    /// `Self::load`, its Lua made with `caps` (`effects.sandbox`):
     /// `tests::a_mesh_stopped_at_load_names_its_budget_and_key`.
     pub(crate) fn load_with(name: &str, dir: &Path, caps: Caps) -> Result<Self, Problem> {
         let file = dir.join("effect.lua");
@@ -628,7 +628,7 @@ impl<P: Clone> Host<P> {
         self.reload_keeping(Vec::new());
     }
 
-    /// [`Self::reload`], `sol.present` keeping `live`, the names a geometry
+    /// `Self::reload`, `sol.present` keeping `live`, the names a geometry
     /// still draws with: an unchanged one keeps its version and its id
     /// (Ruling 7: an unrelated reload rebuilds nothing), and only one whose
     /// folder changed ends a present under way, by its `on_reload`.

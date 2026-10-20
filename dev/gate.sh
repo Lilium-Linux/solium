@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# fmt --check, clippy, tests, build, the Lua check and the QML GPU check. Exits
-# non-zero if any of them complains.
+# fmt --check, clippy, tests, build, the Lua check, the documentation site and
+# the QML GPU check. Exits non-zero if any of them complains.
 #
 # It exists because a clippy failure went into a commit three times in a row,
 # each time because the test line was read and the one above it was not. A
@@ -124,6 +124,20 @@ run "./target/debug/solium --check >/dev/null" \
 # compositor's GL objects, a buffer stored upside down -- and each of them
 # returned success from every call involved. There is nothing to notice by
 # looking. See dev/wirecheck/README.md.
+# The documentation site, exactly as CI publishes it: the Rust API with every
+# intra-doc link resolved, the pages generated from the code, the book and
+# every link in it. Nothing above reads a doc comment, and a merge reaches
+# `stage` without a pull request's CI, so a doc link to a renamed function
+# once kept the site from publishing for two weeks while every gate passed
+# (#265). dev/docs.sh builds in the same image, with the same limits; its
+# `cargo build` is the one above, so it costs the rustdoc pass and the book.
+echo "docs..."
+SOLIUM_DOCS_IMAGE="$image" SOLIUM_DOCS_JOBS="${SOLIUM_GATE_JOBS:-}" \
+    SOLIUM_DOCS_CPUS="${SOLIUM_GATE_CPUS:-}" \
+    SOLIUM_DOCS_PODMAN_ARGS="${SOLIUM_GATE_PODMAN_ARGS:-}" \
+    "$root/dev/docs.sh" \
+    || { echo "GATE FAILED: docs (dev/docs.sh)" >&2; exit 1; }
+
 echo "wirecheck..."
 # A source tarball leaves the harness out; the checks above are the whole gate
 # there.

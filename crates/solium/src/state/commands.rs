@@ -15,7 +15,7 @@ pub(super) const ATTEMPT_ROUNDS: usize = 16;
 /// inserting into `warned` as it goes, so a path seen on an earlier reload is
 /// not returned again.
 ///
-/// Split out the same way [`crate::autoreload::resolve_roots`] is split from
+/// Split out the same way `crate::autoreload::resolve_roots` is split from
 /// `watch_roots`: a test drives this with plain `PathBuf`s it makes up,
 /// rather than a real pane style or shell scene that would have to resolve
 /// against the filesystem to be worth anything.

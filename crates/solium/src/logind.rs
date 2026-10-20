@@ -22,7 +22,7 @@
 //! inhibitor for `"sleep"` at every moment the session is unlocked. On
 //! `PrepareForSleep(true)` it runs the locker the same way, and releases the
 //! inhibitor — which is what lets the machine actually suspend — the moment
-//! [`Solium::confirm_lock`] reaches the presentation-accurate `locked` event
+//! [`Solium::confirm_lock`](crate::state::Solium::confirm_lock) reaches the presentation-accurate `locked` event
 //! (`prepare_for_sleep_locks_before_the_inhibitor_is_released`), or when
 //! `InhibitDelayMaxUSec` runs out first, so a locker that never locks does not
 //! hold sleep for ever
