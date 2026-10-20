@@ -36,9 +36,6 @@ whether it is ready has not happened yet. What stands in the way is the
   hardware sometimes starts with no input devices and stops itself ([#48]).
 - Nothing has run unattended for hours on the hardware ([#65]).
 - There is no explicit sync, so Vulkan and NVIDIA clients can stutter ([#59]).
-- There are no touchpad settings, so no tap-to-click ([#157]); no volume,
-  brightness, media or screenshot keys by default ([#151]); and logind's lock
-  and sleep requests are ignored ([#153]).
 - There are no packages in a repository: a Fedora 44 package, or an install,
   is built from a checkout ([#66]).
 - Two tiling bugs found in use are fixed, and stay open until real use bears
@@ -98,7 +95,10 @@ suite.
   off too ([#54]); the ten-minute screen-off has been seen working on both
   machines named above.
 - **Input.** Keyboard layouts, with bindings that keep working under a
-  non-Latin one ([#132]) and on shifted keys ([#121]). Escape reaches
+  non-Latin one ([#132]) and on shifted keys ([#121]). The laptop's volume,
+  brightness, media and screenshot keys are bound by default ([#151]); a held
+  volume or brightness key repeats, and those and the media keys work at the
+  lock screen as well ([#224]). Escape reaches
   applications: the overview binds it only while it is open ([#174]). A small
   pill near the text field's caret says Caps Lock is on, or which layout you
   just switched to; it is written in Lua and QML as configuration rather than
@@ -570,8 +570,6 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#150]: https://github.com/Lilium-Linux/solium/issues/150
 [#151]: https://github.com/Lilium-Linux/solium/issues/151
 [#152]: https://github.com/Lilium-Linux/solium/issues/152
-[#153]: https://github.com/Lilium-Linux/solium/issues/153
-[#157]: https://github.com/Lilium-Linux/solium/issues/157
 [#161]: https://github.com/Lilium-Linux/solium/issues/161
 [#162]: https://github.com/Lilium-Linux/solium/issues/162
 [#163]: https://github.com/Lilium-Linux/solium/issues/163
@@ -585,3 +583,4 @@ other projects is listed, with its licence, in [THIRD_PARTY.md](THIRD_PARTY.md).
 [#178]: https://github.com/Lilium-Linux/solium/issues/178
 [#180]: https://github.com/Lilium-Linux/solium/issues/180
 [#181]: https://github.com/Lilium-Linux/solium/issues/181
+[#224]: https://github.com/Lilium-Linux/solium/issues/224

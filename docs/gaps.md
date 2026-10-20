@@ -91,7 +91,6 @@ Deliberately not, with reasons in [#79](https://github.com/Lilium-Linux/solium/i
 
 | | |
 |---|---|
-| [#151](https://github.com/Lilium-Linux/solium/issues/151) media keys | no volume, brightness, media, screenshot or lock keys are bound by default |
 | [#157](https://github.com/Lilium-Linux/solium/issues/157) libinput device settings | none are set: no tap-to-click, which libinput leaves off, so tapping a touchpad does nothing; no acceleration profile or speed, disable-while-typing, left-handed mode or middle-button emulation; and natural scrolling comes only from the form factor, for every device at once |
 
 ### The backend
