@@ -84,9 +84,15 @@ decides which output draws a window; `state/hit_test.rs` owns the hit test;
 their live item trees claim it, with explicit pointer grabs and keyboard
 requests. This lets windows remain interactive beneath unused shell regions.
 
-Touch currently reaches client surfaces. Frame controls, hosted scenes and
-other compositor UI do not yet have complete touch handling; this is a
-capability gap, not another presentation mode.
+Touch uses that same stacking order and live item hit test. Each slot captures
+its lock surface, hosted grab or scene, frame control, move/resize operation,
+script input grab or client at touch-down and keeps it until release or cancel.
+Compositor contacts never enter the client seat, and pointer capture remains
+independent. Hosted scenes and frame layers receive real Qt touch events;
+move/resize operations share the pointer's geometry and completion paths.
+Lua observes routed touch outside seat callbacks, with lock contacts excluded
+even when unlocking cancels them. System gesture recognition is separate work
+in [#252](https://github.com/Lilium-Linux/solium/issues/252).
 
 ## Rendering
 

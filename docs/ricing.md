@@ -906,6 +906,30 @@ left waiting.
 Nested, there is no display to power off: a monitor that is "off" is drawn
 black and then not drawn at all, so all of the above can be tried in a window.
 
+### Touch
+
+A finger operates the compositor's frame buttons and hosted QML controls.
+Touching a titlebar away from its controls moves the window; dragging a border
+resizes a floating window or moves a tiled seam through the layout's normal
+resize handling. The border uses the same hit region as the pointer.
+
+Each finger keeps the target chosen at touch-down until release or cancel,
+even outside that target's bounds. Mouse capture is independent. QML receives
+real touch events for `TapHandler`, `DragHandler` and `PinchHandler`; Qt Quick
+supplies mouse synthesis for `MouseArea` controls. Scene grabs use their usual
+outside-click policy, and lock-screen touches belong exclusively to the lock.
+
+Touch-to-focus follows the active input profile for client content. Frame
+moves and resizes focus their window, as their pointer equivalents do.
+
+Touchscreen output selection is tracked by
+[#42](https://github.com/Lilium-Linux/solium/issues/42): its
+`input.touchscreen.output` setting selects a connector, with per-device overrides
+in `input.devices`. Without an override, that work uses libinput's `WL_OUTPUT`
+binding, then the first connected output. It must be present in the build to
+validate a touchscreen with an external monitor; these UI changes alone do
+not establish hardware mapping accuracy.
+
 ### Touch events in Lua
 
 `sol.on("touch", function(event) end)` observes each finger after its input is
