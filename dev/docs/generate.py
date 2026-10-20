@@ -468,7 +468,9 @@ def normalise(combo):
 
 
 def check_output(solium):
-    """What `solium --check` prints for the shipped configuration alone."""
+    """What `solium --check` prints for the shipped configuration alone: every
+    combination, and what each one asked for beside its note -- "repeats while
+    held", "fires at the lock" -- where it asked for anything."""
     with tempfile.TemporaryDirectory() as home:
         environment = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -482,19 +484,23 @@ def check_output(solium):
         )
     if result.returncode != 0:
         sys.exit(f"generate: `solium --check` failed:\n{result.stdout}{result.stderr}")
-    combos, expected = [], None
+    combos, asked, expected = [], {}, None
     for line in result.stdout.splitlines():
         match = re.match(r"^\s+ok: (\d+) binding", line)
         if match:
             expected = int(match.group(1))
             continue
         if expected is not None and line.startswith("    "):
-            combos.append(line.split()[0])
+            combo = line.split()[0]
+            combos.append(combo)
+            options = re.search(r"\(([^()]*)\)\s*$", line)
+            if options:
+                asked[combo] = options.group(1)
         elif expected is not None and not line.startswith("    "):
             break
     if expected is None or len(combos) != expected:
         sys.exit(f"generate: could not read the bindings from `solium --check`:\n{result.stdout}")
-    return combos
+    return combos, asked
 
 
 BIND = re.compile(r'^\s*(?:sol\.)?bind\(\s*"([^"]*)"\s*(\.\.\s*[A-Za-z_]\w*\s*)?,\s*(.*)$')
@@ -505,6 +511,11 @@ def handler_text(lines, index, rest):
     call = rest.rstrip()
     if call.endswith(")") and not re.match(r"^function\s*\([^)]*\)$", call):
         call = call[:-1].strip()
+        # A third argument is the binding's note or its options, which say
+        # where it came from and how it behaves rather than what it does: a
+        # string, a table, or a constant naming one, as `init.lua`'s laptop
+        # keys share theirs.
+        call = re.sub(r',\s*(?:"[^"]*"|\{[^{}]*\}|[A-Z][A-Z0-9_]*)\s*$', "", call)
         inline = re.match(r"^function\s*\([^)]*\)\s*(.*?)\s*end$", call)
         return inline.group(1) if inline else call
     if re.match(r"^function\s*\([^)]*\)\s*$", call):
@@ -569,7 +580,7 @@ def module_summary(path):
 
 
 def bindings(solium, rev):
-    combos = check_output(solium)
+    combos, asked = check_output(solium)
     sites = binding_sites()
     literal = {normalise(site["combo"]): site for site in sites if not site["template"]}
     rows = {}
@@ -628,6 +639,9 @@ def bindings(solium, rev):
                 what.append(f"`{site['handler']}`")
             if site["comment"]:
                 what.append(site["comment"])
+            behaves = sorted({asked[normalise(combo)] for combo in shown if normalise(combo) in asked})
+            if behaves:
+                what.append("; ".join(behaves).capitalize())
             cell = " — ".join(what).replace("|", "\\|")
             where = f"[{name}:{site['line']}]({source_link(path, site['line'], rev)})"
             out.append(f"| {keys} | {cell} | {where} |")

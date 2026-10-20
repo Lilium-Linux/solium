@@ -1050,18 +1050,32 @@ function sol.status(text) end
 ---Bind a key combination to a function.
 ---
 ---The combination is normalised, so `super+shift+q` and `Shift+Super+Q` are
----one binding. A later call for the same combination replaces the earlier one.
+---one binding. A later call for the same combination replaces the earlier one,
+---and what it asked for with it: a binding bound again with nothing asked asks
+---for nothing.
 ---While the session is unlocked, a bound combination never reaches the
----application with the keyboard. A key a mode needs only while it is up is
----bound when the mode starts and taken away with `sol.unbind` when it stops, as
----`overview.lua` does with `escape`.
+---application with the keyboard. While it is locked, only a binding that asked
+---with `locked` fires, and the lock screen is not sent its key. A key a mode
+---needs only while it is up is bound when the mode starts and taken away with
+---`sol.unbind` when it stops, as `overview.lua` does with `escape`.
 ---`note` is a short phrase saying where the binding came from, which
----`solium --check` prints beside it.
+---`solium --check` prints beside it; or a `sol.BindOptions` table, which holds
+---the note and what else the binding asks for, as
+---`{ note = "laptop keys", repeating = true, locked = true }` does for the
+---shipped volume keys.
 ---@param combo string
 ---@param handler fun()
----@param note? string
+---@param note? string|sol.BindOptions
 ---@return nil
 function sol.bind(combo, handler, note) end
+
+---What a binding asks for besides its handler: `sol.bind`'s third argument as
+---a table. Anything else in it is an error, so a misspelt option is not one
+---that quietly does nothing.
+---@class sol.BindOptions
+---@field note? string Where the binding came from, which `solium --check` prints beside it.
+---@field repeating? boolean While the key is held, the handler runs again at the keyboard's repeat delay and rate (`sol.keyboard()`'s `repeat_delay` and `repeat_rate`), as an application repeats a letter. It stops when the key comes up or any other key goes down or up, when the keyboard moves to another window by anything but the handler itself, at a VT switch, when the session locks, and when the handler fails. A modifier or a group toggle never repeats, nor anything on a keyboard whose rate is 0. A loop that looks late runs it once, not once for every repeat it missed. Spelled `repeating` because `repeat` is a word of Lua's own.
+---@field locked? boolean It fires while the session is locked as well: for a key that is no way past the lock, such as volume, brightness and media. There its handler may not act on a window or a workspace, or end the session -- a `sol` call that would is an error the handler can catch -- and anything else, `sol.spawn` included, it may. Off unless asked.
 
 ---Whether a combination is bound, in whatever spelling it is given.
 ---@param combo string
@@ -1159,6 +1173,12 @@ sol._strikes = {}
 ---@private
 ---@type table<string, string>
 sol._binding_sources = {}
+
+---Internal: what each binding asked for besides its handler, by combination,
+---for a binding that asked for something. Use `sol.bind`.
+---@private
+---@type table<string, { repeating: boolean, locked: boolean }>
+sol._binding_options = {}
 
 ---Internal: what `sol.unknown` reported.
 ---@private

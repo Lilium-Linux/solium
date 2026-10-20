@@ -198,27 +198,36 @@ end)
 -- 100%, with shift for a 1% step; brightness through `brightnessctl`; media
 -- through `playerctl`; Print through `grim`, shift+Print a region with
 -- `slurp`, into ~/Pictures/Screenshots and onto the clipboard when `wl-copy`
--- is there. Held keys do not repeat yet: a binding fires once per press.
--- `script::shipped::every_shipped_binding_is_reachable_on_us`.
+-- is there.
+--
+-- A held volume or brightness key repeats, at the keyboard's own rate, and
+-- those and the media keys work at the lock screen too (#224), where nothing
+-- they do can reach a window. Mute, the media keys and Print do not repeat --
+-- a toggle repeating is a key that cannot be pressed once -- and Print does
+-- not fire at the lock, which has nothing on screen worth keeping.
+-- `script::shipped::every_shipped_binding_is_reachable_on_us`,
+-- `script::shipped::the_held_volume_keys_repeat_and_only_the_laptop_keys_fire_at_the_lock`.
 local function run(...)
     local argv = { ... }
     return function()
         sol.spawn(table.unpack(argv))
     end
 end
+local HELD = { note = "laptop keys", repeating = true, locked = true }
+local AT_THE_LOCK = { note = "laptop keys", locked = true }
 local SINK, SOURCE = "@DEFAULT_AUDIO_SINK@", "@DEFAULT_AUDIO_SOURCE@"
-sol.bind("XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "5%+"), "laptop keys")
-sol.bind("XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "5%-"), "laptop keys")
-sol.bind("shift+XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "1%+"), "laptop keys")
-sol.bind("shift+XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "1%-"), "laptop keys")
-sol.bind("XF86AudioMute", run("wpctl", "set-mute", SINK, "toggle"), "laptop keys")
-sol.bind("XF86AudioMicMute", run("wpctl", "set-mute", SOURCE, "toggle"), "laptop keys")
-sol.bind("XF86MonBrightnessUp", run("brightnessctl", "set", "5%+"), "laptop keys")
-sol.bind("XF86MonBrightnessDown", run("brightnessctl", "set", "5%-"), "laptop keys")
-sol.bind("XF86AudioPlay", run("playerctl", "play-pause"), "laptop keys")
-sol.bind("XF86AudioPause", run("playerctl", "play-pause"), "laptop keys")
-sol.bind("XF86AudioNext", run("playerctl", "next"), "laptop keys")
-sol.bind("XF86AudioPrev", run("playerctl", "previous"), "laptop keys")
+sol.bind("XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "5%+"), HELD)
+sol.bind("XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "5%-"), HELD)
+sol.bind("shift+XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "1%+"), HELD)
+sol.bind("shift+XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "1%-"), HELD)
+sol.bind("XF86AudioMute", run("wpctl", "set-mute", SINK, "toggle"), AT_THE_LOCK)
+sol.bind("XF86AudioMicMute", run("wpctl", "set-mute", SOURCE, "toggle"), AT_THE_LOCK)
+sol.bind("XF86MonBrightnessUp", run("brightnessctl", "set", "5%+"), HELD)
+sol.bind("XF86MonBrightnessDown", run("brightnessctl", "set", "5%-"), HELD)
+sol.bind("XF86AudioPlay", run("playerctl", "play-pause"), AT_THE_LOCK)
+sol.bind("XF86AudioPause", run("playerctl", "play-pause"), AT_THE_LOCK)
+sol.bind("XF86AudioNext", run("playerctl", "next"), AT_THE_LOCK)
+sol.bind("XF86AudioPrev", run("playerctl", "previous"), AT_THE_LOCK)
 -- One shell line each, so the file name and the clipboard step stay in one
 -- place a user can read and copy; the name sorts by time.
 local SHOT = 'dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"; mkdir -p "$dir"; '

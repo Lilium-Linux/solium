@@ -88,9 +88,24 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
                 // Padded so the notes line up into a column of their own, and
                 // only when there is a note -- most configurations have none,
                 // and trailing space on every line of the common case is
-                // noise.
-                match binding.note {
-                    Some(note) => report.line(&format!("    {:<28}{note}", binding.combo)),
+                // noise. What a binding asked for besides its handler (#224)
+                // goes in the same column, after the note: which keys work at
+                // the lock screen is worth reading without reading every
+                // script. `tests::a_binding_that_repeats_or_fires_at_the_lock_says_so`.
+                let asked: Vec<&str> = [
+                    (binding.repeating, "repeats while held"),
+                    (binding.locked, "fires at the lock"),
+                ]
+                .into_iter()
+                .filter_map(|(asked, said)| asked.then_some(said))
+                .collect();
+                let asked = (!asked.is_empty()).then(|| format!("({})", asked.join(", ")));
+                let said = match (binding.note, asked) {
+                    (Some(note), Some(asked)) => Some(format!("{note} {asked}")),
+                    (note, asked) => note.or(asked),
+                };
+                match said {
+                    Some(said) => report.line(&format!("    {:<28}{said}", binding.combo)),
                     None => report.line(&format!("    {}", binding.combo)),
                 }
             }
@@ -869,6 +884,55 @@ mod tests {
                 .take_while(|line| line.starts_with("    "))
                 .any(|line| line.trim_start().starts_with("super+x")),
             "the binding is not in the block generate.py reads: {text}"
+        );
+    }
+
+    /// **A binding that repeats, or that fires at the lock screen, says so**,
+    /// beside its note when it has one (#224). Which keys work at the lock is
+    /// worth being able to read without reading every script.
+    #[test]
+    fn a_binding_that_repeats_or_fires_at_the_lock_says_so() {
+        let directory = std::env::temp_dir().join("solium-check-test-binding-options");
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("init.lua");
+        std::fs::write(
+            &path,
+            "local function nothing() end\n\
+             sol.bind(\"XF86AudioRaiseVolume\", nothing, \
+             { note = \"laptop keys\", repeating = true, locked = true })\n\
+             sol.bind(\"XF86AudioMute\", nothing, { locked = true })\n\
+             sol.bind(\"super+j\", nothing, { repeating = true })\n\
+             sol.bind(\"super+x\", nothing)\n",
+        )
+        .expect("the file");
+        let (passed, text) = reported(|report| {
+            let _ = config(&path, report);
+        });
+        assert!(passed, "{text}");
+        let line = |combo: &str| {
+            text.lines()
+                .find(|line| line.trim_start().starts_with(combo))
+                .map(str::trim_end)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(
+            [
+                line("xf86audioraisevolume"),
+                line("xf86audiomute"),
+                line("super+j"),
+                line("super+x"),
+            ],
+            [
+                format!(
+                    "    {:<28}laptop keys (repeats while held, fires at the lock)",
+                    "xf86audioraisevolume"
+                ),
+                format!("    {:<28}(fires at the lock)", "xf86audiomute"),
+                format!("    {:<28}(repeats while held)", "super+j"),
+                "    super+x".to_owned(),
+            ],
+            "{text}"
         );
     }
 

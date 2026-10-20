@@ -100,6 +100,7 @@ use crate::{
 mod close;
 mod commands;
 mod handlers;
+mod held;
 mod hit_test;
 mod hosted;
 mod keyboard;
@@ -563,6 +564,10 @@ pub(crate) struct Solium {
     /// The key held for the scene holding the keyboard, and when it repeats
     /// next. `crate::input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.
     pub(crate) scene_repeat: Option<SceneRepeat>,
+    /// The binding whose key is held and which asked to repeat while it is,
+    /// and when it runs next. Any key, pressed or let go, ends it, as do the
+    /// lock and a VT switch. See `held.rs`.
+    pub(crate) held_binding: Option<held::HeldBinding>,
     /// Every key told to the scene holding the keyboard, for the tests.
     #[cfg(test)]
     pub(crate) scene_keys: Vec<crate::qml::hosted::SceneKey>,
@@ -1285,6 +1290,7 @@ impl Solium {
             hosted_keyboard: None,
             keys_to_scene: std::collections::HashSet::new(),
             scene_repeat: None,
+            held_binding: None,
             #[cfg(test)]
             scene_keys: Vec::new(),
             reported_at: std::time::Duration::ZERO,

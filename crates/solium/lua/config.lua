@@ -307,6 +307,21 @@ local defaults = {
     --               nothing is not the same thing: the compositor would still
     --               swallow the key.
     --
+    -- A list can also say how its key behaves, in named fields beside the
+    -- command (#224):
+    --
+    --     ["XF86AudioRaiseVolume"] = { "pamixer", "-i", "5", repeating = true, locked = true },
+    --
+    --   repeating   while the key is held, run it again at `keyboard`'s
+    --               repeat delay and rate, as the shipped volume and
+    --               brightness keys do.
+    --   locked      fire at the lock screen as well, as those and the media
+    --               keys do. There it may run programs, but nothing it asks of
+    --               a window or a workspace, or to end the session, happens.
+    --
+    -- A binding here replaces the shipped one whole, what it asked for
+    -- included: a volume key rebound as a string does not repeat.
+    --
     -- The combination is written the way you would say it and normalised by
     -- the compositor, so `super+shift+q` and `Shift+Super+Q` are one binding.
     --

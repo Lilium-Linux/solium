@@ -363,6 +363,10 @@ impl SessionLockHandler for Solium {
         self.lock = Some(Lock::new(confirmation));
         // An unlock still waiting for its key to come up is moot now.
         self.refocus_on_release = false;
+        // And a binding held down at the desktop stops repeating, even one
+        // allowed at the lock: its key went down before there was one.
+        // `state::tests::real_client::lock_focus::held::the_lock_stops_a_held_binding_repeating`.
+        self.held_binding = None;
         // Input is pointed at whatever the user was doing a moment ago, and it
         // stays pointed there until something moves. Between the lock and the
         // client's first surface -- which is a client starting up, so tens of

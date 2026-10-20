@@ -75,6 +75,32 @@ local function handler(combo, what)
     end
 end
 
+-- Bind one entry, with what its list asks for besides the command (#224):
+-- `repeating` and `locked`, named fields beside the words, which `table.unpack`
+-- above never sees. They go to `sol.bind` as its options, so it is the one
+-- place that decides what an option is, and what it refuses it refuses here
+-- naming the binding. `note` is this file's own, saying where the binding came
+-- from, so a list does not get to set it.
+-- `script::tests::a_user_file_binding_can_ask_to_repeat_and_to_fire_at_the_lock`,
+-- `script::tests::a_user_file_binding_with_an_option_it_does_not_have_is_refused`.
+local function bind(combo, what, note)
+    local asked = {}
+    if type(what) == "table" then
+        for key, value in pairs(what) do
+            if key == "note" then
+                error(("bindings[%q]: the note is config.bindings' own"):format(combo), 0)
+            elseif type(key) ~= "number" then
+                asked[key] = value
+            end
+        end
+    end
+    asked.note = note
+    local ok, err = pcall(sol.bind, combo, handler(combo, what), asked)
+    if not ok then
+        error(("bindings[%q]: %s"):format(combo, tostring(err)), 0)
+    end
+end
+
 for combo, what in pairs(config.bindings or {}) do
     -- Asked *before* binding, because afterwards the answer is always yes. The
     -- note is what `solium --check` prints beside the combination, and it is
@@ -89,7 +115,7 @@ for combo, what in pairs(config.bindings or {}) do
             sol.unbind(combo, "config.bindings")
         end
     else
-        sol.bind(combo, handler(combo, what),
+        bind(combo, what,
             taken and "config.bindings, replacing a shipped binding" or "config.bindings")
     end
 end
@@ -122,7 +148,7 @@ function bindings.rebind(combo, fallback)
         return
     end
     local taken = sol.bound(combo)
-    sol.bind(combo, handler(combo, what),
+    bind(combo, what,
         taken and "config.bindings, replacing a shipped binding" or "config.bindings")
 end
 
