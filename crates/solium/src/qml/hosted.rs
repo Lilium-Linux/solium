@@ -50,6 +50,14 @@ mod ffi {
             pixel_x: f64,
             pixel_y: f64,
         );
+        pub(super) fn solium_qml_scene_touch_event(
+            scene: *mut super::super::ffi::Scene,
+            kind: c_int,
+            id: c_int,
+            x: f64,
+            y: f64,
+            time: u64,
+        );
         pub(super) fn solium_qml_scene_hit(
             scene: *const super::super::ffi::Scene,
             x: f64,
@@ -207,6 +215,21 @@ impl Scene {
         // SAFETY: the scene is live for as long as `self`, and both strings
         // outlive the call.
         unsafe { ffi::solium_qml_scene_set_json(self.scene, path.as_ptr(), value.as_ptr()) != 0 }
+    }
+
+    /// Deliver a finger to this window in scene coordinates. Qt Quick owns
+    /// gesture recognition and mouse synthesis for unhandled touch.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn touch_event(&mut self, x: f64, y: f64, event: &SceneTouch) {
+        touched();
+        let kind = match event.kind {
+            TouchKind::Down => 0,
+            TouchKind::Motion => 1,
+            TouchKind::Up => 2,
+            TouchKind::Cancel => 3,
+        };
+        // SAFETY: this scene remains live throughout the synchronous call.
+        unsafe { ffi::solium_qml_scene_touch_event(self.scene, kind, event.slot, x, y, event.time) }
     }
 
     /// Deliver one pointer event at a point in scene coordinates. A press
@@ -572,12 +595,233 @@ pub(crate) struct ScenePointer {
     pub(crate) time: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TouchKind {
+    Down,
+    Motion,
+    Up,
+    Cancel,
+}
+
+/// A slot's event, with milliseconds on the compositor's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SceneTouch {
+    pub(crate) kind: TouchKind,
+    pub(crate) slot: i32,
+    pub(crate) time: u64,
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::PathBuf;
 
     use super::{GrabReport, Hit, KeyboardReport, PointerKind, SceneKey, ScenePointer};
     use crate::qml::{Scene, qt_test::on_the_qt_thread};
+
+    #[test]
+    fn touch_probe_a_tap_handler_taps_again_after_release_and_never_on_cancel() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-touch-tap-probe",
+                r"import QtQuick
+                Item {
+                    id: root
+                    property int taps: 0
+                    TapHandler { onTapped: root.taps += 1 }
+                }",
+                "touch-tap-probe",
+            );
+            for time in [1000, 2000] {
+                scene.touch_event(
+                    20.0,
+                    15.0,
+                    &super::SceneTouch {
+                        kind: super::TouchKind::Down,
+                        slot: 0,
+                        time,
+                    },
+                );
+                scene.touch_event(
+                    20.0,
+                    15.0,
+                    &super::SceneTouch {
+                        kind: super::TouchKind::Up,
+                        slot: 0,
+                        time: time + 10,
+                    },
+                );
+            }
+            assert_eq!(scene.get_int("taps"), 2);
+            scene.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Down,
+                    slot: 0,
+                    time: 3000,
+                },
+            );
+            scene.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Cancel,
+                    slot: 0,
+                    time: 3010,
+                },
+            );
+            assert_eq!(scene.get_int("taps"), 2, "cancel never taps");
+            drop(scene);
+            let _ = std::fs::remove_dir_all(directory);
+        });
+    }
+
+    #[test]
+    fn touch_probe_cancelling_one_scene_keeps_another_scenes_finger() {
+        on_the_qt_thread(|| {
+            let qml = r"import QtQuick
+                Item {
+                    id: root
+                    property int taps: 0
+                    property int held: tap.pressed ? 1 : 0
+                    TapHandler { id: tap; onTapped: root.taps += 1 }
+                }";
+            let (first_dir, mut first) = hosted("solium-touch-cancel-first", qml, "touch-first");
+            let (second_dir, mut second) =
+                hosted("solium-touch-cancel-second", qml, "touch-second");
+            first.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Down,
+                    slot: 0,
+                    time: 1000,
+                },
+            );
+            second.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Down,
+                    slot: 1,
+                    time: 1010,
+                },
+            );
+            assert_eq!((first.get_int("held"), second.get_int("held")), (1, 1));
+            first.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Cancel,
+                    slot: 0,
+                    time: 1020,
+                },
+            );
+            assert_eq!((first.get_int("held"), second.get_int("held")), (0, 1));
+            second.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Up,
+                    slot: 1,
+                    time: 1030,
+                },
+            );
+            assert_eq!((first.get_int("taps"), second.get_int("taps")), (0, 1));
+            drop((first, second));
+            let _ = std::fs::remove_dir_all(first_dir);
+            let _ = std::fs::remove_dir_all(second_dir);
+        });
+    }
+
+    #[test]
+    fn touch_probe_qt_synthesizes_a_mouse_area_click() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-touch-mouse-probe",
+                r"import QtQuick
+                Item {
+                    id: root
+                    property int clicks: 0
+                    MouseArea { anchors.fill: parent; onClicked: root.clicks += 1 }
+                }",
+                "touch-mouse-probe",
+            );
+            scene.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Down,
+                    slot: 0,
+                    time: 1000,
+                },
+            );
+            scene.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Up,
+                    slot: 0,
+                    time: 1010,
+                },
+            );
+            assert_eq!(scene.get_int("clicks"), 1);
+            drop(scene);
+            let _ = std::fs::remove_dir_all(directory);
+        });
+    }
+
+    #[test]
+    fn touch_probe_a_drag_handler_tracks_all_three_motions() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-touch-drag-probe",
+                r"import QtQuick
+                Item {
+                    id: root
+                    property real dragged: box.x
+                    Rectangle {
+                        id: box; width: 100; height: 32
+                        DragHandler { dragThreshold: 0 }
+                    }
+                }",
+                "touch-drag-probe",
+            );
+            scene.resize(240, 32, 1.0);
+            scene.touch_event(
+                20.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Down,
+                    slot: 0,
+                    time: 1000,
+                },
+            );
+            for (index, x) in [40.0, 60.0, 80.0].into_iter().enumerate() {
+                scene.touch_event(
+                    x,
+                    15.0,
+                    &super::SceneTouch {
+                        kind: super::TouchKind::Motion,
+                        slot: 0,
+                        time: 1010 + index as u64 * 10,
+                    },
+                );
+            }
+            scene.touch_event(
+                80.0,
+                15.0,
+                &super::SceneTouch {
+                    kind: super::TouchKind::Up,
+                    slot: 0,
+                    time: 1050,
+                },
+            );
+            assert_eq!(scene.get_real("dragged", -1.0), 60.0);
+            drop(scene);
+            let _ = std::fs::remove_dir_all(directory);
+        });
+    }
     use crate::scripted::SceneReserve;
 
     /// A field that wants the keyboard while it has the focus, claiming two

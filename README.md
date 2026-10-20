@@ -61,6 +61,10 @@ on the headers of Solium's own QML types; `QT_MOC` names it when the build
 cannot find it, and [dev/README.md](dev/README.md#building) says where it
 looks.
 
+Touch delivery uses QtBase's private event-point headers to preserve the press
+history and grabs Qt Quick handlers need. Install the private development files
+matching QtBase; a Qt minor-version upgrade requires rebuilding Solium.
+
 Rust is easiest from [rustup](https://rustup.rs); a distribution's own Rust
 works too if it is new enough. The system packages:
 
@@ -69,7 +73,7 @@ works too if it is new enough. The system packages:
 ```sh
 sudo dnf install gcc gcc-c++ pkgconf-pkg-config wayland-devel libinput-devel \
     systemd-devel libseat-devel libxkbcommon-devel mesa-libgbm-devel \
-    mesa-libEGL-devel libdrm-devel qt6-qtbase-devel qt6-qtdeclarative-devel
+    mesa-libEGL-devel libdrm-devel qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel
 ```
 
 **Arch Linux**
@@ -85,13 +89,13 @@ sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
 ```sh
 sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
     libudev-dev libseat-dev libxkbcommon-dev libgbm-dev libegl-dev libdrm-dev \
-    qt6-base-dev qt6-declarative-dev
+    qt6-base-dev qt6-base-private-dev qt6-declarative-dev
 ```
 
 **openSUSE Tumbleweed**
 
 ```sh
-sudo zypper install gcc-c++ pkgconf qt6-base-devel qt6-declarative-devel \
+sudo zypper install gcc-c++ pkgconf qt6-base-devel qt6-base-private-devel qt6-declarative-devel \
     'pkgconfig(wayland-server)' 'pkgconfig(libinput)' 'pkgconfig(libudev)' \
     'pkgconfig(libseat)' 'pkgconfig(xkbcommon)' 'pkgconfig(gbm)' 'pkgconfig(egl)' \
     'pkgconfig(libdrm)'

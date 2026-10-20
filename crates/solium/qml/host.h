@@ -453,6 +453,8 @@ void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double y, int pre
  * `qml::hosted::tests::the_wheel_reaches_a_wheel_handler_with_its_angle`,
  * `qml::hosted::tests::a_double_press_on_a_mouse_area_is_one_double_click`,
  * `qml::hosted::tests::a_tap_handler_counts_taps_by_when_they_happened`. */
+void solium_qml_scene_touch_event(SoliumQmlScene *scene, int kind, int id,
+                                  double x, double y, unsigned long long time);
 void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,
                                     unsigned button, unsigned buttons, unsigned modifiers,
                                     unsigned long long time, double angle_x, double angle_y,

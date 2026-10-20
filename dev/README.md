@@ -27,6 +27,13 @@ Choose a task:
 
 ## Building
 
+The Qt host updates the input device's persistent event points before sending
+touch straight to a hosted window. Qt Quick uses their press positions, velocity
+and grab records for handlers. This requires QtBase's matching private headers
+(`qt6-qtbase-private-devel` on Fedora). The compositor and GPU wirecheck share
+`dev/qt-input-build.rs` to discover the versioned include directories. Rebuild
+an existing build image after adding that package to `dev/Containerfile`.
+
 `dev/setup.sh`, run once after cloning, checks what this section needs: Rust
 (the toolchain `rust-toolchain.toml` names, with rustfmt and clippy), the
 development packages, and on Fedora without them the build image, which it

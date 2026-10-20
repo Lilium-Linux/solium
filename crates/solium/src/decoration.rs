@@ -1061,6 +1061,18 @@ impl Decoration {
         }
     }
 
+    /// Fingers use the layer's own scene coordinates, including its bleed,
+    /// just as the pointer does.
+    pub(crate) fn touch(&mut self, x: f64, y: f64, event: &crate::qml::hosted::SceneTouch) {
+        for layer in &mut self.layers {
+            layer.scene.touch_event(
+                x + f64::from(layer.bleed.left),
+                y + f64::from(layer.bleed.top),
+                event,
+            );
+        }
+    }
+
     /// Whether the pointer is over a button.
     ///
     /// Asked of QML rather than worked out from coordinates: QML owns the

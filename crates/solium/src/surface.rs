@@ -267,6 +267,18 @@ impl ShellSurface {
         self.scene.pointer_event(local.x, local.y, event);
     }
 
+    /// Deliver a finger in compositor coordinates, using the same scene origin
+    /// as the pointer. The caller retains the target until release or cancel.
+    pub(crate) fn touch(
+        &mut self,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+        event: &crate::qml::hosted::SceneTouch,
+    ) {
+        let local = location - area.loc.to_f64();
+        self.scene.touch_event(local.x, local.y, event);
+    }
+
     /// What the scene claims at a point in compositor coordinates. One item
     /// walk per point until Qt next runs: the press, the pointer's shape and
     /// the cursor's every-frame check all ask, and a still pointer is walked

@@ -50,6 +50,11 @@ libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm development files.
 `QT_MOC` names moc when the build cannot find it;
 [dev/README.md](dev/README.md#building) says where it looks.
 
+QtBase's matching private headers are also required for touch-point history:
+`qt6-qtbase-private-devel` on Fedora, `qt6-base-private-dev` on Debian/Ubuntu,
+or the private headers supplied by your distribution's QtBase development
+packages. Rebuild Solium when Qt's minor version changes.
+
 ```sh
 cargo build
 ./target/debug/solium          # nested, as a window inside your session

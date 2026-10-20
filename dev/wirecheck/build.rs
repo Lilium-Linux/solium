@@ -5,6 +5,10 @@
 //! -- see the trap in dev/README.md. This compiles the source next to it, so
 //! what runs is what is checked out.
 
+mod qt_input_build {
+    include!("../qt-input-build.rs");
+}
+
 use std::path::{Path, PathBuf};
 
 /// The headers moc runs on, in crates/solium/qml: the same list as
@@ -123,6 +127,8 @@ fn main() {
             }
         }
     }
+
+    qt_input_build::include_private_input_headers(&mut build);
 
     // The same moc step as crates/solium/build.rs, on the same headers; the
     // gate's wirecheck step builds only with it.
