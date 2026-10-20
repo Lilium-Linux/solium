@@ -4,6 +4,13 @@ Everything below is a file you write. Nothing here needs the compositor
 rebuilt, and nothing needs you to copy the files that ship in order to change
 one thing in them.
 
+Start with [the first configuration](#the-thirty-second-version) and
+[file locations](#where-things-live). Use the
+[generated settings reference](https://lilium-linux.github.io/solium/generated/reference/settings.html)
+for a specific option, [modes](modes.md) for window management,
+[decorations](decorations.md) for frames, and
+[shell hosting](shell-boundary.md) for your own desktop scenes.
+
 Two commands are worth knowing first:
 
     solium --check          # would my configuration run? which bindings survived? do its scenes build?
@@ -1544,10 +1551,9 @@ return {
 }
 ```
 
-A press on a client's own shell surface -- a bar or a panel, say -- is not
-covered yet, even one that does not ask for the keyboard itself: it leaves
-focus exactly as it was. [#219](https://github.com/Lilium-Linux/solium/issues/219)
-is still open on that case.
+A press on an external layer-shell bar or panel does not clear the previous
+window's keyboard focus when the surface declines keyboard focus. This case
+remains outside `focus.clear_on_empty_click`.
 
 Whether moving the pointer over a window focuses it is a per-mode question,
 not a single on/off switch: floating -- the desktop, with no layout in charge

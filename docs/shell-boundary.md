@@ -1,33 +1,38 @@
-# Where Solium ends and a shell begins
+# Shell hosting and integration
 
-Solium is the compositor. A shell — the bar, the dock, the launcher — is a
-project of its own, in its own repository, and it runs **inside** Solium as its
-configuration: its QML is hosted in the compositor's own engine, beside the
-window frames, the pointer and every other scene the compositor draws. That is
-the line, and it is not where a Wayland tutorial would put it.
+Solium manages windows and provides primitives for desktop UI. A shell supplies
+bars, docks, launchers and other scenes as configuration. It can live in this
+repository or be a separate project; it does not require a separate desktop
+environment.
 
-**Where it is today:**
+The default preview shell is hosted in the compositor's QML engine, beside the
+window frames. It includes a bottom bar, top dock, search and desktop icons.
+Set `preview = false` to disable it, or name your own root with
+`shell = { scene = "<path to QML>" }`. `preview = true` supplies the default
+when no shell is explicitly selected.
 
-- A shell is named in the configuration, `shell = { scene = "<its root QML
-  file>" }`, and hosted in-process through `sol.surface`, by `lua/shell.lua`.
-  The shipped configuration names none.
-- A shell is QML written against Solium's own API: `import Solium` for
-  `Theme`, `Keyboard`, `Monitors`, `Windows`, `WindowList`, `Workspaces`,
-  `WorkspaceList`, `Grab` and the attached `Solium` object
-  (`Solium.monitor`, `Solium.input`, `Solium.surface.reserve`,
-  `Solium.keyboard`, `Solium.status`), and `Solium.send` for what it asks Lua
-  to do ([below](#what-a-hosted-shell-is-given)). Quickshell support was
-  removed (#172); Quickshell itself may add Solium support on its own side.
-- The pointer can be a scene of its own the same way, `cursor = { scene =
-  "<its QML file>" }`, given what the pointer is doing as `Solium.cursor`
-  ([below](#what-a-pointer-scene-is-given)).
-- A shell that runs as its own program — Waybar, a Quickshell instance run
-  on its own, any `wlr-layer-shell` panel — is supported too, as an ordinary
-  client. It needs nothing from the configuration and gets nothing from the
-  compositor's engine.
+There are two integration paths:
 
-The rest of this file is why hosting is the design, how to host one, and
-exactly what a hosted shell is given and what it is not.
+| Path | What it gets |
+|---|---|
+| Hosted QML | `import Solium`, live models, shared theme, compositor clock, `sol.surface`, explicit input and work-area reservation |
+| Separate client | Ordinary Wayland and layer-shell behavior; no access to the in-process QML engine or its models |
+
+Quickshell-specific in-process compatibility was removed. A Quickshell panel
+can still run separately as a layer-shell client. External shells face the
+missing management protocols listed in [known limitations](gaps.md).
+
+Use this guide by task:
+
+- [Host your own shell](#hosting-a-shell).
+- [Read models, handle input and issue commands](#what-a-hosted-shell-is-given).
+- [Provide a pointer scene](#what-a-pointer-scene-is-given).
+- [Understand boundaries](#what-it-is-not-given) and [costs](#what-hosting-costs-honestly).
+- [Start portals, authentication agents and other session services](#how-the-rest-of-the-desktop-starts).
+
+The architecture discussion below distinguishes implemented hosting from
+planned cross-scene animation. Sharing an engine does not itself provide
+flights, morphs or live icon anchors.
 
 ## The requirement that decides the architecture
 
@@ -113,8 +118,9 @@ typo in the shell costs a reload rather than the session
 Editing a file under the scene's own directory
 rebuilds the scene with no reload at all: that is checked every half second
 while frames are being drawn.
-`false`, the default, hosts nothing, and taking the setting out takes
-the shell away on the next reload.
+With `preview = true` (the default), leaving `shell.scene` unset or false
+selects the bundled preview. To host no shell, set `preview = false` and
+leave `shell.scene` false; reloading then removes the hosted shell.
 
 A reload does not rebuild a hosted scene. `sol.surface` declared again with the
 same scene file writes the properties that changed into the live scene, so an
@@ -612,7 +618,8 @@ builds and an SVG-only one falls back to the default glyph there.
 outright, not a ghost (nothing pins a desktop file the way a dock pins an
 app id), and unlike `Apps`' wholesale rescan on a reload only, `Folder` is
 live: `crate::folder::Watcher` holds one inotify watch on the directory,
-polled every frame, and any change rescans the whole folder, wholesale,
+registered with the compositor event loop so changes wake an idle session.
+A change triggers a full folder rescan,
 exactly the way `Apps` already prefers a simple rescan over incremental
 tracking. Empty, and costing nothing to watch or scan, with
 `Solium.dirs.desktop` empty. `Solium.dirs.desktop` is `$XDG_DESKTOP_DIR`, or
@@ -910,6 +917,12 @@ it, as a client, and gives up the one engine to get it.
 
 ## How the rest of the desktop starts
 
+The installed session currently uses `Lilium` as its fallback desktop identifier
+and installs `lilium-portals.conf`. These are legacy integration names, not a
+requirement for a Lilium desktop environment. Keep them in portal and autostart
+configuration until the runtime identifiers are migrated together.
+
+
 Whatever Solium loads itself starts with it and needs nothing below: its own
 QML scenes, and everything `init.lua` declares. A shell that Solium loads
 through its configuration is one of those, and needs none of this either.
@@ -1016,7 +1029,7 @@ Plasma or GNOME. `solium-session.target` starts it only under Solium.
 they are for.** Fedora's KDE polkit agent, for instance, ships
 `/etc/xdg/autostart/polkit-kde-authentication-agent-1.desktop` with
 `OnlyShowIn=KDE;` and `X-systemd-skip=true`, so autostart skips it under
-Lilium, and a copy of it would be skipped too. It also ships
+Solium's current desktop identifier, and a copy of it would be skipped too. It also ships
 `plasma-polkit-agent.service`, which is already
 `PartOf=graphical-session.target`, so a single command starts it with every
 Solium session, autostart on or off:
@@ -1069,13 +1082,12 @@ window grew out of it. Captured frame by frame in `docs/morph.png`, a record
 of 2026-09-06 and of a dock that no longer exists — 460x208 near the dock, then
 928x504, 1192x672, settled at full size about a third of a second later.
 
-`sol.present_from` is still there and still does that. What is missing is a
-dock to give it a rectangle. `config.lua` carried a `dock.morph` duration for
-the day one exists, and #117 removed it — nothing had ever read it, and a
-setting configuring a component that does not exist cannot be told apart, from
-outside, from one that is broken. `--check` reports that spelling as an
-unrecognised key now, and a dock brings its settings back to that spot when it
-arrives.
+`sol.present_from` still provides rectangle-based launch presentation. The
+current preview dock is implemented as configuration, but live icon anchors
+and cross-scene flights/morphs remain planned. The removed `dock.morph`
+setting never controlled an implemented behavior; `--check` reports it as an
+unrecognised key. Use the current `shell.dock` settings for the preview dock,
+not the settings of this historical experiment.
 
 None of that is reachable from a separate process. A client dock can pass a
 rectangle over IPC, but by the time the window exists the two are separate

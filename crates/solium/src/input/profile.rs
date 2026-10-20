@@ -92,12 +92,10 @@ pub(crate) struct Profile {
     /// nothing keeps the keyboard once you can no longer see what held it
     /// (#219).
     ///
-    /// A press on a client's own shell surface -- a bar, say -- is not
-    /// covered by this flag, even one that declines the keyboard itself:
-    /// `on_a_client` in `input::pointer_button` returns well before the
-    /// fallback this guards reads it, which is #219's still-open third case,
-    /// not a reading of this field. Correcting that is tracked on the issue,
-    /// not promised here.
+    /// A press on an external layer-shell bar or panel is outside this flag.
+    /// If it declines keyboard focus, the previous window stays focused;
+    /// `on_a_client` in `input::pointer_button` excludes client surfaces from
+    /// empty-click clearing.
     ///
     /// True for every form factor: the bug this guards against -- a window
     /// that cannot be unfocused -- has nothing to do with what the machine

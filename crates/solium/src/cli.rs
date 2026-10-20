@@ -116,7 +116,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Comma
 /// `tests::help_names_every_flag_environment_txt_lists`.
 pub(crate) fn help() -> String {
     let mut out = String::from(
-        "solium: the Wayland compositor of Lilium DE\n\n\
+        "solium: a configurable Wayland compositor\n\n\
          Usage: solium [--tty [--session]] [--debug-mode] [--qml <mode>]\n       \
          solium --check [<file.qml> | <effect folder>] | --probe | --help | --version\n\n\
          Nested when WAYLAND_DISPLAY or DISPLAY is set, on the hardware otherwise.\n",

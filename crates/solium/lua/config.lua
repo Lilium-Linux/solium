@@ -1557,17 +1557,9 @@ local defaults = {
         follow_new_windows = true,
     },
 
-    -- There is no dock.
-    --
-    -- A `dock` section sat here offering `items` and `morph`, and nothing in
-    -- the compositor or in any script had ever read either of them --
-    -- `lua/init.lua` says as much in as many words, where the genie's target
-    -- rectangle is a hardcoded strip of screen "because there is no dock yet".
-    -- Removed by #117 rather than wired up, because there is nothing to wire it
-    -- to: a setting that configures a component which does not exist cannot be
-    -- told apart, from out here, from one that is broken. When a dock arrives
-    -- it brings its settings back to this spot. Until then `--check` reports
-    -- the old spelling as an unrecognised key, which is the truth.
+    -- The preview dock is configured under shell.dock. The old top-level
+    -- dock.items and dock.morph keys were never read and are not supported.
+    -- Live icon anchors and launch morphs remain separate future work.
 
     open = {
         -- The animation a window arrives with.

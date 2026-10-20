@@ -271,9 +271,9 @@ end)
 
 -- Dev: the genie. `deform` names an effect folder -- `genie` ships, and
 -- your copy in ~/.config/solium/effects/genie/ is used instead -- and `to`
--- is what the window is pulled into. A rect here because there is no dock
--- yet; with one, `to = { window = id }` would follow its icon as the icon
--- moves, which a rect read out of this table cannot.
+-- is what the window is pulled into. This demonstration uses a fixed rect.
+-- The preview dock exists, but a live icon anchor is not exposed yet;
+-- following an icon while it moves needs that integration.
 --
 -- `axis` is which edge leads, so a dock down the side of the screen is
 -- `"left"` and the compositor turns the mesh to match; `"auto"` picks the

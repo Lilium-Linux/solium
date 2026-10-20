@@ -346,7 +346,7 @@
 ---@field click? boolean Whether a press focuses the window it lands on.
 ---@field follow? boolean Whether moving the pointer over a window focuses it.
 ---@field after_close? sol.AfterClose|sol.AfterClose[] Where the keyboard goes when the window that has it closes, tried in order until one finds a window on screen; `{}` leaves it on nothing. Left out: `{ "pointer", "topmost" }`. An unknown word is logged and skipped.
----@field clear_on_empty_click? boolean Whether a press on empty desktop or the wallpaper clears keyboard focus. A press on a client's own shell surface (a bar, say) is not covered yet, even one that declines the keyboard: see #219.
+---@field clear_on_empty_click? boolean Whether a press on empty desktop or the wallpaper clears keyboard focus. A press on an external layer-shell bar or panel is outside this flag; if it declines keyboard focus, the previous window stays focused.
 
 ---One word of `sol.FocusModeOptions.after_close` (#128).
 ---@alias sol.AfterClose

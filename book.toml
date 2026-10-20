@@ -7,7 +7,7 @@
 
 [book]
 title = "Solium"
-description = "The Wayland compositor of Lilium DE: configuring it, scripting it, and working on it."
+description = "A configurable Wayland compositor: setup, customization, architecture and development."
 language = "en"
 src = "docs"
 

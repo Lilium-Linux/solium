@@ -253,11 +253,10 @@ And from Solium's first weeks:
 
 ### History worth knowing
 
-Solium began as a Hyprland fork. That work is archived, and its post-mortem —
-most usefully, why an out-of-process QML shell was the wrong architecture — is
-in the `lilium-de` repository of the [Lilium-Linux](https://github.com/Lilium-Linux)
-organisation. Read it before
-proposing a helper process.
+Solium's earlier Hyprland-fork experiments informed its current architecture.
+The current implementation is a standalone Smithay compositor. The
+[architecture guide](docs/architecture.md#design-rules) records the boundaries
+that matter when proposing a helper process, especially for window-coupled UI.
 
 ## The documentation site
 
