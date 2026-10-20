@@ -14,6 +14,7 @@ pub(crate) mod devices;
 pub(crate) mod grab;
 pub(crate) mod profile;
 pub(crate) mod resize;
+pub(crate) mod touch;
 pub(crate) mod warp;
 
 use smithay::{
@@ -30,7 +31,6 @@ use smithay::{
             AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, PointerHandle,
             RelativeMotionEvent,
         },
-        touch::{DownEvent, MotionEvent as TouchMotionEvent, UpEvent},
     },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint},
@@ -104,16 +104,8 @@ pub(crate) fn handle<B: InputBackend>(
         InputEvent::TouchDown { event } => touch_down(state, region, event),
         InputEvent::TouchMotion { event } => touch_motion(state, region, event),
         InputEvent::TouchUp { event } => touch_up(state, event),
-        InputEvent::TouchFrame { .. } => {
-            if let Some(touch) = state.seat.get_touch() {
-                touch.frame(state);
-            }
-        }
-        InputEvent::TouchCancel { .. } => {
-            if let Some(touch) = state.seat.get_touch() {
-                touch.cancel(state);
-            }
-        }
+        InputEvent::TouchFrame { .. } => touch::frame(state),
+        InputEvent::TouchCancel { .. } => touch::cancel(state),
         _ => {}
     }
     // What the event made the scenes say, read in the dispatch that
@@ -1621,33 +1613,11 @@ fn touch_down<B: InputBackend>(
     region: Rectangle<i32, Logical>,
     event: impl TouchDownEvent<B>,
 ) {
-    let Some(touch) = state.seat.get_touch() else {
-        return;
-    };
-    let location = absolute_location(region, &event);
-    let under = state.touch_under(location);
-    let serial = SERIAL_COUNTER.next_serial();
-
-    // Not the window under something over the windows: a client's layer
-    // surface, or a shell where it takes a press, which the touch did not
-    // reach either (`Solium::touch_under`).
-    // `state::tests::real_client::reflow_on_close::hosted::a_touch_on_a_shell_button_neither_reaches_nor_focuses_the_window_under_it`.
-    if state.profile.touch_to_focus
-        && !state.pointed_above(location)
-        && let Some((window, _)) = state.window_under(location)
-    {
-        state.focus_window(&window, serial, script::FocusSource::Touch);
-    }
-
-    touch.down(
+    touch::down(
         state,
-        under,
-        &DownEvent {
-            slot: event.slot(),
-            location,
-            serial,
-            time: event.time_msec(),
-        },
+        event.slot(),
+        absolute_location(region, &event),
+        event.time_msec(),
     );
 }
 
@@ -1656,35 +1626,16 @@ fn touch_motion<B: InputBackend>(
     region: Rectangle<i32, Logical>,
     event: impl TouchMotionEventTrait<B>,
 ) {
-    let Some(touch) = state.seat.get_touch() else {
-        return;
-    };
-    let location = absolute_location(region, &event);
-    let under = state.touch_under(location);
-
-    touch.motion(
+    touch::motion(
         state,
-        under,
-        &TouchMotionEvent {
-            slot: event.slot(),
-            location,
-            time: event.time_msec(),
-        },
+        event.slot(),
+        absolute_location(region, &event),
+        event.time_msec(),
     );
 }
 
 fn touch_up<B: InputBackend>(state: &mut Solium, event: impl TouchUpEvent<B>) {
-    let Some(touch) = state.seat.get_touch() else {
-        return;
-    };
-    touch.up(
-        state,
-        &UpEvent {
-            slot: event.slot(),
-            serial: SERIAL_COUNTER.next_serial(),
-            time: event.time_msec(),
-        },
-    );
+    touch::up(state, event.slot(), event.time_msec());
 }
 
 /// Turn a device's own position into a point in the global space.

@@ -727,6 +727,9 @@ impl Solium {
 /// one did nothing at all, `focus_lock` did nothing either, and every key
 /// typed at the lock screen went to the menu's client.
 fn blind(state: &mut Solium) {
+    // Fingers captured before locking must neither stay pressed in Qt nor
+    // finish inside an application after the lock has taken input away.
+    crate::input::touch::cancel(state);
     state.release_grabs();
     state.give_keyboard(None, SERIAL_COUNTER.next_serial());
 

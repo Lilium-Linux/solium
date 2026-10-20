@@ -505,6 +505,10 @@ pub(crate) struct Solium {
     /// button is up (Ruling 7).
     /// `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`.
     pub(crate) scene_press: Option<ScenePress>,
+    /// Finger capture is separate from the pointer's press hold.
+    pub(crate) touches: std::collections::HashMap<i32, crate::input::touch::Contact>,
+    /// A final client release needs a frame even after its slot has gone.
+    pub(crate) touch_frame_pending: bool,
     /// What became of the `sol.act`s the dispatch being applied ran, told to
     /// Lua once all of it is applied (Ruling 15).
     /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
@@ -1275,6 +1279,8 @@ impl Solium {
             hovered_frame: None,
             pointer_buttons: 0,
             scene_press: None,
+            touches: std::collections::HashMap::new(),
+            touch_frame_pending: false,
             settled_attempts: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
             unknown_in_workspaces: std::collections::HashSet::new(),
@@ -2588,7 +2594,7 @@ impl Solium {
     /// So the geometry is here and the delivery is there, and there is still
     /// one predicate: `surface_pointer` reaches its surface through this and
     /// cannot pick a different one.
-    fn surface_claiming(
+    pub(crate) fn surface_claiming(
         &self,
         above_windows: bool,
         location: Point<f64, Logical>,

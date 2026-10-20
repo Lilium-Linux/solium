@@ -419,6 +419,19 @@ impl Surface {
         })
     }
 
+    /// Deliver a captured finger to the same instance throughout its stream.
+    pub(crate) fn deliver_touch(
+        &mut self,
+        output: &Output,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+        event: &crate::qml::hosted::SceneTouch,
+    ) {
+        if let Some(instance) = self.instance_mut(output) {
+            instance.touch(area, location, event);
+        }
+    }
+
     /// What this surface's scene on one monitor claims at a point, nothing
     /// outside its area.
     /// `state::tests::real_client::reflow_on_close::hosted::a_press_where_the_shell_draws_nothing_reaches_the_window_under_it`.

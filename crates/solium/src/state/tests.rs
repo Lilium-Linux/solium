@@ -30782,13 +30782,14 @@ end)
         }
 
         /// The compositor's routing to hosted scenes, with a stand-in for each
-        /// scene: a real Wayland client and a Qt scene cannot share a test
-        /// (the #99 test).
+        /// scene for most pointer policy tests. Real Qt touch tests below
+        /// keep the whole Wayland fixture on Qt's executor thread.
         mod hosted {
             use super::*;
             use crate::qml::hosted::PointerKind;
             use crate::scripted::{Layer as Scripted, Stand};
             use smithay::backend::input::{ButtonState, KeyState};
+            use wayland_client::Proxy as _;
 
             const SHIFT_L: u32 = 50;
             const SUPER_L: u32 = 133;
@@ -31276,6 +31277,450 @@ end)
                 );
             }
 
+            #[test]
+            fn a_real_touch_button_clicks_without_reaching_or_focusing_its_client() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let mut desk = Desk::new();
+                    let opened = desk.open_surface();
+                    let window = desk
+                        .state
+                        .panes
+                        .get(opened.pane)
+                        .and_then(crate::pane::Pane::client)
+                        .cloned()
+                        .expect("a client");
+                    desk.state.space.map_element(window, (600, 500), false);
+                    let other = desk.open_surface();
+                    let other_window = desk
+                        .state
+                        .panes
+                        .get(other.pane)
+                        .and_then(crate::pane::Pane::client)
+                        .cloned()
+                        .expect("another client");
+                    desk.state
+                        .space
+                        .map_element(other_window.clone(), (100, 100), false);
+                    desk.state.space.refresh();
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    desk.state.focus_window(
+                        &other_window,
+                        SERIAL_COUNTER.next_serial(),
+                        crate::script::FocusSource::Script,
+                    );
+                    desk.state.profile.touch_to_focus = true;
+                    let directory = std::env::temp_dir().join("solium-real-touch-button");
+                    std::fs::create_dir_all(&directory).expect("scene directory");
+                    let path = directory.join("Scene.qml");
+                    std::fs::write(
+                        &path,
+                        r"import QtQuick
+                        Item {
+                            property int clicks: 0
+                            MouseArea { anchors.fill: parent; onClicked: parent.clicks += 1 }
+                        }",
+                    )
+                    .expect("scene source");
+                    desk.state
+                        .declare_surface(crate::scripted::Declaration::for_test(
+                            "touch-button",
+                            path,
+                            Scripted::Top,
+                            crate::scripted::On::Rect(Rectangle::new(
+                                (600, 500).into(),
+                                (64, 64).into(),
+                            )),
+                        ));
+                    let id = desk.state.surfaces.named("touch-button").expect("declared");
+                    let output = desk.state.space.outputs().next().cloned().expect("monitor");
+                    desk.state
+                        .surfaces
+                        .get_mut(id)
+                        .and_then(|surface| surface.instance_mut(&output))
+                        .expect("real scene on the Qt thread")
+                        .scene_for_test()
+                        .resize(64, 64, 1.0);
+                    assert_eq!(
+                        desk.state.surfaces.get(id).expect("scene").hit(
+                            &output,
+                            Rectangle::new((600, 500).into(), (64, 64).into()),
+                            (630.0, 520.0).into()
+                        ),
+                        crate::qml::hosted::Hit::Press,
+                        "the rendered button owns the test point"
+                    );
+                    let _touch = desk.client.seat_touch(&desk.qh);
+                    desk.pump();
+                    let region = region(&desk);
+                    crate::synth::send_touch(&mut desk.state, region, (630.0, 520.0), 10_000);
+                    desk.pump();
+                    let clicks = desk
+                        .state
+                        .surfaces
+                        .get_mut(id)
+                        .and_then(|surface| surface.instance_mut(&output))
+                        .expect("real scene on the Qt thread")
+                        .scene_for_test()
+                        .get_int("clicks");
+                    assert_eq!(clicks, 1);
+                    assert!(
+                        desk.client.touches.is_empty(),
+                        "the client under the scene gets no finger"
+                    );
+                    assert_eq!(desk.focused(), other.pane);
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(directory);
+                });
+            }
+
+            #[test]
+            fn a_real_touch_on_the_shipped_frames_close_button_closes_its_client() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let mut desk = Desk::new();
+                    let opened = desk.open_surface();
+                    desk.state
+                        .decorations
+                        .set_style(&mut desk.state.panes, Some("top".into()));
+                    desk.state
+                        .decorations
+                        .insert(&mut desk.state.panes, opened.pane, 64, 96);
+                    let values = crate::decoration::Values::default();
+                    desk.state
+                        .panes
+                        .get_mut(opened.pane)
+                        .and_then(Pane::decoration_mut)
+                        .expect("shipped frame")
+                        .tell_as_a_frame_would(
+                            &crate::decoration::Look {
+                                title: "touch",
+                                app_id: "",
+                                focused: true,
+                                pointer_inside: false,
+                                caret: None,
+                                values: &values,
+                            },
+                            64,
+                            96,
+                        );
+                    // A Row places the shipped buttons during polish, as on
+                    // the first real frame, before any hardware can touch it.
+                    let layers = desk
+                        .state
+                        .panes
+                        .get_mut(opened.pane)
+                        .and_then(Pane::decoration_mut)
+                        .expect("frame")
+                        .rendered_layers();
+                    assert!(!layers.is_empty());
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    let outer = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    let at = (
+                        f64::from(outer.loc.x + outer.size.w) - 18.5,
+                        f64::from(outer.loc.y) + 16.0,
+                    );
+                    assert!(
+                        matches!(desk.state.chrome_under(at.into()), Some(under) if matches!(under.chrome, crate::state::Chrome::Frame))
+                    );
+                    let region = region(&desk);
+                    crate::synth::send_touch(&mut desk.state, region, at, 10);
+                    desk.ask();
+                    assert!(desk.client.closes.contains(&opened.toplevel.id()));
+                });
+            }
+
+            #[test]
+            fn locking_cancels_fingers_already_held_on_a_real_scene_and_client() {
+                with_real_touch_scene(
+                    "lock-held",
+                    r"import QtQuick
+                    Item {
+                        property bool held: finger.pressed
+                        property int taps: 0
+                        TapHandler { id: finger; onTapped: parent.taps += 1 }
+                    }",
+                    |desk, id, output| {
+                        let region = region(desk);
+                        crate::synth::touch_down(&mut desk.state, region, 0, (620.0, 520.0), 10);
+                        crate::synth::touch_down(&mut desk.state, region, 1, (720.0, 520.0), 11);
+                        crate::synth::touch_frame(&mut desk.state, region);
+                        desk.pump();
+                        assert!(
+                            desk.state
+                                .surfaces
+                                .get_mut(id)
+                                .and_then(|s| s.instance_mut(output))
+                                .expect("scene")
+                                .scene_for_test()
+                                .get_bool("held")
+                        );
+                        let _lock = desk
+                            .client
+                            .locks
+                            .as_ref()
+                            .expect("manager")
+                            .lock(&desk.qh, ());
+                        desk.pump();
+                        let scene = desk
+                            .state
+                            .surfaces
+                            .get_mut(id)
+                            .and_then(|s| s.instance_mut(output))
+                            .expect("scene")
+                            .scene_for_test();
+                        assert!(
+                            !scene.get_bool("held"),
+                            "lock cancels the scene finger immediately"
+                        );
+                        assert_eq!(scene.get_int("taps"), 0, "cancel is never a tap");
+                        assert!(
+                            desk.client
+                                .touches
+                                .iter()
+                                .any(|event| matches!(event, wl_touch::Event::Cancel)),
+                            "the client finger is cancelled too"
+                        );
+                        crate::synth::touch_up(&mut desk.state, region, 0, 20);
+                        crate::synth::touch_up(&mut desk.state, region, 1, 21);
+                        crate::synth::touch_frame(&mut desk.state, region);
+                        desk.pump();
+                        assert!(
+                            !desk
+                                .client
+                                .touches
+                                .iter()
+                                .any(|event| matches!(event, wl_touch::Event::Up { .. })),
+                            "pre-lock fingers never release into another target"
+                        );
+                    },
+                );
+            }
+
+            // Keep the entire Wayland fixture on Qt's executor: a scene and
+            // its destructor must run on the thread that owns QGuiApplication.
+            fn with_real_touch_scene(
+                name: &'static str,
+                source: &'static str,
+                run: impl FnOnce(&mut Desk, crate::scripted::SurfaceId, &Output) + Send + 'static,
+            ) {
+                crate::qml::qt_test::on_the_qt_thread(move || {
+                    crate::qml::start().expect("Qt starts");
+                    let mut desk = Desk::new();
+                    let opened = desk.open_surface();
+                    let window = desk
+                        .state
+                        .panes
+                        .get(opened.pane)
+                        .and_then(crate::pane::Pane::client)
+                        .cloned()
+                        .expect("client");
+                    desk.state.space.map_element(window, (700, 500), false);
+                    desk.state.space.refresh();
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    let directory = std::env::temp_dir().join(format!("solium-touch-{name}"));
+                    std::fs::create_dir_all(&directory).expect("directory");
+                    let path = directory.join("Scene.qml");
+                    std::fs::write(&path, source).expect("scene source");
+                    desk.state
+                        .declare_surface(crate::scripted::Declaration::for_test(
+                            name,
+                            path,
+                            Scripted::Top,
+                            crate::scripted::On::Rect(Rectangle::new(
+                                (600, 500).into(),
+                                (64, 64).into(),
+                            )),
+                        ));
+                    let id = desk.state.surfaces.named(name).expect("declared");
+                    let output = desk.state.space.outputs().next().cloned().expect("monitor");
+                    desk.state
+                        .surfaces
+                        .get_mut(id)
+                        .and_then(|s| s.instance_mut(&output))
+                        .expect("real scene")
+                        .scene_for_test()
+                        .resize(64, 64, 1.0);
+                    let _touch = desk.client.seat_touch(&desk.qh);
+                    desk.pump();
+                    run(&mut desk, id, &output);
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(directory);
+                });
+            }
+
+            const TOUCH_DRAG_SCENE: &str = r"import QtQuick
+                Item {
+                    id: root
+                    property real distance: box.x
+                    property int ended: 0
+                    Rectangle {
+                        id: box; width: 64; height: 64
+                        DragHandler {
+                            dragThreshold: 0
+                            onActiveChanged: if (!active) root.ended += 1
+                        }
+                    }
+                }";
+
+            #[test]
+            fn a_finger_dragging_a_real_scenes_drag_handler_moves_it() {
+                with_real_touch_scene("drag", TOUCH_DRAG_SCENE, |desk, id, output| {
+                    let region = region(desk);
+                    crate::synth::touch_down(&mut desk.state, region, 0, (620.0, 520.0), 10);
+                    for (index, x) in [640.0, 660.0, 680.0].into_iter().enumerate() {
+                        crate::synth::touch_motion(
+                            &mut desk.state,
+                            region,
+                            0,
+                            (x, 520.0),
+                            20 + index as u64,
+                        );
+                    }
+                    crate::synth::touch_up(&mut desk.state, region, 0, 30);
+                    let scene = desk
+                        .state
+                        .surfaces
+                        .get_mut(id)
+                        .and_then(|s| s.instance_mut(output))
+                        .expect("scene")
+                        .scene_for_test();
+                    assert_eq!(scene.get_real("distance", -1.0), 60.0);
+                    assert_eq!(scene.get_int("ended"), 1);
+                });
+            }
+
+            #[test]
+            fn a_finger_keeps_its_real_scene_after_moving_over_a_client() {
+                with_real_touch_scene("capture", TOUCH_DRAG_SCENE, |desk, id, output| {
+                    let region = region(desk);
+                    crate::synth::touch_down(&mut desk.state, region, 0, (620.0, 520.0), 10);
+                    crate::synth::touch_motion(&mut desk.state, region, 0, (650.0, 520.0), 20);
+                    crate::synth::touch_motion(&mut desk.state, region, 0, (720.0, 520.0), 30);
+                    crate::synth::touch_up(&mut desk.state, region, 0, 40);
+                    crate::synth::touch_frame(&mut desk.state, region);
+                    desk.pump();
+                    let scene = desk
+                        .state
+                        .surfaces
+                        .get_mut(id)
+                        .and_then(|s| s.instance_mut(output))
+                        .expect("scene")
+                        .scene_for_test();
+                    assert_eq!(scene.get_real("distance", -1.0), 100.0);
+                    assert_eq!(scene.get_int("ended"), 1);
+                    assert!(desk.client.touches.is_empty(), "captured touch never leaks");
+                });
+            }
+
+            #[test]
+            fn two_fingers_on_a_real_scene_and_client_reach_their_own_targets() {
+                with_real_touch_scene(
+                    "two-targets",
+                    r"import QtQuick
+                    Item { property int taps: 0; TapHandler { onTapped: parent.taps += 1 } }",
+                    |desk, id, output| {
+                        let region = region(desk);
+                        crate::synth::touch_down(&mut desk.state, region, 0, (620.0, 520.0), 10);
+                        crate::synth::touch_down(&mut desk.state, region, 1, (720.0, 520.0), 11);
+                        crate::synth::touch_frame(&mut desk.state, region);
+                        crate::synth::touch_up(&mut desk.state, region, 0, 20);
+                        crate::synth::touch_up(&mut desk.state, region, 1, 21);
+                        crate::synth::touch_frame(&mut desk.state, region);
+                        desk.pump();
+                        let taps = desk
+                            .state
+                            .surfaces
+                            .get_mut(id)
+                            .and_then(|s| s.instance_mut(output))
+                            .expect("scene")
+                            .scene_for_test()
+                            .get_int("taps");
+                        assert_eq!(taps, 1);
+                        assert!(
+                            desk.client
+                                .touches
+                                .iter()
+                                .any(|e| matches!(e, wl_touch::Event::Down { id: 1, .. }))
+                        );
+                        assert!(
+                            desk.client
+                                .touches
+                                .iter()
+                                .any(|e| matches!(e, wl_touch::Event::Up { id: 1, .. }))
+                        );
+                        assert!(!desk.client.touches.iter().any(|e| matches!(
+                            e,
+                            wl_touch::Event::Down { id: 0, .. } | wl_touch::Event::Up { id: 0, .. }
+                        )));
+                    },
+                );
+            }
+
+            #[test]
+            fn while_locked_a_touch_over_a_real_scene_reaches_only_the_lock_surface() {
+                with_real_touch_scene(
+                    "locked",
+                    r"import QtQuick
+                    Item { property int taps: 0; TapHandler { onTapped: parent.taps += 1 } }",
+                    |desk, id, output| {
+                        let _global = output.create_global::<Solium>(&desk.display.handle());
+                        desk.pump();
+                        let lock = desk
+                            .client
+                            .locks
+                            .as_ref()
+                            .expect("lock manager")
+                            .lock(&desk.qh, ());
+                        let surface = desk
+                            .client
+                            .compositor
+                            .as_ref()
+                            .expect("compositor")
+                            .create_surface(&desk.qh, ());
+                        let role =
+                            lock.get_lock_surface(&surface, &desk.client.outputs[0], &desk.qh, ());
+                        desk.pump();
+                        let serial = desk
+                            .client
+                            .lock_configures
+                            .iter()
+                            .find(|(id, _)| *id == role.id())
+                            .expect("configure")
+                            .1;
+                        role.ack_configure(serial);
+                        let _buffer = super::super::commit_buffer(
+                            &desk.client,
+                            &desk.qh,
+                            &surface,
+                            1920,
+                            1080,
+                        );
+                        desk.pump();
+                        assert!(desk.state.lock.is_some());
+                        let region = region(desk);
+                        crate::synth::send_touch(&mut desk.state, region, (620.0, 520.0), 10);
+                        desk.pump();
+                        let taps = desk
+                            .state
+                            .surfaces
+                            .get_mut(id)
+                            .and_then(|s| s.instance_mut(output))
+                            .expect("scene")
+                            .scene_for_test()
+                            .get_int("taps");
+                        assert_eq!(taps, 0);
+                        assert!(desk.client.touches.iter().any(|e| matches!(e, wl_touch::Event::Down { surface: target, .. } if target == &surface)));
+                    },
+                );
+            }
+
             /// Two fingers retain independent slots and surface-local positions
             /// through the actual input dispatcher and the wl_touch wire (#181).
             #[test]
@@ -31342,9 +31787,9 @@ end)
             }
 
             /// **A touch neither reaches nor focuses the window under a shell
-            /// button** (Ruling 8, as for the pointer): a scene takes no
-            /// touch, so a touch where the shell takes a press is nobody's,
-            /// and the window with the keyboard keeps it. Beside the button
+            /// button** (Ruling 8, as for the pointer): a touch where the shell
+            /// takes a press belongs to that scene, and the window with the
+            /// keyboard keeps it. Beside the button
             /// the touch lands on the window under the shell and focuses it,
             /// even while the shell holds a press of the mouse's, which is the
             /// pointer's and not the touch's.
