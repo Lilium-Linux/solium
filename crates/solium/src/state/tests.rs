@@ -31730,6 +31730,220 @@ end)
                 });
             }
 
+            const TOUCH_LOGGER: &str = r#"
+                touch_events = {}
+                sol.on("touch", function(event)
+                    touch_events[#touch_events + 1] = string.format("%s:%d:%.0f:%.0f:%s",
+                        event.kind, event.slot, event.x, event.y, event.output)
+                end)
+            "#;
+
+            fn recorded_touches(desk: &Desk) -> String {
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .expect("scripts")
+                    .evaluate("return table.concat(touch_events, ',')")
+            }
+
+            #[test]
+            fn lua_hears_each_fingers_touch_after_scene_and_client_routing() {
+                with_real_touch_scene(
+                    "lua-touch",
+                    r"import QtQuick
+                    Item { property int taps: 0; TapHandler { onTapped: parent.taps += 1 } }",
+                    |desk, id, output| {
+                        desk.install(TOUCH_LOGGER);
+                        let region = region(desk);
+                        crate::synth::touch_down(
+                            &mut desk.state,
+                            region,
+                            0,
+                            (620.0, 520.0),
+                            10_000,
+                        );
+                        crate::synth::touch_down(
+                            &mut desk.state,
+                            region,
+                            1,
+                            (720.0, 520.0),
+                            11_000,
+                        );
+                        crate::synth::touch_motion(
+                            &mut desk.state,
+                            region,
+                            1,
+                            (730.0, 530.0),
+                            20_000,
+                        );
+                        crate::synth::touch_up(&mut desk.state, region, 0, 30_000);
+                        crate::synth::touch_up(&mut desk.state, region, 1, 31_000);
+                        crate::synth::touch_frame(&mut desk.state, region);
+                        desk.pump();
+                        let name = output.name();
+                        assert_eq!(
+                            recorded_touches(desk),
+                            format!(
+                                "down:0:620:520:{name},down:1:720:520:{name},motion:1:730:530:{name},up:0:620:520:{name},up:1:730:530:{name}"
+                            )
+                        );
+                        assert_eq!(
+                            desk.state
+                                .surfaces
+                                .get_mut(id)
+                                .and_then(|s| s.instance_mut(output))
+                                .expect("scene")
+                                .scene_for_test()
+                                .get_int("taps"),
+                            1
+                        );
+                        assert!(
+                            desk.client
+                                .touches
+                                .iter()
+                                .any(|e| matches!(e, wl_touch::Event::Down { id: 1, .. }))
+                        );
+                    },
+                );
+            }
+
+            #[test]
+            fn lua_hears_cancel_at_the_fingers_last_position_and_no_later_release() {
+                with_real_touch_scene(
+                    "lua-cancel",
+                    r"import QtQuick
+                    Item { TapHandler {} }",
+                    |desk, _, output| {
+                        desk.install(TOUCH_LOGGER);
+                        let region = region(desk);
+                        crate::synth::touch_down(
+                            &mut desk.state,
+                            region,
+                            1,
+                            (720.0, 520.0),
+                            10_000,
+                        );
+                        crate::synth::touch_motion(
+                            &mut desk.state,
+                            region,
+                            1,
+                            (730.0, 530.0),
+                            20_000,
+                        );
+                        crate::synth::touch_frame(&mut desk.state, region);
+                        crate::synth::touch_cancel(&mut desk.state, region);
+                        crate::synth::touch_up(&mut desk.state, region, 1, 30_000);
+                        desk.pump();
+                        let name = output.name();
+                        assert_eq!(
+                            recorded_touches(desk),
+                            format!(
+                                "down:1:720:520:{name},motion:1:730:530:{name},cancel:1:730:530:{name}"
+                            )
+                        );
+                        assert!(
+                            desk.client
+                                .touches
+                                .iter()
+                                .any(|e| matches!(e, wl_touch::Event::Cancel))
+                        );
+                    },
+                );
+            }
+
+            #[test]
+            fn locked_touch_is_never_told_to_lua_even_when_unlock_cancels_it() {
+                with_real_touch_scene(
+                    "lua-locked",
+                    r"import QtQuick
+                    Item { TapHandler {} }",
+                    |desk, _, output| {
+                        desk.install(TOUCH_LOGGER);
+                        let lock = desk
+                            .client
+                            .locks
+                            .as_ref()
+                            .expect("manager")
+                            .lock(&desk.qh, ());
+                        desk.pump();
+                        let region = region(desk);
+                        crate::synth::touch_down(
+                            &mut desk.state,
+                            region,
+                            0,
+                            (620.0, 520.0),
+                            10_000,
+                        );
+                        crate::synth::touch_motion(
+                            &mut desk.state,
+                            region,
+                            0,
+                            (630.0, 530.0),
+                            20_000,
+                        );
+                        assert_eq!(recorded_touches(desk), "");
+                        let frame = desk.state.lock_frame();
+                        desk.state.frame_presented(output, frame);
+                        desk.pump();
+                        lock.unlock_and_destroy();
+                        desk.pump();
+                        assert!(desk.state.lock.is_none());
+                        crate::synth::touch_up(&mut desk.state, region, 0, 30_000);
+                        assert_eq!(
+                            recorded_touches(desk),
+                            "",
+                            "unlock never replays lock input"
+                        );
+                    },
+                );
+            }
+
+            #[test]
+            fn a_touch_under_a_script_grab_clicks_the_mode_but_scenes_still_own_their_controls() {
+                with_real_touch_scene(
+                    "script-touch",
+                    r"import QtQuick
+                    Item { property int taps: 0; TapHandler { onTapped: parent.taps += 1 } }",
+                    |desk, id, output| {
+                        desk.install(
+                            r#"
+                            clicks = {}
+                            sol.on("click", function(x, y)
+                                clicks[#clicks + 1] = string.format("%.0f:%.0f", x, y)
+                            end)
+                        "#,
+                        );
+                        desk.state.script_grab = true;
+                        let region = region(desk);
+                        crate::synth::send_touch(&mut desk.state, region, (720.0, 520.0), 10_000);
+                        crate::synth::send_touch(&mut desk.state, region, (620.0, 520.0), 20_000);
+                        desk.pump();
+                        assert_eq!(
+                            desk.state
+                                .scripts
+                                .as_ref()
+                                .expect("scripts")
+                                .evaluate("return table.concat(clicks, ',')"),
+                            "720:520"
+                        );
+                        assert!(
+                            desk.client.touches.is_empty(),
+                            "overview's client receives no finger"
+                        );
+                        assert_eq!(
+                            desk.state
+                                .surfaces
+                                .get_mut(id)
+                                .and_then(|s| s.instance_mut(output))
+                                .expect("scene")
+                                .scene_for_test()
+                                .get_int("taps"),
+                            1
+                        );
+                    },
+                );
+            }
+
             // Keep the entire Wayland fixture on Qt's executor: a scene and
             // its destructor must run on the thread that owns QGuiApplication.
             fn with_real_touch_scene(

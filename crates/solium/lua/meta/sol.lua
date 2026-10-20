@@ -27,6 +27,14 @@
 ---@field w number
 ---@field h number
 
+---A raw finger event, observed after routing. Lock-screen input is never exposed.
+---@class sol.TouchEvent
+---@field kind "down"|"motion"|"up"|"cancel"
+---@field slot integer Finger identifier until up or cancel.
+---@field x number Last global logical x coordinate, including for up/cancel.
+---@field y number Last global logical y coordinate, including for up/cancel.
+---@field output string Connector containing the original down, empty outside outputs.
+
 ---A size in logical pixels.
 ---@class sol.Size
 ---@field w number
@@ -414,7 +422,8 @@
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
 ---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
----| "click" # A press while a script holds input: `(x, y)`.
+---| "click" # A pointer or finger press while a script holds input: `(x, y)`.
+---| "touch" # A raw finger event after routing: `(event)`, a `sol.TouchEvent`. Observes clients and compositor controls without consuming input. Never delivered while locked, nor replayed on unlock.
 ---| "surface" # A hosted scene sent an action: `(surface, action, data)`, `data` a table, a value or `nil`. Every action is heard, in the order sent, in a dispatch after the one that sent it; a scene that sets an `action` string property is heard the same way, with `data` `nil`.
 ---| "direction" # `sol.focus_direction` or `sol.move_direction` was called: `(verb, dir)`, `verb` being `"focus"` or `"move"`. The layout in charge answers.
 ---| "layout" # Arrange the windows you already hold again: `()`.
@@ -1128,6 +1137,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))
 ---@overload fun(event: "click", handler: fun(x: number, y: number))
+---@overload fun(event: "touch", handler: fun(event: sol.TouchEvent))
 ---@overload fun(event: "surface", handler: fun(surface: string, action: string, data: any))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore"|"problems", handler: fun())

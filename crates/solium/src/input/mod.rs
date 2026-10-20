@@ -111,6 +111,7 @@ pub(crate) fn handle<B: InputBackend>(
     // What the event made the scenes say, read in the dispatch that
     // delivered it (Ruling 11):
     // `state::tests::real_client::reflow_on_close::hosted::a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant`.
+    touch::flush(state);
     state.settle_scenes();
 }
 

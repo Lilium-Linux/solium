@@ -509,6 +509,8 @@ pub(crate) struct Solium {
     pub(crate) touches: std::collections::HashMap<i32, crate::input::touch::Contact>,
     /// A final client release needs a frame even after its slot has gone.
     pub(crate) touch_frame_pending: bool,
+    /// Observations queued until touch routing has released the seat lock.
+    pub(crate) touch_events: Vec<crate::script::TouchEvent>,
     /// What became of the `sol.act`s the dispatch being applied ran, told to
     /// Lua once all of it is applied (Ruling 15).
     /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
@@ -1281,6 +1283,7 @@ impl Solium {
             scene_press: None,
             touches: std::collections::HashMap::new(),
             touch_frame_pending: false,
+            touch_events: Vec::new(),
             settled_attempts: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
             unknown_in_workspaces: std::collections::HashSet::new(),

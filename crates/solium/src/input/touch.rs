@@ -27,6 +27,7 @@ pub(crate) enum TouchTarget {
     Move(MoveDrag),
     Resize(ResizeDrag),
     Client,
+    Script,
     Swallowed,
 }
 
@@ -35,6 +36,7 @@ pub(crate) enum TouchTarget {
 pub(crate) struct Contact {
     target: TouchTarget,
     location: Point<f64, Logical>,
+    output: String,
 }
 
 fn target(state: &mut Solium, location: Point<f64, Logical>, serial: Serial) -> TouchTarget {
@@ -70,6 +72,11 @@ fn target(state: &mut Solium, location: Point<f64, Logical>, serial: Serial) -> 
             output,
             area,
         });
+    }
+    // As with pointer input, a mode owns the background while its hosted
+    // controls above the windows still receive their own presses.
+    if state.script_grab {
+        return TouchTarget::Script;
     }
     // A client's layer above the windows occludes their frames too.
     if !state.client_above(location)
@@ -119,6 +126,9 @@ fn target(state: &mut Solium, location: Point<f64, Logical>, serial: Serial) -> 
 }
 
 pub(crate) fn down(state: &mut Solium, slot: TouchSlot, location: Point<f64, Logical>, time: u32) {
+    let output = crate::monitor::at(&state.space, location)
+        .map(|output| output.name())
+        .unwrap_or_default();
     let serial = SERIAL_COUNTER.next_serial();
     let target = target(state, location, serial);
     match &target {
@@ -147,9 +157,13 @@ pub(crate) fn down(state: &mut Solium, slot: TouchSlot, location: Point<f64, Log
         }
         _ => deliver(state, &target, location, TouchKind::Down, slot.into(), time),
     }
-    state
-        .touches
-        .insert(slot.into(), Contact { target, location });
+    let contact = Contact {
+        target,
+        location,
+        output,
+    };
+    queue(state, &contact, "down", slot.into());
+    state.touches.insert(slot.into(), contact);
 }
 
 pub(crate) fn motion(
@@ -162,8 +176,8 @@ pub(crate) fn motion(
         return;
     };
     contact.location = location;
-    let target = contact.target.clone();
-    match &target {
+    let contact = contact.clone();
+    match &contact.target {
         TouchTarget::Client | TouchTarget::Lock => {
             let under = state.touch_under(location);
             if let Some(touch) = state.seat.get_touch() {
@@ -181,13 +195,14 @@ pub(crate) fn motion(
         }
         _ => deliver(
             state,
-            &target,
+            &contact.target,
             location,
             TouchKind::Motion,
             slot.into(),
             time,
         ),
     }
+    queue(state, &contact, "motion", slot.into());
 }
 
 pub(crate) fn up(state: &mut Solium, slot: TouchSlot, time: u32) {
@@ -217,6 +232,7 @@ pub(crate) fn up(state: &mut Solium, slot: TouchSlot, time: u32) {
             time,
         ),
     }
+    queue(state, &contact, "up", slot.into());
 }
 
 pub(crate) fn frame(state: &mut Solium) {
@@ -246,6 +262,7 @@ pub(crate) fn cancel(state: &mut Solium) {
                 time,
             ),
         }
+        queue(state, &contact, "cancel", slot);
     }
     if let Some(touch) = state.seat.get_touch() {
         if pending && clients.is_empty() {
@@ -272,6 +289,37 @@ pub(crate) fn cancel(state: &mut Solium) {
             }
             touch.cancel(state);
         }
+    }
+}
+
+fn queue(state: &mut Solium, contact: &Contact, kind: &'static str, slot: i32) {
+    // Unlock also cancels contacts, after removing state.lock. Never reveal
+    // a lock-screen finger then, or replay observations delayed by locking.
+    if state.lock.is_some() || matches!(contact.target, TouchTarget::Lock) {
+        return;
+    }
+    state.touch_events.push(crate::script::TouchEvent {
+        kind,
+        slot,
+        x: contact.location.x,
+        y: contact.location.y,
+        output: contact.output.clone(),
+    });
+}
+
+pub(crate) fn flush(state: &mut Solium) {
+    let events = std::mem::take(&mut state.touch_events);
+    for event in events {
+        if state.lock.is_some() {
+            break;
+        }
+        let snapshot = state.snapshot();
+        let Some(mut scripts) = state.scripts.take() else {
+            break;
+        };
+        let outcome = scripts.touch(event, snapshot);
+        state.scripts = Some(scripts);
+        state.apply(outcome);
     }
 }
 
@@ -310,6 +358,11 @@ fn deliver(
                 {
                     state.frame_action(*id, action);
                 }
+            }
+        }
+        TouchTarget::Script => {
+            if kind == TouchKind::Down {
+                state.trigger_click(location.x, location.y);
             }
         }
         TouchTarget::Move(drag) => match kind {

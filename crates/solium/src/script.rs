@@ -35,6 +35,16 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use crate::input::devices::{DeviceKind, DeviceMatch, InputConfig, Settings as InputSettings};
 use crate::present::{Curve, Frame};
 
+/// A routed finger event, expressed entirely in script coordinates.
+#[derive(Clone, Debug)]
+pub(crate) struct TouchEvent {
+    pub(crate) kind: &'static str,
+    pub(crate) slot: i32,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) output: String,
+}
+
 /// A rectangle as a script sees it: plain numbers, no coordinate-space types.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Rect {
@@ -1890,6 +1900,19 @@ impl Scripts {
     pub(crate) fn click(&mut self, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
         self.dispatch_as(FocusSource::Click, snapshot, move |lua, _| {
             call_listeners(lua, "click", (x, y))
+        })
+    }
+
+    /// Raw touch is observed after routing, outside the seat's input lock.
+    pub(crate) fn touch(&mut self, event: TouchEvent, snapshot: Snapshot) -> Outcome {
+        self.dispatch_as(FocusSource::Touch, snapshot, move |lua, _| {
+            let table = lua.create_table()?;
+            table.set("kind", event.kind)?;
+            table.set("slot", event.slot)?;
+            table.set("x", event.x)?;
+            table.set("y", event.y)?;
+            table.set("output", event.output)?;
+            call_listeners(lua, "touch", table)
         })
     }
 

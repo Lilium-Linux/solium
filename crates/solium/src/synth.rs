@@ -245,6 +245,9 @@ impl smithay::backend::input::TouchMotionEvent<Synthetic> for Touch {}
 #[cfg(test)]
 impl smithay::backend::input::TouchFrameEvent<Synthetic> for Touch {}
 
+#[cfg(test)]
+impl smithay::backend::input::TouchCancelEvent<Synthetic> for Touch {}
+
 impl InputBackend for Synthetic {
     type Device = SynthDevice;
     type KeyboardKeyEvent = Key;
@@ -275,6 +278,9 @@ impl InputBackend for Synthetic {
     type TouchMotionEvent = Touch;
     #[cfg(not(test))]
     type TouchMotionEvent = UnusedEvent;
+    #[cfg(test)]
+    type TouchCancelEvent = Touch;
+    #[cfg(not(test))]
     type TouchCancelEvent = UnusedEvent;
     #[cfg(test)]
     type TouchFrameEvent = Touch;
@@ -572,6 +578,21 @@ pub(crate) fn touch_frame(state: &mut Solium, region: Rectangle<i32, Logical>) {
         state,
         region,
         InputEvent::TouchFrame {
+            event: Touch {
+                at: (0.0, 0.0).into(),
+                time: 0,
+                slot: 0,
+            },
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn touch_cancel(state: &mut Solium, region: Rectangle<i32, Logical>) {
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::TouchCancel {
             event: Touch {
                 at: (0.0, 0.0).into(),
                 time: 0,

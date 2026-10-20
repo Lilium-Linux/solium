@@ -906,6 +906,29 @@ left waiting.
 Nested, there is no display to power off: a monitor that is "off" is drawn
 black and then not drawn at all, so all of the above can be tried in a window.
 
+### Touch events in Lua
+
+`sol.on("touch", function(event) end)` observes each finger after its input is
+routed. `event.kind` is `"down"`, `"motion"`, `"up"` or `"cancel"`; `slot`
+identifies the finger until it lifts or is cancelled. `x` and `y` are global
+logical coordinates, retaining the last position for up and cancel. `output`
+is the connector containing the original down, or empty outside all outputs.
+
+```lua
+sol.on("touch", function(event)
+    sol.log(string.format("touch %s slot=%d x=%.1f y=%.1f output=%s",
+        event.kind, event.slot, event.x, event.y, event.output))
+end)
+```
+
+This observes touch on clients, hosted scenes and window frames; it does not
+consume the client's input. Nothing is delivered while locked, or replayed
+when unlocking. While a mode holds input with `sol.grab_input(true)`, a finger
+press triggers its `click(x, y)` listeners, as a pointer press does; hosted
+controls above the windows still receive their own presses first.
+System gesture recognition and ownership are tracked by
+[#252](https://github.com/Lilium-Linux/solium/issues/252).
+
 ### Touchpad, mouse and keyboard settings
 
 A touchpad taps and scrolls naturally out of the box; a mouse does not get
