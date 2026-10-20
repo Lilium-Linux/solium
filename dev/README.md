@@ -19,6 +19,12 @@ page, made from what `solium --check` prints.
 
 ## Building
 
+`dev/setup.sh`, run once after cloning, checks what this section needs: Rust
+(the toolchain `rust-toolchain.toml` names, with rustfmt and clippy), the
+development packages, and on Fedora without them the build image, which it
+builds. It also installs the git hooks in `dev/hooks`. It says what to install
+when it cannot do it itself, and exits non-zero until nothing is missing.
+
 Natively, with the development packages the top-level README lists under
 *Building*:
 

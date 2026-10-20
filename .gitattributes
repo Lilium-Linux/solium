@@ -22,6 +22,10 @@
 # Decision records, with the evidence that settled them.
 /docs/spikes            export-ignore
 
+# Setting up a clone.
+/dev/setup.sh           export-ignore
+/dev/hooks              export-ignore
+
 # Repository plumbing.
 /.github                export-ignore
 /.gitattributes         export-ignore

@@ -36,6 +36,10 @@ conduct](CODE_OF_CONDUCT.md).
 
 ## Building
 
+After cloning, run `dev/setup.sh` once. It checks Rust and the packages below,
+builds the Fedora build image when they are missing (see *The gate*), installs
+the project's git hooks, and says what to install when it cannot do it itself.
+
 The README's [Building](README.md#building) section lists the packages for
 each distribution. In short: Rust 1.88 or newer (edition 2024), a C++17
 compiler, Qt 6.5 or newer (Quick and Qml) with its `moc`, and the Wayland,
@@ -100,6 +104,9 @@ reproduces the bug.
   issue it belongs to: `#115: the layouts take each window's own floor`. A
   follow-up from review says so: `#115 review: small corrections`.
 - The body says why. The diff already says what.
+- No AI attribution: no `Co-Authored-By` trailer naming an AI tool, and no
+  "Generated with" footer, in commits or pull requests. The `commit-msg` hook
+  `dev/setup.sh` installs strips them from commits.
 - Comments describe the code as it is, not how it got there. A comment that
   stops being true when the code changes is changed with it.
 
