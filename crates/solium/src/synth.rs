@@ -192,7 +192,6 @@ impl smithay::backend::input::PointerAxisEvent<Synthetic> for Axis {
 }
 
 /// One finger on a touchscreen, at a point of the region it is glued to.
-#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct Touch {
     at: Point<f64, Logical>,
@@ -200,7 +199,6 @@ pub(crate) struct Touch {
     slot: u32,
 }
 
-#[cfg(test)]
 impl Event<Synthetic> for Touch {
     fn time(&self) -> u64 {
         self.time
@@ -210,14 +208,12 @@ impl Event<Synthetic> for Touch {
     }
 }
 
-#[cfg(test)]
 impl smithay::backend::input::TouchEvent<Synthetic> for Touch {
     fn slot(&self) -> smithay::backend::input::TouchSlot {
         Some(self.slot).into()
     }
 }
 
-#[cfg(test)]
 impl smithay::backend::input::AbsolutePositionEvent<Synthetic> for Touch {
     fn x(&self) -> f64 {
         self.at.x
@@ -233,19 +229,14 @@ impl smithay::backend::input::AbsolutePositionEvent<Synthetic> for Touch {
     }
 }
 
-#[cfg(test)]
 impl smithay::backend::input::TouchDownEvent<Synthetic> for Touch {}
 
-#[cfg(test)]
 impl smithay::backend::input::TouchUpEvent<Synthetic> for Touch {}
 
-#[cfg(test)]
 impl smithay::backend::input::TouchMotionEvent<Synthetic> for Touch {}
 
-#[cfg(test)]
 impl smithay::backend::input::TouchFrameEvent<Synthetic> for Touch {}
 
-#[cfg(test)]
 impl smithay::backend::input::TouchCancelEvent<Synthetic> for Touch {}
 
 impl InputBackend for Synthetic {
@@ -266,26 +257,11 @@ impl InputBackend for Synthetic {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
-    #[cfg(test)]
     type TouchDownEvent = Touch;
-    #[cfg(not(test))]
-    type TouchDownEvent = UnusedEvent;
-    #[cfg(test)]
     type TouchUpEvent = Touch;
-    #[cfg(not(test))]
-    type TouchUpEvent = UnusedEvent;
-    #[cfg(test)]
     type TouchMotionEvent = Touch;
-    #[cfg(not(test))]
-    type TouchMotionEvent = UnusedEvent;
-    #[cfg(test)]
     type TouchCancelEvent = Touch;
-    #[cfg(not(test))]
-    type TouchCancelEvent = UnusedEvent;
-    #[cfg(test)]
     type TouchFrameEvent = Touch;
-    #[cfg(not(test))]
-    type TouchFrameEvent = UnusedEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
     type TabletToolTipEvent = UnusedEvent;
@@ -521,7 +497,6 @@ pub(crate) fn send_touch(
     touch_frame(state, region);
 }
 
-#[cfg(test)]
 pub(crate) fn touch_down(
     state: &mut Solium,
     region: Rectangle<i32, Logical>,
@@ -539,7 +514,6 @@ pub(crate) fn touch_down(
     );
 }
 
-#[cfg(test)]
 pub(crate) fn touch_motion(
     state: &mut Solium,
     region: Rectangle<i32, Logical>,
@@ -557,7 +531,6 @@ pub(crate) fn touch_motion(
     );
 }
 
-#[cfg(test)]
 pub(crate) fn touch_up(state: &mut Solium, region: Rectangle<i32, Logical>, slot: u32, time: u64) {
     crate::input::handle::<Synthetic>(
         state,
@@ -572,7 +545,6 @@ pub(crate) fn touch_up(state: &mut Solium, region: Rectangle<i32, Logical>, slot
     );
 }
 
-#[cfg(test)]
 pub(crate) fn touch_frame(state: &mut Solium, region: Rectangle<i32, Logical>) {
     crate::input::handle::<Synthetic>(
         state,
@@ -587,7 +559,6 @@ pub(crate) fn touch_frame(state: &mut Solium, region: Rectangle<i32, Logical>) {
     );
 }
 
-#[cfg(test)]
 pub(crate) fn touch_cancel(state: &mut Solium, region: Rectangle<i32, Logical>) {
     crate::input::handle::<Synthetic>(
         state,

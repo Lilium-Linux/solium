@@ -933,6 +933,23 @@ binding, then the first connected output. It must be present in the build to
 validate a touchscreen with an external monitor; these UI changes alone do
 not establish hardware mapping accuracy.
 
+A release can carry its measured velocity into a physical spring:
+
+```lua
+sol.animate({ easing = { spring = {
+    stiffness = 300, damping = 25, mass = 1,
+    initial_velocity = velocity / remaining_distance,
+} } })
+-- Queue the target presentation here. Guard zero remaining distance in Lua.
+```
+
+Velocity is in **remaining-distance fractions per second**, with its sign
+preserved. Springs use physical settling time rather than the requested duration.
+For a normalized gesture progress `p` settling to `target`, use
+`progress_velocity / (target - p)`. The solver derives acceleration from spring
+force and damping. One spring controls one progress track; it does not supply
+independent velocities for every rectangle component.
+
 ### Touch events in Lua
 
 `sol.on("touch", function(event) end)` receives each finger. **Down runs

@@ -195,7 +195,14 @@
 ---| "inOutQuad"
 ---| "inOutCubic"
 ---| "spring"
+---| sol.SpringEasing
 ---| number[]
+
+---Physical spring parameters. Omitted fields use the engine's defaults.
+---Mass must be at least machine epsilon; stiffness is positive, damping is
+---nonnegative, epsilon is between zero and one, and all values must be finite.
+---@class sol.SpringEasing
+---@field spring { stiffness?: number, damping?: number, mass?: number, initial_velocity?: number, epsilon?: number } Initial velocity is signed remaining-distance fractions per second. Springs use their physical settling time, ignoring duration.
 
 ---How long an animation takes and how it moves.
 ---@class sol.Motion

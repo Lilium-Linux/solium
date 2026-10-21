@@ -151,6 +151,73 @@ pub(crate) fn drags() -> Vec<Drag> {
     .collect()
 }
 
+/// Scheduled touchscreen samples, in global logical coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TouchPhase {
+    Down,
+    Motion,
+    Up,
+    Cancel,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TouchSample {
+    pub(crate) at: Duration,
+    pub(crate) phase: TouchPhase,
+    pub(crate) slot: u32,
+    pub(crate) point: (f64, f64),
+}
+
+pub(crate) fn parse_touches(raw: &str) -> Result<Vec<TouchSample>, String> {
+    let mut samples = Vec::new();
+    for line in raw.split(';').filter(|s| !s.trim().is_empty()) {
+        let invalid = || format!("invalid touch sample: {line}");
+        let parts: Vec<_> = line.split(':').map(str::trim).collect();
+        let [time, phase, slot, point] = parts.as_slice() else {
+            return Err(invalid());
+        };
+        let at = Duration::from_millis(time.parse::<u64>().map_err(|_| invalid())?);
+        let phase = match *phase {
+            "down" => TouchPhase::Down,
+            "motion" => TouchPhase::Motion,
+            "up" => TouchPhase::Up,
+            "cancel" => TouchPhase::Cancel,
+            _ => return Err(invalid()),
+        };
+        let slot = slot.parse::<i32>().map_err(|_| invalid())?;
+        let slot = u32::try_from(slot).map_err(|_| invalid())?;
+        let (x, y) = point.split_once(',').ok_or_else(invalid)?;
+        let (x, y) = (
+            x.parse::<f64>().map_err(|_| invalid())?,
+            y.parse::<f64>().map_err(|_| invalid())?,
+        );
+        if !x.is_finite() || !y.is_finite() {
+            return Err(invalid());
+        }
+        samples.push(TouchSample {
+            at,
+            phase,
+            slot,
+            point: (x, y),
+        });
+    }
+    samples.sort_by_key(|s| s.at);
+    Ok(samples)
+}
+
+pub(crate) fn touches() -> Vec<TouchSample> {
+    match std::env::var("SOLIUM_TOUCH_AT") {
+        Ok(raw) => match parse_touches(&raw) {
+            Ok(samples) => samples,
+            Err(error) => {
+                tracing::warn!(%error, "touch replay rejected");
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Windows to open for an application that will never arrive, as
 /// `<ms>:<program>` separated by commas.
 ///
@@ -484,6 +551,26 @@ pub(crate) fn debug_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn motion_274_touch_replay_keeps_times_and_stable_sample_order() {
+        let samples =
+            super::parse_touches("20:motion:0:3,4;10:down:0:1,2;20:up:0:0,0").expect("samples");
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].at, std::time::Duration::from_millis(10));
+        assert_eq!(samples[0].phase, super::TouchPhase::Down);
+        assert_eq!(samples[1].phase, super::TouchPhase::Motion);
+        assert_eq!(samples[2].phase, super::TouchPhase::Up);
+        for invalid in [
+            "bad",
+            "1:tap:0:1,2",
+            "1:down:-1:1,2",
+            "1:down:0:NaN,2",
+            "1:motion:0:1,inf",
+        ] {
+            assert!(super::parse_touches(invalid).is_err(), "{invalid}");
+        }
+    }
+
     /// **The geometry oracle is named by its effect**, trimmed; unset or
     /// empty names none.
     #[test]
