@@ -28,6 +28,15 @@ your configuration names, in a rule, in `effects.on` or in a binding, and the
 effects those name in turn. Every other folder is left alone, yours and the
 shipped ones alike.
 
+A folder only `sol.present` plays is named when the first present names it,
+so that present finds it not yet loaded and draws the window flat. Name it in
+`effects.load` and it loads with the configuration instead, before anything
+plays it:
+
+```lua
+sol.effects({ load = { "genie" } })
+```
+
 ## Rules
 
 A rule puts an effect in a slot of a part of a window, or of a surface. Rules

@@ -395,7 +395,8 @@ struct Versions<P> {
 #[derive(Debug)]
 pub(crate) struct Host<P = super::gl::Program> {
     library: Library,
-    /// Who wants what: `"rules"`, `"on"`, `"style"`, `"present"`, `"check"`.
+    /// Who wants what: `"rules"`, `"on"`, `"style"`, `"present"`, `"check"`,
+    /// and `"load"`, the configuration's `effects.load` (#300).
     wanted: BTreeMap<&'static str, BTreeSet<String>>,
     slots: BTreeMap<String, Versions<P>>,
     next_index: u32,
