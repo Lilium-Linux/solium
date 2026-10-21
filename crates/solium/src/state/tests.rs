@@ -14008,6 +14008,7 @@ end)"#,
                     duration: Duration::from_secs(10),
                     easing: present::Curve::Linear,
                 },
+                channels: None,
             }],
             ..Outcome::default()
         });

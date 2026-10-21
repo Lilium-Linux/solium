@@ -617,6 +617,7 @@ impl Solium {
                 now,
                 animation.duration,
                 animation.easing,
+                None,
             );
         }
     }
@@ -1059,7 +1060,7 @@ impl Solium {
             return;
         }
         let to = grown(held.slot(), self.insets_of(pane));
-        present::from(held, to, start, now, motion.duration, motion.easing);
+        present::from(held, to, start, now, motion.duration, motion.easing, None);
         let lands = now + motion.duration;
         let window = held.client().cloned();
         if let Some(window) = &window {

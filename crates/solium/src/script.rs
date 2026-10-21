@@ -505,6 +505,8 @@ pub(crate) enum Command {
         rect: Rect,
         opacity: Option<f32>,
         animation: AnimationSpec,
+        /// As [`Command::Present`]'s: a timing per property (#293).
+        channels: Option<Box<crate::present::Channels<AnimationSpec>>>,
     },
     /// Give a window the keyboard: `sol.focus`. `source` is what the
     /// handler that asked was answering, which the `focus` event tells
@@ -4156,13 +4158,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 .flatten();
             with_pending(lua, |pending| {
                 let animation = pending.animation;
-                // What a property's motion leaves out is the batch's.
-                let channels = motion.map(|motion| {
-                    Box::new(motion.map(|(duration, easing)| AnimationSpec {
-                        duration: duration.unwrap_or(animation.duration),
-                        easing: easing.unwrap_or(animation.easing),
-                    }))
-                });
+                let channels = resolved(motion, animation);
                 pending.commands.push(Command::Present {
                     id,
                     rect,
@@ -4190,13 +4186,16 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 ));
             };
             let opacity = options.get::<Option<f32>>("opacity")?;
+            let motion = present_motion_from(&options)?;
             with_pending(lua, |pending| {
                 let animation = pending.animation;
+                let channels = resolved(motion, animation);
                 pending.commands.push(Command::PresentFrom {
                     id,
                     rect,
                     opacity,
                     animation,
+                    channels,
                 });
             })
         })?,
@@ -6318,10 +6317,24 @@ fn motion_from(options: Option<&Table>) -> mlua::Result<(Option<Duration>, Optio
     ))
 }
 
+/// A present's `motion` with what it leaves out filled from the batch's own
+/// timing (#293).
+fn resolved(
+    motion: Option<PresentMotion>,
+    animation: AnimationSpec,
+) -> Option<Box<crate::present::Channels<AnimationSpec>>> {
+    motion.map(|motion| {
+        Box::new(motion.map(|(duration, easing)| AnimationSpec {
+            duration: duration.unwrap_or(animation.duration),
+            easing: easing.unwrap_or(animation.easing),
+        }))
+    })
+}
+
 /// The properties `sol.present`'s `motion` can time apart (#293).
 const PRESENT_MOTIONS: [&str; 4] = ["x", "y", "size", "opacity"];
 
-/// A present's `motion` (#293): a timing per property, `x` and `y` for the
+/// A present's or a `present_from`'s `motion` (#293): a timing per property, `x` and `y` for the
 /// drawn rect's centre, `size` for its width and height, `opacity`, each
 /// `{ duration, easing }` as `sol.animate` takes it. A property left out, and
 /// a duration or easing left out of one, is `None` for the caller to fill
@@ -6665,6 +6678,8 @@ mod tests {
                                  motion = { opacity = { duration = 500 },
                                             size = { easing = "linear" } } })
                 sol.present(2, { x = 0, y = 0, w = 10, h = 10 })
+                sol.present_from(3, { x = 0, y = 0, w = 10, h = 10,
+                                      motion = { x = { duration = 120 } } })
             end)
             "#,
         )
@@ -6675,7 +6690,9 @@ mod tests {
             .commands
             .iter()
             .map(|command| match command {
-                Command::Present { channels, .. } => channels.as_deref().copied(),
+                Command::Present { channels, .. } | Command::PresentFrom { channels, .. } => {
+                    channels.as_deref().copied()
+                }
                 other => panic!("expected a present command, got {other:?}"),
             })
             .collect();
@@ -6699,6 +6716,15 @@ mod tests {
                     },
                 }),
                 None,
+                Some(crate::present::Channels {
+                    x: AnimationSpec {
+                        duration: Duration::from_millis(120),
+                        easing: Curve::OutBack,
+                    },
+                    y: batch,
+                    size: batch,
+                    opacity: batch,
+                }),
             ]
         );
         let _ = std::fs::remove_dir_all(&directory);

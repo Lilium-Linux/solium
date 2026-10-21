@@ -347,6 +347,7 @@ impl Solium {
                     rect,
                     opacity,
                     animation,
+                    channels,
                 } => {
                     let Some(pane) = self.panes.by_script_id(id) else {
                         continue;
@@ -380,6 +381,7 @@ impl Solium {
                         now,
                         animation.duration,
                         animation.easing,
+                        channels.map(|channels| channels.map(|spec| (spec.duration, spec.easing))),
                     );
                 }
                 Command::Clear { id, animation } => {

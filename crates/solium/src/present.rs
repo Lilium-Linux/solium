@@ -647,6 +647,15 @@ impl<A> Channels<A> {
     }
 }
 
+/// A present's timings per property, started now.
+fn timed(
+    channels: Option<Channels<(Duration, Curve)>>,
+    now: Duration,
+) -> Option<Channels<Animation>> {
+    channels
+        .map(|channels| channels.map(|(duration, easing)| Animation::new(now, duration, easing)))
+}
+
 /// How far each property of a frame has gone, for [`Frame::blend_channels`].
 #[derive(Clone, Copy, Debug)]
 struct Progress {
@@ -854,9 +863,7 @@ pub(crate) fn present(
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
         let mut transform = Transform::new(from, to, now, duration, easing, false);
-        transform.channels = channels.map(|channels| {
-            channels.map(|(duration, easing)| Animation::new(now, duration, easing))
-        });
+        transform.channels = timed(channels, now);
         *slot = Some(transform);
     });
 }
@@ -1103,6 +1110,9 @@ pub(crate) fn was_shown(pane: &Pane) -> bool {
 /// own rectangle shrunk a little it is an ordinary open; with a rectangle off
 /// the edge of the screen it is something nobody has asked for yet. The
 /// compositor does not decide which — see `docs/shell-boundary.md`.
+///
+/// `channels` times the centre, the size and the opacity apart, as
+/// [`present`]'s does (#293): an icon's launch whose centre leads its size.
 pub(crate) fn from(
     pane: &Pane,
     real: Rectangle<i32, Logical>,
@@ -1110,17 +1120,13 @@ pub(crate) fn from(
     now: Duration,
     duration: Duration,
     easing: Curve,
+    channels: Option<Channels<(Duration, Curve)>>,
 ) {
     with_slot(pane, |slot| {
         // Released on arrival: an opened window is an ordinary window.
-        *slot = Some(Transform::new(
-            start,
-            Frame::real(real),
-            now,
-            duration,
-            easing,
-            true,
-        ));
+        let mut transform = Transform::new(start, Frame::real(real), now, duration, easing, true);
+        transform.channels = timed(channels, now);
+        *slot = Some(transform);
     });
 }
 
@@ -1399,6 +1405,7 @@ mod tests {
             start,
             Duration::from_millis(240),
             Curve::OutCubic,
+            None,
         );
 
         for at in [0, 30, 120, 240] {
@@ -1473,6 +1480,7 @@ mod tests {
             start,
             Duration::from_millis(200),
             Curve::OutCubic,
+            None,
         );
         for at in [0, 50, 200] {
             let (w, h) = pictured(frame(&pane, real, start + Duration::from_millis(at)));
