@@ -2841,6 +2841,76 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A delegate of `Apps` reads the app's desktop id as `model.id`**, and
+    /// a later change to that row is taken: `models::apps::rows` keeps the id
+    /// as the row's key and does not repeat it among the values, so the key
+    /// role is filled from the key (#291).
+    #[test]
+    fn an_apps_delegate_reads_the_desktop_id_and_a_later_change_is_taken() {
+        use crate::models::diff::{diff, render};
+
+        fn entry(name: &str) -> crate::apps::Entry {
+            crate::apps::Entry {
+                id: "solium.test.apps-id".to_owned(),
+                name: name.to_owned(),
+                untranslated_name: name.to_owned(),
+                generic_name: String::new(),
+                icon: String::new(),
+                exec: "true".to_owned(),
+                categories: Vec::new(),
+                keywords: Vec::new(),
+                terminal: false,
+                path: None,
+                source: PathBuf::from("/nowhere/solium.test.apps-id.desktop"),
+            }
+        }
+        on_the_qt_thread(|| {
+            let (directory, scene) = hosted(
+                "solium-hosted-apps-id",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property string listedId: ""
+                    property string changedName: ""
+                    Repeater {
+                        model: Apps
+                        delegate: Item {
+                            Component.onCompleted: {
+                                if (model.name === "Before") root.listedId = model.id
+                            }
+                            // Read through the list, never `Apps.get`, which
+                            // would make the row before the list does.
+                            readonly property string name: model.name
+                            onNameChanged: if (name === "After") root.changedName = name
+                        }
+                    }
+                }
+                "#,
+                "apps-id",
+            );
+            let before = crate::models::apps::rows(&[entry("Before")]);
+            assert!(super::apply_rows(
+                super::Model::Apps,
+                &render(&diff(&[], &before))
+            ));
+            assert_eq!(scene.get_string_for_test("listedId"), "solium.test.apps-id");
+            let after = crate::models::apps::rows(&[entry("After")]);
+            assert!(
+                super::apply_rows(super::Model::Apps, &render(&diff(&before, &after))),
+                "a change to a listed app is refused"
+            );
+            assert_eq!(scene.get_string_for_test("changedName"), "After");
+            assert!(super::apply_rows(
+                super::Model::Apps,
+                &render(&diff(&after, &[]))
+            ));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
     /// **A batch that does not match the rows held is refused**, and so is
     /// text that is not a batch, so a publish that was not taken is sent
     /// again rather than recorded as taken.
