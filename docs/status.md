@@ -26,7 +26,7 @@ for current daily-use priorities.
 
 Implemented features can still have correctness and compatibility issues.
 [Known limitations](gaps.md) names affected workflows, including IMEs,
-clipboard managers, compositor touch, explicit sync, multi-GPU and portals.
+clipboard privacy, compositor touch, explicit sync, multi-GPU and portals.
 
 ## Validation and remaining risk
 

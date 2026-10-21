@@ -1443,6 +1443,20 @@ impl PrimarySelectionHandler for Solium {
         &self.primary_selection_state
     }
 }
+impl smithay::wayland::selection::wlr_data_control::DataControlHandler for Solium {
+    fn data_control_state(
+        &self,
+    ) -> &smithay::wayland::selection::wlr_data_control::DataControlState {
+        &self.data_control_state
+    }
+}
+impl smithay::wayland::selection::ext_data_control::DataControlHandler for Solium {
+    fn data_control_state(
+        &self,
+    ) -> &smithay::wayland::selection::ext_data_control::DataControlState {
+        &self.ext_data_control_state
+    }
+}
 
 impl ClientDndGrabHandler for Solium {
     /// A client has started a drag, and this is the only moment its icon is
@@ -1699,4 +1713,8 @@ smithay::delegate_cursor_shape!(Solium);
 delegate_output!(Solium);
 delegate_data_device!(Solium);
 smithay::delegate_primary_selection!(Solium);
+// A selection a clipboard manager sets reaches `new_selection` above like any
+// other, so X11 clients are offered it without anything here (#52).
+smithay::delegate_data_control!(Solium);
+smithay::delegate_ext_data_control!(Solium);
 smithay::delegate_xwayland_shell!(Solium);

@@ -35,7 +35,7 @@ several are missing:
 |---|---|---|
 | Window and workspace management | External taskbars and workspace switchers lack foreign-toplevel and workspace-management interfaces. | [#50](https://github.com/Lilium-Linux/solium/issues/50), [#60](https://github.com/Lilium-Linux/solium/issues/60) |
 | Display configuration clients | Tools such as kanshi cannot arrange outputs through output-management; use Lua monitor configuration instead. | [#51](https://github.com/Lilium-Linux/solium/issues/51) |
-| Clipboard managers | Normal copy/paste and primary selection work, but data-control is missing. | [#52](https://github.com/Lilium-Linux/solium/issues/52) |
+| Clipboard managers | Data-control (wlr and ext) works, but every client is offered it, so any client can read every copy without focus. Limiting it to trusted clients needs security-context. | [#68](https://github.com/Lilium-Linux/solium/issues/68) |
 | Client-supplied window icons | Application icons resolve through desktop files; per-toplevel icons through xdg-toplevel-icon are unavailable. | [#73](https://github.com/Lilium-Linux/solium/issues/73) |
 | External background effects | Compositor effects exist, but clients cannot request blur through ext-background-effect. | [#78](https://github.com/Lilium-Linux/solium/issues/78) |
 | Portals | Screencopy and session portal configuration exist; screen sharing and the wider portal flow still need end-to-end validation. | [#83](https://github.com/Lilium-Linux/solium/issues/83) |

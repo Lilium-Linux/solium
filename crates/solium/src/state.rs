@@ -723,6 +723,21 @@ pub(crate) struct Solium {
     /// pastes nothing at all.
     pub(crate) primary_selection_state: PrimarySelectionState,
 
+    /// `zwlr_data_control_v1` and its successor `ext_data_control_v1`: the
+    /// clipboard for a client that is not focused, which is what a clipboard
+    /// manager is (#52). Both, because `wl-clipboard` and `cliphist` speak the
+    /// wlroots one and newer clients the other. Both carry the primary
+    /// selection too.
+    ///
+    /// Offered to every client, as every wlroots compositor does. That lets
+    /// any client read every copy without focus, passwords included, and
+    /// there is no identity to gate it on yet: a filter here would refuse
+    /// clients by a name the compositor cannot verify. When
+    /// `security-context-v1` exists, a sandboxed client is the one to refuse.
+    pub(crate) data_control_state: smithay::wayland::selection::wlr_data_control::DataControlState,
+    pub(crate) ext_data_control_state:
+        smithay::wayland::selection::ext_data_control::DataControlState,
+
     /// How windows are framed: which QML draws a frame, and the building of
     /// one. The frames themselves are on the panes they are drawn around.
     pub(crate) decorations: Decorations,
@@ -1262,6 +1277,11 @@ impl Solium {
         let _ = seat.add_pointer();
         let _ = seat.add_touch();
 
+        // Ahead of the struct, because data control is built from it: a
+        // clipboard manager reads the middle-click selection through the same
+        // device as the clipboard.
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
+
         Self {
             compositor_state: CompositorState::new::<Self>(&display_handle),
             xdg_shell_state: XdgShellState::new::<Self>(&display_handle),
@@ -1302,7 +1322,19 @@ impl Solium {
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
                 &display_handle,
             ),
-            primary_selection_state: PrimarySelectionState::new::<Self>(&display_handle),
+            data_control_state:
+                smithay::wayland::selection::wlr_data_control::DataControlState::new::<Self, _>(
+                    &display_handle,
+                    Some(&primary_selection_state),
+                    |_| true,
+                ),
+            ext_data_control_state:
+                smithay::wayland::selection::ext_data_control::DataControlState::new::<Self, _>(
+                    &display_handle,
+                    Some(&primary_selection_state),
+                    |_| true,
+                ),
+            primary_selection_state,
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
