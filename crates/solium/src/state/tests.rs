@@ -32309,6 +32309,58 @@ end)
                     .evaluate("return table.concat(touch_events, ',')")
             }
 
+            /// **Lua hears each finger's velocity, measured by Solium (#284)**,
+            /// through the real input path: a finger moving 1000 px/s right
+            /// and 500 px/s up, sampled every 7 ms and stamped in 10 ms steps
+            /// as the Surface's touchscreen stamps them. `t` is the stamp in
+            /// seconds; a lift right after the motion keeps the throw.
+            #[test]
+            fn lua_hears_each_fingers_velocity_measured_by_solium() {
+                let mut desk = Desk::new();
+                let _opened = desk.open_surface();
+                desk.install(
+                    r#"
+                    touch_velocity = {}
+                    sol.on("touch", function(event)
+                        touch_velocity[#touch_velocity + 1] = string.format("%s:%.0f:%.0f:%.3f",
+                            event.kind, event.vx, event.vy, event.t)
+                    end)
+                    "#,
+                );
+                let region = region(&desk);
+                let stamp = |real_us: u64| real_us / 10_000 * 10_000;
+                crate::synth::touch_down(&mut desk.state, region, 0, (200.0, 400.0), 1_000_000);
+                for step in 1..=12_u32 {
+                    let real_us = 1_000_000 + u64::from(step) * 7_000;
+                    let moved = f64::from(step) * 7.0;
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (200.0 + moved, 400.0 - moved / 2.0),
+                        stamp(real_us),
+                    );
+                }
+                crate::synth::touch_up(&mut desk.state, region, 0, stamp(1_000_000 + 13 * 7_000));
+                let log = desk
+                    .state
+                    .scripts
+                    .as_ref()
+                    .expect("scripts")
+                    .evaluate("return touch_velocity[#touch_velocity]");
+                let fields: Vec<&str> = log.split(':').collect();
+                let (kind, vx, vy, t) = (
+                    fields[0],
+                    fields[1].parse::<f64>().expect("vx"),
+                    fields[2].parse::<f64>().expect("vy"),
+                    fields[3].parse::<f64>().expect("t"),
+                );
+                assert_eq!(kind, "up", "{log}");
+                assert!((vx - 1000.0).abs() < 120.0, "vx at the lift: {log}");
+                assert!((vy + 500.0).abs() < 60.0, "vy at the lift: {log}");
+                assert!((t - 1.09).abs() < 0.001, "t is the lift's stamp: {log}");
+            }
+
             #[test]
             fn lua_hears_each_fingers_touch_with_its_original_target() {
                 with_real_touch_scene(

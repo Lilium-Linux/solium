@@ -39,6 +39,9 @@
 ---@field control boolean Whether the frame's QML claims the down.
 ---@field edges? "top"|"bottom"|"left"|"right"|"top_left"|"top_right"|"bottom_left"|"bottom_right"
 ---@field time integer Latest backend timestamp in milliseconds, wrapping at 32 bits.
+---@field t number The event's own time in seconds, monotonic, from the kernel's microsecond stamp; differences of `t` are exact where `time`'s are coarse.
+---@field vx number The finger's velocity along x, in logical pixels a second: a least-squares fit over the last `input.touchscreen.velocity_window_ms` (80 by default). Near zero for a finger that rested before it lifted.
+---@field vy number The same along y.
 
 ---@class sol.TouchOptions
 ---@field action "capture"|"move"|"resize"
@@ -322,6 +325,7 @@
 ---matches, the first screen is used. Relative devices ignore this setting.
 ---@class sol.InputDeviceOptions
 ---@field output? string Monitor connector for a touchscreen or tablet tool, such as "eDP-1".
+---@field velocity_window_ms? integer For a touchscreen: how far back, in milliseconds from 1 to 1000, a finger's `vx`/`vy` are fitted. 80 when unset.
 ---@field tap? boolean Tapping the pad clicks.
 ---@field tap_button_map? "left_right_middle"|"left_middle_right" 1/2/3-finger tap maps to which button.
 ---@field drag? boolean A tap-then-move drags, without holding the pad down.

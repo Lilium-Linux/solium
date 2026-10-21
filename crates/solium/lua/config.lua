@@ -706,6 +706,12 @@ local defaults = {
             -- on reload restores that device binding. Relative devices such
             -- as mice and touchpads ignore output.
             -- output = "eDP-1",
+
+            -- How far back, in milliseconds, each finger's velocity (the
+            -- `vx` and `vy` of `sol.on("touch")`) is fitted: shorter follows
+            -- a change of direction sooner, longer smooths a noisy screen.
+            -- A whole number from 1 to 1000; 80 when unset.
+            -- velocity_window_ms = 80,
         },
         tablet_tool = {
             -- Same connector binding and fallback as touchscreen.output.

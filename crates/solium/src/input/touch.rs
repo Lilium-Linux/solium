@@ -41,6 +41,19 @@ pub(crate) struct Contact {
     output: String,
     hit: Hit,
     accepting: bool,
+    /// Where it has been, for the velocity every event reports (#284).
+    tracker: super::velocity::Tracker,
+}
+
+/// The velocity fit's window: `input.touchscreen.velocity_window_ms`, or
+/// [`super::velocity::WINDOW_MS`].
+fn velocity_window(state: &Solium) -> u32 {
+    state
+        .input
+        .config()
+        .default_for(crate::input::devices::DeviceKind::Touchscreen)
+        .and_then(|settings| settings.velocity_window_ms)
+        .unwrap_or(super::velocity::WINDOW_MS)
 }
 
 #[derive(Clone, Debug)]
@@ -229,7 +242,13 @@ pub(crate) fn resizing(state: &Solium) -> bool {
         .any(|contact| matches!(contact.target, TouchTarget::Resize(_)))
 }
 
-pub(crate) fn down(state: &mut Solium, slot: TouchSlot, location: Point<f64, Logical>, time: u32) {
+pub(crate) fn down(
+    state: &mut Solium,
+    slot: TouchSlot,
+    location: Point<f64, Logical>,
+    time: u32,
+    time_us: u64,
+) {
     state.touch_time = time;
     let output = crate::monitor::at(&state.space, location)
         .map(|output| output.name())
@@ -242,6 +261,12 @@ pub(crate) fn down(state: &mut Solium, slot: TouchSlot, location: Point<f64, Log
         location,
         output,
         accepting: true,
+        tracker: super::velocity::Tracker::new(
+            time_us,
+            location.x,
+            location.y,
+            velocity_window(state),
+        ),
     };
     queue(state, &contact, "down", slot.into());
     state.touches.insert(slot.into(), contact);
@@ -278,12 +303,14 @@ pub(crate) fn motion(
     slot: TouchSlot,
     location: Point<f64, Logical>,
     time: u32,
+    time_us: u64,
 ) {
     state.touch_time = time;
     let Some(contact) = state.touches.get_mut(&slot.into()) else {
         return;
     };
     contact.location = location;
+    contact.tracker.push(time_us, location.x, location.y);
     let contact = contact.clone();
     match &contact.target {
         TouchTarget::Client | TouchTarget::Lock => {
@@ -313,11 +340,12 @@ pub(crate) fn motion(
     queue(state, &contact, "motion", slot.into());
 }
 
-pub(crate) fn up(state: &mut Solium, slot: TouchSlot, time: u32) {
+pub(crate) fn up(state: &mut Solium, slot: TouchSlot, time: u32, time_us: u64) {
     state.touch_time = time;
-    let Some(contact) = state.touches.remove(&slot.into()) else {
+    let Some(mut contact) = state.touches.remove(&slot.into()) else {
         return;
     };
+    contact.tracker.at(time_us);
     match &contact.target {
         TouchTarget::Client | TouchTarget::Lock => {
             if let Some(touch) = state.seat.get_touch() {
@@ -421,6 +449,8 @@ fn queue(state: &mut Solium, contact: &Contact, kind: &'static str, slot: i32) {
         control: contact.hit.control,
         edges: contact.hit.edges,
         time: state.touch_time,
+        t: contact.tracker.seconds(),
+        velocity: contact.tracker.velocity(),
     });
 }
 

@@ -960,6 +960,14 @@ retaining the last position for up/cancel. `output` is the connector containing
 the original down, or empty outside all outputs. `time` is the backend's
 32-bit timestamp in milliseconds, including its normal wraparound.
 
+`t` is the same moment in seconds, monotonic and from the kernel's microsecond
+stamp, and `vx` and `vy` are the finger's velocity in pixels a second, measured
+by Solium: a least-squares fit over the last
+`input.touchscreen.velocity_window_ms` milliseconds (80 by default). Use them
+for a release's throw rather than dividing positions by `time`: some
+touchscreens stamp in coarse steps, and dividing by those gives speeds that
+jump. A finger that stops before it lifts reads near zero.
+
 `target` describes the original hit: `"client"`, `"frame"`, `"border"`, `"scene"`,
 `"script"` (a Lua input grab), or `"blocked"`. `window` is the window ID when
 present, `control` tells whether the frame's QML claims the point, and `edges`
