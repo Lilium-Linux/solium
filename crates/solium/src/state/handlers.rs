@@ -600,6 +600,8 @@ impl XdgShellHandler for Solium {
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.size = Some(screen.size);
+            // Out of its tile, so not tiled either (#228).
+            placement::set_tiled(state, false);
         });
         if surface.is_initial_configure_sent() {
             surface.send_pending_configure();
@@ -691,11 +693,17 @@ impl XdgShellHandler for Solium {
             });
             kept.map(|kept| self.back_on_a_screen(&window, kept))
         };
+        // Back in its tile or not, and told so with the size (#228).
+        let tiled = self
+            .panes
+            .get(id)
+            .is_some_and(|pane| pane.placed().is_some());
 
         surface.with_pending_state(|state| {
             state.states.unset(xdg_toplevel::State::Fullscreen);
             // No rect, no size: the client picks its own.
             state.size = back.map(|back| back.size);
+            placement::set_tiled(state, tiled);
         });
         if surface.is_initial_configure_sent() {
             surface.send_pending_configure();
@@ -713,10 +721,6 @@ impl XdgShellHandler for Solium {
         // centres a floated window at the size it has, which is still the
         // monitor's.
         // `a_floated_window_made_fullscreen_is_left_so_by_a_sweep_and_goes_back_where_it_floated`.
-        let tiled = self
-            .panes
-            .get(id)
-            .is_some_and(|pane| pane.placed().is_some());
         if tiled {
             self.trigger_relayout();
         }

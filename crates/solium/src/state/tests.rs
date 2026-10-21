@@ -2870,6 +2870,10 @@ mod real_client {
         /// compositor that sends the same size sixty times a second looks
         /// identical from its own side and costs nothing on the wire.
         configures: Vec<(wayland_client::backend::ObjectId, i32, i32)>,
+        /// Whether each of those configures said the window is tiled, in the
+        /// same order: all four `tiled_*` states, for #228. Read through
+        /// [`tiled_sent`].
+        tiled: Vec<(wayland_client::backend::ObjectId, bool)>,
 
         /// The monitor, the lock manager and the clipboard, for
         /// `lock_focus`: the only tests that need a surface to lock a
@@ -3157,7 +3161,9 @@ mod real_client {
                     state.idle_notifier = Some(registry.bind(name, 2, qh, ()));
                 }
                 "wl_compositor" => state.compositor = Some(registry.bind(name, 1, qh, ())),
-                "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
+                // Version 2 for the tiled states, #228; a client bound at 1
+                // is never sent them.
+                "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 2, qh, ())),
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "wl_subcompositor" => {
                     state.subcompositor = Some(registry.bind(name, 1, qh, ()));
@@ -3494,10 +3500,29 @@ mod real_client {
             _qh: &QueueHandle<Self>,
         ) {
             match event {
-                xdg_toplevel::Event::Configure { width, height, .. } => {
-                    state
-                        .configures
-                        .push((wayland_client::Proxy::id(toplevel), width, height))
+                xdg_toplevel::Event::Configure {
+                    width,
+                    height,
+                    states,
+                } => {
+                    use xdg_toplevel::State;
+                    let states: Vec<u32> = states
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|word| u32::from_ne_bytes(*word))
+                        .collect();
+                    let tiled = [
+                        State::TiledLeft,
+                        State::TiledRight,
+                        State::TiledTop,
+                        State::TiledBottom,
+                    ]
+                    .into_iter()
+                    .all(|edge| states.contains(&(edge as u32)));
+                    let id = wayland_client::Proxy::id(toplevel);
+                    state.tiled.push((id.clone(), tiled));
+                    state.configures.push((id, width, height));
                 }
                 xdg_toplevel::Event::Close => {
                     state.closes.push(wayland_client::Proxy::id(toplevel));
@@ -5608,6 +5633,18 @@ end)"#,
             .iter()
             .filter(|(to, _, _)| *to == id)
             .map(|&(_, width, height)| (width, height))
+            .collect()
+    }
+
+    /// Whether each configure this toplevel has been sent said it is tiled,
+    /// oldest first.
+    fn tiled_sent(client: &Client, toplevel: &xdg_toplevel::XdgToplevel) -> Vec<bool> {
+        let id = wayland_client::Proxy::id(toplevel);
+        client
+            .tiled
+            .iter()
+            .filter(|(to, _)| *to == id)
+            .map(|&(_, tiled)| tiled)
             .collect()
     }
 
@@ -8260,6 +8297,98 @@ end)"#,
             "and an edge drag starts from the layout's rectangle, not the \
              client's"
         );
+    }
+
+    /// **A tiled window is told it is tiled, and told when it no longer is**
+    /// (#228).
+    ///
+    /// Without the four `tiled_*` states a client may answer a tile with a
+    /// size of its own, and foot did: it rounded down to whole character cells
+    /// and never filled its tile. So the client side is asked, not the server's
+    /// pending state: each step below reads the configure the client last
+    /// received. Maximised and fullscreen are out of the tile and say so;
+    /// leaving either goes back into it and says so; and floated by a layout
+    /// at the very size it had, the window is still told, because the state is
+    /// the whole of the change.
+    #[test]
+    fn a_tiled_window_is_told_it_is_tiled() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _output = one_screen(&mut state);
+        let (window, toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (_pane, tile) = tiled_alone(&mut state, &window);
+        macro_rules! pumped {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                )
+            };
+        }
+        pumped!();
+        assert_eq!(
+            tiled_sent(&client, &toplevel).last(),
+            Some(&true),
+            "the layout tiled it and the client was not told"
+        );
+
+        state.toggle_maximize(&window);
+        pumped!();
+        assert_eq!(
+            tiled_sent(&client, &toplevel).last(),
+            Some(&false),
+            "a maximised window is out of its tile"
+        );
+        state.toggle_maximize(&window);
+        pumped!();
+        assert_eq!(
+            tiled_sent(&client, &toplevel).last(),
+            Some(&true),
+            "and back in it once restored"
+        );
+
+        toplevel.set_fullscreen(None);
+        pumped!();
+        assert_eq!(
+            tiled_sent(&client, &toplevel).last(),
+            Some(&false),
+            "a fullscreen window is out of its tile"
+        );
+        toplevel.unset_fullscreen();
+        pumped!();
+        assert_eq!(
+            tiled_sent(&client, &toplevel).last(),
+            Some(&true),
+            "and back in it once it leaves fullscreen"
+        );
+
+        let sent = tiled_sent(&client, &toplevel).len();
+        state.place(
+            state.window_id(&window),
+            Rect {
+                x: f64::from(tile.loc.x),
+                y: f64::from(tile.loc.y),
+                w: f64::from(tile.size.w),
+                h: f64::from(tile.size.h),
+            },
+            AnimationSpec {
+                duration: Duration::ZERO,
+                ..AnimationSpec::default()
+            },
+            Duration::ZERO,
+            Standing::Free,
+        );
+        pumped!();
+        let after = tiled_sent(&client, &toplevel);
+        assert!(
+            after.len() > sent,
+            "floated at the size it had, the client heard nothing"
+        );
+        assert_eq!(after.last(), Some(&false), "a floated window is not tiled");
     }
 
     /// **Fullscreen is not tiled either**, and leaving it goes back into
