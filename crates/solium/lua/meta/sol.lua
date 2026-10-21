@@ -291,7 +291,11 @@
 ---One device's libinput settings: a device-type default in `sol.input`, or
 ---one `devices` entry. A key left out keeps libinput's own default (or
 ---whatever a previous reload already set) rather than turning it off.
+---`output` binds absolute positions to a monitor connector. When omitted it
+---uses libinput's udev binding, including after reload; if no connected monitor
+---matches, the first screen is used. Relative devices ignore this setting.
 ---@class sol.InputDeviceOptions
+---@field output? string Monitor connector for a touchscreen or tablet tool, such as "eDP-1".
 ---@field tap? boolean Tapping the pad clicks.
 ---@field tap_button_map? "left_right_middle"|"left_middle_right" 1/2/3-finger tap maps to which button.
 ---@field drag? boolean A tap-then-move drags, without holding the pad down.

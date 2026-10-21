@@ -37,7 +37,7 @@ use smithay::{
             exporter::gbm::GbmFramebufferExporter,
         },
         egl::{EGLContext, EGLDisplay},
-        input::InputEvent,
+        input::{Event as _, InputEvent},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::gles::GlesRenderer,
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
@@ -54,7 +54,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::Display,
     },
-    utils::{DeviceFd, Transform},
+    utils::{DeviceFd, Logical, Rectangle, Transform},
     wayland::dmabuf::DmabufFeedbackBuilder,
 };
 
@@ -520,6 +520,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         animating: false,
         input_devices: 0,
         live_devices: HashMap::new(),
+        device_outputs: HashMap::new(),
         drm: None,
         signal: event_loop.get_signal(),
         active: true,
@@ -993,6 +994,9 @@ pub(crate) struct State {
     /// `Solium` itself only holds what the configuration says (#157), never a
     /// live libinput handle, which only this backend has.
     live_devices: HashMap<String, smithay::reexports::input::Device>,
+    /// Effective connector binding per device. Regions are resolved at dispatch
+    /// so a monitor's movement or hotplug cannot leave stale coordinates.
+    device_outputs: HashMap<String, Option<String>>,
     /// Held for the session's lifetime: dropping it closes the device.
     drm: Option<DrmDevice>,
     /// The buffer allocator and the node it belongs to.
@@ -2169,25 +2173,85 @@ fn on_first_pass<S, E>(
 
 /// One libinput event, from the backend or the first pass, to `handle_input`.
 fn route_input(state: &mut State, event: InputEvent<LibinputInputBackend>) {
-    // The first monitor, as the region an absolute device's positions are
-    // measured against. Right for a single screen and a guess with several:
-    // libinput can say which output a touchscreen or tablet is glued to, and
-    // reading that is what makes touch land on the right monitor. Filed as #42
-    // rather than guessed at here -- a mouse and a keyboard are unaffected,
-    // because relative motion is bounded by every screen instead.
-    let Some(output) = state.screens.first().map(|screen| screen.output.clone()) else {
+    let device = match &event {
+        InputEvent::TouchDown { event } => Some(event.device().sysname().to_owned()),
+        InputEvent::TouchMotion { event } => Some(event.device().sysname().to_owned()),
+        InputEvent::PointerMotionAbsolute { event } => Some(event.device().sysname().to_owned()),
+        InputEvent::TabletToolAxis { event } => Some(event.device().sysname().to_owned()),
+        InputEvent::TabletToolProximity { event } => Some(event.device().sysname().to_owned()),
+        InputEvent::TabletToolTip { event } => Some(event.device().sysname().to_owned()),
+        InputEvent::TabletToolButton { event } => Some(event.device().sysname().to_owned()),
+        _ => None,
+    };
+    let region = if device.is_some() {
+        let screens: Vec<_> = state
+            .screens
+            .iter()
+            .filter_map(|screen| {
+                state
+                    .solium
+                    .space
+                    .output_geometry(&screen.output)
+                    .map(|region| (screen.output.name(), region))
+            })
+            .collect();
+        region_for_device(&screens, &state.device_outputs, device.as_deref())
+    } else {
+        state
+            .screens
+            .first()
+            .and_then(|screen| state.solium.space.output_geometry(&screen.output))
+    };
+    let lifecycle = matches!(
+        &event,
+        InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
+    );
+    let Some(region) = region_for_input(region, lifecycle) else {
         return;
     };
-    handle_input(state, &output, event);
+    handle_input(state, region, event);
+}
+
+/// Device bookkeeping outlives outputs. Its region is unused, while positional
+/// input must wait for real output geometry rather than invent coordinates.
+fn region_for_input(
+    region: Option<Rectangle<i32, Logical>>,
+    lifecycle: bool,
+) -> Option<Rectangle<i32, Logical>> {
+    region.or_else(|| lifecycle.then(Rectangle::default))
+}
+
+/// Resolve the connector against current logical geometry, retaining the
+/// first-screen fallback for devices without a connected binding (#42).
+fn region_for_device(
+    screens: &[(String, Rectangle<i32, Logical>)],
+    device_outputs: &HashMap<String, Option<String>>,
+    device: Option<&str>,
+) -> Option<Rectangle<i32, Logical>> {
+    let wanted = device
+        .and_then(|id| device_outputs.get(id))
+        .and_then(|name| name.as_deref());
+    crate::input::devices::absolute_region(
+        wanted,
+        screens
+            .iter()
+            .map(|(name, region)| (name.as_str(), *region)),
+    )
 }
 
 /// Route a libinput event through the same profile the nested backend uses.
-fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputInputBackend>) {
+fn handle_input(
+    state: &mut State,
+    region: Rectangle<i32, Logical>,
+    event: InputEvent<LibinputInputBackend>,
+) {
     match &event {
         InputEvent::DeviceAdded { device } => {
             state.input_devices += 1;
-            let info = crate::input::devices::DeviceInfo::of(device);
+            let mut info = crate::input::devices::DeviceInfo::of(device);
+            info.output = device.output_name().map(str::to_owned);
             let settings = state.solium.input.config().resolve(&info);
+            bind_device_output(&mut state.device_outputs, &state.screens, &info, &settings);
             let mut handle = device.clone();
             let report = crate::input::devices::apply(&mut handle, &settings);
             log_device(&info, &report);
@@ -2197,6 +2261,7 @@ fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputIn
         InputEvent::DeviceRemoved { device } => {
             let info = crate::input::devices::DeviceInfo::of(device);
             state.live_devices.remove(&info.id);
+            state.device_outputs.remove(&info.id);
             state.solium.input.device_gone(&info.id);
         }
         _ => {}
@@ -2204,11 +2269,6 @@ fn handle_input(state: &mut State, output: &Output, event: InputEvent<LibinputIn
 
     // The same entry point the nested backend uses: a binding, a profile or a
     // grab must not behave differently because libinput is underneath.
-    let region = state
-        .solium
-        .space
-        .output_geometry(output)
-        .unwrap_or_default();
     crate::input::handle(&mut state.solium, region, event);
 
     // Things the input layer cannot do itself, because only a backend has a
@@ -2254,6 +2314,44 @@ fn log_device(info: &crate::input::devices::DeviceInfo, report: &crate::input::d
     );
 }
 
+/// Keep routing and the diagnostic binding line in step on plug and reload.
+fn bind_device_output(
+    bindings: &mut HashMap<String, Option<String>>,
+    screens: &[Screen],
+    info: &crate::input::devices::DeviceInfo,
+    settings: &crate::input::devices::Settings,
+) {
+    use crate::input::devices::{DeviceKind, bound_output};
+
+    let wanted = bound_output(info, settings);
+    bindings.insert(info.id.clone(), wanted.map(str::to_owned));
+    if !matches!(info.kind, DeviceKind::Touchscreen | DeviceKind::TabletTool) {
+        return;
+    }
+    let connected = screens
+        .iter()
+        .find(|screen| wanted == Some(screen.output.name().as_str()));
+    let output = connected
+        .or_else(|| screens.first())
+        .map(|screen| screen.output.name());
+    let source = if settings.output.is_some() {
+        "config"
+    } else if info.output.is_some() {
+        "libinput"
+    } else {
+        "default"
+    };
+    tracing::info!(
+        device = info.name,
+        kind = info.kind.as_str(),
+        requested = ?wanted,
+        output = ?output,
+        source,
+        fallback = connected.is_none(),
+        "absolute input device bound"
+    );
+}
+
 /// The backend half of a reload: `state.solium.reload()`, just before this
 /// runs, has already read the new `config.lua` and stored its `input`
 /// section (`commands.rs`'s `Command::Input`). What only a backend can do is
@@ -2270,8 +2368,10 @@ fn reapply_input_settings(state: &mut State) {
     let config = state.solium.input.config().clone();
     let mut seen = Vec::new();
     for device in state.live_devices.values_mut() {
-        let info = crate::input::devices::DeviceInfo::of(device);
+        let mut info = crate::input::devices::DeviceInfo::of(device);
+        info.output = device.output_name().map(str::to_owned);
         let settings = config.resolve(&info);
+        bind_device_output(&mut state.device_outputs, &state.screens, &info, &settings);
         let report = crate::input::devices::apply(device, &settings);
         log_device(&info, &report);
         seen.push((info, report));
@@ -2337,6 +2437,68 @@ fn owes_frame_callbacks(held: bool, queued: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{gone, nothing_in_flight, on_first_pass};
+
+    #[test]
+    fn device_lifecycle_is_routed_without_outputs_but_positional_input_is_not() {
+        use smithay::utils::Rectangle;
+
+        assert_eq!(
+            super::region_for_input(None, true),
+            Some(Rectangle::default())
+        );
+        assert_eq!(super::region_for_input(None, false), None);
+        let region = Rectangle::new((0, 1440).into(), (1920, 1080).into());
+        assert_eq!(super::region_for_input(Some(region), true), Some(region));
+        assert_eq!(super::region_for_input(Some(region), false), Some(region));
+    }
+
+    /// Wrong device ids, missing bindings and unplugged outputs must retain
+    /// the first-screen fallback; a named second output must not (#42).
+    #[test]
+    fn an_absolute_event_uses_its_devices_current_screen_region() {
+        use smithay::utils::Rectangle;
+        use std::collections::HashMap;
+
+        let screens = [
+            (
+                "DP-2".into(),
+                Rectangle::new((0, 0).into(), (2560, 1440).into()),
+            ),
+            (
+                "eDP-1".into(),
+                Rectangle::new((0, 1440).into(), (1920, 1080).into()),
+            ),
+        ];
+        let bindings = HashMap::from([
+            ("event1".into(), Some("eDP-1".into())),
+            ("event2".into(), None),
+            ("event3".into(), Some("HDMI-A-1".into())),
+        ]);
+        assert_eq!(
+            super::region_for_device(&screens, &bindings, Some("event1")),
+            Some(screens[1].1)
+        );
+        for device in [Some("unknown"), None, Some("event2"), Some("event3")] {
+            assert_eq!(
+                super::region_for_device(&screens, &bindings, device),
+                Some(screens[0].1),
+                "fallback for {device:?}"
+            );
+        }
+        assert_eq!(
+            super::region_for_device(&[], &bindings, Some("event1")),
+            None
+        );
+        let rearranged = [(
+            "eDP-1".into(),
+            Rectangle::new((-1920, 0).into(), (1920, 1080).into()),
+        )];
+        assert_eq!(
+            super::region_for_device(&rearranged, &bindings, Some("event1")),
+            Some(rearranged[0].1),
+            "positions follow the current layout"
+        );
+    }
 
     use std::{
         cell::RefCell, collections::VecDeque, io::Read as _, io::Write as _,

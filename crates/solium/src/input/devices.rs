@@ -49,6 +49,23 @@ use std::collections::HashMap;
 
 use smithay::backend::input::{Device as BackendDevice, DeviceCapability};
 use smithay::reexports::input::{AccelProfile, DeviceConfigResult, ScrollMethod, TapButtonMap};
+use smithay::utils::{Logical, Rectangle};
+
+/// The screen an absolute device measures its positions against (#42).
+/// A missing or disconnected connector falls back to the first screen.
+pub(crate) fn absolute_region<'a>(
+    wanted: Option<&str>,
+    screens: impl IntoIterator<Item = (&'a str, Rectangle<i32, Logical>)>,
+) -> Option<Rectangle<i32, Logical>> {
+    let mut first = None;
+    for (name, region) in screens {
+        if wanted == Some(name) {
+            return Some(region);
+        }
+        first.get_or_insert(region);
+    }
+    first
+}
 
 /// What kind of device libinput handed us, by capability.
 ///
@@ -141,6 +158,8 @@ pub(crate) struct DeviceInfo {
     pub(crate) kind: DeviceKind,
     pub(crate) vendor: Option<u32>,
     pub(crate) product: Option<u32>,
+    /// libinput's udev output binding, when the backend can provide one.
+    pub(crate) output: Option<String>,
 }
 
 impl DeviceInfo {
@@ -155,6 +174,7 @@ impl DeviceInfo {
             kind: DeviceKind::classify(device),
             vendor,
             product,
+            output: None,
         }
     }
 }
@@ -166,9 +186,11 @@ impl DeviceInfo {
 /// was rather than reset to a hardware default nothing here could even name.
 /// `a_reload_that_changes_an_override_reapplies_it_to_the_same_device` makes
 /// exactly this assertion, alongside the override-merge case it shares a test
-/// with.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// with. `output` is compositor routing rather than a libinput setter: when
+/// omitted on reload it returns to the device's own output binding.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Settings {
+    pub(crate) output: Option<String>,
     pub(crate) tap: Option<bool>,
     pub(crate) tap_button_map: Option<TapButtonMap>,
     pub(crate) drag: Option<bool>,
@@ -191,6 +213,9 @@ impl Settings {
     /// that says nothing about it never erases an earlier match's answer.
     /// `two_overrides_matching_the_same_device_merge_field_by_field_in_order`.
     fn overlay(&mut self, over: &Self) {
+        if over.output.is_some() {
+            self.output.clone_from(&over.output);
+        }
         if over.tap.is_some() {
             self.tap = over.tap;
         }
@@ -281,7 +306,7 @@ impl InputConfig {
     /// `a_name_matched_override_changes_only_the_fields_it_names`,
     /// `a_vendor_and_product_matched_override_applies`.
     pub(crate) fn resolve(&self, info: &DeviceInfo) -> Settings {
-        let mut settings = self.defaults.get(&info.kind).copied().unwrap_or_default();
+        let mut settings = self.defaults.get(&info.kind).cloned().unwrap_or_default();
         for (matcher, over) in &self.overrides {
             if matcher.matches(info) {
                 settings.overlay(over);
@@ -289,6 +314,11 @@ impl InputConfig {
         }
         settings
     }
+}
+
+/// Configuration wins over udev's output binding; neither binds relative input.
+pub(crate) fn bound_output<'a>(info: &'a DeviceInfo, settings: &'a Settings) -> Option<&'a str> {
+    settings.output.as_deref().or(info.output.as_deref())
 }
 
 /// Whether a setting actually reached the device, or the device (or this
@@ -511,6 +541,41 @@ impl Registry {
 mod tests {
     use super::*;
 
+    /// An absolute device lands on its named connector, with the first screen
+    /// as the fallback when no connected connector matches (#42).
+    #[test]
+    fn an_absolute_device_lands_on_the_screen_it_names_else_the_first() {
+        use smithay::utils::Rectangle;
+
+        let screens = [
+            ("DP-2", Rectangle::new((0, 0).into(), (2560, 1440).into())),
+            (
+                "eDP-1",
+                Rectangle::new((0, 1440).into(), (1920, 1080).into()),
+            ),
+        ];
+        assert_eq!(
+            super::absolute_region(Some("eDP-1"), screens),
+            Some(screens[1].1),
+            "bound to the laptop panel"
+        );
+        assert_eq!(
+            super::absolute_region(None, screens),
+            Some(screens[0].1),
+            "bound to nothing"
+        );
+        assert_eq!(
+            super::absolute_region(Some("HDMI-A-1"), screens),
+            Some(screens[0].1),
+            "bound to a screen that is not connected"
+        );
+        assert_eq!(
+            super::absolute_region(Some("DP-2"), []),
+            None,
+            "no screens at all"
+        );
+    }
+
     /// A device no test ever has to open an evdev node for: capabilities set
     /// by hand, a name and a usb id given up front. Stands in for
     /// `smithay::backend::input::Device` wherever this module reads one.
@@ -617,6 +682,61 @@ mod tests {
             natural_scroll: Some(natural_scroll),
             ..Settings::default()
         }
+    }
+
+    /// Configuration overrides the device's udev binding; removing it restores
+    /// that binding, rather than retaining a previous configuration (#42).
+    #[test]
+    fn an_absolute_devices_output_prefers_config_then_libinput_else_none() {
+        let mut info = DeviceInfo::of(&mouse("Panel", None));
+        info.output = Some("eDP-1".into());
+        let configured = Settings {
+            output: Some("DP-2".into()),
+            ..Settings::default()
+        };
+        assert_eq!(bound_output(&info, &configured), Some("DP-2"));
+        assert_eq!(bound_output(&info, &Settings::default()), Some("eDP-1"));
+        info.output = None;
+        assert_eq!(bound_output(&info, &Settings::default()), None);
+    }
+
+    #[test]
+    fn a_devices_output_override_beats_the_kind_default_and_omissions_keep_it() {
+        let mut config = InputConfig::default();
+        config.set_default(
+            DeviceKind::Touchscreen,
+            Settings {
+                output: Some("DP-2".into()),
+                ..Settings::default()
+            },
+        );
+        let mut info = DeviceInfo::of(&mouse("Panel", None));
+        info.kind = DeviceKind::Touchscreen;
+        let matcher = DeviceMatch {
+            name_contains: Some("Panel".into()),
+            ..DeviceMatch::default()
+        };
+        assert_eq!(config.resolve(&info).output.as_deref(), Some("DP-2"));
+        config.push_override(
+            matcher.clone(),
+            Settings {
+                output: Some("eDP-1".into()),
+                ..Settings::default()
+            },
+        );
+        config.push_override(matcher, Settings::default());
+        assert_eq!(config.resolve(&info).output.as_deref(), Some("eDP-1"));
+        config.push_override(
+            DeviceMatch {
+                name_contains: Some("Panel".into()),
+                ..DeviceMatch::default()
+            },
+            Settings {
+                output: Some("HDMI-A-1".into()),
+                ..Settings::default()
+            },
+        );
+        assert_eq!(config.resolve(&info).output.as_deref(), Some("HDMI-A-1"));
     }
 
     #[test]
