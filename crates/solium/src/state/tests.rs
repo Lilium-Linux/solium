@@ -11676,6 +11676,153 @@ end)"#,
         assert!(names.is_empty() && uniforms.params.as_slice().is_empty());
     }
 
+    /// A window still loading, its standing-in scene the shipped one built
+    /// on the Qt thread, over 400 by 300 on a monitor of `label`'s, its
+    /// effects the fixtures': what #302's tests present.
+    fn loading_with_its_scene(label: &str) -> (Solium, crate::pane::PaneId) {
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        let _ = a_screen(&mut state, label, (0, 0));
+        fixture_effects(&mut state);
+        let scene = crate::surface::ShellSurface::new(
+            crate::pane::loading_source(None),
+            r#"{"program":"kitty","waited":0}"#,
+        )
+        .expect("the shipped loading scene builds");
+        let now = state.clock.now();
+        let pane = state.panes.open(Pane::loading(
+            "kitty",
+            None,
+            Rectangle::new((200, 150).into(), (400, 300).into()),
+            std::path::PathBuf::new(),
+            Some(scene),
+            now,
+        ));
+        (state, pane)
+    }
+
+    /// `sol.present(<pane>, { deform = <lua> })` at once, on `state`.
+    fn deform_now(state: &mut Solium, pane: crate::pane::PaneId, lua: &str) {
+        state.apply(crate::script::Outcome {
+            commands: vec![crate::script::Command::Present {
+                id: pane.get(),
+                rect: None,
+                opacity: None,
+                matrix: None,
+                deform: Some(crate::script::deform_for_test(lua)),
+                z: 0.0,
+                pivot: (0.5, 0.5),
+                animation: crate::script::AnimationSpec {
+                    duration: std::time::Duration::ZERO,
+                    easing: crate::present::Curve::OutCubic,
+                },
+            }],
+            ..Default::default()
+        });
+    }
+
+    /// **A loading pane under a present is planned through the warp**
+    /// (#302): a window whose application has not arrived, under a genie,
+    /// is planned `Warp` through the genie's grid, as an arrived window is,
+    /// and is captured from its standing-in scene, so it is drawn bent and
+    /// not flat. No client, so the scene may be a real one (the #99 rule).
+    #[test]
+    fn a_loading_pane_under_a_present_is_planned_through_the_warp() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            if crate::qml::on_gpu() {
+                return;
+            }
+            let (mut state, pane) = loading_with_its_scene("loading-warp");
+            deform_now(
+                &mut state,
+                pane,
+                "{ effect = 'genie', progress = 0.5, to = { x = 380, y = 900, w = 40, h = 40 } }",
+            );
+            crate::render::plan_warps(&mut state);
+            assert!(
+                matches!(
+                    state.presented.take(pane),
+                    Some(crate::render::Planned::Warp { grid: Some(_), .. })
+                ),
+                "a window still loading under a genie is not planned through its grid"
+            );
+            assert_eq!(
+                crate::render::captured(&state, pane, None).map(|(what, _)| what),
+                Some(crate::render::Captured::Standing),
+                "its capture does not hold its scene"
+            );
+        });
+    }
+
+    /// **A loading pane at rest builds no capture** (#302): with no
+    /// present on it, a window still loading is planned flat, which
+    /// `prepare` captures nothing for, and is drawn as it always was.
+    #[test]
+    fn a_loading_pane_at_rest_builds_no_capture() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            if crate::qml::on_gpu() {
+                return;
+            }
+            let (mut state, pane) = loading_with_its_scene("loading-rest");
+            crate::render::plan_warps(&mut state);
+            let planned = state.presented.take(pane);
+            assert!(
+                matches!(planned, Some(crate::render::Planned::Flat)),
+                "a window still loading at rest is planned {planned:?}"
+            );
+            assert_eq!(
+                crate::render::wanted_capture(crate::render::route(false, true)),
+                None,
+                "the premise: a pane planned flat wants no capture"
+            );
+        });
+    }
+
+    /// **A present on a loading pane survives its application's arrival**
+    /// (#302): the application maps into the window it was launched into,
+    /// and the genie on that window is the same one, planned through its
+    /// grid from the window's own capture now. The transform lives on the
+    /// pane, so the handover carries it.
+    #[test]
+    fn a_present_on_a_loading_pane_survives_its_applications_arrival() {
+        fx2_fixture!(fixture, "loading-handover");
+        fixture_effects(&mut fixture.state);
+        let pane = fixture.state.open_loading(
+            "app",
+            Some(std::process::id()),
+            crate::pane::loading_source(None),
+            None,
+        );
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'genie', progress = 0.5, to = {to} }}"),
+        );
+        let before = geometry_of(&fixture, pane).expect("a genie on the window still loading");
+        let window = open_kept(&mut fixture);
+        assert_eq!(
+            fixture.state.panes.id_of(&window),
+            Some(pane),
+            "the premise: the application arrived in the window it was launched into"
+        );
+        assert_eq!(
+            geometry_of(&fixture, pane),
+            Some(before),
+            "the handover dropped or changed the present"
+        );
+        crate::render::plan_warps(&mut fixture.state);
+        assert!(
+            matches!(
+                fixture.state.presented.take(pane),
+                Some(crate::render::Planned::Warp { grid: Some(_), .. })
+            ),
+            "the arrived window is not planned through the genie"
+        );
+    }
+
     /// **A present through a pixels effect reads the params it blends**:
     /// `fly`'s `pixels` is `rounded`, so a deform's `radius` is `rounded`'s
     /// and its `lift` `fly`'s, each packed with its own effect and blended

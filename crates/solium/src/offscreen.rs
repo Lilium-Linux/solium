@@ -335,10 +335,43 @@ pub(crate) fn pane_job(
 
     // Built at the origin rather than at the window's position: the texture is
     // the window's own space, and where it ends up on screen is the warp's
-    // business.
-    let elements = crate::render::flat_window_elements(state, renderer, window, scale, slots);
-    if elements.is_empty() {
+    // business. The scene still dissolving off a window that has just
+    // arrived first, in front of it as the walk draws it, so the two bend
+    // as one (#302).
+    let mut elements = crate::render::scene_in_capture(state, renderer, pane, outer, scale);
+    let client = crate::render::flat_window_elements(state, renderer, window, scale, slots);
+    if client.is_empty() {
         tracing::warn!("a warped window had nothing to draw offscreen");
+        return None;
+    }
+    elements.extend(client);
+    let (kind, size) = (crate::keyed::Kind::Pane, pixels(outer, scale));
+    let inputs = crate::keyed::Inputs::of(kind, size, scale, &elements);
+    Some(Job {
+        into: HeldIn::Pane(pane, kind),
+        size,
+        scale,
+        elements,
+        inputs,
+    })
+}
+
+/// A window still loading, flat at its pane's size: its warp's capture
+/// (#302), as [`pane_job`] is an arrived window's. Its standing-in scene in
+/// the client's place and the style's layers when `loading.decorated` draws
+/// them (`render::standing_elements`), kept on the pane like any capture and
+/// drawn again when they change: the scene's element moves its commit each
+/// time Qt draws it a new picture, so its own animation restales the
+/// capture through [`crate::keyed::Inputs`] as a client's commit does.
+pub(crate) fn standing_job(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: PaneId,
+    scale: f64,
+) -> Option<Job> {
+    let outer = state.pane_outer_of(pane)?.size;
+    let elements = crate::render::standing_elements(state, renderer, pane, scale);
+    if elements.is_empty() {
         return None;
     }
     let (kind, size) = (crate::keyed::Kind::Pane, pixels(outer, scale));

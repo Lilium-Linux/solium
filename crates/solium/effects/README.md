@@ -492,7 +492,10 @@ the overlay and by `solium --check` at the line its `mesh` is on.
 
 `sol.present` plays one: `deform = { effect = "genie", to = …, progress =
 0.5 }` names the folder, its params beside it, and how far the window is
-pulled into `to` (`t.direction` is −1). Its grid is built once a frame
+pulled into `to` (`t.direction` is −1). A window whose application has not
+arrived yet is drawn through it too, its loading scene in the
+application's place, so a launch played as a deform has its shape from
+the first frame. Its grid is built once a frame
 whatever the number of monitors, and again only when something it depends
 on moves: the effect, its params, the part, the grid, the axis, the
 progress, the seed, the window's and the target's rectangles, the monitor.
