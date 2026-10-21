@@ -834,8 +834,28 @@ fn runtime_dir() -> PathBuf {
 }
 
 /// Forget compiled QML, so the next scene is read from disk.
+///
+/// **In the tests, only on the Qt thread.** The compositor runs Qt on one
+/// thread, and the tests have one of their own for it
+/// ([`qt_test::on_the_qt_thread`]), but a reload in a test on any other of
+/// `cargo test`'s threads clears the engine's component cache from there. Two
+/// such clears at once, or one while the Qt thread builds a scene from that
+/// cache, freed the same `QCache` twice and took the whole test binary down on
+/// `SIGSEGV` (#237). Off the Qt thread, the clear is handed to it, so every
+/// clear is serialised with the rest of Qt's work.
+/// `tests::a_cache_clear_from_a_test_thread_runs_on_the_qt_thread`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn clear_cache() {
+    #[cfg(test)]
+    if !qt_test::is_the_qt_thread() {
+        qt_test::on_the_qt_thread(clear_cache);
+        return;
+    }
+    #[cfg(test)]
+    qt_test::CLEARED_OFF_THE_QT_THREAD.fetch_add(
+        usize::from(!qt_test::is_the_qt_thread()),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     // SAFETY: the host checks that it has an engine.
     unsafe { ffi::solium_qml_clear_cache() }
 }
@@ -1900,6 +1920,11 @@ pub(crate) mod qt_test {
 
     /// Whether the code running now is on the Qt thread.
     /// `scripted::tests::a_surface_synced_off_the_qt_thread_builds_nothing`.
+    /// How many times the engine's component cache was cleared from a thread
+    /// other than the Qt thread: none, since #237 (see [`super::clear_cache`]).
+    pub(crate) static CLEARED_OFF_THE_QT_THREAD: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     pub(crate) fn is_the_qt_thread() -> bool {
         ON_IT.with(std::cell::Cell::get)
     }
@@ -1931,6 +1956,32 @@ mod tests {
             }
             assert_eq!(super::warnings_since(mark), 2);
         });
+    }
+
+    /// **A cache clear from a test thread runs on the Qt thread (#237).**
+    /// `cargo test` runs this on one of its own threads, as a reload in any
+    /// test does; the clear has to reach the engine from the Qt thread, where
+    /// every other Qt call of the tests is made, or two at once free the same
+    /// cache twice.
+    #[test]
+    fn a_cache_clear_from_a_test_thread_runs_on_the_qt_thread() {
+        use std::sync::atomic::Ordering;
+        assert!(
+            !super::qt_test::is_the_qt_thread(),
+            "the premise: this test runs on one of cargo's threads"
+        );
+        let before = super::qt_test::CLEARED_OFF_THE_QT_THREAD.load(Ordering::Relaxed);
+        super::clear_cache();
+        let handed: Vec<std::thread::JoinHandle<()>> =
+            (0..4).map(|_| std::thread::spawn(super::clear_cache)).collect();
+        for each in handed {
+            assert!(each.join().is_ok(), "a clear on its own thread panicked");
+        }
+        assert_eq!(
+            super::qt_test::CLEARED_OFF_THE_QT_THREAD.load(Ordering::Relaxed),
+            before,
+            "no clear reached Qt from a thread other than the Qt thread"
+        );
     }
 
     /// The guard has to actually catch the thing it exists for, and a guard
