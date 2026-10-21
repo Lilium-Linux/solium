@@ -1972,8 +1972,9 @@ mod tests {
         );
         let before = super::qt_test::CLEARED_OFF_THE_QT_THREAD.load(Ordering::Relaxed);
         super::clear_cache();
-        let handed: Vec<std::thread::JoinHandle<()>> =
-            (0..4).map(|_| std::thread::spawn(super::clear_cache)).collect();
+        let handed: Vec<std::thread::JoinHandle<()>> = (0..4)
+            .map(|_| std::thread::spawn(super::clear_cache))
+            .collect();
         for each in handed {
             assert!(each.join().is_ok(), "a clear on its own thread panicked");
         }
