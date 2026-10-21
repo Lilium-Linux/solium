@@ -5551,12 +5551,6 @@ fn easing_from(options: &Table) -> mlua::Result<Option<Curve>> {
             || spring.damping < 0.0
             || spring.epsilon <= 0.0
             || spring.epsilon >= 1.0
-            || !(spring.stiffness / spring.mass).is_finite()
-            || !(spring.stiffness * spring.mass).is_finite()
-            || !(spring.damping / spring.mass).is_finite()
-            || !(spring.initial_velocity.abs() + spring.damping / spring.mass).is_finite()
-            || spring.stiffness / spring.mass == 0.0
-            || spring.stiffness * spring.mass == 0.0
         {
             return Err(mlua::Error::runtime(
                 "spring: finite positive stiffness, mass >= machine epsilon, nonnegative damping, finite velocity and 0 < epsilon < 1 required",
