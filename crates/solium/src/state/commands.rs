@@ -298,6 +298,7 @@ impl Solium {
                     z,
                     pivot,
                     animation,
+                    channels,
                 } => {
                     let Some(pane_id) = self.panes.by_script_id(id).map(Pane::id) else {
                         continue;
@@ -338,6 +339,7 @@ impl Solium {
                         now,
                         animation.duration,
                         animation.easing,
+                        channels.map(|channels| channels.map(|spec| (spec.duration, spec.easing))),
                     );
                 }
                 Command::PresentFrom {

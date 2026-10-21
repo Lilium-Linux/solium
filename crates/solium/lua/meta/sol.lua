@@ -252,6 +252,17 @@
 ---@field pivot_y? number What the rotation turns about, as a share of the height. 0.5 is the default; outside 0..1 is kept.
 ---@field z? number Draw order and nothing else: higher is in front, equal keeps the stacking order, 0 is the default. Input still follows the rect.
 ---@field deform? sol.Deform A deformation of the window's mesh.
+---@field motion? sol.PresentMotion A timing of their own for the centre, the size and the opacity; the batch's for what it leaves out.
+
+---A timing per property of a present, each `{ duration, easing }` as
+---`sol.animate` takes it. A property left out moves on the batch's timing, and
+---the present is done when the last of them is. Anything else under `motion`
+---is an error.
+---@class sol.PresentMotion
+---@field x? sol.Motion The drawn rect's centre, across.
+---@field y? sol.Motion The drawn rect's centre, down.
+---@field size? sol.Motion Its width and height.
+---@field opacity? sol.Motion Its opacity.
 
 ---A deformation, named by effect. Its other keys are that effect's params,
 ---bound and checked by the effect (an unknown one, or one of the wrong kind,

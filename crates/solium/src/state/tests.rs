@@ -11110,6 +11110,7 @@ end)"#,
                 duration: std::time::Duration::ZERO,
                 easing: crate::present::Curve::OutCubic,
             },
+            channels: None,
         };
         fixture.state.apply(crate::script::Outcome {
             commands: vec![command],
@@ -13971,6 +13972,7 @@ end)"#,
                 z: 0.0,
                 pivot: (0.5, 0.5),
                 animation: instant,
+                channels: None,
             }],
             ..Outcome::default()
         });
@@ -27239,6 +27241,7 @@ end)
                         now,
                         Duration::ZERO,
                         solium_animation::Curve::Linear,
+                        None,
                     );
                 }
                 assert!(

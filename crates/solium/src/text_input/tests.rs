@@ -533,6 +533,7 @@ fn the_caret_follows_its_window_moved_and_presented() {
         now,
         Duration::ZERO,
         solium_animation::Curve::Linear,
+        None,
     );
     let caret = desk.state.text_field().and_then(|field| field.caret);
     assert_eq!(
