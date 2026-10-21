@@ -52,14 +52,17 @@ BuildRequires:  mesa-libgbm-devel
 BuildRequires:  mesa-libEGL-devel
 BuildRequires:  libdrm-devel
 BuildRequires:  qt6-qtbase-devel
+BuildRequires:  qt6-qtbase-private-devel
 BuildRequires:  qt6-qtdeclarative-devel
 %endif
 
 # rpm finds the libraries the binary links. These it cannot see, and
 # dev/install-check.sh's "the Fedora package" asserts each is the package that
 # provides it: the QML modules the shipped QML imports, Xwayland, and the
-# flock solium-session takes its lock with. Qt's symbols are all versioned
-# Qt_6, so the Qt the binary was built against, or newer, is spelt out here:
+# flock solium-session takes its lock with. Qt's public symbols are versioned
+# Qt_6, so the Qt the binary was built against, or newer, is spelt out here.
+# The touch host also uses QtBase private symbols; rpm records their matching
+# Qt minor-version requirement from the binary, so that upgrade needs a rebuild:
 # dev/rpm.sh defines _qt6_version as the build image's, and a source build has
 # it from qt6-qtbase-devel. dev/install-check.sh asserts the version clause.
 Requires:       qt6-qtdeclarative%{?_isa}%{?_qt6_version: >= %{_qt6_version}}

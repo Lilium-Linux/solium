@@ -906,6 +906,74 @@ left waiting.
 Nested, there is no display to power off: a monitor that is "off" is drawn
 black and then not drawn at all, so all of the above can be tried in a window.
 
+### Touch
+
+A finger operates the compositor's frame buttons and hosted QML controls.
+The shipped `touch.lua` chooses desktop touch behaviour: touching a titlebar
+away from its controls moves the window, and dragging a border resizes a
+floating window or moves a tiled seam. Each action is configurable in
+`config.touch = { focus = true, move = true, resize = true, click = true }`.
+Set individual options to `false` in `user.lua`, or omit `require("touch")`
+from a custom entry point. Without Lua bindings, there is no touch move,
+resize, focus or mode click, regardless of `SOLIUM_FORM_FACTOR`.
+
+Each finger keeps its selected target until release or cancel, even outside
+that target's bounds. Mouse capture is independent. QML receives real touch
+events for `TapHandler`, `DragHandler` and `PinchHandler`; Qt Quick supplies
+mouse synthesis for `MouseArea` controls. Scene grabs use their usual outside
+click policy, and lock-screen touches belong exclusively to the lock.
+One resize owns the shared resize pipeline at a time. Further requested
+resizes are swallowed until it ends; ordinary input continues.
+
+Touchscreen output selection is tracked by
+[#42](https://github.com/Lilium-Linux/solium/issues/42): its
+`input.touchscreen.output` setting selects a connector, with per-device overrides
+in `input.devices`. Without an override, that work uses libinput's `WL_OUTPUT`
+binding, then the first connected output. It must be present in the build to
+validate a touchscreen with an external monitor; these UI changes alone do
+not establish hardware mapping accuracy.
+
+### Touch events in Lua
+
+`sol.on("touch", function(event) end)` receives each finger. **Down runs
+before delivery**, outside the seat's input locks, so Lua can choose ownership.
+`kind` is `"down"`, `"motion"`, `"up"` or `"cancel"`; `slot` identifies the finger
+until it lifts or is cancelled. `x` and `y` are global logical coordinates,
+retaining the last position for up/cancel. `output` is the connector containing
+the original down, or empty outside all outputs. `time` is the backend's
+32-bit timestamp in milliseconds, including its normal wraparound.
+
+`target` describes the original hit: `"client"`, `"frame"`, `"border"`, `"scene"`,
+`"script"` (a Lua input grab), or `"blocked"`. `window` is the window ID when
+present, `control` tells whether the frame's QML claims the point, and `edges`
+names a border: `"top"`, `"bottom"`, `"left"`, `"right"`, or a corner such as
+`"bottom_right"`. These hit fields remain the same throughout the stream.
+
+```lua
+-- Example custom policy: capture a client finger and handle its stream in Lua.
+sol.on("touch", function(event)
+    if event.kind == "down" and event.target == "client" then
+        sol.touch(event.slot, { action = "capture" })
+    end
+    -- Feed captured motion/up/cancel to your own Lua interaction here.
+end)
+```
+
+`sol.touch(slot, options)` accepts `action = "capture"`, `"move"` or `"resize"`.
+Move and resize require `window`; resize also requires `edges`. These are
+operations, with no implicit focus: call `sol.focus(event.window)` if wanted.
+The first accepted ownership request wins. Only the currently dispatching down
+can be claimed; requests for stale slots or from motion/up are ignored. Capture
+keeps the whole stream away from clients and QML. Without a claim, normal Qt
+or client delivery continues. Calling `sol.grab_input(true)` alone does not
+turn touch into a click: the desktop module explicitly calls
+`sol.click(event.x, event.y)` to dispatch existing click listeners.
+
+Nothing is exposed while locked or replayed on unlock. These primitives support
+Lua policy without choosing a mobile gesture vocabulary in Rust. Recognition,
+competition and claims after client delivery are tracked by
+[#252](https://github.com/Lilium-Linux/solium/issues/252).
+
 ### Touchpad, mouse and keyboard settings
 
 A touchpad taps and scrolls naturally out of the box; a mouse does not get

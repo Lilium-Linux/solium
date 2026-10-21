@@ -4,6 +4,10 @@
 //! container and CI are Fedora, but whoever builds a package may be on any
 //! distribution, and distributions lay Qt out differently.
 
+mod qt_input_build {
+    include!("../../dev/qt-input-build.rs");
+}
+
 use std::path::PathBuf;
 
 #[path = "src/commit.rs"]
@@ -105,6 +109,8 @@ fn main() {
             }
         }
     }
+
+    qt_input_build::include_private_input_headers(&mut build);
 
     // attached.h, rows.h, keyboard.h and pointer.h declare Q_OBJECT types --
     // the attached `Solium` object, the rows it hands out and the store they

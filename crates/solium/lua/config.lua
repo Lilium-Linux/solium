@@ -36,6 +36,10 @@
 --     190 ms.
 
 local defaults = {
+    -- Desktop touch policy, implemented by touch.lua. Each action is optional;
+    -- a mobile configuration may turn them all off or omit require("touch").
+    touch = { focus = true, move = true, resize = true, click = true },
+
     -- Space between windows and around the work area, in logical pixels.
     gap = 12,
 

@@ -87,6 +87,13 @@ else
     absent=("${modules[@]}")
 fi
 command -v c++ >/dev/null 2>&1 || absent+=("a C++17 compiler (c++)")
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists Qt6Gui; then
+    qt_include_dir="$(pkg-config --variable=includedir Qt6Gui)"
+    qt_base_version="$(pkg-config --modversion Qt6Gui)"
+    if [[ ! -f "$qt_include_dir/QtGui/$qt_base_version/QtGui/private/qpointingdevice_p.h" ]]; then
+        absent+=("QtBase $qt_base_version private development headers")
+    fi
+fi
 
 gate="dev/gate.sh"
 if [[ ${#absent[@]} -eq 0 ]]; then

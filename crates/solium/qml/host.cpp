@@ -62,6 +62,7 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
+#include <QtCore/QMap>
 
 #include <QtCore/QAbstractAnimation>
 #include <QtCore/QAbstractEventDispatcher>
@@ -83,6 +84,11 @@
 #include <QtGui/QFocusEvent>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QPointingDevice>
+#include <QtGui/QTouchEvent>
+#include <QtGui/private/qeventpoint_p.h>
+#include <QtGui/private/qpointingdevice_p.h>
+#include <QtGui/qpa/qwindowsysteminterface.h>
 #include <QtGui/QWheelEvent>
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QOpenGLFunctions>
@@ -346,6 +352,11 @@ struct SoliumQmlScene
     Qt::MouseButton press_button = Qt::NoButton;
     unsigned long long press_time = 0;
     QPointF press_at;
+    /* Every active finger belongs to its scene until release or cancel. */
+    QMap<int, QEventPoint> touch_points;
+    /* A virtual device per window keeps Qt's device-wide cancel local to the
+     * scene that owns these fingers. Owned by window and created on demand. */
+    QPointingDevice *touch_device = nullptr;
 
     /* GPU scenes only. `image` is null on those and `texture` is zero on
      * software ones, so either could stand in for this flag — but "which path
@@ -1480,6 +1491,10 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
 {
     if (scene == nullptr) {
         return;
+    }
+    if (!scene->touch_points.isEmpty()) {
+        solium_qml_scene_touch_event(scene, 3, 0, 0, 0,
+                                     scene->touch_points.last().timestamp());
     }
 
     // Out of the registry first, before anything below can leave a half-torn
@@ -2883,6 +2898,94 @@ extern "C" void solium_qml_scene_pointer(SoliumQmlScene *scene, double x, double
 
     QMouseEvent event(type, at, at, button, buttons, Qt::NoModifier);
     QCoreApplication::sendEvent(scene->window, &event);
+}
+
+extern "C" void solium_qml_scene_touch_event(SoliumQmlScene *scene, int kind, int id,
+                                             double x, double y, unsigned long long time)
+{
+    if (scene == nullptr || scene->window == nullptr) {
+        return;
+    }
+    // Like pointer delivery, touch goes straight to the hosted window. Qt
+    // Quick makes MouseArea's mouse events from touch it does not accept.
+    const bool first = scene->touch_points.isEmpty();
+    if (kind == 3 && first) {
+        return;
+    }
+    if (kind != 0 && kind != 3 && !scene->touch_points.contains(id)) {
+        return;
+    }
+    if (scene->touch_device == nullptr) {
+        scene->touch_device = new QPointingDevice(
+            QStringLiteral("solium-touchscreen"), reinterpret_cast<qintptr>(scene),
+            QInputDevice::DeviceType::TouchScreen, QPointingDevice::PointerType::Finger,
+            QInputDevice::Capability::Position | QInputDevice::Capability::Area, 10, 0,
+            QString(), QPointingDeviceUniqueId(), scene->window);
+        // Qt's item-ungrab path walks the registered devices. Registration
+        // makes it find these points; delivery still goes straight to window.
+        QWindowSystemInterface::registerInputDevice(scene->touch_device);
+    }
+    auto &device = *scene->touch_device;
+    if (kind == 0) {
+        scene->touch_points.insert(id, QEventPoint(id, QEventPoint::Pressed, QPointF(x, y), QPointF(x, y)));
+    }
+    QList<QEventPoint> points;
+    auto *device_state = QPointingDevicePrivate::get(&device);
+    for (auto point = scene->touch_points.cbegin(); point != scene->touch_points.cend(); ++point) {
+        const bool changed = point.key() == id;
+        const auto state = changed && kind == 0 ? QEventPoint::Pressed
+                           : changed && kind == 1 ? QEventPoint::Updated
+                           : changed && kind == 2 ? QEventPoint::Released
+                                                  : QEventPoint::Stationary;
+        const QPointF at = changed && kind != 3 ? QPointF(x, y) : point.value().scenePosition();
+        // Direct delivery bypasses QGuiApplication's persistent point update.
+        // A fresh public QEventPoint loses press/last positions: TapHandler
+        // still taps, but DragHandler never moves (the touch_probe tests).
+        // Keep Qt's own history and grab records, then localize and timestamp
+        // the point before handing it to Quick. Registration alone does not
+        // perform this update.
+        auto &persistent = device_state->pointById(point.key())->eventPoint;
+        QMutableEventPoint::update(QEventPoint(point.key(), state, at, at), persistent);
+        QMutableEventPoint::setDevice(persistent, &device);
+        QMutableEventPoint::setWindow(persistent, scene->window);
+        QMutableEventPoint::setPosition(persistent, at);
+        persistent.setAccepted(false);
+        QMutableEventPoint::setTimestamp(persistent, time);
+        points.append(persistent);
+    }
+    const QEvent::Type type = kind == 3 ? QEvent::TouchCancel
+                              : kind == 0 && first ? QEvent::TouchBegin
+                              : kind == 2 && scene->touch_points.size() == 1 ? QEvent::TouchEnd
+                                                                           : QEvent::TouchUpdate;
+    QTouchEvent event(type, &device, Qt::NoModifier, points);
+    event.setTimestamp(time);
+    if (kind == 3) {
+        // Qt's generic cancel clears passive grabs as an ordinary ungrab.
+        // A passive TapHandler then stays pressed. Tell those grabbers that
+        // this is cancellation before the window resets mouse synthesis.
+        for (const auto &point : points) {
+            const auto passives = device_state->pointById(point.id())->passiveGrabbers;
+            for (const auto &grabber : passives) {
+                if (grabber) {
+                    device_state->removeGrabber(grabber, true);
+                }
+            }
+        }
+    }
+    QCoreApplication::sendEvent(scene->window, &event);
+    if (kind == 3) {
+        for (auto point = scene->touch_points.cbegin(); point != scene->touch_points.cend(); ++point) {
+            device_state->removePointById(point.key());
+        }
+        scene->touch_points.clear();
+    } else if (kind == 2) {
+        device_state->removePointById(id);
+        scene->touch_points.remove(id);
+    } else {
+        for (const auto &point : event.points()) {
+            scene->touch_points.insert(point.id(), point);
+        }
+    }
 }
 
 extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, double x, double y,

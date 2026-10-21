@@ -392,6 +392,10 @@ impl Solium {
                     // why `clear` reports at all.
                     let _ = present::clear(pane, outer, now, animation.duration, animation.easing);
                 }
+                Command::Touch { slot, action } => crate::input::touch::claim(self, slot, action),
+                Command::Click { x, y } => {
+                    self.trigger_click(x, y);
+                }
                 Command::Focus { id, source, warp } => {
                     if let Some(window) = self.window_by_id(id) {
                         tracing::debug!(id, title = self.window_title(&window), "script focused");
@@ -846,7 +850,7 @@ impl Solium {
     ///
     /// Ids that no longer exist are simply not found — a window closing while a
     /// mode holds its id is ordinary, not an error.
-    pub(super) fn window_by_id(&self, id: u64) -> Option<Window> {
+    pub(crate) fn window_by_id(&self, id: u64) -> Option<Window> {
         self.panes.by_script_id(id).and_then(Pane::client).cloned()
     }
 

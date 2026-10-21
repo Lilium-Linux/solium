@@ -105,6 +105,8 @@ require("direction")
 -- in charge (#222). After `direction`, whose four arrow bindings this takes
 -- over only while floating is the mode in charge.
 require("floating")
+-- Desktop finger bindings; independent of the Rust input profile.
+require("touch")
 
 -- Programs. `sol.spawn` starts them as clients of this compositor, whatever
 -- session the compositor itself happens to be nested in.
