@@ -837,7 +837,7 @@ fn runtime_dir() -> PathBuf {
 ///
 /// **In the tests, only on the Qt thread.** The compositor runs Qt on one
 /// thread, and the tests have one of their own for it
-/// ([`qt_test::on_the_qt_thread`]), but a reload in a test on any other of
+/// (`qt_test::on_the_qt_thread`), but a reload in a test on any other of
 /// `cargo test`'s threads clears the engine's component cache from there. Two
 /// such clears at once, or one while the Qt thread builds a scene from that
 /// cache, freed the same `QCache` twice and took the whole test binary down on
