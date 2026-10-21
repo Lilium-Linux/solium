@@ -761,7 +761,7 @@ function sol.present(id, options) end
 ---Draw a window at a rect and animate it to where it lives: every "appears from
 ---somewhere" animation. The rect is required.
 ---@param id integer
----@param options { x: number, y: number, w: number, h: number, opacity?: number, motion?: sol.PresentMotion }
+---@param options { x: number, y: number, w: number, h: number, opacity?: number, motion?: sol.PresentMotion, deform?: sol.Deform } `deform` is the shape it starts in, relaxed to none as it lands.
 ---@return nil
 function sol.present_from(id, options) end
 

@@ -114,7 +114,8 @@ sol.present(id, { x = icon.x, y = icon.y, w = icon.w, h = icon.h, opacity = 0,
 initial velocity is the finger's on that axis, and the window curves the way
 the throw went before it settles on its target. The present is done when the
 last of them is. `sol.present_from` takes the same `motion`, which is how a
-launch's window grows out of its icon with its centre ahead of its size.
+launch's window grows out of its icon with its centre ahead of its size; its
+`deform` is the shape it starts in, relaxed to the plain window as it lands.
 
 ## Where the feel actually lives
 

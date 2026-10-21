@@ -507,6 +507,9 @@ pub(crate) enum Command {
         animation: AnimationSpec,
         /// As [`Command::Present`]'s: a timing per property (#293).
         channels: Option<Box<crate::present::Channels<AnimationSpec>>>,
+        /// The deformation it starts in, relaxed to none as it lands: a
+        /// launch that grows out of its icon already in the icon's shape.
+        deform: Option<DeformSpec>,
     },
     /// Give a window the keyboard: `sol.focus`. `source` is what the
     /// handler that asked was answering, which the `focus` event tells
@@ -4187,6 +4190,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             let opacity = options.get::<Option<f32>>("opacity")?;
             let motion = present_motion_from(&options)?;
+            let deform = deform_from(&options)?;
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let channels = resolved(motion, animation);
@@ -4196,6 +4200,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     opacity,
                     animation,
                     channels,
+                    deform,
                 });
             })
         })?,
@@ -6727,6 +6732,40 @@ mod tests {
                 }),
             ]
         );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.present_from` reads a deform for the frame it starts in**,
+    /// checked as `sol.present`'s is.
+    #[test]
+    fn present_from_carries_the_deform_it_starts_in() {
+        let directory = std::env::temp_dir().join("solium-script-test-present-from-deform");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+1", function()
+                sol.present_from(1, { x = 0, y = 0, w = 60, h = 60,
+                    deform = { effect = "genie", to = { x = 0, y = 0, w = 60, h = 60 } } })
+                sol.present_from(2, { x = 0, y = 0, w = 60, h = 60 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+1", Snapshot::default());
+        let effects: Vec<Option<String>> = outcome
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::PresentFrom { deform, .. } => {
+                    deform.as_ref().map(|deform| deform.effect.clone())
+                }
+                other => panic!("expected a present_from command, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(effects, vec![Some("genie".to_owned()), None]);
         let _ = std::fs::remove_dir_all(&directory);
     }
 

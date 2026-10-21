@@ -11405,6 +11405,55 @@ end)"#,
         );
     }
 
+    /// **`sol.present_from` starts in its deform and lands without it**: a
+    /// launch growing out of its icon already in the icon's shape, relaxed
+    /// to the plain window as it arrives and then let go, as any
+    /// `present_from` is.
+    #[test]
+    fn a_present_from_starts_deformed_and_lands_plain() {
+        fx2_fixture!(fixture, "present-from-deform");
+        let (pane, _) = one_window(&mut fixture);
+        let _ = scratch_genie(&mut fixture);
+        let to = below(&fixture, pane);
+        let start = fixture.state.clock.now();
+        fixture.state.apply(crate::script::Outcome {
+            commands: vec![crate::script::Command::PresentFrom {
+                id: pane.get(),
+                rect: crate::script::Rect {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 60.0,
+                    h: 60.0,
+                },
+                opacity: None,
+                animation: crate::script::AnimationSpec {
+                    duration: Duration::from_millis(100),
+                    easing: present::Curve::Linear,
+                },
+                channels: None,
+                deform: Some(crate::script::deform_for_test(&format!(
+                    "{{ effect = 'genie', progress = 1, to = {to} }}"
+                ))),
+            }],
+            ..Default::default()
+        });
+        let held = fixture.state.panes.get(pane).expect("the pane");
+        let outer = fixture.state.pane_outer(held);
+        let at = |ms| present::frame(held, outer, start + Duration::from_millis(ms));
+        let first = at(0).deform.map(|deform| deform.effect.progress);
+        assert_eq!(first, Some(1.0), "it starts all the way in its deform");
+        let half = at(50).deform.map(|deform| deform.effect.progress);
+        assert!(
+            half.is_some_and(|progress| (progress - 0.5).abs() < 0.01),
+            "relaxing as it goes, got {half:?}"
+        );
+        assert!(
+            !present::settle(held, outer, start + Duration::from_millis(150)),
+            "it has landed"
+        );
+        assert!(!present::transformed(held), "and is let go, deform and all");
+    }
+
     /// **A reload that changes only `effects.sandbox` keeps a present**: the
     /// new caps load the genie's unchanged folder again, under them, and
     /// it keeps its id, so a window held at progress 0.5 under the default
@@ -14009,6 +14058,7 @@ end)"#,
                     easing: present::Curve::Linear,
                 },
                 channels: None,
+                deform: None,
             }],
             ..Outcome::default()
         });
