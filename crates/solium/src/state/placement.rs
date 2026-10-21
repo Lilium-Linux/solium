@@ -3,6 +3,7 @@
 //! window with its modals kept above it, and maximising.
 
 use super::*;
+use smithay::wayland::shell::xdg::ToplevelState;
 
 /// What a placement says about the tile a pane is held in.
 ///
@@ -60,6 +61,36 @@ fn over_the_arrangement(window: &Window) -> bool {
                 || state.states.contains(xdg_toplevel::State::Maximized)
         })
     })
+}
+
+/// Tell the client whether it is tiled: all four `tiled_*` states, or none
+/// (#228).
+///
+/// A client that is not told it is tiled is free to answer a configure with a
+/// size of its own, and the ones that round to a grid do: foot landed on its
+/// tile and then shrank to whole character cells, leaving gaps of up to a cell
+/// on the right and bottom of every terminal. A tiled client is to fill the
+/// size it is given, and that is what it hears here.
+///
+/// All four together because a tile is held on every edge: the layout owns
+/// the rectangle, and no edge of it is the client's to move. Only the states
+/// are written, into the pending configure; whoever writes the size beside them
+/// sends it, so the two arrive in one configure and the client never resizes
+/// once for the size and again for the states. Smithay drops them for a client
+/// bound below version 2, which has never heard of them.
+pub(super) fn set_tiled(state: &mut ToplevelState, tiled: bool) {
+    for edge in [
+        xdg_toplevel::State::TiledLeft,
+        xdg_toplevel::State::TiledRight,
+        xdg_toplevel::State::TiledTop,
+        xdg_toplevel::State::TiledBottom,
+    ] {
+        if tiled {
+            state.states.set(edge);
+        } else {
+            state.states.unset(edge);
+        }
+    }
 }
 
 /// `rect`, moved from the monitor at `from` onto the one at `to`: at the same
@@ -421,6 +452,22 @@ impl Solium {
         // A client is moved and resized for real, and the space is told,
         // because the space is the authority for a mapped window.
         if let Some(window) = self.panes.get(pane).and_then(Pane::client).cloned() {
+            // **Whether it is tiled, in the same configure as the size** (#228).
+            // Before `offers_size`, so that a window floated at the size it
+            // already has is still told: a changed state is a pending change,
+            // and a pending change is sent. Kept says nothing new about the
+            // tile, and a leaving window is told nothing at all; the note on
+            // the configure below is why.
+            let tiled = match standing {
+                Standing::Tile | Standing::Within(_) => Some(true),
+                Standing::Free => Some(false),
+                Standing::Kept => None,
+            };
+            if let Some(tiled) = tiled.filter(|_| !leaving)
+                && let Some(toplevel) = window.toplevel()
+            {
+                toplevel.with_pending_state(|state| set_tiled(state, tiled));
+            }
             if !leaving && self.offers_size(pane, &window, client, now) {
                 size_window(&window, client);
             }
@@ -1170,6 +1217,7 @@ impl Solium {
 
         toplevel.with_pending_state(|state| {
             state.size = back.map(|back| back.size);
+            set_tiled(state, tiled);
             if maximized {
                 state.states.set(xdg_toplevel::State::Maximized);
             } else {
