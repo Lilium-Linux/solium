@@ -19,7 +19,8 @@ for current daily-use priorities.
 - A default preview shell with a bottom bar, top dock, application/window
   search and live desktop icons. It can be disabled or replaced.
 - Multiple outputs, hotplug, scaling and screen power; keyboard layouts,
-  per-device libinput settings and cursor themes.
+  per-device libinput settings and cursor themes; keyboard-shortcuts-inhibit,
+  so a VM or remote desktop can have `super`.
 - Session-lock with external lockers, idle inhibition, logind lock/sleep
   handling and installed-session integration with systemd and XDG autostart.
 - Checkout installation and a Fedora 44 RPM build script.

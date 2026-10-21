@@ -238,6 +238,15 @@ local CLIP = ' && { command -v wl-copy >/dev/null && wl-copy < "$file" || true; 
 sol.bind("Print", run("sh", "-c", SHOT .. 'grim "$file"' .. CLIP), "laptop keys")
 sol.bind("shift+Print", run("sh", "-c", SHOT .. 'area="$(slurp)" && grim -g "$area" "$file"' .. CLIP), "laptop keys")
 
+-- A virtual machine, a remote desktop or a nested compositor can ask for
+-- every key, `super` included, and it gets them while it has the keyboard
+-- (#58): no binding fires over it but one that asked with `inhibited`. This
+-- one takes the keys back until the keyboard leaves that window. Ctrl+Alt+F*
+-- and Ctrl+Alt+Backspace work whatever holds the keys.
+sol.bind("super+Escape", function()
+    sol.take_shortcuts_back()
+end, { note = "shortcuts", inhibited = true })
+
 sol.log("solium configuration loaded")
 
 -- Show or hide the Developer Tweaks panel. Nothing without --debug-mode.

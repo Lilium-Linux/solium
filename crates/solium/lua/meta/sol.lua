@@ -766,6 +766,17 @@ function sol.debug_mode() end
 ---@return nil
 function sol.reload() end
 
+---Take the compositor's shortcuts back from the window holding them.
+---
+---A window that is itself a desktop -- a virtual machine, a remote desktop, a
+---nested compositor -- can ask for every key, and while it has the keyboard no
+---binding fires over it except one that asked with `inhibited`. This hands
+---them back to the bindings until the keyboard leaves that window; the next
+---time the window has the keyboard, it holds them again. The shipped
+---`super+Escape` calls it. Nothing happens when no window holds them.
+---@return nil
+function sol.take_shortcuts_back() end
+
 ---Choose how every window is framed, at once.
 ---
 ---A name is a folder under `~/.config/solium/qml/panes` or the shipped
@@ -1121,6 +1132,7 @@ function sol.bind(combo, handler, note) end
 ---@class sol.BindOptions
 ---@field note? string Where the binding came from, which `solium --check` prints beside it.
 ---@field repeating? boolean While the key is held, the handler runs again at the keyboard's repeat delay and rate (`sol.keyboard()`'s `repeat_delay` and `repeat_rate`), as an application repeats a letter. It stops when the key comes up or any other key goes down or up, when the keyboard moves to another window by anything but the handler itself, at a VT switch, when the session locks, and when the handler fails. A modifier or a group toggle never repeats, nor anything on a keyboard whose rate is 0. A loop that looks late runs it once, not once for every repeat it missed. Spelled `repeating` because `repeat` is a word of Lua's own.
+---@field inhibited? boolean It fires while a window holds the compositor's shortcuts as well -- a virtual machine or a remote desktop that asked for every key -- over which no other binding does. For the key that takes them back, `sol.take_shortcuts_back`. Off unless asked.
 ---@field locked? boolean It fires while the session is locked as well: for a key that is no way past the lock, such as volume, brightness and media. There its handler may not act on a window or a workspace, or end the session -- a `sol` call that would is an error the handler can catch -- and anything else, `sol.spawn` included, it may. Off unless asked.
 
 ---Whether a combination is bound, in whatever spelling it is given.

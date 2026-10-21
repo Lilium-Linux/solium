@@ -1333,8 +1333,10 @@ impl SeatHandler for Solium {
     }
     /// Text-input focus follows the keyboard's:
     /// `text_input::tests::a_field_whose_window_loses_the_keyboard_is_gone`.
+    /// So do the shortcuts a window asked for (#58): see `shortcuts_inhibit`.
     fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
         self.text_input_focus(focused);
+        self.settle_inhibitors(focused);
     }
 }
 

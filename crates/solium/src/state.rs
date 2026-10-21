@@ -681,6 +681,10 @@ pub(crate) struct Solium {
         reason = "registers wp_content_type_manager_v1; dropping it would remove the global"
     )]
     pub(crate) content_type_state: ContentTypeState,
+    /// The windows that have asked for the compositor's own key
+    /// combinations, and which of them holds them now (#58). See
+    /// `shortcuts_inhibit`.
+    pub(crate) inhibitors: crate::shortcuts_inhibit::Inhibitors,
     /// Telling a surface what scale it is really being drawn at.
     ///
     /// Without it a client has only the integer scale from `wl_output`, so on
@@ -1360,6 +1364,7 @@ impl Solium {
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
             single_pixel_buffer_state: crate::single_pixel::state(&display_handle),
             content_type_state: ContentTypeState::new::<Self>(&display_handle),
+            inhibitors: crate::shortcuts_inhibit::Inhibitors::new(&display_handle),
             // 1 is CLOCK_MONOTONIC, which is the clock every timestamp in this
             // compositor comes from -- both the DRM page-flip time and our own
             // animation clock. Telling a client a different clock id than the

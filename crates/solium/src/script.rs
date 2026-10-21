@@ -543,6 +543,8 @@ pub(crate) enum Command {
     Quit,
     /// Read the configuration again.
     Reload,
+    /// Take back the compositor's shortcuts from the window holding them.
+    TakeShortcutsBack,
     /// Where the monitors are, relative to each other.
     Monitors(crate::monitor::Arrangement),
     /// Which layouts the keyboard has, which is live, and how keys repeat.
@@ -739,6 +741,9 @@ impl Command {
             Self::Decoration { .. }
             | Self::PaneValues(_)
             | Self::Reload
+            // No window holds the shortcuts at the lock, and taking them back
+            // gives a window nothing.
+            | Self::TakeShortcutsBack
             | Self::Monitors(_)
             | Self::Keyboard(_)
             | Self::Surface(_)
@@ -1392,6 +1397,7 @@ pub(crate) struct Binding {
     /// What else it asked for. See [`BindingOptions`].
     pub(crate) repeating: bool,
     pub(crate) locked: bool,
+    pub(crate) inhibited: bool,
 }
 
 /// What a binding asked for besides its handler: the table form of
@@ -1405,6 +1411,10 @@ pub(crate) struct BindingOptions {
     /// It also fires while the session is locked, where nothing it does may
     /// reach a window. `state::tests::real_client::lock_focus::held`.
     pub(crate) locked: bool,
+    /// It also fires while a window holds the compositor's shortcuts (#58),
+    /// which every other binding gives way to.
+    /// `state::tests::real_client::lock_focus::shortcuts_inhibit`.
+    pub(crate) inhibited: bool,
 }
 
 /// A setting a configuration wrote that nothing reads.
@@ -1469,6 +1479,7 @@ impl Scripts {
                     combo,
                     repeating: asked.repeating,
                     locked: asked.locked,
+                    inhibited: asked.inhibited,
                 }
             })
             .collect();
@@ -1499,6 +1510,7 @@ impl Scripts {
         Some(BindingOptions {
             repeating: flag("repeating"),
             locked: flag("locked"),
+            inhibited: flag("inhibited"),
         })
     }
 
@@ -1531,6 +1543,7 @@ impl Scripts {
                 // Gone, so it asks for nothing.
                 repeating: false,
                 locked: false,
+                inhibited: false,
             })
             .collect();
         gone.sort_by(|left, right| left.combo.cmp(&right.combo));
@@ -4198,6 +4211,17 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // The shortcuts a window holds, taken back until the keyboard leaves it
+    // (#58). See `shortcuts_inhibit`.
+    sol.set(
+        "take_shortcuts_back",
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::TakeShortcutsBack);
+            })
+        })?,
+    )?;
+
     sol.set(
         "pane",
         lua.create_function(|lua, name: Option<String>| {
@@ -5193,7 +5217,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `--check` stays a plain list until a configuration has something to say.
     //
     // Or the third argument is a table, which holds the note and what else the
-    // binding asks for (#224): `repeating`, `locked`. What a binding asks for
+    // binding asks for (#224): `repeating`, `locked`, and `inhibited` (#58).
+    // What a binding asks for
     // is replaced with it, so a later call that asks for nothing asks for
     // nothing -- a configuration rebinding a shipped repeating key to launch
     // something does not inherit the repeat.
@@ -5213,6 +5238,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     let table = lua.create_table()?;
                     table.set("repeating", asked.repeating)?;
                     table.set("locked", asked.locked)?;
+                    table.set("inhibited", asked.inhibited)?;
                     options.set(combo.clone(), table)?;
                 }
                 if let Some(note) = note {
@@ -6478,6 +6504,7 @@ fn binding_note_and_options(said: Option<Value>) -> mlua::Result<(Option<String>
             },
             "repeating" => asked.repeating = flag(&value)?,
             "locked" => asked.locked = flag(&value)?,
+            "inhibited" => asked.inhibited = flag(&value)?,
             "repeat" => {
                 return Err(mlua::Error::runtime(
                     "sol.bind: a binding that repeats while held is `repeating = true`",
@@ -6486,7 +6513,7 @@ fn binding_note_and_options(said: Option<Value>) -> mlua::Result<(Option<String>
             other => {
                 return Err(mlua::Error::runtime(format!(
                     "sol.bind: there is no option `{other}`; a binding takes `note`, \
-                     `repeating` and `locked`"
+                     `repeating`, `locked` and `inhibited`"
                 )));
             }
         }
