@@ -5509,6 +5509,17 @@ fn rect_from(options: &Table) -> mlua::Result<Option<Rect>> {
         options.get::<Option<f64>>("h")?,
     );
     match (x, y, w, h) {
+        // A size below zero, or any side that is not a number, is a mistake
+        // in the script -- most often an easing's overshoot computed in Lua
+        // -- and drawing it would panic deep in the renderer (#282). Said by
+        // name, as a half-specified rect is.
+        (Some(x), Some(y), Some(w), Some(h))
+            if ![x, y, w, h].into_iter().all(f64::is_finite) || w < 0.0 || h < 0.0 =>
+        {
+            Err(mlua::Error::runtime(format!(
+                "a rect needs finite x and y and a size of zero or more; got x={x}, y={y}, w={w}, h={h}"
+            )))
+        }
         (Some(x), Some(y), Some(w), Some(h)) => Ok(Some(Rect { x, y, w, h })),
         (None, None, None, None) => Ok(None),
         // A half-specified rect is a typo, and silently filling in the missing
@@ -6536,6 +6547,31 @@ pub(crate) use tests::logged_while;
 mod tests {
     use super::*;
     use crate::input::devices::DeviceInfo;
+
+    /// **A rect with a negative size, or a side that is not a number, is
+    /// refused by name (#282)**, rather than reaching the renderer, which
+    /// panicked on a negative size. Zero is a size.
+    #[test]
+    fn a_rect_with_a_negative_or_non_finite_side_is_refused() {
+        let lua = mlua::Lua::new();
+        let rect = |source: &str| {
+            let table: mlua::Table = lua.load(source).eval().expect("a table");
+            super::rect_from(&table)
+        };
+        assert!(rect("return { x = 0, y = 0, w = 0, h = 10 }").is_ok());
+        for bad in [
+            "return { x = 0, y = 0, w = -18, h = 13 }",
+            "return { x = 0, y = 0, w = 10, h = -1 }",
+            "return { x = 0/0, y = 0, w = 10, h = 10 }",
+            "return { x = 0, y = 0, w = 1/0, h = 10 }",
+        ] {
+            let refused = rect(bad).expect_err(bad).to_string();
+            assert!(
+                refused.contains("a size of zero or more"),
+                "{bad}: {refused}"
+            );
+        }
+    }
 
     #[test]
     fn combos_normalise_to_one_spelling() {

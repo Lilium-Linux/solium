@@ -103,8 +103,17 @@ impl Default for Clock {
 /// `Rectangle::new` takes a typed `Point` and `Size`, which is the right
 /// discipline for a compositor and pure noise at the call sites doing the
 /// arithmetic. The conversion happens here and nowhere else.
+///
+/// **A size is never negative, or NaN.** An animation's progress leaves 0..1
+/// whenever its easing overshoots: a spring started with a finger's velocity
+/// does so by design. Blending a window that shrinks from 800 px towards a
+/// 100 px card at a progress of 1.2 gives a width of −40, and Smithay's `Size`
+/// panics on that, taking the session with it: a fast swipe up on a Surface,
+/// 2026-10-21 (#282). A side at or below zero is drawn at zero, for as long as
+/// the overshoot lasts, and NaN (`f64::max` returns the other argument) is
+/// zero too. `tests::an_overshooting_shrink_never_draws_a_negative_size`.
 pub(crate) fn logical(loc: (f64, f64), size: (f64, f64)) -> Rectangle<f64, Logical> {
-    Rectangle::new(loc.into(), size.into())
+    Rectangle::new(loc.into(), (size.0.max(0.0), size.1.max(0.0)).into())
 }
 
 /// A rectangle in the form `solium-effects` takes.
@@ -1091,6 +1100,33 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
         Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    /// **An overshooting shrink never draws a negative size (#282).** A
+    /// spring carrying a fast swipe's velocity takes progress past 1, and
+    /// past 0 on the way back; blended there, a window shrinking to a card
+    /// had a negative width, which Smithay panicked on.
+    #[test]
+    fn an_overshooting_shrink_never_draws_a_negative_size() {
+        let from = Frame::real(rect(0, 0, 800, 600));
+        let to = Frame::real(rect(300, 400, 100, 120));
+        for progress in [-0.6, -0.3, 1.2, 1.3, 2.0, f64::NAN] {
+            let size = from.blend(to, progress).rect.size;
+            assert!(
+                size.w >= 0.0 && size.h >= 0.0,
+                "at progress {progress}: {size:?}"
+            );
+        }
+        assert_eq!(
+            logical((0.0, 0.0), (-18.0, 13.2)).size,
+            (0.0, 13.2).into(),
+            "the size in the panic, drawn at zero width"
+        );
+        assert_eq!(
+            from.blend(to, 0.5).rect.size,
+            (450.0, 360.0).into(),
+            "and a size inside the animation is untouched"
+        );
     }
 
     #[test]
