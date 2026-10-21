@@ -14,19 +14,48 @@
 //! epilogue), so the driver's log names the user's own line, and a failure
 //! carries that log, which smithay's `compile_custom_texture_shader` drops
 //! (`gles/error.rs:12`). Smithay and std only, so `dev/wirecheck` includes
-//! this file and compiles through it (cases 12a and 12b).
+//! this file and compiles through it (cases 12a, 12b and 12j), with
+//! `super::params` and `super::warp` beside it.
+
+use std::rc::Rc;
 
 use smithay::backend::renderer::gles::ffi;
 
-/// A linked effect program, and what it really has.
+/// A linked effect program, and what it really has. Cheap to clone, so a
+/// warp element can carry the one a folder's frag compiled into (Task 29).
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
     pub(crate) id: ffi::types::GLuint,
-    /// The full-target quad's buffer, made once with the program.
+    /// The full-target quad's buffer, made once with the program; a warp
+    /// program's vertices, uploaded each draw.
     pub(crate) buffer: ffi::types::GLuint,
     /// Every active uniform: name, location, GL type (`glGetActiveUniform`;
     /// wirecheck case 12b).
-    uniforms: Vec<(String, ffi::types::GLint, ffi::types::GLenum)>,
+    uniforms: Rc<[(String, ffi::types::GLint, ffi::types::GLenum)]>,
+    /// The vertex attributes a warp program reads, where they are:
+    /// `position` and `uvq` (`glGetAttribLocation`; wirecheck case 12j).
+    attributes: [(&'static str, Option<ffi::types::GLuint>); 2],
+}
+
+/// What a pixel program in the warp reads, beside the capture. `Copy` and
+/// compared, because it is part of the warp's `Shape` (Task 29).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct PixelUniforms {
+    pub(crate) progress: f32,
+    pub(crate) clamped: f32,
+    pub(crate) direction: f32,
+    pub(crate) seed: f32,
+    pub(crate) time: f32,
+    /// The capture's size in pixels: `sol_size`, and `sol_texel` is 1 / it.
+    pub(crate) size: [f32; 2],
+    /// The subject inside the padded capture, in `uv`.
+    pub(crate) content: [f32; 4],
+    /// The part of the pane's unit square the capture is (u0, v0, u1, v1).
+    pub(crate) part: [f32; 4],
+    /// The effect's numeric params in their sorted order, at most
+    /// `effects.limits.params` of them (Task 28's `Params`; amended
+    /// 2026-10-08, configurable).
+    pub(crate) params: super::params::Params,
 }
 
 /// Why a program did not build: which stage, and the driver's own words.
@@ -80,13 +109,21 @@ impl Program {
                     text,
                 });
             }
-            let uniforms = active_uniforms(gl, id);
+            let uniforms = active_uniforms(gl, id).into();
+            let attribute = |name: &std::ffi::CStr| {
+                u32::try_from(gl.GetAttribLocation(id, name.as_ptr().cast())).ok()
+            };
+            let attributes = [
+                ("position", attribute(c"position")),
+                ("uvq", attribute(c"uvq")),
+            ];
             let mut buffer = 0;
             gl.GenBuffers(1, &raw mut buffer);
             Ok(Self {
                 id,
                 buffer,
                 uniforms,
+                attributes,
             })
         }
     }
@@ -100,7 +137,8 @@ impl Program {
         Self {
             id: 0,
             buffer: 0,
-            uniforms: Vec::new(),
+            uniforms: Rc::from([]),
+            attributes: [("position", None), ("uvq", None)],
         }
     }
 
@@ -110,10 +148,120 @@ impl Program {
     }
 
     pub(crate) fn location(&self, name: &str) -> Option<i32> {
+        self.uniform(name).map(|(location, _)| location)
+    }
+
+    /// An active uniform's location and GL type.
+    fn uniform(&self, name: &str) -> Option<(i32, u32)> {
         self.uniforms
             .iter()
             .find(|(each, _, _)| each == name)
-            .map(|(_, location, _)| *location)
+            .map(|(_, location, kind)| (*location, *kind))
+    }
+
+    /// Whether the program reads `name`: a uniform the driver did not
+    /// optimise away.
+    pub(crate) fn reads(&self, name: &str) -> bool {
+        self.uniform(name).is_some()
+    }
+
+    /// Where the vertex attribute `name` is, if the program has it: a warp
+    /// program's `position` and `uvq` (wirecheck case 12j).
+    pub(crate) fn attribute(&self, name: &str) -> Option<u32> {
+        self.attributes
+            .iter()
+            .find(|(each, _)| *each == name)
+            .and_then(|(_, location)| *location)
+    }
+
+    /// Draw `vertices` (x, y, u·q, v·q, q per vertex, physical pixels)
+    /// through `projection` as the warp draws them, with this program, a
+    /// folder's frag compiled for the warp (`glsl::WARP_VERTEX`, the prelude
+    /// for `Host::Warp`): `textures[0]` is the capture, `sol_tex`, on unit 0,
+    /// each further one on the next unit; `uniforms` and `alpha` set; once,
+    /// or once under each of `scissors`, then what smithay expects put back.
+    /// `params` names `uniforms.params`' slots in order (`p_<name>`, a
+    /// `vec4` four slots of one name), each set as the program declares it:
+    /// `Uniform1f`, `Uniform1i`, or `Uniform4f` from four slots. A uniform
+    /// the program does not have (optimised away) is skipped, and so is
+    /// `uvq` for a frag that reads no `uv`. Wirecheck case 12j.
+    ///
+    /// # Safety
+    /// A GL context is current, and every name is this context's.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the warp's draw, and what a pixel program reads"
+    )]
+    pub(crate) unsafe fn draw_warp(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 9],
+        textures: &[u32],
+        vertices: &[f32],
+        alpha: f32,
+        uniforms: &PixelUniforms,
+        params: &[String],
+        scissors: &[[i32; 4]],
+    ) {
+        // `uvq` is dropped by the driver from a frag that reads no `uv`.
+        let Some(position) = self.attribute("position") else {
+            return;
+        };
+        let uvq = self.attribute("uvq");
+        // SAFETY: the caller's contract.
+        unsafe {
+            gl.UseProgram(self.id);
+            let at = |name: &str| self.location(name);
+            if let Some(location) = at("projection") {
+                gl.UniformMatrix3fv(location, 1, ffi::FALSE, projection.as_ptr());
+            }
+            let float = |name: &str, v: f32| {
+                if let Some(location) = at(name) {
+                    gl.Uniform1f(location, v);
+                }
+            };
+            let vec2 = |name: &str, v: [f32; 2]| {
+                if let Some(location) = at(name) {
+                    gl.Uniform2f(location, v[0], v[1]);
+                }
+            };
+            let vec4 = |name: &str, v: [f32; 4]| {
+                if let Some(location) = at(name) {
+                    gl.Uniform4f(location, v[0], v[1], v[2], v[3]);
+                }
+            };
+            float("alpha", alpha);
+            for (unit, texture) in textures.iter().enumerate() {
+                super::warp::bind_texture(gl, u32::try_from(unit).unwrap_or(0), *texture);
+            }
+            gl.ActiveTexture(ffi::TEXTURE0);
+            if let Some(location) = at("sol_tex_sampler") {
+                gl.Uniform1i(location, 0);
+            }
+            vec4("sol_tex_box", [0.0, 0.0, 1.0, 1.0]);
+            vec4("sol_tex_clamp", [0.0, 0.0, 1.0, 1.0]);
+            let [w, h] = uniforms.size;
+            vec2("sol_texel", [1.0 / w.max(1.0), 1.0 / h.max(1.0)]);
+            vec2("sol_size", uniforms.size);
+            vec2("sol_box_px", uniforms.size);
+            vec4("sol_content", uniforms.content);
+            vec4("sol_part", uniforms.part);
+            float("sol_progress", uniforms.progress);
+            float("sol_clamped", uniforms.clamped);
+            float("sol_direction", uniforms.direction);
+            float("sol_seed", uniforms.seed);
+            float("sol_time", uniforms.time);
+            set_params(gl, self, uniforms.params.as_slice(), params);
+
+            gl.Enable(ffi::BLEND);
+            gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+            super::warp::triangles(gl, (self.buffer, position, uvq), vertices, scissors);
+            for unit in (0..textures.len()).rev() {
+                gl.ActiveTexture(ffi::TEXTURE0 + u32::try_from(unit).unwrap_or(0));
+                gl.BindTexture(ffi::TEXTURE_2D, 0);
+            }
+            gl.UseProgram(0);
+        }
     }
 
     /// # Safety
@@ -164,6 +312,43 @@ unsafe fn stage(
                 .to_owned());
         }
         Ok(shader)
+    }
+}
+
+/// Each of `names` (`p_<name>`), the slots of `values` in order: a
+/// `vec4` takes four slots of one name and `Uniform4f`; an `int` (or a
+/// `bool`) `Uniform1i`, rounded; anything else `Uniform1f`. A name the
+/// program does not have takes its slots and sets nothing.
+///
+/// # Safety
+/// A GL context is current, and `program` is in use in it.
+unsafe fn set_params(gl: &ffi::Gles2, program: &Program, values: &[f32], names: &[String]) {
+    let mut at = 0;
+    while let Some(name) = names.get(at) {
+        // Every slot this name has, so one optimised away is skipped whole.
+        let run = names
+            .get(at..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|each| *each == name)
+            .count()
+            .max(1);
+        let slot = |offset: usize| values.get(at + offset).copied().unwrap_or(0.0);
+        // SAFETY: the caller's contract.
+        unsafe {
+            match program.uniform(name) {
+                Some((location, ffi::FLOAT_VEC4)) => {
+                    gl.Uniform4f(location, slot(0), slot(1), slot(2), slot(3));
+                }
+                Some((location, ffi::INT | ffi::BOOL)) => {
+                    #[expect(clippy::cast_possible_truncation, reason = "an int param, rounded")]
+                    gl.Uniform1i(location, slot(0).round() as i32);
+                }
+                Some((location, _)) => gl.Uniform1f(location, slot(0)),
+                None => {}
+            }
+        }
+        at += run;
     }
 }
 

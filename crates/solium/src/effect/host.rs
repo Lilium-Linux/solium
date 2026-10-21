@@ -146,7 +146,42 @@ pub(crate) struct Loaded<P = super::gl::Program> {
     /// once every one compiled
     /// (`tests::a_reload_with_a_broken_effect_keeps_the_one_that_ran`).
     pub(crate) needs: Vec<u64>,
+    /// A geometry's pixels, asked for with its plans and among its `needs`
+    /// (Task 29): `None` for an effect with no `mesh`, or a `mesh` with no
+    /// `frag` and no `pixels`, which the plain warp draws.
+    /// `tests::a_geometrys_pixels_compile_in_the_warp_and_follow_their_frag`.
+    pub(crate) pixels: Option<WarpPixels>,
     _program: std::marker::PhantomData<P>,
+}
+
+/// What a geometry's warp draws its capture through: the program its frag
+/// (its own `frag`, or that of the effect its `pixels` names) compiles into
+/// in the warp, by key, and the names of that effect's params' slots in the
+/// order [`pack_pixels`] packs them (`p_<name>`, a `vec4` four slots of one
+/// name), which `effect::gl::Program::draw_warp` sets them by.
+/// `tests::a_geometrys_pixels_compile_in_the_warp_and_follow_their_frag`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WarpPixels {
+    pub(crate) key: u64,
+    pub(crate) names: Rc<[String]>,
+}
+
+/// A pixels effect's params bound with `params` and packed for its warp, at
+/// most `limit` of them (`effects.limits.params`): refused, as a problem at
+/// its file saying why, for a param it does not have, a word, or more
+/// numbers than the limit, never cut (amended 2026-10-08, configurable).
+/// What a `sol.present` geometry whose `pixels` names another effect packs
+/// for that effect's frag.
+/// `tests::a_pixels_effect_with_more_params_than_the_limit_is_refused_at_bind`.
+pub(crate) fn pack_pixels<P>(
+    loaded: &Loaded<P>,
+    params: &[(String, Value)],
+    limit: usize,
+) -> Result<geometry::Params, Problem> {
+    let file = loaded.dir().join("effect.lua");
+    let refused = |message: String| Problem::error(loaded.name(), &file, None, message);
+    let (bound, _) = solium_effects::spec::bind(&loaded.spec().params, params).map_err(refused)?;
+    geometry::packed(&bound, limit).map_err(refused)
 }
 
 /// An effect bound with a rule's overrides.
@@ -195,6 +230,7 @@ impl<P> Loaded<P> {
             hash: folder_hash(dir),
             used,
             needs: Vec::new(),
+            pixels: None,
             _program: std::marker::PhantomData,
         })
     }
@@ -382,6 +418,11 @@ struct Versions<P> {
     /// (`tests::an_effect_changed_under_its_user_gives_its_old_program_back`).
     holds: Vec<u64>,
     pending: Option<Loaded<P>>,
+    /// How many generations were given out to pending versions that were
+    /// dropped before they ran ([`Host::upcoming`]): a later version takes
+    /// a generation past them, so an id a present was given for one never
+    /// comes to name another (`state::tests::real_client::a_present_whose_frag_will_not_compile_follows_its_failed`).
+    burnt: u32,
     /// [`Host::revive`] gave the running version up: its folder changed
     /// since it loaded, or loading it again failed. It is not tried again,
     /// and its folder not read, until a reload or a new version
@@ -675,10 +716,30 @@ impl<P: Clone> Host<P> {
                 break;
             }
             for name in next {
-                if self.load_one(&name) {
+                if self.load_one(&name, false) {
                     fresh.push(name.clone());
                 }
                 loaded.insert(name);
+            }
+        }
+        // A geometry whose `pixels` effect is a new version is loaded again,
+        // its folder unchanged, so it draws that frag once it compiled under
+        // the same id, and keeps the one that ran if it does not
+        // (`tests::a_geometrys_pixels_compile_in_the_warp_and_follow_their_frag`).
+        let users: Vec<String> = self
+            .slots
+            .keys()
+            .filter(|name| !fresh.contains(*name))
+            .filter(|name| {
+                self.latest(name)
+                    .and_then(|loaded| loaded.spec().pixels.as_ref())
+                    .is_some_and(|pixels| fresh.contains(pixels))
+            })
+            .cloned()
+            .collect();
+        for name in users {
+            if self.load_one(&name, true) {
+                fresh.push(name);
             }
         }
         // Bound once the whole closure is loaded, since a version's plans
@@ -718,9 +779,9 @@ impl<P: Clone> Host<P> {
         self.forget_unheld_asks();
     }
 
-    /// Load `name` if its folder changed, or was never loaded: whether a
-    /// new version is now pending.
-    fn load_one(&mut self, name: &str) -> bool {
+    /// Load `name` if its folder changed, or was never loaded, or `again`:
+    /// whether a new version is now pending.
+    fn load_one(&mut self, name: &str, again: bool) -> bool {
         let Some(dir) = self.library.resolve(name) else {
             self.replace_problems(
                 name,
@@ -741,7 +802,8 @@ impl<P: Clone> Host<P> {
         // (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`),
         // and so is one loaded under other caps
         // (`tests::new_caps_load_every_wanted_folder_again`).
-        if let Some(slot) = self.slots.get(name)
+        if !again
+            && let Some(slot) = self.slots.get(name)
             && slot.pending.is_none()
             && slot.current.as_ref().is_some_and(|current| {
                 current.hash() == hash
@@ -785,6 +847,7 @@ impl<P: Clone> Host<P> {
                     current: None,
                     holds: Vec::new(),
                     pending: None,
+                    burnt: 0,
                     given_up: false,
                 });
                 slot.pending = Some(loaded);
@@ -804,16 +867,31 @@ impl<P: Clone> Host<P> {
     /// `tests::an_effect_changed_under_its_user_gives_its_old_program_back`.
     fn programs_of(&mut self, name: &str) {
         if !self.has_pending(name) {
-            if let Ok((_, holds)) = self.bind_plans(name, &[])
+            if let Ok((_, mut holds)) = self.bind_plans(name, &[])
                 && let Some(slot) = self.slots.get_mut(name)
             {
+                // And its pixels, which binding its plans does not ask for.
+                holds.extend(
+                    slot.current
+                        .as_ref()
+                        .and_then(|current| current.pixels.as_ref())
+                        .map(|pixels| pixels.key),
+                );
                 slot.holds = holds;
             }
             return;
         }
-        match self.bind_plans(name, &[]) {
-            Ok((bound, needs)) => {
+        let bound = self.bind_plans(name, &[]).and_then(|(bound, mut needs)| {
+            let pixels = self.warp_pixels(name)?;
+            needs.extend(pixels.as_ref().map(|pixels| pixels.key));
+            Ok((bound, needs, pixels))
+        });
+        match bound {
+            Ok((bound, needs, pixels)) => {
                 if let Some(slot) = self.slots.get_mut(name) {
+                    if let Some(pending) = slot.pending.as_mut() {
+                        pending.pixels = pixels;
+                    }
                     // With nothing to compile (a geometry file alone) the
                     // version is current at once, so a `sol.present` genie
                     // resolves its id on the pass it is named:
@@ -833,7 +911,9 @@ impl<P: Clone> Host<P> {
                 // Refused as a load is: on a cold start the effect is absent
                 // (`tests::a_stage_effect_swaps_in_only_once_every_step_compiled`).
                 let cold = self.slots.get_mut(name).is_some_and(|slot| {
-                    slot.pending = None;
+                    if let Some(pending) = slot.pending.take() {
+                        burn(slot, &pending);
+                    }
                     slot.current.is_none()
                 });
                 if cold {
@@ -842,6 +922,85 @@ impl<P: Clone> Host<P> {
                 self.add_problems(problems);
             }
         }
+    }
+
+    /// A geometry version's pixels, asked for: the frag its warp draws (its
+    /// own `frag`, or that of the effect its `pixels` names) assembled for
+    /// the warp (`glsl::WARP_VERTEX`, the prelude for `Host::Warp` with that
+    /// effect's params, the warp's epilogue) and linted first, so a lint
+    /// error refuses the version as a pass's does. None for an effect with
+    /// no `mesh`, or a `mesh` with neither, which the plain warp draws; a
+    /// `pixels` effect that is not loaded or has no `frag` refuses it.
+    /// `tests::a_geometrys_pixels_compile_in_the_warp_and_follow_their_frag`.
+    fn warp_pixels(&mut self, name: &str) -> Result<Option<WarpPixels>, Vec<Problem>> {
+        let Some(loaded) = self.latest(name).filter(|loaded| loaded.spec().mesh) else {
+            return Ok(None);
+        };
+        let file = loaded.dir().join("effect.lua");
+        let source = match (&loaded.spec().frag, &loaded.spec().pixels) {
+            (Some(_), _) => name.to_owned(),
+            (None, Some(other)) => other.clone(),
+            (None, None) => return Ok(None),
+        };
+        let refused = |message: String| vec![Problem::error(name, &file, None, message)];
+        let Some(from) = self.latest(&source) else {
+            return Err(refused(format!("its `pixels`, `{source}`, is not loaded")));
+        };
+        let Some(frag) = from.spec().frag.as_ref().map(|frag| from.dir().join(frag)) else {
+            return Err(refused(format!(
+                "its `pixels`, `{source}`, has no `frag`: the warp draws one frag in the same pass"
+            )));
+        };
+        let mut params = Vec::new();
+        let mut names = Vec::new();
+        for (param, spec) in &from.spec().params {
+            let Some(kind) = glsl::kind_of(&spec.default) else {
+                continue;
+            };
+            let slots = if kind == glsl::ParamKind::Vec4 { 4 } else { 1 };
+            names.extend(std::iter::repeat_n(format!("p_{param}"), slots));
+            params.push((param.clone(), kind));
+        }
+        let text = std::fs::read_to_string(&frag).map_err(|err| {
+            vec![Problem::error(
+                &source,
+                &frag,
+                None,
+                format!("cannot read it: {err}"),
+            )]
+        })?;
+        let signature = glsl::Signature {
+            host: glsl::Host::Warp,
+            params,
+            uses: Vec::new(),
+            known: Vec::new(),
+        };
+        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+        for lint in glsl::lint(&signature, &text) {
+            let problem = Problem {
+                line: Some(lint.line),
+                severity: lint.severity,
+                ..Problem::error(&source, &frag, None, lint.message)
+            };
+            match lint.severity {
+                Severity::Error => errors.push(problem),
+                Severity::Warning => warnings.push(problem),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        self.add_problems(warnings);
+        let key = self.request(
+            &source,
+            &frag,
+            glsl::WARP_VERTEX,
+            glsl::assemble(&signature, &text),
+        );
+        Ok(Some(WarpPixels {
+            key,
+            names: names.into(),
+        }))
     }
 
     /// The newest version of `name`: the one waiting to compile if there is
@@ -1138,6 +1297,8 @@ impl<P: Clone> Host<P> {
                 .all(|key| matches!(self.programs.get(key), Some(Ok(_))))
             {
                 swap_in(slot, pending);
+            } else {
+                burn(slot, &pending);
             }
         }
         if std::mem::take(&mut self.sweep) {
@@ -1208,6 +1369,7 @@ impl<P: Clone> Host<P> {
                 Ok(mut fresh) if fresh.hash() == current.hash() => {
                     // `tests::a_rebuilt_state_keeps_what_its_version_needs`.
                     fresh.needs.clone_from(&current.needs);
+                    fresh.pixels.clone_from(&current.pixels);
                     slot.current = Some(Rc::new(fresh));
                 }
                 Ok(_) => slot.given_up = true,
@@ -1291,7 +1453,7 @@ impl<P: Clone> Host<P> {
         // id (`tests::new_caps_keep_an_unchanged_folders_id`).
         let generation = match (&slot.pending, &slot.current) {
             (Some(pending), _) if same_folder(slot, pending) => slot.generation,
-            (Some(_), _) => slot.generation.checked_add(1)?,
+            (Some(_), _) => slot.generation.checked_add(1)?.checked_add(slot.burnt)?,
             (None, Some(_)) => slot.generation,
             (None, None) => return None,
         };
@@ -1299,6 +1461,21 @@ impl<P: Clone> Host<P> {
             index: slot.index,
             generation,
         })
+    }
+
+    /// Whether `id` names a version that never ran and never will: one
+    /// given out while it waited to compile ([`Self::upcoming`]) and dropped
+    /// since, newer than the version that runs and not the one waiting now.
+    /// A present carrying it follows its `failed`, as one naming a missing
+    /// folder does, where an id a reload left behind is drawn undeformed.
+    /// `state::tests::real_client::a_present_whose_frag_will_not_compile_follows_its_failed`.
+    pub(crate) fn never_ran(&self, id: EffectId) -> bool {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.index == id.index)
+            .is_some_and(|(name, slot)| {
+                id.generation > slot.generation && self.upcoming(name) != Some(id)
+            })
     }
 
     /// The version an id names, while it is the one that runs.
@@ -1310,10 +1487,8 @@ impl<P: Clone> Host<P> {
             .and_then(|slot| slot.current.clone())
     }
 
-    #[expect(
-        dead_code,
-        reason = "Task 29's warp draws a folder's frag through it once it compiled"
-    )]
+    /// A compiled program by key: what a geometry's warp draws its pixels
+    /// through once they compiled (`render::present_pixels`).
     pub(crate) fn program(&self, key: u64) -> Option<&P> {
         self.programs
             .get(&key)
@@ -1401,11 +1576,22 @@ impl<P: Clone> Host<P> {
 /// is the running one's folder as it was ([`same_folder`]).
 fn swap_in<P>(slot: &mut Versions<P>, pending: Loaded<P>) {
     if !same_folder(slot, &pending) {
-        slot.generation += 1;
+        slot.generation += 1 + slot.burnt;
+        slot.burnt = 0;
     }
     slot.holds = pending.needs.clone();
     slot.current = Some(Rc::new(pending));
     slot.given_up = false;
+}
+
+/// `pending`, dropped without running: the generation it would have taken
+/// is never given to another version, unless it was the running one's
+/// folder as it was, which took none.
+/// `state::tests::real_client::a_present_whose_frag_will_not_compile_follows_its_failed`.
+fn burn<P>(slot: &mut Versions<P>, pending: &Loaded<P>) {
+    if !same_folder(slot, pending) {
+        slot.burnt += 1;
+    }
 }
 
 /// Whether `pending` is the running version's folder as it was, loaded again
@@ -1894,6 +2080,109 @@ pub(crate) mod tests {
         host.compile_pending(&mut compiler);
         assert_eq!(compiler.compiled.len(), 1, "{:?}", compiler.compiled);
         assert!(host.effect("a").is_some() && host.effect("b").is_some());
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A pixels effect with more params than the limit is refused at
+    /// bind** (`effects.limits.params`, amended 2026-10-08, configurable):
+    /// nine numbers under a limit of 8 are a problem naming the key and the
+    /// count, never cut to eight (the first draft's `[f32; 8]` kept eight
+    /// and dropped the ninth with no word); under 16 all nine are packed, in
+    /// their sorted order.
+    #[test]
+    fn a_pixels_effect_with_more_params_than_the_limit_is_refused_at_bind() {
+        let place = scratch("pixels-limit");
+        let params: Vec<String> = (1..=9).map(|n| format!("p{n} = {{ {n}.0 }}")).collect();
+        let dir = folder(
+            &place,
+            "nine",
+            &format!(
+                "return {{ api = 1, inputs = {{ 'self' }}, params = {{ {} }}, frag = 'effect.frag' }}",
+                params.join(", ")
+            ),
+            &[("effect.frag", FRAG)],
+        );
+        let loaded = super::Loaded::<u32>::load("nine", &dir).expect("it loads");
+        let refused = super::pack_pixels(&loaded, &[], 8).expect_err("nine over eight");
+        assert!(
+            refused.message.contains("effects.limits.params") && refused.message.contains('9'),
+            "{refused:?}"
+        );
+        assert_eq!(refused.effect, "nine");
+        let packed = super::pack_pixels(&loaded, &[], 16).expect("nine under sixteen");
+        assert_eq!(
+            packed.as_slice(),
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        );
+        let _ = std::fs::remove_dir_all(place);
+    }
+
+    /// **A geometry's pixels compile in the warp and follow their frag**: a
+    /// `mesh` naming `pixels` asks for its pixels effect's frag assembled
+    /// for the warp (its vertex shader, the warp's prelude with that
+    /// effect's params, the warp's epilogue), and runs only once it
+    /// compiled; that frag edited, the geometry draws the new one under the
+    /// same id, and the old program is given back.
+    #[test]
+    fn a_geometrys_pixels_compile_in_the_warp_and_follow_their_frag() {
+        let fixtures = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/effects"
+        ));
+        let place = scratch("warp-pixels");
+        let read = |file: &str| std::fs::read_to_string(fixtures.join(file)).expect("a fixture");
+        folder(&place, "fly", &read("fly/effect.lua"), &[]);
+        let frag = read("rounded/rounded.frag");
+        folder(
+            &place,
+            "rounded",
+            &read("rounded/effect.lua"),
+            &[("rounded.frag", &frag)],
+        );
+        let warp = |text: &str| {
+            use solium_effects::glsl;
+            glsl::assemble(
+                &glsl::Signature {
+                    host: glsl::Host::Warp,
+                    params: vec![("radius".to_owned(), glsl::ParamKind::Float)],
+                    uses: Vec::new(),
+                    known: Vec::new(),
+                },
+                text,
+            )
+            .key(glsl::WARP_VERTEX)
+        };
+        let mut host = host_with(&place);
+        host.want("present", ["fly".to_owned()]);
+        let pixels = host
+            .latest("fly")
+            .and_then(|fly| fly.pixels.clone())
+            .expect("its pixels are asked for");
+        assert_eq!(pixels.key, warp(&frag));
+        assert_eq!(&*pixels.names, ["p_radius".to_owned()]);
+        assert!(host.asked_for_test().contains(&pixels.key));
+        assert!(
+            host.effect("fly").is_none(),
+            "it runs once its pixels compiled"
+        );
+        let mut compiler = Counting::default();
+        host.compile_pending(&mut compiler);
+        let id = host.id("fly").expect("it runs");
+        assert!(host.program(pixels.key).is_some());
+        let edited = frag.replace("0.5 - away", "0.25 - away");
+        std::fs::write(place.join("rounded/rounded.frag"), &edited).expect("edited");
+        host.reload_keeping(["fly".to_owned()]);
+        host.compile_pending(&mut compiler);
+        let now = host
+            .effect("fly")
+            .and_then(|fly| fly.pixels.clone())
+            .expect("its pixels");
+        assert_eq!(now.key, warp(&edited));
+        assert_eq!(host.id("fly"), Some(id), "its own folder is unchanged");
+        assert!(
+            host.program(pixels.key).is_none(),
+            "the old pixels were not given back"
+        );
         let _ = std::fs::remove_dir_all(place);
     }
 

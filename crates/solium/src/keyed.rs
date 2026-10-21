@@ -359,6 +359,30 @@ mod tests {
         );
     }
 
+    /// **A pixels-only warp moves its commit with progress**: two `Shape`s
+    /// with the same mesh and different progress give different commits.
+    /// Against Phase 0 Task 18's `Shape`, this fails: a burn would freeze on
+    /// its first frame.
+    #[test]
+    fn a_pixels_only_warp_moves_its_commit_with_progress() {
+        let mut captures = Captures::<u32>::default();
+        let still = |progress: f32| {
+            let frame = crate::present::Frame::real(smithay::utils::Rectangle::new(
+                (100, 100).into(),
+                (400, 400).into(),
+            ));
+            crate::render::Shape::of(&frame, None, 1.0).with_pixels(
+                crate::effect::gl::PixelUniforms {
+                    progress,
+                    ..Default::default()
+                },
+            )
+        };
+        let first = captures.warp_commit_for(crate::keyed::Kind::Pane, still(0.2), false);
+        let second = captures.warp_commit_for(crate::keyed::Kind::Pane, still(0.3), false);
+        assert_ne!(first, second);
+    }
+
     /// A GBM buffer freed when its last handle goes, as `offscreen`'s tests
     /// modelled it: a `GlesTexture` is an `Arc`, and the memory comes back
     /// when every handle is gone.

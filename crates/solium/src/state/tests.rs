@@ -11591,6 +11591,237 @@ end)"#,
         );
     }
 
+    /// A copy of the fixture effect `name` in a scratch folder, which is
+    /// all the fixture's effects read besides the shipped ones: its folder.
+    fn scratch_fixture(fixture: &mut Fixture, name: &str) -> std::path::PathBuf {
+        let from = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/effects"
+        ))
+        .join(name);
+        let place = crate::effect::host::tests::scratch(&format!("fx2-{}", fixture.label));
+        let copy = place.join(name);
+        std::fs::create_dir_all(&copy).expect("a scratch folder");
+        for entry in std::fs::read_dir(&from).expect("the fixture") {
+            let entry = entry.expect("an entry");
+            std::fs::copy(entry.path(), copy.join(entry.file_name())).expect("copied");
+        }
+        fixture.state.effects = crate::effect::host::Host::new(crate::effect::host::Library::with(
+            Some(place.clone()),
+            crate::assets::effects(),
+        ));
+        fixture.scratch = Some(place);
+        copy
+    }
+
+    /// The pixels a pane's present draws through over the whole pane, its
+    /// capture 200 by 100.
+    fn pixels_of(
+        fixture: &Fixture,
+        pane: crate::pane::PaneId,
+        geometry: crate::present::Geometry,
+    ) -> Option<(
+        crate::effect::gl::Program,
+        crate::effect::gl::PixelUniforms,
+        std::rc::Rc<[String]>,
+    )> {
+        crate::render::present_pixels(
+            &fixture.state,
+            pane,
+            geometry,
+            crate::warp::UnitRect::WHOLE,
+            (200, 100).into(),
+        )
+    }
+
+    /// **A present draws its folder's frag as its pixels**: a geometry with
+    /// a frag beside its mesh is drawn, once that frag compiled into the
+    /// warp, through it, with the present's progress, a leaving's
+    /// direction, its seed, the capture's size and the part the capture is;
+    /// before then through nothing of its own.
+    #[test]
+    fn a_present_draws_its_folders_frag_as_its_pixels() {
+        fx2_fixture!(fixture, "present-pixels");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'mesh-frag', progress = 0.5, seed = 0.25, to = {to} }}"),
+        );
+        let geometry = geometry_of(&fixture, pane).expect("a geometry");
+        assert!(
+            pixels_of(&fixture, pane, geometry).is_none(),
+            "drawn through pixels that had not compiled"
+        );
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        let (_, uniforms, names) =
+            pixels_of(&fixture, pane, geometry).expect("its frag, once compiled");
+        assert_eq!(
+            (
+                uniforms.progress,
+                uniforms.clamped,
+                uniforms.direction,
+                uniforms.seed
+            ),
+            (0.5, 0.5, -1.0, 0.25)
+        );
+        assert_eq!(uniforms.size, [200.0, 100.0]);
+        assert_eq!(uniforms.content, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(uniforms.part, [0.0, 0.0, 1.0, 1.0]);
+        assert!(names.is_empty() && uniforms.params.as_slice().is_empty());
+    }
+
+    /// **A present through a pixels effect reads the params it blends**:
+    /// `fly`'s `pixels` is `rounded`, so a deform's `radius` is `rounded`'s
+    /// and its `lift` `fly`'s, each packed with its own effect and blended
+    /// by the present, and `rounded`'s frag is drawn with `radius`. A param
+    /// neither has is a problem, and the window is drawn undeformed.
+    #[test]
+    fn a_present_through_a_pixels_effect_reads_the_params_it_blends() {
+        fx2_fixture!(fixture, "present-pixels-effect");
+        let (pane, _) = one_window(&mut fixture);
+        fixture_effects(&mut fixture.state);
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'fly', progress = 0.5, radius = 12, lift = 0.25, to = {to} }}"),
+        );
+        let geometry = geometry_of(&fixture, pane).expect("a geometry");
+        assert_eq!(geometry.params.as_slice(), [0.25]);
+        assert_eq!(geometry.pixels.as_slice(), [12.0]);
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        let (_, uniforms, names) =
+            pixels_of(&fixture, pane, geometry).expect("rounded's frag, once compiled");
+        assert_eq!(&*names, ["p_radius".to_owned()]);
+        assert_eq!(uniforms.params.as_slice(), [12.0]);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'fly', progress = 0.5, roundness = 1, to = {to} }}"),
+        );
+        assert!(geometry_of(&fixture, pane).is_none());
+        assert!(
+            fixture
+                .state
+                .effects
+                .problems()
+                .iter()
+                .any(|problem| problem.message.contains("roundness")),
+            "{:?}",
+            fixture.state.effects.problems()
+        );
+    }
+
+    /// **A present whose frag will not compile follows its `failed`**, and
+    /// the id it was given never names a later version: the version it
+    /// waited for is dropped, so under `failed = "hide"` nothing of the
+    /// window is drawn; once the frag is mended a new version runs under an
+    /// id of its own, and the present, whose folder a reload changed, is
+    /// drawn undeformed as `on_reload = "flat"` draws one, never through
+    /// the mended version's grid.
+    #[test]
+    fn a_present_whose_frag_will_not_compile_follows_its_failed() {
+        fx2_fixture!(fixture, "present-frag-fails");
+        let (pane, _) = one_window(&mut fixture);
+        let folder = scratch_fixture(&mut fixture, "mesh-frag");
+        let frag = folder.join("effect.frag");
+        let good = std::fs::read_to_string(&frag).expect("its frag");
+        std::fs::write(&frag, format!("{good}FAIL\n")).expect("broken");
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'mesh-frag', progress = 0.5, failed = 'hide', to = {to} }}"),
+        );
+        let geometry = geometry_of(&fixture, pane).expect("a geometry");
+        assert_ne!(geometry.effect, crate::effect::host::EffectId::NONE);
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        assert!(
+            matches!(planned(&mut fixture, pane), crate::render::Planned::Hidden),
+            "a version that never ran was drawn undeformed, not by its `failed`"
+        );
+        std::fs::write(&frag, &good).expect("mended");
+        fixture
+            .state
+            .effects
+            .reload_keeping(["mesh-frag".to_owned()]);
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        assert!(
+            fixture
+                .state
+                .effects
+                .id("mesh-frag")
+                .is_some_and(|id| id != geometry.effect),
+            "the premise: a new version runs, under an id of its own"
+        );
+        assert!(
+            matches!(planned(&mut fixture, pane), crate::render::Planned::Flat),
+            "the dangling id came to name the mended version"
+        );
+    }
+
+    /// **A present under `on_reload = "keep"` begun while its version
+    /// compiles keeps that version**: nothing runs to pin when it is made,
+    /// so the first pass whose id answers pins it, and a reload that
+    /// changes the folder leaves it drawn through its grid.
+    #[test]
+    fn a_kept_present_begun_while_its_version_compiles_keeps_it() {
+        fx2_fixture!(fixture, "present-keep-pending");
+        let (pane, _) = one_window(&mut fixture);
+        let folder = scratch_fixture(&mut fixture, "mesh-frag");
+        let to = below(&fixture, pane);
+        present_deform(
+            &mut fixture,
+            pane,
+            &format!("{{ effect = 'mesh-frag', progress = 0.5, on_reload = 'keep', to = {to} }}"),
+        );
+        assert!(
+            fixture.state.effects.has_pending("mesh-frag"),
+            "the premise: its version waits for a compile"
+        );
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        assert!(matches!(
+            planned(&mut fixture, pane),
+            crate::render::Planned::Warp { grid: Some(_), .. }
+        ));
+        let file = folder.join("effect.lua");
+        let edited = std::fs::read_to_string(&file).expect("read") + "-- edited\n";
+        std::fs::write(&file, edited).expect("edited");
+        fixture
+            .state
+            .effects
+            .reload_keeping(["mesh-frag".to_owned()]);
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        assert!(
+            matches!(
+                planned(&mut fixture, pane),
+                crate::render::Planned::Warp { grid: Some(_), .. }
+            ),
+            "a kept present lost its version to a reload"
+        );
+    }
+
     /// **A present refused for its popups alone is said once, and its
     /// popups follow `failed`**: a mesh finite over the window and NaN past
     /// its bottom edge warps the pane and is refused for a menu below it.

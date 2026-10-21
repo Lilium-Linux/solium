@@ -7,7 +7,8 @@
 //! beneath a warp and a capture's hole are drawn with (Ruling F37, amended
 //! 2026-10-14, live under motion and warps). Smithay and std only, so
 //! `dev/wirecheck` compiles and draws them on a GPU (cases 11e, 11g and
-//! 13i). Compiled between frames by `pass::Programs::warp` and
+//! 13i; 12j draws a folder's frag through [`triangles`] too, as
+//! `effect::gl::Program::draw_warp`). Compiled between frames by `pass::Programs::warp` and
 //! `pass::Programs::beneath`, latched there, and carried by each `Warp`,
 //! `effect::beneath::Beneath` and `effect::beneath::Hole`.
 
@@ -16,22 +17,9 @@ use smithay::{
     utils::{Physical, Rectangle},
 };
 
-const VERTEX: &str = r"
-precision highp float;
-uniform mat3 projection;
-attribute vec2 position;
-attribute vec3 uvq;
-// Explicitly highp on both sides: a varying whose precision differs between
-// the two stages is a link error the driver is free to resolve by handing the
-// fragment stage zeroes, which looks exactly like an attribute that was never
-// uploaded.
-varying highp vec3 v_uvq;
-void main() {
-    vec3 clip = projection * vec3(position, 1.0);
-    gl_Position = vec4(clip.xy, 0.0, 1.0);
-    v_uvq = uvq;
-}
-";
+/// The warp's vertex shader: one text, in `solium_effects`, for this program
+/// and for a folder's frag compiled into the warp (Task 29).
+const VERTEX: &str = solium_effects::glsl::WARP_VERTEX;
 
 const FRAGMENT: &str = r"
 precision highp float;
@@ -157,7 +145,7 @@ impl Program {
             gl.UseProgram(self.id);
             gl.UniformMatrix3fv(self.projection, 1, ffi::FALSE, projection.as_ptr());
             gl.Uniform1f(self.alpha, alpha);
-            bind_texture(gl, texture);
+            bind_texture(gl, 0, texture);
             gl.Uniform1i(self.tex, 0);
 
             gl.Enable(ffi::BLEND);
@@ -165,7 +153,7 @@ impl Program {
 
             triangles(
                 gl,
-                (self.buffer, self.position, self.uvq),
+                (self.buffer, self.position, Some(self.uvq)),
                 vertices,
                 scissors,
             );
@@ -325,7 +313,7 @@ impl BeneathProgram {
                     gl.Uniform1f(self.erase, 0.0);
                     gl.Uniform1f(self.alpha, alpha);
                     gl.Uniform4f(self.screen_map, map[0], map[1], map[2], map[3]);
-                    bind_texture(gl, texture);
+                    bind_texture(gl, 0, texture);
                     gl.Uniform1i(self.tex, 0);
                     gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
                 }
@@ -336,7 +324,7 @@ impl BeneathProgram {
             }
             triangles(
                 gl,
-                (self.buffer, self.position, self.uvq),
+                (self.buffer, self.position, Some(self.uvq)),
                 vertices,
                 scissors,
             );
@@ -347,14 +335,15 @@ impl BeneathProgram {
     }
 }
 
-/// Bind `texture` on unit 0, clamped and linear, as both programs sample it.
+/// Bind `texture` on `unit`, clamped and linear, as every warp program
+/// samples it, leaving `unit` active.
 ///
 /// # Safety
 /// A GL context is current, and `texture` is its.
-unsafe fn bind_texture(gl: &ffi::Gles2, texture: ffi::types::GLuint) {
+pub(crate) unsafe fn bind_texture(gl: &ffi::Gles2, unit: u32, texture: ffi::types::GLuint) {
     // SAFETY: the caller's contract.
     unsafe {
-        gl.ActiveTexture(ffi::TEXTURE0);
+        gl.ActiveTexture(ffi::TEXTURE0 + unit);
         gl.BindTexture(ffi::TEXTURE_2D, texture);
         // Clamped, so the divide landing a hair outside 0..1 at an edge
         // samples the edge rather than wrapping to the far side.
@@ -387,16 +376,22 @@ unsafe fn bind_texture(gl: &ffi::Gles2, texture: ffi::types::GLuint) {
 }
 
 /// Draw `vertices` (x, y, u·q, v·q, q per vertex) as triangles through the
-/// bound program, from `buffer` into its `position` and `uvq` attributes:
-/// once, or once under each of `scissors`; then put back what smithay
-/// expects to find.
+/// bound program, from `buffer` into its `position` and `uvq` attributes,
+/// `uvq` none for a program that reads no texture coordinate (a pixel
+/// program whose frag reads no `uv`, which the driver drops it from,
+/// wirecheck case 12j): once, or once under each of `scissors`; then put
+/// back what smithay expects to find.
 ///
 /// # Safety
-/// A GL context is current, a program reading `position` and `uvq` is in
-/// use, and every name is this context's.
-unsafe fn triangles(
+/// A GL context is current, a program reading `position` (and `uvq`, when
+/// given) is in use, and every name is this context's.
+pub(crate) unsafe fn triangles(
     gl: &ffi::Gles2,
-    (buffer, position, uvq): (ffi::types::GLuint, ffi::types::GLuint, ffi::types::GLuint),
+    (buffer, position, uvq): (
+        ffi::types::GLuint,
+        ffi::types::GLuint,
+        Option<ffi::types::GLuint>,
+    ),
     vertices: &[f32],
     scissors: &[[i32; 4]],
 ) {
@@ -420,15 +415,17 @@ unsafe fn triangles(
             stride,
             std::ptr::null(),
         );
-        gl.EnableVertexAttribArray(uvq);
-        gl.VertexAttribPointer(
-            uvq,
-            3,
-            ffi::FLOAT,
-            ffi::FALSE,
-            stride,
-            (2 * std::mem::size_of::<f32>()) as *const _,
-        );
+        if let Some(uvq) = uvq {
+            gl.EnableVertexAttribArray(uvq);
+            gl.VertexAttribPointer(
+                uvq,
+                3,
+                ffi::FLOAT,
+                ffi::FALSE,
+                stride,
+                (2 * std::mem::size_of::<f32>()) as *const _,
+            );
+        }
 
         // Per vertex, not per instance. The divisor is state on the
         // attribute *index*, not on the program, and Smithay draws its own
@@ -438,7 +435,9 @@ unsafe fn triangles(
         // texel: the window renders as a single flat colour, geometry
         // perfectly correct, which is a memorably confusing way to fail.
         gl.VertexAttribDivisor(position, 0);
-        gl.VertexAttribDivisor(uvq, 0);
+        if let Some(uvq) = uvq {
+            gl.VertexAttribDivisor(uvq, 0);
+        }
 
         #[expect(
             clippy::cast_possible_truncation,
@@ -467,7 +466,9 @@ unsafe fn triangles(
         // everything per element, so leaving our buffer and attributes
         // enabled corrupts whatever draws next.
         gl.DisableVertexAttribArray(position);
-        gl.DisableVertexAttribArray(uvq);
+        if let Some(uvq) = uvq {
+            gl.DisableVertexAttribArray(uvq);
+        }
         gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
     }
 }

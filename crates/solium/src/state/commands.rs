@@ -51,7 +51,11 @@ impl Solium {
     /// effect ([`crate::effect::host::EffectId::NONE`]) and is drawn by its
     /// `failed`, undeformed by default; params that do not bind, or pack past
     /// `effects.limits.params`, are a problem on the overlay and the window
-    /// is drawn undeformed. `tests::real_client::a_present_deform_is_a_file`,
+    /// is drawn undeformed. A param the effect its `pixels` names has, and it
+    /// does not, is that effect's, packed with it for its frag; one both
+    /// have is both's (Task 29).
+    /// `tests::real_client::a_present_deform_is_a_file`,
+    /// `tests::real_client::a_present_through_a_pixels_effect_reads_the_params_it_blends`,
     /// `tests::real_client::a_geometry_effect_with_twelve_params_presents_under_a_raised_limit`,
     /// `tests::real_client::effects_present_is_the_default_a_deform_overrides`.
     fn aimed(
@@ -112,10 +116,11 @@ impl Solium {
                 )
             }
         };
-        let geometry = |effect, params| present::Geometry {
+        let geometry = |effect, params, pixels| present::Geometry {
             effect,
             progress: deform.progress,
             params,
+            pixels,
             axis,
             seed: deform.seed.unwrap_or(0.0),
             failed,
@@ -127,15 +132,47 @@ impl Solium {
                 "no geometry effect by that name loaded, drawing the window by its `failed`"
             );
             return Some(present::Deform {
-                effect: geometry(EffectId::NONE, geometry::Params::default()),
+                effect: geometry(
+                    EffectId::NONE,
+                    geometry::Params::default(),
+                    geometry::Params::default(),
+                ),
                 anchor,
             });
         };
-        // Bound against the version it is drawn with.
-        let (file, bound) = self
-            .effects
-            .latest(name)
-            .map(|loaded| (loaded.dir().join("effect.lua"), loaded.bind(&deform.params)))?;
+        // Bound against the version it is drawn with, and its pixels
+        // effect's params packed with that effect.
+        let limit = self.effect_settings.limits.params;
+        let (file, bound, pixels) = {
+            let loaded = self.effects.latest(name)?;
+            let other = loaded
+                .spec()
+                .pixels
+                .as_deref()
+                .and_then(|other| self.effects.latest(other));
+            let has = |spec: &solium_effects::spec::EffectSpec, param: &str| {
+                spec.params.iter().any(|(name, _)| name == param)
+            };
+            let pixels_have = |param: &str| other.is_some_and(|other| has(other.spec(), param));
+            let mine: Vec<_> = deform
+                .params
+                .iter()
+                .filter(|(param, _)| has(loaded.spec(), param) || !pixels_have(param))
+                .cloned()
+                .collect();
+            let theirs: Vec<_> = deform
+                .params
+                .iter()
+                .filter(|(param, _)| pixels_have(param))
+                .cloned()
+                .collect();
+            let pixels = other.map(|other| {
+                crate::effect::host::pack_pixels(other, &theirs, limit).map_err(|problem| {
+                    format!("its pixels, `{}`: {}", other.name(), problem.message)
+                })
+            });
+            (loaded.dir().join("effect.lua"), loaded.bind(&mine), pixels)
+        };
         // Its own problems, said again for this present or mended by it.
         let label = format!("present:{name}");
         self.effects.clear_problems_of(&label);
@@ -147,10 +184,15 @@ impl Solium {
                     format!("sol.present: {}", warning.message),
                 ));
             }
-            geometry::packed(&bound.params, self.effect_settings.limits.params)
+            geometry::packed(&bound.params, limit)
         });
-        let params = match packed {
-            Ok(params) => params,
+        // A folder's own frag reads its own params.
+        let packed = packed.and_then(|params| match pixels {
+            Some(pixels) => pixels.map(|pixels| (params, pixels)),
+            None => Ok((params, params)),
+        });
+        let (params, pixels) = match packed {
+            Ok(packed) => packed,
             Err(message) => {
                 self.effects.push_problem(Problem::error(
                     &label,
@@ -171,7 +213,7 @@ impl Solium {
             meshes.begin();
         }
         Some(present::Deform {
-            effect: geometry(id, params),
+            effect: geometry(id, params, pixels),
             anchor,
         })
     }

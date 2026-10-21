@@ -421,6 +421,7 @@ error at its line.
 | `sol_content`, `sol_to_content(uv)`, `sol_to_uv(px)`, `sol_sdf_rrect(px, size, radii)` | the part's rectangle inside the box the pass draws, the maps between `uv` and the part's pixels, and the rounded-box distance itself |
 | `sol_box_px`, `sol_radii` | the box the pass draws, in pixels, and the part's four corner radii in pixels, top-left, top-right, bottom-left and bottom-right, which `sol_sdf` rounds it by |
 | `sol_progress`, `sol_clamped`, `sol_direction`, `sol_seed`, `sol_time` | in a transition: its progress, which a spring may carry past 1; the same clamped to 0..1; +1 arriving, −1 leaving, 0 resizing; a random number fixed for the transition; seconds |
+| `sol_part`, `sol_to_pane(uv)` | in the warp, the part of the window's unit square the picture is, `(u0, v0, u1, v1)` (the window's own, or a menu's past it), and `uv` taken to the window's own square, so noise drawn in it runs on across a window and its menus; in a pass the whole square |
 | `sol_noise(p)`, `sol_hash(p)` | value noise, and the hash in [0, 1) it is made from |
 
 A `p_` name the effect has no param for, and a `sol_` name that is none of
@@ -503,6 +504,19 @@ A folder a reload finds changed while a present plays draws it flat for
 the rest of the move, or on the version it began with under `on_reload =
 "keep"`; a reload that leaves the folder as it was changes nothing, even
 one that changes `effects.sandbox`.
+
+A geometry's pixels are drawn in the same warp, one pass: a folder with a
+`frag` beside its `mesh` draws the window's picture through it, and one
+whose `pixels` names another effect through that effect's `frag`. In the
+warp, `uv` runs across the window's picture (or its menus'), `sol_tex` is
+that picture, `sol_size` and `sol_box_px` its size in pixels, and
+`sol_progress`, `sol_clamped`, `sol_direction` (−1 under `sol.present`) and
+`sol_seed` the present's. Its `p_<param>`s are the frag's effect's: under
+`sol.present` a param given beside the effect's name goes to the geometry
+when it has it and to its `pixels` effect when that one has it, and both
+blend from one present to the next. The frag compiles with the effect, which
+runs once it has; until then, and if it never compiles, the effect is not
+the one drawn, and a present follows its `failed`.
 
 The shipped [`genie`](genie/README.md) is a whole one in a page of Lua: it
 works out how far each row has gone, once (each column, when the window is

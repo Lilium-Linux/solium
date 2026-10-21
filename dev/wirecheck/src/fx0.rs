@@ -666,8 +666,8 @@ fn a_warp_redrawn_under_partial_damage_blends_once(renderer: &mut GlesRenderer) 
 }
 
 /// A 64² target cleared transparent, one draw into it through `draw`, and
-/// the pixels read back once the draw is done.
-fn drawn_alone(
+/// the pixels read back once the draw is done. FX2's 12j draws through it too.
+pub(crate) fn drawn_alone(
     renderer: &mut GlesRenderer,
     side: i32,
     draw: impl FnOnce(

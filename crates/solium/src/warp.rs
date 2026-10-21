@@ -41,7 +41,7 @@ use smithay::{
 use crate::mat4::Mat4;
 
 mod gl;
-pub(crate) use gl::{BeneathProgram, Draw, Program, scissor_box};
+pub(crate) use gl::{BeneathProgram, Draw, Program, bind_texture, scissor_box, triangles};
 
 /// One corner: where it lands, and its projective weight.
 #[derive(Clone, Copy, Debug)]
@@ -56,6 +56,15 @@ pub(crate) struct Corner {
     pub(crate) q: f32,
 }
 
+/// What a warp draws its texture through in place of its plain program: a
+/// folder's frag compiled for the warp, what it reads, and the names of its
+/// params' slots (Task 29).
+pub(crate) type Pixels = (
+    crate::effect::gl::Program,
+    crate::effect::gl::PixelUniforms,
+    std::rc::Rc<[String]>,
+);
+
 /// A texture drawn through four corners.
 #[derive(Clone, Debug)]
 pub(crate) struct Warp {
@@ -66,6 +75,8 @@ pub(crate) struct Warp {
     bounds: Rectangle<i32, Physical>,
     alpha: f32,
     program: Program,
+    /// A folder's pixels, drawn instead of `program` when there are some.
+    pixels: Option<Pixels>,
 }
 
 impl Warp {
@@ -90,7 +101,14 @@ impl Warp {
             bounds,
             alpha,
             program,
+            pixels: None,
         }
+    }
+
+    /// The same warp drawn through `pixels`, a folder's frag, when there
+    /// are some: `render::present_pixels`.
+    pub(crate) fn with_pixels(self, pixels: Option<Pixels>) -> Self {
+        Self { pixels, ..self }
     }
 }
 
@@ -514,7 +532,21 @@ impl RenderElement<GlesRenderer> for Warp {
                     .iter()
                     .map(|rect| self::gl::scissor_box(&projection, viewport, *rect))
                     .collect();
-                program.draw(gl, &projection, texture, &vertices, alpha, &scissors);
+                // A folder's pixels, or the plain warp: one pass either way
+                // (wirecheck case 12j).
+                match &self.pixels {
+                    Some((pixels, uniforms, names)) => pixels.draw_warp(
+                        gl,
+                        &projection,
+                        &[texture],
+                        &vertices,
+                        alpha,
+                        uniforms,
+                        names,
+                        &scissors,
+                    ),
+                    None => program.draw(gl, &projection, texture, &vertices, alpha, &scissors),
+                }
             }
         })
     }

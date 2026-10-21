@@ -20,6 +20,19 @@ use solium_effects::stage::{self, Binding, Depends, Format, Plan, Stage};
 )]
 pub(crate) mod gl;
 
+/// The compositor's packed params, which `gl`'s `PixelUniforms` carries:
+/// case 12j sets them.
+#[path = "../../../crates/solium/src/effect/params.rs"]
+#[allow(
+    dead_code,
+    reason = "the compositor's params, of which case 12j packs some and blends none"
+)]
+pub(crate) mod params;
+
+/// `gl`'s `super::warp`: the warp's own GL, whose draw `draw_warp` shares,
+/// as the compositor's `effect` module names it.
+use crate::fx0::warp_gl as warp;
+
 /// The compositor's executor, with `gl` and `pool` beside it as `super::`
 /// (Ruling 2): cases 12d to 12g and 12q run plans through it.
 #[path = "../../../crates/solium/src/effect/run.rs"]
@@ -62,6 +75,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_chain_feeds_each_links_result_to_the_next(renderer)?;
     nothing_is_allocated_while_a_result_is_drawn(renderer)?;
     a_result_is_cut_by_its_mask(renderer)?;
+    a_warp_drawn_through_a_folders_frag(renderer)?;
     Ok(())
 }
 
@@ -1545,6 +1559,166 @@ fn a_result_is_cut_by_its_mask(renderer: &mut GlesRenderer) -> Result<()> {
         "  inside exact, outside and past a corner's arc transparent, drawn 1:1 and at twice \
          its size; with no mask, whole; a crop under an off-centre mask, cut where the \
          placement says"
+    );
+    Ok(())
+}
+
+/// **Case 12j: a warp drawn through a folder's frag.** The warp's two
+/// triangles over a 64×64 target, through a pixel program built as the
+/// compositor's host builds a geometry's pixels (`glsl::WARP_VERTEX`, the
+/// prelude for `Host::Warp`, the warp's epilogue) from
+/// `return sol_tex(uv) * 0.5;` and drawn by `effect/gl.rs`'s `draw_warp`,
+/// sampling a solid white capture: every pixel reads half of what the plain
+/// warp (`warp/gl.rs`'s program) draws from it, within 1. Then one built
+/// from `return vec4(sol_direction < 0.0 ? 1.0 : 0.0);` drawn with
+/// `direction = -1`: every pixel is 255. Then one reading a float, an int
+/// and a `vec4` param, from slots named as the host names them (`p_a`,
+/// `p_n`, four of `p_v`) and packed as `Params` packs them: every pixel is
+/// `(a, n / 4, v.z, 1)`, so each is set by its own type from its own slots.
+fn a_warp_drawn_through_a_folders_frag(renderer: &mut GlesRenderer) -> Result<()> {
+    println!("\n=== FX2: a warp drawn through a folder's frag ===");
+    let side = 64;
+    let (capture, _) = upload(renderer, (64, 64), |_, _| [255, 255, 255, 255])?;
+    let edge = 64.0_f32;
+    // x, y, u·q, v·q, q: two triangles over the whole target, q = 1.
+    let vertices: Vec<f32> = [
+        (0.0, 0.0, 0.0, 0.0),
+        (edge, 0.0, 1.0, 0.0),
+        (edge, edge, 1.0, 1.0),
+        (0.0, 0.0, 0.0, 0.0),
+        (edge, edge, 1.0, 1.0),
+        (0.0, edge, 0.0, 1.0),
+    ]
+    .iter()
+    .flat_map(|(x, y, u, v)| [*x, *y, *u, *v, 1.0])
+    .collect();
+    let name = capture.tex_id();
+    // SAFETY: `with_context` makes the context current.
+    let plain = renderer
+        .with_context(|gl| unsafe { warp::Program::compile(gl) })
+        .map_err(|err| anyhow!("{err}"))?
+        .map_err(|why| anyhow!("{why}"))?;
+    let want = crate::fx0::drawn_alone(renderer, side, |frame| {
+        let projection = *frame.projection();
+        // SAFETY: inside the frame's context; the program and texture are its.
+        frame.with_context(|gl| unsafe {
+            plain.draw(gl, &projection, name, &vertices, 1.0, &[]);
+        })
+    })?;
+    let pixels = |renderer: &mut GlesRenderer,
+                  user: &str,
+                  params: Vec<(String, ParamKind)>,
+                  uniforms: gl::PixelUniforms,
+                  names: &[String]|
+     -> Result<Vec<u8>> {
+        let signature = Signature {
+            host: Host::Warp,
+            params,
+            uses: Vec::new(),
+            known: Vec::new(),
+        };
+        let sources = glsl::assemble(&signature, user);
+        // SAFETY: `with_context` makes the context current for the compile.
+        let program = renderer
+            .with_context(|gl| unsafe {
+                gl::Program::compile(gl, glsl::WARP_VERTEX, sources.strings())
+            })
+            .map_err(|err| anyhow!("{err}"))?
+            .map_err(|log| anyhow!("the pixel program's {} did not build: {}", log.stage, log.text))?;
+        // `uvq` where the frag reads `uv`; a driver may drop it from one that
+        // does not (NVIDIA does, from the direction case's), and the draw
+        // goes on without it.
+        let reads_uv = user.contains("(uv)");
+        if program.attribute("position").is_none() || (reads_uv && program.attribute("uvq").is_none()) {
+            return Err(anyhow!(
+                "the pixel program's attributes are position {:?}, uvq {:?}, for a frag that {} `uv`",
+                program.attribute("position"),
+                program.attribute("uvq"),
+                if reads_uv { "reads" } else { "does not read" }
+            ));
+        }
+        let drawn = crate::fx0::drawn_alone(renderer, side, |frame| {
+            let projection = *frame.projection();
+            // SAFETY: inside the frame's context; the program and texture are its.
+            frame.with_context(|gl| unsafe {
+                program.draw_warp(gl, &projection, &[name], &vertices, 1.0, &uniforms, names, &[]);
+            })
+        });
+        // SAFETY: the program was made in this renderer's context.
+        renderer
+            .with_context(|gl| unsafe { program.delete(gl) })
+            .map_err(|err| anyhow!("{err}"))?;
+        drawn
+    };
+    let half = pixels(
+        renderer,
+        "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * 0.5; }\n",
+        Vec::new(),
+        gl::PixelUniforms::default(),
+        &[],
+    )?;
+    let off = half
+        .iter()
+        .zip(&want)
+        .map(|(got, plain)| got.abs_diff(plain / 2))
+        .max()
+        .unwrap_or(u8::MAX);
+    if half.len() != want.len() || off > 1 || want.iter().any(|byte| *byte != 255) {
+        return Err(anyhow!(
+            "the folder's frag drew {:?} where the plain warp drew {:?}: off by {off}",
+            half.get(..4),
+            want.get(..4)
+        ));
+    }
+    let leaving = pixels(
+        renderer,
+        "vec4 sol_effect(vec2 uv) { return vec4(sol_direction < 0.0 ? 1.0 : 0.0); }\n",
+        Vec::new(),
+        gl::PixelUniforms {
+            direction: -1.0,
+            ..Default::default()
+        },
+        &[],
+    )?;
+    if leaving.iter().any(|byte| *byte != 255) {
+        return Err(anyhow!(
+            "drawn with direction -1, a pixel read {:?}, not 255",
+            leaving.chunks_exact(4).find(|pixel| pixel.iter().any(|byte| *byte != 255))
+        ));
+    }
+    let names: Vec<String> = ["p_a", "p_n", "p_v", "p_v", "p_v", "p_v"]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let read = pixels(
+        renderer,
+        "vec4 sol_effect(vec2 uv) { return vec4(p_a, float(p_n) / 4.0, p_v.z, 1.0); }\n",
+        vec![
+            ("a".to_owned(), ParamKind::Float),
+            ("n".to_owned(), ParamKind::Int),
+            ("v".to_owned(), ParamKind::Vec4),
+        ],
+        gl::PixelUniforms {
+            params: params::Params::pack(&[0.5, 2.0, 0.0, 0.0, 1.0, 0.0], 8)
+                .map_err(|count| anyhow!("{count} params"))?,
+            ..Default::default()
+        },
+        &names,
+    )?;
+    // Either byte order: red and green half, blue and alpha full.
+    let wrong = read.chunks_exact(4).find(|pixel| {
+        let halves = pixel.iter().filter(|byte| byte.abs_diff(128) <= 1).count();
+        let fulls = pixel.iter().filter(|byte| **byte == 255).count();
+        (halves, fulls) != (2, 2)
+    });
+    if let Some(pixel) = wrong {
+        return Err(anyhow!(
+            "a float, an int and a vec4 param read {pixel:?}, not (128, 128, 255, 255)"
+        ));
+    }
+    println!(
+        "  half of the plain warp's white, within 1; 255 with direction -1; a float, an int \
+         and a vec4 param each set from its own slots"
     );
     Ok(())
 }
