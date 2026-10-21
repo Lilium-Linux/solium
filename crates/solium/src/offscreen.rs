@@ -261,7 +261,8 @@ where
             // The same `window_surface_origin` every other client piece is
             // placed by (#232), so a self capture cannot drift from them.
             let origin = crate::render::window_surface_origin(corner, window, scale);
-            crate::render::client_piece(renderer, window, origin, output_scale)
+            // Unfaded: a slot's result is faded where it is placed.
+            crate::render::client_piece(renderer, window, origin, output_scale, 1.0)
         }
         PartSource::Popups(window) => {
             let Some(covered) = crate::render::popups_covered(window) else {
@@ -322,7 +323,9 @@ impl std::fmt::Debug for Job {
 /// than one worth handling.
 ///
 /// With every slot `slots` holds ready, so a blurred window is captured
-/// blurred (Ruling 17, `render::tests::a_warped_panes_capture_walks_its_client_slot`).
+/// blurred (Ruling 17, `render::tests::a_warped_panes_capture_walks_its_client_slot`),
+/// and its client at `client_opacity` inside it (#296), which the capture's
+/// key then holds, so a client fading under a warp is captured again.
 pub(crate) fn pane_job(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -330,13 +333,15 @@ pub(crate) fn pane_job(
     window: &Window,
     scale: f64,
     slots: &crate::effect::plan::Slots,
+    client_opacity: f32,
 ) -> Option<Job> {
     let outer = crate::render::flat(state, window)?.outer;
 
     // Built at the origin rather than at the window's position: the texture is
     // the window's own space, and where it ends up on screen is the warp's
     // business.
-    let elements = crate::render::flat_window_elements(state, renderer, window, scale, slots);
+    let elements =
+        crate::render::flat_window_elements(state, renderer, window, scale, slots, client_opacity);
     if elements.is_empty() {
         tracing::warn!("a warped window had nothing to draw offscreen");
         return None;

@@ -236,14 +236,15 @@
 ---@field interrupt? "pointer"|"picture" Where the mouse carries on from if it moves before the picture lands: `"pointer"`, where the warp put it (the default), or `"picture"`, where the picture is drawn.
 
 ---Where and how `sol.present` draws a window. A key left out says nothing: with
----no rect the window is drawn at its own, with no opacity it is opaque, and
----with no rotation it is flat.
+---no rect the window is drawn at its own, with no opacity it is opaque, with no
+---client_opacity its content is, and with no rotation it is flat.
 ---@class sol.PresentOptions
 ---@field x? number The rect it is drawn at: all four of `x`, `y`, `w` and `h`, or none.
 ---@field y? number
 ---@field w? number
 ---@field h? number
----@field opacity? number From 0 to 1.
+---@field opacity? number From 0 to 1. The whole pane: its client and its style's layers.
+---@field client_opacity? number From 0 to 1, anything else an error. The client's content alone, inside its pane: the style's layers keep `opacity`, so a layer `behind` the client (an app's icon) shows through as it fades while the pane goes on moving. Hit testing follows `opacity` alone.
 ---@field rotate_x? number Degrees about the horizontal axis.
 ---@field rotate_y? number Degrees about the vertical axis.
 ---@field rotate_z? number Degrees in the plane of the screen.
@@ -252,7 +253,7 @@
 ---@field pivot_y? number What the rotation turns about, as a share of the height. 0.5 is the default; outside 0..1 is kept.
 ---@field z? number Draw order and nothing else: higher is in front, equal keeps the stacking order, 0 is the default. Input still follows the rect.
 ---@field deform? sol.Deform A deformation of the window's mesh.
----@field motion? sol.PresentMotion A timing of their own for the centre, the size and the opacity; the batch's for what it leaves out.
+---@field motion? sol.PresentMotion A timing of their own for the centre, the size, the opacity and the client's opacity; the batch's for what it leaves out.
 
 ---A timing per property of a present, each `{ duration, easing }` as
 ---`sol.animate` takes it. A property left out moves on the batch's timing, and
@@ -263,6 +264,7 @@
 ---@field y? sol.Motion The drawn rect's centre, down.
 ---@field size? sol.Motion Its width and height.
 ---@field opacity? sol.Motion Its opacity.
+---@field client_opacity? sol.Motion Its client's opacity inside it.
 
 ---A deformation, named by effect. Its other keys are that effect's params,
 ---bound and checked by the effect (an unknown one, or one of the wrong kind,
@@ -751,7 +753,7 @@ function sol.window_at(x, y, skip) end
 ---at.
 ---
 ---A present that lands exactly on the window's own frame (no rect, no rotation,
----full opacity) lets the window go, as `sol.present_clear` does, rather than
+---full opacity and client_opacity) lets the window go, as `sol.present_clear` does, rather than
 ---holding it there.
 ---@param id integer
 ---@param options? sol.PresentOptions
@@ -759,9 +761,10 @@ function sol.window_at(x, y, skip) end
 function sol.present(id, options) end
 
 ---Draw a window at a rect and animate it to where it lives: every "appears from
----somewhere" animation. The rect is required.
+---somewhere" animation. The rect is required. `opacity` and `client_opacity`
+---are what it starts at, as `sol.PresentOptions` has them; it lands opaque.
 ---@param id integer
----@param options { x: number, y: number, w: number, h: number, opacity?: number, motion?: sol.PresentMotion }
+---@param options { x: number, y: number, w: number, h: number, opacity?: number, client_opacity?: number, motion?: sol.PresentMotion }
 ---@return nil
 function sol.present_from(id, options) end
 

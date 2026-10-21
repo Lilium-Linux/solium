@@ -10604,7 +10604,8 @@ end)"#,
         let popup_id = Id::from_wayland_resource(&popup);
         let mut renderer = DummyRenderer;
         let scale = smithay::utils::Scale::from(1.0);
-        let client_side = crate::render::client_piece(&mut renderer, &window, (0, 0).into(), scale);
+        let client_side =
+            crate::render::client_piece(&mut renderer, &window, (0, 0).into(), scale, 1.0);
         assert!(
             client_side.iter().all(|element| element.id() != &popup_id),
             "the capture's client holds the popup"
@@ -10772,6 +10773,97 @@ end)"#,
         assert!(
             !capture.stale(&key(&mut renderer)),
             "nothing committed, and it would be drawn again"
+        );
+    }
+
+    /// **A warped pane's capture is redrawn as its client fades** (#296). A
+    /// present with a turn and a `client_opacity` warps the pane, and the
+    /// frame its warp is planned from carries the client's opacity; the
+    /// capture draws the client at it, through the same `client_piece` and
+    /// `piece_alpha` `flat_pane` does, and that alpha is in the capture's
+    /// key, so a client fading under a warp is captured again each time it
+    /// changes and only then.
+    #[test]
+    fn a_warped_panes_capture_is_redrawn_as_its_client_fades() {
+        use smithay::backend::renderer::{element::Element as _, test::DummyRenderer};
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (pane, tile) = tiled_alone(&mut state, &window);
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let present = |state: &mut Solium, client_opacity: f32| {
+            state.apply(crate::script::Outcome {
+                commands: vec![crate::script::Command::Present {
+                    id: pane.get(),
+                    rect: None,
+                    opacity: None,
+                    client_opacity: Some(client_opacity),
+                    matrix: Some(crate::mat4::Mat4::rotate_z(0.2)),
+                    deform: None,
+                    z: 0.0,
+                    pivot: (0.5, 0.5),
+                    animation: crate::script::AnimationSpec {
+                        duration: std::time::Duration::ZERO,
+                        easing: crate::present::Curve::Linear,
+                    },
+                    channels: None,
+                }],
+                ..Default::default()
+            });
+        };
+        let planned = |state: &Solium| {
+            let outer = state.pane_outer_of(pane).expect("the pane is here");
+            crate::render::warp_of(state, pane, outer, state.clock.now())
+                .expect("a turned pane is warped")
+                .0
+                .client_opacity
+        };
+        let mut renderer = DummyRenderer;
+        let scale = smithay::utils::Scale::from(1.0);
+        let size = (tile.size.w, tile.size.h).into();
+        let drawn = |renderer: &mut DummyRenderer, client_opacity: f32| {
+            crate::render::client_piece(
+                renderer,
+                &window,
+                (0, 0).into(),
+                scale,
+                crate::render::piece_alpha(1.0, client_opacity, crate::render::Piece::Client),
+            )
+        };
+        let key = |elements: &[_]| {
+            crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, 1.0, elements)
+        };
+
+        present(&mut state, 0.5);
+        let half = planned(&state);
+        assert!((half - 0.5).abs() < f32::EPSILON, "planned at {half}");
+        let elements = drawn(&mut renderer, half);
+        assert!(
+            !elements.is_empty()
+                && elements
+                    .iter()
+                    .all(|element| (element.alpha() - 0.5).abs() < f32::EPSILON),
+            "the client is not drawn at half in the capture"
+        );
+        let mut capture = crate::keyed::Capture::<u32>::default();
+        capture.drawn(1, key(&elements));
+        assert!(
+            !capture.stale(&key(&drawn(&mut renderer, planned(&state)))),
+            "nothing changed, and it would be drawn again"
+        );
+
+        present(&mut state, 0.0);
+        assert!(
+            capture.stale(&key(&drawn(&mut renderer, planned(&state)))),
+            "the client faded out and the capture still holds it at half"
         );
     }
 
@@ -11102,6 +11194,7 @@ end)"#,
             id: pane.get(),
             rect: rect.map(|(x, y, w, h)| crate::script::Rect { x, y, w, h }),
             opacity: None,
+            client_opacity: None,
             matrix: None,
             deform: deform.map(crate::script::deform_for_test),
             z: 0.0,
@@ -13967,6 +14060,7 @@ end)"#,
                 id,
                 rect: Some(thumbnail),
                 opacity: None,
+                client_opacity: None,
                 matrix: None,
                 deform: None,
                 z: 0.0,
@@ -14004,6 +14098,7 @@ end)"#,
                 id,
                 rect: shrunk,
                 opacity: Some(0.0),
+                client_opacity: None,
                 animation: AnimationSpec {
                     duration: Duration::from_secs(10),
                     easing: present::Curve::Linear,
