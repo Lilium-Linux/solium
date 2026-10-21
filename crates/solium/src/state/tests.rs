@@ -2764,6 +2764,9 @@ mod real_client {
     use wayland_protocols::wp::idle_inhibit::zv1::client::{
         zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1,
     };
+    use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
+        zwp_keyboard_shortcuts_inhibit_manager_v1, zwp_keyboard_shortcuts_inhibitor_v1,
+    };
     use wayland_protocols::wp::pointer_constraints::zv1::client::{
         zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
     };
@@ -2983,6 +2986,11 @@ mod real_client {
         power_failed: Vec<wayland_client::backend::ObjectId>,
         /// For `power`: what a video player holds the machine awake with.
         inhibit: Option<zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1>,
+        /// For #58: what a VM viewer asks for every key with, and every
+        /// `active` (true) and `inactive` (false) it has been told, in order.
+        shortcuts:
+            Option<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1>,
+        shortcuts_held: Vec<bool>,
         /// For `power`: what `swayidle` asks with, and every `idled` (true)
         /// and `resumed` (false) its notifications have been told.
         idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
@@ -3193,6 +3201,9 @@ mod real_client {
                 "wp_content_type_manager_v1" => {
                     state.content_types = Some(registry.bind(name, 1, qh, ()));
                 }
+                "zwp_keyboard_shortcuts_inhibit_manager_v1" => {
+                    state.shortcuts = Some(registry.bind(name, 1, qh, ()));
+                }
                 "xdg_activation_v1" => {
                     state.activation = Some(registry.bind(name, 1, qh, ()));
                 }
@@ -3321,6 +3332,31 @@ mod real_client {
     wayland_client::delegate_noop!(Client: ignore zxdg_imported_v2::ZxdgImportedV2);
     wayland_client::delegate_noop!(Client: ignore wp_content_type_manager_v1::WpContentTypeManagerV1);
     wayland_client::delegate_noop!(Client: ignore wp_content_type_v1::WpContentTypeV1);
+    wayland_client::delegate_noop!(
+        Client: ignore zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1
+    );
+
+    /// See [`Client::shortcuts_held`].
+    impl Dispatch<zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _inhibitor: &zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+            event: zwp_keyboard_shortcuts_inhibitor_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            match event {
+                zwp_keyboard_shortcuts_inhibitor_v1::Event::Active => {
+                    state.shortcuts_held.push(true);
+                }
+                zwp_keyboard_shortcuts_inhibitor_v1::Event::Inactive => {
+                    state.shortcuts_held.push(false);
+                }
+                _ => {}
+            }
+        }
+    }
 
     /// See [`Client::exported_handles`].
     impl Dispatch<zxdg_exported_v2::ZxdgExportedV2, ()> for Client {
@@ -20453,6 +20489,216 @@ end)"#,
         /// filter's half is `input::tests::held`; this is the half that needs
         /// windows and a lock client. Every keyboard is `us,ru` with Russian
         /// active.
+        /// #58: a window that asks for the compositor's shortcuts -- a VM
+        /// viewer, a remote desktop -- has them while it has the keyboard.
+        /// On `us,ru` with Russian active throughout, where `super+q` arrives
+        /// as `super+Cyrillic_shorti`.
+        mod shortcuts_inhibit {
+            use super::*;
+            use crate::keyboard_change::tests::configured;
+            use crate::keymap::tests::set_us_ru;
+
+            /// Super, Q, Escape, Ctrl, Alt and F2, as xkb keycodes.
+            const SUPER: u32 = 133;
+            const Q: u32 = 24;
+            const ESCAPE: u32 = 9;
+            const CTRL: u32 = 37;
+            const ALT: u32 = 64;
+            const F2: u32 = 68;
+
+            /// A binding that every window gives way to, and the shipped
+            /// take-back binding.
+            const SCRIPT: &str = r#"
+                sol.bind("super+q", function() sol.status("q") end)
+                sol.bind("super+Escape", function() sol.take_shortcuts_back() end,
+                    { inhibited = true })
+            "#;
+
+            fn key(session: &mut Session, code: u32, pressed: bool) {
+                let state = if pressed {
+                    KeyState::Pressed
+                } else {
+                    KeyState::Released
+                };
+                crate::input::key(&mut session.state, Keycode::new(code), state, 0);
+            }
+
+            /// Press `codes` in order and let them go in reverse; the status a
+            /// binding left, if one fired.
+            fn tap(session: &mut Session, codes: &[u32]) -> String {
+                for &code in codes {
+                    key(session, code, true);
+                }
+                for &code in codes.iter().rev() {
+                    key(session, code, false);
+                }
+                std::mem::take(&mut session.state.status)
+            }
+
+            /// The keys the application was sent pressed since the last call,
+            /// as xkb keycodes.
+            fn heard(session: &mut Session) -> Vec<u32> {
+                session.app.pump(&mut session.display, &mut session.state);
+                session
+                    .app
+                    .client
+                    .key_events
+                    .drain(..)
+                    .filter(|(_, pressed)| *pressed)
+                    .map(|(code, _)| code + 8)
+                    .collect()
+            }
+
+            /// What the application's inhibitor was last told: active or not.
+            fn held(session: &mut Session) -> Option<bool> {
+                session.app.pump(&mut session.display, &mut session.state);
+                session.app.client.shortcuts_held.last().copied()
+            }
+
+            /// Two windows on `us,ru` with Russian active, the second focused
+            /// and asking for the shortcuts.
+            fn asking(tag: &str) -> (Session, Window, Window) {
+                let mut session = Session::new();
+                set_us_ru(&mut session.state, 1);
+                configured(&mut session.state, tag, SCRIPT);
+                let (first, ..) = session.app.open(&mut session.display, &mut session.state);
+                let (second, _, surface, _) =
+                    session.app.open(&mut session.display, &mut session.state);
+                focus(&mut session, &second);
+                let manager = session
+                    .app
+                    .client
+                    .shortcuts
+                    .clone()
+                    .expect("zwp_keyboard_shortcuts_inhibit_manager_v1 is advertised");
+                let seat = session.app.client.seat.clone().expect("wl_seat bound");
+                let _inhibitor = manager.inhibit_shortcuts(&surface, &seat, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                let _ = heard(&mut session);
+                (session, first, second)
+            }
+
+            fn focus(session: &mut Session, window: &Window) {
+                session.state.focus_window(
+                    window,
+                    smithay::utils::SERIAL_COUNTER.next_serial(),
+                    crate::script::FocusSource::Script,
+                );
+            }
+
+            /// **The window with the keyboard gets `super`, and the escapes
+            /// and the take-back binding still work.** `super+q` reaches the
+            /// application rather than its binding; Ctrl+Alt+F2 still switches
+            /// the console; `super+Escape` takes the shortcuts back without the
+            /// application seeing it, and `super+q` is the binding's again.
+            #[test]
+            fn a_window_holding_the_shortcuts_gets_super_and_the_take_back_key_still_works() {
+                let (mut session, ..) = asking("inhibit-super");
+                assert_eq!(
+                    held(&mut session),
+                    Some(true),
+                    "the focused window asked and was not made active"
+                );
+
+                let fired = tap(&mut session, &[SUPER, Q]);
+                let sent = heard(&mut session);
+                assert_eq!(fired, "", "super+q fired its binding over the window");
+                assert!(
+                    sent.contains(&SUPER) && sent.contains(&Q),
+                    "the window holding the shortcuts was not sent super+q: {sent:?}"
+                );
+
+                let _ = tap(&mut session, &[CTRL, ALT, F2]);
+                assert_eq!(
+                    session.state.request.take(),
+                    Some(Request::Vt(2)),
+                    "ctrl+alt+F2 did not switch the console over the window"
+                );
+                let _ = heard(&mut session);
+
+                let _ = tap(&mut session, &[SUPER, ESCAPE]);
+                let sent = heard(&mut session);
+                assert!(
+                    !sent.contains(&ESCAPE),
+                    "the take-back key reached the window: {sent:?}"
+                );
+                assert_eq!(
+                    held(&mut session),
+                    Some(false),
+                    "super+Escape did not take the shortcuts back"
+                );
+                assert_eq!(
+                    tap(&mut session, &[SUPER, Q]),
+                    "q",
+                    "taken back, super+q is still not the binding's"
+                );
+            }
+
+            /// **The shortcuts follow the keyboard.** Focus on the other window
+            /// makes the inhibitor inactive and `super+q` the binding's; focus
+            /// back makes it active again -- after a take-back too.
+            #[test]
+            fn the_shortcuts_follow_the_keyboard() {
+                let (mut session, first, second) = asking("inhibit-focus");
+                focus(&mut session, &first);
+                assert_eq!(
+                    held(&mut session),
+                    Some(false),
+                    "the window kept the shortcuts in the background"
+                );
+                assert_eq!(
+                    tap(&mut session, &[SUPER, Q]),
+                    "q",
+                    "with another window focused, super+q is not the binding's"
+                );
+
+                focus(&mut session, &second);
+                assert_eq!(
+                    held(&mut session),
+                    Some(true),
+                    "the window did not get the shortcuts back with the keyboard"
+                );
+
+                let _ = tap(&mut session, &[SUPER, ESCAPE]);
+                assert_eq!(held(&mut session), Some(false), "the premise");
+                focus(&mut session, &first);
+                focus(&mut session, &second);
+                assert_eq!(
+                    held(&mut session),
+                    Some(true),
+                    "taken back once, the window never held the shortcuts again"
+                );
+                let _ = heard(&mut session);
+                assert_eq!(tap(&mut session, &[SUPER, Q]), "");
+                assert!(heard(&mut session).contains(&Q));
+            }
+
+            /// **Locking takes them, and unlocking gives them back** to the
+            /// window that still has the keyboard. At the lock, `super+q` goes
+            /// to the lock screen and not to the window.
+            #[test]
+            fn the_lock_takes_the_shortcuts_and_gives_them_back() {
+                let (mut session, ..) = asking("inhibit-lock");
+                let lock = session.lock();
+                assert_eq!(
+                    held(&mut session),
+                    Some(false),
+                    "a window behind the lock still held the shortcuts"
+                );
+                let _ = tap(&mut session, &[SUPER, Q]);
+                assert!(
+                    !heard(&mut session).contains(&Q),
+                    "a key at the lock reached the window behind it"
+                );
+                session.assert_unlocks(lock);
+                assert_eq!(
+                    held(&mut session),
+                    Some(true),
+                    "unlocked, the window with the keyboard did not get them back"
+                );
+            }
+        }
+
         mod held {
             use super::*;
             use crate::keyboard_change::tests::configured;

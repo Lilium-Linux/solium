@@ -59,6 +59,7 @@ mod screensaver;
 mod script;
 mod scripted;
 mod session;
+mod shortcuts_inhibit;
 mod signals;
 mod single_pixel;
 mod stack;

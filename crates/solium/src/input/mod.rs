@@ -302,7 +302,8 @@ fn press(
     // is the last line: it drops the key if the keyboard is on
     // anything the gate would have refused, or held by any grab.
     if locked {
-        if !sealed && let Some(combo) = allowed_at_the_lock(state, modifiers, &handle) {
+        if !sealed && let Some(combo) = allowed_by(state, modifiers, &handle, |asked| asked.locked)
+        {
             return FilterResult::Intercept(Some(Action::Bound {
                 combo,
                 repeats: key_repeats(&handle),
@@ -363,6 +364,23 @@ fn press(
             },
             None => Action::Scene(scene_key(&handle, modifiers, true)),
         }));
+    }
+
+    // A window holding the compositor's shortcuts (#58), which is asked
+    // after the escapes, the lock and a scene holding the keyboard, and not
+    // while a mode owns input: none of those is a window's to take. Every
+    // key goes to it but a binding that asked with `inhibited`, which the
+    // shipped `super+Escape` does to take them back. Both of `combos_for`'s
+    // names, as at the lock, so it is the same key on Russian.
+    // `state::tests::real_client::lock_focus::shortcuts_inhibit`.
+    if !state.script_grab && state.inhibitors.active() {
+        if let Some(combo) = allowed_by(state, modifiers, &handle, |asked| asked.inhibited) {
+            return FilterResult::Intercept(Some(Action::Bound {
+                combo,
+                repeats: key_repeats(&handle),
+            }));
+        }
+        return FilterResult::Forward;
     }
 
     // A press answers to two names, tried in order -- see
@@ -468,15 +486,18 @@ fn scene_key(
     }
 }
 
-/// The binding a press at the lock screen fires: the one it would fire with
-/// the session unlocked, tried under both of [`combos_for`]'s names as there,
-/// and only if that binding asked to fire at the lock (#224). One that did
-/// not ask is not passed over for one that did under the other name: the key
-/// does at the lock what it does at the desktop, or nothing.
-fn allowed_at_the_lock(
+/// The binding a press fires where only bindings that asked fire: at the
+/// lock screen (`locked`, #224), or over a window holding the compositor's
+/// shortcuts (`inhibited`, #58). The one it would fire anywhere else, tried
+/// under both of [`combos_for`]'s names as there, and only if that binding
+/// asked, as `asked` says. One that did not ask is not passed over for one
+/// that did under the other name: the key does there what it does at the
+/// desktop, or nothing.
+fn allowed_by(
     state: &Solium,
     modifiers: &ModifiersState,
     handle: &smithay::input::keyboard::KeysymHandle<'_>,
+    asked: impl Fn(&script::BindingOptions) -> bool,
 ) -> Option<String> {
     let scripts = state.scripts.as_ref()?;
     let combo = combos_for(
@@ -488,7 +509,7 @@ fn allowed_at_the_lock(
     .find(|combo| scripts.has_binding(combo))?;
     scripts
         .binding_options(&combo)
-        .is_some_and(|asked| asked.locked)
+        .is_some_and(|options| asked(&options))
         .then_some(combo)
 }
 

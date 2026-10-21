@@ -95,6 +95,10 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
                 let asked: Vec<&str> = [
                     (binding.repeating, "repeats while held"),
                     (binding.locked, "fires at the lock"),
+                    (
+                        binding.inhibited,
+                        "fires over a window holding the shortcuts",
+                    ),
                 ]
                 .into_iter()
                 .filter_map(|(asked, said)| asked.then_some(said))
