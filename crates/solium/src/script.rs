@@ -5533,6 +5533,44 @@ fn easing_from(options: &Table) -> mlua::Result<Option<Curve>> {
             return Ok(None);
         }
     };
+    if let Some(options) = points.get::<Option<Table>>("spring")? {
+        let defaults = solium_animation::Spring::default();
+        let spring = solium_animation::Spring {
+            stiffness: options
+                .get::<Option<f64>>("stiffness")?
+                .unwrap_or(defaults.stiffness),
+            damping: options
+                .get::<Option<f64>>("damping")?
+                .unwrap_or(defaults.damping),
+            mass: options.get::<Option<f64>>("mass")?.unwrap_or(defaults.mass),
+            initial_velocity: options
+                .get::<Option<f64>>("initial_velocity")?
+                .unwrap_or(defaults.initial_velocity),
+            epsilon: options
+                .get::<Option<f64>>("epsilon")?
+                .unwrap_or(defaults.epsilon),
+        };
+        if ![
+            spring.stiffness,
+            spring.damping,
+            spring.mass,
+            spring.initial_velocity,
+            spring.epsilon,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            || spring.stiffness <= 0.0
+            || spring.mass < f64::EPSILON
+            || spring.damping < 0.0
+            || spring.epsilon <= 0.0
+            || spring.epsilon >= 1.0
+        {
+            return Err(mlua::Error::runtime(
+                "spring: finite positive stiffness, mass >= machine epsilon, nonnegative damping, finite velocity and 0 < epsilon < 1 required",
+            ));
+        }
+        return Ok(Some(Curve::Spring(spring)));
+    }
     let numbers: Vec<f64> = points.sequence_values::<f64>().collect::<Result<_, _>>()?;
     let [x1, y1, x2, y2] = numbers.as_slice() else {
         tracing::warn!(
@@ -12679,6 +12717,49 @@ mod shipped {
     /// for the genie tweak. `Curve::from_name` knew five names and that was not
     /// one of them, so both fell back to `outCubic` -- a different animation,
     /// chosen by nobody, announced only in a log line.
+    #[test]
+    fn motion_274_lua_springs_carry_physical_release_velocity() {
+        use crate::present::Curve;
+        use crate::script::easing_from;
+        use mlua::{Lua, Table};
+        let lua = Lua::new();
+        let options: Table = lua.load("return { easing = { spring = { stiffness = 220, damping = 24, mass = 1.2, initial_velocity = -3.5, epsilon = 0.002 } } }").eval().expect("options");
+        let Curve::Spring(spring) = easing_from(&options)
+            .expect("spring options")
+            .expect("curve")
+        else {
+            panic!("physical spring required")
+        };
+        assert_eq!(
+            (
+                spring.stiffness,
+                spring.damping,
+                spring.mass,
+                spring.initial_velocity,
+                spring.epsilon
+            ),
+            (220.0, 24.0, 1.2, -3.5, 0.002)
+        );
+        assert!((spring.value_at(0.0000001) / 0.0000001 + 3.5).abs() < 0.001);
+        for invalid in [
+            "mass=0",
+            "mass=1e-30",
+            "stiffness=-1",
+            "damping=-1",
+            "epsilon=0",
+            "initial_velocity=1/0",
+            "mass=0/0",
+        ] {
+            let options: Table = lua
+                .load(format!(
+                    "return {{ easing = {{ spring = {{ {invalid} }} }} }}"
+                ))
+                .eval()
+                .expect("options");
+            assert!(easing_from(&options).is_err(), "{invalid}");
+        }
+    }
+
     #[test]
     fn every_easing_named_is_one_the_engine_has() {
         let asked = everywhere("easing =");

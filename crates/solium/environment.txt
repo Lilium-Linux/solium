@@ -216,6 +216,15 @@ SOLIUM_CLICK_AT=<ms>:<x>,<y>;...
     goes to the scripts, not through the input path: for a real press, use
     `SOLIUM_DRAG_AT` with the same point at both ends.
 
+SOLIUM_TOUCH_AT=<ms>:<kind>:<slot>:<x>,<y>;...
+    **Nested only.** Replay scheduled down/motion/up/cancel touchscreen samples,
+    through normal input routing. Times are backend timestamps in milliseconds;
+    coordinates are global logical pixels. Invalid samples reject the entire
+    stream. Equal-time samples retain their listed order. This is scripted
+    input, not hardware validation.
+    Up and cancel still require placeholder coordinates, for example
+    `1000:up:0:0,0` or `1000:cancel:0:0,0`; those coordinates are ignored.
+
 SOLIUM_DRAG_AT=<ms>:<x1>,<y1>><x2>,<y2>;...
     **Nested only.** Drag the pointer from one place to another, through the
     real input path, the real grab and the real layout scripts.

@@ -481,6 +481,7 @@ pub(crate) fn run() -> Result<()> {
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
     let mut drags = dev::drags();
+    let mut touches = dev::touches();
     let mut keys = dev::keys();
     let mut screen_changes = dev::outputs_at();
     let mut loadings = dev::loading_at();
@@ -493,6 +494,7 @@ pub(crate) fn run() -> Result<()> {
     clicks.reverse();
     loadings.reverse();
     drags.reverse();
+    touches.reverse();
     keys.reverse();
     screen_changes.reverse();
 
@@ -669,6 +671,24 @@ pub(crate) fn run() -> Result<()> {
             }
         }
 
+        while touches.last().is_some_and(|sample| now >= sample.at) {
+            if let Some(sample) = touches.pop() {
+                let region = crate::monitor::union(&state.space)
+                    .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
+                let time = u64::try_from(sample.at.as_micros()).unwrap_or(u64::MAX);
+                match sample.phase {
+                    dev::TouchPhase::Down => {
+                        synth::touch_down(&mut state, region, sample.slot, sample.point, time)
+                    }
+                    dev::TouchPhase::Motion => {
+                        synth::touch_motion(&mut state, region, sample.slot, sample.point, time)
+                    }
+                    dev::TouchPhase::Up => synth::touch_up(&mut state, region, sample.slot, time),
+                    dev::TouchPhase::Cancel => synth::touch_cancel(&mut state, region),
+                }
+                synth::touch_frame(&mut state, region);
+            }
+        }
         while drags.last().is_some_and(|(at, _, _)| now >= *at) {
             if let Some((_, from, to)) = drags.pop() {
                 tracing::info!(?from, ?to, "scripted drag");

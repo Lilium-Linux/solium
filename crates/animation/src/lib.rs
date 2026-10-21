@@ -101,11 +101,14 @@ impl Spring {
                     + ((zeta * natural - velocity) / damped) * (damped * seconds).sin())
         } else {
             // Overdamped: crawls in without overshooting.
-            let rate = natural * (zeta * zeta - 1.0).sqrt();
-            let decay = (-zeta * natural * seconds).exp();
-            -decay
-                * ((rate * seconds).cosh()
-                    + ((zeta * natural - velocity) / rate) * (rate * seconds).sinh())
+            // Separate decaying roots avoid 0 * infinity from exp * cosh.
+            // Rationalise the slow root to avoid cancellation at high damping.
+            let decay = self.damping / mass / 2.0;
+            let rate = decay * (1.0 - (natural / decay).powi(2)).sqrt();
+            let slow = -(stiffness / mass) / (decay + rate);
+            let fast = -decay - rate;
+            let a = (velocity + fast) / (slow - fast);
+            a * (slow * seconds).exp() + (-1.0 - a) * (fast * seconds).exp()
         };
 
         1.0 + offset
@@ -373,6 +376,22 @@ pub fn lerp(from: f64, to: f64, progress: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn heavily_overdamped_spring_stays_finite_and_approaches_the_target() {
+        let spring = Spring {
+            damping: 1e6,
+            ..Spring::default()
+        };
+        for t in [0.004, 0.016, 0.1, 1.0, 10.0] {
+            let value = spring.value_at(t);
+            assert!(
+                value.is_finite() && (0.0..=1.0).contains(&value),
+                "t={t}, value={value}"
+            );
+        }
+        assert!(spring.value_at(10.0) > spring.value_at(1.0));
+    }
+
     #[test]
     fn a_bezier_hits_both_ends_and_stays_monotonic() {
         // ease-in-out, as CSS spells it.
