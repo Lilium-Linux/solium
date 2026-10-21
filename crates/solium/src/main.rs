@@ -148,8 +148,13 @@ fn start_logging(log: Option<std::sync::Arc<std::fs::File>>) {
 fn log_panics() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // The backtrace into the log, whatever RUST_BACKTRACE says: a
+        // compositor's panic happens once, on someone's hardware, and the
+        // profiles abort right after this hook (#283), so this line is all
+        // there will be to read.
         tracing::error!(
             location = info.location().map(ToString::to_string),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
             "panic: {}",
             info
         );
