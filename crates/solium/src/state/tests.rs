@@ -504,6 +504,50 @@ fn first_step(state: &Solium) -> Option<&solium_effects::stage::Step> {
         .and_then(|plan| plan.steps.first())
 }
 
+/// **A program run in the background opens no window** (#319): `sol.run`
+/// starts it as `sol.spawn` would, and it runs, but no loading window is
+/// opened for it to wait in; `sol.spawn`, the control, opens one.
+#[test]
+fn a_program_run_in_the_background_opens_no_window() {
+    let display = TestDisplay::new().expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    let marker = std::env::temp_dir().join(format!("solium-run-test-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    state.apply(crate::script::Outcome {
+        commands: vec![crate::script::Command::Run {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), format!("touch '{}'", marker.display())],
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        state.panes.len(),
+        0,
+        "a window was opened for a program run in the background"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the program never ran"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_file(&marker);
+    state.apply(crate::script::Outcome {
+        commands: vec![crate::script::Command::Spawn {
+            program: "true".to_owned(),
+            args: Vec::new(),
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        state.panes.len(),
+        1,
+        "the premise: sol.spawn opens a window for what it starts"
+    );
+}
+
 /// **A broken rule keeps the rules that ran**, and the error is a problem;
 /// **a rule naming an effect nobody ships is refused** the same way.
 #[test]

@@ -301,7 +301,8 @@ when the user asks for the program: your mode is told then, gets to place the
 window then, and the application appears inside it later. That is
 `loading.reserves_a_slot`, which is on by default. A window its application
 opens by itself — a second browser window, a dialog — is told at its first
-frame instead. Nothing special is required of you for either — but it is why
+frame instead. A command that shows no window, a volume key's `wpctl`, is
+started with `sol.run`, which opens no window for it and tells `open` nothing. Nothing special is required of you for either — but it is why
 `open` is the event that puts a window into your arrangement, and `layout` is
 not. A layout keeps its own structure and adds to it on `open`; `layout` only
 means "re-run what you already hold".
