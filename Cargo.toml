@@ -41,14 +41,12 @@ todo        = "deny"
 # Dependencies are optimised even in dev builds. Smithay's tree is large and a
 # compositor that stutters under a debugger teaches nothing about smoothness.
 opt-level = 1
-# A panic stops the compositor where it happened. Unwinding cannot save a
-# session, and unwound past Qt it ran Qt's exit handlers on state the panic had
-# left half-dropped: the heap corrupted, and the core dump blamed Qt instead
-# of the panic (#283). `main.rs`'s hook logs the panic and its backtrace
-# first. Tests are built with unwinding whatever this says, which
-# `#[should_panic]` and the Qt test thread rely on.
-panic = "abort"
 
+# A panic stops the compositor where it happened (#283): see `main.rs`'s
+# `log_panics`, which aborts in every build once it has logged the panic. Only
+# the release profile says so here too, because a dev profile that aborts
+# builds the libraries a doctest links to aborting, and a doctest, built to
+# unwind whatever the profile says, then refuses to link against them.
 [profile.release]
 panic = "abort"
 
