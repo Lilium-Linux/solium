@@ -47,6 +47,10 @@ pub(crate) struct PixelUniforms {
     pub(crate) seed: f32,
     pub(crate) time: f32,
     /// The capture's size in pixels: `sol_size`, and `sol_texel` is 1 / it.
+    /// For a present's pixels, the size the capture stands for, the pane's
+    /// whole box at its monitor's scale, even while the pane is drawn small
+    /// enough to be captured at a fraction of it (#307): a frag's on-screen
+    /// arithmetic does not move with the resolution.
     pub(crate) size: [f32; 2],
     /// The subject inside the padded capture, in `uv`.
     pub(crate) content: [f32; 4],

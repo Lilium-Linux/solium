@@ -103,7 +103,10 @@ implementation, not a renderer-independent backend or a Vulkan compositor.
 Ordinary surfaces use the direct element path where possible. Rounded corners
 are per-surface fragment programs and do not require a window capture.
 Mesh transforms use cached captures of the window's surface tree. A capture
-keeps a stable identity and is redrawn when its inputs change. Popups have
+keeps a stable identity and is redrawn when its inputs change. It is taken at
+the resolution the transform draws the window at, in steps down to an eighth,
+so a window flying into an icon is not captured at full size while it is small;
+a present's pixel shader is still told the full size the capture stands for. Popups have
 separate captures so they can extend beyond the window while following its
 transform. `render.rs`, `clip.rs`, `warp/`, `capture.rs` and `pool.rs` contain
 these paths.
