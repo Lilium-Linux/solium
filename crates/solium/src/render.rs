@@ -401,6 +401,96 @@ pub(crate) fn over_part(
     }
 }
 
+/// What a pane's warp capture holds past its outer rectangle: its style's
+/// layers' bleed, all of them, a dormant layer's too, so one waking during
+/// a flight is not cut and does not change the capture's size; none for a
+/// bare pane. The same while its window loads as once its application has
+/// arrived, so a present across that handover keeps its part and its grid.
+/// A decoration needs Qt, so what is done with the bleed is what is tested
+/// ([`pane_part`], `offscreen::pane_capture`).
+pub(crate) fn capture_bleed(state: &Solium, pane: crate::pane::PaneId) -> crate::style::Bleed {
+    state
+        .panes
+        .get(pane)
+        .and_then(Pane::decoration)
+        .map_or_else(
+            crate::style::Bleed::default,
+            crate::decoration::Decoration::bleed,
+        )
+}
+
+/// `outer` grown by `bleed` on every side: the rectangle a warped pane's
+/// capture holds (#312), its corner up and left of the pane's by the bleed.
+/// Not `decoration::canvas`, which fits one layer's bleed under the largest
+/// scene a layer may have: a capture holds every layer whole.
+/// `tests::a_warped_panes_part_reaches_past_it_by_its_bleed`.
+pub(crate) fn bled(
+    outer: Rectangle<i32, Logical>,
+    bleed: crate::style::Bleed,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        (outer.loc.x - bleed.left, outer.loc.y - bleed.top).into(),
+        (
+            outer.size.w + bleed.left + bleed.right,
+            outer.size.h + bleed.top + bleed.bottom,
+        )
+            .into(),
+    )
+}
+
+/// The part of a pane's unit square its own warp covers: its outer
+/// rectangle grown by `bleed` ([`bled`]), over the pane's `outer` size, so
+/// a shadow or a title above the pane is captured, meshed and drawn with
+/// it (#312), as its popups' part reaches past it ([`over_part`]).
+/// Exactly [`crate::warp::UnitRect::WHOLE`] with no bleed.
+/// `tests::a_warped_panes_part_reaches_past_it_by_its_bleed`,
+/// `tests::a_pane_that_bleeds_nothing_is_captured_as_it_always_was`.
+pub(crate) fn pane_part(
+    outer: Size<i32, Logical>,
+    bleed: crate::style::Bleed,
+) -> crate::warp::UnitRect {
+    if !bleed.any() {
+        return crate::warp::UnitRect::WHOLE;
+    }
+    let (w, h) = (f64::from(outer.w.max(1)), f64::from(outer.h.max(1)));
+    crate::warp::UnitRect {
+        u0: -f64::from(bleed.left) / w,
+        v0: -f64::from(bleed.top) / h,
+        u1: 1.0 + f64::from(bleed.right) / w,
+        v1: 1.0 + f64::from(bleed.bottom) / h,
+    }
+}
+
+/// [`pane_part`] for `pane` as it is now: its slot's size and its
+/// [`capture_bleed`]. What its grid is planned over, its capture taken at
+/// and its warp drawn over, one answer for the three.
+pub(crate) fn warp_part(state: &Solium, pane: crate::pane::PaneId) -> crate::warp::UnitRect {
+    state
+        .pane_outer_of(pane)
+        .map_or(crate::warp::UnitRect::WHOLE, |outer| {
+            pane_part(outer.size, capture_bleed(state, pane))
+        })
+}
+
+/// Where the pane's own rectangle is inside a capture of `part` of its unit
+/// square, its corner and its size in the capture's `uv`: a present's
+/// pixels' `sol_content`, so a frag finds the pane inside a capture that
+/// holds its layers' bleed (#312). `[0, 0, 1, 1]` for the whole pane.
+/// `tests::sol_content_names_the_pane_inside_its_capture`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "what a shader reads, as f32"
+)]
+pub(crate) fn content_in(part: crate::warp::UnitRect) -> [f32; 4] {
+    let pane = crate::warp::UnitRect::WHOLE.in_part(part);
+    [
+        pane.u0 as f32,
+        pane.v0 as f32,
+        (pane.u1 - pane.u0) as f32,
+        (pane.v1 - pane.v0) as f32,
+    ]
+}
+
 /// What `prepare` does with a pane. `tests::a_window_whose_warp_has_no_program_is_drawn_flat`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Route {
@@ -459,12 +549,15 @@ fn source_of(
 }
 
 /// What a present geometry's warp draws a piece's capture through, the
-/// piece the `part` of the pane's unit square captured at `size`: the
-/// program its version's pixels compiled into, once compiled, reading the
-/// geometry's progress with a leaving's direction (as its `mesh` is told),
-/// its seed, the pass's time when the frag reads it, the capture whole as
-/// its subject, the part, and its pixels' params. None for a geometry with
-/// no pixels or before they compiled, which the plain warp draws.
+/// piece the `part` of the pane's unit square captured at `size`, its
+/// subject at `content` inside it: the program its version's pixels
+/// compiled into, once compiled, reading the geometry's progress with a
+/// leaving's direction (as its `mesh` is told), its seed, the pass's time
+/// when the frag reads it, the subject, the part, and its pixels' params.
+/// The pane's own subject is the pane inside a capture that may hold its
+/// layers' bleed ([`content_in`]); its popups' is their whole capture. None
+/// for a geometry with no pixels or before they compiled, which the plain
+/// warp draws.
 /// `state::tests::real_client::a_present_draws_its_folders_frag_as_its_pixels`,
 /// `state::tests::real_client::a_present_through_a_pixels_effect_reads_the_params_it_blends`.
 #[expect(
@@ -476,7 +569,7 @@ pub(crate) fn present_pixels(
     state: &Solium,
     pane: crate::pane::PaneId,
     geometry: present::Geometry,
-    part: crate::warp::UnitRect,
+    (part, content): (crate::warp::UnitRect, [f32; 4]),
     size: Size<i32, Physical>,
 ) -> Option<crate::warp::Pixels> {
     let loaded = source_of(state, pane, geometry)?;
@@ -496,7 +589,7 @@ pub(crate) fn present_pixels(
         seed: geometry.seed as f32,
         time,
         size: [size.w as f32, size.h as f32],
-        content: [0.0, 0.0, 1.0, 1.0],
+        content,
         part: [
             part.u0 as f32,
             part.v0 as f32,
@@ -618,7 +711,8 @@ pub(crate) enum Planned {
 /// [`warp_of`], and a present geometry's grid built once a pass: refused,
 /// the window follows its `failed` (undeformed, as an unresolved anchor is,
 /// still tilted if it is; or nothing of it), and with its folder reloaded
-/// under `on_reload = "flat"` it is undeformed. Asked with no renderer.
+/// under `on_reload = "flat"` it is undeformed. The grid is over the
+/// pane's [`warp_part`], its layers' bleed and all. Asked with no renderer.
 /// `tests::a_refused_present_follows_its_failed_policy`,
 /// `state::tests::real_client::a_present_deform_is_a_file`,
 /// `state::tests::real_client::effects_present_is_the_default_a_deform_overrides`.
@@ -639,14 +733,10 @@ pub(crate) fn plan_warp(
             grid: None,
         };
     };
-    let gridded = present_grid(
-        state,
-        pane,
-        &frame,
-        aimed,
-        (WarpPiece::Pane, crate::warp::UnitRect::WHOLE),
-        scale,
-    );
+    // Over the pane grown by its layers' bleed, the part its capture holds
+    // (#312), as its popups' grid is over theirs.
+    let part = warp_part(state, pane);
+    let gridded = present_grid(state, pane, &frame, aimed, (WarpPiece::Pane, part), scale);
     let route = match gridded {
         Gridded::Grid(grid) => {
             return Planned::Warp {
@@ -1622,6 +1712,9 @@ impl Phases for Gpu<'_> {
                 // time its fade or its commits make the capture stale (#307).
                 let fraction = capture_fraction(&frame, grid.as_ref(), outer.size);
                 let captured_at = scale * fraction;
+                // The pane grown by its layers' bleed, which its capture
+                // holds, its grid is over and its warp is drawn over (#312).
+                let part = warp_part(state, pane);
                 let job = match &captured {
                     Captured::Client(window) => crate::offscreen::pane_job(
                         state,
@@ -1635,15 +1728,15 @@ impl Phases for Gpu<'_> {
                         crate::offscreen::standing_job(state, renderer, pane, captured_at)
                     }
                 };
-                // Its present geometry's pixels over the whole pane, once
-                // they compiled: the warp draws its capture through them,
-                // told the size the capture stands for.
+                // Its present geometry's pixels over its part, once they
+                // compiled: the warp draws its capture through them, told
+                // the size the capture stands for and where the pane is in it.
                 let pixels = aimed.zip(job.as_ref()).and_then(|(aimed, job)| {
                     present_pixels(
                         state,
                         pane,
                         aimed.effect,
-                        crate::warp::UnitRect::WHOLE,
+                        (part, content_in(part)),
                         whole_size(job.size, fraction),
                     )
                 });
@@ -1677,11 +1770,12 @@ impl Phases for Gpu<'_> {
                 let over = match (over, aimed) {
                     (Some((job, part)), Some(aimed)) => {
                         over_grid(state, pane, &frame, aimed, part, scale).map(|grid| {
+                            // Their capture whole is their subject.
                             let pixels = present_pixels(
                                 state,
                                 pane,
                                 aimed.effect,
-                                part,
+                                (part, [0.0, 0.0, 1.0, 1.0]),
                                 whole_size(job.size, fraction),
                             );
                             (job, part, grid, pixels)
@@ -1717,7 +1811,7 @@ impl Phases for Gpu<'_> {
                             program,
                             id,
                             commit,
-                            part: crate::warp::UnitRect::WHOLE,
+                            part,
                             grid,
                             under,
                             pixels,
@@ -1725,7 +1819,7 @@ impl Phases for Gpu<'_> {
                     } else {
                         jobs.push((
                             job,
-                            Then::Warp(program, pane, shape, grid, (holes, scale), pixels),
+                            Then::Warp(program, pane, shape, part, grid, (holes, scale), pixels),
                         ));
                     }
                 }
@@ -1759,7 +1853,7 @@ impl Phases for Gpu<'_> {
         // (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
         for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
             match then {
-                Then::Warp(program, pane, shape, grid, (holes, scale), pixels) => {
+                Then::Warp(program, pane, shape, part, grid, (holes, scale), pixels) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
                     let under = unders(state, slots, &holes, scale, commit);
                     self.warps.push(Warped {
@@ -1768,7 +1862,7 @@ impl Phases for Gpu<'_> {
                         program,
                         id,
                         commit,
-                        part: crate::warp::UnitRect::WHOLE,
+                        part,
                         grid,
                         under,
                         pixels,
@@ -1829,17 +1923,19 @@ fn shown(state: &Solium, pane: crate::pane::PaneId) -> bool {
 
 /// What a capture becomes once drawn: `dev/fence-check.sh` has two warps,
 /// `dev/present-check.sh`'s menu case a warp and its popups. A warp
-/// carries its pane and the [`Shape`] its commit is moved by; its popups' warp
-/// the part of the pane they cover as well; each the pixels it is drawn
-/// through, if any.
+/// carries its pane, the [`Shape`] its commit is moved by and the part of
+/// the pane's unit square its capture covers (the pane and its layers'
+/// bleed, or its popups' rectangle); each the pixels it is drawn through,
+/// if any.
 #[derive(Debug)]
 enum Then {
-    /// The pane's own warp, its grid, and the slots its capture holes with
-    /// the capture's scale (Ruling F37).
+    /// The pane's own warp over its part, its grid, and the slots its
+    /// capture holes with the capture's scale (Ruling F37).
     Warp(
         crate::warp::Program,
         crate::pane::PaneId,
         Shape,
+        crate::warp::UnitRect,
         Option<crate::warp::Grid>,
         (Vec<(crate::effect::plan::Owner, Slot)>, f64),
         Option<crate::warp::Pixels>,
@@ -1890,7 +1986,9 @@ fn holes_in(elements: &[Element]) -> Vec<(crate::effect::plan::Owner, Slot)> {
 
 /// A warped pane's beneath slots on every monitor, in its capture's order:
 /// each hole's slot with its T2 texture there (`Slots::screened`), its
-/// shape in the capture's pixels at `scale`, the T2 result's per-monitor
+/// shape in the capture's pixels at `scale`, the capture the pane grown by
+/// its layers' bleed (`tests::a_hole_is_masked_at_its_place_in_a_capture_that_bleeds`),
+/// the T2 result's per-monitor
 /// id, and a commit that moves with the warp's or a re-run
 /// (`effect::store::tests::an_unders_commit_moves_with_its_warp_or_its_rerun`).
 /// What `dev/effects-check.sh motion`'s `genie` draws beneath its funnel.
@@ -1917,8 +2015,11 @@ fn unders(
         let Some(rest) = part_rect(state, &found) else {
             continue;
         };
+        // In the capture, which holds the pane's layers' bleed around it
+        // (#312): the part's place in the pane grown by it.
+        let captured = bled(outer, capture_bleed(state, *pane));
         let mask = crate::effect::beneath::BeneathMask::Shape(
-            crate::effect::beneath::beneath_mask(rest, outer, boxed.radii, scale),
+            crate::effect::beneath::beneath_mask(rest, captured, boxed.radii, scale),
         );
         for place in slots.places(owner, *slot) {
             let Some(screened) = slots.screened(owner, *slot, &place.monitor) else {
@@ -3613,8 +3714,10 @@ fn monitors_overlapped(state: &Solium, rect: Rectangle<f64, Logical>) -> usize {
 /// one cell, the pane's corners) the part's own quad, projected exactly as
 /// `warp::mesh_part` projects a part, so a titlebar's bounds are its own
 /// band and not the whole pane's box (amended 2026-10-14, live under motion
-/// and warps).
+/// and warps). `unit` is in the pane's own unit square, whatever part the
+/// grid is over.
 /// `tests::a_tilted_parts_beneath_bounds_are_its_own_band`,
+/// `tests::a_parts_beneath_bounds_on_a_grid_over_the_bleed_are_its_own_cells`,
 /// `warp::tests::a_parts_bounds_on_a_mesh_are_its_cells`.
 pub(crate) fn beneath_bounds(
     frame: &present::Frame,
@@ -3624,8 +3727,10 @@ pub(crate) fn beneath_bounds(
     // Global logical: a "screen" at the origin, at scale 1.
     let origin = Rectangle::from_size((1, 1).into());
     let bounds = match grid {
-        Some(grid) => warp_mesh_on(origin, frame, Some(grid), crate::warp::UnitRect::WHOLE, 1.0)?
-            .part_bounds(unit)?,
+        // The grid's texture runs 0 to 1 across its part, which is the pane
+        // grown by its layers' bleed (#312): the part measured across it.
+        Some(grid) => warp_mesh_on(origin, frame, Some(grid), grid.part, 1.0)?
+            .part_bounds(unit.in_part(grid.part))?,
         // The part's own mesh: its texture runs 0 to 1 across the part, so
         // every one of its triangles is the part's.
         None => warp_mesh_on(origin, frame, None, unit, 1.0)?
@@ -4787,20 +4892,22 @@ fn scene(
 }
 
 /// A pane's standing-in scene as a warp's capture holds it: over the
-/// pane's whole rectangle at its own size, its corner at the target's
-/// origin, as the walk draws it over the pane's frame rectangle, unfaded
-/// by the frame (the warp fades the whole capture) and faded by its own
-/// dissolve into the arriving application. Nothing for a pane without one.
+/// pane's whole rectangle at its own size, its corner at `at` in the
+/// target's physical pixels (past the layers' bleed, #312), as the walk
+/// draws it over the pane's frame rectangle, unfaded by the frame (the warp
+/// fades the whole capture) and faded by its own dissolve into the arriving
+/// application. Nothing for a pane without one.
 pub(crate) fn scene_in_capture(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     pane: crate::pane::PaneId,
-    outer: Size<i32, Logical>,
+    (outer, at): (Size<i32, Logical>, Point<i32, Physical>),
     scale: f64,
 ) -> Vec<Element> {
     let mut elements = Vec::new();
     if state.pane_has_scene(pane) {
-        let at_rest = present::Frame::real(Rectangle::from_size(outer));
+        let mut at_rest = present::Frame::real(Rectangle::from_size(outer));
+        at_rest.rect.loc = at.to_f64().to_logical(scale);
         let now = pass_now(state);
         scene(
             state,
@@ -4817,7 +4924,8 @@ pub(crate) fn scene_in_capture(
 }
 
 /// What a window still loading is captured from for its warp (#302): the
-/// walk's `ours` branch at rest at the target's origin, in `PANE_ORDER`,
+/// walk's `ours` branch at rest, the pane's corner at `at` in the target's
+/// physical pixels (past the layers' bleed, #312), in `PANE_ORDER`,
 /// the style's layers at their depths when `loading.decorated` draws them
 /// and the standing-in scene in the client's place
 /// ([`scene_in_capture`]), so it bends as one thing and an `above` layer
@@ -4828,19 +4936,14 @@ pub(crate) fn standing_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     pane: crate::pane::PaneId,
+    at: Point<i32, Physical>,
     scale: f64,
 ) -> Vec<Element> {
     let Some(outer) = state.pane_outer_of(pane).map(|outer| outer.size) else {
         return Vec::new();
     };
-    let (drawing, _) = pane_drawing_at(
-        outer,
-        state.insets_of(pane),
-        (0, 0).into(),
-        scale,
-        pass_now(state),
-    );
-    let mut scene = Some(scene_in_capture(state, renderer, pane, outer, scale));
+    let (drawing, _) = pane_drawing_at(outer, state.insets_of(pane), at, scale, pass_now(state));
+    let mut scene = Some(scene_in_capture(state, renderer, pane, (outer, at), scale));
     let mut elements = Vec::new();
     pane_pieces(&mut elements, |elements, piece| match piece {
         Piece::Layers(depth) if state.loading.decorated => {
@@ -5513,7 +5616,10 @@ pub(crate) fn warp_mesh_on(
 /// A transform that is not identity cannot be drawn as a rectangle. The
 /// window is rendered flat into a texture first — frame included — and
 /// that texture is bent, so the whole window deforms as one thing
-/// instead of the client tilting away from its own titlebar. Its popups
+/// instead of the client tilting away from its own titlebar. The texture
+/// holds what its style's layers paint past it, a shadow or a title above
+/// it, and is drawn over the pane grown by that much ([`warp_part`]), so
+/// they bend with it (#312). Its popups
 /// are not in that texture (`state::tests::a_warped_panes_capture_holds_no_popups`):
 /// they are a capture of their own, bent by the same matrix and deform
 /// over their part of the pane, and drawn in front of it
@@ -5546,7 +5652,7 @@ fn push_warp(
             screen,
             &drawn_global,
             warped.grid.as_ref(),
-            crate::warp::UnitRect::WHOLE,
+            warped.part,
             scale,
         )
     {
@@ -6551,11 +6657,12 @@ fn cursor(
     }
 }
 
-/// One window's elements, flat, at the origin and the size its pane has.
+/// One window's elements, flat, at the size its pane has, its corner at
+/// `at` in the target's physical pixels: as far in as its layers bleed.
 ///
 /// The offscreen pass draws these into a texture so a deformed window is
-/// deformed as one thing. Built at the origin because the texture *is* the
-/// window's own space; where it lands on screen is the warp's business.
+/// deformed as one thing. Built near the origin because the texture *is*
+/// the window's own space; where it lands on screen is the warp's business.
 ///
 /// **At the pane's size, from [`flat`], which for a tiled client that committed
 /// more than its tile is the tile (#133).** `warp::mesh_part` spreads the whole
@@ -6567,18 +6674,14 @@ fn cursor(
 /// is simply off the texture's edge -- the cut `elements` makes with a crop,
 /// made here by the framebuffer.
 ///
-/// **A deformed window loses its bleed, and that is a known limit rather than
-/// an oversight.** `offscreen::pane_job` sizes its texture from the window's
-/// outer rect, so a layer placed at `(-bleed.left, -bleed.top)` falls outside
-/// the framebuffer and is clipped by the renderer — the spikes are simply not
-/// in the picture that gets bent. Fixing it means capturing at the decoration's
-/// widest canvas *and* building `warp::mesh_part` over that larger rectangle,
-/// since the mesh is what maps the texture back onto the window; both the
-/// genie's anchor arithmetic and `crates/effects` are written against the
-/// window's own rect today. It is `capture`'s change and the effects plan's,
-/// not this one's. What it costs meanwhile is an effect that disappears while a
-/// window is being deformed and comes back when it lands, which is visible but
-/// is not wrong pixels.
+/// **A deformed window keeps its bleed** (#312). `offscreen::pane_job` sizes
+/// its texture from the window's outer rect grown by its layers' bleed
+/// (`render::bled`) and puts the pane's corner at `at`, the bleed's top-left,
+/// so a layer placed at `(-bleed.left, -bleed.top)` from the pane lands at
+/// the texture's corner; the warp's grid is planned and its mesh drawn over
+/// that larger part of the pane's unit square ([`warp_part`]), which maps
+/// the texture back onto the window and its shadow where the flat path
+/// draws them (`tests::a_bleeding_layer_drawn_through_a_warp_at_rest_lands_where_the_flat_path_draws_it`).
 ///
 /// **No popups.** A warped pane's popups are a capture of their own
 /// (`offscreen::over_job`), drawn in front of the warp: inside this one they
@@ -6597,21 +6700,14 @@ pub(crate) fn flat_window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
     scale: f64,
+    at: Point<i32, Physical>,
     slots: &Slots,
 ) -> Vec<Element> {
     let pieces = state
         .panes
         .id_of(window)
         .map_or_else(|| PANE_ORDER.to_vec(), |pane| capture_pieces(slots, pane));
-    flat_pane(
-        state,
-        renderer,
-        window,
-        scale,
-        (0, 0).into(),
-        slots,
-        &pieces,
-    )
+    flat_pane(state, renderer, window, scale, at, slots, &pieces)
 }
 
 /// [`flat_window_elements`] with the pane's corner at `at`, in the target's
@@ -6789,8 +6885,9 @@ fn flat_pane(
 
 /// A pane drawn flat at its own size with its corner at `at`, in a target's
 /// physical pixels at `scale`: the drawing its layers are drawn with, and
-/// where its client's corner goes, the insets inside it. At `(0, 0)`, a
-/// warp's capture. `tests::a_pane_drawn_at_the_pad_has_its_client_inside_it`.
+/// where its client's corner goes, the insets inside it. At its layers'
+/// bleed, a warp's capture (`offscreen::pane_capture`).
+/// `tests::a_pane_drawn_at_the_pad_has_its_client_inside_it`.
 pub(crate) fn pane_drawing_at(
     outer: Size<i32, Logical>,
     insets: crate::decoration::Insets,
@@ -6818,7 +6915,8 @@ pub(crate) fn pane_drawing_at(
 /// it. See [`flat`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Flat {
-    /// The texture's size, in logical pixels: the pane's outer size.
+    /// The pane's outer size, in logical pixels: the texture's, grown by
+    /// its layers' bleed (`offscreen::pane_capture`).
     pub(crate) outer: Size<i32, Logical>,
     /// The frame's share of it, which puts the client's corner.
     pub(crate) insets: crate::decoration::Insets,
@@ -6830,7 +6928,8 @@ pub(crate) struct Flat {
 
 /// What `offscreen::pane_job` and [`flat_window_elements`] draw a warped window
 /// at: **the pane's own outer rectangle**, which is the rectangle `elements`
-/// builds the warp's mesh over, so the texture and the mesh are one size.
+/// builds the warp's mesh over (grown on both by its layers' bleed,
+/// [`warp_part`]), so the texture and the mesh are one size.
 ///
 /// That is the tile for a tiled client that committed more than it (#133),
 /// where the window's `outer_geometry` is the committed size:
@@ -7668,6 +7767,274 @@ pub(crate) mod tests {
         assert_eq!(
             super::capture_fraction(&frame, None, smithay::utils::Size::from((1600, 900))),
             1.0
+        );
+    }
+
+    /// **A grid over the bleed is measured across its part** (#312): a
+    /// pane's grid now spans its layers' bleed as well, and a cell is still
+    /// held to what it spans of the pane's own pixels, so a pane drawn at a
+    /// quarter is captured at a quarter, bleed and all.
+    #[test]
+    fn a_grid_over_the_bleed_is_measured_across_its_part() {
+        let outer = smithay::utils::Size::from((1600, 900));
+        let frame = presented_at(1600, 900, (400.0, 225.0));
+        // 160 of bleed either side: the part 1920 of the pane's pixels wide,
+        // drawn 480 wide.
+        let part = super::pane_part(
+            outer,
+            crate::style::Bleed {
+                left: 160,
+                right: 160,
+                ..crate::style::Bleed::default()
+            },
+        );
+        let grid = crate::warp::Grid {
+            cols: 1,
+            rows: 1,
+            part,
+            points: vec![-40.0, 0.0, 440.0, 0.0, -40.0, 225.0, 440.0, 225.0],
+        };
+        assert_eq!(super::capture_fraction(&frame, Some(&grid), outer), 0.25);
+    }
+
+    /// A 300 by 200 pane's style bleeding 12 above it, 6 to its right, 4
+    /// below and 20 to its left: a shadow, and a title above it.
+    fn bleeding() -> crate::style::Bleed {
+        crate::style::Bleed {
+            top: 12,
+            right: 6,
+            bottom: 4,
+            left: 20,
+        }
+    }
+
+    /// **A warped pane's part reaches past it by its bleed** (#312): its
+    /// capture holds the pane grown by its layers' bleed, the pane's corner
+    /// as far in as the bleed at every scale, a fractional one rounded as a
+    /// capture is; and its part of the pane's unit square reaches past
+    /// [0, 1] by as much, as its popups' does past the pane.
+    #[test]
+    fn a_warped_panes_part_reaches_past_it_by_its_bleed() {
+        use smithay::utils::{Rectangle, Size};
+        let outer = Size::from((300, 200));
+        assert_eq!(
+            super::pane_part(outer, bleeding()),
+            crate::warp::UnitRect {
+                u0: -20.0 / 300.0,
+                v0: -12.0 / 200.0,
+                u1: 1.0 + 6.0 / 300.0,
+                v1: 1.0 + 4.0 / 200.0,
+            }
+        );
+        assert_eq!(
+            super::bled(Rectangle::new((100, 50).into(), outer), bleeding()),
+            Rectangle::new((80, 38).into(), (326, 216).into())
+        );
+        for (scale, size, corner) in [
+            (1.0, (326, 216), (20, 12)),
+            (2.0, (652, 432), (40, 24)),
+            (1.25, (408, 270), (25, 15)),
+        ] {
+            assert_eq!(
+                crate::offscreen::pane_capture(outer, bleeding(), scale),
+                (size.into(), corner.into()),
+                "captured at {scale}"
+            );
+        }
+    }
+
+    /// **A pane that bleeds nothing is captured as it always was**: at its
+    /// outer rectangle's size, its corner at the origin, over the whole
+    /// pane, its pixels' subject the whole capture.
+    #[test]
+    fn a_pane_that_bleeds_nothing_is_captured_as_it_always_was() {
+        let outer = smithay::utils::Size::from((300, 200));
+        let none = crate::style::Bleed::default();
+        assert_eq!(super::pane_part(outer, none), crate::warp::UnitRect::WHOLE);
+        for (scale, size) in [(1.0, (300, 200)), (1.25, (375, 250)), (1.5, (450, 300))] {
+            assert_eq!(
+                crate::offscreen::pane_capture(outer, none, scale),
+                (size.into(), (0, 0).into()),
+                "captured at {scale}"
+            );
+        }
+        assert_eq!(
+            super::content_in(crate::warp::UnitRect::WHOLE),
+            [0.0, 0.0, 1.0, 1.0]
+        );
+    }
+
+    /// **`sol_content` names the pane inside its capture** (#312): its
+    /// corner and its size in the `uv` of a capture that holds its layers'
+    /// bleed, so a frag finds the pane and not the shadow around it.
+    #[test]
+    fn sol_content_names_the_pane_inside_its_capture() {
+        let content = super::content_in(super::pane_part(
+            smithay::utils::Size::from((300, 200)),
+            bleeding(),
+        ));
+        let wanted = [20.0 / 326.0, 12.0 / 216.0, 300.0 / 326.0, 200.0 / 216.0];
+        for (got, want) in content.into_iter().zip(wanted) {
+            assert!(
+                (f64::from(got) - want).abs() < 1e-6,
+                "the pane is at {content:?} in its capture, not {wanted:?}"
+            );
+        }
+    }
+
+    /// **A bleeding layer drawn through a warp at rest lands where the flat
+    /// path draws it** (#312): the layer's canvas, drawn into the capture
+    /// from the pane's corner at the bleed, and carried onto the screen by
+    /// the mesh over the pane's part with nothing moving it, is where
+    /// `elements` puts it standing still, and so is the pane, to within the
+    /// capture's rounding at a fractional scale.
+    #[test]
+    fn a_bleeding_layer_drawn_through_a_warp_at_rest_lands_where_the_flat_path_draws_it() {
+        use smithay::utils::{Logical, Rectangle, Size};
+        let outer = Size::<i32, Logical>::from((300, 200));
+        let insets = crate::decoration::Insets {
+            top: 30,
+            ..crate::decoration::Insets::default()
+        };
+        let rest = Rectangle::<f64, Logical>::new((100.0, 50.0).into(), (300.0, 200.0).into());
+        let now = std::time::Duration::ZERO;
+        for scale in [1.0, 2.0, 1.25] {
+            let (size, corner) = crate::offscreen::pane_capture(outer, bleeding(), scale);
+            let (drawing, _) = super::pane_drawing_at(outer, insets, corner, scale, now);
+            let captured = crate::decoration::spread(drawing, bleeding()).drawn;
+            let mesh = crate::warp::mesh_part(
+                rest,
+                super::pane_part(outer, bleeding()),
+                crate::mat4::Mat4::IDENTITY,
+                (0.5, 0.5),
+                scale,
+            )
+            .expect("a mesh");
+            // One cell: its first vertex is the texture's (0, 0), its third
+            // the texture's (1, 1).
+            let (first, third) = (mesh.vertices()[0], mesh.vertices()[2]);
+            // Where a point drawn into the capture lands on the screen, and
+            // whether the capture holds it at all: a layer drawn off its
+            // edge is cut there, wherever the mesh would have put it.
+            let on_screen = |x: f64, y: f64| {
+                let (u, v) = (x * scale / f64::from(size.w), y * scale / f64::from(size.h));
+                let held = (-1e-9..=1.0 + 1e-9).contains(&u) && (-1e-9..=1.0 + 1e-9).contains(&v);
+                (
+                    f64::from(first.x) + u * f64::from(third.x - first.x),
+                    f64::from(first.y) + v * f64::from(third.y - first.y),
+                    held,
+                )
+            };
+            let flat = crate::decoration::spread(
+                crate::decoration::Drawing {
+                    rect: rest,
+                    outer,
+                    alpha: 1.0,
+                    scale,
+                    now,
+                },
+                bleeding(),
+            )
+            .drawn;
+            let far = |rect: Rectangle<f64, Logical>| {
+                (rect.loc.x + rect.size.w, rect.loc.y + rect.size.h)
+            };
+            for (what, (x, y), (want_x, want_y)) in [
+                (
+                    "the layer's corner",
+                    (captured.loc.x, captured.loc.y),
+                    (flat.loc.x, flat.loc.y),
+                ),
+                ("the layer's far corner", far(captured), far(flat)),
+                (
+                    "the pane's corner",
+                    (drawing.rect.loc.x, drawing.rect.loc.y),
+                    (rest.loc.x, rest.loc.y),
+                ),
+            ] {
+                let (got_x, got_y, held) = on_screen(x, y);
+                assert!(
+                    held,
+                    "at {scale} {what} is drawn off the capture, at ({x}, {y})"
+                );
+                assert!(
+                    (got_x - want_x * scale).abs() <= 1.0 && (got_y - want_y * scale).abs() <= 1.0,
+                    "at {scale} {what} lands at ({got_x}, {got_y}), not where the flat path \
+                     draws it, ({}, {})",
+                    want_x * scale,
+                    want_y * scale
+                );
+            }
+        }
+    }
+
+    /// **A hole is masked at its place in a capture that bleeds** (#312):
+    /// a slot drawn beneath a warped pane is cut by its part's shape where
+    /// the part is in the capture, the pane's corner at the bleed: the
+    /// client's corner in the mask is the client's corner in the capture.
+    #[test]
+    fn a_hole_is_masked_at_its_place_in_a_capture_that_bleeds() {
+        use smithay::utils::{Logical, Rectangle};
+        let outer = Rectangle::<i32, Logical>::new((100, 50).into(), (300, 200).into());
+        let client = Rectangle::<i32, Logical>::new((100, 80).into(), (300, 170).into());
+        let scale = 2.0;
+        let mask = crate::effect::beneath::beneath_mask(
+            client,
+            super::bled(outer, bleeding()),
+            [0.0; 4],
+            scale,
+        );
+        let (size, corner) = crate::offscreen::pane_capture(outer.size, bleeding(), scale);
+        // The client 30 below the pane's corner, in the capture's pixels.
+        let in_capture = (f64::from(corner.x), f64::from(corner.y) + 30.0 * scale);
+        assert_eq!(
+            (
+                f64::from(mask.rect[0]) / f64::from(mask.size[0]),
+                f64::from(mask.rect[1]) / f64::from(mask.size[1]),
+            ),
+            (
+                in_capture.0 / f64::from(size.w),
+                in_capture.1 / f64::from(size.h),
+            )
+        );
+    }
+
+    /// **A part's beneath bounds on a grid over the bleed are its own
+    /// cells** (#312): a pane's grid runs across its layers' bleed too, and
+    /// the pane's own part of it is found across that, not across the grid.
+    #[test]
+    fn a_parts_beneath_bounds_on_a_grid_over_the_bleed_are_its_own_cells() {
+        let frame = crate::present::Frame::real(smithay::utils::Rectangle::new(
+            (0, 0).into(),
+            (100, 100).into(),
+        ));
+        // 50 of bleed either side, four cells across, each 50 wide.
+        let part = super::pane_part(
+            smithay::utils::Size::from((100, 100)),
+            crate::style::Bleed {
+                left: 50,
+                right: 50,
+                ..crate::style::Bleed::default()
+            },
+        );
+        let mut points = Vec::new();
+        for y in [0.0, 100.0] {
+            for x in [-50.0, 0.0, 50.0, 100.0, 150.0] {
+                points.extend_from_slice(&[x, y]);
+            }
+        }
+        let grid = crate::warp::Grid {
+            cols: 4,
+            rows: 1,
+            part,
+            points,
+        };
+        let bounds = super::beneath_bounds(&frame, Some(&grid), crate::warp::UnitRect::WHOLE)
+            .expect("bounds");
+        assert_eq!(
+            (bounds.loc.x, bounds.size.w),
+            (0.0, 100.0),
+            "the pane's bounds are {bounds:?}, its shadow's cells and all"
         );
     }
 

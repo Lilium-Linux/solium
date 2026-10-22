@@ -52,7 +52,10 @@ pub(crate) struct PixelUniforms {
     /// enough to be captured at a fraction of it (#307): a frag's on-screen
     /// arithmetic does not move with the resolution.
     pub(crate) size: [f32; 2],
-    /// The subject inside the padded capture, in `uv`.
+    /// The subject inside the padded capture, in `uv`: corner and size.
+    /// For a present's pixels, the pane inside a capture that holds its
+    /// layers' bleed around it (#312, `render::content_in`); its popups'
+    /// whole capture for theirs.
     pub(crate) content: [f32; 4],
     /// The part of the pane's unit square the capture is (u0, v0, u1, v1).
     pub(crate) part: [f32; 4],

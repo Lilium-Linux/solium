@@ -244,6 +244,25 @@ impl UnitRect {
         u1: 1.0,
         v1: 1.0,
     };
+
+    /// This rectangle of the pane's unit square in the texture coordinates
+    /// of a capture of `part`, which run 0 to 1 across the part: what a
+    /// mesh drawn over `part` calls it. Itself in a capture of
+    /// [`Self::WHOLE`], and unchanged against a part with no area, which
+    /// nothing makes.
+    /// `tests::a_rectangle_inside_a_part_is_measured_across_the_part`.
+    pub(crate) fn in_part(self, part: Self) -> Self {
+        let (across, down) = (part.u1 - part.u0, part.v1 - part.v0);
+        if across <= 0.0 || down <= 0.0 {
+            return self;
+        }
+        Self {
+            u0: (self.u0 - part.u0) / across,
+            v0: (self.v0 - part.v0) / down,
+            u1: (self.u1 - part.u0) / across,
+            v1: (self.v1 - part.v0) / down,
+        }
+    }
 }
 
 /// A grid of points over `part` of a pane's unit square, in global logical
@@ -887,6 +906,30 @@ mod tests {
         )
         .expect("a mesh");
         assert!((past.vertices[2].x - (40.0 + 200.0 * 1.3)).abs() < 1e-3);
+    }
+
+    /// **A rectangle inside a part is measured across the part**: the pane
+    /// inside a capture reaching a quarter past it on the left and half past
+    /// it at the bottom, and the pane itself in a capture of the pane.
+    #[test]
+    fn a_rectangle_inside_a_part_is_measured_across_the_part() {
+        use super::UnitRect;
+        let part = UnitRect {
+            u0: -0.25,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.5,
+        };
+        assert_eq!(
+            UnitRect::WHOLE.in_part(part),
+            UnitRect {
+                u0: 0.2,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0 / 1.5,
+            }
+        );
+        assert_eq!(UnitRect::WHOLE.in_part(UnitRect::WHOLE), UnitRect::WHOLE);
     }
 
     /// **A part's bounds on a mesh are its cells'**: the whole mesh's for
