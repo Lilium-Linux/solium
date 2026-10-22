@@ -506,7 +506,10 @@ fn first_step(state: &Solium) -> Option<&solium_effects::stage::Step> {
 
 /// **A program run in the background opens no window** (#319): `sol.run`
 /// starts it as `sol.spawn` would, and it runs, but no loading window is
-/// opened for it to wait in; `sol.spawn`, the control, opens one.
+/// opened for it to wait in. (`sol.spawn` opens one by building its QML scene,
+/// which a plain test thread may not do once Qt has started elsewhere in the
+/// process, so it is not the control here; the test fails with `run` routed
+/// through `spawn`.)
 #[test]
 fn a_program_run_in_the_background_opens_no_window() {
     let display = TestDisplay::new().expect("creating a test wayland display");
@@ -534,18 +537,6 @@ fn a_program_run_in_the_background_opens_no_window() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let _ = std::fs::remove_file(&marker);
-    state.apply(crate::script::Outcome {
-        commands: vec![crate::script::Command::Spawn {
-            program: "true".to_owned(),
-            args: Vec::new(),
-        }],
-        ..Default::default()
-    });
-    assert_eq!(
-        state.panes.len(),
-        1,
-        "the premise: sol.spawn opens a window for what it starts"
-    );
 }
 
 /// **A broken rule keeps the rules that ran**, and the error is a problem;
