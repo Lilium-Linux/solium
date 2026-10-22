@@ -12031,12 +12031,14 @@ end)"#,
                 opacity: None,
                 matrix: None,
                 deform: Some(crate::script::deform_for_test(lua)),
+                client_opacity: None,
                 z: 0.0,
                 pivot: (0.5, 0.5),
                 animation: crate::script::AnimationSpec {
                     duration: std::time::Duration::ZERO,
                     easing: crate::present::Curve::OutCubic,
                 },
+                channels: None,
             }],
             ..Default::default()
         });
