@@ -115,6 +115,32 @@ impl BoundChain {
     }
 }
 
+impl BoundChain {
+    /// Whether `other` runs as this chain does: the same passes, its states'
+    /// included, at the same tier, reach, split and cut, whatever values its
+    /// params give the passes' uniforms. What a slot's capture and held
+    /// targets were made for, so a slot may keep them across the two (#305,
+    /// `state::tests::a_param_that_picks_other_passes_starts_the_slots_afresh`).
+    pub(crate) fn runs_as(&self, other: &Self) -> bool {
+        fn passes(plan: &Plan) -> Plan {
+            let mut plan = plan.clone();
+            for step in plan.steps.iter_mut().chain(
+                plan.states
+                    .iter_mut()
+                    .flat_map(|state| state.steps.iter_mut()),
+            ) {
+                step.uniforms.clear();
+            }
+            plan
+        }
+        passes(&self.plan) == passes(&other.plan)
+            && self.tier == other.tier
+            && self.reach.to_bits() == other.reach.to_bits()
+            && self.split_by == other.split_by
+            && self.cut == other.cut
+    }
+}
+
 /// Every rule's bound chain, by its key.
 /// `state::tests::a_replaced_rule_set_holds_only_its_own_programs`.
 #[derive(Debug, Default)]
