@@ -62,6 +62,14 @@ A link may also give `reach` and `bleed`, in pixels, in place of the
 effect's own. A chain reads as far around its part as its first link
 reaches, and draws as far beyond it as all its links bleed together.
 
+`sol.effects` may be called again at any time, and the rules it hands over
+replace the running ones. When they are the same rules with nothing changed
+but their links' params (an animated radius, say), every slot keeps what it
+captured and only its chain runs again at the new params, so a configuration
+may animate a param by handing its rules over each step. Anything else, a rule
+added or reordered, another effect, or a param that makes an effect run other
+passes, starts every slot afresh.
+
 A pane style may give rules of its own, for the windows it frames, in an
 `effects.lua` beside its `Pane.qml`
 ([pane styles](../qml/panes/README.md#effectslua)). For one part and one slot
