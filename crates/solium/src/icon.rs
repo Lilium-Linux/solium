@@ -387,6 +387,11 @@ extern "C" fn solium_icon_lookup(
     };
     let size = u32::try_from(size).unwrap_or(48);
     let scale = u32::try_from(scale).unwrap_or(1);
+    #[cfg(test)]
+    tests::LOOKED_UP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(name.to_owned());
     resolve(name, size, scale)
         .and_then(|path| path.to_str().map(ToOwned::to_owned))
         .and_then(|path| std::ffi::CString::new(path).ok())
@@ -412,6 +417,9 @@ extern "C" fn solium_icon_lookup_free(path: *mut std::ffi::c_char) {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Every name the image provider asked [`super::solium_icon_lookup`] for.
+    pub(super) static LOOKED_UP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -496,5 +504,38 @@ mod tests {
             lookup(&roots, "Fixture", "vector", 512, 1),
             Some(root.join("Fixture/scalable/apps/vector.svg"))
         );
+    }
+
+    /// **An icon asked for again is not looked up again** (#306): the image
+    /// provider keeps every answer, a miss included, so an `Image` that loads
+    /// the same icon twice, QML's own cache turned off, reaches the theme
+    /// once. Before, every request walked the theme and decoded again.
+    #[test]
+    fn an_icon_asked_for_again_is_not_looked_up_again() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let dir = tmp("again");
+            let file = dir.join("Again.qml");
+            write(
+                &file,
+                "import QtQuick\nItem {\n    property string src: \"\"\n    Image { cache: false; source: parent.src }\n}\n",
+            );
+            crate::qml::start().expect("Qt starts");
+            let mut scene =
+                crate::qml::Scene::for_host(&file, 32, 32, None).expect("the scene builds");
+            let name = "solium-test-asked-for-again";
+            let url = format!("image://solium/icon/{name}?size=17");
+            for source in [url.as_str(), "", url.as_str()] {
+                scene.set_string("src", source);
+                let _ = scene.render();
+            }
+            let asked = LOOKED_UP
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|asked| *asked == name)
+                .count();
+            assert_eq!(asked, 1, "looked up {asked} times");
+            let _ = fs::remove_dir_all(dir);
+        });
     }
 }
