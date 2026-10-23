@@ -20,6 +20,7 @@ const MOC_HEADERS: &[&str] = &[
     "qml/rows.h",
     "qml/keyboard.h",
     "qml/pointer.h",
+    "qml/lock.h",
 ];
 
 fn main() {
@@ -42,6 +43,8 @@ fn main() {
     println!("cargo:rerun-if-changed=qml/pointer.h");
     println!("cargo:rerun-if-changed=qml/icon.cpp");
     println!("cargo:rerun-if-changed=qml/icon.h");
+    println!("cargo:rerun-if-changed=qml/lock.cpp");
+    println!("cargo:rerun-if-changed=qml/lock.h");
 
     // The commit `solium --version` names (#156; `commit::tests`), and empty
     // outside a git checkout, so `env!("BUILD_COMMIT")` is always this build's
@@ -75,6 +78,7 @@ fn main() {
         .file("qml/keyboard.cpp")
         .file("qml/pointer.cpp")
         .file("qml/icon.cpp")
+        .file("qml/lock.cpp")
         .include("qml");
 
     // Qt6Quick pulls in Core, Gui and Qml transitively.
@@ -112,9 +116,10 @@ fn main() {
 
     qt_input_build::include_private_input_headers(&mut build);
 
-    // attached.h, rows.h, keyboard.h and pointer.h declare Q_OBJECT types --
-    // the attached `Solium` object, the rows it hands out and the store they
-    // are kept in, the `Keyboard` singleton, and `Solium.cursor` -- so they
+    // attached.h, rows.h, keyboard.h, pointer.h and lock.h declare Q_OBJECT
+    // types -- the attached `Solium` object, the rows it hands out and the
+    // store they are kept in, the `Keyboard` singleton, `Solium.cursor`, and
+    // the native lock's `Lock`, `SecretField` and `SecretKeypad` -- so they
     // need moc, which host.cpp itself still does not.
     // `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
     // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`,

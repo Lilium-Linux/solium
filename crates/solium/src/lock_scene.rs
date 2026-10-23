@@ -24,9 +24,15 @@
 //! is the fallback.
 //!
 //! The scene is told the fingers on its monitor as Qt touch events, so its
-//! `DragHandler`s and `TapHandler`s work, and nothing else is
-//! (`input::touch`). It is given nothing that could unlock: it shows things,
-//! and only Rust ends the lock (`Solium::unlock_natively`).
+//! `DragHandler`s and `TapHandler`s work (`input::touch`), and the pointer's
+//! motion and presses as Qt mouse events, so its buttons can be clicked
+//! (`Solium::lock_scene_motion`, `Solium::lock_scene_button`). Nothing else
+//! hears either. A press or a finger on a `SecretKeypad` key is the
+//! exception: the compositor finds the key itself, types it into the
+//! password, and the scene hears nothing of it, not even the pointer passing
+//! over the pad (`lock_auth.rs`). Keys never reach the scene at all. It is
+//! given nothing that could unlock: it shows things, and only Rust ends the
+//! lock (`Solium::unlock_natively`).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -41,7 +47,7 @@ use smithay::{
 };
 
 use crate::{
-    qml::hosted::SceneTouch,
+    qml::hosted::{ScenePointer, SceneTouch},
     render::Drawn,
     surface::{Raster, ShellSurface},
 };
@@ -85,6 +91,25 @@ pub(crate) struct LockScenes {
     /// The monitors neither the scene nor the fallback would load on, which
     /// show the backdrop and are not tried again until the next lock.
     failed: HashSet<String>,
+    /// Where the pointer is, as the scenes have been told it.
+    pub(crate) pointer: LockPointer,
+}
+
+/// The pointer at the native lock, as its scenes have been told it.
+#[derive(Debug, Default)]
+pub(crate) struct LockPointer {
+    /// The monitor whose scene last heard the pointer.
+    pub(crate) on: Option<String>,
+    /// The scene a press went to, drawn across its rectangle: it hears the
+    /// pointer wherever it goes until every button is up, as Qt's own
+    /// windows do.
+    pub(crate) held: Option<(String, Rectangle<i32, Logical>)>,
+    /// Whether a press is on a keypad key: its release, and every other
+    /// button until then, goes nowhere.
+    pub(crate) on_pad: bool,
+    /// Whether the scene under the pointer was told it left, because the
+    /// pointer is over its keypad.
+    pub(crate) hidden: bool,
 }
 
 impl LockScenes {
@@ -98,6 +123,7 @@ impl LockScenes {
         if !locked {
             self.instances.clear();
             self.failed.clear();
+            self.pointer = LockPointer::default();
             return;
         }
         let names: Vec<String> = outputs.iter().map(Output::name).collect();
@@ -238,6 +264,40 @@ impl LockScenes {
         if let Some(instance) = self.instances.get_mut(monitor) {
             instance.surface.touch(area, location, event);
         }
+    }
+
+    /// Deliver a pointer event to `monitor`'s scene, drawn across `area`.
+    /// Nothing, on a monitor showing the backdrop.
+    pub(crate) fn pointer_event(
+        &mut self,
+        monitor: &str,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+        event: &ScenePointer,
+    ) {
+        if let Some(instance) = self.instances.get_mut(monitor) {
+            instance.surface.pointer(area, location, event);
+        }
+    }
+
+    /// Tell `monitor`'s scene the pointer left it.
+    pub(crate) fn leave(&mut self, monitor: &str) {
+        if let Some(instance) = self.instances.get_mut(monitor) {
+            instance.surface.leave();
+        }
+    }
+
+    /// The `SecretKeypad` key at `location` on `monitor`'s scene, drawn
+    /// across `area`.
+    pub(crate) fn keypad_at(
+        &self,
+        monitor: &str,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+    ) -> Option<usize> {
+        self.instances
+            .get(monitor)
+            .and_then(|instance| instance.surface.keypad_at(area, location))
     }
 
     /// Show `scene` from the next lock on, or the fallback with `None`.

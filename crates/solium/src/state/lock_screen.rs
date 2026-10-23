@@ -1,6 +1,6 @@
 //! The keyboard while the session is locked: pointing it at the lock surface on the monitor the
 //! user is working on, or at any lock surface, and `settle_focus`'s answer while locked. And the
-//! native lock's scenes, one per monitor.
+//! native lock's scenes, one per monitor, and the pointer at them.
 
 use super::*;
 
@@ -78,5 +78,123 @@ impl Solium {
         let native = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         self.lock_scenes.sync(&outputs, native);
+    }
+
+    /// The monitor under `location`, by name, and where it is drawn.
+    fn lock_monitor_at(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(String, Rectangle<i32, Logical>)> {
+        let output = crate::monitor::at(&self.space, location)?;
+        let area = self.space.output_geometry(&output)?;
+        Some((output.name(), area))
+    }
+
+    /// The pointer moved to `location` while the session is locked. Solium's
+    /// own lock tells the scene under it, or the scene a press went to, as Qt
+    /// does; over a keypad the scene is told the pointer left instead, so not
+    /// even where it hovers is the scene's to know. Nothing, for a lock a
+    /// client holds: smithay gives the pointer to its surfaces.
+    /// `lock_auth::tests::a_press_at_the_native_lock_reaches_its_scene_and_nothing_else`,
+    /// `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`.
+    pub(crate) fn lock_scene_motion(&mut self, location: Point<f64, Logical>) {
+        if !self.lock.as_ref().is_some_and(crate::lock::Lock::is_native) {
+            return;
+        }
+        let event = crate::input::scene_event(self, crate::qml::hosted::PointerKind::Motion);
+        if let Some((monitor, area)) = self.lock_scenes.pointer.held.clone() {
+            self.lock_scenes
+                .pointer_event(&monitor, area, location, &event);
+            self.redraw = true;
+            return;
+        }
+        if self.lock_scenes.pointer.on_pad {
+            return;
+        }
+        let under = self.lock_monitor_at(location);
+        let left = self
+            .lock_scenes
+            .pointer
+            .on
+            .clone()
+            .filter(|was| under.as_ref().is_none_or(|(now, _)| now != was));
+        if let Some(was) = left {
+            self.lock_scenes.leave(&was);
+            self.lock_scenes.pointer.hidden = false;
+        }
+        let Some((monitor, area)) = under else {
+            self.lock_scenes.pointer.on = None;
+            return;
+        };
+        self.lock_scenes.pointer.on = Some(monitor.clone());
+        if self
+            .lock_scenes
+            .keypad_at(&monitor, area, location)
+            .is_some()
+        {
+            if !self.lock_scenes.pointer.hidden {
+                self.lock_scenes.leave(&monitor);
+                self.lock_scenes.pointer.hidden = true;
+            }
+            return;
+        }
+        self.lock_scenes.pointer.hidden = false;
+        self.lock_scenes
+            .pointer_event(&monitor, area, location, &event);
+        self.redraw = true;
+    }
+
+    /// A button pressed or let go at `location` while the session is
+    /// locked, as `scene` tells it, or `None` for a button Qt has no name
+    /// for, which no scene is told. Solium's own lock gives a press on a
+    /// keypad key to the password and its release to nobody; any other press
+    /// goes to the scene under the pointer, and its release to the same
+    /// scene. Nothing, for a lock a client holds.
+    /// `lock_auth::tests::a_press_at_the_native_lock_reaches_its_scene_and_nothing_else`,
+    /// `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`.
+    pub(crate) fn lock_scene_button(
+        &mut self,
+        location: Point<f64, Logical>,
+        scene: Option<crate::qml::hosted::ScenePointer>,
+    ) {
+        if !self.lock.as_ref().is_some_and(crate::lock::Lock::is_native) {
+            return;
+        }
+        let Some(event) = scene else {
+            return;
+        };
+        let pressed = matches!(event.kind, crate::qml::hosted::PointerKind::Press(_));
+        let all_up = self.pointer_buttons == 0;
+        if self.lock_scenes.pointer.on_pad {
+            if !pressed && all_up {
+                self.lock_scenes.pointer.on_pad = false;
+                self.keypad_up();
+            }
+            return;
+        }
+        if let Some((monitor, area)) = self.lock_scenes.pointer.held.clone() {
+            self.lock_scenes
+                .pointer_event(&monitor, area, location, &event);
+            if all_up {
+                self.lock_scenes.pointer.held = None;
+            }
+            self.redraw = true;
+            return;
+        }
+        if !pressed {
+            return;
+        }
+        let Some((monitor, area)) = self.lock_monitor_at(location) else {
+            return;
+        };
+        if let Some(key) = self.lock_scenes.keypad_at(&monitor, area, location) {
+            self.lock_scenes.pointer.on_pad = true;
+            self.keypad_down(key);
+            return;
+        }
+        self.lock_scenes
+            .pointer_event(&monitor, area, location, &event);
+        self.lock_scenes.pointer.held = Some((monitor, area));
+        self.redraw = true;
     }
 }

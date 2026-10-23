@@ -760,6 +760,40 @@ local defaults = {
         -- `swayidle`'s own `before-sleep` keeps working either way; set this
         -- to false only to stop the two overlapping.
         before_sleep = true,
+
+        -- Solium's own lock screen (#281): how it takes and checks a
+        -- password. The password goes to `solium-auth`, a small helper that
+        -- runs PAM's `solium` service; PAM's own rules (pam_faillock) hold
+        -- as well as these.
+        --
+        -- After `attempts` wrong passwords in a row the field is shut for
+        -- `seconds`, then twice as long after each further run of them, up
+        -- to `max_seconds`.
+        lockout = { attempts = 3, seconds = 30, max_seconds = 300 },
+
+        -- Which keyboard layout a password is typed in. "first": the first
+        -- layout that types Latin letters, switched to as the session locks
+        -- and switched back from as it unlocks, so with `us,ru` a password
+        -- is not typed in Cyrillic because Russian was live. "current":
+        -- whatever layout is live.
+        secret_layout = "first",
+
+        -- How long the helper has to answer before it is stopped and the
+        -- password counts as not checked, in milliseconds. A network login
+        -- (sssd, LDAP) can take seconds; pam_unix takes a fraction of one.
+        helper_timeout_ms = 30000,
+
+        -- When the helper cannot answer at all (it is missing, crashed, or
+        -- PAM has no `solium` service), the password typed is tried again
+        -- after `seconds`, then twice as long each time, up to
+        -- `max_seconds`, until it answers or Escape clears the field.
+        retry = { seconds = 2, max_seconds = 60 },
+
+        -- The passcode pad a lock screen can show (`SecretKeypad`), for a
+        -- touchscreen: "digits", a phone's pad; "letters", the same with
+        -- the phone letters under the digits; or "keyboard", the digits and
+        -- the letters a-z.
+        keypad = "digits",
     },
 
     -- X11 windows that are refused a tile, decoration or bar entry outright

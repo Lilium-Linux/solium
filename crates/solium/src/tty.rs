@@ -864,6 +864,8 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             crate::idle::settle(&mut state.solium);
             // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
             crate::logind::settle(&mut state.solium);
+            // The native lock's password check: the one place its yes unlocks.
+            crate::lock_auth::settle(&mut state.solium);
             // And a key held for the scene holding the keyboard repeats, on
             // the same once-a-loop check (Ruling 14).
             // `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`.

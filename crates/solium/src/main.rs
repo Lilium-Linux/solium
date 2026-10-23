@@ -47,6 +47,7 @@ mod keymap;
 mod launch;
 mod layer;
 mod lock;
+mod lock_auth;
 mod lock_scene;
 mod logind;
 mod mat4;

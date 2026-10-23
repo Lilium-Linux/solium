@@ -478,6 +478,24 @@ int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, double y);
  * `qml::hosted::tests::a_left_scene_drops_its_hover`. */
 void solium_qml_scene_pointer_leave(SoliumQmlScene *scene);
 
+/* The `SecretKeypad` key at a point in scene coordinates, counted row by row
+ * from 0, or -1 when no visible keypad is there. Rust asks before a press or
+ * a finger reaches a lock scene, and a press on a key never reaches it.
+ * `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`. */
+int solium_qml_scene_keypad_at(const SoliumQmlScene *scene, double x, double y);
+
+/* The native lock's state for the `Lock` singleton, `SecretField` and
+ * `SecretKeypad`, as one JSON object. 0 when Qt has not started.
+ * `lock_auth::tests::the_fallback_shows_what_is_typed_as_dots`. */
+int solium_qml_lock_publish(const char *json);
+
+/* `Lock.submit()` (1) and `Lock.clear()` (2) since the last call, as bits. */
+int solium_qml_lock_take_requests(void);
+
+/* Every method, signal and property `which` ("lock", "field", "keypad")
+ * declares itself, one per line. For tests. */
+const char *solium_qml_lock_api_for_test(const char *which);
+
 /* The scene's reserve, when it changed since the last take: returns 1 and
  * writes top, right, bottom and left into `edges` (negative is unset). 0
  * when it did not change, or for a scene that is not hosted.

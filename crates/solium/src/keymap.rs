@@ -228,6 +228,24 @@ pub(crate) fn layouts(state: &mut Solium) -> Vec<String> {
     })
 }
 
+/// The first layout of the keymap, zero-based, whose `a` key types a Latin
+/// letter: the one Solium's own lock types a password in under
+/// `lock.secret_layout = "first"` (#281). `None` when no layout does.
+/// `lock_auth::tests::with_us_ru_on_russian_a_password_is_typed_in_latin_and_russian_comes_back`.
+pub(crate) fn first_latin(state: &mut Solium) -> Option<usize> {
+    let keyboard = state.seat.get_keyboard()?;
+    keyboard.with_xkb_state(state, |context| {
+        let xkb = context.xkb().lock().ok()?;
+        // `a` on a PC keyboard, as xkb numbers it: evdev 30, plus 8.
+        let key = smithay::input::keyboard::Keycode::new(38);
+        xkb.layouts().position(|layout| {
+            xkb.raw_syms_for_key_in_layout(key, layout)
+                .iter()
+                .any(|sym| (u32::from('a')..=u32::from('z')).contains(&sym.raw()))
+        })
+    })
+}
+
 /// Everything a script or a shell can ask about the keyboard.
 pub(crate) fn describe(state: &mut Solium) -> State {
     let layouts = layouts(state);

@@ -49,6 +49,9 @@ impl crate::state::Solium {
         // The caret each decoration is told this frame:
         // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
         self.settle_caret();
+        // What Solium's own lock shows of its password: never the password.
+        // `lock_auth::tests::typed_text_never_reaches_the_lock_scene`.
+        crate::lock_auth::publish(self);
         // Apps: scanned once, lazily, on the first call this process ever
         // makes here, and again whenever a reload asked for one
         // (`state/commands.rs`'s `reload_from`). No worker thread and no

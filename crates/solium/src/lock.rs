@@ -173,10 +173,12 @@
 //! events and nothing else (`a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`).
 //!
 //! It is ended only by [`Solium::unlock_natively`], which nothing in Lua, QML
-//! or JavaScript can reach (`no_lua_function_unlocks_a_native_lock`). Its one
-//! caller is logind's `Unlock`, the administrator's way out
-//! (`logind::tests::an_unlock_signal_unlocks_a_native_lock`); an authentication
-//! that succeeded will be the other.
+//! or JavaScript can reach (`no_lua_function_unlocks_a_native_lock`,
+//! `lock_auth::tests::nothing_in_qml_can_unlock_or_read_the_secret`). It has
+//! two callers: `solium-auth` saying yes to the password typed at it
+//! (`lock_auth::settle`), and logind's `Unlock`, the administrator's way out
+//! (`logind::tests::an_unlock_signal_unlocks_a_native_lock`). What is typed at
+//! it, and how it is checked, is `lock_auth.rs`.
 
 use smithay::{
     backend::renderer::element::Id,
@@ -684,11 +686,14 @@ impl Solium {
     /// client may end, or for none.
     ///
     /// `pub(crate)` and reached from nowhere a script, a scene or a client can
-    /// get to: logind's `Unlock` is its caller, and an authentication that
-    /// succeeded will be the other. Not from `locked` on: the administrator's
-    /// way out works on a lock still waiting for a monitor too.
+    /// get to. Its two callers: `lock_auth::settle`, on `solium-auth`'s yes to
+    /// the password typed at the lock, and logind's `Unlock`. Not from
+    /// `locked` on: the administrator's way out works on a lock still waiting
+    /// for a monitor too, and a password typed before every monitor showed
+    /// the lock is still the user's.
     /// `logind::tests::an_unlock_signal_unlocks_a_native_lock`,
-    /// `no_lua_function_unlocks_a_native_lock`.
+    /// `no_lua_function_unlocks_a_native_lock`,
+    /// `lock_auth::tests::a_yes_unlocks_and_a_no_counts_an_attempt`.
     pub(crate) fn unlock_natively(&mut self) {
         if !self.lock.as_ref().is_some_and(Lock::is_native) {
             tracing::info!("a native unlock with no native lock: nothing to do");
@@ -720,6 +725,11 @@ impl Solium {
             native,
             "session locking: `locked` waits for every monitor to show the lock"
         );
+        // A fresh password field, typed in the secret layout if the settings
+        // ask for one: `lock_auth.rs`.
+        if native {
+            self.begin_lock_auth();
+        }
         // After input is taken, so a scene slow to build holds nothing of
         // the session's open: each monitor's scene, or its fallback.
         self.sync_lock_scenes();
@@ -733,8 +743,15 @@ impl Solium {
         // gate in `focus.rs`, and the gate refuses every window for as long as
         // `lock` is `Some`. Cleared after, the session would unlock with the
         // keyboard on nothing.
+        let native = self.lock.as_ref().is_some_and(Lock::is_native);
         self.lock = None;
         self.redraw = true;
+        // Solium's own lock: what was typed is wiped, a check under way is
+        // cancelled, and the layout that was live before the lock is again,
+        // before any window is given the keyboard.
+        if native {
+            self.end_lock_auth();
+        }
         // logind's `LockedHint` follows, and a fresh delay inhibitor for sleep
         // is asked for if `lock.before_sleep` holds one: see `logind.rs`.
         self.logind.locked(false);

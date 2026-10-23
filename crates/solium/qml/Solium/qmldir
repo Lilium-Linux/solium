@@ -9,6 +9,11 @@ Layer 1.0 Layer.qml
 KeyboardPill 1.0 KeyboardPill.qml
 KeyboardPillLayer 1.0 KeyboardPillLayer.qml
 
+# A lock screen's password field (#281): dots and a caret over the native
+# `SecretField`, which is told how many characters there are and nothing
+# else. `Lock`, `SecretField` and `SecretKeypad` are native (`qml/lock.h`).
+SecretInput 1.0 SecretInput.qml
+
 # The groups inside a PaneStyle. Internal because a style writes `insets.top`
 # and `client.shadow.blur` and never names these -- they exist so QML can
 # resolve those paths against a declared type, which is the only reason they

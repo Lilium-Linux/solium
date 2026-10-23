@@ -613,6 +613,10 @@ impl Solium {
                 Command::Lock(settings) => {
                     self.logind.configure(settings, self.lock.is_some());
                 }
+                Command::LockAuth(settings) => {
+                    self.lock_auth.configure(settings);
+                    self.lock_auth_changed();
+                }
                 Command::X11(settings) => {
                     if self.x11 != settings {
                         tracing::debug!(?settings, "which WM_CLASS names are hidden set");

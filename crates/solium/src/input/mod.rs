@@ -67,6 +67,9 @@ enum Action {
     /// A key for the scene holding the keyboard.
     /// `tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`.
     Scene(crate::qml::hosted::SceneKey),
+    /// A key for Solium's own lock's password field, never for a scene.
+    /// `lock_auth::tests::typed_text_never_reaches_the_lock_scene`.
+    Secret(crate::lock_auth::Edit),
 }
 
 /// Route one backend event to the seat.
@@ -246,6 +249,7 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
             state.request = Some(request);
         }
         Some(Some(Action::Scene(key))) => state.deliver_scene_key(key),
+        Some(Some(Action::Secret(edit))) => state.secret_edit(edit),
         _ => {}
     }
 
@@ -310,11 +314,23 @@ fn press(
                 repeats: key_repeats(&handle),
             }));
         }
-        return if sealed {
-            FilterResult::Intercept(None)
-        } else {
-            FilterResult::Forward
-        };
+        if sealed {
+            return FilterResult::Intercept(None);
+        }
+        // Solium's own lock has no surface to forward to: a key is the
+        // password field's, as an edit of the buffer in Rust, and never a
+        // scene's, a client's or a log line's. A key that edits nothing goes
+        // nowhere. `lock_auth::tests::typed_text_never_reaches_the_lock_scene`.
+        if state
+            .lock
+            .as_ref()
+            .is_some_and(crate::lock::Lock::is_native)
+        {
+            return FilterResult::Intercept(
+                crate::lock_auth::edit_for(modifiers, &handle).map(Action::Secret),
+            );
+        }
+        return FilterResult::Forward;
     }
 
     // A scene holding the keyboard (primitive 6). The escape hatches and the
@@ -682,6 +698,10 @@ fn pointer_motion<B: InputBackend>(
         }
         follow_pointer(state, location, pointer.is_grabbed());
         state.finish_scene_motion();
+    } else {
+        // Solium's own lock: its scene hears the pointer, and nothing else.
+        // `lock_auth::tests::a_press_at_the_native_lock_reaches_its_scene_and_nothing_else`.
+        state.lock_scene_motion(location);
     }
 
     let under = state.surface_under(location);
@@ -783,6 +803,8 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
             }
             follow_pointer(state, location, pointer.is_grabbed());
             state.finish_scene_motion();
+        } else {
+            state.lock_scene_motion(location);
         }
         pointer.motion(
             state,
@@ -1171,6 +1193,10 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         time: event.time_msec(),
     };
     if state.lock.is_some() {
+        // Solium's own lock: the press is its scene's, or a keypad key's,
+        // and nothing else hears it.
+        // `lock_auth::tests::a_press_at_the_native_lock_reaches_its_scene_and_nothing_else`.
+        state.lock_scene_button(location, scene);
         forward_button(state, &pointer, &forward);
         return;
     }

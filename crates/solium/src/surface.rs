@@ -362,6 +362,18 @@ impl ShellSurface {
         hit
     }
 
+    /// The `SecretKeypad` key at a point in compositor coordinates, of the
+    /// scene drawn across `area`.
+    /// `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`.
+    pub(crate) fn keypad_at(
+        &self,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+    ) -> Option<usize> {
+        let local = location - area.loc.to_f64();
+        self.scene.keypad_at(local.x, local.y)
+    }
+
     /// The pointer left this scene. `qml::hosted::tests::a_left_scene_drops_its_hover`.
     pub(crate) fn leave(&mut self) {
         self.scene.leave();
