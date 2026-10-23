@@ -106,7 +106,9 @@ Mesh transforms use cached captures of the window's surface tree. A capture
 keeps a stable identity and is redrawn when its inputs change. It is taken at
 the resolution the transform draws the window at, in steps down to an eighth,
 so a window flying into an icon is not captured at full size while it is small;
-a present's pixel shader is still told the full size the capture stands for. Popups have
+a present's pixel shader is still told the full size the capture stands for. A
+capture holds what the window's style paints past it, its layers' bleed, and
+its mesh is built over that larger rectangle. Popups have
 separate captures so they can extend beyond the window while following its
 transform. `render.rs`, `clip.rs`, `warp/`, `capture.rs` and `pool.rs` contain
 these paths.

@@ -128,7 +128,9 @@ pub(crate) struct Under {
     pub(crate) opacity: f32,
 }
 
-/// A part's rest rectangle in its pane's capture, at the capture's scale.
+/// A part's rest rectangle in its pane's capture, at the capture's scale,
+/// `outer` the rectangle the capture holds: the pane grown by its layers'
+/// bleed (`render::bled`).
 /// `tests::a_beneath_mask_is_the_part_in_the_captures_pixels`.
 #[expect(
     clippy::cast_possible_truncation,

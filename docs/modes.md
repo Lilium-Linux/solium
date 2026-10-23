@@ -166,7 +166,9 @@ are looked up again on every frame, so the effect follows its target as it
 moves; a rectangle is fixed. A target that no longer exists draws the window
 flat, and an effect name this build does not have is logged and ignored.
 Animating to a deform starts from none, and `sol.present_clear` animates back
-out of one.
+out of one. A tilted or deformed window takes its frame with it, and what its
+pane style paints past the window too, a shadow around it or a title above
+it: they bend as one picture.
 
 `sol.present_group` takes `opacity` and the rotation keys too, applied on top of
 each member's own, and a third argument, `{ duration = ..., easing = ... }`,

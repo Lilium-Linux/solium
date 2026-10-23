@@ -11947,7 +11947,10 @@ end)"#,
             &fixture.state,
             pane,
             geometry,
-            crate::warp::UnitRect::WHOLE,
+            (
+                crate::warp::UnitRect::WHOLE,
+                crate::render::content_in(crate::warp::UnitRect::WHOLE),
+            ),
             (200, 100).into(),
         )
     }
