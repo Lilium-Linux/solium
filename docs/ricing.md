@@ -1092,6 +1092,150 @@ above.
 following whatever is actually locked, for a greeter or `loginctl` itself to
 read.
 
+### Your own lock screen
+
+Solium has a lock screen of its own (#281), drawn by a QML scene on every
+monitor, with the password checked by `solium-auth`, a small helper that runs
+PAM's `solium` service. The scene shows things and nothing more: the password
+never reaches it, and nothing in it can unlock. Until the rest of #281 lands,
+nothing takes it yet: logind's `Lock` (`loginctl lock-session`) still runs
+`lock.command`. The settings below already decide what it shows.
+
+```lua
+return {
+    lock = {
+        scene = "Mine",          -- qml/lock/Mine.qml, yours first, then Solium's
+        prompt_on = "pointer",   -- or "primary", or a monitor's name
+        exit_ms = 250,           -- the exit over the desktop, at most 600
+    },
+}
+```
+
+`scene` is a path (`"~/my-lock.qml"`), or a name looked for as
+`qml/lock/<name>.qml` in `~/.config/solium/qml/` and then in the shipped QML
+(`lock_scene::tests::a_bare_name_is_looked_for_in_the_users_directory_first`).
+The default, `"Lock"`, is the shipped one, `crates/solium/qml/lock/Lock.qml`:
+the date and a big clock over the dimmed wallpaper, the user and the password
+field on one monitor, and on a touchscreen a swipe up that follows the finger
+to bring up a passcode pad. Copy it to `~/.config/solium/qml/lock/Lock.qml`
+and it is the one used.
+
+`native` says whether Solium's own lock is the session's at all: true unless
+`command` names a locker. While it is, each monitor's scene is built as the
+session starts and kept between locks, so the first locked frame is already
+the scene, and while you work it is kept quiet: drawn by nothing, its Timers
+and animations stopped
+(`lock_scene::tests::a_kept_scene_neither_ticks_nor_wakes_while_unlocked`).
+Run yours only while `Lock.locked`, as the example below does: a Timer or a
+loop Qt runs for you, in a `Behavior` or a `Transition`, is not stopped for
+you.
+
+A scene that is missing, will not load, or fails while it runs is replaced by
+the shipped one, and that by a fallback compiled into Solium, never by the
+desktop, and the log says which and why
+(`lock_scene::tests::a_broken_scene_falls_back_to_the_shipped_one_and_then_to_the_fallback`,
+`lock_scene::tests::a_scene_that_fails_at_run_time_is_swapped_down_the_chain`).
+A scene you mend is tried again at the next lock.
+
+A lock scene has the same `import Solium` as any other, and adds:
+
+- `Lock`, read-only: `state` (`"idle"`, `"prompting"`, `"checking"`,
+  `"failed"`, `"lockedOut"`, `"unavailable"`, `"unlocking"`), `locked`,
+  `attempts`, `retryAfter` (seconds, while locked out or retrying),
+  `message`, `user` (`name`, `realName`, `avatar`), `promptOn` (the
+  monitor `prompt_on` names) and `exitMs`. `Lock.submit()` checks what was
+  typed, as Return does, and `Lock.clear()` empties it, as Escape does; both
+  carry nothing.
+- `SecretInput`, the password field: a dot for each character typed and a
+  caret. Keys go into it whichever item has focus, with no click first.
+  Its colours, sizes and spacing are properties. `SecretField` is the
+  native item under it, for a field drawn your own way.
+- `SecretKeypad`, a passcode pad whose keys are your `delegate`, laid out
+  as `lock.keypad` says. Solium finds the key under a press or a finger and
+  types it; your scene is told only that a key was pressed
+  (`keyPressed()`), never which.
+
+While locked, a lock scene reads only what a lock may show: the monitors, the
+keyboard layout, and its own clock. `Windows`, `Workspaces`, `Apps`,
+`Folder` and `Solium.status` read empty until the unlock
+(`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`). Keys never
+reach the scene; the pointer and fingers on its monitor do, as Qt events, so
+its buttons and swipes work.
+
+When the password is right, Solium unlocks at once: the keyboard and the
+pointer are the desktop's from that moment. The scene stays over the desktop
+for `exit_ms` more with `Lock.state` reading `"unlocking"`, so it can lift or
+fade itself away, and at that bound it is gone, whatever it is doing
+(`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`).
+`prompt_on` picks the one monitor whose scene shows the field; the others
+show theirs without it
+(`lock_auth::tests::the_prompt_is_on_the_monitor_prompt_on_names_and_no_other`).
+
+A minimal one: the time, the field on the prompt's monitor, what went wrong,
+and a fade at the unlock.
+
+```qml
+// ~/.config/solium/qml/lock/Mine.qml
+import QtQuick
+import Solium
+
+Rectangle {
+    id: root
+    color: "#101014"
+    readonly property bool prompt: Lock.promptOn === Solium.monitor.name
+
+    // The time, read each minute while locked, and afresh at every lock.
+    property date now: new Date()
+    Timer {
+        interval: 60000
+        running: Lock.locked
+        repeat: true
+        onTriggered: root.now = new Date()
+    }
+    Connections {
+        target: Lock
+        function onLockedChanged() {
+            if (Lock.locked) {
+                root.now = new Date()
+                root.opacity = 1
+            }
+        }
+        function onStateChanged() {
+            if (Lock.state === "unlocking")
+                fade.restart()
+        }
+    }
+    NumberAnimation {
+        id: fade
+        target: root; property: "opacity"; to: 0
+        duration: Math.min(160, Lock.exitMs)
+    }
+
+    Column {
+        anchors.centerIn: parent
+        spacing: 16
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: Qt.formatTime(root.now, "hh:mm")
+            color: "white"
+            font.pixelSize: 96
+        }
+        SecretInput {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: root.prompt
+        }
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: root.prompt
+            color: "#bbbbbb"
+            text: Lock.state === "failed" ? "Wrong password"
+                : Lock.state === "lockedOut" ? "Try again in " + Lock.retryAfter + " s"
+                : Lock.message
+        }
+    }
+}
+```
+
 ### One workspace per screen, or one for the desk
 
 Each monitor has its own workspace in view by default: `super+2` switches the

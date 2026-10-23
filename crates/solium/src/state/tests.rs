@@ -19224,16 +19224,17 @@ end)"#,
                 );
             }
 
-            /// **A scene that fails to load shows the fallback on its monitor,
+            /// **A scene that fails to load is stood in for on its monitor --
+            /// by the shipped scene, and by the fallback if that fails too --
             /// and the session stays locked.**
             #[test]
-            fn a_scene_that_fails_to_load_shows_the_fallback_and_the_session_stays_locked() {
+            fn a_scene_that_fails_to_load_is_stood_in_for_and_the_session_stays_locked() {
                 crate::qml::qt_test::on_the_qt_thread(|| {
                     crate::qml::start().expect("Qt starts");
                     let mut session = Session::new();
                     session.app.open(&mut session.display, &mut session.state);
                     let broken = scene_file("broken", "import QtQuick\nItem { not QML at all }\n");
-                    session.state.lock_scenes.use_scene(Some(broken));
+                    session.state.lock_scenes.use_scene(broken);
 
                     session.state.lock_natively();
                     session.show_all();
@@ -19242,8 +19243,8 @@ end)"#,
                     let output = session.output(0);
                     assert_eq!(
                         session.state.lock_scenes.shown_on(&output),
-                        Shown::Fallback,
-                        "a scene that will not load is not replaced by the fallback"
+                        Shown::Shipped,
+                        "a scene that will not load is not replaced by the shipped one"
                     );
                     assert!(
                         natively_locked(&session),
@@ -19461,7 +19462,7 @@ end)"#,
                     let first = session.output(0);
                     assert_eq!(
                         session.state.lock_scenes.shown_on(&first),
-                        Shown::Fallback,
+                        Shown::Shipped,
                         "the premise: the first monitor has its scene"
                     );
 
@@ -33021,12 +33022,15 @@ end)
                         "the premise: `sol.on(\"touch\")` hears a finger"
                     );
 
-                    let lock_scene = std::env::temp_dir().join(format!(
-                        "solium-native-lock-touch-{}.qml",
-                        std::process::id()
-                    ));
+                    // In a directory of its own: a scene's reload watch is
+                    // its whole directory, so one loose in the temporary
+                    // directory would be another test's edit.
+                    let lock_directory = std::env::temp_dir()
+                        .join(format!("solium-native-lock-touch-{}", std::process::id()));
+                    std::fs::create_dir_all(&lock_directory).expect("a directory for the scene");
+                    let lock_scene = lock_directory.join("Lock.qml");
                     std::fs::write(&lock_scene, TAPS).expect("writing the lock scene");
-                    desk.state.lock_scenes.use_scene(Some(lock_scene.clone()));
+                    desk.state.lock_scenes.use_scene(lock_scene);
                     desk.state.lock_natively();
                     desk.state
                         .lock_scenes
@@ -33069,7 +33073,7 @@ end)
                         desk.state.lock.is_none(),
                         "the native unlock did not unlock"
                     );
-                    let _ = std::fs::remove_file(lock_scene);
+                    let _ = std::fs::remove_dir_all(lock_directory);
                 });
             }
 
@@ -33143,7 +33147,7 @@ end)
                         .expect("a directory for the lock scene");
                     let lock_scene = lock_directory.join("Lock.qml");
                     std::fs::write(&lock_scene, PRESSES).expect("writing the lock scene");
-                    desk.state.lock_scenes.use_scene(Some(lock_scene.clone()));
+                    desk.state.lock_scenes.use_scene(lock_scene);
                     desk.state.lock_natively();
                     desk.state
                         .lock_scenes
@@ -33167,7 +33171,7 @@ end)
                     };
                     assert_eq!(
                         desk.state.lock_scenes.shown_on(output),
-                        crate::lock_scene::Shown::Scene,
+                        crate::lock_scene::Shown::Own,
                         "the premise: the lock shows its scene"
                     );
                     assert_eq!(

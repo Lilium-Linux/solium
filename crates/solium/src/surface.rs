@@ -303,7 +303,7 @@ impl ShellSurface {
     /// Whether the scene failed to render the last time it was asked to, and
     /// has not rendered since: a scene that fails at run time. Drawn, it shows
     /// its last good picture or nothing.
-    /// `lock_scene::tests::a_scene_that_fails_at_run_time_is_swapped_for_the_fallback`.
+    /// `lock_scene::tests::a_scene_that_fails_at_run_time_is_swapped_down_the_chain`.
     pub(crate) fn failing(&self) -> bool {
         match &self.backing {
             Backing::Memory { .. } => self.failing,
@@ -466,6 +466,13 @@ impl ShellSurface {
             }
         }
         bag.clone_into(&mut self.properties);
+    }
+
+    /// Keep the scene but stop it ticking, or start it again: see
+    /// `qml::Scene::set_quiet`. A native lock's scenes while the session is
+    /// unlocked.
+    pub(crate) fn set_quiet(&mut self, quiet: bool) {
+        self.scene.set_quiet(quiet);
     }
 
     /// Fail as a render that failed does, for a test that has no renderer.

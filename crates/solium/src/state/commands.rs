@@ -617,6 +617,14 @@ impl Solium {
                     self.lock_auth.configure(settings);
                     self.lock_auth_changed();
                 }
+                Command::LockScene(settings) => {
+                    self.lock_scenes.configure(settings);
+                    // Built, dropped or rebuilt ahead of the next lock now,
+                    // and `Lock.promptOn` and `Lock.exitMs` told.
+                    self.sync_lock_scenes();
+                    self.lock_auth.touch();
+                    self.lock_auth_changed();
+                }
                 Command::X11(settings) => {
                     if self.x11 != settings {
                         tracing::debug!(?settings, "which WM_CLASS names are hidden set");

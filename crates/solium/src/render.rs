@@ -5244,6 +5244,28 @@ pub(crate) fn elements(
         ));
     }
 
+    // Solium's own lock has just ended: the session is unlocked, input is the
+    // desktop's, and the desktop is drawn below; the lock's scene for this
+    // monitor plays its exit over it, under only the pointer, until
+    // `lock.exit_ms` is up, and is drawn no more after that whatever it is
+    // doing (`lock_scene.rs`). A frame is asked for every frame of it, so the
+    // bound is met even by a scene that does nothing.
+    // `tests::the_lock_s_exit_is_drawn_over_the_session_and_under_the_pointer`.
+    if state.lock.is_none()
+        && state.lock_scenes.exiting(now)
+        && let Some(output) = state.output_for(screen)
+    {
+        let painted = state.lock_scenes.element(
+            renderer,
+            &output,
+            smithay::utils::Rectangle::from_size(screen.size),
+            now,
+            crate::surface::Raster::at(scale),
+        );
+        state.redraw = true;
+        elements.extend(painted.element);
+    }
+
     // Locked, so this is the whole frame. Everything below here belongs to the
     // session -- windows, bars, the shell, the tweaks panel -- and none of it
     // is drawn. Returning early is the point: a filter further down is
@@ -10050,6 +10072,30 @@ pub(crate) mod tests {
             "the drag icon is emitted at byte {icon}, above the lock screen's \
              early return at {returned} -- a locked session would draw a \
              client's surface over the lock screen"
+        );
+    }
+
+    /// **The lock's exit is drawn over the session and under the pointer**:
+    /// `elements` emits it after the pointer, which is above everything, and
+    /// before the lock's own branch and everything of the session's, so the
+    /// desktop is under it and nothing of the session's is over it. Like the
+    /// test above, this pins only the order of the statements.
+    #[test]
+    fn the_lock_s_exit_is_drawn_over_the_session_and_under_the_pointer() {
+        let source = include_str!("render.rs");
+        let at = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("`elements` no longer has {needle:?}"))
+        };
+        let pointer = at("elements.extend(cursor(");
+        let exit = at("&& state.lock_scenes.exiting(now)");
+        let lock = at("if let Some(lock) = state.lock.as_ref() {");
+        let icon = at("elements.extend(drag_icon(");
+        assert!(
+            pointer < exit && exit < lock && lock < icon,
+            "the exit is drawn at byte {exit}, not between the pointer ({pointer}) \
+             and the session ({lock}, {icon})"
         );
     }
 

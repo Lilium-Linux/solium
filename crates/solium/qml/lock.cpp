@@ -39,6 +39,8 @@ void SoliumLock::publish(const QJsonObject &next)
     const QString message = next.value(QStringLiteral("message")).toString(m_message);
     const QVariantMap user = next.value(QStringLiteral("user")).toObject().toVariantMap();
     const QString prompt_on = next.value(QStringLiteral("promptOn")).toString(m_prompt_on);
+    const bool locked = next.value(QStringLiteral("locked")).toBool(m_locked);
+    const int exit_ms = next.value(QStringLiteral("exitMs")).toInt(m_exit_ms);
 
     const bool state_moved = state != m_state;
     const bool attempts_moved = attempts != m_attempts;
@@ -46,12 +48,16 @@ void SoliumLock::publish(const QJsonObject &next)
     const bool message_moved = message != m_message;
     const bool user_moved = user != m_user;
     const bool prompt_moved = prompt_on != m_prompt_on;
+    const bool locked_moved = locked != m_locked;
+    const bool exit_moved = exit_ms != m_exit_ms;
     m_state = state;
     m_attempts = attempts;
     m_retry_after = retry_after;
     m_message = message;
     m_user = user;
     m_prompt_on = prompt_on;
+    m_locked = locked;
+    m_exit_ms = exit_ms;
 
     if (attempts_moved) {
         emit attemptsChanged();
@@ -67,6 +73,12 @@ void SoliumLock::publish(const QJsonObject &next)
     }
     if (prompt_moved) {
         emit promptOnChanged();
+    }
+    if (exit_moved) {
+        emit exitMsChanged();
+    }
+    if (locked_moved) {
+        emit lockedChanged();
     }
     // Last, so a handler of the state reads the counts and the line that go
     // with it.

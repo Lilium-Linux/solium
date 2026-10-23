@@ -159,9 +159,16 @@ protocol handlers live in `state/` and the corresponding protocol modules.
 
 The installed session wrapper integrates with systemd, D-Bus and XDG autostart.
 Logind Lock and PrepareForSleep handling can run the configured locker; an
-external locker uses session-lock. Configure `lock.command`: a native preview
-lock screen is not shipped yet. Idle notifications, inhibitors and monitor
-power are distinct from locking.
+external locker uses session-lock. The session lock can also be Solium's own
+(#281): a QML scene per monitor (`lock.scene`), built at session start and
+kept quiet between locks, with the shipped scene and then a compiled-in
+fallback standing in for one that fails, never the desktop. The password is
+typed into Rust and checked by the `solium-auth` PAM helper; only its yes,
+or logind's `Unlock`, ends the lock, and the scene then plays its exit over
+the unlocked desktop for at most `lock.exit_ms`. Taking that lock from
+logind's `Lock`, idle and a key is #281's last step; until then `Lock` runs
+`lock.command`. Idle notifications, inhibitors and monitor power are distinct
+from locking.
 
 Programs launched by Solium inherit the environment saved before Qt modifies
 it, with the session's display and activation variables added. The current

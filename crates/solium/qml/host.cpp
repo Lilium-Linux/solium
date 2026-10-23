@@ -74,6 +74,8 @@
 // because this file now *installs* the handler rather than only feeding it.
 #include <QtCore/QtMessageHandler>
 #include <QtCore/QPauseAnimation>
+#include <QtCore/QPointer>
+#include <QtCore/QSet>
 #include <QtCore/QSize>
 #include <QtCore/QSocketNotifier>
 #include <QtCore/QUrl>
@@ -137,6 +139,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -343,6 +346,12 @@ struct SoliumQmlScene
     double scale = 1.0;
     /* Whether the scene has changed since it was last rendered. */
     bool dirty = true;
+    /* Whether the scene is kept but not shown: a native lock's scene while
+     * the session is unlocked. Its Timers are stopped and its animations
+     * paused (`hushed`, to start again when it is shown), and its changes
+     * wake nothing: see solium_qml_scene_set_quiet. */
+    bool quiet = false;
+    QList<QPointer<QObject>> hushed;
     /* Backing store for the last value handed out by take_string. */
     QByteArray taken;
     /* The last press, as Qt keeps it to make a double-click of the next one:
@@ -957,7 +966,11 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     const auto mark_dirty = [scene]() {
         if (!scene->dirty) {
             scene->dirty = true;
-            ++g_dirtied;
+            // A quiet scene is drawn by nothing, so a change to it is no
+            // reason for a frame: it is drawn as it is when it is shown.
+            if (!scene->quiet) {
+                ++g_dirtied;
+            }
         }
     };
     QObject::connect(scene->control, &QQuickRenderControl::renderRequested,
@@ -2373,6 +2386,111 @@ extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene)
         return 0;
     }
     return animation_running(scene->object) ? 1 : 0;
+}
+
+/* Every object of the scene once: its QObject children, and the visual
+ * children that are not also those (a Repeater's delegates; see
+ * animation_running). */
+template <typename Each>
+static void visit_scene(QObject *object, QSet<QObject *> &seen, const Each &each)
+{
+    if (object == nullptr || seen.contains(object)) {
+        return;
+    }
+    seen.insert(object);
+    each(object);
+    for (QObject *child : object->children()) {
+        visit_scene(child, seen, each);
+    }
+    if (auto *item = qobject_cast<QQuickItem *>(object)) {
+        for (QQuickItem *child : item->childItems()) {
+            visit_scene(child, seen, each);
+        }
+    }
+}
+
+/* Whether `animation` can be paused from outside: a root animation, not one
+ * inside a group, a Behavior or a Transition, which Qt runs itself and
+ * refuses `paused` on (qtdeclarative v6.11.2, qquickanimation.cpp,
+ * QQuickAbstractAnimation::setPaused). */
+static bool pausable(const QObject *animation)
+{
+    const QObject *parent = animation->parent();
+    return parent == nullptr
+        || !(parent->inherits("QQuickAnimationGroup") || parent->inherits("QQuickBehavior")
+             || parent->inherits("QQuickTransition"));
+}
+
+/*
+ * Keep a scene but stop it ticking, or start it again.
+ *
+ * A native lock's scenes are built at session start and kept between locks,
+ * so the first locked frame is the scene's (`lock_scene.rs`). While the
+ * session is unlocked nothing draws them, and nothing of them may wake the
+ * compositor either: every QML Timer that is running is stopped and every
+ * root animation that is running is paused, and remembered, to be started
+ * again when the scene is shown. A change to a quiet scene marks it dirty, so
+ * it is drawn fresh when it is shown, and asks for no frame.
+ *
+ * What this cannot reach is what Qt runs itself: an animation in a Behavior or
+ * a Transition, which runs once when its property changes, and Timers a
+ * binding starts again while the scene is quiet. A lock scene ties those to
+ * `Lock.locked`, as the shipped ones do.
+ * `lock_scene::tests::a_kept_scene_neither_ticks_nor_wakes_while_unlocked`.
+ */
+extern "C" void solium_qml_scene_set_quiet(SoliumQmlScene *scene, int quiet)
+{
+    if (scene == nullptr || scene->object == nullptr) {
+        return;
+    }
+    if (quiet == 0) {
+        scene->quiet = false;
+        const QList<QPointer<QObject>> hushed = std::exchange(scene->hushed, {});
+        for (const QPointer<QObject> &each : hushed) {
+            if (each.isNull()) {
+                continue;
+            }
+            if (each->inherits("QQmlTimer")) {
+                each->setProperty("running", true);
+            } else {
+                each->setProperty("paused", false);
+            }
+        }
+        return;
+    }
+    scene->quiet = true;
+    QSet<QObject *> seen;
+    visit_scene(scene->object, seen, [scene](QObject *object) {
+        if (object->inherits("QQmlTimer")) {
+            if (object->property("running").toBool()) {
+                object->setProperty("running", false);
+                scene->hushed.append(QPointer<QObject>(object));
+            }
+        } else if (object->inherits("QQuickAbstractAnimation") && pausable(object)) {
+            if (object->property("running").toBool() && !object->property("paused").toBool()) {
+                object->setProperty("paused", true);
+                scene->hushed.append(QPointer<QObject>(object));
+            }
+        }
+    });
+}
+
+/* Whether anything in the scene ticks: a QML Timer running, or an animation
+ * running unpaused. For the tests that a quiet scene does not.
+ * `lock_scene::tests::a_kept_scene_neither_ticks_nor_wakes_while_unlocked`. */
+extern "C" int solium_qml_scene_ticking(const SoliumQmlScene *scene)
+{
+    if (scene == nullptr || scene->object == nullptr) {
+        return 0;
+    }
+    bool ticking = false;
+    QSet<QObject *> seen;
+    visit_scene(scene->object, seen, [&ticking](QObject *object) {
+        if (object->inherits("QQmlTimer") && object->property("running").toBool()) {
+            ticking = true;
+        }
+    });
+    return ticking || animation_running(scene->object) ? 1 : 0;
 }
 
 extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)

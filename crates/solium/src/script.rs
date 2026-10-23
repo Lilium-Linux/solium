@@ -673,6 +673,9 @@ pub(crate) enum Command {
     /// `secret_layout`, `helper_timeout_ms`, `retry` and `keypad` (#281). See
     /// `crate::lock_auth::Settings`.
     LockAuth(crate::lock_auth::Settings),
+    /// What Solium's own lock shows: `sol.lock`'s `native`, `scene`,
+    /// `prompt_on` and `exit_ms` (#281). See `crate::lock_scene::Settings`.
+    LockScene(crate::lock_scene::Settings),
     /// Which `WM_CLASS` names are refused a tile, decoration or bar entry
     /// outright: `sol.x11`, from `config.x11` (#221). See
     /// `crate::xwayland::Settings`.
@@ -790,6 +793,7 @@ impl Command {
             | Self::Input(_)
             | Self::Lock(_)
             | Self::LockAuth(_)
+            | Self::LockScene(_)
             | Self::X11(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
@@ -1341,6 +1345,93 @@ fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
                 "lock.keypad is \"digits\", \"letters\" or \"keyboard\"; keeping the default, \"digits\""
             ),
         },
+    }
+    settings
+}
+
+/// `sol.lock`'s settings for what Solium's own lock shows (#281): `native`
+/// (true or false; unset, true unless `command` names a locker, as
+/// `has_command` says), `scene` (a path or a name, not empty), `prompt_on`
+/// (`"primary"`, `"pointer"` or a monitor's name) and `exit_ms` (a whole number
+/// of milliseconds, 0 for none, at most `lock_scene::EXIT_MAX_MS`, a longer one
+/// taken as that). Each one absent keeps its default; each one of the wrong
+/// kind is named in the log and keeps its default.
+/// `tests::sol_lock_parses_what_the_native_lock_shows`.
+fn lock_scene_settings(
+    options: Option<&mlua::Table>,
+    has_command: bool,
+) -> crate::lock_scene::Settings {
+    use crate::lock_scene::{EXIT_MAX_MS, EXIT_MS, PromptOn, SHIPPED, Settings};
+    let mut settings = Settings {
+        native: !has_command,
+        ..Settings::default()
+    };
+    let Some(options) = options else {
+        return settings;
+    };
+    let text = |value: &Value| -> Option<String> {
+        value
+            .as_string()
+            .and_then(|text| text.to_str().ok().map(|text| text.to_owned()))
+    };
+    match options.get::<Value>("native") {
+        Ok(Value::Boolean(on)) => settings.native = on,
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(other) => tracing::warn!(
+            value = describe(&other),
+            "lock.native is true or false; keeping the default, true unless lock.command is set"
+        ),
+    }
+    match options.get::<Value>("scene") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(value) => match text(&value).filter(|scene| !scene.is_empty()) {
+            Some(scene) => settings.scene = scene,
+            None => tracing::warn!(
+                value = describe(&value),
+                "lock.scene is a path or a name, like \"{SHIPPED}\"; keeping the default"
+            ),
+        },
+    }
+    match options.get::<Value>("prompt_on") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(value) => match text(&value).and_then(|name| PromptOn::named(&name)) {
+            Some(prompt_on) => settings.prompt_on = prompt_on,
+            None => tracing::warn!(
+                value = describe(&value),
+                "lock.prompt_on is \"primary\", \"pointer\" or a monitor's name; keeping the default, \"pointer\""
+            ),
+        },
+    }
+    match options.get::<Value>("exit_ms") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(value) => {
+            let whole = match &value {
+                Value::Integer(number) => Some(*number),
+                Value::Number(number) if number.fract() == 0.0 && number.is_finite() => {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "a whole number, bounded below"
+                    )]
+                    let whole = *number as i64;
+                    Some(whole)
+                }
+                _ => None,
+            };
+            match whole.and_then(|ms| u64::try_from(ms).ok()) {
+                Some(ms) if ms > u64::from(EXIT_MAX_MS) => {
+                    tracing::warn!(
+                        ms,
+                        "lock.exit_ms is at most {EXIT_MAX_MS}: input is the desktop's from the unlock on; taking {EXIT_MAX_MS}"
+                    );
+                    settings.exit = std::time::Duration::from_millis(u64::from(EXIT_MAX_MS));
+                }
+                Some(ms) => settings.exit = std::time::Duration::from_millis(ms),
+                None => tracing::warn!(
+                    value = describe(&value),
+                    "lock.exit_ms is a whole number of milliseconds, 0 or more; keeping the default, {EXIT_MS}"
+                ),
+            }
+        }
     }
     settings
 }
@@ -4085,14 +4176,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // not a string, nothing runs on `Lock` or before sleep, which is the
     // default — see `logind.rs` for why. `before_sleep` is true or false,
     // default true; anything else is named in the log and the default kept.
-    // The rest is how Solium's own lock checks a password (#281):
-    // `lock_auth_settings`.
+    // The rest is how Solium's own lock checks a password (#281),
+    // `lock_auth_settings`, and what it shows, `lock_scene_settings`.
     sol.set(
         "lock",
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let mut settings = crate::logind::Settings::default();
             let auth = options.as_ref().map(lock_auth_settings).unwrap_or_default();
-            if let Some(options) = options {
+            if let Some(options) = options.as_ref() {
                 match options.get::<Value>("command") {
                     Ok(Value::String(command)) => match command.to_str() {
                         Ok(command) => settings.command = Some(command.to_owned()),
@@ -4115,9 +4206,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     ),
                 }
             }
+            let scene = lock_scene_settings(options.as_ref(), settings.command.is_some());
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Lock(settings));
                 pending.commands.push(Command::LockAuth(auth));
+                pending.commands.push(Command::LockScene(scene));
             })
         })?,
     )?;
@@ -9376,6 +9469,109 @@ mod tests {
         );
     }
 
+    /// `sol.lock`'s settings for what Solium's own lock shows (#281): every
+    /// one read, `native` true by default and false by default once
+    /// `command` names a locker, `exit_ms` held to its maximum, and a value
+    /// of the wrong kind named in the log with the default kept. See
+    /// `crate::lock_scene::Settings`.
+    #[test]
+    fn sol_lock_parses_what_the_native_lock_shows() {
+        use crate::lock_scene::{EXIT_MAX_MS, PromptOn, Settings};
+        use std::time::Duration;
+        let directory = std::env::temp_dir().join("solium-script-test-lock-scene");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::LockScene(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::LockScene")
+        };
+
+        assert_eq!(
+            configured(
+                r#"sol.lock({
+                    native = false,
+                    scene = "~/my-lock.qml",
+                    prompt_on = "DP-2",
+                    exit_ms = 400,
+                })"#
+            ),
+            Settings {
+                native: false,
+                scene: "~/my-lock.qml".to_owned(),
+                prompt_on: PromptOn::Monitor("DP-2".to_owned()),
+                exit: Duration::from_millis(400),
+            }
+        );
+        assert_eq!(
+            configured(r#"sol.lock({ prompt_on = "primary", exit_ms = 0 })"#),
+            Settings {
+                prompt_on: PromptOn::Primary,
+                exit: Duration::ZERO,
+                ..Settings::default()
+            }
+        );
+        assert_eq!(
+            configured("sol.lock({ exit_ms = 5000 })").exit,
+            Duration::from_millis(u64::from(EXIT_MAX_MS)),
+            "an exit past the maximum was not held to it"
+        );
+        assert!(
+            !configured(r#"sol.lock({ command = "swaylock -f" })"#).native,
+            "a locker named, and Solium's own lock is still the default"
+        );
+        assert!(
+            configured(r#"sol.lock({ command = "swaylock -f", native = true })"#).native,
+            "`native = true` beside a locker was not taken"
+        );
+        // Said nothing, two ways, and said everything of the wrong kind.
+        for source in [
+            "sol.lock()",
+            "sol.lock({})",
+            r#"sol.lock({ native = "yes", scene = "", prompt_on = 3, exit_ms = -5 })"#,
+            "sol.lock({ scene = 7, exit_ms = 12.5 })",
+        ] {
+            assert_eq!(configured(source), Settings::default(), "{source:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped configuration's settings for what the native lock shows
+    /// match `lock_scene::Settings`'s own default.**
+    #[test]
+    fn the_shipped_configuration_s_lock_scene_settings_match_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-lock-scene-default", "return {}")
+        else {
+            return;
+        };
+        let settings: Vec<crate::lock_scene::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::LockScene(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            settings,
+            [crate::lock_scene::Settings::default()],
+            "the shipped init.lua did not hand config.lock over as it says"
+        );
+    }
+
     /// **The shipped configuration's `lock` table matches `logind::Settings`'s
     /// own default**, the same parity
     /// `the_shipped_configuration_turns_the_screens_off_after_ten_minutes`
@@ -13673,11 +13869,13 @@ mod shipped {
 
     /// **Every QML scene a shipped script names is one that ships.**
     ///
-    /// Two lookups, because there are two kinds of scene and a script writes
-    /// them the same way: a scripted surface's, found on the QML search path by
-    /// `scripted::find_scene`, and a loading scene's, which is a name under
-    /// `qml/loading`. A scene that is not there is an `ERROR` and a hole in the
-    /// picture -- `sol.surface` says "no such QML scene" and draws nothing.
+    /// Three lookups, because there are three kinds of scene and a script
+    /// writes them the same way: a scripted surface's, found on the QML search
+    /// path by `scripted::find_scene`; a loading scene's, which is a name under
+    /// `qml/loading`; and the lock's (`lock.scene`), a name under `qml/lock`
+    /// (`lock_scene::find_scene`). A scene that is not there is an `ERROR` and
+    /// a hole in the picture -- `sol.surface` says "no such QML scene" and
+    /// draws nothing, and a lock shows its stand-in.
     ///
     /// The resolved path has to land inside the shipped QML directory. Without
     /// that, a developer with their own `~/.config/solium/qml/wallpaper.qml`
@@ -13694,10 +13892,12 @@ mod shipped {
                 .join("loading")
                 .join(format!("{name}.qml"))
                 .is_file();
+            let lock = crate::lock_scene::find_scene(&name, None, &shipped.join("lock"))
+                .is_some_and(|path| path.starts_with(&shipped) && path.is_file());
             assert!(
-                surface || loading,
+                surface || loading || lock,
                 "{file}:{line} names scene {name:?}, and there is no {name} in \
-                 {} or in its loading directory",
+                 {}, its loading directory or its lock directory",
                 shipped.display()
             );
         }
