@@ -329,7 +329,7 @@ fn preferred_mode(connector: &connector::Info) -> Option<DrmMode> {
 /// The hardware session. `place` says whether this is the user's graphical
 /// session (`--tty --session`) or a start by hand (`--tty`); see `session.rs`.
 pub(crate) fn run(place: crate::session::Place) -> Result<()> {
-    let mut event_loop: EventLoop<State> =
+    let mut event_loop: EventLoop<'static, State> =
         EventLoop::try_new().context("creating the event loop")?;
     // First, so that a SIGTERM from logind at any point from here on stops
     // the loop, and the session ends through `Session::end` below. If the
@@ -523,6 +523,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         device_outputs: HashMap::new(),
         drm: None,
         signal: event_loop.get_signal(),
+        handle: event_loop.handle(),
         active: true,
         chain: None,
     };
@@ -955,6 +956,13 @@ struct Screen {
     /// stamped, for `late`.
     /// `pacing::tests::a_flip_from_idle_on_a_cea_1080p60_mode_is_judged_by_its_blank`.
     blank: Duration,
+    /// When this screen's clients were last told they may draw, on the
+    /// `wall_clock`: by a flip, or after a pass that queued nothing. What
+    /// the next answer to such a pass is paced by ([`answer_in`]).
+    told: Option<Duration>,
+    /// A timer is armed to tell this screen's clients they may draw
+    /// ([`State::answer_unqueued`]), so another pass arms none.
+    answering: bool,
 }
 
 impl std::fmt::Debug for Screen {
@@ -1013,6 +1021,9 @@ pub(crate) struct State {
     /// frame queued in that render is chained to it.
     /// `pacing::tests::a_chained_frame_that_skipped_a_vblank_is_one_late`.
     chain: Option<(crtc::Handle, crate::pacing::Flip)>,
+    /// The loop, for the timers that tell a screen's clients they may draw
+    /// after a pass that queued nothing there ([`State::answer_unqueued`]).
+    handle: LoopHandle<'static, State>,
 }
 
 impl State {
@@ -1178,6 +1189,8 @@ impl State {
             lit: Lit::On,
             queued: None,
             blank,
+            told: None,
+            answering: false,
         });
         true
     }
@@ -1704,15 +1717,19 @@ impl State {
                     false
                 }
             };
-            // A first frame held to the clear colour draws the same nothing on
-            // every pass after its first flip, so nothing is queued and no
-            // flip comes to tell this screen's clients to draw: told here,
-            // throttled as a flip's are, as the nested backend tells them on
-            // every pass (`tests::a_held_pass_that_queued_nothing_tells_its_clients`;
-            // the call needs a GPU, and no test reaches it).
-            if owes_frame_callbacks(prepared.held, queued) {
-                self.solium
-                    .send_frames_on(&output, wall_clock(), frame_interval(&output));
+            // A pass that queued nothing has no flip coming to tell this
+            // screen's clients they may draw, so it tells them itself, a
+            // refresh after they were last told: a commit that carried no new
+            // buffer (a client asking only for its frame callback, as
+            // Firefox's vsync does), damage nothing on screen shows, or a
+            // first frame held to the clear colour. Told only on a flip, such
+            // a client waits until something else flips the screen, and its
+            // next picture with it.
+            // `state::tests::real_client::lock_focus::frames::a_commit_that_draws_nothing_is_still_told_when_it_may_draw`,
+            // `tests::a_pass_that_queued_nothing_tells_its_clients_a_refresh_after_the_last`;
+            // the timer needs a GPU, and no test reaches it.
+            if !queued {
+                self.answer_unqueued(index);
             }
         }
 
@@ -1856,13 +1873,71 @@ impl State {
         //
         // Each screen's own layer and lock surfaces as well, told by that
         // screen alone (`a_layer_surface_is_not_told_to_draw_by_a_monitor_it_is_not_on`).
-        for screen in &self.screens {
+        for screen in &mut self.screens {
             if self.solium.power.is_off(&screen.output) {
                 continue;
             }
             self.solium
                 .send_frames_on(&screen.output, now, frame_interval(&screen.output));
+            screen.told = Some(now);
         }
+    }
+
+    /// Tell screen `index`'s clients they may draw after a pass that queued
+    /// no frame there, when [`answer_in`] says: at once, or from a timer a
+    /// refresh after they were last told. One timer a screen at a time, so a
+    /// client committing nothing on every pass is told once a refresh.
+    fn answer_unqueued(&mut self, index: usize) {
+        let Some(screen) = self.screens.get_mut(index) else {
+            return;
+        };
+        if screen.answering {
+            return;
+        }
+        let interval = frame_interval(&screen.output);
+        let now = wall_clock();
+        let Some(delay) = answer_in(false, screen.told, now, interval) else {
+            return;
+        };
+        if !delay.is_zero() {
+            let crtc = screen.crtc;
+            let armed = self.handle.insert_source(
+                Timer::from_duration(delay),
+                move |_, (), state: &mut State| {
+                    state.answer_due(crtc);
+                    TimeoutAction::Drop
+                },
+            );
+            match armed {
+                Ok(_) => {
+                    screen.answering = true;
+                    return;
+                }
+                // Told now rather than not at all: a client told a little
+                // early draws a frame early, one never told stops drawing.
+                Err(err) => tracing::warn!(?err, "could not arm a screen's frame callbacks"),
+            }
+        }
+        self.solium.send_frames_on(&screen.output, now, interval);
+        screen.told = Some(now);
+    }
+
+    /// The timer [`State::answer_unqueued`] armed for the screen on `crtc`
+    /// is due: its clients are told, unless a frame queued since will tell
+    /// them at its flip, the screen has gone off (the dark pass tells them,
+    /// see `power.rs`), or the session is away.
+    fn answer_due(&mut self, crtc: crtc::Handle) {
+        let Some(screen) = self.screens.iter_mut().find(|screen| screen.crtc == crtc) else {
+            return;
+        };
+        screen.answering = false;
+        if screen.pending || !self.active || self.solium.power.is_off(&screen.output) {
+            return;
+        }
+        let now = wall_clock();
+        self.solium
+            .send_frames_on(&screen.output, now, frame_interval(&screen.output));
+        screen.told = Some(now);
     }
 }
 
@@ -2430,8 +2505,27 @@ fn nothing_in_flight(pending: impl IntoIterator<Item = bool>) -> bool {
 /// Whether a screen's pass owes its clients their frame callbacks itself: a
 /// pass the first frame's gate held that queued nothing, so no flip will
 /// send them. `tests::a_held_pass_that_queued_nothing_tells_its_clients`.
-fn owes_frame_callbacks(held: bool, queued: bool) -> bool {
-    held && !queued
+/// How long after `now` a screen's pass tells its clients they may draw:
+/// never, for a pass that `queued` a frame, whose flip tells them; otherwise
+/// a refresh (`interval`) after its clients were last `told`, at once when
+/// that is past or they never were, and never more than a refresh away
+/// whichever way the wall clock jumped. So a client that asks for its frame
+/// callback with a commit that draws nothing is told at the display's rate,
+/// as a flip would tell it, and not on every pass the commit causes.
+/// `tests::a_pass_that_queued_nothing_tells_its_clients_a_refresh_after_the_last`,
+/// `state::tests::real_client::lock_focus::frames::a_commit_that_draws_nothing_is_still_told_when_it_may_draw`.
+pub(crate) fn answer_in(
+    queued: bool,
+    told: Option<Duration>,
+    now: Duration,
+    interval: Duration,
+) -> Option<Duration> {
+    if queued {
+        return None;
+    }
+    Some(told.map_or(Duration::ZERO, |told| {
+        (told + interval).saturating_sub(now).min(interval)
+    }))
 }
 
 #[cfg(test)]
@@ -2669,24 +2763,42 @@ mod tests {
         assert!(nothing_in_flight([]));
     }
 
-    /// **A held pass that queued nothing tells its screen's clients to
-    /// draw**: the first frame held to the clear colour is queued once, and
-    /// after its flip each held pass draws the same nothing, queues no frame,
-    /// and so no flip comes to send the frame callbacks; the pass sends them
-    /// itself, throttled as a flip's are. A queued frame's flip sends them,
-    /// and a pass not held that queued nothing is as before the gate.
+    /// **A pass that queued nothing tells its screen's clients to draw, a
+    /// refresh after they were last told**: whatever queued nothing (a
+    /// commit with no new buffer, a first frame held to the clear colour),
+    /// no flip comes to send the frame callbacks, so the pass sends them,
+    /// at the display's rate and not on every pass. A queued frame's flip
+    /// sends them.
     #[test]
-    fn a_held_pass_that_queued_nothing_tells_its_clients() {
-        assert!(super::owes_frame_callbacks(true, false));
-        assert!(
-            !super::owes_frame_callbacks(true, true),
+    fn a_pass_that_queued_nothing_tells_its_clients_a_refresh_after_the_last() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let refresh = ms(16);
+        assert_eq!(
+            super::answer_in(true, Some(ms(0)), ms(5), refresh),
+            None,
             "its flip tells them"
         );
-        assert!(
-            !super::owes_frame_callbacks(false, false),
-            "a pass not held changed"
+        assert_eq!(
+            super::answer_in(false, None, ms(5), refresh),
+            Some(Duration::ZERO),
+            "never told: told at once"
         );
-        assert!(!super::owes_frame_callbacks(false, true));
+        assert_eq!(
+            super::answer_in(false, Some(ms(0)), ms(5), refresh),
+            Some(ms(11)),
+            "told a refresh after the last"
+        );
+        assert_eq!(
+            super::answer_in(false, Some(ms(0)), ms(40), refresh),
+            Some(Duration::ZERO),
+            "a refresh has passed: told at once"
+        );
+        assert_eq!(
+            super::answer_in(false, Some(ms(1_000)), ms(5), refresh),
+            Some(refresh),
+            "a wall clock that went back holds it no more than a refresh"
+        );
     }
 
     #[test]
