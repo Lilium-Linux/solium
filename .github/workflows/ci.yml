@@ -31,7 +31,8 @@ jobs:
       # The rest is `dev/Containerfile`'s list, minus `foot` -- a terminal is
       # for looking at a running compositor by hand and there is nobody here to
       # look. Smithay links against the system Wayland, input and session
-      # stacks, so all of it is needed to compile rather than to run.
+      # stacks, so all of it is needed to compile rather than to run; `pam` is
+      # the libpam.so.0 solium-auth links by name (#281), never pam-devel.
       - name: System dependencies
         run: |
           dnf install -y --setopt=install_weak_deps=False \
@@ -39,7 +40,8 @@ jobs:
             wayland-devel libinput-devel systemd-devel libseat-devel \
             libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
             libdrm-devel \
-            qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel
+            qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
+            pam
 
       - uses: actions/checkout@v5
 
@@ -93,7 +95,7 @@ jobs:
             libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
             libdrm-devel \
             qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
-            python3
+            pam python3
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 

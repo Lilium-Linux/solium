@@ -24,6 +24,12 @@ solium-effects = { path = "../effects" }
 # windows arranges the boxes in the preview. See crates/layout.
 solium-layout = { path = "../layout" }
 
+# The lock screen's password check (#281): the protocol the `solium-auth`
+# helper speaks and the zeroised `Secret`, both sides of which live there so
+# they are tested together. Only the helper binary links PAM; this does not.
+# See `src/auth.rs`.
+solium-auth = { path = "../solium-auth" }
+
 # Wayland plumbing, input and backends. Rendering is Smithay's GLES2 renderer
 # -- see docs/spikes/2026-08-27-vulkan-on-smithay.md for why, and for what a
 # Vulkan backend would now have to replace.

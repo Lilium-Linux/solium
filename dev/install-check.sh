@@ -3,9 +3,11 @@
 # Does dev/install.sh install, check and uninstall cleanly?
 #
 # A full install into a DESTDIR under /tmp, with --session-dir under /tmp too,
-# then every file it put there (solium-session, the systemd units and the
-# portal configuration included), the sudo lines it printed (run without sudo, since they point into
-# /tmp), `--check` from the staged copy, and an uninstall that leaves nothing
+# then every file it put there (solium-session, the solium-auth helper, the PAM
+# service file, the systemd units and the portal configuration included), the
+# sudo lines it printed (the session file's run without sudo, since it points
+# into /tmp; the PAM file's, which names /etc, only read), `--check` from the
+# staged copy, and an uninstall that leaves nothing
 # behind. Before and around that, the refusals: paths it
 # cannot print safely, a link it would delete through, a Solium running from
 # the binary (one started during the build included), and a check that fails
@@ -150,11 +152,13 @@ DESTDIR="$work/link-d" "$install_sh" --uninstall --session-dir "$sessions" >/dev
 # above look, and share/solium still resolves into the checkout. A stand-in
 # checkout under $work, since the real one is what a failure would delete.
 fake_root="$work/checkout"
-mkdir -p "$fake_root/dev/session" "$fake_root/target/install/release" "$fake_root/inside"
+mkdir -p "$fake_root/dev/session" "$fake_root/dev/pam" "$fake_root/target/install/release" "$fake_root/inside"
 cp "$install_sh" "$fake_root/dev/install.sh"
 cp "$root/dev/session/"* "$fake_root/dev/session/"
+cp "$root/dev/pam/solium" "$fake_root/dev/pam/solium"
 printf '#!/bin/sh\nexit 1\n' >"$fake_root/target/install/release/solium"
-chmod +x "$fake_root/target/install/release/solium"
+cp "$fake_root/target/install/release/solium" "$fake_root/target/install/release/solium-auth"
+chmod +x "$fake_root/target/install/release/solium" "$fake_root/target/install/release/solium-auth"
 mkdir -p "$(dirname "$work/link-c$prefix")"
 ln -s "$fake_root/inside" "$work/link-c$prefix"
 refuses_through_link link-c "a prefix that resolves into the checkout" "$work/link-c" \
@@ -181,15 +185,19 @@ check "bin/solium is executable" [ -x "$dest/bin/solium" ]
 check "bin/solium is the release build" cmp -s "$dest/bin/solium" "$root/target/install/release/solium"
 check "bin/solium-session is executable" [ -x "$dest/bin/solium-session" ]
 check "  and a copy of dev/session/solium-session" cmp -s "$dest/bin/solium-session" "$root/dev/session/solium-session"
+check "libexec/solium-auth is executable" [ -x "$dest/libexec/solium-auth" ]
+check "  and the release build" cmp -s "$dest/libexec/solium-auth" "$root/target/install/release/solium-auth"
+check "share/solium/solium.pam is a copy of dev/pam/solium" cmp -s "$share/solium.pam" "$root/dev/pam/solium"
+check "  mode 644" [ "$(stat -c %a "$share/solium.pam" 2>/dev/null)" = 644 ]
 check "share/solium/qml is a copy of crates/solium/qml" diff -r "$root/crates/solium/qml" "$share/qml"
 check "share/solium/lua is a copy of crates/solium/lua" diff -r "$root/crates/solium/lua" "$share/lua"
 check "share/solium/effects is a copy of crates/solium/effects" diff -r "$root/crates/solium/effects" "$share/effects"
 check "a file left by an earlier install is gone" [ ! -e "$share/qml/removed-since.qml" ]
 check "nothing staged is a symlink" [ -z "$(find "$destdir" -type l)" ]
-# The binary, solium-session, the session file, three configuration files and
-# the record of them.
-expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 7))
-check "exactly those files, solium-session, the session file, the units, the portal choice and their record ($expected_files)" \
+# The binary, solium-session, the helper, the session file, the PAM file, three
+# configuration files and the record of them.
+expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 9))
+check "exactly those files, solium-session, the helper, the session and PAM files, the units, the portal choice and their record ($expected_files)" \
     [ "$(count_files "$destdir")" -eq "$expected_files" ]
 for entry in "${config_files[@]}"; do
     name="${entry%%:*}"
@@ -223,12 +231,15 @@ check "  and is the only line that differs from dev/session/solium.desktop" \
     diff <(grep -v '^Exec=' "$root/dev/session/solium.desktop") <(grep -v '^Exec=' "$staged")
 check "install.sh wrote nothing into --session-dir itself" [ ! -e "$sessions" ]
 
-echo "the printed sudo line"
+echo "the printed sudo lines"
 mapfile -t lines < <(grep -E '^  sudo install -Dm644 ' "$work/install.log")
 expected="  sudo install -Dm644 $staged $sessions/solium.desktop"
-check "exactly one sudo line is printed" [ "${#lines[@]}" -eq 1 ]
-check "  and it is install -Dm644 <staged> <session-dir>/solium.desktop" \
+check "exactly two sudo lines are printed" [ "${#lines[@]}" -eq 2 ]
+check "  the first install -Dm644 <staged> <session-dir>/solium.desktop" \
     [ "${lines[0]:-}" = "$expected" ]
+# Not run: it names /etc/pam.d, which this check never writes.
+check "  the second install -Dm644 <staged solium.pam> /etc/pam.d/solium" \
+    [ "${lines[1]:-}" = "  sudo install -Dm644 $share/solium.pam /etc/pam.d/solium" ]
 # Only the line just checked is run: any other could name any path.
 if [[ "${lines[0]:-}" == "$expected" ]]; then
     read -ra command <<<"${lines[0]#  sudo }"
@@ -264,6 +275,8 @@ check "reads the staged init.lua" grep -qx "checking $real_share/lua/init.lua" "
 check "resolves its assets to its own share/solium" \
     grep -q "shipped assets root=$real_share\$" "$work/check.out"
 check "loads the bindings" grep -q '^  ok: [0-9]* binding(s)' "$work/check.out"
+check "finds its own libexec/solium-auth" \
+    grep -qx "  solium-auth  $(realpath "$dest/libexec/solium-auth")" "$work/check.out"
 check "install.sh ran the same check and said so" grep -q -- "--check passed" "$work/install.log"
 check "install.sh names the session log" grep -q "solium/session.log" "$work/install.log"
 check "install.sh names the uninstall command" \
@@ -346,9 +359,11 @@ nc_root="$work/no-check-checkout"
 mkdir -p "$nc_root/dev" "$nc_root/crates/solium" "$nc_root/target/install/release"
 cp "$install_sh" "$nc_root/dev/install.sh"
 cp -R "$root/dev/session" "$nc_root/dev/session"
+cp -R "$root/dev/pam" "$nc_root/dev/pam"
 cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" "$nc_root/crates/solium/"
 printf '#!/bin/sh\nexit 1\n' >"$nc_root/target/install/release/solium"
-chmod +x "$nc_root/target/install/release/solium"
+cp "$nc_root/target/install/release/solium" "$nc_root/target/install/release/solium-auth"
+chmod +x "$nc_root/target/install/release/solium" "$nc_root/target/install/release/solium-auth"
 DESTDIR="$work/no-check" "$nc_root/dev/install.sh" --no-build --no-check --prefix /usr \
     >"$work/no-check.log" 2>&1
 check "install exits 0 without running the binary" [ $? -eq 0 -a -x "$work/no-check/usr/bin/solium" ]
@@ -406,6 +421,10 @@ check "install exits 0, with a ~ in DESTDIR and a broken XDG_CONFIG_HOME" [ "$st
 [[ "$status" -eq 0 ]] || tail -20 "$work/system.log"
 check "bin/solium and bin/solium-session are in /usr/bin" \
     [ -x "$sys/usr/bin/solium" -a -x "$sys/usr/bin/solium-session" ]
+check "solium-auth is in /usr/libexec" [ -x "$sys/usr/libexec/solium-auth" ]
+check "the PAM service file is /etc/pam.d/solium, a copy of dev/pam/solium" \
+    cmp -s "$root/dev/pam/solium" "$sys/etc/pam.d/solium"
+check "  mode 644" [ "$(stat -c %a "$sys/etc/pam.d/solium" 2>/dev/null)" = 644 ]
 check "the QML and Lua are copies in /usr/share/solium" \
     diff -r "$root/crates/solium/qml" "$sys_share/qml"
 check "  both of them" diff -r "$root/crates/solium/lua" "$sys_share/lua"
@@ -424,10 +443,10 @@ for entry in "solium-session.target:lib/systemd/user" "solium-autostart.target:l
     check "  mode 644" [ "$(stat -c %a "$path" 2>/dev/null)" = 644 ]
 done
 check "nothing went into XDG_CONFIG_HOME" [ ! -e "$sys$broken" ]
-check "share/solium has no session file and no checksums" \
-    [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/config.sha256" ]
-check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 6)))" \
-    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 6))" ]
+check "share/solium has no session file, no PAM file and no checksums" \
+    [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/solium.pam" -a ! -e "$sys_share/config.sha256" ]
+check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 8)))" \
+    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 8))" ]
 check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
 check "--check passed, using the staged /usr/share/solium" \
     grep -qF -- "--check passed (ok: " "$work/system.log"
@@ -439,6 +458,8 @@ check "  its units in /usr/local/lib/systemd/user" \
     [ -f "$work/system-local/usr/local/lib/systemd/user/solium-session.target" ]
 check "  its session file in /usr/local/share/wayland-sessions" \
     grep -qx "Exec=/usr/local/bin/solium-session" "$work/system-local/usr/local/share/wayland-sessions/solium.desktop"
+check "  its helper in /usr/local/libexec, and its PAM file still in /etc/pam.d" \
+    [ -x "$work/system-local/usr/local/libexec/solium-auth" -a -f "$work/system-local/etc/pam.d/solium" ]
 DESTDIR="$work/system-local" "$install_sh" --uninstall --prefix /usr/local >/dev/null 2>&1
 DESTDIR="$work/system-refused" "$install_sh" --no-build --prefix /usr --session-dir "$sessions" \
     >"$work/system-refused.log" 2>&1
@@ -455,9 +476,10 @@ echo "the Fedora package (dev/rpm/solium.spec)"
 spec="$root/dev/rpm/solium.spec"
 spell() {
     sed -e 's|%{_bindir}|/usr/bin|g' -e 's|%{_datadir}|/usr/share|g' \
-        -e 's|%{_userunitdir}|/usr/lib/systemd/user|g' -e 's|%{_prefix}|/usr|g'
+        -e 's|%{_userunitdir}|/usr/lib/systemd/user|g' -e 's|%{_prefix}|/usr|g' \
+        -e 's|%{_libexecdir}|/usr/libexec|g' -e 's|%{_sysconfdir}|/etc|g'
 }
-macros='%{_bindir} %{_datadir} %{_userunitdir} %{_prefix}'
+macros='%{_bindir} %{_datadir} %{_userunitdir} %{_prefix} %{_libexecdir} %{_sysconfdir}'
 if command -v rpm >/dev/null && [ "$(rpm --eval '%{_userunitdir}')" != '%{_userunitdir}' ]; then
     check "rpm's macros are the table's" [ "$(rpm --eval "$macros")" = "$(spell <<<"$macros")" ]
 else
@@ -469,6 +491,7 @@ while IFS= read -r line; do
     case "$line" in
         "" | "#"* | "%license "* | "%doc "*) ;;
         "%dir "*) dirs+=("${line#%dir }") ;;
+        "%config(noreplace) "*) entries+=("${line#%config(noreplace) }") ;;
         *) entries+=("$line") ;;
     esac
 done < <(awk '/^%files$/ { on = 1; next } on && /^%(changelog|package|files)/ { on = 0 } on' "$spec" | spell)
@@ -531,6 +554,17 @@ for program in Xwayland flock; do
         check "Requires $pkg, which has /usr/bin/$program" requires "$pkg"
     else
         echo "  skip  /usr/bin/$program is not installed here"
+    fi
+done
+# The lock screen's password check: PAM's modules and configuration (rpm finds
+# libpam.so.0 itself, but not what it loads), and the service dev/pam/solium
+# includes.
+check "dev/pam/solium includes the login service" grep -qE '^auth[[:space:]]+include[[:space:]]+login$' "$root/dev/pam/solium"
+for file in "$(rpm --eval '%{_libdir}' 2>/dev/null)/security/pam_unix.so" /etc/pam.d/login; do
+    if pkg="$(owner "$file")" && [[ -n "$pkg" ]]; then
+        check "Requires $pkg, which has $file" requires "$pkg"
+    else
+        echo "  skip  $file is not installed here"
     fi
 done
 check "Recommends xdg-desktop-portal, which reads lilium-portals.conf" recommends xdg-desktop-portal

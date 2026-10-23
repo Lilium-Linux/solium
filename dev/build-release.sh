@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Build the release binary that is installed or packaged:
-# target/install/release/solium.
+# Build the release binaries that are installed or packaged:
+# target/install/release/solium, and target/install/release/solium-auth, the
+# helper its lock screen checks a password with (#281).
 #
 # In the build container, through the shared build lock, with its memory
 # capped. dev/install.sh builds through this, and so does dev/rpm.sh, so a
@@ -56,6 +57,7 @@ done
 # staged install, and dev/rpm.sh for the unpacked package.
 mount="/solium-src"
 built="$root/target/install/release/solium"
+built_helper="$root/target/install/release/solium-auth"
 
 command -v podman >/dev/null || die "podman is not installed, and the build runs in a container"
 podman image exists "$image" \
@@ -71,7 +73,7 @@ flock "$lock" podman run --rm --memory="$memory" --memory-swap="$memory" \
     -e CARGO_TARGET_DIR="$mount/target/install" \
     -e PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
     -w "$mount" "$image" \
-    sh -c "nice -n 19 ionice -c 3 cargo build --release -j$jobs -p solium" \
+    sh -c "nice -n 19 ionice -c 3 cargo build --release -j$jobs -p solium -p solium-auth" \
     || status=$?
 if [[ $status -eq 137 ]]; then
     die "the build container was killed (exit 137: out of its $memory). Re-run with --jobs 1"
@@ -79,3 +81,4 @@ elif [[ $status -ne 0 ]]; then
     die "the build failed (exit $status)"
 fi
 [[ -x "$built" ]] || die "the build finished and left no binary at $built"
+[[ -x "$built_helper" ]] || die "the build finished and left no binary at $built_helper"

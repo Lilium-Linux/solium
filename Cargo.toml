@@ -4,6 +4,7 @@ members = [
     "crates/effects",
     "crates/layout",
     "crates/solium",
+    "crates/solium-auth",
     "crates/wl-probe",
 ]
 # dev/wirecheck is a hardware harness, not part of the compositor: it needs a
