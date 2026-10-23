@@ -604,6 +604,7 @@ function sol.problems() end
 ---fails on it.
 ---@class sol.EffectsOptions
 ---@field rules? sol.Rule[] The rules; left out, none.
+---@field load? string[] Effect folders to load with the configuration, before anything plays them: what your `sol.present` deforms will name, which nothing else names up front, so the first one finds its folder compiled rather than drawing the window flat. Each a folder's name; a bad one refuses the set.
 ---@field sandbox? { load_ms?: number, memory_mib?: integer } What an effect's own Lua may spend as it loads: `load_ms` for each call, shared by the checks a `mesh` is put through at load (100 by default, 10 to 5000), and `memory_mib` of memory (16 by default, 1 to 512). A folder past either is named by `sol.problems()` and not loaded; changing either loads every effect again.
 ---@field limits? { params?: integer } How many numbers a geometry or a pixels effect's params may be once packed (8 by default, 1 to 64); one with more is named by `sol.problems()`, never cut.
 ---@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when a reload finds its folder changed while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with; a reload that leaves the folder as it was changes nothing, even one that changes `sandbox`). A deform may say either for itself.

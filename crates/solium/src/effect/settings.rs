@@ -21,6 +21,7 @@ pub(crate) const KEYS: &[&str] = &[
     "xray",
     "memo",
     "motion_hz",
+    "load",
 ];
 
 /// Everything under `effects` that is not a rule or a transition.
@@ -29,6 +30,11 @@ pub(crate) struct Settings {
     pub(crate) sandbox: Caps,
     pub(crate) limits: Limits,
     pub(crate) present: Present,
+    /// `effects.load`: folders loaded with the configuration, before anything
+    /// plays them -- what a configuration's presents will name, which nothing
+    /// else names up front (#300).
+    /// `tests::effects_load_is_a_list_of_names`.
+    pub(crate) load: Vec<String>,
     /// `effects.xray` (Ruling F29): what T2 effects read as the backdrop.
     /// `script::tests::sol_effects_reads_xray_and_memo`.
     pub(crate) xray: crate::effect::xray::XrayConfig,
@@ -52,6 +58,7 @@ impl Default for Settings {
             sandbox: Caps::default(),
             limits: Limits::default(),
             present: Present::default(),
+            load: Vec::new(),
             xray: crate::effect::xray::XrayConfig::default(),
             memo: crate::effect::memo::MemoConfig::default(),
             motion_hz: MOTION_HZ_DEFAULT,
@@ -395,6 +402,7 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
     if motion_hz != 0.0 && !MOTION_HZ.contains(&motion_hz) {
         return Err("`effects.motion_hz` is 0, or a number from 10 to 1000".to_owned());
     }
+    let wanted = load_names(options)?;
     Ok(Settings {
         sandbox: Caps {
             load: Duration::from_secs_f64(load / 1000.0),
@@ -402,10 +410,36 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
         },
         limits: Limits { params },
         present: Present { failed, on_reload },
+        load: wanted,
         xray,
         memo,
         motion_hz,
     })
+}
+
+/// `effects.load`: a list of effect names, each one an effect's name
+/// (`host::is_name`), or the whole set refused naming the key.
+/// `tests::effects_load_is_a_list_of_names`.
+fn load_names(options: &Tree) -> Result<Vec<String>, String> {
+    const SHAPE: &str = "`effects.load` is a list of effect names, such as { \"genie\" }";
+    let Some(tree) = options.field("load") else {
+        return Ok(Vec::new());
+    };
+    let Tree::Table { list, fields } = tree else {
+        return Err(SHAPE.to_owned());
+    };
+    if !fields.is_empty() {
+        return Err(SHAPE.to_owned());
+    }
+    list.iter()
+        .map(|item| match item {
+            Tree::Text(name) if crate::effect::host::is_name(name) => Ok(name.clone()),
+            Tree::Text(name) => Err(format!(
+                "`effects.load` names effects by their folder's name, lower-case letters, digits, `-` and `_`; got {name:?}"
+            )),
+            _ => Err(SHAPE.to_owned()),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -527,6 +561,43 @@ mod tests {
         ] {
             let refused = super::parse(&tree(lua)).expect_err(lua);
             assert!(refused.contains(says), "{lua}: {refused}");
+        }
+    }
+
+    /// **`effects.load` is a list of names** (#300): read in order, empty
+    /// when left out, and refused naming the key when it is not a list of
+    /// effect names.
+    #[test]
+    fn effects_load_is_a_list_of_names() {
+        let lua = mlua::Lua::new();
+        let read = |source: &str| {
+            let table: mlua::Table = lua.load(source).eval().expect("a table");
+            let tree = Tree::from_lua(&mlua::Value::Table(table))
+                .expect("a tree")
+                .expect("a table is a tree");
+            super::parse(&tree)
+        };
+        assert_eq!(
+            read("return {}").expect("defaults").load,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            read("return { load = { 'mobile-flight', 'genie' } }")
+                .expect("two names")
+                .load,
+            vec!["mobile-flight".to_owned(), "genie".to_owned()]
+        );
+        for (bad, says) in [
+            ("return { load = 'genie' }", "a list of effect names"),
+            ("return { load = { 3 } }", "a list of effect names"),
+            (
+                "return { load = { name = 'genie' } }",
+                "a list of effect names",
+            ),
+            ("return { load = { '../genie' } }", "by their folder's name"),
+        ] {
+            let refused = read(bad).expect_err(bad);
+            assert!(refused.contains(says), "{bad}: {refused}");
         }
     }
 }

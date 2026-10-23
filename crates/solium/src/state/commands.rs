@@ -1253,6 +1253,9 @@ impl Solium {
     pub(crate) fn apply_settings(&mut self, settings: crate::effect::settings::Settings) {
         let caps = settings.sandbox;
         let split = self.effects.set_memo_split(settings.memo.split);
+        // Before anything plays them: what the configuration's presents will
+        // name, wanted up front so the first one finds them compiled (#300).
+        self.effects.want("load", settings.load.iter().cloned());
         self.effect_settings = settings;
         let caps = self.effects.set_caps(caps).then_some(caps);
         if let Some(caps) = caps {

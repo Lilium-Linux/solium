@@ -11591,6 +11591,41 @@ end)"#,
         assert!(!present::transformed(held), "and is let go, deform and all");
     }
 
+    /// **`effects.load` loads a folder before anything plays it** (#300): a
+    /// geometry only presents use is otherwise wanted only when the first
+    /// present names it, and that present draws the window flat. Named in
+    /// `load`, it is loaded with the configuration, and a reload that drops
+    /// it from `load` gives it back.
+    #[test]
+    fn effects_load_loads_a_folder_before_a_present_names_it() {
+        fx2_fixture!(fixture, "effects-load");
+        let _ = one_window(&mut fixture);
+        let _ = scratch_genie(&mut fixture);
+        reload_with(&mut fixture, "sol.effects({ rules = {} })\n");
+        assert!(
+            fixture.state.effects.effect("genie").is_none(),
+            "the premise: nothing names the genie, so it is not loaded"
+        );
+        reload_with(
+            &mut fixture,
+            "sol.effects({ rules = {}, load = { 'genie' } })\n",
+        );
+        assert!(
+            fixture.state.effects.effect("genie").is_some(),
+            "named in effects.load, the genie is not loaded"
+        );
+        assert!(
+            fixture.state.effects.problems().is_empty(),
+            "{:?}",
+            fixture.state.effects.problems()
+        );
+        reload_with(&mut fixture, "sol.effects({ rules = {} })\n");
+        assert!(
+            fixture.state.effects.effect("genie").is_none(),
+            "dropped from effects.load, the genie is still held"
+        );
+    }
+
     /// **A reload that changes only `effects.sandbox` keeps a present**: the
     /// new caps load the genie's unchanged folder again, under them, and
     /// it keeps its id, so a window held at progress 0.5 under the default
