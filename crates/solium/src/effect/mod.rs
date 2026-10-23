@@ -14,6 +14,7 @@ pub(crate) mod gl;
 pub(crate) mod host;
 pub(crate) mod mask;
 pub(crate) mod memo;
+pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod rules;
 pub(crate) mod run;
@@ -27,6 +28,9 @@ pub(crate) mod xray;
 /// So `super::pool` resolves the same in `effect/run.rs` here and in
 /// `dev/wirecheck`, which includes `pool.rs` beside it (Ruling 2).
 pub(crate) use crate::pool;
+/// So `super::warp`'s draw resolves the same in `effect/gl.rs` here and in
+/// `dev/wirecheck`, which includes `warp/gl.rs` (Task 29).
+pub(crate) use crate::warp;
 
 use smithay::backend::renderer::gles::GlesRenderer;
 

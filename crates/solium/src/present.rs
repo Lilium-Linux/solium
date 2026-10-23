@@ -167,15 +167,20 @@ pub(crate) enum Anchor {
 /// A geometry effect on a pane's frame: which folder (by id: a reload that
 /// changes it draws the window flat for the rest of this transform, as an
 /// unresolved anchor does, unless `on_reload` keeps the version it began
-/// with), how far, its params, its axis, resolved once when it was
-/// presented, its seed, and what it draws when it cannot be drawn
-/// (`failed`): `effects.present` and the call's `deform`.
-/// `state::tests::real_client::a_present_deform_is_a_file`.
+/// with), how far, its params and its pixels' params, its axis, resolved
+/// once when it was presented, its seed, and what it draws when it cannot
+/// be drawn (`failed`): `effects.present` and the call's `deform`.
+/// `state::tests::real_client::a_present_deform_is_a_file`,
+/// `state::tests::real_client::a_present_through_a_pixels_effect_reads_the_params_it_blends`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Geometry {
     pub(crate) effect: crate::effect::host::EffectId,
     pub(crate) progress: f64,
     pub(crate) params: crate::effect::geometry::Params,
+    /// The params of the frag its warp draws (the folder's own `frag`, or
+    /// the effect its `pixels` names), packed with that effect: the same as
+    /// `params` for a folder's own frag (Task 29).
+    pub(crate) pixels: crate::effect::geometry::Params,
     pub(crate) axis: solium_effects::Axis,
     pub(crate) seed: f64,
     pub(crate) failed: crate::effect::settings::PresentFailed,
@@ -198,20 +203,25 @@ impl Geometry {
         }
     }
 
-    /// Progress lerps, and the params when both are the same effect's (as
-    /// many of them); the effect, the axis, the seed, the policies and,
-    /// for another effect's params, the params are the destination's.
+    /// Progress lerps, and the params and the pixels' params when both are
+    /// the same effect's (as many of them); the effect, the axis, the seed,
+    /// the policies and, for another effect's params, the params are the
+    /// destination's.
     /// `tests::an_anchor_does_not_blend_halfway`,
     /// `tests::another_effects_params_are_the_destinations_not_a_blend`.
     fn mix(self, other: Self, t: f64) -> Self {
-        let params = if self.effect == other.effect {
-            self.params.lerp(other.params, t)
+        let (params, pixels) = if self.effect == other.effect {
+            (
+                self.params.lerp(other.params, t),
+                self.pixels.lerp(other.pixels, t),
+            )
         } else {
-            other.params
+            (other.params, other.pixels)
         };
         Self {
             progress: self.progress + (other.progress - self.progress) * t,
             params,
+            pixels,
             ..other
         }
     }
@@ -223,6 +233,7 @@ impl Geometry {
             effect: crate::effect::host::EffectId::for_test(1),
             progress: 0.5,
             params: crate::effect::geometry::Params::default(),
+            pixels: crate::effect::geometry::Params::default(),
             axis: solium_effects::Axis::Down,
             seed: 0.0,
             failed,
@@ -1744,16 +1755,19 @@ mod tests {
         let geometry = |effect: u32, value: f32| Geometry {
             effect: crate::effect::host::EffectId::for_test(effect),
             params: Params::pack(&[value], 8).expect("one number"),
+            pixels: Params::pack(&[value * 2.0], 8).expect("one number"),
             ..Geometry::for_test(crate::effect::settings::PresentFailed::Flat)
         };
+        let other = geometry(1, 1.0).mix(geometry(2, 3.0), 0.25);
         assert_eq!(
-            geometry(1, 1.0).mix(geometry(2, 3.0), 0.25).params,
-            geometry(2, 3.0).params,
+            (other.params, other.pixels),
+            (geometry(2, 3.0).params, geometry(2, 3.0).pixels),
             "another effect's params were lerped"
         );
+        let same = geometry(1, 1.0).mix(geometry(1, 3.0), 0.25);
         assert_eq!(
-            geometry(1, 1.0).mix(geometry(1, 3.0), 0.25).params,
-            geometry(1, 1.5).params,
+            (same.params, same.pixels),
+            (geometry(1, 1.5).params, geometry(1, 1.5).pixels),
             "the same effect's params did not lerp"
         );
     }

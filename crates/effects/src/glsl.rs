@@ -107,6 +107,27 @@ varying highp vec2 v_uv;
 void main() { gl_FragColor = sol_effect(v_uv); }
 ";
 
+/// The warp's vertex shader, which its own program (`warp/gl.rs`) and a
+/// folder's frag compiled into the warp both link against, so the varying
+/// [`WARP_EPILOGUE`] reads is the one this writes.
+/// `tests::the_warp_vertex_shader_is_the_one_the_warp_compiles`.
+pub const WARP_VERTEX: &str = r"
+precision highp float;
+uniform mat3 projection;
+attribute vec2 position;
+attribute vec3 uvq;
+// Explicitly highp on both sides: a varying whose precision differs between
+// the two stages is a link error the driver is free to resolve by handing the
+// fragment stage zeroes, which looks exactly like an attribute that was never
+// uploaded.
+varying highp vec3 v_uvq;
+void main() {
+    vec3 clip = projection * vec3(position, 1.0);
+    gl_Position = vec4(clip.xy, 0.0, 1.0);
+    v_uvq = uvq;
+}
+";
+
 /// The warp's: the same divide its own fragment shader does
 /// (`warp/gl.rs`), so one `.frag` runs in either host.
 /// `tests::the_users_file_is_its_own_source_string`.
@@ -168,7 +189,7 @@ float sol_noise(vec2 p) {
 /// accepts besides the known texture names (`tests::lint_names_an_undeclared_param_at_its_line`
 /// reads `sol_tex` and `sol_effect` with no lint), and what a saved name may
 /// not be (`stage::tests::a_saved_name_is_a_new_glsl_name`).
-pub(crate) const VOCABULARY: [&str; 22] = [
+pub(crate) const VOCABULARY: [&str; 24] = [
     "effect",
     "tex",
     "tex_sampler",
@@ -186,6 +207,8 @@ pub(crate) const VOCABULARY: [&str; 22] = [
     "time",
     "to_content",
     "to_uv",
+    "part",
+    "to_pane",
     "sdf_rrect",
     "sdf",
     "shape",
@@ -197,8 +220,10 @@ pub(crate) const VOCABULARY: [&str; 22] = [
 /// because they are a part's (its box, its shape, its own pixels, its
 /// transition): a step whose `.frag` reads one is never memoised (Ruling F30).
 /// `tests::every_prelude_name_is_per_part_or_monitor_wide`.
-pub const PER_PART: [&str; 13] = [
+pub const PER_PART: [&str; 15] = [
     "sol_content",
+    "sol_part",
+    "sol_to_pane",
     "sol_to_content",
     "sol_to_uv",
     "sol_box_px",
@@ -278,6 +303,18 @@ pub fn prelude(signature: &Signature) -> String {
     for (name, kind) in &signature.params {
         text.push_str(&format!("uniform {} p_{name};\n", glsl_type(*kind)));
     }
+    // The part of the pane's unit square the warp's capture is, so noise in
+    // pane coordinates is continuous across a pane and its popups. A pass's
+    // `uv` is its own box, so there it is the whole square, a constant, and
+    // one `.frag` compiles in either host.
+    // `tests::the_warp_prelude_declares_the_part`.
+    text.push_str(match signature.host {
+        Host::Warp => "uniform vec4 sol_part;\n",
+        Host::Pass => "const vec4 sol_part = vec4(0.0, 0.0, 1.0, 1.0);\n",
+    });
+    text.push_str(
+        "vec2 sol_to_pane(vec2 uv) { return sol_part.xy + uv * (sol_part.zw - sol_part.xy); }\n",
+    );
     // Last, always: the user's file is line 1 of string 1 (Ruling 6).
     // `tests::the_users_file_is_its_own_source_string`.
     text.push_str("#line 0 1\n");
@@ -618,8 +655,8 @@ pub fn content_hash(parts: &[&[u8]]) -> u64 {
 mod tests {
     use super::{
         Host, LINE_PROBE, MONITOR_WIDE, PASS_VERTEX, PER_PART, ParamKind, Signature, VOCABULARY,
-        assemble, compile_log, content_hash, kind_of, line_probe, line_shift, lint, prelude,
-        reads_any,
+        WARP_VERTEX, assemble, compile_log, content_hash, kind_of, line_probe, line_shift, lint,
+        prelude, reads_any,
     };
     use crate::spec::Severity;
 
@@ -708,6 +745,58 @@ mod tests {
             warp.epilogue.contains("v_uvq.xy / v_uvq.z") && warp.epilogue.contains("* alpha"),
             "{}",
             warp.epilogue
+        );
+    }
+
+    /// **The warp's vertex shader is the one the warp compiles**: one text
+    /// for its own program and a folder's frag in it, and the varying the
+    /// warp's epilogue reads is the one it writes, byte for byte.
+    #[test]
+    fn the_warp_vertex_shader_is_the_one_the_warp_compiles() {
+        let varying = "varying highp vec3 v_uvq;";
+        assert!(WARP_VERTEX.contains(varying), "{WARP_VERTEX}");
+        let warp = assemble(
+            &Signature {
+                host: Host::Warp,
+                ..signature(&[], &[])
+            },
+            "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+        );
+        assert!(
+            warp.epilogue.lines().any(|line| line == varying),
+            "{}",
+            warp.epilogue
+        );
+    }
+
+    /// **The warp's prelude declares the part** of the pane's unit square
+    /// its capture is, a uniform, and `sol_to_pane` over it; a pass has the
+    /// whole square as a constant, so one `.frag` reading it compiles in
+    /// either host. Both before the `#line 0 1` that ends the prelude.
+    #[test]
+    fn the_warp_prelude_declares_the_part() {
+        let to_pane =
+            "vec2 sol_to_pane(vec2 uv) { return sol_part.xy + uv * (sol_part.zw - sol_part.xy); }";
+        let warp = prelude(&Signature {
+            host: Host::Warp,
+            ..signature(&[], &[])
+        });
+        assert!(has_line(&warp, "uniform vec4 sol_part;"), "{warp}");
+        assert!(has_line(&warp, to_pane));
+        assert!(warp.ends_with("\n#line 0 1\n"));
+        let pass = prelude(&signature(&[], &[]));
+        assert!(
+            has_line(&pass, "const vec4 sol_part = vec4(0.0, 0.0, 1.0, 1.0);"),
+            "{pass}"
+        );
+        assert!(has_line(&pass, to_pane));
+        assert!(
+            lint(
+                &signature(&[], &[]),
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * sol_noise(sol_to_pane(uv) * sol_part.zw); }\n"
+            )
+            .is_empty(),
+            "the part is part of the contract"
         );
     }
 

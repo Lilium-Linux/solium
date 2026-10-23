@@ -313,12 +313,16 @@ pub(crate) struct Warped {
     /// The slots drawn beneath it, on every monitor, in its capture's
     /// order ([`unders`]); none for its popups' warp.
     under: Vec<crate::effect::beneath::Under>,
+    /// What it is drawn through in place of `program`: its present
+    /// geometry's pixels, once they compiled ([`present_pixels`]).
+    pixels: Option<crate::warp::Pixels>,
 }
 
-/// What a warp's mesh is a function of, in global space, so one comparison
-/// serves every output and screencopy. Exact comparison: a `NaN` always
-/// differs, which recommits, the safe way round.
-/// `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
+/// What a warp's mesh and its pixels are a function of, in global space, so
+/// one comparison serves every output and screencopy. Exact comparison: a
+/// `NaN` always differs, which recommits, the safe way round.
+/// `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`,
+/// `keyed::tests::a_pixels_only_warp_moves_its_commit_with_progress`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Shape {
     rect: Rectangle<f64, Logical>,
@@ -326,9 +330,13 @@ pub(crate) struct Shape {
     pivot: (f32, f32),
     scale: f64,
     aimed: Option<present::Aimed>,
+    /// What its pixel program reads, if it is drawn through one: a warp
+    /// whose mesh does not move still redraws as these do (Task 29).
+    pixels: Option<crate::effect::gl::PixelUniforms>,
 }
 
 impl Shape {
+    /// With no pixels: every warp that draws its capture plainly.
     pub(crate) fn of(frame: &present::Frame, aimed: Option<present::Aimed>, scale: f64) -> Self {
         Self {
             rect: frame.rect,
@@ -336,6 +344,15 @@ impl Shape {
             pivot: frame.pivot,
             scale,
             aimed,
+            pixels: None,
+        }
+    }
+
+    /// The same shape, drawn through a pixel program reading `pixels`.
+    pub(crate) fn with_pixels(self, pixels: crate::effect::gl::PixelUniforms) -> Self {
+        Self {
+            pixels: Some(pixels),
+            ..self
         }
     }
 }
@@ -439,6 +456,56 @@ fn source_of(
     })
 }
 
+/// What a present geometry's warp draws a piece's capture through, the
+/// piece the `part` of the pane's unit square captured at `size`: the
+/// program its version's pixels compiled into, once compiled, reading the
+/// geometry's progress with a leaving's direction (as its `mesh` is told),
+/// its seed, the pass's time when the frag reads it, the capture whole as
+/// its subject, the part, and its pixels' params. None for a geometry with
+/// no pixels or before they compiled, which the plain warp draws.
+/// `state::tests::real_client::a_present_draws_its_folders_frag_as_its_pixels`,
+/// `state::tests::real_client::a_present_through_a_pixels_effect_reads_the_params_it_blends`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "what a shader reads, as f32"
+)]
+pub(crate) fn present_pixels(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+    geometry: present::Geometry,
+    part: crate::warp::UnitRect,
+    size: Size<i32, Physical>,
+) -> Option<crate::warp::Pixels> {
+    let loaded = source_of(state, pane, geometry)?;
+    let pixels = loaded.pixels.as_ref()?;
+    let program = state.effects.program(pixels.key)?.clone();
+    // Read only by a frag that reads it, so a still warp whose frag does
+    // not is not given a new commit every pass.
+    let time = if program.reads("sol_time") {
+        state.clock.now().as_secs_f32()
+    } else {
+        0.0
+    };
+    let uniforms = crate::effect::gl::PixelUniforms {
+        progress: geometry.progress as f32,
+        clamped: geometry.progress.clamp(0.0, 1.0) as f32,
+        direction: -1.0,
+        seed: geometry.seed as f32,
+        time,
+        size: [size.w as f32, size.h as f32],
+        content: [0.0, 0.0, 1.0, 1.0],
+        part: [
+            part.u0 as f32,
+            part.v0 as f32,
+            part.u1 as f32,
+            part.v1 as f32,
+        ],
+        params: geometry.pixels,
+    };
+    Some((program, uniforms, pixels.names.clone()))
+}
+
 /// What `prepare` does with a pane this pass, before anything is captured.
 /// `state::tests::real_client::a_present_deform_is_a_file`.
 #[derive(Debug)]
@@ -524,7 +591,8 @@ enum Gridded {
     /// No source: its folder was reloaded mid-flight under `on_reload =
     /// "flat"`. The window undeformed.
     Undeformed,
-    /// Refused, or its folder missing: what its `failed` says.
+    /// Refused, its folder missing, or a version that never ran: what its
+    /// `failed` says.
     Refused,
 }
 
@@ -550,8 +618,25 @@ fn present_grid(
     if geometry.effect == crate::effect::host::EffectId::NONE {
         return Gridded::Refused;
     }
+    // A present under `on_reload = "keep"` begun while its version compiled
+    // had nothing to pin then: it pins that version the first pass its id
+    // answers (`state::tests::real_client::a_kept_present_begun_while_its_version_compiles_keeps_it`).
+    if geometry.on_reload == crate::effect::settings::PresentReload::Keep
+        && let Some(running) = state.effects.by_id(geometry.effect)
+        && let Some(held) = state.panes.get_mut(pane)
+        && held.meshes().pinned.is_none()
+    {
+        held.meshes_mut().pinned = Some(running);
+    }
     let Some(loaded) = source_of(state, pane, geometry) else {
-        return Gridded::Undeformed;
+        // A version that never ran follows `failed`; one a reload replaced
+        // under `on_reload = "flat"` is drawn undeformed
+        // (`state::tests::real_client::a_present_whose_frag_will_not_compile_follows_its_failed`).
+        return if state.effects.never_ran(geometry.effect) {
+            Gridded::Refused
+        } else {
+            Gridded::Undeformed
+        };
     };
     let (from, to) = (
         present::for_effects(frame.rect),
@@ -1412,10 +1497,6 @@ impl Phases for Gpu<'_> {
                 continue;
             }
             if let (Route::Warp, Some(program), Some((frame, aimed))) = (routed, program, warp) {
-                // What its mesh is drawn from, in global space: the warp's commit
-                // moves when this does, as well as when its capture is redrawn.
-                // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
-                let shape = Shape::of(&frame, aimed, scale);
                 // Its client at the frame's `client_opacity` inside the
                 // capture, so a fading client is captured fading: its
                 // surfaces' alpha is in the capture's key, which redraws it
@@ -1429,6 +1510,30 @@ impl Phases for Gpu<'_> {
                     slots,
                     frame.client_opacity,
                 );
+                // Its present geometry's pixels over the whole pane, once
+                // they compiled: the warp draws its capture through them.
+                let pixels = aimed.zip(job.as_ref()).and_then(|(aimed, job)| {
+                    present_pixels(
+                        state,
+                        pane,
+                        aimed.effect,
+                        crate::warp::UnitRect::WHOLE,
+                        job.size,
+                    )
+                });
+                // What its mesh and its pixels are drawn from, in global
+                // space: the warp's commit moves when this does, as well as
+                // when its capture is redrawn.
+                // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`,
+                // `keyed::tests::a_pixels_only_warp_moves_its_commit_with_progress`.
+                let shaped = |pixels: &Option<crate::warp::Pixels>| {
+                    let shape = Shape::of(&frame, aimed, scale);
+                    match pixels {
+                        Some((_, uniforms, _)) => shape.with_pixels(*uniforms),
+                        None => shape,
+                    }
+                };
+                let shape = shaped(&pixels);
                 // Its popups the same way, in a capture of their own that `panes`
                 // draws in front of the pane's warp
                 // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept until
@@ -1444,10 +1549,12 @@ impl Phases for Gpu<'_> {
                 };
                 let over = match (over, aimed) {
                     (Some((job, part)), Some(aimed)) => {
-                        over_grid(state, pane, &frame, aimed, part, scale)
-                            .map(|grid| (job, part, grid))
+                        over_grid(state, pane, &frame, aimed, part, scale).map(|grid| {
+                            let pixels = present_pixels(state, pane, aimed.effect, part, job.size);
+                            (job, part, grid, pixels)
+                        })
                     }
-                    (over, _) => over.map(|(job, part)| (job, part, None)),
+                    (over, _) => over.map(|(job, part)| (job, part, None, None)),
                 };
                 // Holding only what it captures this pass: popups that closed give
                 // their capture back while the pane goes on warping.
@@ -1480,15 +1587,25 @@ impl Phases for Gpu<'_> {
                             part: crate::warp::UnitRect::WHOLE,
                             grid,
                             under,
+                            pixels,
                         });
                     } else {
                         jobs.push((
                             job,
-                            Then::Warp(window.clone(), program, pane, shape, grid, (holes, scale)),
+                            Then::Warp(
+                                window.clone(),
+                                program,
+                                pane,
+                                shape,
+                                grid,
+                                (holes, scale),
+                                pixels,
+                            ),
                         ));
                     }
                 }
-                if let Some((job, part, grid)) = over {
+                if let Some((job, part, grid, pixels)) = over {
+                    let shape = shaped(&pixels);
                     if let Some((texture, id, _commit)) = crate::offscreen::kept(state, &job) {
                         let commit =
                             warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
@@ -1501,9 +1618,13 @@ impl Phases for Gpu<'_> {
                             part,
                             grid,
                             under: Vec::new(),
+                            pixels,
                         });
                     } else {
-                        jobs.push((job, Then::Over(window, program, pane, shape, part, grid)));
+                        jobs.push((
+                            job,
+                            Then::Over(window, program, pane, shape, part, grid, pixels),
+                        ));
                     }
                 }
                 continue;
@@ -1516,7 +1637,7 @@ impl Phases for Gpu<'_> {
         // (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
         for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
             match then {
-                Then::Warp(window, program, pane, shape, grid, (holes, scale)) => {
+                Then::Warp(window, program, pane, shape, grid, (holes, scale), pixels) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
                     let under = unders(state, slots, &holes, scale, commit);
                     self.warps.push(Warped {
@@ -1528,9 +1649,10 @@ impl Phases for Gpu<'_> {
                         part: crate::warp::UnitRect::WHOLE,
                         grid,
                         under,
+                        pixels,
                     });
                 }
-                Then::Over(window, program, pane, shape, part, grid) => {
+                Then::Over(window, program, pane, shape, part, grid, pixels) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
                     self.overs.push(Warped {
                         window,
@@ -1541,6 +1663,7 @@ impl Phases for Gpu<'_> {
                         part,
                         grid,
                         under: Vec::new(),
+                        pixels,
                     });
                 }
             }
@@ -1585,7 +1708,8 @@ fn shown(state: &Solium, pane: crate::pane::PaneId) -> bool {
 /// What a capture becomes once drawn: `dev/fence-check.sh` has two warps,
 /// `dev/present-check.sh`'s menu case a warp and its popups. A warp
 /// carries its pane and the [`Shape`] its commit is moved by; its popups' warp
-/// the part of the pane they cover as well.
+/// the part of the pane they cover as well; each the pixels it is drawn
+/// through, if any.
 #[derive(Debug)]
 enum Then {
     /// The pane's own warp, its grid, and the slots its capture holes with
@@ -1597,6 +1721,7 @@ enum Then {
         Shape,
         Option<crate::warp::Grid>,
         (Vec<(crate::effect::plan::Owner, Slot)>, f64),
+        Option<crate::warp::Pixels>,
     ),
     /// Its popups', over their part, and its grid.
     Over(
@@ -1606,6 +1731,7 @@ enum Then {
         Shape,
         crate::warp::UnitRect,
         Option<crate::warp::Grid>,
+        Option<crate::warp::Pixels>,
     ),
 }
 
@@ -5512,14 +5638,17 @@ fn panes(
                                 scale,
                             )
                         {
-                            elements.push(Element::Warped(crate::warp::Warp::new(
-                                over.id.clone(),
-                                over.commit,
-                                over.texture.clone(),
-                                mesh,
-                                frame.client_alpha(),
-                                over.program,
-                            )));
+                            elements.push(Element::Warped(
+                                crate::warp::Warp::new(
+                                    over.id.clone(),
+                                    over.commit,
+                                    over.texture.clone(),
+                                    mesh,
+                                    frame.client_alpha(),
+                                    over.program,
+                                )
+                                .with_pixels(over.pixels.clone()),
+                            ));
                         }
                     }
                     WarpPiece::Pane => {
@@ -5528,14 +5657,17 @@ fn panes(
                         // changed, so a still warp is not damaged and a moving
                         // one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
                         if let Some((id, texture, mesh)) = pane_warp.take() {
-                            elements.push(Element::Warped(crate::warp::Warp::new(
-                                id,
-                                commit,
-                                texture,
-                                mesh.clone(),
-                                frame.opacity,
-                                program,
-                            )));
+                            elements.push(Element::Warped(
+                                crate::warp::Warp::new(
+                                    id,
+                                    commit,
+                                    texture,
+                                    mesh.clone(),
+                                    frame.opacity,
+                                    program,
+                                )
+                                .with_pixels(warped.pixels.clone()),
+                            ));
                             // Beneath the warp, in its capture's order, through
                             // its mesh, each fragment reading the backdrop where
                             // it is on this monitor (Ruling F37, amended
