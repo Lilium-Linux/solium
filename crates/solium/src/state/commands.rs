@@ -737,6 +737,7 @@ impl Solium {
                     }
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
+                Command::Run { program, args } => self.run(&program, &args),
                 Command::FolderTrust { absolute } => {
                     self.folder_trust.trust(&absolute);
                     if let Some(entry) = self.folder.iter_mut().find(|entry| {

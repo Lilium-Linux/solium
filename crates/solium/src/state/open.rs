@@ -385,6 +385,66 @@ impl Solium {
     /// top. `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`
     /// and `launch::tests::a_spawned_program_holds_no_descriptor_beyond_stdio`.
     pub(crate) fn spawn(&mut self, program: &str, args: &[String]) {
+        let mut process = self.client_process(program, args);
+
+        // Before the fork, so the window is on screen and the other windows
+        // have moved aside by the time the program has been asked to start.
+        let pane = self.begin_loading(program, None);
+
+        // And a token in the child's environment, naming the window we just
+        // opened for it.
+        //
+        // This is what makes the window find its application whatever the
+        // application does to its own processes. Matching on the pid works
+        // right up until a launcher forks and exits -- Firefox does -- and then
+        // the chain from the client runs into init and stops. A token does not
+        // care: we made it, we handed it over, and whatever comes back holding
+        // it is the thing we launched.
+        let token = self.launch_token(pane);
+        process.env("XDG_ACTIVATION_TOKEN", &token);
+        // The older spelling, for programs that only look for that one.
+        process.env("DESKTOP_STARTUP_ID", &token);
+
+        match process.spawn() {
+            Ok(child) => {
+                tracing::info!(program, socket = self.socket_name, "spawned");
+                // And it learns whose process to wait for here, because there
+                // was no process to name a moment ago.
+                if let Some(pane) = self.panes.get_mut(pane) {
+                    pane.expect(child.id());
+                }
+                reap(child, program);
+            }
+            Err(err) => {
+                // Nothing is coming, so the window goes now rather than
+                // sitting there for the whole of `patience` promising
+                // otherwise. The layout is told, and closes the gap, while the
+                // window fades out of it. See `Self::depart`.
+                self.depart(pane);
+                self.redraw = true;
+                tracing::warn!(?err, program, "could not spawn");
+            }
+        }
+    }
+
+    /// Start a program that shows no window (`sol.run`, #319): the child
+    /// [`Self::spawn`] starts, but with no loading window opened for it and no
+    /// activation token, since nothing will come back to fill either.
+    /// `tests::a_program_run_in_the_background_opens_no_window`.
+    pub(crate) fn run(&mut self, program: &str, args: &[String]) {
+        match self.client_process(program, args).spawn() {
+            Ok(child) => {
+                tracing::debug!(program, "ran");
+                reap(child, program);
+            }
+            Err(err) => tracing::warn!(?err, program, "could not run"),
+        }
+    }
+
+    /// The child every program Solium starts is: from
+    /// [`crate::launch::command`], with its arguments, stdin and stdout on
+    /// `/dev/null`, stderr Solium's, and the session's own variables.
+    fn client_process(&self, program: &str, args: &[String]) -> std::process::Command {
         use std::process::Stdio;
 
         let mut process = crate::launch::command(program);
@@ -420,59 +480,7 @@ impl Solium {
         if std::env::var_os("XDG_SESSION_TYPE").is_none() {
             process.env("XDG_SESSION_TYPE", "wayland");
         }
-
-        // Before the fork, so the window is on screen and the other windows
-        // have moved aside by the time the program has been asked to start.
-        let pane = self.begin_loading(program, None);
-
-        // And a token in the child's environment, naming the window we just
-        // opened for it.
-        //
-        // This is what makes the window find its application whatever the
-        // application does to its own processes. Matching on the pid works
-        // right up until a launcher forks and exits -- Firefox does -- and then
-        // the chain from the client runs into init and stops. A token does not
-        // care: we made it, we handed it over, and whatever comes back holding
-        // it is the thing we launched.
-        let token = self.launch_token(pane);
-        process.env("XDG_ACTIVATION_TOKEN", &token);
-        // The older spelling, for programs that only look for that one.
-        process.env("DESKTOP_STARTUP_ID", &token);
-
-        match process.spawn() {
-            Ok(mut child) => {
-                tracing::info!(program, socket = self.socket_name, "spawned");
-                // And it learns whose process to wait for here, because there
-                // was no process to name a moment ago.
-                if let Some(pane) = self.panes.get_mut(pane) {
-                    pane.expect(child.id());
-                }
-                // Waited on so the child is reaped — a compositor that leaves
-                // zombies eventually cannot fork at all — and so that an early
-                // exit is *reported*. A program that starts and immediately
-                // quits is indistinguishable from one that never drew, and
-                // that is the hard version of this to debug.
-                let name = program.to_owned();
-                std::thread::spawn(move || match child.wait() {
-                    Ok(status) if status.success() => {
-                        tracing::debug!(program = name, "a spawned program exited cleanly");
-                    }
-                    Ok(status) => {
-                        tracing::warn!(program = name, %status, "a spawned program exited");
-                    }
-                    Err(err) => tracing::warn!(program = name, ?err, "could not wait for a child"),
-                });
-            }
-            Err(err) => {
-                // Nothing is coming, so the window goes now rather than
-                // sitting there for the whole of `patience` promising
-                // otherwise. The layout is told, and closes the gap, while the
-                // window fades out of it. See `Self::depart`.
-                self.depart(pane);
-                self.redraw = true;
-                tracing::warn!(?err, program, "could not spawn");
-            }
-        }
+        process
     }
 
     /// An activation token naming the window opened for a launch, for the
@@ -970,4 +978,19 @@ impl Solium {
         )
             .into()
     }
+}
+
+/// Wait on a started program, so it is reaped (a compositor that leaves
+/// zombies eventually cannot fork at all) and an early exit is *reported*: a
+/// program that starts and quits at once is otherwise indistinguishable from
+/// one that never drew, and that is the hard version of this to debug.
+fn reap(mut child: std::process::Child, program: &str) {
+    let name = program.to_owned();
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) if status.success() => {
+            tracing::debug!(program = name, "a started program exited cleanly");
+        }
+        Ok(status) => tracing::warn!(program = name, %status, "a started program exited"),
+        Err(err) => tracing::warn!(program = name, ?err, "could not wait for a child"),
+    });
 }

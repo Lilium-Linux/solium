@@ -630,6 +630,13 @@ pub(crate) enum Command {
         program: String,
         args: Vec<String>,
     },
+    /// `sol.run`: start a program that shows no window, a command run in the
+    /// background (#319): no loading window opened for it, no activation
+    /// token.
+    Run {
+        program: String,
+        args: Vec<String>,
+    },
     /// `folder.trust { uri }`, validated and resolved to an absolute path by
     /// `Solium::act` (04-ui.md §4.9): mark a desktop launcher trusted,
     /// durably, so `folder.open` will run it. Its own command, rather than a
@@ -768,6 +775,7 @@ impl Command {
             | Self::Surface(_)
             | Self::SurfaceGone(_)
             | Self::Spawn { .. }
+            | Self::Run { .. }
             | Self::FolderTrust { .. }
             | Self::Loading(_)
             | Self::ClientSizes(_)
@@ -5214,6 +5222,22 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let args = args.into_iter().collect();
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Spawn { program, args });
+            })
+        })?,
+    )?;
+
+    // `sol.run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.5")`: a
+    // program that shows no window, so no window is opened for it (#319).
+    sol.set(
+        "run",
+        lua.create_function(|lua, mut args: mlua::Variadic<String>| {
+            if args.is_empty() {
+                return Err(mlua::Error::runtime("sol.run needs a program to run"));
+            }
+            let program = args.remove(0);
+            let args = args.into_iter().collect();
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Run { program, args });
             })
         })?,
     )?;

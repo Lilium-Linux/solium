@@ -1082,7 +1082,8 @@ function sol.close(id) end
 function sol.act(action, data, done) end
 
 ---Start a program, with its arguments as separate strings:
----`sol.spawn("foot", "-e", "htop")`.
+---`sol.spawn("foot", "-e", "htop")`. A loading window is opened for it, which
+---its first window fills; a command that opens none wants `sol.run`.
 ---
 ---The program gets the environment Solium was started with, not what Qt and
 ---the libraries it loads have written into Solium's own since. On top of that:
@@ -1096,6 +1097,21 @@ function sol.act(action, data, done) end
 ---@param ... string
 ---@return nil
 function sol.spawn(program, ...) end
+
+---Start a program that shows no window: a command run in the background,
+---`sol.run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.5")`.
+---
+---The same child as `sol.spawn` starts — the environment Solium was started
+---with, the compositor's `WAYLAND_DISPLAY` and `DISPLAY`, no file descriptor
+---past stdin, stdout and stderr, a session of its own — but no loading window
+---is opened for it and it is handed no activation token, since nothing will
+---come back to fill either. Use `sol.spawn` for an application, which opens a
+---window; `sol.run` for a command, which does not. A program that exits with
+---an error is logged, as one `sol.spawn` starts is.
+---@param program string
+---@param ... string
+---@return nil
+function sol.run(program, ...) end
 
 ---Whether a program can be found on `PATH`. A name with a `/` in it is
 ---checked as a path. Nothing is run.
