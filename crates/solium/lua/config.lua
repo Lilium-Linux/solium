@@ -371,6 +371,8 @@ local defaults = {
     --   super+f                              fullscreen, and back
     --   super+shift+m                        maximised, and back
     --   super+shift+space                    float over the layout, and back
+    --   super+m                              minimize (focusing it brings it
+    --                                        back; see `minimize` below)
     --
     -- Up on k is super+alt+k because super+shift+k cycles the keyboard layout
     -- (`init.lua`). What a direction does is the layout's: see `tiling.move`
@@ -1693,15 +1695,21 @@ local defaults = {
         first_frame = { hold = true, max_ms = 2000, on_reload = false },
     },
 
-    -- How much of a window trails behind it in the genie, for the Developer
-    -- Tweaks panel's version of that effect (`--debug-mode` only).
-    --
-    -- Declared here because `tweaks.lua` already reads `config.genie_spread`
-    -- and falls back to this number. An undeclared key that works is the same
-    -- fault as a declared one that does not, read from the other side: nothing
-    -- tells you it is there, and the unrecognised-key report below would call
-    -- a working setting a typo.
-    genie_spread = 1.4,
+    -- A minimized window (#30, `minimize.lua`): `super+m`, `sol.minimize`, or
+    -- the application's own button. It goes into a slot at the bottom of its
+    -- monitor with the genie, and comes back out of it when it is shown
+    -- again. `motion` is how long that takes and on which curve, both ways;
+    -- `spread` is how much of the window trails behind it, 0 pulling it in
+    -- rigidly and larger values drawing the tail out; `slot` is the size of
+    -- the strip it goes into, centred on the bottom edge of the monitor's
+    -- work area. The Developer Tweaks panel's genie (`--debug-mode`) plays
+    -- the same. A layout leaves a minimized window out and takes it back
+    -- where it was; focusing it shows it again.
+    minimize = {
+        motion = { duration = 520, easing = "inOutCubic" },
+        spread = 1.4,
+        slot = { w = 120, h = 24 },
+    },
 }
 
 -- A list is a table with a [1]; anything else with keys is a section to

@@ -9,8 +9,6 @@
 --
 -- Only shown when the compositor is started with `--debug-mode`.
 
-local config = require("config")
-
 local function focused()
     for _, window in ipairs(sol.windows()) do
         if window.focused then
@@ -164,21 +162,9 @@ function tweaks.handle(id)
         sol.animate({ duration = 220, easing = "outCubic" })
         sol.present(window.id, { opacity = 0.5 })
     elseif name == "genie" then
-        local area = sol.monitor()
-        sol.animate({ duration = 520, easing = "inOutCubic" })
-        sol.present(window.id, {
-            deform = {
-                effect = "genie",
-                axis = "down",
-                spread = config.genie_spread or 1.4,
-                to = {
-                    x = area.x + area.w / 2 - 60,
-                    y = area.y + area.h - 24,
-                    w = 120,
-                    h = 24,
-                },
-            },
-        })
+        -- The minimize genie (`config.minimize`), without minimizing: the
+        -- window stays where the genie leaves it, and "flat" brings it back.
+        require("minimize").into(window.id)
     end
 end
 

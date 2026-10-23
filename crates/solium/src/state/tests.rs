@@ -37362,6 +37362,140 @@ end
                 );
             }
 
+            /// Whether `layout` holds window `pane` in its arrangement, as
+            /// the number of trees or strips that have it.
+            fn held_by(desk: &Desk, layout: &str, pane: crate::pane::PaneId) -> String {
+                let (table, kind) = if layout == "tiling" {
+                    ("trees", "tree")
+                } else {
+                    ("views", "view")
+                };
+                let chunk = format!(
+                    "local n = 0 \
+                     for _, {kind} in pairs(require({layout:?}).{table}) do \
+                     if {kind}:contains({id}) then n = n + 1 end end \
+                     return tostring(n)",
+                    id = pane.get()
+                );
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate_in(desk.state.snapshot(), &chunk))
+                    .unwrap_or_default()
+            }
+
+            /// **The shipped layouts leave a minimized window out, and take
+            /// it back where it was** when it is shown again: tiling into
+            /// the very tile, scrolling beside the same neighbour. An
+            /// `adopt` in between -- a reload's, a monitor's -- does not put
+            /// it back early.
+            #[test]
+            fn the_layouts_leave_a_minimized_window_out_and_take_it_back_where_it_was() {
+                const BEFORE: &str = r#"
+sol.on("minimize", function(id) last = id end)
+sol.bind("super+x", function() sol.minimize() end)
+sol.bind("super+y", function() sol.unminimize(last) end)
+"#;
+                for layout in LAYOUTS {
+                    let mut desk = Desk::new();
+                    let (away, stays) = two(&mut desk, layout, BEFORE);
+                    let before = (desk.placed(away), desk.placed(stays));
+
+                    assert!(desk.state.trigger("super+x"));
+                    land(&mut desk);
+                    assert_eq!(minimized(&desk, away), Some(true), "{layout}: the premise");
+                    assert_eq!(
+                        held_by(&desk, layout, away),
+                        "0",
+                        "{layout}: a minimized window is still in the arrangement"
+                    );
+                    if layout == "tiling" {
+                        assert!(
+                            desk.placed(stays).size.w > before.1.size.w,
+                            "tiling: the window beside it did not grow into its space"
+                        );
+                    }
+                    let adopt = format!("require({layout:?}).adopt() return \"adopted\"");
+                    let adopted = desk
+                        .state
+                        .scripts
+                        .as_ref()
+                        .map(|scripts| scripts.evaluate_in(desk.state.snapshot(), &adopt));
+                    assert_eq!(
+                        adopted.as_deref(),
+                        Some("adopted"),
+                        "{layout}: the premise: adopt ran"
+                    );
+                    assert_eq!(
+                        held_by(&desk, layout, away),
+                        "0",
+                        "{layout}: an adopt put a minimized window back"
+                    );
+
+                    assert!(desk.state.trigger("super+y"));
+                    land(&mut desk);
+                    assert_eq!(
+                        held_by(&desk, layout, away),
+                        "1",
+                        "{layout}: the window shown again is not in the arrangement"
+                    );
+                    let after = (desk.placed(away), desk.placed(stays));
+                    match layout {
+                        "tiling" => assert_eq!(
+                            after, before,
+                            "tiling: the window did not come back where it was"
+                        ),
+                        _ => {
+                            let (back, other) = after;
+                            let (left, right) = if back.loc.x < other.loc.x {
+                                (back, other)
+                            } else {
+                                (other, back)
+                            };
+                            assert_eq!(
+                                before.0.loc.x < before.1.loc.x,
+                                back.loc.x < other.loc.x,
+                                "scrolling: the window came back on the other side of its \
+                                 neighbour"
+                            );
+                            assert_eq!(
+                                left.loc.x + left.size.w + 12,
+                                right.loc.x,
+                                "scrolling: the two are not neighbours: {left:?}, {right:?}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            /// **`super+m` minimizes the focused window through the shipped
+            /// configuration**, `minimize.lua`, which `init.lua` loads: the
+            /// genie plays, and the window is gone once it lands.
+            #[test]
+            fn super_m_minimizes_the_focused_window_through_the_shipped_configuration() {
+                let mut desk = Desk::new();
+                let (_, _, pane) = desk.open();
+                land(&mut desk);
+                focus(&mut desk, pane);
+                desk.install(&format!("require(\"minimize\")\n{HEARD}"));
+                assert!(
+                    std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lua/init.lua"))
+                        .is_ok_and(|init| init.contains("require(\"minimize\")")),
+                    "init.lua does not load minimize.lua"
+                );
+
+                assert!(desk.state.trigger("super+m"), "super+m is bound");
+                assert_eq!(minimized(&desk, pane), Some(true));
+                assert_eq!(desk.events(), format!("minimize {}_", pane.get()));
+                after(&mut desk, 300);
+                assert!(drawn(&desk).contains(&pane), "the genie is not playing");
+                after(&mut desk, 600);
+                assert!(
+                    !drawn(&desk).contains(&pane),
+                    "it is drawn once the genie landed"
+                );
+            }
+
             /// **`sol.act("windows.minimize")` and `"windows.unminimize"`
             /// do what `sol.minimize` and `sol.unminimize` do**, and `done`
             /// hears that they were done.
@@ -37387,6 +37521,146 @@ sol.bind("super+b", function() sol.act("windows.unminimize", {{ id = {id} }}, to
                 assert_eq!(minimized(&desk, pane), Some(false));
                 assert_eq!(desk.state.status, "true;true;");
                 assert_eq!(desk.events(), format!("minimize {id}_,unminimize {id}"));
+            }
+
+            /// **The overview shows a minimized window, and choosing it
+            /// shows it again** with the keyboard: drawn as a thumbnail
+            /// while the overview is up, and a click on the thumbnail
+            /// focuses it, which shows it.
+            #[test]
+            fn the_overview_shows_a_minimized_window_and_choosing_it_shows_it_again() {
+                let mut desk = Desk::new();
+                let (_, _, other) = desk.open();
+                let (_, _, chosen) = desk.open();
+                land(&mut desk);
+                focus(&mut desk, chosen);
+                desk.install(&format!(
+                    "require(\"minimize\")\nrequire(\"overview\")\n{HEARD}"
+                ));
+                assert!(desk.state.trigger("super+m"));
+                after(&mut desk, 1000);
+                assert!(!drawn(&desk).contains(&chosen), "the premise: put away");
+
+                assert!(
+                    desk.state.trigger("super+space"),
+                    "the overview key is bound"
+                );
+                after(&mut desk, 1000);
+                assert!(
+                    drawn(&desk).contains(&chosen) && drawn(&desk).contains(&other),
+                    "the overview does not show the minimized window beside the other"
+                );
+                let thumbnail = desk
+                    .state
+                    .panes
+                    .get(chosen)
+                    .and_then(present::target_of)
+                    .expect("the overview presents the minimized window")
+                    .rect;
+                let centre = (
+                    thumbnail.loc.x + thumbnail.size.w / 2.0,
+                    thumbnail.loc.y + thumbnail.size.h / 2.0,
+                );
+                desk.state.trigger_click(centre.0, centre.1);
+                desk.pump();
+
+                assert_eq!(
+                    minimized(&desk, chosen),
+                    Some(false),
+                    "it is still minimized"
+                );
+                assert_eq!(
+                    focused(&desk),
+                    Some(chosen),
+                    "it does not have the keyboard"
+                );
+                after(&mut desk, 1000);
+                assert!(
+                    drawn(&desk).contains(&chosen),
+                    "it is not drawn once the overview left"
+                );
+            }
+
+            /// Window `pane` minimized through the shipped configuration,
+            /// with `before` run first, and what `minimize.lua` presented,
+            /// recorded by a `sol.present` that writes down its options.
+            fn presented_with(before: &str) -> (Desk, String) {
+                let mut desk = Desk::new();
+                let (_, _, pane) = desk.open();
+                land(&mut desk);
+                focus(&mut desk, pane);
+                desk.install(&format!(
+                    r#"seen = nil
+local present = sol.present
+sol.present = function(id, options) seen = options; return present(id, options) end
+{before}
+require("minimize")"#
+                ));
+                assert!(desk.state.trigger("super+m"));
+                let said = desk
+                    .state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| {
+                        scripts.evaluate(
+                            "local d = seen.deform \
+                             return string.format(\"%g %g %g %g %g\", \
+                             d.spread, d.to.x, d.to.y, d.to.w, d.to.h)",
+                        )
+                    })
+                    .unwrap_or_default();
+                (desk, said)
+            }
+
+            /// **`config.minimize.motion` is how long the genie plays**:
+            /// over by 700 ms at the shipped 520, still playing then at 1000.
+            #[test]
+            fn config_minimize_motion_is_how_long_the_genie_plays() {
+                for (set, playing) in [
+                    ("", false),
+                    (
+                        "require(\"config\").minimize.motion = { duration = 1000, easing = \"inOutCubic\" }",
+                        true,
+                    ),
+                ] {
+                    let (mut desk, _) = presented_with(set);
+                    let pane = desk
+                        .state
+                        .snapshot()
+                        .windows
+                        .first()
+                        .map(|row| row.id)
+                        .and_then(|id| desk.state.panes.by_script_id(id).map(Pane::id))
+                        .expect("a window");
+                    after(&mut desk, 700);
+                    assert_eq!(
+                        drawn(&desk).contains(&pane),
+                        playing,
+                        "with {set:?}, the genie is {} playing at 700 ms",
+                        if playing { "not" } else { "still" }
+                    );
+                }
+            }
+
+            /// **`config.minimize.spread` is how much of the window trails
+            /// behind it**, handed to the genie as its `spread`.
+            #[test]
+            fn config_minimize_spread_is_the_genies_spread() {
+                let (_, shipped) = presented_with("");
+                let (_, set) = presented_with("require(\"config\").minimize.spread = 2.5");
+                assert!(shipped.starts_with("1.4 "), "{shipped:?}");
+                assert!(set.starts_with("2.5 "), "{set:?}");
+            }
+
+            /// **`config.minimize.slot` is the strip the window goes into**,
+            /// centred on the bottom edge of the monitor's work area.
+            #[test]
+            fn config_minimize_slot_is_the_strip_the_window_goes_into() {
+                let (_, shipped) = presented_with("");
+                let (_, set) =
+                    presented_with("require(\"config\").minimize.slot = { w = 300, h = 40 }");
+                assert_eq!(shipped, "1.4 900 1056 120 24");
+                assert_eq!(set, "1.4 810 1040 300 40");
             }
         }
     }

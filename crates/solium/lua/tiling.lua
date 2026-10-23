@@ -32,6 +32,10 @@ local direction = require("direction")
 -- it was in. It is what a refused close puts the window back by. See the
 -- `closing` and `refused` handlers.
 --
+-- `minimized` is the same for each window minimized out of a tree (#30), and
+-- is what it is put back by when it is shown again. Kept beside the trees, so
+-- a window minimized before a reload still comes back where it was.
+--
 -- `trees` is the arrangement, one tree per desk (see `tree_for`), and
 -- `sol.keep` holds it so that it outlives `super+shift+r`: a reload is a change
 -- of configuration, not of arrangement. A tree is userdata, and the host carries
@@ -55,13 +59,15 @@ local direction = require("direction")
 -- anything -- every window launched with `sol.spawn`, whose `open` comes at
 -- the launch, before its application exists -- by id, with the split target
 -- and the pointer that `open` decided from. See `reconsider`.
-local kept = sol.keep("tiling", { trees = {}, cramped = {} })
+local kept = sol.keep("tiling", { trees = {}, cramped = {}, minimized = {} })
 kept.cramped = kept.cramped or {}
+kept.minimized = kept.minimized or {}
 local tiling = {
     active = false,
     trees = kept.trees,
     exiled = {},
     leaving = {},
+    minimized = kept.minimized,
     cramped = kept.cramped,
     unsized = {},
 }
@@ -414,6 +420,10 @@ function tiling.adopt()
             -- instead, it is an ordinary window until `close`.
             if window.leaving and reflows_before_gone() then
                 -- Nothing: see above.
+            -- A minimized window is in no tree, for the same reason, and
+            -- `unminimize` is what puts it back (#30).
+            elseif window.minimized then
+                -- Nothing: see above.
             -- A dialog is deliberately absent from every tree, so `adopt` --
             -- whose whole job is to put back whatever is missing -- has to be
             -- told that this one is missing on purpose. It is left out of
@@ -717,7 +727,10 @@ end)
 -- rather than its own -- a rearrangement of a layout the user is not even
 -- looking at. `adopt` leaves a window being closed out if the user switches
 -- to tiling during the close.
-local function take_out(id)
+--
+-- `into` is where it stood is kept: `tiling.leaving` for a close, and
+-- `tiling.minimized` for a window minimized (#30).
+local function take_out(id, into)
     local window = dialogs.by_id(id)
     local from
     for key, tree in pairs(tiling.trees) do
@@ -732,7 +745,7 @@ local function take_out(id)
     -- grown over its space -- its old sibling, when that was a single window.
     -- Kept only for a window this took out of a tree: a dialog is in none.
     if window and from then
-        tiling.leaving[id] = {
+        (into or tiling.leaving)[id] = {
             x = window.x + window.w / 2,
             y = window.y + window.h / 2,
             tree = from,
@@ -791,9 +804,10 @@ end
 -- being closed. Where it stood is used only if that is still the tree the
 -- window belongs in: a monitor unplugged during the close leaves a tree
 -- `apply` never walks.
-sol.on("refused", function(id)
-    local stood = tiling.leaving[id]
-    tiling.leaving[id] = nil
+--
+-- A minimized window shown again comes back by the same rule (#30), from
+-- where `minimize` took it out: `bring_back`.
+local function bring_back(id, stood)
     if not stood and not tiling.active then
         return
     end
@@ -812,6 +826,29 @@ sol.on("refused", function(id)
     end
     rejoin(tree, id, nil, stood and stood.x, stood and stood.y, options(monitor), stood ~= nil)
     tiling.apply()
+end
+
+sol.on("refused", function(id)
+    local stood = tiling.leaving[id]
+    tiling.leaving[id] = nil
+    bring_back(id, stood)
+end)
+
+-- Minimized (#30): out of its tree, and the windows beside it grow into its
+-- space, as for a close. Only while this layout is in charge, as there;
+-- `adopt` leaves a minimized window out when the user switches to tiling.
+sol.on("minimize", function(id)
+    if tiling.active then
+        take_out(id, tiling.minimized)
+    end
+end)
+
+-- Shown again: back where it was.
+-- `the_layouts_leave_a_minimized_window_out_and_take_it_back_where_it_was`.
+sol.on("unminimize", function(id)
+    local stood = tiling.minimized[id]
+    tiling.minimized[id] = nil
+    bring_back(id, stood)
 end)
 
 -- The window is gone. Unchanged by `reflow_on_close`: a window that closed
@@ -826,6 +863,7 @@ sol.on("close", function(id)
     -- window back -- it would simply accumulate for the life of the session.
     tiling.exiled[id] = nil
     tiling.leaving[id] = nil
+    tiling.minimized[id] = nil
     tiling.cramped[id] = nil
     tiling.unsized[id] = nil
     dialogs.forget(id)

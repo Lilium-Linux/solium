@@ -6,15 +6,16 @@ way in rather than shrinking. Played backwards, the same file draws a window
 out of its target. It is a geometry effect, a `mesh` and nothing else: it
 moves the window's picture and leaves its pixels as they are.
 
-`super+m` plays it, and so does the Developer tweaks panel's genie, through
-`sol.present`: `deform = { effect = "genie", axis = "down", spread = 1.4,
-to = … }`.
+`super+m` plays it as it minimizes a window (`lua/minimize.lua`), and so does
+the Developer tweaks panel's genie, through `sol.present`: `deform = { effect =
+"genie", axis = "down", spread = 1.4, to = … }`, with the spread, the strip and
+the timing from `minimize` in `config.lua`.
 
 | Param | Default | What it does |
 |---|---|---|
 | `spread` | `1.4` | how much of the window is in motion at once: 0 or more. At 0 the window is pulled in rigidly; a larger one starts the far edge later, drawing the tail out behind the lead |
 
-It plays for 520 ms on `inOutCubic`, over a grid of 48 steps along the way
+It plays for 520 ms on `inOutCubic` (`minimize.motion`), over a grid of 48 steps along the way
 the window is pulled and 8 across it, which turns with that way: 48 rows for
 a window pulled down or up, 48 columns for one pulled sideways.
 
