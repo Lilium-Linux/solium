@@ -225,6 +225,8 @@ sol.on("surface", function(surface, action, data) end) -- a hosted scene sent an
 sol.on("closing", function(id) end)                -- a close was asked for
 sol.on("close_landed", function(id) end)           -- ...its animation has played
 sol.on("refused", function(id) end)                -- ...and declined: it is back
+sol.on("minimize", function(id) end)               -- it was minimized: take it out, play it away
+sol.on("unminimize", function(id) end)             -- it is shown again: take it back, play it back
 sol.on("close",  function(id) end)                 -- it is gone
 sol.on("focus",  function(id, source, changed) end) -- the keyboard moved, what moved it, and from another window?
 sol.on("activate", function(id, why) end)          -- a window asked to come forward: "launch" or "request"
@@ -382,6 +384,55 @@ keeps working unchanged, and keeps its slot for a closing window until the
 application has gone. To close up at once, handle `closing` (or
 `close_landed`), leave `leaving` windows out of any arrangement you build from
 `sol.windows()`, and put the window back on `refused`.
+
+**A minimized window is kept, and not shown** (#30). `sol.minimize(id)`,
+`super+m` (the focused window) and the application's own minimize button all
+minimize a window, and `sol.unminimize(id)` shows it again; so does focusing
+it -- `sol.focus`, a click in the overview, an application asking to be
+brought forward. Its client stays mapped and alive, and is told it is
+suspended where its protocol has the word: an xdg toplevel's `suspended`
+state from version 6, an X11 window's `_NET_WM_STATE_HIDDEN`. Its row in
+`sol.windows()` says `minimized = true`, and so does the `Windows` model.
+
+| event | sent | means |
+|---|---|---|
+| `minimize(id)` | the moment it is minimized, before anything else reacts, its row already `minimized` | play it away, and take it out if you arrange it |
+| `unminimize(id)` | the moment it is shown again, before the `focus` that showed it | play it back, and take it back |
+
+Each is told once: minimizing a window already minimized, or showing one
+that is not, does nothing
+(`state::tests::real_client::reflow_on_close::minimize::minimizing_or_unminimizing_twice_does_nothing_the_second_time`,
+`state::tests::real_client::reflow_on_close::minimize::sol_minimize_marks_the_row_fires_once_and_leaves_the_client_mapped`,
+`state::tests::real_client::reflow_on_close::minimize::a_client_asking_to_be_minimized_is_minimized`,
+`state::tests::real_client::reflow_on_close::minimize::focusing_a_minimized_window_shows_it_first`,
+`state::tests::real_client::reflow_on_close::minimize::sol_unminimize_shows_the_window_again`).
+
+**The compositor keeps the state; how it looks is yours.** A minimized window
+is drawn while a present started on it plays out, and not once it has landed,
+so a present started in `minimize` -- the shipped genie into a slot at the
+bottom of the monitor, `lua/minimize.lua` -- is seen to the end
+(`state::tests::real_client::reflow_on_close::minimize::a_minimized_window_is_drawn_until_its_present_lands`). `sol.present_clear`
+in `unminimize` plays it back out. `sol.show_minimized(id)` draws one anyway,
+wherever a present puts it, which is how the overview shows minimized windows
+as thumbnails; choosing one focuses it, which shows it
+(`state::tests::real_client::reflow_on_close::minimize::the_overview_shows_a_minimized_window_and_choosing_it_shows_it_again`).
+
+A minimized window takes no pointer or touch, not even while its present
+plays out: a press there reaches what is under it, and `sol.window_at` does
+not name it (`state::tests::real_client::reflow_on_close::minimize::a_press_on_a_minimized_window_reaches_what_is_under_it`). It
+never holds the keyboard: the keyboard leaves it as it leaves a closed window,
+by `config.focus.after_close`, and no hand-off ever picks it
+(`state::tests::real_client::reflow_on_close::minimize::the_keyboard_leaves_a_minimized_window_for_the_next_and_never_comes_back_to_it`).
+Placing it moves nothing, so it keeps the place it had for when it comes back
+(`state::tests::real_client::reflow_on_close::minimize::a_placement_leaves_a_minimized_window_where_it_is`).
+
+The shipped layouts take a minimized window out on `minimize`, close up
+around it, leave it out of every `adopt`, and put it back on `unminimize`
+where it was: tiling into the tile under the centre of where it stood,
+scrolling beside the same neighbour
+(`state::tests::real_client::reflow_on_close::minimize::the_layouts_leave_a_minimized_window_out_and_take_it_back_where_it_was`).
+A layout of your own does the same with `minimized` in `sol.windows()`, as it
+does with `leaving`.
 
 **`focus` is heard for a new window too**, in every mode and for an X11
 window as much as a Wayland one. The compositor gives a window the keyboard at
@@ -894,6 +945,7 @@ them replaceable in `config.bindings`:
 | `super+f` | fullscreen, and back |
 | `super+shift+m` | maximised, and back |
 | `super+shift+space` | float over the layout, and back into it |
+| `super+m` | minimize: focusing it brings it back (`lua/minimize.lua`) |
 
 Moving up on `k` is `super+alt+k` because `super+shift+k` cycles the keyboard
 layout. A window floated with `super+shift+space` is, to both layouts, what a

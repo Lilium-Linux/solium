@@ -46,8 +46,9 @@ Tracking: [hosted desktop](https://github.com/Lilium-Linux/solium/issues/169),
 ## Effects and presentation
 
 User-authored effect folders and shipped blur, glass, shade and genie already
-exist. Continue work on live tuning, effect quality and performance, minimize
-and restore, live anchors, and cross-scene flights/morphs. A shared QML engine
+exist, and so does minimize with its way back (#30). Continue work on live
+tuning, effect quality and performance, an effects-driven minimize (#202),
+live anchors, and cross-scene flights/morphs. A shared QML engine
 enables shared data and components; it does not by itself implement morphing.
 
 Tracking: [effects](https://github.com/Lilium-Linux/solium/issues/87),

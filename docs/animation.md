@@ -2,7 +2,7 @@
 
 There is one animation engine and one clock. Every window that moves — a tiling
 rearrangement, entering overview, a window opening or closing, the genie
-`super+m` plays — moves through the same code. That is not tidiness: it is why
+`super+m` plays as it minimizes a window — moves through the same code. That is not tidiness: it is why
 modes cannot animate inconsistently with each other, which is the usual way a
 desktop ends up feeling assembled rather than designed.
 
@@ -56,7 +56,8 @@ something that was already on screen reads as a wobble.
 `inOutCubic` is `inOutQuad` with more of both ends: it holds back longer at each
 and crosses the middle faster. Reach for it when the distance *is* the point —
 the `super+m` genie pulls a window across most of the screen into a strip at
-its bottom edge, and wants to feel like it — and for `inOutQuad` when a window
+its bottom edge as it minimizes it (`minimize.motion` in `config.lua`), and
+wants to feel like it — and for `inOutQuad` when a window
 is only moving between two slots.
 
 `spring` ignores `duration` entirely; a spring arrives when it arrives. Its

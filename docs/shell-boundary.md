@@ -488,8 +488,9 @@ compositor's own panes and updated in place once per frame: `id`, `title`,
 `urgent` (it asked for attention nobody could see, until it is focused),
 `fullscreen` and `maximized` (as the compositor last set them, without
 waiting for the application), `modal`,
-`parent`, `state` (`loading` from the click, `shown`, `closing`) and
-`onStage`
+`parent`, `state` (`loading` from the click, `shown`, `closing`), `onStage`
+and `minimized` (#30;
+`state::tests::real_client::reflow_on_close::minimize::sol_minimize_marks_the_row_fires_once_and_leaves_the_client_mapped`)
 (`state::tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
 `state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
 `state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`,
@@ -724,8 +725,10 @@ decides
 `state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`).
 The shipped `lua/actions.lua` sends the vocabulary on to `sol.act`, the
 compositor's one entry point for its verbs: `windows.focus`, `windows.close`,
-`windows.fullscreen` and `windows.maximize`, each with `{ id = <window id> }`
-(`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`).
+`windows.fullscreen`, `windows.maximize`, `windows.minimize` and
+`windows.unminimize`, each with `{ id = <window id> }`
+(`state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`,
+`state::tests::real_client::reflow_on_close::minimize::sol_act_minimizes_and_unminimizes_a_window`).
 `sol.act`'s data crosses as JSON, as a surface's `properties` do, nested at
 most 64 deep and 65 536 values in all, a table counted once for each place it
 is in: a table nested deeper or holding more, or one that contains itself, is
@@ -734,8 +737,10 @@ an error in the handler that sent it, not a crash or a stall of the compositor
 `json::tests::a_table_of_more_than_65536_values_is_an_error_not_a_stall`).
 `sol.act(action, data, done)` answers an attempt id, and `done(ok, reason)`
 hears once whether it was done, after it was; `reason` is `"unknown-action"`,
-`"unknown-window"`, `"bad-data"`, for a `windows.focus` behind the lock
-`"locked"`, or, for a `windows.fullscreen` or `windows.maximize` of an X11
+`"unknown-window"`, `"bad-data"`, for a `windows.focus`, `windows.minimize` or
+`windows.unminimize` behind the lock `"locked"`
+(`state::tests::real_client::lock_focus::sol_act_minimize_behind_the_lock_is_answered_locked`),
+or, for a `windows.fullscreen` or `windows.maximize` of an X11
 window, which the compositor cannot send there, `"unsupported"` (no test can
 make an X11 window, so that one is read in `Solium::act`), and a window still
 loading, one `sol.windows()` lists before its application has arrived, is
