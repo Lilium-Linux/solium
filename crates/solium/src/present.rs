@@ -302,6 +302,13 @@ impl Deform {
 pub(crate) struct Frame {
     pub(crate) rect: Rectangle<f64, Logical>,
     pub(crate) opacity: f32,
+    /// The client's opacity inside its pane (#296): multiplied into the
+    /// client's surfaces, its popups and what stands in for it -- a loading
+    /// scene, a departed client's remains -- and not into the pane style's
+    /// layers, which keep `opacity` alone. What lets a style's `behind` layer
+    /// show through as the window fades into it, while the pane goes on
+    /// flying. 1.0 at rest.
+    pub(crate) client_opacity: f32,
     /// A 4x4 applied about `pivot`, which is the rect's centre until a script
     /// moves it. Identity means flat, and flat stays on the cheap path — see
     /// `docs/spikes/2026-09-06-3d-presentation.md`.
@@ -381,6 +388,7 @@ impl Frame {
         Self {
             rect: geometry.to_f64(),
             opacity: 1.0,
+            client_opacity: 1.0,
             matrix: Mat4::IDENTITY,
             deform: None,
             z: 0.0,
@@ -390,7 +398,7 @@ impl Frame {
     }
 
     /// Whether this frame draws a pane exactly at rest at `real`: its own
-    /// rectangle, opaque, flat, undeformed, unzoomed and at depth 0.
+    /// rectangle, opaque with its client opaque inside it, flat, undeformed, unzoomed and at depth 0.
     /// `tests::a_held_transform_that_lands_on_the_panes_own_frame_is_released`.
     pub(crate) fn is_rest_of(&self, real: Rectangle<i32, Logical>) -> bool {
         let real = real.to_f64();
@@ -400,6 +408,7 @@ impl Frame {
             && near(self.rect.size.w, real.size.w)
             && near(self.rect.size.h, real.size.h)
             && self.opacity >= 1.0 - 1e-6
+            && self.client_opacity >= 1.0 - 1e-6
             && self.matrix.is_identity()
             && self.deform.is_none_or(|deform| deform.effect.is_at_rest())
             && near(self.zoom.0, 1.0)
@@ -421,8 +430,25 @@ impl Frame {
     }
 
     /// Whether this frame paints anything at all.
+    ///
+    /// On `opacity` alone, not `client_opacity` (#296): a pane whose client
+    /// has faded out still draws its style's layers, and owns the pixels
+    /// they are drawn on, as [`Self::covers`] asks.
     pub(crate) fn shows(&self) -> bool {
         self.opacity > INVISIBLE
+    }
+
+    /// The alpha the client's own pixels are drawn at on screen: the pane's
+    /// opacity times the client's inside it (#296).
+    pub(crate) fn client_alpha(&self) -> f32 {
+        self.opacity * self.client_opacity
+    }
+
+    /// Whether the client's own pixels put anything on screen, by the same
+    /// threshold as [`Self::shows`]: what lets the flat path draw no client
+    /// at all once it has faded into its pane.
+    pub(crate) fn shows_client(&self) -> bool {
+        self.client_alpha() > INVISIBLE
     }
 
     /// Whether this frame covers `point` with something the user can see.
@@ -480,6 +506,7 @@ impl Frame {
         Self {
             rect: logical(loc, size),
             opacity: self.opacity,
+            client_opacity: self.client_opacity,
             matrix: self.matrix,
             deform: self.deform,
             z: self.z,
@@ -503,6 +530,13 @@ impl Frame {
 
     pub(crate) fn with_opacity(mut self, opacity: f32) -> Self {
         self.opacity = opacity;
+        self
+    }
+
+    /// The same frame, its client at `client_opacity` inside the pane.
+    #[cfg(test)]
+    pub(crate) fn with_client_opacity(mut self, client_opacity: f32) -> Self {
+        self.client_opacity = client_opacity;
         self
     }
 
@@ -537,6 +571,15 @@ impl Blend for Frame {
                 reason = "opacity is a small float either way"
             )]
             opacity: lerp(f64::from(self.opacity), f64::from(other.opacity), progress) as f32,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "opacity is a small float either way"
+            )]
+            client_opacity: lerp(
+                f64::from(self.client_opacity),
+                f64::from(other.client_opacity),
+                progress,
+            ) as f32,
             // Element-wise, which is not how one rotates halfway between two
             // rotations — that needs the rotation pulled apart and blended as
             // an angle. It is right for the cases the compositor animates:
@@ -584,7 +627,8 @@ impl Frame {
     /// This, part-way toward `other` with each property on its own progress
     /// (#293): `x` and `y` move the rect's centre, `size` its width and height
     /// and, with them, `zoom`, which keeps the rectangle being pictured exact
-    /// as [`Blend::blend`] says; `opacity` its opacity. The rest -- the matrix,
+    /// as [`Blend::blend`] says; `opacity` its opacity, and `client_opacity`
+    /// its client's inside it (#296). The rest -- the matrix,
     /// the deform, and the depth and pivot that select rather than measure --
     /// go as `blend` takes them at `progress.rest`.
     ///
@@ -621,6 +665,15 @@ impl Frame {
                 f64::from(other.opacity),
                 progress.opacity,
             ) as f32,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "opacity is a small float either way"
+            )]
+            client_opacity: lerp(
+                f64::from(self.client_opacity),
+                f64::from(other.client_opacity),
+                progress.client_opacity,
+            ) as f32,
             matrix: rest.matrix,
             deform: rest.deform,
             z: rest.z,
@@ -634,15 +687,16 @@ impl Frame {
 }
 
 /// One present's timing per property (#293), for `sol.present`'s `motion`:
-/// `x` and `y` move the drawn rect's centre, `size` its width and height, and
-/// `opacity` its opacity. What none of them names moves on the present's own
-/// timing.
+/// `x` and `y` move the drawn rect's centre, `size` its width and height,
+/// `opacity` its opacity, and `client_opacity` its client's inside it (#296).
+/// What none of them names moves on the present's own timing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Channels<A> {
     pub(crate) x: A,
     pub(crate) y: A,
     pub(crate) size: A,
     pub(crate) opacity: A,
+    pub(crate) client_opacity: A,
 }
 
 impl<A> Channels<A> {
@@ -652,6 +706,7 @@ impl<A> Channels<A> {
             y: f(self.y),
             size: f(self.size),
             opacity: f(self.opacity),
+            client_opacity: f(self.client_opacity),
         }
     }
 }
@@ -672,6 +727,7 @@ struct Progress {
     y: f64,
     size: f64,
     opacity: f64,
+    client_opacity: f64,
     rest: f64,
 }
 
@@ -757,9 +813,15 @@ impl<T: Blend> Transform<T> {
     pub(crate) fn finished(&self, now: Duration) -> bool {
         self.animation.done(now)
             && self.channels.is_none_or(|channels| {
-                [channels.x, channels.y, channels.size, channels.opacity]
-                    .iter()
-                    .all(|animation| animation.done(now))
+                [
+                    channels.x,
+                    channels.y,
+                    channels.size,
+                    channels.opacity,
+                    channels.client_opacity,
+                ]
+                .iter()
+                .all(|animation| animation.done(now))
             })
     }
 }
@@ -777,6 +839,7 @@ impl Transform<Frame> {
                     y: channels.y.progress(now),
                     size: channels.size.progress(now),
                     opacity: channels.opacity.progress(now),
+                    client_opacity: channels.client_opacity.progress(now),
                     rest: self.animation.progress(now),
                 },
             ),
@@ -1388,6 +1451,7 @@ mod tests {
         let drawn = Frame {
             rect: logical((500.0, 100.0), (200.0, 150.0)),
             opacity: 1.0,
+            client_opacity: 1.0,
             matrix: Mat4::IDENTITY,
             deform: None,
             z: 0.0,
@@ -1771,6 +1835,7 @@ mod tests {
                     y: progress,
                     size: progress,
                     opacity: progress,
+                    client_opacity: progress,
                     rest: progress,
                 },
             );
@@ -1781,6 +1846,7 @@ mod tests {
                     && close(plain.rect.size.w, split.rect.size.w)
                     && close(plain.rect.size.h, split.rect.size.h)
                     && plain.opacity == split.opacity
+                    && plain.client_opacity == split.client_opacity
                     && close(plain.zoom.0, split.zoom.0),
                 "at {progress}: {plain:?} against {split:?}"
             );
@@ -1817,6 +1883,7 @@ mod tests {
                 y: linear(50),
                 size: linear(100),
                 opacity: linear(400),
+                client_opacity: linear(100),
             }),
         );
         let at = |ms| frame(&pane, real, Duration::from_millis(ms));
@@ -1849,5 +1916,106 @@ mod tests {
         );
         assert!(!settle(&pane, real, Duration::from_millis(400)), "done");
         assert_eq!(at(400), icon);
+    }
+
+    /// **A frame at rest draws its client opaque** (#296), and a frame whose
+    /// client is faded is not at rest, so a present that fades only the
+    /// client is held where it lands rather than released.
+    #[test]
+    fn a_frame_at_rest_draws_its_client_opaque() {
+        let real = rect(10, 20, 300, 200);
+        let rest = Frame::real(real);
+        assert!((rest.client_opacity - 1.0).abs() < f32::EPSILON);
+        assert!(rest.is_rest_of(real));
+        assert!(
+            !rest.with_client_opacity(0.5).is_rest_of(real),
+            "a faded client is not the pane at rest"
+        );
+        assert!(
+            rest.with_client_opacity(0.0).shows(),
+            "and the pane still shows: its layers are drawn"
+        );
+    }
+
+    /// **The client's opacity blends on its own channel** (#296): apart from
+    /// the pane's, in a plain blend as in a split one.
+    #[test]
+    fn client_opacity_blends_on_its_own_channel() {
+        let real = rect(0, 0, 400, 300);
+        let from = Frame::real(real);
+        let to = Frame::real(real).with_client_opacity(0.0);
+        let plain = from.blend(to, 0.25);
+        assert!((plain.client_opacity - 0.75).abs() < 1e-6);
+        assert!(
+            (plain.opacity - 1.0).abs() < f32::EPSILON,
+            "the pane's stays"
+        );
+        let split = from.with_opacity(0.0).blend_channels(
+            to,
+            Progress {
+                x: 0.0,
+                y: 0.0,
+                size: 0.0,
+                opacity: 0.5,
+                client_opacity: 0.25,
+                rest: 0.0,
+            },
+        );
+        assert!(
+            (split.client_opacity - 0.75).abs() < 1e-6,
+            "on its own progress: {}",
+            split.client_opacity
+        );
+        assert!(
+            (split.opacity - 0.5).abs() < 1e-6,
+            "and the pane's on its own"
+        );
+    }
+
+    /// **A present is done only when its client's opacity lands** (#296):
+    /// the window flies home in 100 ms and its client goes on fading into
+    /// the icon behind it until 300.
+    #[test]
+    fn a_present_whose_client_opacity_lands_last_is_done_when_it_lands() {
+        let real = rect(0, 0, 1600, 900);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            real,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        let icon = Frame::real(rect(700, 300, 60, 60)).with_client_opacity(0.0);
+        let linear = |ms| (Duration::from_millis(ms), Curve::Linear);
+        present(
+            &pane,
+            real,
+            icon,
+            Duration::ZERO,
+            Duration::from_millis(100),
+            Curve::Linear,
+            Some(Channels {
+                x: linear(100),
+                y: linear(100),
+                size: linear(100),
+                opacity: linear(100),
+                client_opacity: linear(300),
+            }),
+        );
+        let at = |ms| frame(&pane, real, Duration::from_millis(ms));
+        let flown = at(150);
+        assert_eq!(flown.rect, icon.rect, "home at 100 ms");
+        assert!(
+            (flown.client_opacity - 0.5).abs() < 1e-6,
+            "its client half faded at 150: {}",
+            flown.client_opacity
+        );
+        assert!(
+            settle(&pane, real, Duration::from_millis(299)),
+            "still going"
+        );
+        assert!(!settle(&pane, real, Duration::from_millis(300)), "done");
+        assert_eq!(at(300), icon);
     }
 }

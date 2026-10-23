@@ -293,6 +293,7 @@ impl Solium {
                     id,
                     rect,
                     opacity,
+                    client_opacity,
                     matrix,
                     deform,
                     z,
@@ -321,6 +322,9 @@ impl Solium {
                         // own rectangle. See `Frame::zoom`.
                         zoom: Frame::zoom_of(rect, outer),
                         opacity: opacity.unwrap_or(1.0),
+                        // The client's own, inside the pane: a style's layer
+                        // behind it shows through as it fades (#296).
+                        client_opacity: client_opacity.unwrap_or(1.0),
                         deform,
                         // Both arrive resolved: `script::depth_from` and
                         // `script::pivot_from` hold the defaults, so a table
@@ -346,6 +350,7 @@ impl Solium {
                     id,
                     rect,
                     opacity,
+                    client_opacity,
                     animation,
                     channels,
                     deform,
@@ -368,6 +373,9 @@ impl Solium {
                         // shrinks the window's own rectangle. See `Frame::zoom`.
                         zoom: Frame::zoom_of(rect, outer),
                         opacity: opacity.unwrap_or(1.0),
+                        // What it starts from; it lands on the real frame's,
+                        // 1 (#296).
+                        client_opacity: client_opacity.unwrap_or(1.0),
                         deform,
                         // Explicit so the next field added breaks this line
                         // instead of being defaulted past it -- and these two

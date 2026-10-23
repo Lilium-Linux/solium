@@ -455,6 +455,9 @@ pub(crate) enum Command {
         id: u64,
         rect: Option<Rect>,
         opacity: Option<f32>,
+        /// The client's opacity inside its pane, the style's layers left at
+        /// `opacity` (#296). See [`crate::present::Frame::client_opacity`].
+        client_opacity: Option<f32>,
         /// A 3D transform about `pivot`, which is the drawn rect's centre
         /// unless the script moved it. `None` keeps the window flat and on the
         /// cheap path.
@@ -509,6 +512,8 @@ pub(crate) enum Command {
         id: u64,
         rect: Rect,
         opacity: Option<f32>,
+        /// The client's opacity inside its pane at the start (#296).
+        client_opacity: Option<f32>,
         animation: AnimationSpec,
         /// As [`Command::Present`]'s: a timing per property (#293).
         channels: Option<Box<crate::present::Channels<AnimationSpec>>>,
@@ -4170,17 +4175,18 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "present",
         lua.create_function(|lua, (id, options): (u64, Option<Table>)| {
-            let (rect, opacity, matrix, deform) = match options.as_ref() {
+            let (rect, opacity, client_opacity, matrix, deform) = match options.as_ref() {
                 Some(options) => (
                     rect_from(options)?,
                     options.get::<Option<f32>>("opacity")?,
+                    client_opacity_from(options, "sol.present")?,
                     transform_from(options)?,
                     deform_from(options)?,
                 ),
-                None => (None, None, None, None),
+                None => (None, None, None, None, None),
             };
             // Outside the match, because these two resolve to a value where
-            // the four above resolve to "said nothing": `sol.present(id)` and
+            // the five above resolve to "said nothing": `sol.present(id)` and
             // `sol.present(id, {})` have to produce the same depth and the
             // same pivot, and one function answering for both tables is how
             // the two answers cannot drift apart.
@@ -4198,6 +4204,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     id,
                     rect,
                     opacity,
+                    client_opacity,
                     matrix,
                     deform,
                     z,
@@ -4221,6 +4228,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 ));
             };
             let opacity = options.get::<Option<f32>>("opacity")?;
+            let client_opacity = client_opacity_from(&options, "sol.present_from")?;
             let motion = present_motion_from(&options)?;
             let deform = deform_from(&options)?;
             with_pending(lua, |pending| {
@@ -4230,6 +4238,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     id,
                     rect,
                     opacity,
+                    client_opacity,
                     animation,
                     channels,
                     deform,
@@ -6380,10 +6389,11 @@ fn resolved(
 }
 
 /// The properties `sol.present`'s `motion` can time apart (#293).
-const PRESENT_MOTIONS: [&str; 4] = ["x", "y", "size", "opacity"];
+const PRESENT_MOTIONS: [&str; 5] = ["x", "y", "size", "opacity", "client_opacity"];
 
 /// A present's or a `present_from`'s `motion` (#293): a timing per property, `x` and `y` for the
-/// drawn rect's centre, `size` for its width and height, `opacity`, each
+/// drawn rect's centre, `size` for its width and height, `opacity`, and
+/// `client_opacity` for its client's inside it (#296), each
 /// `{ duration, easing }` as `sol.animate` takes it. A property left out, and
 /// a duration or easing left out of one, is `None` for the caller to fill
 /// with the batch's own; no `motion` at all is `None`. Anything else under
@@ -6432,7 +6442,37 @@ fn present_motion_from(options: &Table) -> mlua::Result<Option<PresentMotion>> {
         y: timing("y")?,
         size: timing("size")?,
         opacity: timing("opacity")?,
+        client_opacity: timing("client_opacity")?,
     }))
+}
+
+/// A present's `client_opacity` (#296): the client's opacity inside its pane,
+/// a number from 0 to 1, or `None` when the table names none. Anything else
+/// is refused by name, as a half-given rect is: a window whose content
+/// stayed opaque, or vanished, because a script passed a string or a 2 is a
+/// mistake nobody would find from the screen.
+/// `tests::a_client_opacity_is_a_number_from_0_to_1_and_anything_else_is_refused`.
+fn client_opacity_from(options: &Table, call: &str) -> mlua::Result<Option<f32>> {
+    let value = options.get::<Value>("client_opacity")?;
+    if value.is_nil() {
+        return Ok(None);
+    }
+    let Some(number) = number(&value) else {
+        return Err(mlua::Error::runtime(format!(
+            "{call}: `client_opacity` is a number from 0 to 1, got a {}",
+            value.type_name()
+        )));
+    };
+    if !(0.0..=1.0).contains(&number) {
+        return Err(mlua::Error::runtime(format!(
+            "{call}: `client_opacity` is a number from 0 to 1, got {number}"
+        )));
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a number from 0 to 1, checked above"
+    )]
+    Ok(Some(number as f32))
 }
 
 /// Where on a window the pointer goes when no `to` says: its centre.
@@ -6720,6 +6760,7 @@ mod tests {
         assert_eq!(timed.y, (None, None), "left out, so the batch's");
         assert_eq!(timed.size, (None, None));
         assert_eq!(timed.opacity, (Some(Duration::from_millis(450)), None));
+        assert_eq!(timed.client_opacity, (None, None));
         for (bad, says) in [
             ("return { motion = 3 }", "a table of timings by property"),
             ("return { motion = { colour = {} } }", "not colour"),
@@ -6787,6 +6828,7 @@ mod tests {
                         duration: Duration::from_millis(500),
                         easing: Curve::OutBack,
                     },
+                    client_opacity: batch,
                 }),
                 None,
                 Some(crate::present::Channels {
@@ -6797,8 +6839,121 @@ mod tests {
                     y: batch,
                     size: batch,
                     opacity: batch,
+                    client_opacity: batch,
                 }),
             ]
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`client_opacity` is a number from 0 to 1, and anything else is
+    /// refused by name** (#296), with the call that was given it.
+    #[test]
+    fn a_client_opacity_is_a_number_from_0_to_1_and_anything_else_is_refused() {
+        let lua = mlua::Lua::new();
+        let read = |source: &str| {
+            let table: mlua::Table = lua.load(source).eval().expect("a table");
+            super::client_opacity_from(&table, "sol.present")
+        };
+        assert_eq!(read("return {}").expect("none"), None);
+        assert_eq!(
+            read("return { client_opacity = 0.25 }").expect("a quarter"),
+            Some(0.25)
+        );
+        assert_eq!(
+            read("return { client_opacity = 0 }").expect("an integer"),
+            Some(0.0)
+        );
+        assert_eq!(
+            read("return { client_opacity = 1 }").expect("the end"),
+            Some(1.0)
+        );
+        for (bad, says) in [
+            ("return { client_opacity = 'half' }", "got a string"),
+            ("return { client_opacity = {} }", "got a table"),
+            ("return { client_opacity = 1.5 }", "got 1.5"),
+            ("return { client_opacity = -0.1 }", "got -0.1"),
+            ("return { client_opacity = 0/0 }", "a number from 0 to 1"),
+        ] {
+            let refused = read(bad).expect_err(bad).to_string();
+            assert!(
+                refused.contains("sol.present: `client_opacity` is a number from 0 to 1")
+                    && refused.contains(says),
+                "{bad}: {refused}"
+            );
+        }
+    }
+
+    /// **Both calls carry `client_opacity`, and `motion` times it** (#296):
+    /// `sol.present`'s is the client's opacity to land on, `present_from`'s
+    /// the one to start from; a bad one fails the call that was given it.
+    #[test]
+    fn both_presents_carry_a_client_opacity_and_motion_times_it() {
+        let directory = std::env::temp_dir().join("solium-script-test-client-opacity");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+1", function()
+                sol.animate({ duration = 300, easing = "outBack" })
+                sol.present(1, { client_opacity = 0,
+                                 motion = { client_opacity = { duration = 450 } } })
+                sol.present_from(2, { x = 0, y = 0, w = 10, h = 10, client_opacity = 0.5 })
+                sol.present(3, {})
+            end)
+            sol.bind("super+2", function()
+                sol.present_from(2, { x = 0, y = 0, w = 10, h = 10, client_opacity = 2 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+1", Snapshot::default());
+        let read: Vec<_> = outcome
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::Present {
+                    client_opacity,
+                    channels,
+                    ..
+                }
+                | Command::PresentFrom {
+                    client_opacity,
+                    channels,
+                    ..
+                } => (
+                    *client_opacity,
+                    channels.as_deref().map(|channels| channels.client_opacity),
+                ),
+                other => panic!("expected a present command, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                (
+                    Some(0.0),
+                    Some(AnimationSpec {
+                        duration: Duration::from_millis(450),
+                        easing: Curve::OutBack,
+                    })
+                ),
+                (Some(0.5), None),
+                (None, None),
+            ]
+        );
+        let mut refused = None;
+        let log = logged_while(|| {
+            refused = Some(scripts.key("super+2", Snapshot::default()));
+        });
+        assert!(
+            refused.is_some_and(|outcome| outcome.commands.is_empty())
+                && log.contains("sol.present_from")
+                && log.contains("client_opacity")
+                && log.contains("got 2"),
+            "a client_opacity of 2 was not refused by name:\n{log}"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }

@@ -1416,7 +1416,19 @@ impl Phases for Gpu<'_> {
                 // moves when this does, as well as when its capture is redrawn.
                 // `keyed::tests::a_warp_whose_mesh_moves_inside_the_same_bounds_is_given_a_new_commit`.
                 let shape = Shape::of(&frame, aimed, scale);
-                let job = crate::offscreen::pane_job(state, renderer, pane, &window, scale, slots);
+                // Its client at the frame's `client_opacity` inside the
+                // capture, so a fading client is captured fading: its
+                // surfaces' alpha is in the capture's key, which redraws it
+                // and moves the warp's commit as it changes (#296).
+                let job = crate::offscreen::pane_job(
+                    state,
+                    renderer,
+                    pane,
+                    &window,
+                    scale,
+                    slots,
+                    frame.client_opacity,
+                );
                 // Its popups the same way, in a capture of their own that `panes`
                 // draws in front of the pane's warp
                 // (`tests::a_warped_panes_popups_are_in_front_of_it`), kept until
@@ -3819,6 +3831,42 @@ pub(crate) fn pane_pieces<T>(into: &mut Vec<T>, mut piece: impl FnMut(&mut Vec<T
     }
 }
 
+/// Whether a piece is the client's own pixels (#296): the client, and the
+/// slots on it and on its popups, which are its pixels run through an
+/// effect. A layer's and the whole pane's slots are not.
+fn is_client(piece: Piece) -> bool {
+    matches!(
+        piece,
+        Piece::Client | Piece::Slot(PaneSlot::Client | PaneSlot::Popups, _)
+    )
+}
+
+/// The alpha one of a pane's pieces is drawn at, the pane at `opacity` and
+/// its client at `client_opacity` inside it (#296): the client's pixels at
+/// both, the style's layers and the pane's own slots at the pane's alone, so
+/// a layer `behind` the client shows through as the client fades. A capture
+/// passes an `opacity` of 1, since its warp fades the whole texture after.
+/// `tests::a_client_faded_out_draws_its_panes_layers_and_no_client`.
+pub(crate) fn piece_alpha(opacity: f32, client_opacity: f32, piece: Piece) -> f32 {
+    if is_client(piece) {
+        opacity * client_opacity
+    } else {
+        opacity
+    }
+}
+
+/// What the flat path draws a piece at under `frame`: [`piece_alpha`], or
+/// nothing for the client's pixels once they show nothing
+/// ([`present::Frame::shows_client`]), so a client faded into its pane
+/// costs nothing to draw while its layers go on being drawn.
+/// `tests::a_client_faded_out_draws_its_panes_layers_and_no_client`.
+pub(crate) fn drawn_alpha(frame: &present::Frame, piece: Piece) -> Option<f32> {
+    if is_client(piece) && !frame.shows_client() {
+        return None;
+    }
+    Some(piece_alpha(frame.opacity, frame.client_opacity, piece))
+}
+
 /// A pane's pieces with its slots, topmost first (Ruling 15): the pane's
 /// `front`, then `PANE_ORDER` with the client's slots around the client, then
 /// the pane's `behind`; a pane `replace` is the whole of it; a client
@@ -4133,6 +4181,12 @@ fn slot_element(
     ) {
         SlotDraw::Result => {}
         SlotDraw::Skip => return None,
+        // A known limit (#297): the hole erases what the pane's lower layers
+        // drew under it at full strength, so a client backdrop slot under a
+        // warp erases the layers beneath it at any `client_opacity` (#296) --
+        // a style's icon `behind` the client included -- where the flat path
+        // fades the slot with the client. Its `Beneath` stays at the pane's
+        // alpha to match, rather than leave a see-through hole.
         SlotDraw::Hole => {
             let Mask::Rect { rect, radii } = part else {
                 return None;
@@ -4489,9 +4543,11 @@ fn scene(
     // Two fades, and they multiply. The scene's own, as the application it was
     // standing in for appears underneath it; and the pane's, because a window
     // being closed or animated by a script takes everything inside it along --
-    // the scene is part of the window, not something laid over it.
+    // the scene is part of the window, not something laid over it. The pane's
+    // is the client's (#296): the scene stands in for the client, so it fades
+    // with `client_opacity` as the client would.
     let fade = state.loading.fade;
-    let alpha = frame.opacity
+    let alpha = frame.client_alpha()
         * state
             .panes
             .get(pane)
@@ -5443,8 +5499,11 @@ fn panes(
             let mut pane_warp = Some((id, texture, pane_mesh));
             for piece in WARP_ORDER {
                 match piece {
+                    // The popups are the client's (#296): at its alpha, and
+                    // not at all once it shows nothing, as on the flat path.
                     WarpPiece::Over => {
-                        if let Some(over) = prepared.over(&window)
+                        if frame.shows_client()
+                            && let Some(over) = prepared.over(&window)
                             && let Some(mesh) = warp_mesh_on(
                                 screen,
                                 &drawn_global,
@@ -5458,7 +5517,7 @@ fn panes(
                                 over.commit,
                                 over.texture.clone(),
                                 mesh,
-                                frame.opacity,
+                                frame.client_alpha(),
                                 over.program,
                             )));
                         }
@@ -5615,8 +5674,16 @@ fn panes(
         // In front on both paths: a warped pane's popups are a capture of
         // their own, drawn as a warp in front of the pane's above
         // (`tests::a_warped_panes_popups_are_in_front_of_it`).
-        let (popups, covered) =
-            popup_elements(renderer, &window, origin, output_scale, frame.opacity);
+        //
+        // At the client's alpha, and none once it shows nothing: a menu is
+        // the client's (#296).
+        let (popups, covered) = popup_elements(
+            renderer,
+            &window,
+            origin,
+            output_scale,
+            frame.client_alpha(),
+        );
         let popups_part = covered.map(|covered| Mask::Rect {
             rect: Rectangle::new(
                 (
@@ -5649,7 +5716,7 @@ fn panes(
                         slot,
                         part,
                         scale,
-                        frame.opacity,
+                        drawn_alpha(&frame, Piece::Slot(PaneSlot::Popups, slot))?,
                         (monitor.as_deref(), Within::Screen),
                     )
                 })),
@@ -5661,6 +5728,7 @@ fn panes(
                 // place a toplevel's popups are drawn on this path -- the
                 // toplevel itself is drawn from its own surface tree, which
                 // holds no popups; see [`toplevel_elements`].
+                None if !frame.shows_client() => {}
                 None => {
                     elements.extend(popups.take().into_iter().flatten().filter_map(|element| {
                         fitted(element, origin, fitting.uncut(), output_scale)
@@ -5701,7 +5769,10 @@ fn panes(
                         state.resizing.background,
                         &placed,
                         real.size,
-                        frame.opacity,
+                        // The pane's background where the client's picture does
+                        // not reach: it stands in for the client, so it fades
+                        // with it (#296).
+                        frame.client_alpha(),
                         scale,
                         rounded.as_ref().map(|(effect, _)| *effect),
                     ),
@@ -5726,6 +5797,11 @@ fn panes(
                 drawing,
             ),
             Piece::Slot(part, slot) => {
+                // The client's slots at the client's alpha, and none once it
+                // shows nothing; the pane's own at the pane's (#296).
+                let Some(alpha) = drawn_alpha(&frame, piece) else {
+                    return;
+                };
                 let radii = declared_rounding(state, pane).map(|effect| effect.radii());
                 let mask = match part {
                     PaneSlot::Client => crate::effect::mask::client_mask(
@@ -5744,7 +5820,7 @@ fn panes(
                     slot,
                     mask,
                     scale,
-                    frame.opacity,
+                    alpha,
                     (monitor.as_deref(), Within::Screen),
                 ));
             }
@@ -5752,19 +5828,20 @@ fn panes(
                 // Popups are not here: they went in above the whole sandwich,
                 // before this walk started. See the comment there.
 
+                // A client faded out inside its pane draws nothing, nor the
+                // background standing in for it, and its layers are still
+                // drawn around the place it was (#296).
+                let Some(alpha) = drawn_alpha(&frame, piece) else {
+                    return;
+                };
+
                 // A surface's top-left is not the window's -- see
                 // `window_surface_origin`. That is what made Firefox look
                 // both misplaced and shadowed. Popups already did this;
                 // toplevels did not.
                 let surface_origin = window_surface_origin(origin, &window, scale);
                 let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                    toplevel_elements(
-                        renderer,
-                        &window,
-                        surface_origin,
-                        output_scale,
-                        frame.opacity,
-                    );
+                    toplevel_elements(renderer, &window, surface_origin, output_scale, alpha);
                 // A style's rounding: each surface wrapped, in its own place,
                 // and cut to the client's rectangle as drawn, taken back
                 // through the zoom into the surfaces' own pixels
@@ -6193,12 +6270,17 @@ fn cursor(
 /// warped. `prepare` builds this only once the chains have run
 /// (`tests::a_warped_panes_capture_walks_its_client_slot`,
 /// `tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
+///
+/// **Its client at `client_opacity`** (#296), the layers opaque: the warp
+/// fades the whole texture by the pane's opacity, and only the client fades
+/// inside it. `state::tests::real_client::a_warped_panes_capture_is_redrawn_as_its_client_fades`.
 pub(crate) fn flat_window_elements(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
     window: &Window,
     scale: f64,
     slots: &Slots,
+    client_opacity: f32,
 ) -> Vec<Element> {
     let pieces = state
         .panes
@@ -6212,6 +6294,7 @@ pub(crate) fn flat_window_elements(
         (0, 0).into(),
         slots,
         &pieces,
+        client_opacity,
     )
 }
 
@@ -6229,16 +6312,42 @@ pub(crate) fn flat_window_elements_at(
     at: Point<i32, Physical>,
     slots: &Slots,
 ) -> Vec<Element> {
-    let pieces = state
-        .panes
-        .id_of(window)
-        .map_or_else(|| PANE_ORDER.to_vec(), |pane| inner_pieces(slots, pane));
-    flat_pane(state, renderer, window, scale, at, slots, &pieces)
+    let pane = state.panes.id_of(window);
+    let pieces = pane.map_or_else(|| PANE_ORDER.to_vec(), |pane| inner_pieces(slots, pane));
+    // The client as the pane shows it this pass (#296): a whole pane's
+    // effect stands for the pane, so the client inside it is already faded,
+    // as the warp's capture has it. Read here, where nothing hands a frame
+    // in; the pass's instant is the one the walk draws at.
+    let client_opacity = pane
+        .and_then(|pane| {
+            let outer = state.pane_outer_of(pane)?;
+            Some(
+                state
+                    .drawn_id_at(pane, outer, pass_now(state))
+                    .client_opacity,
+            )
+        })
+        .unwrap_or(1.0);
+    flat_pane(
+        state,
+        renderer,
+        window,
+        scale,
+        at,
+        slots,
+        &pieces,
+        client_opacity,
+    )
 }
 
 /// One pane drawn flat at its own size, its corner at `at`, walking
-/// `pieces`: what both captures of a pane are drawn from.
+/// `pieces`, its client at `client_opacity` (#296): what both captures of a
+/// pane are drawn from.
 /// `tests::a_warped_panes_capture_walks_its_client_slot`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one pane's capture: whose, at what scale and corner, with what slots, which pieces, and its client's opacity"
+)]
 fn flat_pane(
     state: &mut Solium,
     renderer: &mut GlesRenderer,
@@ -6247,6 +6356,7 @@ fn flat_pane(
     at: Point<i32, Physical>,
     slots: &Slots,
     pieces: &[Piece],
+    client_opacity: f32,
 ) -> Vec<Element> {
     let mut elements = Vec::new();
     let Some(Flat { outer, insets, .. }) = flat(state, window) else {
@@ -6273,7 +6383,11 @@ fn flat_pane(
     // Fully opaque, and over the whole texture: this pass draws the window flat
     // at its real size and the warp applies the transform's opacity to the
     // whole texture afterwards, so applying it here as well would fade the
-    // frame squared. The client within it.
+    // frame squared. The client within it, but for its own `client_opacity`
+    // (#296), which only the client's pixels take: [`piece_alpha`] at a pane
+    // opacity of 1. Drawn even at 0, unlike the flat path, which drops it:
+    // the capture is redrawn only when its key moves, and a pane with no
+    // layers would otherwise have nothing to capture at all.
     let (drawing, origin) = pane_drawing_at(outer, insets, at, scale, pass_now(state));
 
     // Asked before the walk, which holds the state.
@@ -6312,6 +6426,7 @@ fn flat_pane(
                 let Some(pane) = pane else {
                     continue;
                 };
+                let alpha = piece_alpha(1.0, client_opacity, piece);
                 let mask = match part {
                     PaneSlot::Client => crate::effect::mask::client_mask(
                         present::logical(
@@ -6335,7 +6450,7 @@ fn flat_pane(
                     slot,
                     mask,
                     scale,
-                    1.0,
+                    alpha,
                     (monitor.as_deref(), Within::Capture),
                 ));
             }
@@ -6353,7 +6468,13 @@ fn flat_pane(
                 // already used, so the two cannot drift apart again.
                 // `state::tests::window_surface_origin_matches_a_csd_clients_shadow_offset`.
                 let surface_origin = window_surface_origin(origin, window, scale);
-                let surfaces = client_piece(renderer, window, surface_origin, output_scale);
+                let surfaces = client_piece(
+                    renderer,
+                    window,
+                    surface_origin,
+                    output_scale,
+                    piece_alpha(1.0, client_opacity, piece),
+                );
                 match &rounded {
                     Some((effect, programs)) => {
                         // `origin` for the room, `surface_origin` for the tree:
@@ -6980,8 +7101,10 @@ pub(crate) fn remains_elements(
         // `inset` into it for a client that draws a shadow, which is the same
         // offset the live path takes off.
         let surfaces = origin - picture.inset().to_physical_precise_round(scale);
+        // What the client left fades with `client_opacity` as the client did
+        // (#296), and the fill below with it.
         return picture
-            .elements(surfaces, scale, frame.opacity)
+            .elements(surfaces, scale, frame.client_alpha())
             .filter_map(|surface| {
                 fitted(surface, origin, placed.fit, output_scale).map(Fitted::into_remains)
             })
@@ -6993,7 +7116,7 @@ pub(crate) fn remains_elements(
         placed.client.size.to_physical_precise_round(scale),
     );
     let fill = crate::remains::FILL;
-    let alpha = fill[3] * frame.opacity;
+    let alpha = fill[3] * frame.client_alpha();
     vec![Element::Solid(
         smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
             left.fill.clone(),
@@ -7154,18 +7277,22 @@ pub(crate) fn window_surface_origin(
 }
 
 /// What a pane's capture draws of its client: its own surface tree, no
-/// popups. `state::tests::a_warped_panes_capture_holds_no_popups`.
+/// popups, at `alpha`: the client's opacity inside its pane in a warp's
+/// capture (#296), 1 in the client's own self capture, whose result is
+/// faded where it is placed.
+/// `state::tests::a_warped_panes_capture_holds_no_popups`.
 pub(crate) fn client_piece<R>(
     renderer: &mut R,
     window: &Window,
     origin: Point<i32, Physical>,
     scale: Scale<f64>,
+    alpha: f32,
 ) -> Vec<WaylandSurfaceRenderElement<R>>
 where
     R: Renderer + ImportAll,
     R::TextureId: Clone + 'static,
 {
-    toplevel_elements(renderer, window, origin, scale, 1.0)
+    toplevel_elements(renderer, window, origin, scale, alpha)
 }
 
 /// Drawn size over real size, guarding the degenerate case.
@@ -9428,6 +9555,70 @@ pub(crate) mod tests {
             super::Piece::Slot(part, slot) => into.push(format!("<{part:?} {slot:?}>")),
         });
         order
+    }
+
+    /// **A client faded out draws its pane's layers and no client** (#296):
+    /// the flat path's walk, each piece at what `drawn_alpha` gives it. At a
+    /// `client_opacity` of 0 the layers are drawn at the pane's opacity and
+    /// nothing of the client is, its slots included; the pane's own slot
+    /// keeps the pane's. Half way, the client and its slot are at the pane's
+    /// opacity times its own.
+    #[test]
+    fn a_client_faded_out_draws_its_panes_layers_and_no_client() {
+        use crate::effect::plan::PaneSlot;
+        use crate::effect::rules::Slot;
+        on_the_qt_thread(|| {
+            let decoration = example();
+            let has = |part: PaneSlot, slot: Slot| slot == Slot::Front && part != PaneSlot::Popups;
+            let drawn = |client_opacity: f32| {
+                let frame = crate::present::Frame::real(smithay::utils::Rectangle::new(
+                    (0, 0).into(),
+                    (300, 200).into(),
+                ))
+                .with_opacity(0.8)
+                .with_client_opacity(client_opacity);
+                let mut order: Vec<(String, f32)> = Vec::new();
+                super::pane_walk(&mut order, &has, |into, piece| {
+                    let Some(alpha) = super::drawn_alpha(&frame, piece) else {
+                        return;
+                    };
+                    match piece {
+                        super::Piece::Layers(depth) => into.extend(
+                            decoration
+                                .layers_at(depth)
+                                .map(|name| (name.to_owned(), alpha)),
+                        ),
+                        super::Piece::Client => into.push(("<client>".to_owned(), alpha)),
+                        super::Piece::Slot(part, slot) => {
+                            into.push((format!("<{part:?} {slot:?}>"), alpha));
+                        }
+                    }
+                });
+                order
+            };
+            let at = |name: &str, alpha: f32| (name.to_owned(), alpha);
+            assert_eq!(
+                drawn(0.0),
+                [
+                    at("<Pane Front>", 0.8),
+                    at("spikes", 0.8),
+                    at("bar", 0.8),
+                    at("glow", 0.8)
+                ]
+            );
+            let half = 0.8_f32 * 0.5;
+            assert_eq!(
+                drawn(0.5),
+                [
+                    at("<Pane Front>", 0.8),
+                    at("spikes", 0.8),
+                    at("bar", 0.8),
+                    at("<Client Front>", half),
+                    at("<client>", half),
+                    at("glow", 0.8)
+                ]
+            );
+        });
     }
 
     /// **With no slots the pane walk is `PANE_ORDER`**, exactly.

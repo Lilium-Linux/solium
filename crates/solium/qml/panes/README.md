@@ -108,6 +108,15 @@ becomes its own element in the frame, which is what lets the client's surface
 sit *between* two layers of one style -- the thing a single QML file can never
 do.
 
+**A layer keeps the pane's opacity while the client fades on its own.**
+`sol.present`'s `opacity` fades the whole pane, layers and all, and its
+`client_opacity` fades only the client's content inside it. A layer at
+`behind` that draws the app's icon (it has `appId`) is then what the window
+turns into as it flies home, and what a launch grows out of, because the pane
+is one thing on screen the whole way. One limit, #297: while a pane is warped
+(a turn or a deform), an effect on the client drawn beneath the pane erases
+the layers under it at any `client_opacity`.
+
 Layers at one depth are drawn in declaration order, the later one on top.
 Pointer input goes to every layer. When more than one layer sets `action` for
 the same press, the topmost is the one acted on.

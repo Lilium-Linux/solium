@@ -117,6 +117,27 @@ last of them is. `sol.present_from` takes the same `motion`, which is how a
 launch's window grows out of its icon with its centre ahead of its size; its
 `deform` is the shape it starts in, relaxed to the plain window as it lands.
 
+`client_opacity` fades the window's content inside its pane and leaves the
+pane's style alone, and `motion.client_opacity` gives it a curve of its own.
+A pane style with a layer `behind` the client that draws the app's icon then
+turns the window into its icon as it flies home, as one shape, with nothing
+drawn beside it:
+
+```lua
+sol.present(id, { x = icon.x, y = icon.y, w = icon.w, h = icon.h,
+    client_opacity = 0,
+    motion = {
+        x = { easing = { spring = { stiffness = 520, damping = 46 } } },
+        y = { easing = { spring = { stiffness = 520, damping = 46 } } },
+        size = { easing = { spring = { stiffness = 320, damping = 36 } } },
+        -- The app until late, then the icon its layer draws.
+        client_opacity = { duration = 360, easing = { 0.55, 0, 0.9, 0.45 } },
+    } })
+```
+
+A launch runs it backwards: `sol.present_from` with `client_opacity = 0`
+starts at the icon and fades the app in as it grows.
+
 ## Where the feel actually lives
 
 Almost none of it should be in your mode. `config.lua` declares it, and your
