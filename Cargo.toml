@@ -42,5 +42,13 @@ todo        = "deny"
 # compositor that stutters under a debugger teaches nothing about smoothness.
 opt-level = 1
 
+# A panic stops the compositor where it happened (#283): see `main.rs`'s
+# `log_panics`, which aborts in every build once it has logged the panic. Only
+# the release profile says so here too, because a dev profile that aborts
+# builds the libraries a doctest links to aborting, and a doctest, built to
+# unwind whatever the profile says, then refuses to link against them.
+[profile.release]
+panic = "abort"
+
 [profile.dev.package."*"]
 opt-level = 3

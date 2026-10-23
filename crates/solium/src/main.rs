@@ -148,12 +148,23 @@ fn start_logging(log: Option<std::sync::Arc<std::fs::File>>) {
 fn log_panics() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // The backtrace into the log, whatever RUST_BACKTRACE says: a
+        // compositor's panic happens once, on someone's hardware, and it
+        // aborts right after this (#283), so this line is all there will be
+        // to read.
         tracing::error!(
             location = info.location().map(ToString::to_string),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
             "panic: {}",
             info
         );
         previous(info);
+        // Stopped where it happened, in every build. Unwinding cannot save a
+        // session, and unwound past Qt it ran Qt's exit handlers on state the
+        // panic had left half-dropped: the heap corrupted, and the core dump
+        // blamed Qt instead of the panic. Only the compositor installs this
+        // hook; tests unwind, as `#[should_panic]` and the Qt test thread need.
+        std::process::abort();
     }));
 }
 
