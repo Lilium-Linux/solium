@@ -52,6 +52,21 @@
 //! are gone, whatever the scene is doing
 //! (`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`).
 //!
+//! **The peek.** While the session is unlocked, the configuration can pull
+//! the lock's scenes down over the desktop with a finger, as an iPhone's lock
+//! follows the finger pulled down from the top: `sol.lock_peek(progress)`
+//! makes them live and draws them over the desktop, reading `Lock.state` as
+//! `"peeking"` and `Lock.progress` as how far down, from 0 to 1. It is a
+//! picture and nothing more: nothing is locked, input stays the session's
+//! (the configuration's own gesture holds the finger), and the scenes read
+//! the redacted models they always do. `sol.lock_peek(false)` ends it with
+//! the exit, reading `"unlocking"` for `lock.exit_ms` at most, and
+//! `sol.lock_now()` takes the lock from it, its entry going on from the
+//! peek's progress for what is left of `lock.enter_ms`. Only scenes that are
+//! not the fallback are drawn in a peek, as in an entry: the fallback does
+//! not move, and would cover the desktop at the finger's first pixel
+//! (`state::tests::real_client::lock_focus::native::peek`).
+//!
 //! The scene is told the fingers on its monitor as Qt touch events, so its
 //! `DragHandler`s and `TapHandler`s work (`input::touch`), and the pointer's
 //! motion and presses as Qt mouse events, so its buttons can be clicked
@@ -263,7 +278,7 @@ pub(crate) struct LockScenes {
     /// show the backdrop and are not tried again until the lock ends.
     failed: HashSet<String>,
     /// Whether the scenes are live: drawn and ticking, while Solium holds the
-    /// lock and through its exit. Quiet otherwise.
+    /// lock, through a peek and through an exit. Quiet otherwise.
     live: bool,
     /// Whether every scene is to be built again once they are quiet: the
     /// configuration named another scene.
@@ -274,8 +289,17 @@ pub(crate) struct LockScenes {
     /// entry: lit when the lock was taken, and showing a scene that is not
     /// the fallback and has not failed since.
     entering_on: HashSet<String>,
+    /// Where the entry under way started, from 0 to 1: the peek it took the
+    /// lock from (`Lock.progress` through it), 0 for a lock taken from none.
+    enter_from: f64,
     /// When the exit under way ends, on the compositor's clock.
     exit_until: Option<Duration>,
+    /// Whether the exit under way ends a peek rather than a lock, so the
+    /// fallback, which a peek never draws, is not drawn through it either.
+    exit_after_peek: bool,
+    /// The peek under way: how far down the configuration has pulled the
+    /// scenes over the unlocked desktop, from 0 to 1 (`sol.lock_peek`).
+    peek: Option<f64>,
     /// Where the pointer is, as the scenes have been told it.
     pub(crate) pointer: LockPointer,
 }
@@ -295,7 +319,10 @@ impl Default for LockScenes {
             rebuild: false,
             enter_until: None,
             entering_on: HashSet::new(),
+            enter_from: 0.0,
             exit_until: None,
+            exit_after_peek: false,
+            peek: None,
             pointer: LockPointer::default(),
         }
     }
@@ -580,18 +607,43 @@ impl LockScenes {
         true
     }
 
-    /// The lock was taken at `now`, on the monitors `lit` names: its scenes
-    /// come down over the desktop for `lock.enter_ms`, if it is not 0 and a
-    /// monitor is lit. Which monitors draw the desktop under their scene is
-    /// settled by [`Self::keep_entry_where_scenes_are`], once the scenes are
-    /// there.
-    pub(crate) fn begin_entry(&mut self, now: Duration, lit: Vec<String>) {
+    /// The lock was taken at `now`, on the monitors `lit` names, from a peek
+    /// `from` of the way down (0 for none): its scenes come down over the
+    /// desktop for what is left of `lock.enter_ms`, `1 - from` of it, if
+    /// that is not 0 and a monitor is lit. Which monitors draw the desktop
+    /// under their scene is settled by [`Self::keep_entry_where_scenes_are`],
+    /// once the scenes are there.
+    pub(crate) fn begin_entry(&mut self, now: Duration, lit: Vec<String>, from: f64) {
         self.end_entry();
-        if self.settings.enter.is_zero() || lit.is_empty() {
+        let from = if from.is_finite() {
+            from.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let enter = self.settings.enter;
+        let left = if from <= 0.0 {
+            enter
+        } else {
+            Duration::try_from_secs_f64(enter.as_secs_f64() * (1.0 - from))
+                .unwrap_or(Duration::ZERO)
+                .min(enter)
+        };
+        if left.is_zero() || lit.is_empty() {
             return;
         }
-        self.enter_until = Some(now + self.settings.enter);
+        self.enter_until = Some(now + left);
         self.entering_on = lit.into_iter().collect();
+        self.enter_from = from;
+    }
+
+    /// Where the entry under way started, from 0 to 1: `Lock.progress`
+    /// through it. 0 with no entry.
+    pub(crate) fn entry_from(&self) -> f64 {
+        if self.enter_until.is_some() {
+            self.enter_from
+        } else {
+            0.0
+        }
     }
 
     /// Keep the entry only on the monitors that show a scene that is not the
@@ -630,6 +682,7 @@ impl LockScenes {
     pub(crate) fn end_entry(&mut self) {
         self.enter_until = None;
         self.entering_on.clear();
+        self.enter_from = 0.0;
     }
 
     /// Whether the desktop is drawn under `monitor`'s scene at `now`: during
@@ -656,12 +709,60 @@ impl LockScenes {
     /// is forgotten, since it is the desktop's now.
     pub(crate) fn begin_exit(&mut self, now: Duration) {
         self.end_entry();
+        self.peek = None;
+        self.exit_after_peek = false;
         self.pointer = LockPointer::default();
         if self.settings.exit.is_zero() || self.instances.is_empty() {
             self.exit_until = None;
             return;
         }
         self.exit_until = Some(now + self.settings.exit);
+    }
+
+    /// Pull the scenes `progress` of the way down over the unlocked desktop
+    /// (0 to 1; anything else is held to that): the peek begins, or follows
+    /// the finger. An exit still playing is over: the peek has the scenes
+    /// now, from where they are. For [`Solium::lock_peek`], which decides
+    /// whether a peek may be.
+    pub(crate) fn peek(&mut self, progress: f64) {
+        self.exit_until = None;
+        self.exit_after_peek = false;
+        self.peek = Some(progress.clamp(0.0, 1.0));
+    }
+
+    /// How far down the peek under way is, or `None` with none.
+    pub(crate) fn peeking(&self) -> Option<f64> {
+        self.peek
+    }
+
+    /// End the peek at `now`, if there is one: its scenes go back up through
+    /// the exit, for `lock.exit_ms` at most. Where it was, or `None` with no
+    /// peek.
+    pub(crate) fn end_peek(&mut self, now: Duration) -> Option<f64> {
+        let was = self.peek?;
+        self.begin_exit(now);
+        self.exit_after_peek = self.exit_until.is_some();
+        Some(was)
+    }
+
+    /// Drop the peek with no exit, because the session is being locked:
+    /// where it was, or `None` with no peek.
+    pub(crate) fn take_peek(&mut self) -> Option<f64> {
+        self.peek.take()
+    }
+
+    /// Whether `monitor`'s scene is drawn over the unlocked desktop at `now`:
+    /// through a peek, and through the exit after a lock or a peek; never the
+    /// fallback for a peek, which does not move.
+    pub(crate) fn over_desktop(&self, monitor: &str, now: Duration) -> bool {
+        let Some(instance) = self.instances.get(monitor) else {
+            return false;
+        };
+        let moves = instance.kind != Kind::Fallback;
+        if self.peek.is_some() {
+            return moves;
+        }
+        self.exiting(now) && (moves || !self.exit_after_peek)
     }
 
     /// Whether the scenes are being drawn over the desktop at `now`.
@@ -677,6 +778,13 @@ impl LockScenes {
     /// End the exit, whether or not it is over: the session locked again.
     pub(crate) fn end_exit(&mut self) {
         self.exit_until = None;
+        self.exit_after_peek = false;
+    }
+
+    /// Whether the scenes are live: drawn and ticking.
+    #[cfg(test)]
+    pub(crate) fn is_live(&self) -> bool {
+        self.live
     }
 
     /// Deliver a finger to `monitor`'s scene, drawn across `area` in the
@@ -1015,7 +1123,7 @@ mod tests {
             let mut scenes = LockScenes::default();
             scenes.use_scene(scene("entry", "import QtQuick\nItem {}\n"));
             let now = Duration::from_secs(10);
-            scenes.begin_entry(now, vec![left.name(), right.name()]);
+            scenes.begin_entry(now, vec![left.name(), right.name()], 0.0);
             scenes.sync(&all, true);
             scenes.keep_entry_where_scenes_are();
             let at = now + Duration::from_millis(1);
@@ -1056,12 +1164,86 @@ mod tests {
 
             let mut fallback = LockScenes::default();
             fallback.use_fallback();
-            fallback.begin_entry(now, vec![left.name()]);
+            fallback.begin_entry(now, vec![left.name()], 0.0);
             fallback.sync(std::slice::from_ref(&left), true);
             fallback.keep_entry_where_scenes_are();
             assert!(
                 !fallback.entry_pending() && !fallback.desktop_under(&left.name(), at),
                 "the fallback has an entry"
+            );
+        });
+    }
+
+    /// **A peek draws a scene that moves, and never the fallback**: pulled
+    /// down, a monitor showing a scene is drawn over the desktop and one
+    /// showing the fallback, which would cover it all at the first pixel, is
+    /// not, nor through the way back up after the peek; the exit after a
+    /// lock draws either. A peek begun during an exit takes it over, and a
+    /// lock taken from a peek comes down for what is left of `enter_ms`.
+    #[test]
+    fn a_peek_draws_a_scene_that_moves_and_never_the_fallback() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let output = monitor("peek-own");
+            let now = Duration::from_secs(10);
+            let mut own = LockScenes::default();
+            own.use_scene(scene("peek", "import QtQuick\nItem {}\n"));
+            own.sync(std::slice::from_ref(&output), false);
+            let mut fallback = LockScenes::default();
+            fallback.use_fallback();
+            fallback.sync(std::slice::from_ref(&output), false);
+            assert_eq!(fallback.shown_on(&output), Shown::Fallback, "the premise");
+
+            for scenes in [&mut own, &mut fallback] {
+                assert!(
+                    !scenes.over_desktop(&output.name(), now),
+                    "drawn with no peek"
+                );
+                scenes.peek(0.4);
+            }
+            assert!(
+                own.over_desktop(&output.name(), now),
+                "a scene is not drawn in a peek"
+            );
+            assert!(
+                !fallback.over_desktop(&output.name(), now),
+                "the fallback is drawn in a peek"
+            );
+            for scenes in [&mut own, &mut fallback] {
+                assert_eq!(scenes.end_peek(now), Some(0.4));
+            }
+            let at = now + Duration::from_millis(1);
+            assert!(own.over_desktop(&output.name(), at), "no way back up");
+            assert!(
+                !fallback.over_desktop(&output.name(), at),
+                "the fallback is drawn on the way back up from a peek"
+            );
+
+            // After a lock, the exit draws either; a peek then takes it over.
+            fallback.end_exit();
+            fallback.begin_exit(now);
+            assert!(
+                fallback.over_desktop(&output.name(), at),
+                "the exit after a lock does not draw the fallback"
+            );
+            own.peek(0.2);
+            assert!(!own.exiting(at), "a peek did not take over from the exit");
+            assert_eq!(own.peeking(), Some(0.2));
+
+            // A lock taken from the peek: what is left of the entry.
+            let from = own.take_peek().unwrap_or_default();
+            own.begin_entry(now, vec![output.name()], from);
+            let left = own.settings().enter.mul_f64(0.8);
+            assert!(own.entering(now + left - Duration::from_millis(1)));
+            assert!(
+                !own.entering(now + left + Duration::from_millis(1)),
+                "the entry from a peek lasted the whole of `enter_ms`"
+            );
+            assert!((own.entry_from() - 0.2).abs() < 1e-9);
+            own.begin_entry(now, vec![output.name()], 1.0);
+            assert!(
+                !own.entry_pending(),
+                "an entry from a peek all the way down"
             );
         });
     }

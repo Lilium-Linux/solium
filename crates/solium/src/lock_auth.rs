@@ -28,6 +28,11 @@
 //!   over the desktop for `lock.enter_ms` (`lock_scene.rs`). Whatever is
 //!   typed meanwhile is the password's as in any other state; the state is
 //!   the entry's until it ends.
+//! * `peeking`: no lock at all. The configuration is pulling the scenes down
+//!   over the unlocked desktop with a finger (`sol.lock_peek`), and
+//!   `Lock.progress` says how far; nothing typed reaches the field, which is
+//!   not armed until a lock is taken. Ended without one, the scenes go back
+//!   up reading `unlocking` for `lock.exit_ms` at most (`lock_scene.rs`).
 //! * `idle`: nothing typed. The field is armed, so the first key goes into it.
 //! * `prompting`: something typed.
 //! * `checking`: the helper has the password; then, after a no, PAM's failure
@@ -991,8 +996,11 @@ impl LockAuth {
         let number = |value: u64| Json::Number(value as f64);
         // Through the exit the session is unlocked, and the state is the
         // one that says so, whatever the field was reset to; through the
-        // entry, the one that says the lock is coming down.
-        let state = if scene.exiting {
+        // entry, the one that says the lock is coming down; through a peek,
+        // the one that says it is only being pulled down, and is no lock.
+        let state = if scene.peeking {
+            "peeking"
+        } else if scene.exiting {
             Phase::Unlocking.name()
         } else if scene.entering {
             "locking"
@@ -1002,6 +1010,7 @@ impl LockAuth {
         object(vec![
             ("state", text(state)),
             ("locked", Json::Bool(scene.locked)),
+            ("progress", Json::Number(scene.progress)),
             ("enterMs", number(scene.enter_ms)),
             ("exitMs", number(scene.exit_ms)),
             ("attempts", number(u64::from(self.attempts))),
@@ -1064,6 +1073,12 @@ struct SceneView {
     /// Whether its entry is coming down over the desktop, which reads as
     /// `"locking"`.
     entering: bool,
+    /// Whether the configuration is pulling the scenes down over the
+    /// unlocked desktop, which reads as `"peeking"`.
+    peeking: bool,
+    /// `Lock.progress`, 0 to 1: how far down a peek is, and through the
+    /// entry that takes the lock from one, where that peek was; 0 otherwise.
+    progress: f64,
     /// `lock.enter_ms`: `Lock.enterMs`.
     enter_ms: u64,
     /// Whether its exit is playing over the desktop, which reads as
@@ -1195,9 +1210,22 @@ impl Solium {
         let exit = self.lock_scenes.settings().exit;
         let enter = self.lock_scenes.settings().enter;
         let locked = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
+        let entering = locked && self.lock_scenes.entering(now);
+        let peek = self
+            .lock
+            .is_none()
+            .then(|| self.lock_scenes.peeking())
+            .flatten();
+        let progress = match peek {
+            Some(progress) => progress,
+            None if entering => self.lock_scenes.entry_from(),
+            None => 0.0,
+        };
         let scene = SceneView {
             locked,
-            entering: locked && self.lock_scenes.entering(now),
+            entering,
+            peeking: peek.is_some(),
+            progress,
             enter_ms: u64::try_from(enter.as_millis()).unwrap_or(u64::MAX),
             exiting: self.lock.is_none() && self.lock_scenes.exiting(now),
             exit_ms: u64::try_from(exit.as_millis()).unwrap_or(u64::MAX),
@@ -1842,6 +1870,14 @@ mod tests {
 
         /// The lock just taken, its scene coming down.
         fn entering(name: &str, shows: &Shows<'_>) -> Self {
+            let mut locked = Self::unlocked(name, shows);
+            locked.state.lock_natively();
+            locked.state.publish_models();
+            locked
+        }
+
+        /// No lock yet: the scene built ahead, and kept quiet.
+        fn unlocked(name: &str, shows: &Shows<'_>) -> Self {
             crate::qml::start().expect("Qt starts");
             // Whatever a test before this one left asked.
             let _ = take_requests();
@@ -1877,7 +1913,7 @@ mod tests {
                 Shows::Shipped => {}
                 Shows::Fallback => state.lock_scenes.use_fallback(),
             }
-            state.lock_natively();
+            state.sync_lock_scenes();
             state
                 .lock_scenes
                 .instance_for_test(&output)
@@ -2086,8 +2122,8 @@ mod tests {
                                 // through its name: every property and
                                 // method its type declares, by name.
                                 root.write(Lock, ["state", "attempts", "retryAfter",
-                                    "message", "user", "promptOn", "locked", "enterMs",
-                                    "exitMs"])
+                                    "message", "user", "promptOn", "locked", "progress",
+                                    "enterMs", "exitMs"])
                                 root.write(field, ["length", "selected", "accepting"])
                                 root.write(pad, ["layout", "pressed"])
                                 try { Lock.submit("unlock", true) } catch (error) {}
@@ -2574,6 +2610,299 @@ mod tests {
             assert!(
                 (down(&mut locked) - 1.0).abs() < 1e-9,
                 "a lock with no entry is not down at once"
+            );
+        });
+    }
+
+    /// A scene that says what `Lock` reads: its state, as one flag each,
+    /// whether it is locked, and `progress` in thousandths.
+    const PEEK_SCENE: &str = r#"import QtQuick
+                import Solium
+                Item {
+                    readonly property int peeking: Lock.state === "peeking" ? 1 : 0
+                    readonly property int locking: Lock.state === "locking" ? 1 : 0
+                    readonly property int unlocking: Lock.state === "unlocking" ? 1 : 0
+                    readonly property int locked: Lock.locked ? 1 : 0
+                    readonly property int progress: Math.round(Lock.progress * 1000)
+                }"#;
+
+    /// Whether the lock's scene on `output` is drawn over the unlocked
+    /// desktop now.
+    fn over_desktop(state: &Solium, output: &Output) -> bool {
+        state.lock_scene_over_desktop(output, state.clock.now())
+    }
+
+    /// **`Lock.state` and `Lock.progress` follow `sol.lock_peek`**: a peek
+    /// reads `"peeking"`, with `progress` where the configuration put it,
+    /// held to 0 to 1, and a number that is not one changes nothing; the
+    /// scene is live and drawn over the desktop, and nothing is locked. A
+    /// lock taken from it reads `"locking"` with `progress` where the peek
+    /// was, and 0 once the entry is over.
+    #[test]
+    fn lock_state_and_progress_follow_sol_lock_peek() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut peeked = Locked::unlocked("peek-follow", &Shows::Own(PEEK_SCENE));
+            let output = peeked.output.clone();
+            assert_eq!(peeked.int("peeking"), 0, "the premise: no peek");
+            assert!(
+                !peeked.state.lock_scenes.is_live() && !over_desktop(&peeked.state, &output),
+                "the premise: the scene is kept quiet"
+            );
+
+            for (asked, reads) in [(0.25, 250), (0.6, 600), (1.7, 1000), (-0.3, 0), (0.4, 400)] {
+                peeked.state.lock_peek(Some(asked));
+                assert_eq!(peeked.int("peeking"), 1, "{asked}: not \"peeking\"");
+                assert_eq!(peeked.int("progress"), reads, "{asked}: `Lock.progress`");
+                assert_eq!(peeked.int("locked"), 0, "{asked}: `Lock.locked` in a peek");
+                assert!(peeked.state.lock.is_none(), "{asked}: a peek locked");
+                assert!(
+                    peeked.state.lock_scenes.is_live() && over_desktop(&peeked.state, &output),
+                    "{asked}: the scene is not drawn over the desktop"
+                );
+            }
+            peeked.state.lock_peek(Some(f64::NAN));
+            assert_eq!(peeked.int("progress"), 400, "a NaN moved the peek");
+
+            // Locked from a peek: the entry goes on from where it was.
+            peeked.state.lock_peek(Some(0.5));
+            peeked.state.lock_natively();
+            assert_eq!(
+                peeked.int("locking"),
+                1,
+                "the lock from a peek is not \"locking\""
+            );
+            assert_eq!(peeked.int("locked"), 1);
+            assert_eq!(
+                peeked.int("progress"),
+                500,
+                "`Lock.progress` through the entry is not where the peek was"
+            );
+            let enter = peeked.state.lock_scenes.settings().enter;
+            peeked.state.clock.advance(enter);
+            crate::lock_scene::settle(&mut peeked.state);
+            assert_eq!(peeked.int("locking"), 0, "the entry did not end");
+            assert_eq!(
+                peeked.int("progress"),
+                0,
+                "`Lock.progress` outlived the entry"
+            );
+            assert!(natively_locked(&peeked.state));
+        });
+    }
+
+    /// **Ending a peek takes the scene back up within its bound, and leaves
+    /// nothing drawn**: `sol.lock_peek(false)` reads `"unlocking"` and keeps
+    /// the scene over the desktop for `lock.exit_ms`, and not a moment more;
+    /// then it is quiet again, reading `"idle"`, drawn on no monitor. A
+    /// second end does nothing, and with `exit_ms` 0 it is gone at once.
+    #[test]
+    fn ending_a_peek_animates_back_within_its_bound_and_leaves_nothing_drawn() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut peeked = Locked::unlocked("peek-end", &Shows::Own(PEEK_SCENE));
+            let output = peeked.output.clone();
+            let settings = scene_settings(&peeked.state, |settings| {
+                settings.exit = Duration::from_millis(400);
+            });
+            peeked.state.lock_scenes.configure(settings);
+
+            peeked.state.lock_peek(Some(0.5));
+            peeked.state.lock_peek(None);
+            assert_eq!(peeked.int("peeking"), 0, "\"peeking\" outlived the peek");
+            assert_eq!(
+                peeked.int("unlocking"),
+                1,
+                "the way back up is not the exit"
+            );
+            assert!(
+                over_desktop(&peeked.state, &output),
+                "the scene was taken away at once, not taken back up"
+            );
+            peeked.state.clock.advance(Duration::from_millis(399));
+            crate::lock_scene::settle(&mut peeked.state);
+            assert!(
+                over_desktop(&peeked.state, &output),
+                "the way back up ended before `exit_ms`"
+            );
+            peeked.state.clock.advance(Duration::from_millis(1));
+            crate::lock_scene::settle(&mut peeked.state);
+            assert!(
+                !over_desktop(&peeked.state, &output),
+                "the scene outlived the way back up"
+            );
+            assert!(
+                !peeked.state.lock_scenes.is_live(),
+                "the scene is not quiet again"
+            );
+            assert_eq!(
+                (
+                    peeked.int("unlocking"),
+                    peeked.int("peeking"),
+                    peeked.int("locked")
+                ),
+                (0, 0, 0),
+                "(unlocking, peeking, locked) after the way back up"
+            );
+            assert!(peeked.state.lock.is_none(), "ending a peek locked");
+
+            peeked.state.lock_peek(None);
+            assert!(
+                !peeked.state.lock_scenes.exiting(peeked.state.clock.now()),
+                "ending no peek played an exit"
+            );
+
+            let settings = scene_settings(&peeked.state, |settings| {
+                settings.exit = Duration::ZERO;
+            });
+            peeked.state.lock_scenes.configure(settings);
+            peeked.state.lock_peek(Some(0.5));
+            peeked.state.lock_peek(None);
+            assert!(
+                !over_desktop(&peeked.state, &output) && !peeked.state.lock_scenes.is_live(),
+                "with no exit, the scene outlived the peek"
+            );
+        });
+    }
+
+    /// **A peek while locked does nothing**: at the lock, and through its
+    /// entry, `sol.lock_peek` with a number or with `false` changes nothing
+    /// the scene reads, plays no exit, and leaves the lock that was
+    /// confirmed, confirmed.
+    #[test]
+    fn a_peek_while_locked_does_nothing() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::entering("peek-locked", &Shows::Own(PEEK_SCENE));
+            for _ in 0..2 {
+                let before = (
+                    locked.int("locking"),
+                    locked.int("progress"),
+                    locked.state.lock_scenes.entry_pending(),
+                );
+                locked.state.lock_peek(Some(0.5));
+                locked.state.lock_peek(None);
+                assert_eq!(
+                    locked.int("peeking"),
+                    0,
+                    "a peek at the lock reads \"peeking\""
+                );
+                assert_eq!(
+                    (
+                        locked.int("locking"),
+                        locked.int("progress"),
+                        locked.state.lock_scenes.entry_pending(),
+                    ),
+                    before,
+                    "a peek at the lock changed what it reads"
+                );
+                assert!(
+                    locked.state.lock_scenes.peeking().is_none()
+                        && !locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                    "a peek at the lock is under way, or played an exit"
+                );
+                assert!(
+                    natively_locked(&locked.state),
+                    "a peek at the lock unlocked it"
+                );
+                // Then the same once the entry is over.
+                let enter = locked.state.lock_scenes.settings().enter;
+                locked.state.clock.advance(enter);
+                crate::lock_scene::settle(&mut locked.state);
+            }
+            let output = locked.output.clone();
+            let frame = locked.state.lock_frame();
+            locked.state.frame_presented(&output, frame);
+            assert!(
+                !locked
+                    .state
+                    .lock
+                    .as_ref()
+                    .is_some_and(crate::lock::Lock::pending),
+                "the premise: the lock is confirmed"
+            );
+            locked.state.lock_peek(Some(0.9));
+            assert_eq!(
+                locked.state.lock_frame(),
+                frame,
+                "a peek at the lock took a fresh lock"
+            );
+            assert!(
+                !locked
+                    .state
+                    .lock
+                    .as_ref()
+                    .is_some_and(crate::lock::Lock::pending)
+            );
+        });
+    }
+
+    /// **The shipped scene follows `Lock.progress` while peeking**: its sheet
+    /// is exactly where the peek is, with no lag behind the finger and no
+    /// QML frame in between; let go, it goes back up and off the top
+    /// through the exit; locked from a peek, it comes the rest of the way
+    /// down from there, never from the top.
+    #[test]
+    fn the_shipped_scene_follows_progress_while_peeking() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut peeked = Locked::unlocked("peek-sheet", &Shows::Shipped);
+            assert_eq!(
+                peeked.state.lock_scenes.shown_on(&peeked.output),
+                crate::lock_scene::Shown::Shipped,
+                "the premise: the shipped scene"
+            );
+            let down = |peeked: &mut Locked| {
+                peeked.state.publish_models();
+                peeked.scene().get_real("down", -1.0)
+            };
+            for progress in [0.3, 0.7, 0.45] {
+                peeked.state.lock_peek(Some(progress));
+                let at = down(&mut peeked);
+                assert!(
+                    (at - progress).abs() < 1e-9,
+                    "the sheet is at {at}, not at the peek's {progress}"
+                );
+                assert!(
+                    peeked.scene().get_bool("moving"),
+                    "no shadow under a sheet pulled part of the way"
+                );
+            }
+
+            peeked.state.lock_peek(None);
+            peeked.state.publish_models();
+            run_qml_clock(100);
+            let going = down(&mut peeked);
+            assert!(
+                going > 0.0 && going < 0.45,
+                "the sheet is not going back up from where it was: {going}"
+            );
+            let exit = peeked.state.lock_scenes.settings().exit;
+            run_qml_clock(u64::try_from(exit.as_millis()).unwrap_or(600) + 100);
+            assert!(down(&mut peeked) < 0.01, "the sheet did not go off the top");
+            peeked.state.clock.advance(exit);
+            crate::lock_scene::settle(&mut peeked.state);
+
+            peeked.state.lock_peek(Some(0.5));
+            assert!((down(&mut peeked) - 0.5).abs() < 1e-9);
+            peeked.state.lock_natively();
+            let from = down(&mut peeked);
+            assert!(
+                (from - 0.5).abs() < 1e-9,
+                "the sheet jumped as the lock was taken from a peek: {from}"
+            );
+            run_qml_clock(60);
+            let coming = down(&mut peeked);
+            assert!(
+                coming > 0.5 && coming < 1.0,
+                "the sheet is not coming the rest of the way down: {coming}"
+            );
+            let enter = peeked.state.lock_scenes.settings().enter;
+            peeked.state.clock.advance(enter / 2);
+            crate::lock_scene::settle(&mut peeked.state);
+            assert!(
+                !peeked.state.lock_scenes.entry_pending(),
+                "the entry from half way lasted longer than half of `enter_ms`"
+            );
+            assert!(
+                (down(&mut peeked) - 1.0).abs() < 1e-9,
+                "the sheet is not down after the entry"
             );
         });
     }

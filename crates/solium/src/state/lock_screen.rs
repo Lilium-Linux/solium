@@ -70,7 +70,7 @@ impl Solium {
     }
 
     /// Give every monitor its native lock scene: live while Solium holds the
-    /// lock and through its exit, and kept quiet for the next lock otherwise,
+    /// lock, through a peek and through an exit, and kept quiet for the next lock otherwise,
     /// while `lock.native` is on. Asked when the lock is taken or ends, when
     /// the exit ends, when the settings change, and when the monitors change,
     /// so one plugged in gets its scene ahead of the next lock and one
@@ -80,9 +80,67 @@ impl Solium {
     /// `lock_scene::tests::the_scenes_are_built_ahead_kept_between_locks_and_follow_the_monitors`.
     pub(crate) fn sync_lock_scenes(&mut self) {
         let native = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
-        let exiting = self.lock.is_none() && self.lock_scenes.exiting(self.clock.now());
+        let unlocked = self.lock.is_none();
+        let exiting = unlocked && self.lock_scenes.exiting(self.clock.now());
+        let peeking = unlocked && self.lock_scenes.peeking().is_some();
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
-        self.lock_scenes.sync(&outputs, native || exiting);
+        self.lock_scenes
+            .sync(&outputs, native || exiting || peeking);
+    }
+
+    /// `sol.lock_peek`: pull Solium's own lock scenes `progress` of the way
+    /// down over the unlocked desktop (0 to 1), or, with `None`, let them go
+    /// back up. A picture and nothing more: nothing is locked, `LockedHint`
+    /// is left alone, input stays the session's and no field takes keys,
+    /// and the scenes read the redacted models they always do.
+    ///
+    /// Nothing while the session is locked, by Solium or a client, or while
+    /// `lock.native` is off. A peek takes over from an exit still playing,
+    /// from where its scenes are; ended, it goes back up through the exit,
+    /// for `lock.exit_ms` at most. `sol.lock_now()` during it takes the lock
+    /// from it (`take_lock`). `lock_scene.rs`, "The peek".
+    /// `real_client::lock_focus::native::peek`,
+    /// `lock_auth::tests::lock_state_and_progress_follow_sol_lock_peek`.
+    pub(crate) fn lock_peek(&mut self, progress: Option<f64>) {
+        if self.lock.is_some() {
+            tracing::debug!("a peek over a session already locked: nothing to do");
+            return;
+        }
+        let now = self.clock.now();
+        match progress {
+            Some(progress) => {
+                if !self.lock_scenes.settings().native {
+                    tracing::debug!("a peek with Solium's own lock off: nothing to do");
+                    return;
+                }
+                if !progress.is_finite() {
+                    tracing::warn!("sol.lock_peek takes a number from 0 to 1; ignoring {progress}");
+                    return;
+                }
+                let begins = self.lock_scenes.peeking().is_none();
+                self.lock_scenes.peek(progress);
+                if begins {
+                    tracing::debug!(progress, "the lock's scenes are peeking");
+                    self.sync_lock_scenes();
+                }
+            }
+            None => {
+                if self.lock_scenes.end_peek(now).is_none() {
+                    return;
+                }
+                tracing::debug!("the peek is over: the lock's scenes go back up");
+                self.sync_lock_scenes();
+            }
+        }
+        self.lock_auth.touch();
+        self.redraw = true;
+    }
+
+    /// Whether `output`'s lock scene is drawn over the unlocked desktop at
+    /// `now`: through a peek, or through the exit after the lock or a peek
+    /// (`render::elements`, `lock_scene.rs`).
+    pub(crate) fn lock_scene_over_desktop(&self, output: &Output, now: Duration) -> bool {
+        self.lock.is_none() && self.lock_scenes.over_desktop(&output.name(), now)
     }
 
     /// Whether a picture of `output` drawn at `now` has the desktop under its

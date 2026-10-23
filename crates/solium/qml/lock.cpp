@@ -40,6 +40,7 @@ SoliumLockAttached::SoliumLockAttached(QObject *object)
     connect(m_lock, &SoliumLock::userChanged, this, &SoliumLockAttached::userChanged);
     connect(m_lock, &SoliumLock::promptOnChanged, this, &SoliumLockAttached::promptOnChanged);
     connect(m_lock, &SoliumLock::lockedChanged, this, &SoliumLockAttached::lockedChanged);
+    connect(m_lock, &SoliumLock::progressChanged, this, &SoliumLockAttached::progressChanged);
     connect(m_lock, &SoliumLock::enterMsChanged, this, &SoliumLockAttached::enterMsChanged);
     connect(m_lock, &SoliumLock::exitMsChanged, this, &SoliumLockAttached::exitMsChanged);
 }
@@ -65,6 +66,8 @@ void SoliumLock::publish(const QJsonObject &next)
     const QVariantMap user = next.value(QStringLiteral("user")).toObject().toVariantMap();
     const QString prompt_on = next.value(QStringLiteral("promptOn")).toString(m_prompt_on);
     const bool locked = next.value(QStringLiteral("locked")).toBool(m_locked);
+    const double progress =
+        std::clamp(next.value(QStringLiteral("progress")).toDouble(m_progress), 0.0, 1.0);
     const int enter_ms = next.value(QStringLiteral("enterMs")).toInt(m_enter_ms);
     const int exit_ms = next.value(QStringLiteral("exitMs")).toInt(m_exit_ms);
 
@@ -75,6 +78,7 @@ void SoliumLock::publish(const QJsonObject &next)
     const bool user_moved = user != m_user;
     const bool prompt_moved = prompt_on != m_prompt_on;
     const bool locked_moved = locked != m_locked;
+    const bool progress_moved = progress != m_progress;
     const bool enter_moved = enter_ms != m_enter_ms;
     const bool exit_moved = exit_ms != m_exit_ms;
     m_state = state;
@@ -84,6 +88,7 @@ void SoliumLock::publish(const QJsonObject &next)
     m_user = user;
     m_prompt_on = prompt_on;
     m_locked = locked;
+    m_progress = progress;
     m_enter_ms = enter_ms;
     m_exit_ms = exit_ms;
 
@@ -110,6 +115,9 @@ void SoliumLock::publish(const QJsonObject &next)
     }
     if (locked_moved) {
         emit lockedChanged();
+    }
+    if (progress_moved) {
+        emit progressChanged();
     }
     // Last, so a handler of the state reads the counts and the line that go
     // with it.

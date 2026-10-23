@@ -26,6 +26,11 @@
 //   either at its bound whatever this is doing, so each one lasts exactly
 //   that long. A lock taken before sleep has no entry: the sheet is down at
 //   once.
+// * pulled down by a finger before any of that (`Lock.state === "peeking"`,
+//   which a configuration's own gesture asks for with `sol.lock_peek`), the
+//   sheet is exactly `Lock.progress` of the way down, with no lag behind the
+//   finger. Locked from there, it comes the rest of the way down in what is
+//   left of the entry; let go, it goes back up as it does at an unlock.
 //
 // Nothing here sees the password. Keys go straight to Rust, which tells the
 // field only how many characters there are; a key on the pad is found and
@@ -63,19 +68,20 @@ Item {
     readonly property bool moving: root.down > 0 && root.down < 1
 
     // The wall clock, read again at the start of every minute, and only
-    // while locked.
+    // while locked or pulled down.
     property date now: new Date()
 
     Timer {
         interval: Math.max(1000, 60000 - root.now.getSeconds() * 1000 - root.now.getMilliseconds())
-        running: Lock.locked
+        running: Lock.locked || Lock.state === "peeking"
         repeat: true
         onTriggered: root.now = new Date()
     }
 
     // A new lock, or a scene built during one: the time now, the pad put
     // away, and the sheet coming down from where it is, which is off the
-    // top unless an exit was still taking it there.
+    // top unless an exit was still taking it there, or a finger had pulled
+    // it part of the way (`Lock.progress`).
     function arrive() {
         root.now = new Date()
         settling.stop()
@@ -84,7 +90,7 @@ Item {
         leaving.stop()
         if (Lock.state === "locking") {
             if (!exiting) {
-                root.down = 0
+                root.down = Lock.progress
             }
             entering.restart()
         } else {
@@ -93,10 +99,34 @@ Item {
         }
     }
 
-    Component.onCompleted: if (Lock.locked) root.arrive()
+    // Pulled down by a finger: the sheet is where the finger has it, at
+    // once, whatever was moving it.
+    function peek() {
+        if (Lock.state !== "peeking") {
+            return
+        }
+        entering.stop()
+        leaving.stop()
+        settling.stop()
+        root.lift = 0
+        root.down = Lock.progress
+    }
+
+    Component.onCompleted: {
+        if (Lock.locked) {
+            root.arrive()
+        } else if (Lock.state === "peeking") {
+            root.now = new Date()
+            root.peek()
+        }
+    }
     Lock.onLockedChanged: if (Lock.locked) root.arrive()
+    Lock.onProgressChanged: root.peek()
     Lock.onStateChanged: {
-        if (Lock.state === "unlocking") {
+        if (Lock.state === "peeking") {
+            root.now = new Date()
+            root.peek()
+        } else if (Lock.state === "unlocking") {
             entering.stop()
             leaving.restart()
         } else if (Lock.locked && Lock.state !== "locking" && root.down < 1) {
@@ -111,13 +141,14 @@ Item {
     }
 
     // The sheet coming down, for all of `lock.enter_ms`, on a curve that
-    // slows into place and never passes it: iOS's sheets.
+    // slows into place and never passes it: iOS's sheets. From a peek, for
+    // what is left of it, which is what Solium waits for.
     NumberAnimation {
         id: entering
         target: root
         property: "down"
         to: 1
-        duration: Math.max(1, Lock.enterMs)
+        duration: Math.max(1, Lock.enterMs * (1 - Lock.progress))
         easing.type: Easing.BezierSpline
         easing.bezierCurve: [0.32, 0.72, 0, 1, 1, 1]
     }

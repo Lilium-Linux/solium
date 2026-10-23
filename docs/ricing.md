@@ -1175,11 +1175,12 @@ A scene you mend is tried again at the next lock.
 A lock scene has the same `import Solium` as any other, and adds:
 
 - `Lock`, read-only, an attached object any item reads: `state`
-  (`"locking"`, `"idle"`, `"prompting"`, `"checking"`, `"failed"`,
-  `"lockedOut"`, `"unavailable"`, `"unlocking"`), `locked`, `attempts`,
-  `retryAfter` (seconds, while locked out or retrying), `message`, `user`
-  (`name`, `realName`, `avatar`), `promptOn` (the monitor `prompt_on` names),
-  `enterMs` and `exitMs`. `Lock.submit()`
+  (`"peeking"`, `"locking"`, `"idle"`, `"prompting"`, `"checking"`,
+  `"failed"`, `"lockedOut"`, `"unavailable"`, `"unlocking"`), `locked`,
+  `progress` (0 to 1, below), `attempts`, `retryAfter` (seconds, while
+  locked out or retrying), `message`, `user` (`name`, `realName`,
+  `avatar`), `promptOn` (the monitor `prompt_on` names), `enterMs` and
+  `exitMs`. `Lock.submit()`
   checks what was typed, as Return does, and `Lock.clear()` empties it, as
   Escape does; both carry nothing. React to it as to any attached object,
   with `Lock.onStateChanged: ...` on one of your items, as the example
@@ -1252,9 +1253,67 @@ or fade itself away, and at that bound it is gone, whatever it is doing
 show theirs without it
 (`lock_auth::tests::the_prompt_is_on_the_monitor_prompt_on_names_and_no_other`).
 
-A minimal one: the time, the field on the prompt's monitor, what went wrong,
-and a sheet that comes down as the session locks and goes back up as it
-unlocks.
+**Pulled down by a finger.** On an iPhone, the lock follows a finger pulled
+down from the top and locks when it is let go far enough. Solium gives your
+configuration the piece it cannot make itself, and leaves the gesture to you:
+`sol.lock_peek(progress)` draws every monitor's lock scene over the desktop,
+with `Lock.state` reading `"peeking"` and `Lock.progress` how far down, from 0
+to 1. It is a picture and nothing more: nothing is locked, `LockedHint` is
+left alone, the keyboard, the pointer and the fingers stay the session's, and
+nothing typed reaches the lock
+(`state::tests::real_client::lock_focus::native::peek`). Call it as the finger
+moves, then `sol.lock_now()` to lock from there, or `sol.lock_peek(false)` to
+let go. Locked from a peek, the entry goes on from `Lock.progress` and lasts
+what is left of `enter_ms`, `enterMs * (1 - progress)`, so the scene does not
+jump back to the top; `Lock.progress` keeps the peek's value until the entry
+is over. Let go, the scene goes back up through the exit, reading
+`"unlocking"` for `exit_ms` at most, and is then quiet again. Over a session
+already locked, or with `native` off, `sol.lock_peek` does nothing, and the
+fallback is never drawn in a peek, since it does not move. A pull from the
+top edge of any monitor that locks past halfway:
+
+```lua
+-- In your config.lua, or a file it requires.
+local pull = nil -- the finger pulling: its slot, and its monitor's top and height
+
+local function monitor_named(name)
+    for _, monitor in ipairs(sol.monitors()) do
+        if monitor.name == name then
+            return monitor.whole
+        end
+    end
+end
+
+sol.on("touch", function(event)
+    if event.kind == "down" then
+        local whole = not pull and monitor_named(event.output)
+        if whole and event.y - whole.y < 24 then
+            sol.touch(event.slot, { action = "capture" })
+            pull = { slot = event.slot, top = whole.y, height = whole.h }
+        end
+        return
+    end
+    if not pull or event.slot ~= pull.slot then
+        return
+    end
+    local progress = math.max(0, math.min(1, (event.y - pull.top) / pull.height))
+    if event.kind == "motion" then
+        sol.lock_peek(progress)
+    elseif event.kind == "up" and progress > 0.5 then
+        sol.lock_now()
+        pull = nil
+    else
+        sol.lock_peek(false)
+        pull = nil
+    end
+end)
+```
+
+`event.vy`, the finger's speed as it lifts, makes a quick flick lock too.
+
+A minimal scene: the time, the field on the prompt's monitor, what went
+wrong, and a sheet that follows a peek, comes down as the session locks, and
+goes back up as it unlocks.
 
 ```qml
 // ~/.config/solium/qml/lock/Mine.qml
@@ -1280,13 +1339,25 @@ Item {
         if (Lock.locked) {
             root.now = new Date()
             slide.stop()
-            root.down = Lock.state === "locking" ? 0 : 1
+            // From the top, or from where a peek left it.
+            root.down = Lock.state === "locking" ? Lock.progress : 1
             if (Lock.state === "locking")
-                slide.go(1, Lock.enterMs)
+                slide.go(1, Lock.enterMs * (1 - Lock.progress))
+        }
+    }
+    // Pulled down by a finger: exactly where the finger has it.
+    Lock.onProgressChanged: {
+        if (Lock.state === "peeking") {
+            slide.stop()
+            root.down = Lock.progress
         }
     }
     Lock.onStateChanged: {
-        if (Lock.state === "unlocking") {
+        if (Lock.state === "peeking") {
+            root.now = new Date()
+            slide.stop()
+            root.down = Lock.progress
+        } else if (Lock.state === "unlocking") {
             slide.go(0, Lock.exitMs)
         } else if (Lock.locked && Lock.state !== "locking") {
             // The entry is over, or there was none: down, whatever is left.

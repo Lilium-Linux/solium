@@ -764,6 +764,7 @@ impl Solium {
                 Command::LockNow => {
                     self.lock_now();
                 }
+                Command::LockPeek(progress) => self.lock_peek(progress),
                 Command::Keyboard(request) => {
                     let keymap = self.keymap.clone();
                     if crate::keymap::apply(self, &request) {
