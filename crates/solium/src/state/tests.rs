@@ -754,6 +754,102 @@ fn a_replaced_rule_set_holds_only_its_own_programs() {
     let _ = std::fs::remove_dir_all(place);
 }
 
+/// The user's rule `index` as the running set keyed it.
+fn running_key(state: &Solium, index: u32) -> crate::effect::rules::RuleKey {
+    crate::effect::rules::RuleKey {
+        origin: crate::effect::rules::Origin::User,
+        index,
+        generation: state.rules_generation,
+    }
+}
+
+/// **A rule set re-sent with new params keeps its generation** (#305): the
+/// same rules, only a param's value changed, so the slot a client's chain
+/// filled is the one it keeps, capture and targets with it, and the chain
+/// is the new one, its params' hash moved so it runs again. A configuration
+/// that animates a param by re-sending its rules each step recaptured every
+/// window each step before.
+#[test]
+fn a_rule_set_resent_with_new_params_keeps_its_generation() {
+    use crate::effect::plan::{Owner, PaneSlot};
+    use crate::effect::rules::Slot;
+    let place = crate::effect::host::tests::scratch("state-rules-resent");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    let rules = |amount: &str| {
+        crate::effect::rules::parse(&tree(&format!(
+            r#"{{ {{ match = "*", part = "client", slot = "replace", effect = {{ "tint", amount = {amount} }} }} }}"#
+        )))
+        .expect("parses")
+    };
+    state.apply_effects(Ok(rules("0.1")));
+    let key = running_key(&state, 0);
+    let hash = state.chains.get(key).expect("bound").params_hash;
+    let client = Owner::Pane(crate::pane::PaneId::from_raw(1), PaneSlot::Client);
+    let slot = state.store.slot_mut(&client, Slot::Replace, key).id.clone();
+    state.apply_effects(Ok(rules("0.5")));
+    assert_eq!(
+        running_key(&state, 0),
+        key,
+        "a param-only re-send started a new generation"
+    );
+    assert_ne!(
+        state.chains.get(key).expect("still bound").params_hash,
+        hash,
+        "the chain kept the old params"
+    );
+    assert_eq!(
+        state
+            .store
+            .slot_mut(&client, Slot::Replace, running_key(&state, 0))
+            .id,
+        slot,
+        "the slot started afresh"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
+/// **A param that picks other passes starts the slots afresh** (#305), as
+/// does another effect, and a rebind after the formats probe however little
+/// changed: a slot's capture and targets were made for the passes it ran.
+#[test]
+fn a_param_that_picks_other_passes_starts_the_slots_afresh() {
+    let place = crate::effect::host::tests::scratch("state-rules-resent-afresh");
+    crate::effect::host::tests::folder(
+        &place,
+        "pick",
+        "return { api = 1, inputs = { 'self' }, params = { which = { 0, int = true } },
+            stages = function(p) if p.which == 1 then return { { 'pass', 'b.frag' } } end return { { 'pass', 'a.frag' } } end }",
+        &[
+            ("a.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n"),
+            ("b.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * 0.5; }\n"),
+        ],
+    );
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    let apply = |state: &mut Solium, effect: &str| {
+        state.apply_effects(Ok(crate::effect::rules::parse(&tree(&format!(
+            r#"{{ {{ match = "*", part = "client", slot = "replace", effect = {effect} }} }}"#
+        )))
+        .expect("parses")));
+        state.rules_generation
+    };
+    let first = apply(&mut state, r#"{ "pick", which = 0 }"#);
+    let other_passes = apply(&mut state, r#"{ "pick", which = 1 }"#);
+    assert_ne!(
+        other_passes, first,
+        "a param that picks another pass kept the slots"
+    );
+    let other_effect = apply(&mut state, r#"{ "tint", amount = 0.1 }"#);
+    assert_ne!(other_effect, other_passes, "another effect kept the slots");
+    state.rebind_effects();
+    assert_ne!(
+        state.rules_generation, other_effect,
+        "a rebind after the probe kept the slots"
+    );
+    let _ = std::fs::remove_dir_all(place);
+}
+
 /// **A refused rule set leaves no compile asked for**: neither the program a
 /// rule of it bound that nothing had asked for (a param picking another
 /// `.frag`) nor the one an effect only it named would be compiled, so

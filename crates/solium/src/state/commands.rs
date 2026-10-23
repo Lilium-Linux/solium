@@ -1322,6 +1322,16 @@ impl Solium {
         &mut self,
         rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
     ) {
+        self.bind_rules(rules, FreshSlots::IfChanged);
+    }
+
+    /// [`Self::apply_effects`], told whether a set that differs only in its
+    /// params may keep the running slots.
+    fn bind_rules(
+        &mut self,
+        rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
+        fresh_slots: FreshSlots,
+    ) {
         use crate::effect::host::Problem;
         use crate::effect::plan::{Chains, rule_problem};
         use crate::effect::rules::{Fill, Origin, RuleKey};
@@ -1344,8 +1354,20 @@ impl Solium {
                 return;
             }
         };
-        let generation = self.rules_generation.wrapping_add(1);
-        let taken = crate::effect::rules::Rules::new(Vec::new(), Vec::new(), rules, generation);
+        let running = self.rules_generation;
+        let same_rules = self.rules.user().len() == rules.len()
+            && self
+                .rules
+                .user()
+                .iter()
+                .zip(&rules)
+                .all(|(running, taken)| running.same_but_params(taken));
+        let mut taken = crate::effect::rules::Rules::new(
+            Vec::new(),
+            Vec::new(),
+            rules,
+            running.wrapping_add(1),
+        );
         let before = self.rules.effects();
         self.effects.want("rules", taken.effects());
         let mut bound = Vec::new();
@@ -1355,14 +1377,7 @@ impl Solium {
                 continue;
             }
             match Chains::bind(&mut self.effects, rule) {
-                Ok(chain) => bound.push((
-                    RuleKey {
-                        origin: Origin::User,
-                        index: u32::try_from(index).unwrap_or(u32::MAX),
-                        generation,
-                    },
-                    chain,
-                )),
+                Ok(chain) => bound.push((u32::try_from(index).unwrap_or(u32::MAX), chain)),
                 Err(problem) => problems.push(rule_problem(index + 1, problem, &file)),
             }
         }
@@ -1375,8 +1390,46 @@ impl Solium {
             self.effects.hold(self.chains.programs());
             return;
         }
+        // A set that differs from the running one only in its links' params,
+        // binding to chains that run the same passes, keeps the running
+        // generation: every slot keeps its capture and targets, and the new
+        // params alone run each chain again (`SlotState::params`). The mobile
+        // shell animates a corner radius by re-sending its rules each step,
+        // which recaptured every window each step before (#305,
+        // `tests::a_rule_set_resent_with_new_params_keeps_its_generation`).
+        // Anything else starts afresh, as a rebind after the probe must.
+        let keep = fresh_slots == FreshSlots::IfChanged
+            && same_rules
+            && bound.iter().all(|(index, chain)| {
+                let key = RuleKey {
+                    origin: Origin::User,
+                    index: *index,
+                    generation: running,
+                };
+                self.chains
+                    .get(key)
+                    .is_some_and(|running| running.runs_as(chain))
+            });
+        let generation = if keep {
+            running
+        } else {
+            running.wrapping_add(1)
+        };
+        if keep {
+            taken = crate::effect::rules::Rules::new(
+                Vec::new(),
+                Vec::new(),
+                taken.user().to_vec(),
+                generation,
+            );
+        }
         self.rules_generation = generation;
-        for (key, chain) in bound {
+        for (index, chain) in bound {
+            let key = RuleKey {
+                origin: Origin::User,
+                index,
+                generation,
+            };
             self.chains.insert(key, chain);
         }
         self.chains.retain_generation(Origin::User, generation);
@@ -1394,7 +1447,7 @@ impl Solium {
     pub(crate) fn rebind_effects(&mut self) {
         self.rebind = false;
         let user = self.rules.user().to_vec();
-        self.apply_effects(Ok(user));
+        self.bind_rules(Ok(user), FreshSlots::Always);
         self.apply_style_rules();
     }
 
@@ -1552,6 +1605,16 @@ impl Solium {
         self.apply(outcome);
         handled
     }
+}
+
+/// Whether binding a rule set may keep the slots the running set filled:
+/// only when nothing but params changed (`IfChanged`, `sol.effects`), never
+/// after the formats probe, whose rebind must start every slot afresh
+/// (`Always`, `rebind_effects`). #305.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreshSlots {
+    IfChanged,
+    Always,
 }
 
 #[cfg(test)]

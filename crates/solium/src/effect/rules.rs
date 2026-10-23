@@ -167,6 +167,35 @@ pub(crate) struct Rule {
     pub(crate) fade: Option<Fade>,
 }
 
+impl Rule {
+    /// Whether `other` is this rule with nothing changed but its links'
+    /// params: the same match, part, slot, source, mask, memo, cut and fade,
+    /// and the same effects in the same order with the same extents. A set
+    /// re-sent so keeps its slots (#305,
+    /// `state::tests::a_rule_set_resent_with_new_params_keeps_its_generation`).
+    pub(crate) fn same_but_params(&self, other: &Self) -> bool {
+        let links = match (&self.fill, &other.fill) {
+            (Fill::Off, Fill::Off) => true,
+            (Fill::Chain(mine), Fill::Chain(theirs)) => {
+                mine.len() == theirs.len()
+                    && mine.iter().zip(theirs).all(|(mine, theirs)| {
+                        mine.effect == theirs.effect && mine.extents == theirs.extents
+                    })
+            }
+            _ => false,
+        };
+        links
+            && self.matches == other.matches
+            && self.part == other.part
+            && self.slot == other.slot
+            && self.source == other.source
+            && self.mask == other.mask
+            && self.memo == other.memo
+            && self.cut == other.cut
+            && self.fade == other.fade
+    }
+}
+
 /// Where a list of rules came from, in the order a later one wins for one
 /// part and slot (Ruling 13); material and expansion are empty in FX2.
 /// `tests::the_origins_are_ordered_style_material_expansion_user`.
