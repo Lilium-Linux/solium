@@ -59,7 +59,17 @@ end)
 -- It is shown again: the genie back out of the slot, which is the present
 -- going back to the window's own rectangle. `present_clear` lets the present
 -- go once it lands.
+--
+-- Not while the overview is up: a mode's picture is the mode's, and the
+-- overview draws the window as one of its thumbnails until it leaves, which
+-- clears every window it drew. A window shown again by an application asking
+-- to be brought forward stays in the grid.
+-- `a_window_shown_again_during_the_overview_stays_in_its_grid`.
 sol.on("unminimize", function(id)
+    local overview = package.loaded["overview"]
+    if overview and overview.active then
+        return
+    end
     sol.animate(config.minimize.motion)
     sol.present_clear(id)
 end)

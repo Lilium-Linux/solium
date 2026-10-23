@@ -164,7 +164,12 @@ function tweaks.handle(id)
     elseif name == "genie" then
         -- The minimize genie (`config.minimize`), without minimizing: the
         -- window stays where the genie leaves it, and "flat" brings it back.
-        require("minimize").into(window.id)
+        -- Only when the configuration loaded `minimize.lua`: requiring it
+        -- here would bind `super+m` for a configuration that left it out.
+        local minimize = package.loaded["minimize"]
+        if minimize then
+            minimize.into(window.id)
+        end
     end
 end
 

@@ -110,7 +110,13 @@ impl Solium {
         // *locate* and therefore declines to close.
         let outer = self.pane_outer(pane);
         let now = self.clock.now();
-        present::close(pane, outer, now);
+        // A minimized window has nothing on screen to fade (#30): it is not
+        // drawn while it is closed, and the present that put it away is kept,
+        // so a close it refuses leaves it put away where it was.
+        // `tests::real_client::reflow_on_close::minimize::a_close_a_minimized_window_refuses_leaves_it_put_away`.
+        if !pane.minimized() {
+            present::close(pane, outer, now);
+        }
         if let Some(pane) = self.panes.get_mut(id) {
             pane.begin_closing(now + present::CLOSING);
         }
@@ -507,7 +513,13 @@ impl Solium {
             return true;
         };
         let outer = self.pane_outer(pane);
-        if !present::clear(pane, outer, now, RETURN, solium_animation::Curve::OutCubic) {
+        // A minimized window comes back put away: no fade back in, which
+        // would be a transform playing and so draw it, and the present that
+        // put it away kept (#30). `close_pane` started no fade on it.
+        // `tests::real_client::reflow_on_close::minimize::a_close_a_minimized_window_refuses_leaves_it_put_away`.
+        if !pane.minimized()
+            && !present::clear(pane, outer, now, RETURN, solium_animation::Curve::OutCubic)
+        {
             if let (Some(owed), Some(pane)) = (owed, self.panes.get_mut(id)) {
                 pane.owe_let_go(owed);
             }

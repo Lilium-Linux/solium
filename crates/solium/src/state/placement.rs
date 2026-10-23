@@ -348,11 +348,15 @@ impl Solium {
         // keeps the place it had for when it is shown again; a stray
         // `sol.place` would otherwise start a glide over the present taking
         // it away. `tests::real_client::reflow_on_close::minimize::a_placement_leaves_a_minimized_window_where_it_is`.
-        if self
-            .panes
-            .get(pane)
-            .is_some_and(|held| held.gone() || held.ghost() || held.minimized())
-        {
+        //
+        // **But the rescue moves it** (`Standing::Kept`, which only
+        // `rescue_offscreen` and `Solium::unminimize` ask for): a minimized
+        // window left on a monitor that went is a window nobody can get back.
+        // It is moved without a glide; see the end of this function.
+        // `tests::real_client::reflow_on_close::minimize::a_minimized_window_on_a_monitor_that_goes_comes_back_on_the_one_left`.
+        if self.panes.get(pane).is_some_and(|held| {
+            held.gone() || held.ghost() || (held.minimized() && standing != Standing::Kept)
+        }) {
             return;
         }
         // **Nor into a tile, nor where a layout floats it, while it is
@@ -624,6 +628,14 @@ impl Solium {
         // and one a script presents stays presented until it presents again
         // or clears.
         if outer == was {
+            return;
+        }
+        // A minimized window rescued is moved with no picture to move: a
+        // glide would be a transform playing, which draws it, and the present
+        // that put it away was aimed at a monitor that has gone. Its client
+        // is shown again from where it now lives.
+        if let Some(held) = self.panes.get(pane).filter(|held| held.minimized()) {
+            present::release(held);
             return;
         }
         if let Some(held) = self.panes.get(pane).filter(|_| !leaving) {

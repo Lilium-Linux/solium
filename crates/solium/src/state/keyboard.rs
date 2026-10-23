@@ -382,19 +382,6 @@ impl Solium {
         let Some(location) = self.space.element_location(window) else {
             return;
         };
-        // **A minimized window is shown again before it is focused** (#30):
-        // it may never hold the keyboard minimized, and focusing one -- a
-        // click in an overview, `sol.focus`, an activation -- is asking for
-        // it back. Before the lock's rule below, so a focus the lock refuses
-        // still shows it, as `sol.unminimize` would; the lock covers it.
-        // `tests::real_client::reflow_on_close::minimize::focusing_a_minimized_window_shows_it_first`.
-        if let Some(pane) = self
-            .panes
-            .id_of(window)
-            .filter(|pane| self.panes.get(*pane).is_some_and(Pane::minimized))
-        {
-            self.unminimize(pane);
-        }
         // The rule in `focus.rs`, asked before anything happens rather than
         // left to `give_keyboard` to refuse halfway through. A focus that is
         // refused must not restack a window behind the lock, activate an X11
@@ -404,6 +391,21 @@ impl Solium {
         if !self.may_focus(window) {
             tracing::debug!("refused to focus a window: the session is locked");
             return;
+        }
+        // **A minimized window is shown again before it is focused** (#30):
+        // it may never hold the keyboard minimized, and focusing one -- a
+        // click in an overview, `sol.focus`, an activation -- is asking for
+        // it back. After the lock's rule above, so a focus behind the lock
+        // shows nothing and reflows nothing, as `sol.act("windows.unminimize")`
+        // is answered `locked` there.
+        // `tests::real_client::reflow_on_close::minimize::focusing_a_minimized_window_shows_it_first`,
+        // `tests::real_client::lock_focus::focusing_a_minimized_window_behind_the_lock_leaves_it_minimized`.
+        if let Some(pane) = self
+            .panes
+            .id_of(window)
+            .filter(|pane| self.panes.get(*pane).is_some_and(Pane::minimized))
+        {
+            self.unminimize(pane);
         }
         // Whether the keyboard comes from another window, or from none, asked
         // before anything moves: a layout focusing again the window that has

@@ -812,7 +812,9 @@ local function bring_back(id, stood)
         return
     end
     local window = dialogs.by_id(id)
-    if not window or dialogs.floats(window) then
+    -- A window refused its close while minimized stays put away, out of
+    -- the arrangement until `unminimize` (#30).
+    if not window or window.minimized or dialogs.floats(window) then
         return
     end
     for _, tree in pairs(tiling.trees) do

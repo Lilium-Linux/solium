@@ -516,7 +516,7 @@ impl Solium {
                 }
                 Command::Unminimize { id } => {
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
-                        self.unminimize(pane);
+                        self.show_again(pane);
                     }
                 }
                 Command::ShowMinimized { id, shown } => {

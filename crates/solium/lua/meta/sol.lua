@@ -457,7 +457,7 @@
 ---| "close_landed" # A close the compositor asked for has played its animation: the window has faded out of sight where it stood, and its application has just been asked to go -- or, an X11 one that let the last request go unanswered, been ended: `(id)`. Told after `closing` and before the `close` or `refused` that follows; not told for a window that went, or answered with a dialog, before its close landed, nor for one whose application never came, which is told `close` there and then.
 ---| "refused" # Its application declined, and the window is back: `(id)`.
 ---| "minimize" # A window was minimized, by `sol.minimize` or its application: `(id)`. Told once, before anything else reacts, with the window already `minimized`: a present started here plays out before the window is put away, and a layout takes the window out. The keyboard leaves it afterwards, as it leaves a window whose close landed (`focus.after_close`).
----| "unminimize" # A minimized window is shown again, by `sol.unminimize`, its application, or a focus -- `sol.focus`, a click in the overview, an application asking to be brought forward: `(id)`. Told before the `focus` that showed it, with the window no longer `minimized`; a configuration presents it back from wherever it put it, and a layout takes it back.
+---| "unminimize" # A minimized window is shown again, by `sol.unminimize`, its application, or a focus -- `sol.focus`, a click in the overview, an application asking to be brought forward, but never behind the lock: `(id)`. Told before the `focus` that showed it, with the window no longer `minimized`; a configuration presents it back from wherever it put it, and a layout takes it back.
 ---| "close" # The window is gone: `(id)`.
 ---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
@@ -1057,16 +1057,20 @@ function sol.unplace(id) end
 function sol.close(id) end
 
 ---Minimize a window: it stays mapped and alive, is drawn only while a
----present on it plays out, takes no pointer or touch, and gives up the
----keyboard. `minimize` is told once, and a window already minimized is left
----as it is. With no id, the focused window; with nothing focused, nothing
----happens.
+---present on it plays out, takes no pointer or touch, lets go of a pointer
+---lock, and gives up the keyboard. A modal dialog goes with the window it
+---belongs to: minimizing either minimizes both, and each is told `minimize`.
+---`minimize` is told once, and a window already minimized is left as it is.
+---With no id, the focused window; with nothing focused, nothing happens.
 ---@param id? integer
 ---@return nil
 function sol.minimize(id) end
 
----Show a minimized window again: `unminimize` is told once, and a window
----that is not minimized is left as it is. It does not take the keyboard;
+---Show a minimized window again, with its modal dialogs or the window it is
+---a dialog of: `unminimize` is told once for each, and a window that is not
+---minimized is left as it is. A window on no monitor is brought onto one
+---first. It does not take the keyboard from another window, but with nothing
+---focused the keyboard settles as it does after any window comes or goes;
 ---`sol.focus` shows a minimized window and focuses it. With no id, the
 ---focused window, which is never a minimized one.
 ---@param id? integer

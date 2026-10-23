@@ -806,7 +806,7 @@ impl XwmHandler for Solium {
 
     fn unminimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(pane) = self.x11_pane(&window) {
-            self.unminimize(pane);
+            self.show_again(pane);
         }
     }
 
