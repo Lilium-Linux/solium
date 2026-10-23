@@ -25,7 +25,9 @@
 //!
 //! While `lock.before_sleep` is on (the default), it holds a logind delay
 //! inhibitor for `"sleep"` at every moment the session is unlocked. On
-//! `PrepareForSleep(true)` it locks the same way, and releases the
+//! `PrepareForSleep(true)` it locks the same way, but with Solium's own lock
+//! fully up at once, with no entry and any entry under way cut short
+//! (`a_lock_before_sleep_has_no_entry_and_cuts_one_short`), and releases the
 //! inhibitor — which is what lets the machine actually suspend — the moment
 //! [`Solium::confirm_lock`](crate::state::Solium::confirm_lock) reaches the presentation-accurate `locked` event,
 //! the same moment for Solium's own lock as for a locker's
@@ -439,8 +441,24 @@ impl crate::state::Solium {
     /// client's that has not shown on every monitor yet, or a locker just
     /// started. That is what decides whether sleep waits for one.
     pub(crate) fn lock_now(&mut self) -> bool {
+        self.lock_now_with(true)
+    }
+
+    /// Lock as [`Self::lock_now`] does, but with Solium's own lock fully up
+    /// at once: no entry, and an entry already playing cut short. The lock
+    /// taken because the machine is about to sleep, which waits for no sheet
+    /// coming down. `a_lock_before_sleep_has_no_entry_and_cuts_one_short`.
+    pub(crate) fn lock_now_at_once(&mut self) -> bool {
+        self.lock_now_with(false)
+    }
+
+    fn lock_now_with(&mut self, entry: bool) -> bool {
         let started = if self.lock_scenes.settings().native {
-            self.lock_natively();
+            if entry {
+                self.lock_natively();
+            } else {
+                self.lock_natively_at_once();
+            }
             false
         } else if should_run_locker(self.lock.is_some()) {
             run_locker(self)
@@ -491,7 +509,9 @@ fn on_sleep_imminent(state: &mut crate::state::Solium) {
     if !state.logind.settings.before_sleep {
         return;
     }
-    let coming = state.lock_now();
+    // Fully up at once: the machine is about to sleep, and a sheet coming
+    // down would only hold it off.
+    let coming = state.lock_now_at_once();
     if state.logind.inhibitor.is_none() {
         return;
     }
@@ -1789,6 +1809,112 @@ mod tests {
             soon(|| !bus.inhibitor_held()),
             "the inhibitor outlived the confirmed native lock"
         );
+    }
+
+    /// **A lock before sleep has no entry, and cuts one short**: with a lock
+    /// scene that would come down over the desktop, the lock `PrepareForSleep`
+    /// takes is fully up at once, and the inhibitor goes with the first frame
+    /// that shows it. A lock taken by hand a moment before is still coming
+    /// down when sleep comes: its entry ends there, and the inhibitor waits
+    /// for a frame built after it, not one built during it.
+    #[test]
+    fn a_lock_before_sleep_has_no_entry_and_cuts_one_short() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory =
+                std::env::temp_dir().join(format!("solium-logind-entry-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("a directory for the scene");
+            let scene = directory.join("Lock.qml");
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("writing the scene");
+
+            let bus = StandIn::new(5_000_000, false);
+            let mut state = solium_with(begin(&bus, None, true));
+            state.lock_scenes.use_scene(scene);
+            let monitor = monitor(&mut state);
+            let held = |state: &mut crate::state::Solium| {
+                soon(|| {
+                    settle(state);
+                    state.logind.holding()
+                })
+            };
+            assert!(held(&mut state), "the initial inhibitor was never taken");
+            bus.wait_for_subscription(MANAGER_INTERFACE, "PrepareForSleep");
+
+            bus.send_prepare_for_sleep(true);
+            assert!(
+                soon(|| {
+                    settle(&mut state);
+                    natively_locked(&state)
+                }),
+                "sleep did not take Solium's own lock"
+            );
+            assert_eq!(
+                state.lock_scenes.shown_on(&monitor),
+                crate::lock_scene::Shown::Own,
+                "the premise: a scene that would come down"
+            );
+            assert!(
+                !state.lock_scenes.entry_pending(),
+                "the lock taken before sleep has an entry"
+            );
+            let now = state.clock.now();
+            assert!(!state.desktop_under_lock(&monitor, now, false));
+            let frame = state.lock_frame();
+            state.frame_presented(&monitor, frame);
+            assert!(
+                soon(|| !bus.inhibitor_held()),
+                "the inhibitor outlived the lock taken before sleep"
+            );
+
+            // Unlocked; then locked by hand, and asleep during its entry.
+            // The stand-in watches only the first inhibitor it handed out,
+            // so the second one is watched from this side: held while
+            // `Logind` keeps its descriptor, released once it drops it.
+            state.unlock_natively();
+            assert!(held(&mut state), "no inhibitor after the unlock");
+            let exit = state.lock_scenes.settings().exit;
+            state.clock.advance(exit);
+            crate::lock_scene::settle(&mut state);
+            assert!(state.lock_now(), "the hand's lock owes no `locked`");
+            assert!(
+                state.lock_scenes.entry_pending(),
+                "the premise: the hand's lock comes down"
+            );
+            let during = state.lock_frame();
+            state.frame_presented(&monitor, during);
+            settle(&mut state);
+            assert!(
+                state.logind.holding(),
+                "the inhibitor went during the entry"
+            );
+
+            bus.send_prepare_for_sleep(true);
+            assert!(
+                soon(|| {
+                    settle(&mut state);
+                    !state.lock_scenes.entry_pending()
+                }),
+                "sleep did not cut the entry short"
+            );
+            assert!(
+                state.logind.holding(),
+                "the inhibitor went before a frame showed the lock"
+            );
+            state.frame_presented(&monitor, during);
+            settle(&mut state);
+            assert!(
+                state.logind.holding(),
+                "a frame built during the entry released the inhibitor"
+            );
+            let after = state.lock_frame();
+            state.frame_presented(&monitor, after);
+            settle(&mut state);
+            assert!(
+                !state.logind.holding(),
+                "the inhibitor outlived the lock's first full frame"
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+        });
     }
 
     /// **With nothing to lock the session, sleep is not held**: `lock.native

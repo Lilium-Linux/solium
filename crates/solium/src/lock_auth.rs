@@ -24,6 +24,10 @@
 //!
 //! **The states**, as `Lock.state` names them:
 //!
+//! * `locking`: the lock has just been taken, and its scenes are coming down
+//!   over the desktop for `lock.enter_ms` (`lock_scene.rs`). Whatever is
+//!   typed meanwhile is the password's as in any other state; the state is
+//!   the entry's until it ends.
 //! * `idle`: nothing typed. The field is armed, so the first key goes into it.
 //! * `prompting`: something typed.
 //! * `checking`: the helper has the password; then, after a no, PAM's failure
@@ -986,15 +990,19 @@ impl LockAuth {
         };
         let number = |value: u64| Json::Number(value as f64);
         // Through the exit the session is unlocked, and the state is the
-        // one that says so, whatever the field was reset to.
+        // one that says so, whatever the field was reset to; through the
+        // entry, the one that says the lock is coming down.
         let state = if scene.exiting {
             Phase::Unlocking.name()
+        } else if scene.entering {
+            "locking"
         } else {
             self.phase.name()
         };
         object(vec![
             ("state", text(state)),
             ("locked", Json::Bool(scene.locked)),
+            ("enterMs", number(scene.enter_ms)),
             ("exitMs", number(scene.exit_ms)),
             ("attempts", number(u64::from(self.attempts))),
             ("retryAfter", number(self.retry_after(now))),
@@ -1053,6 +1061,11 @@ impl LockAuth {
 struct SceneView {
     /// Whether Solium holds the lock: `Lock.locked`.
     locked: bool,
+    /// Whether its entry is coming down over the desktop, which reads as
+    /// `"locking"`.
+    entering: bool,
+    /// `lock.enter_ms`: `Lock.enterMs`.
+    enter_ms: u64,
     /// Whether its exit is playing over the desktop, which reads as
     /// `"unlocking"`.
     exiting: bool,
@@ -1180,8 +1193,12 @@ impl Solium {
     fn lock_view(&self) -> String {
         let now = self.clock.now();
         let exit = self.lock_scenes.settings().exit;
+        let enter = self.lock_scenes.settings().enter;
+        let locked = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
         let scene = SceneView {
-            locked: self.lock.as_ref().is_some_and(crate::lock::Lock::is_native),
+            locked,
+            entering: locked && self.lock_scenes.entering(now),
+            enter_ms: u64::try_from(enter.as_millis()).unwrap_or(u64::MAX),
             exiting: self.lock.is_none() && self.lock_scenes.exiting(now),
             exit_ms: u64::try_from(exit.as_millis()).unwrap_or(u64::MAX),
             prompt_on: self.lock_prompt_on(),
@@ -1790,9 +1807,20 @@ mod tests {
         assert_eq!(state.lock_auth.attempts(), 1);
     }
 
+    /// Which scene a [`Locked`] shows.
+    enum Shows<'a> {
+        /// A scene of this source, in a file of the test's own.
+        Own(&'a str),
+        /// The shipped `Lock.qml`.
+        Shipped,
+        /// The compiled-in fallback.
+        Fallback,
+    }
+
     /// A native lock with `source` as its scene, or the fallback, on one
     /// 1920x1080 monitor, built on the Qt thread and published to. The
-    /// scene's file is in a directory of the test's own.
+    /// scene's file is in a directory of the test's own. Its entry is over
+    /// unless it is made [`Locked::entering`].
     struct Locked {
         _display: Display<Solium>,
         state: Solium,
@@ -1803,6 +1831,17 @@ mod tests {
 
     impl Locked {
         fn new(name: &str, source: Option<&str>) -> Self {
+            let shows = source.map_or(Shows::Fallback, Shows::Own);
+            let mut locked = Self::entering(name, &shows);
+            let enter = locked.state.lock_scenes.settings().enter;
+            locked.state.clock.advance(enter);
+            crate::lock_scene::settle(&mut locked.state);
+            locked.state.publish_models();
+            locked
+        }
+
+        /// The lock just taken, its scene coming down.
+        fn entering(name: &str, shows: &Shows<'_>) -> Self {
             crate::qml::start().expect("Qt starts");
             // Whatever a test before this one left asked.
             let _ = take_requests();
@@ -1828,13 +1867,15 @@ mod tests {
             state.space.map_output(&output, (0, 0));
             let directory = std::env::temp_dir()
                 .join(format!("solium-lock-auth-{name}-{}", std::process::id()));
-            if let Some(source) = source {
-                std::fs::create_dir_all(&directory).expect("a directory for the scene");
-                let path = directory.join("Lock.qml");
-                std::fs::write(&path, source).expect("writing the scene");
-                state.lock_scenes.use_scene(path);
-            } else {
-                state.lock_scenes.use_fallback();
+            match shows {
+                Shows::Own(source) => {
+                    std::fs::create_dir_all(&directory).expect("a directory for the scene");
+                    let path = directory.join("Lock.qml");
+                    std::fs::write(&path, source).expect("writing the scene");
+                    state.lock_scenes.use_scene(path);
+                }
+                Shows::Shipped => {}
+                Shows::Fallback => state.lock_scenes.use_fallback(),
             }
             state.lock_natively();
             state
@@ -2045,7 +2086,8 @@ mod tests {
                                 // through its name: every property and
                                 // method its type declares, by name.
                                 root.write(Lock, ["state", "attempts", "retryAfter",
-                                    "message", "user", "promptOn", "locked", "exitMs"])
+                                    "message", "user", "promptOn", "locked", "enterMs",
+                                    "exitMs"])
                                 root.write(field, ["length", "selected", "accepting"])
                                 root.write(pad, ["layout", "pressed"])
                                 try { Lock.submit("unlock", true) } catch (error) {}
@@ -2354,6 +2396,188 @@ mod tests {
         });
     }
 
+    /// **The entry is bounded even if the scene never finishes**: from the
+    /// instant the lock is taken the scene reads `Lock.state` as
+    /// `"locking"`, `Lock.locked` true and `Lock.enterMs` the setting, and
+    /// the desktop is drawn under it; a scene that animates nothing is fully
+    /// up at `lock.enter_ms` all the same, with the desktop gone and the
+    /// state the field's. A shorter `enter_ms` is a shorter entry, and 0
+    /// none at all.
+    #[test]
+    fn the_entry_is_bounded_even_if_the_scene_never_finishes() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::entering(
+                "entry-bound",
+                &Shows::Own(
+                    r#"import QtQuick
+                import Solium
+                Item {
+                    readonly property int locking: Lock.state === "locking" ? 1 : 0
+                    readonly property int locked: Lock.locked ? 1 : 0
+                    readonly property int enterMs: Lock.enterMs
+                }"#,
+                ),
+            );
+            let output = locked.output.clone();
+            let enter = locked.state.lock_scenes.settings().enter;
+            assert_eq!(
+                enter,
+                Duration::from_millis(u64::from(crate::lock_scene::ENTER_MS)),
+                "the premise: the default entry"
+            );
+            assert_eq!(
+                locked.int("locking"),
+                1,
+                "the entry does not read \"locking\""
+            );
+            assert_eq!(
+                locked.int("locked"),
+                1,
+                "`Lock.locked` is not true from the first instant"
+            );
+            assert_eq!(
+                i64::from(locked.int("enterMs")),
+                i64::from(crate::lock_scene::ENTER_MS),
+                "`Lock.enterMs` is not the setting"
+            );
+            let desktop = |locked: &Locked| {
+                let now = locked.state.clock.now();
+                locked.state.desktop_under_lock(&locked.output, now, false)
+            };
+            assert!(
+                desktop(&locked),
+                "the desktop is not under the scene in its entry"
+            );
+
+            // Half way, and then past the bound: the compositor's clock runs
+            // in real time too, so not to the millisecond.
+            locked.state.clock.advance(enter / 2);
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                locked.state.lock_scenes.entry_pending() && desktop(&locked),
+                "the entry ended before `enter_ms`"
+            );
+            locked.state.clock.advance(enter / 2);
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                !locked.state.lock_scenes.entry_pending(),
+                "the entry outlived `enter_ms`"
+            );
+            assert!(!desktop(&locked), "the desktop outlived the entry");
+            assert_eq!(locked.int("locking"), 0, "\"locking\" outlived the entry");
+            assert!(natively_locked(&locked.state));
+            assert_eq!(
+                locked.state.lock_scenes.shown_on(&output),
+                crate::lock_scene::Shown::Own,
+                "the scene was taken away at the bound"
+            );
+
+            // Shorter, and none.
+            for (ms, plays) in [(120, true), (0, false)] {
+                let settings = scene_settings(&locked.state, |settings| {
+                    settings.enter = Duration::from_millis(ms);
+                });
+                locked.state.lock_scenes.configure(settings);
+                locked.state.unlock_natively();
+                locked.state.lock_natively();
+                assert_eq!(
+                    locked.state.lock_scenes.entry_pending(),
+                    plays,
+                    "enter_ms = {ms}"
+                );
+                assert_eq!(desktop(&locked), plays, "enter_ms = {ms}: the desktop");
+                locked.state.clock.advance(Duration::from_millis(ms));
+                crate::lock_scene::settle(&mut locked.state);
+                assert!(
+                    !locked.state.lock_scenes.entry_pending(),
+                    "enter_ms = {ms} outlived its bound"
+                );
+            }
+        });
+    }
+
+    /// Run QML's clock `ms` on, a frame at a time, on real time since the
+    /// first use, as `cursor::scene`'s tests run it.
+    fn run_qml_clock(ms: u64) {
+        static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let origin = *ORIGIN.get_or_init(std::time::Instant::now);
+        let until = origin.elapsed() + Duration::from_millis(ms);
+        loop {
+            crate::qml::tick(origin.elapsed());
+            if origin.elapsed() >= until {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+
+    /// **The shipped scene comes down as it locks and goes back up as it
+    /// unlocks**, as one sheet: through `"locking"` it starts above the top
+    /// and moves down, with its shadow showing; once the entry is over it
+    /// is down; at `"unlocking"` it goes back up and off the top. A lock
+    /// with no entry, before sleep, has it down at once.
+    #[test]
+    fn the_shipped_scene_comes_down_as_it_locks_and_goes_back_up_as_it_unlocks() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::entering("sheet", &Shows::Shipped);
+            assert_eq!(
+                locked.state.lock_scenes.shown_on(&locked.output),
+                crate::lock_scene::Shown::Shipped,
+                "the premise: the shipped scene"
+            );
+            let down = |locked: &mut Locked| {
+                locked.state.publish_models();
+                locked.scene().get_real("down", -1.0)
+            };
+            assert!(
+                down(&mut locked).abs() < 1e-9,
+                "the sheet does not start above the top"
+            );
+            run_qml_clock(150);
+            let partway = down(&mut locked);
+            assert!(
+                partway > 0.0 && partway < 1.0,
+                "the sheet is not coming down: {partway}"
+            );
+            assert!(
+                locked.scene().get_bool("moving"),
+                "no shadow while the sheet moves"
+            );
+
+            let enter = locked.state.lock_scenes.settings().enter;
+            locked.state.clock.advance(enter);
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                (down(&mut locked) - 1.0).abs() < 1e-9,
+                "the sheet is not down after the entry"
+            );
+            assert!(
+                !locked.scene().get_bool("moving"),
+                "a shadow on a sheet at rest"
+            );
+
+            locked.state.unlock_natively();
+            locked.state.publish_models();
+            run_qml_clock(100);
+            let going = down(&mut locked);
+            assert!(
+                going > 0.0 && going < 1.0,
+                "the sheet is not going back up: {going}"
+            );
+            let exit = locked.state.lock_scenes.settings().exit;
+            run_qml_clock(u64::try_from(exit.as_millis()).unwrap_or(600) + 100);
+            assert!(down(&mut locked) < 0.01, "the sheet did not go off the top");
+
+            locked.state.clock.advance(exit);
+            crate::lock_scene::settle(&mut locked.state);
+            locked.state.lock_natively_at_once();
+            assert!(
+                (down(&mut locked) - 1.0).abs() < 1e-9,
+                "a lock with no entry is not down at once"
+            );
+        });
+    }
+
     /// **The prompt is on the monitor `lock.prompt_on` names, and no
     /// other**: with the shipped scene on two monitors, `"pointer"` puts it
     /// where the pointer is and follows the pointer, `"primary"` on the
@@ -2577,6 +2801,23 @@ mod tests {
             locked.state.lock_natively();
             locked.state.publish_models();
             assert_eq!(read(locked.scene()), empty, "the lock scene, the next lock");
+            // Through that lock's entry the desktop is still on the screen,
+            // under the scene coming down, and does not empty under it; from
+            // the entry's end it reads nothing.
+            assert_eq!(
+                read(desktop.scene_for_test()).0,
+                "a window's secret title",
+                "a desktop scene emptied under the entry"
+            );
+            let enter = locked.state.lock_scenes.settings().enter;
+            locked.state.clock.advance(enter);
+            crate::lock_scene::settle(&mut locked.state);
+            locked.state.publish_models();
+            assert_eq!(
+                read(desktop.scene_for_test()),
+                empty,
+                "a desktop scene, after the entry"
+            );
         });
     }
 

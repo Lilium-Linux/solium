@@ -11,6 +11,11 @@
 // and its dots are drawn here. Its grey is the lock's own backdrop,
 // `lock::BLANK`, drawn under it on every frame.
 //
+// It does not move: as the lock is taken it covers its monitor at once, and
+// Solium never draws the desktop under it, even while other monitors' scenes
+// come down over theirs (`lock_scene.rs`, "The entry"). Nor does it play an
+// exit: it stays as it is until `lock.exit_ms` is up.
+//
 // What is typed is never here: the field is told how many characters there
 // are, and Return, typed anywhere, asks Rust to check them.
 //

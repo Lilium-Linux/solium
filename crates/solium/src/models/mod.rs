@@ -60,7 +60,12 @@ impl crate::state::Solium {
         // empty, and comes back at the unlock. What a lock may show of the
         // rest, redacted in place, is a later issue (#281's plan).
         // `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`.
-        let redacted = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
+        //
+        // Not through the lock's entry, while the desktop is still drawn
+        // under its scenes: what is on screen then is the desktop, and it
+        // must not empty under the sheet coming down. From the entry's end.
+        let redacted = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native)
+            && !self.lock_scenes.entry_pending();
         // Apps: scanned once, lazily, on the first call this process ever
         // makes here, and again whenever a reload asked for one
         // (`state/commands.rs`'s `reload_from`). No worker thread and no

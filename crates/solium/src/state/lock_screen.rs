@@ -85,6 +85,24 @@ impl Solium {
         self.lock_scenes.sync(&outputs, native || exiting);
     }
 
+    /// Whether a picture of `output` drawn at `now` has the desktop under its
+    /// lock scene: only through the entry of Solium's own lock, on a monitor
+    /// it plays on, and never for a capture, which sees the session blanked
+    /// from the lock's first instant (`render::elements`, `lock_scene.rs`).
+    /// `lock_focus::native::entry`.
+    pub(crate) fn desktop_under_lock(&self, output: &Output, now: Duration, capture: bool) -> bool {
+        !capture
+            && self.lock.as_ref().is_some_and(crate::lock::Lock::is_native)
+            && self.lock_scenes.desktop_under(&output.name(), now)
+    }
+
+    /// Whether any monitor has the desktop under its lock scene at `now`, so
+    /// the session's own effects are wanted for it (`render::build_slots`).
+    pub(crate) fn desktop_under_lock_anywhere(&self, now: Duration) -> bool {
+        self.lock.as_ref().is_some_and(crate::lock::Lock::is_native)
+            && self.lock_scenes.desktop_under_any(now)
+    }
+
     /// The monitor `Lock.promptOn` names, as `lock.prompt_on` says: the
     /// primary one, the one the pointer is on, or one by name while it is
     /// plugged in and the primary one while it is not.

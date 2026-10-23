@@ -676,7 +676,8 @@ pub(crate) enum Command {
     /// `crate::lock_auth::Settings`.
     LockAuth(crate::lock_auth::Settings),
     /// What Solium's own lock shows: `sol.lock`'s `native`, `scene`,
-    /// `prompt_on` and `exit_ms` (#281). See `crate::lock_scene::Settings`.
+    /// `prompt_on`, `enter_ms`, `exit_ms` and `keypad_margin` (#281). See
+    /// `crate::lock_scene::Settings`.
     LockScene(crate::lock_scene::Settings),
     /// Which `WM_CLASS` names are refused a tile, decoration or bar entry
     /// outright: `sol.x11`, from `config.x11` (#221). See
@@ -1369,17 +1370,62 @@ fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
 /// `sol.lock`'s settings for what Solium's own lock shows (#281): `native`
 /// (true or false; unset, true unless `command` names a locker, as
 /// `has_command` says), `scene` (a path or a name, not empty), `prompt_on`
-/// (`"primary"`, `"pointer"` or a monitor's name), `exit_ms` (a whole number
-/// of milliseconds, 0 for none, at most `lock_scene::EXIT_MAX_MS`, a longer one
+/// (`"primary"`, `"pointer"` or a monitor's name), `enter_ms` and `exit_ms`
+/// (whole numbers of milliseconds, 0 for none, at most
+/// `lock_scene::ENTER_MAX_MS` and `lock_scene::EXIT_MAX_MS`, a longer one
 /// taken as that) and `keypad_margin` (a whole number of pixels, 0 or more).
 /// Each one absent keeps its default; each one of the wrong kind is named in
 /// the log and keeps its default.
 /// `tests::sol_lock_parses_what_the_native_lock_shows`.
+/// `lock.<key>`, a whole number of milliseconds from 0 to `max`: `None` when
+/// it is absent, or of the wrong kind, which the log names with `default`
+/// kept; one past `max` is taken as `max`, and the log says `why`.
+fn bounded_ms(
+    options: &mlua::Table,
+    key: &str,
+    default: u32,
+    max: u32,
+    why: &str,
+) -> Option<std::time::Duration> {
+    let value = match options.get::<Value>(key) {
+        Ok(Value::Nil) | Err(_) => return None,
+        Ok(value) => value,
+    };
+    let whole = match &value {
+        Value::Integer(number) => Some(*number),
+        Value::Number(number) if number.fract() == 0.0 && number.is_finite() => {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a whole number, bounded below"
+            )]
+            let whole = *number as i64;
+            Some(whole)
+        }
+        _ => None,
+    };
+    match whole.and_then(|ms| u64::try_from(ms).ok()) {
+        Some(ms) if ms > u64::from(max) => {
+            tracing::warn!(ms, "lock.{key} is at most {max}: {why}; taking {max}");
+            Some(std::time::Duration::from_millis(u64::from(max)))
+        }
+        Some(ms) => Some(std::time::Duration::from_millis(ms)),
+        None => {
+            tracing::warn!(
+                value = describe(&value),
+                "lock.{key} is a whole number of milliseconds, 0 or more; keeping the default, {default}"
+            );
+            None
+        }
+    }
+}
+
 fn lock_scene_settings(
     options: Option<&mlua::Table>,
     has_command: bool,
 ) -> crate::lock_scene::Settings {
-    use crate::lock_scene::{EXIT_MAX_MS, EXIT_MS, KEYPAD_MARGIN, PromptOn, SHIPPED, Settings};
+    use crate::lock_scene::{
+        ENTER_MAX_MS, ENTER_MS, EXIT_MAX_MS, EXIT_MS, KEYPAD_MARGIN, PromptOn, SHIPPED, Settings,
+    };
     let mut settings = Settings {
         native: !has_command,
         ..Settings::default()
@@ -1420,36 +1466,23 @@ fn lock_scene_settings(
             ),
         },
     }
-    match options.get::<Value>("exit_ms") {
-        Ok(Value::Nil) | Err(_) => {}
-        Ok(value) => {
-            let whole = match &value {
-                Value::Integer(number) => Some(*number),
-                Value::Number(number) if number.fract() == 0.0 && number.is_finite() => {
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "a whole number, bounded below"
-                    )]
-                    let whole = *number as i64;
-                    Some(whole)
-                }
-                _ => None,
-            };
-            match whole.and_then(|ms| u64::try_from(ms).ok()) {
-                Some(ms) if ms > u64::from(EXIT_MAX_MS) => {
-                    tracing::warn!(
-                        ms,
-                        "lock.exit_ms is at most {EXIT_MAX_MS}: input is the desktop's from the unlock on; taking {EXIT_MAX_MS}"
-                    );
-                    settings.exit = std::time::Duration::from_millis(u64::from(EXIT_MAX_MS));
-                }
-                Some(ms) => settings.exit = std::time::Duration::from_millis(ms),
-                None => tracing::warn!(
-                    value = describe(&value),
-                    "lock.exit_ms is a whole number of milliseconds, 0 or more; keeping the default, {EXIT_MS}"
-                ),
-            }
-        }
+    if let Some(enter) = bounded_ms(
+        options,
+        "enter_ms",
+        ENTER_MS,
+        ENTER_MAX_MS,
+        "the desktop is on screen until the entry ends",
+    ) {
+        settings.enter = enter;
+    }
+    if let Some(exit) = bounded_ms(
+        options,
+        "exit_ms",
+        EXIT_MS,
+        EXIT_MAX_MS,
+        "input is the desktop's from the unlock on",
+    ) {
+        settings.exit = exit;
     }
     match options.get::<Value>("keypad_margin") {
         Ok(Value::Nil) | Err(_) => {}
@@ -9599,12 +9632,12 @@ mod tests {
 
     /// `sol.lock`'s settings for what Solium's own lock shows (#281): every
     /// one read, `native` true by default and false by default once
-    /// `command` names a locker, `exit_ms` held to its maximum, and a value
-    /// of the wrong kind named in the log with the default kept. See
-    /// `crate::lock_scene::Settings`.
+    /// `command` names a locker, `enter_ms` and `exit_ms` held to their
+    /// maximums, and a value of the wrong kind named in the log with the
+    /// default kept. See `crate::lock_scene::Settings`.
     #[test]
     fn sol_lock_parses_what_the_native_lock_shows() {
-        use crate::lock_scene::{EXIT_MAX_MS, PromptOn, Settings};
+        use crate::lock_scene::{ENTER_MAX_MS, EXIT_MAX_MS, PromptOn, Settings};
         use std::time::Duration;
         let directory = std::env::temp_dir().join("solium-script-test-lock-scene");
         let _ = std::fs::remove_dir_all(&directory);
@@ -9630,6 +9663,7 @@ mod tests {
                     native = false,
                     scene = "~/my-lock.qml",
                     prompt_on = "DP-2",
+                    enter_ms = 500,
                     exit_ms = 400,
                     keypad_margin = 0,
                 })"#
@@ -9638,14 +9672,16 @@ mod tests {
                 native: false,
                 scene: "~/my-lock.qml".to_owned(),
                 prompt_on: PromptOn::Monitor("DP-2".to_owned()),
+                enter: Duration::from_millis(500),
                 exit: Duration::from_millis(400),
                 keypad_margin: 0,
             }
         );
         assert_eq!(
-            configured(r#"sol.lock({ prompt_on = "primary", exit_ms = 0 })"#),
+            configured(r#"sol.lock({ prompt_on = "primary", enter_ms = 0, exit_ms = 0 })"#),
             Settings {
                 prompt_on: PromptOn::Primary,
+                enter: Duration::ZERO,
                 exit: Duration::ZERO,
                 ..Settings::default()
             }
@@ -9654,6 +9690,11 @@ mod tests {
             configured("sol.lock({ exit_ms = 5000 })").exit,
             Duration::from_millis(u64::from(EXIT_MAX_MS)),
             "an exit past the maximum was not held to it"
+        );
+        assert_eq!(
+            configured("sol.lock({ enter_ms = 5000 })").enter,
+            Duration::from_millis(u64::from(ENTER_MAX_MS)),
+            "an entry past the maximum was not held to it"
         );
         assert!(
             !configured(r#"sol.lock({ command = "swaylock -f" })"#).native,
@@ -9667,8 +9708,8 @@ mod tests {
         for source in [
             "sol.lock()",
             "sol.lock({})",
-            r#"sol.lock({ native = "yes", scene = "", prompt_on = 3, exit_ms = -5, keypad_margin = -1 })"#,
-            "sol.lock({ scene = 7, exit_ms = 12.5, keypad_margin = \"wide\" })",
+            r#"sol.lock({ native = "yes", scene = "", prompt_on = 3, enter_ms = -1, exit_ms = -5, keypad_margin = -1 })"#,
+            "sol.lock({ scene = 7, enter_ms = \"slow\", exit_ms = 12.5, keypad_margin = \"wide\" })",
         ] {
             assert_eq!(configured(source), Settings::default(), "{source:?}");
         }

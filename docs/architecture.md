@@ -161,11 +161,14 @@ The installed session wrapper integrates with systemd, D-Bus and XDG autostart.
 The session lock is Solium's own by default (#281): a QML scene per monitor
 (`lock.scene`), built at session start and kept quiet between locks, with the
 shipped scene and then a compiled-in fallback standing in for one that fails,
-never the desktop. The password is typed into Rust and checked by the
-`solium-auth` PAM helper; only its yes, or logind's `Unlock`, ends the lock,
-and the scene then plays its exit over the unlocked desktop for at most
-`lock.exit_ms`. Every way of locking goes through one function,
-`Solium::lock_now`: logind's `Lock` and `PrepareForSleep`, `idle.lock_after`,
+never the desktop. Taken, it holds input and refuses captures at once, while
+its scenes come down over the still-drawn desktop for at most
+`lock.enter_ms`; `locked` waits for that entry to end. The password is typed
+into Rust and checked by the `solium-auth` PAM helper; only its yes, or
+logind's `Unlock`, ends the lock, and the scene then plays its exit over the
+unlocked desktop for at most `lock.exit_ms`. Every way of locking goes
+through one function, `Solium::lock_now` (before sleep, with no entry):
+logind's `Lock` and `PrepareForSleep`, `idle.lock_after`,
 `sol.lock_now` and the shipped `super+ctrl+l`. It takes the native lock, or,
 when `lock.command` names an external locker, runs it, and that locker holds
 the lock through session-lock. Before sleep, logind's delay inhibitor is

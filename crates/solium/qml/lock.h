@@ -55,6 +55,7 @@ public:
     QVariantMap user() const { return m_user; }
     QString promptOn() const { return m_prompt_on; }
     bool locked() const { return m_locked; }
+    int enterMs() const { return m_enter_ms; }
     int exitMs() const { return m_exit_ms; }
 
     /* Ask Rust to check what was typed; dropped by the blank one. */
@@ -74,6 +75,7 @@ signals:
     void userChanged();
     void promptOnChanged();
     void lockedChanged();
+    void enterMsChanged();
     void exitMsChanged();
 
 private:
@@ -84,6 +86,7 @@ private:
     QVariantMap m_user;
     QString m_prompt_on;
     bool m_locked = false;
+    int m_enter_ms = 0;
     int m_exit_ms = 0;
     int m_requests = 0;
     bool m_blank = false;
@@ -98,8 +101,8 @@ private:
 class SoliumLockAttached : public QObject
 {
     Q_OBJECT
-    /* "idle", "prompting", "checking", "failed", "lockedOut", "unavailable"
-     * or "unlocking". */
+    /* "locking", "idle", "prompting", "checking", "failed", "lockedOut",
+     * "unavailable" or "unlocking". */
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     /* Wrong passwords since the lock was taken. */
     Q_PROPERTY(int attempts READ attempts NOTIFY attemptsChanged)
@@ -119,6 +122,12 @@ class SoliumLockAttached : public QObject
      * and while the scene is kept for the next lock: a scene runs its Timers
      * and loops only while this is true. */
     Q_PROPERTY(bool locked READ locked NOTIFY lockedChanged)
+    /* How long the entry lasts, in milliseconds: `lock.enter_ms`. As the lock
+     * is taken, `state` reads "locking" for this long while the scene comes
+     * down over the desktop, which is drawn under it meanwhile; then the
+     * desktop is gone, whatever the scene is doing. Input is the lock's from
+     * the start. A lock taken before sleep has no entry. */
+    Q_PROPERTY(int enterMs READ enterMs NOTIFY enterMsChanged)
     /* How long the exit lasts, in milliseconds: `lock.exit_ms`. The scene is
      * drawn over the desktop for this long after the unlock, and then it is
      * gone, whatever it is doing. */
@@ -132,6 +141,7 @@ public:
     QVariantMap user() const { return m_lock->user(); }
     QString promptOn() const { return m_lock->promptOn(); }
     bool locked() const { return m_lock->locked(); }
+    int enterMs() const { return m_lock->enterMs(); }
     int exitMs() const { return m_lock->exitMs(); }
 
     /* Ask Rust to check what was typed. Carries nothing: there is nothing in
@@ -148,6 +158,7 @@ signals:
     void userChanged();
     void promptOnChanged();
     void lockedChanged();
+    void enterMsChanged();
     void exitMsChanged();
 
 private:

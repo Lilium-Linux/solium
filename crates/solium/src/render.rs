@@ -2112,7 +2112,12 @@ pub(crate) fn build_slots(state: &mut Solium) -> crate::effect::plan::Slots {
     // behind the lock, and no xray is built ([16] §5, Ruling F29). The
     // pointer's own scene keeps its slots from Task 61 on.
     // `state::tests::real_client::nothing_of_the_session_is_captured_while_locked`.
-    if state.lock.is_some() {
+    //
+    // But for the entry of Solium's own lock, while the desktop is still on
+    // screen under its scenes: drawn, it is drawn with its effects, so it
+    // does not change under the sheet coming down. A capture of the screen
+    // is still refused (`screencopy.rs`).
+    if state.lock.is_some() && !state.desktop_under_lock_anywhere(pass_now(state)) {
         return Slots::default();
     }
     // At the pass's instant, as the walk draws: a slot fading in or out with
@@ -5067,6 +5072,9 @@ pub(crate) struct Picture {
     pub(crate) scale: f64,
     /// Whether to draw the pointer.
     pub(crate) cursor: bool,
+    /// Whether it is a capture (screencopy), not a monitor's frame: one never
+    /// has the desktop under the lock's entry (`Solium::desktop_under_lock`).
+    pub(crate) capture: bool,
 }
 
 impl Picture {
@@ -5079,6 +5087,7 @@ impl Picture {
             screen,
             scale,
             cursor: true,
+            capture: false,
         }
     }
 }
@@ -5211,6 +5220,7 @@ pub(crate) fn elements(
         screen,
         scale,
         cursor: with_cursor,
+        capture,
     } = picture;
     // At the pass's one instant, the one its T2 places were measured at,
     // however late this runs (amended 2026-10-14, live under motion and
@@ -5285,10 +5295,20 @@ pub(crate) fn elements(
     // Solium's own lock draws its scene for this monitor here instead, and the
     // backdrop goes under that too: a scene that has not drawn yet, or draws
     // with holes in it, shows the backdrop through them (`lock_scene.rs`).
+    //
+    // But for the entry of Solium's own lock: for `lock.enter_ms` its scene
+    // comes down over the desktop, so on a monitor it plays on the session is
+    // drawn under the scene rather than the backdrop, and this does not
+    // return. Never for a capture, which is the lock's from its first
+    // instant (`Solium::desktop_under_lock`). Input is the lock's all the
+    // same, and the frames built meanwhile do not count as showing the lock.
     if let Some(lock) = state.lock.as_ref() {
         let blank = lock.blank();
         let native = lock.is_native();
         let output = state.output_for(screen);
+        let desktop = output
+            .as_ref()
+            .is_some_and(|output| state.desktop_under_lock(output, now, capture));
         let client = output
             .as_ref()
             .and_then(|output| lock.surface_for(output))
@@ -5318,22 +5338,28 @@ pub(crate) fn elements(
                 crate::surface::Raster::at(scale),
             );
             // Still moving, or swapped for the fallback: the next frame is
-            // asked for, as `scripted` asks.
-            if painted.animating {
+            // asked for, as `scripted` asks. Through the entry every frame
+            // is, so its bound is met by a scene that does nothing.
+            if painted.animating || desktop {
                 state.redraw = true;
             }
             elements.extend(painted.element);
         }
-        elements.push(Element::Solid(
-            smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
-                blank,
-                smithay::utils::Rectangle::from_size(screen.size).to_physical_precise_round(scale),
-                CommitCounter::default(),
-                crate::lock::BLANK,
-                Kind::Unspecified,
-            ),
-        ));
-        return elements;
+        // Through the entry the session follows, under the scene, as it
+        // would unlocked; otherwise the backdrop, and nothing more.
+        if !desktop {
+            elements.push(Element::Solid(
+                smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
+                    blank,
+                    smithay::utils::Rectangle::from_size(screen.size)
+                        .to_physical_precise_round(scale),
+                    CommitCounter::default(),
+                    crate::lock::BLANK,
+                    Kind::Unspecified,
+                ),
+            ));
+            return elements;
+        }
     }
 
     // The drag icon: whatever a client attached to the drag it started, at the
@@ -10096,6 +10122,37 @@ pub(crate) mod tests {
             pointer < exit && exit < lock && lock < icon,
             "the exit is drawn at byte {exit}, not between the pointer ({pointer}) \
              and the session ({lock}, {icon})"
+        );
+    }
+
+    /// **Through the lock's entry the session is drawn under the scene, and
+    /// never in a capture**: the lock's branch asks
+    /// `Solium::desktop_under_lock` with the picture's `capture`, and returns
+    /// with the backdrop unless it says yes. What it says is
+    /// `state::tests::real_client::lock_focus::native::entry`'s; like the
+    /// tests above, this pins only the source.
+    #[test]
+    fn the_session_is_under_the_lock_only_through_its_entry_and_never_in_a_capture() {
+        let source = include_str!("render.rs");
+        let at = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("`elements` no longer has {needle:?}"))
+        };
+        let lock = at("if let Some(lock) = state.lock.as_ref() {");
+        let asked = at("state.desktop_under_lock(output, now, capture)");
+        let guard = at("if !desktop {");
+        let returned = lock
+            + source[lock..]
+                .find("return elements;")
+                .expect("the lock guard still returns");
+        assert!(
+            lock < asked && asked < guard && guard < returned,
+            "the backdrop's return is not guarded by the entry's answer for this picture"
+        );
+        assert!(
+            include_str!("screencopy.rs").contains("capture: true,"),
+            "a screencopy is not drawn as a capture"
         );
     }
 

@@ -431,6 +431,7 @@ fn fill(
             screen,
             scale,
             cursor: capture.cursor,
+            capture: true,
         },
     );
 
