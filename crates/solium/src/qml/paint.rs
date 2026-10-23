@@ -279,6 +279,11 @@ impl Said {
     pub(crate) fn worked(&mut self) {
         self.0 = false;
     }
+
+    /// Whether it has failed since it last worked.
+    pub(crate) const fn failing(&self) -> bool {
+        self.0
+    }
 }
 
 /// What a scene has already complained about, one latch per failure.
@@ -379,6 +384,13 @@ pub(crate) struct Gpu {
 }
 
 impl Gpu {
+    /// Whether the scene failed to render the last time it was asked to, and
+    /// has not rendered since: drawn, it shows its last good picture.
+    /// `ShellSurface::failing`.
+    pub(crate) const fn failing(&self) -> bool {
+        self.said.rendering.failing()
+    }
+
     /// A scene whose buffer is `size` pixels.
     ///
     /// The size is the caller's to state because it is the caller that built

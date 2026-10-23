@@ -1,5 +1,6 @@
 //! The keyboard while the session is locked: pointing it at the lock surface on the monitor the
-//! user is working on, or at any lock surface, and `settle_focus`'s answer while locked.
+//! user is working on, or at any lock surface, and `settle_focus`'s answer while locked. And the
+//! native lock's scenes, one per monitor.
 
 use super::*;
 
@@ -66,5 +67,16 @@ impl Solium {
         } else if focus.is_some() {
             self.give_keyboard(None, SERIAL_COUNTER.next_serial());
         }
+    }
+
+    /// Give every monitor its native lock scene while Solium holds the lock,
+    /// and take them away when it does not: when the lock is taken or ends,
+    /// and when the monitors change, so one plugged in while locked gets its
+    /// scene or the fallback, never the desktop. See `lock_scene.rs`.
+    /// `a_monitor_plugged_in_while_natively_locked_gets_a_scene_never_the_desktop`.
+    pub(crate) fn sync_lock_scenes(&mut self) {
+        let native = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        self.lock_scenes.sync(&outputs, native);
     }
 }

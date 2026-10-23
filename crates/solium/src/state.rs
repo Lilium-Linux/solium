@@ -410,6 +410,9 @@ pub(crate) struct Solium {
     /// anything on screen -- see `lock.rs` for why that asymmetry is the
     /// safe one.
     pub(crate) lock: Option<crate::lock::Lock>,
+    /// What Solium's own lock draws on each monitor while it holds the lock.
+    /// See `lock_scene.rs`.
+    pub(crate) lock_scenes: crate::lock_scene::LockScenes,
 
     pub(crate) space: Space<Window>,
 
@@ -1405,6 +1408,7 @@ impl Solium {
             text_inputs: crate::text_input::TextInputs::new(&display_handle),
             session_lock_state: crate::lock::state(&display_handle),
             lock: None,
+            lock_scenes: crate::lock_scene::LockScenes::default(),
             rescan_outputs: false,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),

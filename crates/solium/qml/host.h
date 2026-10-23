@@ -109,6 +109,14 @@ void solium_qml_host_next_on(const char *monitor);
  * `qml::pointer::tests::a_scene_built_after_one_sized_by_its_root_is_sized_by_the_host`. */
 void solium_qml_host_next_sized_by_root(int width, int height);
 
+/* The QML text of the next scene built, or NULL for none: that scene is
+ * compiled from this text rather than read from its path, which names it and
+ * is what its relative imports resolve against. Consumed by the next build,
+ * whether it succeeds or not. For a scene compiled into the compositor, which
+ * has to load when nothing on disk does: the native lock's fallback.
+ * `lock_scene::tests::the_fallback_is_compiled_in_and_loads_with_no_file_on_disk`. */
+void solium_qml_host_next_from(const char *qml);
+
 /* The scene's root item's width and height, in logical pixels. 0 for a scene
  * with no root. `qml::pointer::tests::a_scene_sized_by_its_root_keeps_its_own_size`. */
 int solium_qml_scene_root_size(const SoliumQmlScene *scene, double *width, double *height);

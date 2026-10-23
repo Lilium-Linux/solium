@@ -782,7 +782,9 @@ impl Solium {
         // Locked: the only surface anyone may point at is the lock screen's,
         // and on a monitor it has not covered, none at all. Returning early
         // rather than filtering afterwards is deliberate -- a later `return`
-        // that forgets the check is a click landing in the session.
+        // that forgets the check is a click landing in the session. Solium's
+        // own lock has no surface, so under it there is none anywhere: its
+        // scene is told the fingers itself (`input::touch`).
         if let Some(lock) = self.lock.as_ref() {
             let output = monitor::at(&self.space, location)?;
             let geometry = self.space.output_geometry(&output)?;

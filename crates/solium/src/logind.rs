@@ -31,6 +31,12 @@
 //! wakes, whichever comes first — both are what being unlocked while awake
 //! means, so one hook (`Logind::locked`) covers both.
 //!
+//! On `Unlock` (`loginctl unlock-session`, from another console or over
+//! SSH), it ends Solium's own lock, which is the administrator's way out of
+//! it (`an_unlock_signal_unlocks_a_native_lock`). A lock a client holds is
+//! left to that client: the protocol gives only the holder the unlock, and a
+//! crashed lock client is recovered by starting another, which takes over.
+//!
 //! The session's `LockedHint` is kept in step with the same two moments
 //! (`locked_hint_follows_lock_and_unlock`), so anything else watching
 //! `org.freedesktop.login1.Session` — `loginctl`, a greeter — agrees with
@@ -142,6 +148,8 @@ impl Default for Settings {
 enum Event {
     /// logind's `Lock` signal.
     Lock,
+    /// logind's `Unlock` signal.
+    Unlock,
     /// `PrepareForSleep`: `true` just before sleep, `false` on waking.
     PrepareForSleep(bool),
     /// The answer to asking for a fresh delay inhibitor: the fd held, if
@@ -314,6 +322,7 @@ pub(crate) fn settle(state: &mut crate::state::Solium) {
     for event in drained {
         match event {
             Event::Lock => on_lock(state),
+            Event::Unlock => on_unlock(state),
             Event::PrepareForSleep(true) => on_sleep_imminent(state),
             Event::PrepareForSleep(false) => on_resumed(state),
             Event::Inhibitor(fd, max_delay) => {
@@ -393,6 +402,22 @@ fn on_lock(state: &mut crate::state::Solium) {
         return;
     }
     run_locker(state);
+}
+
+/// `Unlock`: end Solium's own lock, the administrator's way out of it. A
+/// lock a client holds is that client's to end, so it is left alone.
+/// `an_unlock_signal_unlocks_a_native_lock`.
+fn on_unlock(state: &mut crate::state::Solium) {
+    match state.lock.as_ref() {
+        None => tracing::info!("logind's Unlock signal: the session is not locked"),
+        Some(lock) if lock.is_native() => {
+            tracing::info!("logind's Unlock signal: ending Solium's own lock");
+            state.unlock_natively();
+        }
+        Some(_) => tracing::info!(
+            "logind's Unlock signal: the session's lock is a lock client's, and only it may end it"
+        ),
+    }
 }
 
 /// `PrepareForSleep(true)`: run the locker if nothing already has the
@@ -711,6 +736,9 @@ fn listen(address: Option<String>, events: Events, session_path: SessionPath) {
     if let Err(err) = add_match(&connection, SESSION_INTERFACE, "Lock", path.as_str()) {
         tracing::warn!(?err, "could not hear logind's Lock signal");
     }
+    if let Err(err) = add_match(&connection, SESSION_INTERFACE, "Unlock", path.as_str()) {
+        tracing::warn!(?err, "could not hear logind's Unlock signal");
+    }
     if let Err(err) = add_match(
         &connection,
         MANAGER_INTERFACE,
@@ -735,6 +763,7 @@ fn listen(address: Option<String>, events: Events, session_path: SessionPath) {
         };
         match (interface.as_str(), member.as_str()) {
             (SESSION_INTERFACE, "Lock") => lock(&events).push_back(Event::Lock),
+            (SESSION_INTERFACE, "Unlock") => lock(&events).push_back(Event::Unlock),
             (MANAGER_INTERFACE, "PrepareForSleep") => {
                 if let Ok(asleep) = message.body().deserialize::<bool>() {
                     lock(&events).push_back(Event::PrepareForSleep(asleep));
@@ -941,6 +970,15 @@ mod tests {
             .expect("a Lock signal")
     }
 
+    /// logind's `Unlock`, on the session path, as `loginctl unlock-session`
+    /// sends it. See [`lock_message`].
+    fn unlock_message() -> zbus::message::Message {
+        Message::signal(SESSION_PATH, SESSION_INTERFACE, "Unlock")
+            .and_then(|builder| builder.sender(":1.50"))
+            .and_then(|builder| builder.build(&()))
+            .expect("an Unlock signal")
+    }
+
     /// `PrepareForSleep`, on the manager path. See [`lock_message`].
     fn prepare_for_sleep_message(asleep: bool) -> zbus::message::Message {
         Message::signal(MANAGER_PATH, MANAGER_INTERFACE, "PrepareForSleep")
@@ -1127,6 +1165,12 @@ mod tests {
             self.broadcast(SESSION_INTERFACE, "Lock", lock_message);
         }
 
+        /// logind's `Unlock`, on the session path, as if
+        /// `loginctl unlock-session` had just asked for it.
+        fn send_unlock(&self) {
+            self.broadcast(SESSION_INTERFACE, "Unlock", unlock_message);
+        }
+
         /// `PrepareForSleep`, on the manager path.
         fn send_prepare_for_sleep(&self, asleep: bool) {
             self.broadcast(MANAGER_INTERFACE, "PrepareForSleep", move || {
@@ -1273,6 +1317,32 @@ mod tests {
         });
         assert!(seen, "the locker never ran");
         let _ = std::fs::remove_file(&mark);
+    }
+
+    /// **`Unlock` ends Solium's own lock**: `loginctl unlock-session` from
+    /// another console is the administrator's way out of it, and the one way
+    /// out that exists before the password does.
+    #[test]
+    fn an_unlock_signal_unlocks_a_native_lock() {
+        let bus = StandIn::new(5_000_000, false);
+        let logind = begin(&bus, None, false);
+        let mut state = solium_with(logind);
+        state.lock_natively();
+        assert!(
+            state
+                .lock
+                .as_ref()
+                .is_some_and(crate::lock::Lock::is_native),
+            "the premise: natively locked"
+        );
+
+        bus.wait_for_subscription(SESSION_INTERFACE, "Unlock");
+        bus.send_unlock();
+        let unlocked = soon(|| {
+            settle(&mut state);
+            state.lock.is_none()
+        });
+        assert!(unlocked, "logind's Unlock did not end the native lock");
     }
 
     /// #225: a `Lock` a real bus sends the instant the listener's `AddMatch`

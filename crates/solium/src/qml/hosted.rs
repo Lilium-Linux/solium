@@ -31,6 +31,7 @@ mod ffi {
             json_value: *const c_char,
         ) -> c_int;
         pub(super) fn solium_qml_host_next_on(monitor: *const c_char);
+        pub(super) fn solium_qml_host_next_from(qml: *const c_char);
         pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_status(text: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_arrangement(json: *const c_char) -> c_int;
@@ -202,6 +203,30 @@ impl Scene {
             scene.label(&format!("{}@{monitor}", crate::pacing::label_of(qml_path)));
             scene
         })
+    }
+
+    /// [`Self::for_monitor`], compiled from `text` rather than read from
+    /// `qml_path`, which only names it: a scene compiled into the compositor,
+    /// which loads when nothing on disk does.
+    /// `lock_scene::tests::the_fallback_is_compiled_in_and_loads_with_no_file_on_disk`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn for_monitor_from(
+        qml_path: &Path,
+        text: &str,
+        width: i32,
+        height: i32,
+        initial: Option<&str>,
+        monitor: &str,
+    ) -> Result<Self> {
+        let text = CString::new(text).map_err(|_| anyhow!("QML text contains a NUL byte"))?;
+        // SAFETY: `text` outlives the call; the host copies it.
+        unsafe { ffi::solium_qml_host_next_from(text.as_ptr()) };
+        let built = Self::for_monitor(qml_path, width, height, initial, monitor);
+        // Cleared whether or not the scene was built, so no later scene is
+        // compiled from this text by accident.
+        // SAFETY: null is the documented "none".
+        unsafe { ffi::solium_qml_host_next_from(std::ptr::null()) };
+        built
     }
 
     /// Write one property of the scene's root, by path.

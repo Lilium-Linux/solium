@@ -7,7 +7,7 @@ use smithay::{
     backend::input::TouchSlot,
     input::touch::{DownEvent, MotionEvent, UpEvent},
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
-    utils::{Logical, Point, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
 use super::{grab::MoveDrag, resize::ResizeDrag};
@@ -21,7 +21,12 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub(crate) enum TouchTarget {
+    /// A lock client's surface, through the seat.
     Lock,
+    /// Solium's own lock: the scene on the monitor named, drawn across the
+    /// rectangle, which hears the finger as Qt touch events and is the only
+    /// thing that does (`lock_scene.rs`).
+    LockScene(String, Rectangle<i32, Logical>),
     Grab(ScenePress),
     Scene(ScenePress),
     Frame(PaneId),
@@ -119,7 +124,9 @@ fn hit(state: &Solium, target: &TouchTarget, location: Point<f64, Logical>) -> H
         }
         TouchTarget::Scene(_) | TouchTarget::Grab(_) => hit.target = "scene",
         TouchTarget::Script => hit.target = "script",
-        TouchTarget::Lock | TouchTarget::Swallowed => hit.target = "blocked",
+        TouchTarget::Lock | TouchTarget::LockScene(..) | TouchTarget::Swallowed => {
+            hit.target = "blocked";
+        }
         TouchTarget::Move(_) | TouchTarget::Resize(_) => {}
     }
     hit
@@ -131,7 +138,11 @@ pub(crate) fn claim(state: &mut Solium, slot: i32, action: crate::script::TouchA
     let Some(contact) = state.touches.get(&slot).filter(|c| c.accepting).cloned() else {
         return;
     };
-    if state.lock.is_some() || matches!(contact.target, TouchTarget::Lock | TouchTarget::Swallowed)
+    if state.lock.is_some()
+        || matches!(
+            contact.target,
+            TouchTarget::Lock | TouchTarget::LockScene(..) | TouchTarget::Swallowed
+        )
     {
         return;
     }
@@ -177,7 +188,17 @@ pub(crate) fn claim(state: &mut Solium, slot: i32, action: crate::script::TouchA
 }
 
 fn target(state: &mut Solium, location: Point<f64, Logical>) -> TouchTarget {
-    if state.lock.is_some() {
+    if let Some(lock) = state.lock.as_ref() {
+        // Solium's own lock: the scene on the monitor under the finger, and
+        // nothing else -- no client, no scene of the session's. A finger on
+        // no monitor goes to the seat with nothing under it, which is nobody.
+        // `state::tests::real_client::reflow_on_close::hosted::a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`.
+        if lock.is_native()
+            && let Some(output) = crate::monitor::at(&state.space, location)
+            && let Some(area) = state.space.output_geometry(&output)
+        {
+            return TouchTarget::LockScene(output.name(), area);
+        }
         return TouchTarget::Lock;
     }
     if let Some(grab) = state.hosted_grab.clone() {
@@ -435,7 +456,12 @@ pub(crate) fn cancel(state: &mut Solium) {
 fn queue(state: &mut Solium, contact: &Contact, kind: &'static str, slot: i32) {
     // Unlock also cancels contacts, after removing state.lock. Never reveal
     // a lock-screen finger then, or replay observations delayed by locking.
-    if state.lock.is_some() || matches!(contact.target, TouchTarget::Lock) {
+    if state.lock.is_some()
+        || matches!(
+            contact.target,
+            TouchTarget::Lock | TouchTarget::LockScene(..)
+        )
+    {
         return;
     }
     state.touch_events.push(crate::script::TouchEvent {
@@ -484,6 +510,11 @@ fn deliver(
         time: u64::from(time),
     };
     match target {
+        TouchTarget::LockScene(monitor, area) => {
+            state.lock_scenes.touch(monitor, *area, location, &event);
+            // What a finger does to a scene shows on the next frame.
+            state.redraw = true;
+        }
         TouchTarget::Scene(held) | TouchTarget::Grab(held) => {
             if let Some(surface) = state.surfaces.get_mut(held.surface) {
                 surface.deliver_touch(&held.output, held.area, location, &event);
