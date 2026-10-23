@@ -1095,6 +1095,11 @@ impl Solium {
     /// The renderer draws the lifted one over every other window
     /// (`crate::stack`'s `a_lifted_window_is_under_overlay_and_over_top`), so
     /// the walks that ask a window whether it owns a point ask it first.
+    ///
+    /// **Never a minimized window** (#30), not even while the present that
+    /// takes it away is still drawing it: a press there reaches what is under
+    /// it. `lifted_on` lifts no minimized window either.
+    /// `tests::real_client::reflow_on_close::minimize::a_press_on_a_minimized_window_reaches_what_is_under_it`.
     fn panes_front_first(&self, location: Point<f64, Logical>) -> impl Iterator<Item = &Pane> {
         let lifted = monitor::at(&self.space, location)
             .and_then(|output| self.space.output_geometry(&output))
@@ -1103,7 +1108,7 @@ impl Solium {
             self.panes
                 .iter()
                 .rev()
-                .filter(move |pane| Some(pane.id()) != lifted),
+                .filter(move |pane| Some(pane.id()) != lifted && !pane.minimized()),
         )
     }
 

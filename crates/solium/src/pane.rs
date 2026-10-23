@@ -549,6 +549,17 @@ pub(crate) struct Pane {
     /// Whether the layout that last placed this pane said its tile is smaller
     /// than the window's own minimum. See `WindowInfo::cramped`.
     cramped: bool,
+    /// Whether this window is minimized (#30): kept mapped and in its layout's
+    /// memory, but not drawn once a present running on it has played out, not
+    /// under the pointer or a finger, and never holding the keyboard. Written
+    /// only by `Solium::minimize` and `Solium::unminimize`. See
+    /// `WindowInfo::minimized`.
+    minimized: bool,
+    /// Whether a configuration shows this minimized window anyway, where its
+    /// present puts it: an overview's thumbnail, a recents card
+    /// (`sol.show_minimized`). Only read while the window is minimized, and
+    /// cleared when it is shown again. It still takes no pointer or touch.
+    shown_minimized: bool,
     /// A window shrinking back out of fullscreen or maximised, until its
     /// shrink lands. `None` for every other pane, and cleared once it has
     /// landed. Written by `Solium::transition`, read by `Solium::lifted_on`
@@ -633,6 +644,8 @@ impl Pane {
             meshes: crate::effect::geometry::Meshes::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            minimized: false,
+            shown_minimized: false,
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
@@ -667,6 +680,8 @@ impl Pane {
             meshes: crate::effect::geometry::Meshes::default(),
             limits: crate::state::Limits::default(),
             cramped: false,
+            minimized: false,
+            shown_minimized: false,
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
@@ -692,6 +707,31 @@ impl Pane {
     /// What the layout placing this pane says about its tile.
     pub(crate) const fn set_cramped(&mut self, cramped: bool) {
         self.cramped = cramped;
+    }
+
+    /// Whether this window is minimized. See the field.
+    pub(crate) const fn minimized(&self) -> bool {
+        self.minimized
+    }
+
+    /// Minimize this window, or show it again. See the field. Showing it
+    /// again forgets [`Self::shown_minimized`].
+    pub(crate) const fn set_minimized(&mut self, minimized: bool) {
+        self.minimized = minimized;
+        if !minimized {
+            self.shown_minimized = false;
+        }
+    }
+
+    /// Whether a configuration shows this window while it is minimized.
+    /// See the field.
+    pub(crate) const fn shown_minimized(&self) -> bool {
+        self.shown_minimized
+    }
+
+    /// Show this window while it is minimized, or stop. See the field.
+    pub(crate) const fn set_shown_minimized(&mut self, shown: bool) {
+        self.shown_minimized = shown;
     }
 
     /// Whether this pane is shrinking back out of fullscreen or maximised.

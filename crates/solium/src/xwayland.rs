@@ -120,7 +120,7 @@ const fn places_itself(kind: Option<WmWindowType>) -> bool {
 /// `net_state`, and `net_state` is not the client's property: it starts empty at
 /// `CreateNotify` and the only thing that ever writes to it is
 /// `change_net_state`, which is *us* — `set_maximized`, `set_fullscreen`,
-/// `set_minimized`, `set_activated`. smithay never ingests the window's own
+/// `set_suspended`, `set_activated`. smithay never ingests the window's own
 /// `_NET_WM_STATE`, and says so where it would: `update_properties` reads title,
 /// class, protocols, hints, transient-for and window type, with a comment that
 /// `_NET_WM_STATE` is the window manager's to keep. The `_NET_WM_STATE` client
@@ -401,6 +401,16 @@ where
 impl XWaylandShellHandler for Solium {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
         &mut self.xwayland_shell_state
+    }
+}
+
+impl Solium {
+    /// The pane an X11 window is in, if it is in the space.
+    fn x11_pane(&self, window: &X11Surface) -> Option<crate::pane::PaneId> {
+        self.space
+            .elements()
+            .find(|element| element.x11_surface() == Some(window))
+            .and_then(|element| self.panes.id_of(element))
     }
 }
 
@@ -780,6 +790,26 @@ impl XwmHandler for Solium {
 
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {}
 
+    /// An X11 client iconifying itself (`WM_CHANGE_STATE` to iconic), and
+    /// asking to be shown again: done as `sol.minimize` and `sol.unminimize`
+    /// do it (#30). The window is told through `_NET_WM_STATE_HIDDEN`
+    /// (`state::minimize`'s `tell_minimized`), and never unmapped. No test
+    /// can make an X11 window -- an `X11Surface` needs a live Xwayland, as
+    /// `state/hosted.rs`'s `act` says -- so this is checked by reading it;
+    /// the xdg request it mirrors is
+    /// `state::tests::real_client::reflow_on_close::minimize::a_client_asking_to_be_minimized_is_minimized`.
+    fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(pane) = self.x11_pane(&window) {
+            self.minimize(pane);
+        }
+    }
+
+    fn unminimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(pane) = self.x11_pane(&window) {
+            self.unminimize(pane);
+        }
+    }
+
     /// Whether an X11 client may read a selection a Wayland client owns.
     ///
     /// Yes, unless the session is locked. The default is `false`, which is the
@@ -1031,6 +1061,14 @@ impl XwmHandler for crate::tty::State {
 
     fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32) {
         self.solium.move_request(xwm, window, button);
+    }
+
+    fn minimize_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.solium.minimize_request(xwm, window);
+    }
+
+    fn unminimize_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.solium.unminimize_request(xwm, window);
     }
 
     fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {

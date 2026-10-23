@@ -621,6 +621,20 @@ impl XdgShellHandler for Solium {
         tracing::debug!(?screen, "a window went fullscreen");
     }
 
+    /// A client asking to be minimized: `xdg_toplevel.set_minimized`, its
+    /// own button for it. Done as `sol.minimize` does it (#30). xdg has no
+    /// request to come back; a minimized window is shown again by
+    /// focusing it or by a script.
+    /// `tests::real_client::reflow_on_close::minimize::a_client_asking_to_be_minimized_is_minimized`.
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(pane) = self
+            .window_for(surface.wl_surface())
+            .and_then(|window| self.panes.id_of(&window))
+        {
+            self.minimize(pane);
+        }
+    }
+
     /// And asking for it back.
     ///
     /// Back to maximised if the window was maximised when it went fullscreen,

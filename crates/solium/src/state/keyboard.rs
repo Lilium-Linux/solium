@@ -219,7 +219,10 @@ impl Solium {
     /// nothing without it.
     ///
     /// Every candidate is a window [`Self::settle_focus`] could always hand
-    /// the keyboard to: not on its way out, and headed somewhere on screen.
+    /// the keyboard to: not on its way out, not minimized -- even while the
+    /// present taking it away is still on screen (#30) -- and headed
+    /// somewhere on screen. `"pointer"` asks `window_under_at`, which walks
+    /// no minimized window.
     /// `"neighbour"` and `"recent"` keep to the monitor the closed window was
     /// on -- the rectangle it stood in, by its centre, as every window is
     /// placed on a monitor -- where the user was working.
@@ -240,7 +243,7 @@ impl Solium {
                 .panes
                 .iter()
                 .rev()
-                .filter(|pane| !pane.leaving())
+                .filter(|pane| !pane.leaving() && !pane.minimized())
                 .filter(|pane| self.on_stage(pane, screens, landed))
                 .find_map(|pane| pane.client().cloned()),
             Successor::Recent => {
@@ -281,6 +284,7 @@ impl Solium {
         let eligible = |pane: &Pane| {
             pane.id() != gone
                 && !pane.leaving()
+                && !pane.minimized()
                 && pane.client().is_some()
                 && self.on_stage(pane, screens, landed)
                 && self.output_of(self.laid_out_at(pane)) == monitor
@@ -378,6 +382,19 @@ impl Solium {
         let Some(location) = self.space.element_location(window) else {
             return;
         };
+        // **A minimized window is shown again before it is focused** (#30):
+        // it may never hold the keyboard minimized, and focusing one -- a
+        // click in an overview, `sol.focus`, an activation -- is asking for
+        // it back. Before the lock's rule below, so a focus the lock refuses
+        // still shows it, as `sol.unminimize` would; the lock covers it.
+        // `tests::real_client::reflow_on_close::minimize::focusing_a_minimized_window_shows_it_first`.
+        if let Some(pane) = self
+            .panes
+            .id_of(window)
+            .filter(|pane| self.panes.get(*pane).is_some_and(Pane::minimized))
+        {
+            self.unminimize(pane);
+        }
         // The rule in `focus.rs`, asked before anything happens rather than
         // left to `give_keyboard` to refuse halfway through. A focus that is
         // refused must not restack a window behind the lock, activate an X11

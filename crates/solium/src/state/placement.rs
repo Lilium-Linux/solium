@@ -343,10 +343,15 @@ impl Solium {
         // lists the window closing -- would otherwise move the tile a fading
         // picture is cut to, and a script holding the id can `sol.place` it.
         // `a_window_that_left_is_nobodys_to_find` places one.
+        //
+        // **Nor a minimized one** (#30). Its layout has taken it out, and it
+        // keeps the place it had for when it is shown again; a stray
+        // `sol.place` would otherwise start a glide over the present taking
+        // it away. `tests::real_client::reflow_on_close::minimize::a_placement_leaves_a_minimized_window_where_it_is`.
         if self
             .panes
             .get(pane)
-            .is_some_and(|held| held.gone() || held.ghost())
+            .is_some_and(|held| held.gone() || held.ghost() || held.minimized())
         {
             return;
         }

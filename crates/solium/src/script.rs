@@ -182,6 +182,14 @@ pub(crate) struct WindowInfo {
     /// for it is a slot kept for nothing. `tiling.adopt` and
     /// `scrolling.adopt` are the shipped readers.
     pub(crate) leaving: bool,
+    /// Whether this window is minimized (#30): `sol.minimize`, or its own
+    /// client asking. Still mapped and alive, but not drawn once a present
+    /// running on it has played out, under no pointer or finger, and never
+    /// holding the keyboard. The shipped layouts leave a minimized window out
+    /// of their arrangement and take it back where it was when it is shown
+    /// again (`unminimize`).
+    /// `real_client::reflow_on_close::minimize::sol_minimize_marks_the_row_fires_once_and_leaves_the_client_mapped`.
+    pub(crate) minimized: bool,
     /// Which application this is, by the name it gives itself: its xdg
     /// `app_id`, or an X11 window's `WM_CLASS` class. Empty for a window
     /// whose application has not arrived, or said nothing. See
@@ -551,6 +559,22 @@ pub(crate) enum Command {
     ToggleMaximize {
         id: u64,
     },
+    /// Minimize a window (#30): `sol.minimize`, and `super+m`. Nothing for
+    /// a window already minimized. See `WindowInfo::minimized`.
+    Minimize {
+        id: u64,
+    },
+    /// Show a minimized window again: `sol.unminimize`. Nothing for a
+    /// window that is not minimized.
+    Unminimize {
+        id: u64,
+    },
+    /// Show a minimized window anyway, where its present puts it, or stop:
+    /// `sol.show_minimized`. See `Pane::shown_minimized`.
+    ShowMinimized {
+        id: u64,
+        shown: bool,
+    },
     /// Frame every window with a named decoration.
     Decoration {
         name: Option<String>,
@@ -754,6 +778,9 @@ impl Command {
             | Self::Warp(_)
             | Self::ToggleFullscreen { .. }
             | Self::ToggleMaximize { .. }
+            | Self::Minimize { .. }
+            | Self::Unminimize { .. }
+            | Self::ShowMinimized { .. }
             | Self::Place { .. }
             | Self::Unplace { .. }
             | Self::Close { .. }
@@ -2214,6 +2241,25 @@ impl Scripts {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "refused", id))
     }
 
+    /// A window has just been minimized (#30): by `sol.minimize`, or by its
+    /// own client asking. Fired once, before anything else reacts, with the
+    /// window already `minimized` in the snapshot, so a configuration starts
+    /// its present -- the shipped one plays the genie into its slot -- in the
+    /// same dispatch, and a layout takes the window out of its arrangement.
+    /// The window stays drawn while that present plays out.
+    pub(crate) fn minimized(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "minimize", id))
+    }
+
+    /// A minimized window is shown again (#30): by `sol.unminimize`, by its
+    /// client, or by being focused. A layout takes it back where it was, and
+    /// a configuration presents it back from wherever it put it.
+    pub(crate) fn unminimized(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "unminimize", id)
+        })
+    }
+
     /// Something the compositor owns changed the space windows get.
     ///
     /// A decoration reserving a different amount is the case that needs it:
@@ -3205,6 +3251,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("modal", window.modal)?;
                 entry.set("parent", window.parent.to_value(lua)?)?;
                 entry.set("leaving", window.leaving)?;
+                entry.set("minimized", window.minimized)?;
                 entry.set("app_id", window.app_id.clone())?;
                 entry.set("min", size_table(lua, window.min)?)?;
                 entry.set("max", size_table(lua, window.max)?)?;
@@ -4163,11 +4210,16 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             // `false`: no row of a snapshot is what is left of a window whose
             // client has gone -- `Solium::snapshot` lists none, which
             // `a_window_that_left_is_nobodys_to_find` asks.
+            //
+            // A minimized window is under no point, even while a present on
+            // it plays out, as the press walks have it (#30):
+            // `real_client::reflow_on_close::minimize::a_press_on_a_minimized_window_reaches_what_is_under_it`.
             Ok(snapshot
                 .windows
                 .iter()
                 .find(|window| {
                     Some(window.id) != skip
+                        && !window.minimized
                         && crate::state::owns(
                             window.drawn.slot,
                             false,
@@ -5019,6 +5071,54 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             with_pending(lua, |pending| {
                 pending.commands.push(Command::ToggleFullscreen { id });
+            })
+        })?,
+    )?;
+
+    // Minimize a window, and show it again (#30). The window named, or the
+    // focused one when none is, as the toggles above. A minimized window
+    // takes no focus, so `sol.unminimize()` with no id names nothing: it is
+    // for a window a script can name, from `sol.windows()`.
+    // `directions::sol_minimize_names_the_focused_window_when_given_none_and_reaches_past_the_lock`.
+    sol.set(
+        "minimize",
+        lua.create_function(|lua, id: Option<u64>| {
+            let Some(id) = id.or_else(|| focused_id(lua)) else {
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Minimize { id });
+            })
+        })?,
+    )?;
+
+    sol.set(
+        "unminimize",
+        lua.create_function(|lua, id: Option<u64>| {
+            let Some(id) = id.or_else(|| focused_id(lua)) else {
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Unminimize { id });
+            })
+        })?,
+    )?;
+
+    // Show a minimized window anyway, where a present puts it, or stop (#30):
+    // what an overview or a recents screen does to draw a minimized window
+    // as one of its thumbnails. `shown` is `true` when left out. It changes
+    // nothing for a window that is not minimized, and showing it again
+    // forgets it. Still no pointer or touch reaches it: the script that
+    // shows it knows where it put it.
+    // `real_client::reflow_on_close::minimize::the_overview_shows_a_minimized_window_and_choosing_it_shows_it_again`.
+    sol.set(
+        "show_minimized",
+        lua.create_function(|lua, (id, shown): (u64, Option<bool>)| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ShowMinimized {
+                    id,
+                    shown: shown.unwrap_or(true),
+                });
             })
         })?,
     )?;
@@ -7099,6 +7199,7 @@ mod tests {
                 modal: false,
                 parent: Parentage::None,
                 leaving: false,
+                minimized: false,
                 app_id: String::new(),
                 min: None,
                 max: None,
@@ -9698,6 +9799,7 @@ mod tests {
             modal,
             parent,
             leaving: false,
+            minimized: false,
             app_id: String::new(),
             min: None,
             max: None,
@@ -10407,6 +10509,7 @@ mod tests {
                     modal: false,
                     parent: Parentage::None,
                     leaving: false,
+                    minimized: false,
                     app_id: String::new(),
                     min: None,
                     max: None,
@@ -14122,6 +14225,7 @@ mod dialogs {
             modal: false,
             parent: Parentage::None,
             leaving: false,
+            minimized: false,
             app_id: String::new(),
             min: None,
             max: None,
@@ -17691,6 +17795,7 @@ mod directions {
             modal: false,
             parent: Parentage::None,
             leaving: false,
+            minimized: false,
             app_id: String::new(),
             min: None,
             max: None,
@@ -19226,6 +19331,84 @@ mod directions {
         );
         assert!(scripts.key("super+a", desk(false)).commands.is_empty());
         assert!(scripts.key("super+b", desk(false)).commands.is_empty());
+    }
+
+    /// **`sol.minimize` names the focused window when given none**, the
+    /// window given when there is one, and nothing when there is neither;
+    /// `sol.unminimize` and `sol.show_minimized` name the window given. And
+    /// all three, with `sol.act`'s two verbs, reach past the lock, so a
+    /// binding allowed there cannot ask for any of them (#30, #224).
+    #[test]
+    fn sol_minimize_names_the_focused_window_when_given_none_and_reaches_past_the_lock() {
+        let mut scripts = plain(
+            "minimize",
+            r#"
+            sol.bind("super+a", function() sol.minimize() end)
+            sol.bind("super+b", function() sol.unminimize(9) end)
+            sol.bind("super+c", function() sol.show_minimized(9) end)
+            sol.bind("super+d", function() sol.show_minimized(9, false) end)
+            "#,
+        );
+        let desk = |focused: bool| Snapshot {
+            windows: vec![
+                window(4, "DP-1", WIDE),
+                WindowInfo {
+                    focused,
+                    ..window(3, "DP-1", WIDE)
+                },
+            ],
+            ..Snapshot::default()
+        };
+        let asked = |commands: Vec<Command>| -> Vec<String> {
+            commands
+                .iter()
+                .map(|command| format!("{command:?}"))
+                .collect()
+        };
+        assert_eq!(
+            asked(scripts.key("super+a", desk(true)).commands),
+            [format!("{:?}", Command::Minimize { id: 3 })]
+        );
+        assert!(scripts.key("super+a", desk(false)).commands.is_empty());
+        assert_eq!(
+            asked(scripts.key("super+b", desk(true)).commands),
+            [format!("{:?}", Command::Unminimize { id: 9 })]
+        );
+        assert_eq!(
+            asked(scripts.key("super+c", desk(true)).commands),
+            [format!(
+                "{:?}",
+                Command::ShowMinimized { id: 9, shown: true }
+            )]
+        );
+        assert_eq!(
+            asked(scripts.key("super+d", desk(true)).commands),
+            [format!(
+                "{:?}",
+                Command::ShowMinimized {
+                    id: 9,
+                    shown: false
+                }
+            )]
+        );
+        let act = |action: &str| Command::Act {
+            attempt: 1,
+            action: action.to_owned(),
+            data: crate::json::Json::Null,
+            source: FocusSource::Script,
+        };
+        for command in [
+            Command::Minimize { id: 3 },
+            Command::Unminimize { id: 3 },
+            Command::ShowMinimized { id: 3, shown: true },
+            act("windows.minimize"),
+            act("windows.unminimize"),
+        ] {
+            assert!(
+                command.reaches_past_the_lock(),
+                "{command:?} is allowed to a binding at the lock"
+            );
+        }
     }
 
     /// **Desktop mode: the arrows snap the focused window to each half, and a

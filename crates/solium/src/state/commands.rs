@@ -255,6 +255,13 @@ impl Solium {
             if pane.ghost() {
                 continue;
             }
+            // Nor a minimized window put away: it is drawn nowhere, so there
+            // is nothing to keep looking where it was, and a rebase is a
+            // transform playing, which would draw it again (#30,
+            // `Solium::minimized_away`).
+            if self.minimized_away(pane, now) {
+                continue;
+            }
             let outer = self.pane_outer(pane);
             present::rebase(pane, outer, *by, now, animation.duration, animation.easing);
         }
@@ -497,6 +504,24 @@ impl Solium {
                 Command::ToggleMaximize { id } => {
                     if let Some(window) = self.window_by_id(id) {
                         self.toggle_maximize(&window);
+                    }
+                }
+                // Twice is once: a window already minimized, or one that is
+                // not, is left as it is and nothing is told (#30).
+                // `real_client::reflow_on_close::minimize::minimizing_or_unminimizing_twice_does_nothing_the_second_time`.
+                Command::Minimize { id } => {
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
+                        self.minimize(pane);
+                    }
+                }
+                Command::Unminimize { id } => {
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
+                        self.unminimize(pane);
+                    }
+                }
+                Command::ShowMinimized { id, shown } => {
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
+                        self.show_minimized(pane, shown);
                     }
                 }
                 Command::Place {

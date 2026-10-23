@@ -17540,6 +17540,55 @@ end)"#,
             session.assert_unlocks(lock);
         }
 
+        /// **`sol.act("windows.minimize")` behind the lock is answered
+        /// `locked`**, and so is `"windows.unminimize"`, as a focus is: the
+        /// window is left as it was (#30). Tested with the Cyrillic group
+        /// active (#132).
+        #[test]
+        fn sol_act_minimize_behind_the_lock_is_answered_locked() {
+            let mut session = Session::new();
+            russian(&mut session.state);
+            let _ = session.app.open(&mut session.display, &mut session.state);
+            let id = session
+                .state
+                .snapshot()
+                .windows
+                .first()
+                .map(|window| window.id)
+                .expect("a window");
+            let lock = session.lock();
+            let directory =
+                std::env::temp_dir().join(format!("solium-locked-minimize-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&directory);
+            let entry = directory.join("init.lua");
+            std::fs::write(
+                &entry,
+                format!(
+                    r#"answers = ""
+local function told(ok, reason) answers = answers .. tostring(ok) .. " " .. tostring(reason) .. ";"; sol.status(answers) end
+sol.act("windows.minimize", {{ id = {id} }}, told)
+sol.act("windows.unminimize", {{ id = {id} }}, told)"#
+                ),
+            )
+            .expect("writing the entry point");
+            session.state.start_scripts(Some(
+                Scripts::load(&entry).expect("loading the test script"),
+            ));
+            let _ = std::fs::remove_dir_all(&directory);
+            session.app.pump(&mut session.display, &mut session.state);
+            assert_eq!(session.state.status, "false locked;false locked;");
+            assert!(
+                session
+                    .state
+                    .snapshot()
+                    .windows
+                    .iter()
+                    .all(|window| !window.minimized),
+                "a window was minimized behind the lock"
+            );
+            session.assert_unlocks(lock);
+        }
+
         /// **The last line: a key cannot reach a surface the gate would
         /// have refused, even when something has got the keyboard there.**
         ///
@@ -36881,6 +36930,463 @@ end)"#,
                     (Some(Json::Bool(true)), Some(Json::Bool(true))),
                     "(maximized once the compositor maximised it, once the client committed it)"
                 );
+            }
+        }
+
+        /// **#30: a window minimized, and shown again**, against a real
+        /// client: the state, what is drawn, what a press and the keyboard
+        /// reach, the client's own request, focusing, the shipped layouts,
+        /// `super+m`, the overview and `config.minimize`.
+        mod minimize {
+            use super::*;
+            use crate::render::Stacked;
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+            /// Writes down every `minimize`, `unminimize` and `focus`, in
+            /// order, as `"name id"` -- with a `_` when the window's own row
+            /// in that event's snapshot says `minimized`.
+            const HEARD: &str = r#"
+events = {}
+local function row(id)
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then return window end
+    end
+end
+for _, name in ipairs({ "minimize", "unminimize", "focus" }) do
+    sol.on(name, function(id)
+        local window = row(id)
+        local mark = (window == nil and "?") or (window.minimized and "_") or ""
+        events[#events + 1] = name .. " " .. id .. mark
+    end)
+end
+"#;
+
+            /// How long [`slow`]'s present on a minimized window plays.
+            const SLOW_MS: u64 = 5000;
+
+            /// A present on every window minimized, a fade to half over
+            /// [`SLOW_MS`]: a test can look at it part way through.
+            fn slow() -> String {
+                format!(
+                    "sol.on(\"minimize\", function(id) \
+                     sol.animate({{ duration = {SLOW_MS} }}) \
+                     sol.present(id, {{ opacity = 0.5 }}) end)"
+                )
+            }
+
+            /// [`HEARD`], `super+x` minimizing `pane` and `super+y` showing it
+            /// again, and `extra`.
+            fn keys(desk: &mut Desk, pane: crate::pane::PaneId, extra: &str) {
+                desk.install(&format!(
+                    "{HEARD}\n\
+                     sol.bind(\"super+x\", function() sol.minimize({id}) end)\n\
+                     sol.bind(\"super+y\", function() sol.unminimize({id}) end)\n\
+                     {extra}",
+                    id = pane.get()
+                ));
+            }
+
+            /// The panes the desk's monitor draws, topmost first, through
+            /// the walk the renderer draws with.
+            fn drawn(desk: &Desk) -> Vec<crate::pane::PaneId> {
+                let screen = Rectangle::new((0, 0).into(), (1920, 1080).into());
+                crate::render::stacked(&desk.state, screen, desk.state.clock.now())
+                    .into_iter()
+                    .flat_map(|stacked| match stacked {
+                        Stacked::Panes(nodes) => {
+                            nodes.into_iter().map(|((pane, ..), _)| pane).collect()
+                        }
+                        _ => Vec::new(),
+                    })
+                    .collect()
+            }
+
+            /// What `pane`'s row in `sol.windows()` says of `minimized`.
+            fn minimized(desk: &Desk, pane: crate::pane::PaneId) -> Option<bool> {
+                desk.state
+                    .snapshot()
+                    .windows
+                    .iter()
+                    .find(|row| row.id == pane.get())
+                    .map(|row| row.minimized)
+            }
+
+            /// `ms` later, with what landed retired.
+            fn after(desk: &mut Desk, ms: u64) {
+                desk.state.clock.advance(Duration::from_millis(ms));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.pump();
+            }
+
+            /// The pane the keyboard is on, if any.
+            fn focused(desk: &Desk) -> Option<crate::pane::PaneId> {
+                desk.state
+                    .focused_window()
+                    .and_then(|window| desk.state.panes.id_of(&window))
+            }
+
+            /// `pane`'s client.
+            fn window_of(desk: &Desk, pane: crate::pane::PaneId) -> Window {
+                desk.state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("the pane has a client")
+            }
+
+            /// Give `pane` the keyboard, as a script would.
+            fn focus(desk: &mut Desk, pane: crate::pane::PaneId) {
+                let window = window_of(desk, pane);
+                desk.state.focus_window(
+                    &window,
+                    SERIAL_COUNTER.next_serial(),
+                    crate::script::FocusSource::Script,
+                );
+                desk.pump();
+            }
+
+            /// Two windows of 400 by 300 mapped at `at`, the second over
+            /// the first, every animation landed.
+            fn two_at(desk: &mut Desk, at: [(i32, i32); 2]) -> (Opened, Opened) {
+                let first = desk.open_surface();
+                let second = desk.open_surface();
+                for (opened, at) in [(&first, at[0]), (&second, at[1])] {
+                    commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                    desk.pump();
+                    let window = window_of(desk, opened.pane);
+                    desk.state.map_stacked(window, at, false);
+                }
+                land(desk);
+                (first, second)
+            }
+
+            /// **`sol.minimize` minimizes a window**: its row says so in the
+            /// one `minimize` it fires, and so does the `Windows` model; the
+            /// client is told it is suspended, and it stays mapped and alive.
+            #[test]
+            fn sol_minimize_marks_the_row_fires_once_and_leaves_the_client_mapped() {
+                let mut desk = Desk::new();
+                let (window, _toplevel, pane) = desk.open();
+                keys(&mut desk, pane, "");
+
+                assert!(desk.state.trigger("super+x"), "super+x is bound");
+                desk.pump();
+
+                assert_eq!(desk.events(), format!("minimize {}_", pane.get()));
+                assert_eq!(minimized(&desk, pane), Some(true));
+                let row = crate::models::windows::rows(&desk.state)
+                    .into_iter()
+                    .find(|row| row.key == pane.get().to_string())
+                    .and_then(|row| row.values.get("minimized").cloned());
+                assert_eq!(
+                    row,
+                    Some(crate::json::Json::Bool(true)),
+                    "the Windows model does not say the window is minimized"
+                );
+                assert!(
+                    in_state(&window, State::Suspended),
+                    "the client was not told it is suspended"
+                );
+                assert!(
+                    desk.state.space.elements().any(|each| *each == window)
+                        && desk.state.panes.get(pane).and_then(Pane::client) == Some(&window),
+                    "a minimized window was unmapped, or lost its client"
+                );
+            }
+
+            /// **A minimized window is drawn while the present on it plays
+            /// out, and not once it has landed**, when `sol.windows()` says
+            /// it is drawn at no opacity.
+            #[test]
+            fn a_minimized_window_is_drawn_until_its_present_lands() {
+                let mut desk = Desk::new();
+                let (_, _, pane) = desk.open();
+                land(&mut desk);
+                keys(&mut desk, pane, &slow());
+
+                assert!(desk.state.trigger("super+x"));
+                after(&mut desk, SLOW_MS / 2);
+                assert!(
+                    drawn(&desk).contains(&pane),
+                    "a minimized window was not drawn while its present played out"
+                );
+
+                after(&mut desk, SLOW_MS);
+                assert!(
+                    !drawn(&desk).contains(&pane),
+                    "a minimized window is drawn after its present landed"
+                );
+                let outer = desk.state.pane_outer_of(pane).expect("it keeps its slot");
+                assert!(
+                    !desk.state.drawn(pane, outer).shows(),
+                    "`sol.windows()` says a minimized window shows"
+                );
+            }
+
+            /// **A press on a minimized window reaches what is under it**,
+            /// pointer, touch and `sol.window_at` alike -- even while the
+            /// present taking it away is still drawing it there.
+            #[test]
+            fn a_press_on_a_minimized_window_reaches_what_is_under_it() {
+                let mut desk = Desk::new();
+                let (lower, upper) = two_at(&mut desk, [(100, 100), (200, 200)]);
+                let point: Point<f64, Logical> = (300.0, 300.0).into();
+                let lower_window = window_of(&desk, lower.pane);
+                let lower_surface = lower_window
+                    .wl_surface()
+                    .map(std::borrow::Cow::into_owned)
+                    .expect("its surface");
+                assert_eq!(
+                    desk.state.window_under(point).map(|(window, _)| window),
+                    Some(window_of(&desk, upper.pane)),
+                    "the premise: the upper window is under the point"
+                );
+                keys(
+                    &mut desk,
+                    upper.pane,
+                    &format!(
+                        "{}\nsol.bind(\"super+w\", function() \
+                         sol.status(tostring(sol.window_at(300, 300))) end)",
+                        slow()
+                    ),
+                );
+
+                assert!(desk.state.trigger("super+x"));
+                after(&mut desk, SLOW_MS / 2);
+                assert!(
+                    drawn(&desk).contains(&upper.pane),
+                    "the premise: the present is still drawing the window"
+                );
+                assert_eq!(
+                    desk.state.window_under(point).map(|(window, _)| window),
+                    Some(lower_window),
+                    "the pointer stopped at a minimized window"
+                );
+                assert_eq!(
+                    desk.state.surface_under(point).map(|(surface, _)| surface),
+                    Some(lower_surface.clone()),
+                    "a press went to a minimized window"
+                );
+                assert_eq!(
+                    desk.state.touch_under(point).map(|(surface, _)| surface),
+                    Some(lower_surface),
+                    "a touch went to a minimized window"
+                );
+                assert!(desk.state.trigger("super+w"));
+                assert_eq!(
+                    desk.state.status,
+                    lower.pane.get().to_string(),
+                    "`sol.window_at` named a minimized window"
+                );
+            }
+
+            /// **The keyboard leaves a minimized window for the window still
+            /// on screen, and never goes back to it**: not as the window the
+            /// pointer is over, not as the topmost, not while its present
+            /// plays and not after.
+            #[test]
+            fn the_keyboard_leaves_a_minimized_window_for_the_next_and_never_comes_back_to_it() {
+                let mut desk = Desk::new();
+                let (first, second) = two_at(&mut desk, [(100, 100), (700, 100)]);
+                desk.install(&format!(
+                    "{HEARD}\n{}\nsol.bind(\"super+x\", function() sol.minimize() end)",
+                    slow()
+                ));
+                focus(&mut desk, first.pane);
+                point_at(&mut desk.state, (300.0, 250.0).into());
+                assert_eq!(focused(&desk), Some(first.pane), "the premise");
+
+                assert!(desk.state.trigger("super+x"));
+                assert_eq!(
+                    focused(&desk),
+                    Some(second.pane),
+                    "the keyboard did not go on to the window still on screen"
+                );
+
+                assert!(desk.state.trigger("super+x"));
+                assert_eq!(
+                    focused(&desk),
+                    None,
+                    "the keyboard went back to a minimized window"
+                );
+                desk.state.settle_focus();
+                assert_eq!(focused(&desk), None, "a settle handed it one, mid-present");
+                after(&mut desk, SLOW_MS * 2);
+                desk.state.settle_focus();
+                assert_eq!(focused(&desk), None, "a settle handed it one, landed");
+            }
+
+            /// **A client asking to be minimized is minimized**:
+            /// `xdg_toplevel.set_minimized`, as sol.minimize does it.
+            #[test]
+            fn a_client_asking_to_be_minimized_is_minimized() {
+                let mut desk = Desk::new();
+                let (window, toplevel, pane) = desk.open();
+                desk.install(HEARD);
+
+                toplevel.set_minimized();
+                desk.pump();
+
+                assert_eq!(minimized(&desk, pane), Some(true));
+                assert_eq!(desk.events(), format!("minimize {}_", pane.get()));
+                assert!(in_state(&window, State::Suspended));
+            }
+
+            /// **Focusing a minimized window shows it first**: `sol.focus`
+            /// and a window asking to be brought forward each fire
+            /// `unminimize` before `focus`, and the window has the keyboard.
+            #[test]
+            fn focusing_a_minimized_window_shows_it_first() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let pane = opened.pane;
+                let window = window_of(&desk, pane);
+                keys(
+                    &mut desk,
+                    pane,
+                    &format!(
+                        "sol.bind(\"super+f\", function() sol.focus({}) end)",
+                        pane.get()
+                    ),
+                );
+                let id = pane.get();
+
+                assert!(desk.state.trigger("super+x"));
+                assert_eq!(focused(&desk), None, "the premise: it gave the keyboard up");
+                assert!(desk.state.trigger("super+f"));
+                assert_eq!(
+                    desk.events(),
+                    format!("minimize {id}_,unminimize {id},focus {id}")
+                );
+                assert_eq!(minimized(&desk, pane), Some(false));
+                assert!(
+                    !in_state(&window, State::Suspended),
+                    "the client was not told it is back"
+                );
+                assert_eq!(focused(&desk), Some(pane));
+
+                assert!(desk.state.trigger("super+x"));
+                let (token, _) = desk.state.activation_state.create_external_token(
+                    smithay::wayland::xdg_activation::XdgActivationTokenData::default(),
+                );
+                desk.client
+                    .activation
+                    .clone()
+                    .expect("xdg_activation_v1 bound")
+                    .activate(token.as_str().to_owned(), &opened.surface);
+                desk.pump();
+                assert_eq!(
+                    desk.events(),
+                    format!(
+                        "minimize {id}_,unminimize {id},focus {id},\
+                         minimize {id}_,unminimize {id},focus {id}"
+                    ),
+                    "an activation did not show the window before focusing it"
+                );
+                assert_eq!(focused(&desk), Some(pane));
+            }
+
+            /// **`sol.unminimize` shows the window again**: the row, the
+            /// client and the screen.
+            #[test]
+            fn sol_unminimize_shows_the_window_again() {
+                let mut desk = Desk::new();
+                let (window, _, pane) = desk.open();
+                land(&mut desk);
+                keys(&mut desk, pane, &slow());
+                assert!(desk.state.trigger("super+x"));
+                after(&mut desk, SLOW_MS * 2);
+                assert!(!drawn(&desk).contains(&pane), "the premise: put away");
+
+                assert!(desk.state.trigger("super+y"));
+                let id = pane.get();
+                assert_eq!(desk.events(), format!("minimize {id}_,unminimize {id}"));
+                assert_eq!(minimized(&desk, pane), Some(false));
+                assert!(!in_state(&window, State::Suspended));
+                assert!(drawn(&desk).contains(&pane), "it is not drawn again");
+            }
+
+            /// **Minimizing a window twice, or showing one that is not
+            /// minimized, does nothing**, and tells nothing.
+            #[test]
+            fn minimizing_or_unminimizing_twice_does_nothing_the_second_time() {
+                let mut desk = Desk::new();
+                let (_, _, pane) = desk.open();
+                keys(&mut desk, pane, "");
+
+                assert!(desk.state.trigger("super+y"));
+                assert!(desk.state.trigger("super+x"));
+                assert!(desk.state.trigger("super+x"));
+                assert_eq!(minimized(&desk, pane), Some(true));
+                assert!(desk.state.trigger("super+y"));
+                assert!(desk.state.trigger("super+y"));
+                assert_eq!(minimized(&desk, pane), Some(false));
+                let id = pane.get();
+                assert_eq!(desk.events(), format!("minimize {id}_,unminimize {id}"));
+            }
+
+            /// **A placement leaves a minimized window where it is**: its
+            /// slot, its tile and its picture, so a stray `sol.place` starts
+            /// no glide over the present taking it away.
+            #[test]
+            fn a_placement_leaves_a_minimized_window_where_it_is() {
+                let mut desk = Desk::new();
+                let (_, _, pane) = desk.open();
+                land(&mut desk);
+                keys(
+                    &mut desk,
+                    pane,
+                    &format!(
+                        "sol.bind(\"super+p\", function() \
+                         sol.place({}, {{ x = 0, y = 0, w = 50, h = 50 }}) end)",
+                        pane.get()
+                    ),
+                );
+                let slot = desk.state.pane_outer_of(pane);
+                let tile = desk.state.panes.get(pane).and_then(Pane::placed);
+
+                assert!(desk.state.trigger("super+x"));
+                assert!(desk.state.trigger("super+p"));
+
+                assert_eq!(desk.state.pane_outer_of(pane), slot, "it was moved");
+                assert_eq!(
+                    desk.state.panes.get(pane).and_then(Pane::placed),
+                    tile,
+                    "its tile was moved"
+                );
+                assert!(
+                    !desk.state.panes.get(pane).is_some_and(present::transformed),
+                    "a glide was started on it"
+                );
+            }
+
+            /// **`sol.act("windows.minimize")` and `"windows.unminimize"`
+            /// do what `sol.minimize` and `sol.unminimize` do**, and `done`
+            /// hears that they were done.
+            #[test]
+            fn sol_act_minimizes_and_unminimizes_a_window() {
+                let mut desk = Desk::new();
+                let (_, _, pane) = desk.open();
+                let id = pane.get();
+                keys(
+                    &mut desk,
+                    pane,
+                    &format!(
+                        r#"answers = ""
+local function told(ok, reason) answers = answers .. tostring(ok) .. ";"; sol.status(answers) end
+sol.bind("super+a", function() sol.act("windows.minimize", {{ id = {id} }}, told) end)
+sol.bind("super+b", function() sol.act("windows.unminimize", {{ id = {id} }}, told) end)"#
+                    ),
+                );
+
+                assert!(desk.state.trigger("super+a"));
+                assert_eq!(minimized(&desk, pane), Some(true));
+                assert!(desk.state.trigger("super+b"));
+                assert_eq!(minimized(&desk, pane), Some(false));
+                assert_eq!(desk.state.status, "true;true;");
+                assert_eq!(desk.events(), format!("minimize {id}_,unminimize {id}"));
             }
         }
     }
