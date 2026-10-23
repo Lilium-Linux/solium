@@ -1498,6 +1498,85 @@ pub(crate) mod tests {
         });
     }
 
+    /// **A disabled `MouseArea` claims nothing of its own** (#322, Ruling 6):
+    /// its `enabled` is its own, not `Item.enabled`, so Qt keeps the item
+    /// enabled and taking the left button while the `MouseArea` lets every
+    /// press and hover go by. Where it is off, a press is what is under the
+    /// scene's, though it covers the point and would hover there; what is in
+    /// it, which it does not disable, still claims its own, and so does a
+    /// pointer handler on it, which Qt still hands the press; and turned on
+    /// again it takes the press.
+    #[test]
+    fn a_disabled_mouse_area_claims_nothing_of_its_own() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-disabled-mouse-area",
+                r"
+                import QtQuick
+                Item {
+                    id: root
+                    property bool catching: false
+                    property int tapped: 0
+                    MouseArea {
+                        x: 0; y: 0; width: 20; height: 32
+                        enabled: root.catching
+                        hoverEnabled: true
+                    }
+                    MouseArea {
+                        x: 20; y: 0; width: 20; height: 32
+                        enabled: false
+                        MouseArea { x: 0; y: 0; width: 10; height: 32 }
+                    }
+                    MouseArea {
+                        x: 40; y: 0; width: 20; height: 32
+                        enabled: false
+                        TapHandler { onTapped: root.tapped += 1 }
+                    }
+                }
+                ",
+                "disabled-mouse-area-1",
+            );
+            let cases = [
+                ((10.0, 10.0), Hit::Nothing, "a disabled MouseArea"),
+                (
+                    (25.0, 10.0),
+                    Hit::Press,
+                    "an enabled MouseArea in a disabled one",
+                ),
+                ((35.0, 10.0), Hit::Nothing, "a disabled MouseArea beside it"),
+                (
+                    (50.0, 10.0),
+                    Hit::Press,
+                    "a TapHandler on a disabled MouseArea",
+                ),
+            ];
+            let mut wrong: Vec<String> = cases
+                .iter()
+                .filter(|((x, y), wanted, _)| scene.hit(*x, *y) != *wanted)
+                .map(|((x, y), wanted, what)| {
+                    format!(
+                        "{what} at ({x}, {y}): wanted {wanted:?}, got {:?}",
+                        scene.hit(*x, *y)
+                    )
+                })
+                .collect();
+            click(&mut scene, (50.0, 10.0), 1000);
+            if scene.get_int("tapped") != 1 {
+                wrong.push("the TapHandler on a disabled MouseArea was not tapped".to_owned());
+            }
+            scene.set_bool("catching", true);
+            if scene.hit(10.0, 10.0) != Hit::Press {
+                wrong.push(format!(
+                    "the MouseArea enabled again at (10, 10): wanted Press, got {:?}",
+                    scene.hit(10.0, 10.0)
+                ));
+            }
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(wrong.is_empty(), "{wrong:#?}");
+        });
+    }
+
     /// **An open Qt Quick Controls popup claims its press**, though Qt draws
     /// it in the window's overlay, beside the scene's root rather than under
     /// it; and the overlay around it, which takes every button for itself,
