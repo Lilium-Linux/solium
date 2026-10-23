@@ -89,6 +89,34 @@ Give it something that is neither a name nor four numbers and it warns and keeps
 the default rather than failing. Give it an unknown name and the same. A wrong
 easing should cost you a line in the log, not the session.
 
+## One curve per property
+
+A `sol.present` moves everything on the batch's one curve unless it says
+otherwise. `motion` gives the drawn rectangle's centre (`x`, `y`), its size
+and its opacity a timing of their own, each `{ duration, easing }` as
+`sol.animate` takes it, a spring included; what it leaves out is the
+batch's:
+
+```lua
+sol.present(id, { x = icon.x, y = icon.y, w = icon.w, h = icon.h, opacity = 0,
+    motion = {
+        -- The centre gets there ahead of the size, so the window closes on
+        -- the icon rather than shrinking in a straight line onto it.
+        x = { easing = { spring = { stiffness = 520, damping = 46 } } },
+        y = { easing = { spring = { stiffness = 520, damping = 46 } } },
+        size = { easing = { spring = { stiffness = 320, damping = 36 } } },
+        -- Opaque for most of the way, then gone into the icon.
+        opacity = { duration = 420, easing = { 0.55, 0, 0.9, 0.45 } },
+    } })
+```
+
+`x` and `y` apart are also what carries a flick: give each a spring whose
+initial velocity is the finger's on that axis, and the window curves the way
+the throw went before it settles on its target. The present is done when the
+last of them is. `sol.present_from` takes the same `motion`, which is how a
+launch's window grows out of its icon with its centre ahead of its size; its
+`deform` is the shape it starts in, relaxed to the plain window as it lands.
+
 ## Where the feel actually lives
 
 Almost none of it should be in your mode. `config.lua` declares it, and your

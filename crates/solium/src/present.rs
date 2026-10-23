@@ -580,6 +580,101 @@ impl Blend for Frame {
     }
 }
 
+impl Frame {
+    /// This, part-way toward `other` with each property on its own progress
+    /// (#293): `x` and `y` move the rect's centre, `size` its width and height
+    /// and, with them, `zoom`, which keeps the rectangle being pictured exact
+    /// as [`Blend::blend`] says; `opacity` its opacity. The rest -- the matrix,
+    /// the deform, and the depth and pivot that select rather than measure --
+    /// go as `blend` takes them at `progress.rest`.
+    ///
+    /// The centre rather than the corner, so a window can close on a point
+    /// ahead of its shrinking, as the iPad's does: with every property at one
+    /// progress the two are the same rectangle, which
+    /// `tests::a_frame_with_every_property_at_one_progress_is_the_plain_blend`
+    /// asks.
+    fn blend_channels(self, other: Self, progress: Progress) -> Self {
+        let size = (
+            lerp(self.rect.size.w, other.rect.size.w, progress.size),
+            lerp(self.rect.size.h, other.rect.size.h, progress.size),
+        );
+        let centre = |rect: Rectangle<f64, Logical>| {
+            (
+                rect.loc.x + rect.size.w / 2.0,
+                rect.loc.y + rect.size.h / 2.0,
+            )
+        };
+        let (from, to) = (centre(self.rect), centre(other.rect));
+        let centre = (
+            lerp(from.0, to.0, progress.x),
+            lerp(from.1, to.1, progress.y),
+        );
+        let rest = self.blend(other, progress.rest);
+        Self {
+            rect: logical((centre.0 - size.0 / 2.0, centre.1 - size.1 / 2.0), size),
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "opacity is a small float either way"
+            )]
+            opacity: lerp(
+                f64::from(self.opacity),
+                f64::from(other.opacity),
+                progress.opacity,
+            ) as f32,
+            matrix: rest.matrix,
+            deform: rest.deform,
+            z: rest.z,
+            pivot: rest.pivot,
+            zoom: (
+                lerp(self.zoom.0, other.zoom.0, progress.size),
+                lerp(self.zoom.1, other.zoom.1, progress.size),
+            ),
+        }
+    }
+}
+
+/// One present's timing per property (#293), for `sol.present`'s `motion`:
+/// `x` and `y` move the drawn rect's centre, `size` its width and height, and
+/// `opacity` its opacity. What none of them names moves on the present's own
+/// timing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Channels<A> {
+    pub(crate) x: A,
+    pub(crate) y: A,
+    pub(crate) size: A,
+    pub(crate) opacity: A,
+}
+
+impl<A> Channels<A> {
+    pub(crate) fn map<B>(self, mut f: impl FnMut(A) -> B) -> Channels<B> {
+        Channels {
+            x: f(self.x),
+            y: f(self.y),
+            size: f(self.size),
+            opacity: f(self.opacity),
+        }
+    }
+}
+
+/// A present's timings per property, started now.
+fn timed(
+    channels: Option<Channels<(Duration, Curve)>>,
+    now: Duration,
+) -> Option<Channels<Animation>> {
+    channels
+        .map(|channels| channels.map(|(duration, easing)| Animation::new(now, duration, easing)))
+}
+
+/// How far each property of a frame has gone, for [`Frame::blend_channels`].
+#[derive(Clone, Copy, Debug)]
+struct Progress {
+    x: f64,
+    y: f64,
+    size: f64,
+    opacity: f64,
+    rest: f64,
+}
+
 /// Something that can be part-way between two of itself.
 ///
 /// Two things are animated by this file's one clock and they are not the same
@@ -618,6 +713,9 @@ pub(crate) struct Transform<T> {
     from: T,
     to: T,
     animation: Animation,
+    /// A [`Frame`]'s own timing per property, when a present gave one (#293).
+    /// `None` moves every property on `animation`.
+    channels: Option<Channels<Animation>>,
     /// Drop the transform when it lands, so the thing goes back to being drawn
     /// where it lives with no per-frame cost. Set when leaving a mode.
     release: bool,
@@ -636,6 +734,7 @@ impl<T: Blend> Transform<T> {
             from,
             to,
             animation: Animation::new(now, duration, easing),
+            channels: None,
             release,
         }
     }
@@ -657,6 +756,31 @@ impl<T: Blend> Transform<T> {
 
     pub(crate) fn finished(&self, now: Duration) -> bool {
         self.animation.done(now)
+            && self.channels.is_none_or(|channels| {
+                [channels.x, channels.y, channels.size, channels.opacity]
+                    .iter()
+                    .all(|animation| animation.done(now))
+            })
+    }
+}
+
+impl Transform<Frame> {
+    /// The frame to draw this instant, each property on its own timing when
+    /// the present gave one.
+    pub(crate) fn frame_at(&self, now: Duration) -> Frame {
+        match self.channels {
+            None => self.at(now),
+            Some(channels) => self.from.blend_channels(
+                self.to,
+                Progress {
+                    x: channels.x.progress(now),
+                    y: channels.y.progress(now),
+                    size: channels.size.progress(now),
+                    opacity: channels.opacity.progress(now),
+                    rest: self.animation.progress(now),
+                },
+            ),
+        }
     }
 }
 
@@ -733,6 +857,9 @@ pub(crate) fn jam_slot(pane: &Pane) {
 ///
 /// Animating from the *current* frame rather than from real geometry is what
 /// makes re-entering a mode mid-animation continuous instead of a snap.
+///
+/// `channels` times the centre, the size and the opacity apart from the rest
+/// (#293); `None` moves everything on `duration` and `easing`.
 pub(crate) fn present(
     pane: &Pane,
     real: Rectangle<i32, Logical>,
@@ -740,10 +867,13 @@ pub(crate) fn present(
     now: Duration,
     duration: Duration,
     easing: Curve,
+    channels: Option<Channels<(Duration, Curve)>>,
 ) {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
-        *slot = Some(Transform::new(from, to, now, duration, easing, false));
+        let mut transform = Transform::new(from, to, now, duration, easing, false);
+        transform.channels = timed(channels, now);
+        *slot = Some(transform);
     });
 }
 
@@ -814,7 +944,13 @@ pub(crate) fn rebase(
     with_slot(pane, |slot| {
         let (drawn, to, release) = slot.map_or_else(
             || (Frame::real(real), Frame::real(real), true),
-            |transform| (transform.at(now), transform.target(), transform.releases()),
+            |transform| {
+                (
+                    transform.frame_at(now),
+                    transform.target(),
+                    transform.releases(),
+                )
+            },
         );
         *slot = Some(Transform::new(
             drawn.shifted(by.0, by.1),
@@ -830,7 +966,7 @@ pub(crate) fn rebase(
 /// The frame to draw this window in. Real geometry when nothing is animating.
 pub(crate) fn frame(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -> Frame {
     with_slot(pane, |slot| {
-        slot.map_or_else(|| Frame::real(real), |transform| transform.at(now))
+        slot.map_or_else(|| Frame::real(real), |transform| transform.frame_at(now))
     })
     .unwrap_or_else(|| Frame::real(real))
 }
@@ -983,6 +1119,9 @@ pub(crate) fn was_shown(pane: &Pane) -> bool {
 /// own rectangle shrunk a little it is an ordinary open; with a rectangle off
 /// the edge of the screen it is something nobody has asked for yet. The
 /// compositor does not decide which — see `docs/shell-boundary.md`.
+///
+/// `channels` times the centre, the size and the opacity apart, as
+/// [`present`]'s does (#293): an icon's launch whose centre leads its size.
 pub(crate) fn from(
     pane: &Pane,
     real: Rectangle<i32, Logical>,
@@ -990,17 +1129,13 @@ pub(crate) fn from(
     now: Duration,
     duration: Duration,
     easing: Curve,
+    channels: Option<Channels<(Duration, Curve)>>,
 ) {
     with_slot(pane, |slot| {
         // Released on arrival: an opened window is an ordinary window.
-        *slot = Some(Transform::new(
-            start,
-            Frame::real(real),
-            now,
-            duration,
-            easing,
-            true,
-        ));
+        let mut transform = Transform::new(start, Frame::real(real), now, duration, easing, true);
+        transform.channels = timed(channels, now);
+        *slot = Some(transform);
     });
 }
 
@@ -1306,6 +1441,7 @@ mod tests {
             start,
             Duration::from_millis(240),
             Curve::OutCubic,
+            None,
         );
 
         for at in [0, 30, 120, 240] {
@@ -1380,6 +1516,7 @@ mod tests {
             start,
             Duration::from_millis(200),
             Curve::OutCubic,
+            None,
         );
         for at in [0, 50, 200] {
             let (w, h) = pictured(frame(&pane, real, start + Duration::from_millis(at)));
@@ -1473,6 +1610,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_millis(200),
             Curve::Linear,
+            None,
         );
 
         rebase(
@@ -1576,6 +1714,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_millis(100),
             Curve::OutCubic,
+            None,
         );
         assert!(!settle(&pane, real, Duration::from_millis(200)), "landed");
         let moved = rect(600, 100, 400, 300);
@@ -1606,11 +1745,109 @@ mod tests {
             Duration::ZERO,
             Duration::from_millis(100),
             Curve::OutCubic,
+            None,
         );
         assert!(!settle(&pane, real, Duration::from_millis(200)));
         assert_eq!(
             frame(&pane, rect(600, 100, 400, 300), Duration::from_millis(300)),
             dimmed
         );
+    }
+
+    /// **Every property at one progress is the plain blend** (#293): the
+    /// centre blended rather than the corner draws the same rectangle when
+    /// the centre and the size go together, so a present with every motion
+    /// alike draws what one with none did.
+    #[test]
+    fn a_frame_with_every_property_at_one_progress_is_the_plain_blend() {
+        let from = Frame::real(rect(0, 0, 1600, 900));
+        let to = Frame::real(rect(700, 300, 60, 60)).with_opacity(0.0);
+        for progress in [0.0, 0.25, 0.5, 0.8, 1.0] {
+            let plain = from.blend(to, progress);
+            let split = from.blend_channels(
+                to,
+                Progress {
+                    x: progress,
+                    y: progress,
+                    size: progress,
+                    opacity: progress,
+                    rest: progress,
+                },
+            );
+            let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+            assert!(
+                close(plain.rect.loc.x, split.rect.loc.x)
+                    && close(plain.rect.loc.y, split.rect.loc.y)
+                    && close(plain.rect.size.w, split.rect.size.w)
+                    && close(plain.rect.size.h, split.rect.size.h)
+                    && plain.opacity == split.opacity
+                    && close(plain.zoom.0, split.zoom.0),
+                "at {progress}: {plain:?} against {split:?}"
+            );
+        }
+    }
+
+    /// **Each property reaches its end on its own timing, and the present is
+    /// done only when the last one is** (#293): the centre lands at 50 ms,
+    /// the size at 100 ms, and the window stays drawn, fading, until its
+    /// opacity lands at 400 ms -- the iPad's close, which is all window until
+    /// late and all icon at the end.
+    #[test]
+    fn each_property_of_a_present_lands_on_its_own_timing() {
+        let real = rect(0, 0, 1600, 900);
+        let pane = crate::pane::Pane::loading(
+            "kitty",
+            None,
+            real,
+            std::path::PathBuf::new(),
+            None,
+            Duration::ZERO,
+        );
+        let icon = Frame::real(rect(700, 300, 60, 60)).with_opacity(0.0);
+        let linear = |ms| (Duration::from_millis(ms), Curve::Linear);
+        present(
+            &pane,
+            real,
+            icon,
+            Duration::ZERO,
+            Duration::from_millis(100),
+            Curve::Linear,
+            Some(Channels {
+                x: linear(50),
+                y: linear(50),
+                size: linear(100),
+                opacity: linear(400),
+            }),
+        );
+        let at = |ms| frame(&pane, real, Duration::from_millis(ms));
+        let centre = |frame: Frame| {
+            (
+                frame.rect.loc.x + frame.rect.size.w / 2.0,
+                frame.rect.loc.y + frame.rect.size.h / 2.0,
+            )
+        };
+        let half = at(50);
+        assert_eq!(centre(half), (730.0, 330.0), "the centre is there at 50 ms");
+        assert_eq!(
+            (half.rect.size.w, half.rect.size.h),
+            (830.0, 480.0),
+            "the size half way"
+        );
+        let landed = at(100);
+        assert_eq!(
+            (landed.rect.size.w, landed.rect.size.h, landed.opacity),
+            (60.0, 60.0, 0.75),
+            "the size is there at 100 ms, and the window still three quarters drawn"
+        );
+        assert!(
+            settle(&pane, real, Duration::from_millis(100)),
+            "still going"
+        );
+        assert!(
+            settle(&pane, real, Duration::from_millis(399)),
+            "still going"
+        );
+        assert!(!settle(&pane, real, Duration::from_millis(400)), "done");
+        assert_eq!(at(400), icon);
     }
 }

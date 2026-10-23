@@ -298,6 +298,7 @@ impl Solium {
                     z,
                     pivot,
                     animation,
+                    channels,
                 } => {
                     let Some(pane_id) = self.panes.by_script_id(id).map(Pane::id) else {
                         continue;
@@ -338,6 +339,7 @@ impl Solium {
                         now,
                         animation.duration,
                         animation.easing,
+                        channels.map(|channels| channels.map(|spec| (spec.duration, spec.easing))),
                     );
                 }
                 Command::PresentFrom {
@@ -345,8 +347,16 @@ impl Solium {
                     rect,
                     opacity,
                     animation,
+                    channels,
+                    deform,
                 } => {
-                    let Some(pane) = self.panes.by_script_id(id) else {
+                    let Some(pane_id) = self.panes.by_script_id(id).map(Pane::id) else {
+                        continue;
+                    };
+                    // The shape it starts in, aimed now; `Deform::blend`
+                    // relaxes it to none as the window lands.
+                    let deform = deform.and_then(|deform| self.aimed(pane_id, &deform));
+                    let Some(pane) = self.panes.get(pane_id) else {
                         continue;
                     };
                     let outer = self.pane_outer(pane);
@@ -358,7 +368,7 @@ impl Solium {
                         // shrinks the window's own rectangle. See `Frame::zoom`.
                         zoom: Frame::zoom_of(rect, outer),
                         opacity: opacity.unwrap_or(1.0),
-                        deform: None,
+                        deform,
                         // Explicit so the next field added breaks this line
                         // instead of being defaulted past it -- and these two
                         // stay the defaults because `sol.present_from` reads
@@ -378,6 +388,7 @@ impl Solium {
                         now,
                         animation.duration,
                         animation.easing,
+                        channels.map(|channels| channels.map(|spec| (spec.duration, spec.easing))),
                     );
                 }
                 Command::Clear { id, animation } => {

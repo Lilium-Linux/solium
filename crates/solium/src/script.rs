@@ -473,6 +473,10 @@ pub(crate) enum Command {
         /// as `z`.
         pivot: (f32, f32),
         animation: AnimationSpec,
+        /// A timing per property (#293), each already resolved against the
+        /// batch's own; `None` when the present named none, which moves every
+        /// property on `animation`.
+        channels: Option<Box<crate::present::Channels<AnimationSpec>>>,
     },
     /// Name a selection, or take the name away with `None`.
     ///
@@ -506,6 +510,11 @@ pub(crate) enum Command {
         rect: Rect,
         opacity: Option<f32>,
         animation: AnimationSpec,
+        /// As [`Command::Present`]'s: a timing per property (#293).
+        channels: Option<Box<crate::present::Channels<AnimationSpec>>>,
+        /// The deformation it starts in, relaxed to none as it lands: a
+        /// launch that grows out of its icon already in the icon's shape.
+        deform: Option<DeformSpec>,
     },
     /// Give a window the keyboard: `sol.focus`. `source` is what the
     /// handler that asked was answering, which the `focus` event tells
@@ -4177,8 +4186,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             // the two answers cannot drift apart.
             let z = depth_from(options.as_ref())?;
             let pivot = pivot_from(options.as_ref())?;
+            let motion = options
+                .as_ref()
+                .map(present_motion_from)
+                .transpose()?
+                .flatten();
             with_pending(lua, |pending| {
                 let animation = pending.animation;
+                let channels = resolved(motion, animation);
                 pending.commands.push(Command::Present {
                     id,
                     rect,
@@ -4188,6 +4203,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     z,
                     pivot,
                     animation,
+                    channels,
                 });
             })
         })?,
@@ -4205,13 +4221,18 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 ));
             };
             let opacity = options.get::<Option<f32>>("opacity")?;
+            let motion = present_motion_from(&options)?;
+            let deform = deform_from(&options)?;
             with_pending(lua, |pending| {
                 let animation = pending.animation;
+                let channels = resolved(motion, animation);
                 pending.commands.push(Command::PresentFrom {
                     id,
                     rect,
                     opacity,
                     animation,
+                    channels,
+                    deform,
                 });
             })
         })?,
@@ -6344,6 +6365,76 @@ fn motion_from(options: Option<&Table>) -> mlua::Result<(Option<Duration>, Optio
     ))
 }
 
+/// A present's `motion` with what it leaves out filled from the batch's own
+/// timing (#293).
+fn resolved(
+    motion: Option<PresentMotion>,
+    animation: AnimationSpec,
+) -> Option<Box<crate::present::Channels<AnimationSpec>>> {
+    motion.map(|motion| {
+        Box::new(motion.map(|(duration, easing)| AnimationSpec {
+            duration: duration.unwrap_or(animation.duration),
+            easing: easing.unwrap_or(animation.easing),
+        }))
+    })
+}
+
+/// The properties `sol.present`'s `motion` can time apart (#293).
+const PRESENT_MOTIONS: [&str; 4] = ["x", "y", "size", "opacity"];
+
+/// A present's or a `present_from`'s `motion` (#293): a timing per property, `x` and `y` for the
+/// drawn rect's centre, `size` for its width and height, `opacity`, each
+/// `{ duration, easing }` as `sol.animate` takes it. A property left out, and
+/// a duration or easing left out of one, is `None` for the caller to fill
+/// with the batch's own; no `motion` at all is `None`. Anything else under
+/// `motion` is an error naming it.
+/// `tests::a_present_motion_names_its_properties_and_a_bad_one_is_refused`.
+type PresentMotion = crate::present::Channels<(Option<Duration>, Option<Curve>)>;
+
+fn present_motion_from(options: &Table) -> mlua::Result<Option<PresentMotion>> {
+    let motion = match options.get::<Value>("motion")? {
+        Value::Nil => return Ok(None),
+        Value::Table(motion) => motion,
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "sol.present: `motion` is a table of timings by property ({}), got a {}",
+                PRESENT_MOTIONS.join(", "),
+                other.type_name()
+            )));
+        }
+    };
+    for pair in motion.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let Value::String(name) = &key else {
+            return Err(mlua::Error::runtime(format!(
+                "sol.present: `motion` is keyed by property ({}), got a key of type {}",
+                PRESENT_MOTIONS.join(", "),
+                key.type_name()
+            )));
+        };
+        let name = name.to_string_lossy();
+        if !PRESENT_MOTIONS.contains(&name.as_str()) {
+            return Err(mlua::Error::runtime(format!(
+                "sol.present: `motion` times {}, not {name}",
+                PRESENT_MOTIONS.join(", ")
+            )));
+        }
+        if !matches!(value, Value::Table(_)) {
+            return Err(mlua::Error::runtime(format!(
+                "sol.present: `motion.{name}` is {{ duration, easing }}, got a {}",
+                value.type_name()
+            )));
+        }
+    }
+    let timing = |name: &str| motion_from(motion.get::<Option<Table>>(name)?.as_ref());
+    Ok(Some(crate::present::Channels {
+        x: timing("x")?,
+        y: timing("y")?,
+        size: timing("size")?,
+        opacity: timing("opacity")?,
+    }))
+}
+
 /// Where on a window the pointer goes when no `to` says: its centre.
 const CENTRE: (f64, f64) = (0.5, 0.5);
 
@@ -6603,6 +6694,147 @@ mod tests {
                 "{bad}: {refused}"
             );
         }
+    }
+
+    /// **`motion` times a present's properties apart, and anything else
+    /// under it is refused by name** (#293). A property left out, and a
+    /// duration or easing left out of one, is left for the batch's own.
+    #[test]
+    fn a_present_motion_names_its_properties_and_a_bad_one_is_refused() {
+        let lua = mlua::Lua::new();
+        let motion = |source: &str| {
+            let table: mlua::Table = lua.load(source).eval().expect("a table");
+            super::present_motion_from(&table)
+        };
+        assert_eq!(motion("return {}").expect("no motion"), None);
+        let timed = motion(
+            "return { motion = { x = { duration = 300, easing = 'linear' }, \
+             opacity = { duration = 450 } } }",
+        )
+        .expect("a motion")
+        .expect("one was given");
+        assert_eq!(
+            timed.x,
+            (Some(Duration::from_millis(300)), Some(Curve::Linear))
+        );
+        assert_eq!(timed.y, (None, None), "left out, so the batch's");
+        assert_eq!(timed.size, (None, None));
+        assert_eq!(timed.opacity, (Some(Duration::from_millis(450)), None));
+        for (bad, says) in [
+            ("return { motion = 3 }", "a table of timings by property"),
+            ("return { motion = { colour = {} } }", "not colour"),
+            ("return { motion = { [1] = {} } }", "a key of type integer"),
+            (
+                "return { motion = { x = 300 } }",
+                "`motion.x` is { duration, easing }",
+            ),
+        ] {
+            let refused = motion(bad).expect_err(bad).to_string();
+            assert!(refused.contains(says), "{bad}: {refused}");
+        }
+    }
+
+    /// **A present's motion is resolved against the batch's own timing**
+    /// (#293): what a property leaves out is `sol.animate`'s, and a present
+    /// with no `motion` carries none.
+    #[test]
+    fn a_present_motion_fills_what_it_leaves_out_from_the_batch() {
+        let directory = std::env::temp_dir().join("solium-script-test-present-motion");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+1", function()
+                sol.animate({ duration = 300, easing = "outBack" })
+                sol.present(1, { x = 0, y = 0, w = 10, h = 10,
+                                 motion = { opacity = { duration = 500 },
+                                            size = { easing = "linear" } } })
+                sol.present(2, { x = 0, y = 0, w = 10, h = 10 })
+                sol.present_from(3, { x = 0, y = 0, w = 10, h = 10,
+                                      motion = { x = { duration = 120 } } })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+1", Snapshot::default());
+        let channels: Vec<_> = outcome
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::Present { channels, .. } | Command::PresentFrom { channels, .. } => {
+                    channels.as_deref().copied()
+                }
+                other => panic!("expected a present command, got {other:?}"),
+            })
+            .collect();
+        let batch = AnimationSpec {
+            duration: Duration::from_millis(300),
+            easing: Curve::OutBack,
+        };
+        assert_eq!(
+            channels,
+            vec![
+                Some(crate::present::Channels {
+                    x: batch,
+                    y: batch,
+                    size: AnimationSpec {
+                        duration: Duration::from_millis(300),
+                        easing: Curve::Linear,
+                    },
+                    opacity: AnimationSpec {
+                        duration: Duration::from_millis(500),
+                        easing: Curve::OutBack,
+                    },
+                }),
+                None,
+                Some(crate::present::Channels {
+                    x: AnimationSpec {
+                        duration: Duration::from_millis(120),
+                        easing: Curve::OutBack,
+                    },
+                    y: batch,
+                    size: batch,
+                    opacity: batch,
+                }),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.present_from` reads a deform for the frame it starts in**,
+    /// checked as `sol.present`'s is.
+    #[test]
+    fn present_from_carries_the_deform_it_starts_in() {
+        let directory = std::env::temp_dir().join("solium-script-test-present-from-deform");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("super+1", function()
+                sol.present_from(1, { x = 0, y = 0, w = 60, h = 60,
+                    deform = { effect = "genie", to = { x = 0, y = 0, w = 60, h = 60 } } })
+                sol.present_from(2, { x = 0, y = 0, w = 60, h = 60 })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let outcome = scripts.key("super+1", Snapshot::default());
+        let effects: Vec<Option<String>> = outcome
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::PresentFrom { deform, .. } => {
+                    deform.as_ref().map(|deform| deform.effect.clone())
+                }
+                other => panic!("expected a present_from command, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(effects, vec![Some("genie".to_owned()), None]);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
