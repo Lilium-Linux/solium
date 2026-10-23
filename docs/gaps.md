@@ -74,7 +74,7 @@ several are missing:
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| Hardware validation | Suspend/resume and long hardware soaks remain release-readiness checks. Nested tests cannot establish their reliability. | [#64](https://github.com/Lilium-Linux/solium/issues/64), [#65](https://github.com/Lilium-Linux/solium/issues/65) |
+| Hardware validation | Long hardware soaks remain a release-readiness check; nested tests cannot establish their reliability. Suspend and resume, closing and opening the lid included, were checked by hand on a Surface Pro 7 and a laptop (#64). | [#65](https://github.com/Lilium-Linux/solium/issues/65) |
 | X11 launch placeholders | An X11 application may fail to replace its loading pane. | [#180](https://github.com/Lilium-Linux/solium/issues/180) |
 | XWayland selections | The selection-flush workaround still needs upstream follow-up. | [#40](https://github.com/Lilium-Linux/solium/issues/40) |
 | Crash recovery | A compositor crash ends the graphical session; applications are not recovered into a replacement compositor. | [#82](https://github.com/Lilium-Linux/solium/issues/82) |

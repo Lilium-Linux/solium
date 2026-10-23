@@ -23,7 +23,7 @@ epics to start from scratch.
 ## Reliable daily use
 
 Fix correctness issues found in applications, window management, focus and
-frame input. Validate suspend/resume, hotplug and long sessions on hardware.
+frame input. Validate hotplug and long sessions on hardware.
 Complete portal workflows and make failures diagnosable. This work gates a
 credible public preview more directly than adding another visual mode.
 

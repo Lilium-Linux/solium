@@ -37,8 +37,8 @@ Those checks observed QML GPU rendering, animation, idle screen-off, swaylock
 and the keyboard indicator. They are evidence for that revision and those
 machines, not certification of current `stage` or other hardware.
 
-Long hardware soaks, suspend/resume and real application use still need to
-establish reliability. Nested tests cover compositor behavior but cannot prove
+Long hardware soaks and real application use still need to establish
+reliability; suspend and resume have been checked by hand on two machines. Nested tests cover compositor behavior but cannot prove
 device input, GPU pacing or power-management behavior. A crash can end the
 whole session.
 
