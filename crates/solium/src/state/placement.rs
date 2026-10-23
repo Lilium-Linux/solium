@@ -608,6 +608,19 @@ impl Solium {
         // `Frame::real(was)`, so a placement from rest starts where it always
         // did. See
         // `a_refusal_by_dialog_fades_the_window_back_and_moves_its_neighbour_once`.
+        //
+        // **Not when the placement leaves the pane where it is (#289).** A
+        // layout places every window on every pass, at the rect it already
+        // has; gliding from what is drawn to `Frame::real` then cancels a
+        // script's `sol.present` (a hidden app came back at full size behind
+        // a mobile shell's home grid, its recents cards snapped back) and a
+        // mode's thumbnails alike. With nothing moved there is nothing to
+        // glide: a pane at rest stays at rest, one mid-glide keeps its glide,
+        // and one a script presents stays presented until it presents again
+        // or clears.
+        if outer == was {
+            return;
+        }
         if let Some(held) = self.panes.get(pane).filter(|_| !leaving) {
             let start = present::frame(held, was, now);
             present::from(

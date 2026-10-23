@@ -6942,6 +6942,49 @@ end)"#,
             assert!(!desk.transformed());
         }
 
+        /// **Placing a window where it already is keeps its presentation
+        /// (#289).** A layout places every window on every pass; one that
+        /// a script had presented elsewhere (a mobile shell hiding an app
+        /// at Home, its recents cards) glided back to its own rect at full
+        /// opacity, as if the script had cleared it. Placed somewhere new,
+        /// it still glides there.
+        #[test]
+        fn placing_a_window_where_it_already_is_keeps_its_presentation() {
+            let mut desk = Desk::new(
+                "placed-in-place",
+                &format!(
+                    "{SCRIPT}\n\
+                     sol.bind(\"super+o\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.present(window.id, {{ x = 100, y = 100, w = 200, h = 150, opacity = 0 }})\n\
+                         end\n\
+                     end)\n\
+                     sol.bind(\"super+l\", function()\n\
+                         for _, window in ipairs(sol.windows()) do\n\
+                             sol.place(window.id, {{ x = window.x, y = window.y, w = window.w, h = window.h, tile = false }})\n\
+                         end\n\
+                     end)\n"
+                ),
+            );
+            let thumbnail = Rectangle::new((100, 100).into(), (200, 150).into()).to_f64();
+            assert!(desk.state.trigger("super+o"));
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "the premise: presented"
+            );
+
+            assert!(desk.state.trigger("super+l"));
+            desk.land();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                thumbnail,
+                "placed where it already is, it is still drawn where the script presents it"
+            );
+            assert!(desk.transformed(), "and the presentation is still held");
+        }
+
         /// **A `sol.present` a listener makes is replaced by the glide**, as
         /// the compositor's move comes after the listeners' commands: only a
         /// picture a mode was presenting *before* the change is the mode's.
