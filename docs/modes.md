@@ -399,6 +399,15 @@ state from version 6, an X11 window's `_NET_WM_STATE_HIDDEN`. Its row in
 | `minimize(id)` | the moment it is minimized, before anything else reacts, its row already `minimized` | play it away, and take it out if you arrange it |
 | `unminimize(id)` | the moment it is shown again, before the `focus` that showed it | play it back, and take it back |
 
+**A modal dialog goes with its window**: minimizing a window minimizes its
+modal dialogs, minimizing a dialog -- `super+m` on it, `sol.minimize`, its own
+client asking -- minimizes the window it belongs to and so the whole family,
+and showing either shows them all, each told its own event
+(`state::tests::real_client::reflow_on_close::minimize::a_modal_dialog_is_minimized_and_shown_with_its_window`). Behind the lock
+nothing is shown: a focus there is refused before it shows anything, as
+`sol.act("windows.unminimize")` is answered `locked`
+(`state::tests::real_client::lock_focus::focusing_a_minimized_window_behind_the_lock_leaves_it_minimized`).
+
 Each is told once: minimizing a window already minimized, or showing one
 that is not, does nothing
 (`state::tests::real_client::reflow_on_close::minimize::minimizing_or_unminimizing_twice_does_nothing_the_second_time`,
@@ -414,17 +423,34 @@ bottom of the monitor, `lua/minimize.lua` -- is seen to the end
 (`state::tests::real_client::reflow_on_close::minimize::a_minimized_window_is_drawn_until_its_present_lands`). `sol.present_clear`
 in `unminimize` plays it back out. `sol.show_minimized(id)` draws one anyway,
 wherever a present puts it, which is how the overview shows minimized windows
-as thumbnails; choosing one focuses it, which shows it
-(`state::tests::real_client::reflow_on_close::minimize::the_overview_shows_a_minimized_window_and_choosing_it_shows_it_again`).
+as thumbnails; choosing one focuses it, which shows it, and leaving sends
+the rest back with the genie
+(`state::tests::real_client::reflow_on_close::minimize::the_overview_shows_a_minimized_window_and_choosing_it_shows_it_again`,
+`state::tests::real_client::reflow_on_close::minimize::the_overview_sends_the_minimized_windows_it_showed_back_on_leaving`). A
+window shown again while the overview is up stays in its grid until it leaves
+(`state::tests::real_client::reflow_on_close::minimize::a_window_shown_again_during_the_overview_stays_in_its_grid`).
 
 A minimized window takes no pointer or touch, not even while its present
 plays out: a press there reaches what is under it, and `sol.window_at` does
-not name it (`state::tests::real_client::reflow_on_close::minimize::a_press_on_a_minimized_window_reaches_what_is_under_it`). It
-never holds the keyboard: the keyboard leaves it as it leaves a closed window,
-by `config.focus.after_close`, and no hand-off ever picks it
-(`state::tests::real_client::reflow_on_close::minimize::the_keyboard_leaves_a_minimized_window_for_the_next_and_never_comes_back_to_it`).
+not name it (`state::tests::real_client::reflow_on_close::minimize::a_press_on_a_minimized_window_reaches_what_is_under_it`). The
+pointer is handed on the moment it is minimized, so a click with no motion
+before it reaches the window under it, and a pointer lock it held is let go
+(`state::tests::real_client::reflow_on_close::minimize::a_press_with_no_motion_after_a_minimize_reaches_the_window_under_it`,
+`state::tests::real_client::reflow_on_close::minimize::a_minimized_window_lets_go_of_the_pointer_it_locked`). It never holds the
+keyboard: the keyboard leaves it as it leaves a closed window, by
+`config.focus.after_close`, and no hand-off ever picks it
+(`state::tests::real_client::reflow_on_close::minimize::the_keyboard_leaves_a_minimized_window_for_the_next_and_never_comes_back_to_it`);
+shown again by `sol.unminimize` with nothing focused, the keyboard settles,
+usually on it (`state::tests::real_client::reflow_on_close::minimize::a_window_shown_again_with_nothing_focused_takes_the_keyboard`).
 Placing it moves nothing, so it keeps the place it had for when it comes back
-(`state::tests::real_client::reflow_on_close::minimize::a_placement_leaves_a_minimized_window_where_it_is`).
+(`state::tests::real_client::reflow_on_close::minimize::a_placement_leaves_a_minimized_window_where_it_is`) -- except that a
+monitor going brings it onto one that is left, as it brings back every window,
+and showing a window that is on no monitor brings it onto one first
+(`state::tests::real_client::reflow_on_close::minimize::a_minimized_window_on_a_monitor_that_goes_comes_back_on_the_one_left`,
+`state::tests::real_client::reflow_on_close::minimize::unminimizing_a_window_on_no_monitor_brings_it_onto_one`). Closing it plays
+no fade, and a close it refuses leaves it put away, out of the layouts
+(`state::tests::real_client::reflow_on_close::minimize::a_close_a_minimized_window_refuses_leaves_it_put_away`,
+`state::tests::real_client::reflow_on_close::minimize::a_close_refused_while_minimized_leaves_the_window_out_of_the_layouts`).
 
 The shipped layouts take a minimized window out on `minimize`, close up
 around it, leave it out of every `adopt`, and put it back on `unminimize`
