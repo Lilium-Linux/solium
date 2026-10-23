@@ -191,6 +191,9 @@ impl DeviceInfo {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Settings {
     pub(crate) output: Option<String>,
+    /// How far back a finger's velocity is fitted, for a touchscreen (#284);
+    /// `input::velocity::WINDOW_MS` when unset.
+    pub(crate) velocity_window_ms: Option<u32>,
     pub(crate) tap: Option<bool>,
     pub(crate) tap_button_map: Option<TapButtonMap>,
     pub(crate) drag: Option<bool>,
@@ -215,6 +218,9 @@ impl Settings {
     fn overlay(&mut self, over: &Self) {
         if over.output.is_some() {
             self.output.clone_from(&over.output);
+        }
+        if over.velocity_window_ms.is_some() {
+            self.velocity_window_ms = over.velocity_window_ms;
         }
         if over.tap.is_some() {
             self.tap = over.tap;
@@ -305,6 +311,12 @@ impl InputConfig {
     /// `a_device_with_no_matching_override_gets_only_its_type_default`,
     /// `a_name_matched_override_changes_only_the_fields_it_names`,
     /// `a_vendor_and_product_matched_override_applies`.
+    /// What `config.lua` set for every device of `kind`, before any
+    /// per-device override.
+    pub(crate) fn default_for(&self, kind: DeviceKind) -> Option<&Settings> {
+        self.defaults.get(&kind)
+    }
+
     pub(crate) fn resolve(&self, info: &DeviceInfo) -> Settings {
         let mut settings = self.defaults.get(&info.kind).cloned().unwrap_or_default();
         for (matcher, over) in &self.overrides {

@@ -48,6 +48,11 @@ pub(crate) struct TouchEvent {
     pub(crate) control: bool,
     pub(crate) edges: Option<&'static str>,
     pub(crate) time: u32,
+    /// The event's own stamp, in seconds: monotonic, from the kernel's
+    /// microseconds, unlike `time`, which wraps (#284).
+    pub(crate) t: f64,
+    /// Pixels a second, x and y, fitted by `input::velocity`.
+    pub(crate) velocity: (f64, f64),
 }
 
 #[derive(Clone, Debug)]
@@ -1358,8 +1363,32 @@ fn settings_from_table(table: &Table, context: &str) -> mlua::Result<InputSettin
         },
     };
 
+    // A whole number of milliseconds from 1 to 1000 (#284): shorter follows a
+    // change of direction sooner, longer smooths a noisy screen.
+    let velocity_window_ms = match table.get::<Value>("velocity_window_ms")? {
+        Value::Nil => None,
+        other => match number(&other).filter(|ms| ms.fract() == 0.0 && (1.0..=1000.0).contains(ms))
+        {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "checked to be a whole number from 1 to 1000"
+            )]
+            Some(ms) => Some(ms as u32),
+            None => {
+                tracing::warn!(
+                    context,
+                    value = describe(&other),
+                    "input.velocity_window_ms: a whole number of milliseconds from 1 to 1000; leaving it unset"
+                );
+                None
+            }
+        },
+    };
+
     Ok(InputSettings {
         output,
+        velocity_window_ms,
         tap: bool_field("tap")?,
         tap_button_map,
         drag: bool_field("drag")?,
@@ -1968,6 +1997,9 @@ impl Scripts {
             table.set("control", event.control)?;
             table.set("edges", event.edges)?;
             table.set("time", event.time)?;
+            table.set("t", event.t)?;
+            table.set("vx", event.velocity.0)?;
+            table.set("vy", event.velocity.1)?;
             call_listeners(lua, "touch", table)
         })
     }
@@ -8158,6 +8190,45 @@ mod tests {
         panel.name = "External tablet".into();
         assert_eq!(config.resolve(&panel).output.as_deref(), Some("HDMI-A-1"));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// **`input.touchscreen.velocity_window_ms` reaches the compositor, and
+    /// a value that is not a whole number from 1 to 1000 is named and left
+    /// unset (#284).**
+    #[test]
+    fn a_touchscreens_velocity_window_is_read_and_a_bad_one_is_named() {
+        for (window, expected) in [
+            ("40", Some(40)),
+            ("1000", Some(1000)),
+            ("0", None),
+            ("1.5", None),
+            ("2000", None),
+            ("\"fast\"", None),
+        ] {
+            let log = logged_while(|| {
+                let (directory, mut scripts) = shipped_init_with_user(
+                    "solium-script-test-input-velocity-window",
+                    &format!(
+                        "return {{ input = {{ touchscreen = {{ velocity_window_ms = {window} }} }} }}"
+                    ),
+                )
+                .expect("shipped initialization");
+                let config = input_config(scripts.startup()).expect("init calls sol.input");
+                assert_eq!(
+                    config
+                        .default_for(DeviceKind::Touchscreen)
+                        .and_then(|settings| settings.velocity_window_ms),
+                    expected,
+                    "velocity_window_ms = {window}"
+                );
+                let _ = std::fs::remove_dir_all(directory);
+            });
+            assert_eq!(
+                log.contains("input.velocity_window_ms"),
+                expected.is_none(),
+                "velocity_window_ms = {window}: {log}"
+            );
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub(crate) mod grab;
 pub(crate) mod profile;
 pub(crate) mod resize;
 pub(crate) mod touch;
+pub(crate) mod velocity;
 pub(crate) mod warp;
 
 use smithay::{
@@ -1648,6 +1649,7 @@ fn touch_down<B: InputBackend>(
         event.slot(),
         absolute_location(region, &event),
         event.time_msec(),
+        event.time(),
     );
 }
 
@@ -1661,11 +1663,12 @@ fn touch_motion<B: InputBackend>(
         event.slot(),
         absolute_location(region, &event),
         event.time_msec(),
+        event.time(),
     );
 }
 
 fn touch_up<B: InputBackend>(state: &mut Solium, event: impl TouchUpEvent<B>) {
-    touch::up(state, event.slot(), event.time_msec());
+    touch::up(state, event.slot(), event.time_msec(), event.time());
 }
 
 /// Turn a device's own position into a point in the global space.
