@@ -275,10 +275,10 @@ impl Drawn {
 pub(crate) struct Prepared {
     warps: Vec<Warped>,
     overs: Vec<Warped>,
-    /// Windows a refused `sol.present` geometry hides this pass
+    /// Panes a refused `sol.present` geometry hides this pass
     /// (`effects.present.failed = "hide"`): nothing of them is drawn.
     /// `tests::a_refused_present_follows_its_failed_policy`.
-    hidden: Vec<Window>,
+    hidden: Vec<crate::pane::PaneId>,
     /// Every rule resolved once this pass ([`build_slots`]), so every output
     /// and every screencopy places from the same answer.
     pub(crate) slots: crate::effect::plan::Slots,
@@ -303,7 +303,9 @@ pub(crate) struct Prepared {
 /// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
 #[derive(Clone, Debug)]
 pub(crate) struct Warped {
-    window: Window,
+    /// Its pane, which a window still loading is too
+    /// (`state::tests::real_client::a_loading_pane_under_a_present_is_planned_through_the_warp`).
+    pane: crate::pane::PaneId,
     texture: GlesTexture,
     program: crate::warp::Program,
     id: Id,
@@ -848,8 +850,45 @@ pub(crate) fn walk_instant(
     pass.unwrap_or(clock)
 }
 
+/// What a pane's warp capture is drawn from: its client, or, for a window
+/// whose application has not arrived or is not ready to be seen, the scene
+/// standing in for it (#302).
+/// `state::tests::real_client::a_loading_pane_under_a_present_is_planned_through_the_warp`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Captured {
+    /// The client, frame and all ([`flat_window_elements`]).
+    Client(Window),
+    /// The standing-in scene in the client's place, with the style's layers
+    /// when `loading.decorated` draws them ([`standing_elements`]), as the
+    /// walk draws a pane that is `ours`.
+    Standing,
+}
+
+/// What `pane` is captured from for a warp, and the outer rectangle it is
+/// captured over: [`Captured::Standing`] over the pane's own rectangle for a
+/// pane that is ours and has a scene, as the walk decides it (no client, or
+/// one not ready); else its client over the client's outer rectangle; none
+/// for a pane with neither, which nothing draws.
+/// `state::tests::real_client::a_loading_pane_under_a_present_is_planned_through_the_warp`.
+pub(crate) fn captured(
+    state: &Solium,
+    pane: crate::pane::PaneId,
+    window: Option<&Window>,
+) -> Option<(Captured, Rectangle<i32, Logical>)> {
+    let ready = window.is_some_and(|window| state.client_ready(window));
+    if !ready && state.pane_has_scene(pane) {
+        return Some((Captured::Standing, state.pane_outer_of(pane)?));
+    }
+    let window = window?;
+    Some((
+        Captured::Client(window.clone()),
+        state.outer_geometry(window)?,
+    ))
+}
+
 /// Plan every warp of the pass, as `warps` planned them: the same panes
-/// (on screen, with a client and an outer rectangle, `shown`), the same
+/// (on screen, with what to capture and an outer rectangle, [`captured`],
+/// `shown`), the same
 /// rectangle and scale, the same `plan_warp`, once each, all at the one
 /// instant read here. A refusal is still said once and counted once a pass
 /// (`state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
@@ -859,8 +898,7 @@ pub(crate) fn plan_warps(state: &mut Solium) {
     let now = state.clock.now();
     let mut planned = std::collections::HashMap::new();
     for (pane, window) in state.on_screen() {
-        let Some(window) = window else { continue };
-        let Some(outer) = state.outer_geometry(&window) else {
+        let Some((_, outer)) = captured(state, pane, window.as_ref()) else {
             continue;
         };
         if !shown(state, pane) {
@@ -876,30 +914,30 @@ pub(crate) fn plan_warps(state: &mut Solium) {
 }
 
 impl Prepared {
-    /// Lend the warp captured for `window`: the texture to draw through it,
+    /// Lend the warp captured for `pane`: the texture to draw through it,
     /// the program, the id and commit it carries, and its grid.
     ///
     /// Lent rather than taken: with more than one monitor `elements` runs once
     /// per output, and a texture removed by the first one would leave a
     /// deformed window undrawn on every other screen. `GlesTexture` is a
     /// handle, so the clone is a refcount, and the program is GL names.
-    fn warp(&self, window: &Window) -> Option<&Warped> {
-        self.warps.iter().find(|each| each.window == *window)
+    fn warp(&self, pane: crate::pane::PaneId) -> Option<&Warped> {
+        self.warps.iter().find(|each| each.pane == pane)
     }
 
-    /// Lend the capture of `window`'s popups, for the warp drawn in front of
+    /// Lend the capture of `pane`'s popups, for the warp drawn in front of
     /// its own, with the part of the pane's unit square it covers. Lent for
     /// `warp`'s reason. `None` when it has no popups open.
     /// `dev/present-check.sh`'s `menu` case draws it.
-    fn over(&self, window: &Window) -> Option<&Warped> {
-        self.overs.iter().find(|each| each.window == *window)
+    fn over(&self, pane: crate::pane::PaneId) -> Option<&Warped> {
+        self.overs.iter().find(|each| each.pane == pane)
     }
 
-    /// Whether nothing of `window` is drawn this pass: a refused present
+    /// Whether nothing of `pane` is drawn this pass: a refused present
     /// geometry under `failed = "hide"`.
     /// `tests::a_refused_present_follows_its_failed_policy`.
-    fn hidden(&self, window: &Window) -> bool {
-        self.hidden.contains(window)
+    fn hidden(&self, pane: crate::pane::PaneId) -> bool {
+        self.hidden.contains(&pane)
     }
 }
 
@@ -1093,7 +1131,7 @@ struct Gpu<'a> {
     drawn: crate::effect::store::Drawn,
     warps: Vec<Warped>,
     overs: Vec<Warped>,
-    hidden: Vec<Window>,
+    hidden: Vec<crate::pane::PaneId>,
     /// The store's pass, set by `resolve`.
     pass: u64,
 }
@@ -1391,11 +1429,9 @@ impl Phases for Gpu<'_> {
             // `keyed::Captures`, and
             // `keyed::tests::a_pane_that_stops_warping_gives_the_texture_back`.
             let release = |state: &mut Solium| crate::offscreen::release(state, pane);
-            let Some(window) = window else {
-                release(state);
-                continue;
-            };
-            let Some(outer) = state.outer_geometry(&window) else {
+            // A window still loading is captured as one that has arrived,
+            // its scene in its client's place (#302).
+            let Some((captured, outer)) = captured(state, pane, window.as_ref()) else {
                 release(state);
                 continue;
             };
@@ -1467,7 +1503,7 @@ impl Phases for Gpu<'_> {
             };
             let (warp, grid) = match planned {
                 Planned::Hidden => {
-                    self.hidden.push(window);
+                    self.hidden.push(pane);
                     release(state);
                     continue;
                 }
@@ -1497,19 +1533,28 @@ impl Phases for Gpu<'_> {
                 continue;
             }
             if let (Route::Warp, Some(program), Some((frame, aimed))) = (routed, program, warp) {
-                // Its client at the frame's `client_opacity` inside the
-                // capture, so a fading client is captured fading: its
-                // surfaces' alpha is in the capture's key, which redraws it
-                // and moves the warp's commit as it changes (#296).
-                let job = crate::offscreen::pane_job(
-                    state,
-                    renderer,
-                    pane,
-                    &window,
-                    scale,
-                    slots,
-                    frame.client_opacity,
-                );
+                // Its client, or the scene standing in for it, at the frame's
+                // `client_opacity` inside the capture, so a fading client is
+                // captured fading (#296); a window still loading is captured
+                // from its scene and layers (#302).
+                let job = match &captured {
+                    Captured::Client(window) => crate::offscreen::pane_job(
+                        state,
+                        renderer,
+                        pane,
+                        window,
+                        scale,
+                        slots,
+                        frame.client_opacity,
+                    ),
+                    Captured::Standing => crate::offscreen::standing_job(
+                        state,
+                        renderer,
+                        pane,
+                        scale,
+                        frame.client_opacity,
+                    ),
+                };
                 // Its present geometry's pixels over the whole pane, once
                 // they compiled: the warp draws its capture through them.
                 let pixels = aimed.zip(job.as_ref()).and_then(|(aimed, job)| {
@@ -1542,10 +1587,11 @@ impl Phases for Gpu<'_> {
                 // Under a present geometry their part has a grid of its own,
                 // and a grid refused follows the geometry's `failed`: the
                 // popups undeformed, or none of them, the pane's warp kept.
-                let over = if job.is_some() {
-                    crate::offscreen::over_job(state, renderer, pane, &window, scale)
-                } else {
-                    None
+                let over = match (&captured, job.is_some()) {
+                    (Captured::Client(window), true) => {
+                        crate::offscreen::over_job(state, renderer, pane, window, scale)
+                    }
+                    _ => None,
                 };
                 let over = match (over, aimed) {
                     (Some((job, part)), Some(aimed)) => {
@@ -1579,7 +1625,7 @@ impl Phases for Gpu<'_> {
                             warp_commit(state, pane, crate::keyed::Kind::Pane, shape, false);
                         let under = unders(state, slots, &holes, scale, commit);
                         self.warps.push(Warped {
-                            window: window.clone(),
+                            pane,
                             texture,
                             program,
                             id,
@@ -1592,15 +1638,7 @@ impl Phases for Gpu<'_> {
                     } else {
                         jobs.push((
                             job,
-                            Then::Warp(
-                                window.clone(),
-                                program,
-                                pane,
-                                shape,
-                                grid,
-                                (holes, scale),
-                                pixels,
-                            ),
+                            Then::Warp(program, pane, shape, grid, (holes, scale), pixels),
                         ));
                     }
                 }
@@ -1610,7 +1648,7 @@ impl Phases for Gpu<'_> {
                         let commit =
                             warp_commit(state, pane, crate::keyed::Kind::Over, shape, false);
                         self.overs.push(Warped {
-                            window,
+                            pane,
                             texture,
                             program,
                             id,
@@ -1621,10 +1659,7 @@ impl Phases for Gpu<'_> {
                             pixels,
                         });
                     } else {
-                        jobs.push((
-                            job,
-                            Then::Over(window, program, pane, shape, part, grid, pixels),
-                        ));
+                        jobs.push((job, Then::Over(program, pane, shape, part, grid, pixels)));
                     }
                 }
                 continue;
@@ -1637,11 +1672,11 @@ impl Phases for Gpu<'_> {
         // (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
         for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
             match then {
-                Then::Warp(window, program, pane, shape, grid, (holes, scale), pixels) => {
+                Then::Warp(program, pane, shape, grid, (holes, scale), pixels) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
                     let under = unders(state, slots, &holes, scale, commit);
                     self.warps.push(Warped {
-                        window,
+                        pane,
                         texture,
                         program,
                         id,
@@ -1652,10 +1687,10 @@ impl Phases for Gpu<'_> {
                         pixels,
                     });
                 }
-                Then::Over(window, program, pane, shape, part, grid, pixels) => {
+                Then::Over(program, pane, shape, part, grid, pixels) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Over, shape, true);
                     self.overs.push(Warped {
-                        window,
+                        pane,
                         texture,
                         program,
                         id,
@@ -1715,7 +1750,6 @@ enum Then {
     /// The pane's own warp, its grid, and the slots its capture holes with
     /// the capture's scale (Ruling F37).
     Warp(
-        Window,
         crate::warp::Program,
         crate::pane::PaneId,
         Shape,
@@ -1725,7 +1759,6 @@ enum Then {
     ),
     /// Its popups', over their part, and its grid.
     Over(
-        Window,
         crate::warp::Program,
         crate::pane::PaneId,
         Shape,
@@ -4710,6 +4743,93 @@ fn scene(
     state.redraw = true;
 }
 
+/// A pane's standing-in scene as a warp's capture holds it: over the
+/// pane's whole rectangle at its own size, its corner at the target's
+/// origin, as the walk draws it over the pane's frame rectangle, unfaded
+/// by the frame (the warp fades the whole capture) and faded by its own
+/// dissolve into the arriving application. Nothing for a pane without one.
+pub(crate) fn scene_in_capture(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: crate::pane::PaneId,
+    outer: Size<i32, Logical>,
+    scale: f64,
+    client_opacity: f32,
+) -> Vec<Element> {
+    let mut elements = Vec::new();
+    if state.pane_has_scene(pane) {
+        let mut at_rest = present::Frame::real(Rectangle::from_size(outer));
+        // The client's opacity in the pane, which the scene stands in for
+        // (#296): a launch's scene fading in over its icon layer.
+        at_rest.client_opacity = client_opacity;
+        let now = pass_now(state);
+        scene(
+            state,
+            renderer,
+            &mut elements,
+            pane,
+            at_rest,
+            outer,
+            now,
+            scale,
+        );
+    }
+    elements
+}
+
+/// What a window still loading is captured from for its warp (#302): the
+/// walk's `ours` branch at rest at the target's origin, in `PANE_ORDER`,
+/// the style's layers at their depths when `loading.decorated` draws them
+/// and the standing-in scene in the client's place
+/// ([`scene_in_capture`]), so it bends as one thing and an `above` layer
+/// covers the scene as it will cover the client.
+/// `state::tests::real_client::a_loading_pane_under_a_present_is_planned_through_the_warp`
+/// says what is captured ([`captured`]); building it needs a renderer.
+pub(crate) fn standing_elements(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    pane: crate::pane::PaneId,
+    scale: f64,
+    client_opacity: f32,
+) -> Vec<Element> {
+    let Some(outer) = state.pane_outer_of(pane).map(|outer| outer.size) else {
+        return Vec::new();
+    };
+    let (drawing, _) = pane_drawing_at(
+        outer,
+        state.insets_of(pane),
+        (0, 0).into(),
+        scale,
+        pass_now(state),
+    );
+    let mut scene = Some(scene_in_capture(
+        state,
+        renderer,
+        pane,
+        outer,
+        scale,
+        client_opacity,
+    ));
+    let mut elements = Vec::new();
+    pane_pieces(&mut elements, |elements, piece| match piece {
+        Piece::Layers(depth) if state.loading.decorated => {
+            chrome(
+                state,
+                renderer,
+                elements,
+                None,
+                (None, Within::Capture),
+                pane,
+                depth,
+                drawing,
+            );
+        }
+        Piece::Layers(_) | Piece::Slot(..) => (),
+        Piece::Client => elements.extend(scene.take().into_iter().flatten()),
+    });
+    elements
+}
+
 /// What a pane's standing-in scene is laid out at, and where its picture is
 /// drawn: the pane's own outer size, and the rectangle its frame presents
 /// this instant, which it is scaled into.
@@ -5353,6 +5473,153 @@ pub(crate) fn warp_mesh_on(
     }
 }
 
+/// Push `pane`'s warp, if `prepare` captured one this pass and its frame
+/// is transformed: its popups' warp, its own, and the slots beneath it.
+/// Whether anything of it was pushed; nothing is when its mesh fails here,
+/// and the pane falls through to the flat path. What a window and a window
+/// still loading are drawn through alike (#302).
+///
+/// A transform that is not identity cannot be drawn as a rectangle. The
+/// window is rendered flat into a texture first — frame included — and
+/// that texture is bent, so the whole window deforms as one thing
+/// instead of the client tilting away from its own titlebar. Its popups
+/// are not in that texture (`state::tests::a_warped_panes_capture_holds_no_popups`):
+/// they are a capture of their own, bent by the same matrix and deform
+/// over their part of the pane, and drawn in front of it
+/// (`tests::a_warped_panes_popups_are_in_front_of_it`).
+///
+/// The deform's anchor is resolved *here*, on the frame that draws it,
+/// because what it is aimed at moves — see `present::Anchor`. An anchor
+/// that resolves to nothing leaves `aimed` empty, and a window with no
+/// matrix then takes the flat path as if it had never asked for an
+/// effect. Its grid is the one `prepare` built this pass, once for every
+/// output (`present_grid`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the walk's own state for one pane on one output"
+)]
+fn push_warp(
+    state: &mut Solium,
+    prepared: &Prepared,
+    elements: &mut Vec<Element>,
+    pane: crate::pane::PaneId,
+    (frame, drawn_global): (present::Frame, present::Frame),
+    screen: Rectangle<i32, Logical>,
+    scale: f64,
+    monitor: Option<&str>,
+) -> bool {
+    let aimed = state.aimed_at_for(pane, frame.deform);
+    if (!frame.matrix.is_identity() || aimed.is_some())
+        && let Some(warped) = prepared.warp(pane)
+        && let Some(pane_mesh) = warp_mesh_on(
+            screen,
+            &drawn_global,
+            warped.grid.as_ref(),
+            crate::warp::UnitRect::WHOLE,
+            scale,
+        )
+    {
+        let (texture, program, id, commit) = (
+            warped.texture.clone(),
+            warped.program,
+            warped.id.clone(),
+            warped.commit,
+        );
+        // The pane's own mesh first: it can fail (a vertex behind the
+        // viewer), and then nothing of the warp is pushed and the pane
+        // falls through to the flat path below, as before. A popups' mesh
+        // that fails alone drops the popups for that frame and keeps the
+        // pane. Popups first, nearer the front:
+        // `tests::a_warped_panes_popups_are_in_front_of_it`, and
+        // `dev/present-check.sh`'s `menu` case through the real draw.
+        let mut pane_warp = Some((id, texture, pane_mesh));
+        for piece in WARP_ORDER {
+            match piece {
+                WarpPiece::Over => {
+                    // The popups are the client's (#296): at its alpha, and
+                    // not at all once it shows nothing, as on the flat path.
+                    if frame.shows_client()
+                        && let Some(over) = prepared.over(pane)
+                        && let Some(mesh) = warp_mesh_on(
+                            screen,
+                            &drawn_global,
+                            over.grid.as_ref(),
+                            over.part,
+                            scale,
+                        )
+                    {
+                        elements.push(Element::Warped(
+                            crate::warp::Warp::new(
+                                over.id.clone(),
+                                over.commit,
+                                over.texture.clone(),
+                                mesh,
+                                frame.client_alpha(),
+                                over.program,
+                            )
+                            .with_pixels(over.pixels.clone()),
+                        ));
+                    }
+                }
+                WarpPiece::Pane => {
+                    // Its pane capture's id for life, and the commit
+                    // `prepare` moved only if the picture or the mesh
+                    // changed, so a still warp is not damaged and a moving
+                    // one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
+                    if let Some((id, texture, mesh)) = pane_warp.take() {
+                        elements.push(Element::Warped(
+                            crate::warp::Warp::new(
+                                id,
+                                commit,
+                                texture,
+                                mesh.clone(),
+                                frame.opacity,
+                                program,
+                            )
+                            .with_pixels(warped.pixels.clone()),
+                        ));
+                        // Beneath the warp, in its capture's order, through
+                        // its mesh, each fragment reading the backdrop where
+                        // it is on this monitor (Ruling F37, amended
+                        // 2026-10-14): `dev/effects-check.sh motion`'s
+                        // `genie`, and wirecheck case 13i.
+                        if let Some(beneath) = state.programs.beneath_compiled() {
+                            for each in warped
+                                .under
+                                .iter()
+                                .filter(|each| monitor == Some(each.monitor.as_str()))
+                            {
+                                let map = match each.over {
+                                    crate::effect::beneath::Over::Monitor => {
+                                        crate::effect::beneath::ScreenMap::monitor(
+                                            screen.size,
+                                            scale,
+                                        )
+                                    }
+                                    crate::effect::beneath::Over::Box(screen_box) => {
+                                        crate::effect::beneath::ScreenMap::of_box(screen_box)
+                                    }
+                                };
+                                elements.push(Element::Beneath(
+                                    crate::effect::beneath::Beneath::new(
+                                        each,
+                                        mesh.clone(),
+                                        map,
+                                        frame.opacity,
+                                        beneath,
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    false
+}
+
 /// Draw panes, in the order given.
 #[expect(
     clippy::too_many_arguments,
@@ -5525,12 +5792,38 @@ fn panes(
             continue;
         }
 
+        // A refused present geometry under `failed = "hide"`: nothing of it
+        // this pass, a window still loading included
+        // (`tests::a_refused_present_follows_its_failed_policy`).
+        if prepared.hidden(pane) {
+            continue;
+        }
+
         // Nothing of the application to draw yet, so this window is entirely
         // ours and the scene has all of it, bar included. The frame is built
         // and its room reserved — which is why the window does not change shape
         // when the application arrives — but drawing a bar over a surface that
         // already carries the name says it twice, so that is a setting and it
         // is off.
+        //
+        // Under a present that transforms it, it is drawn through its warp as
+        // an arrived window is, from a capture of exactly this (#302): a
+        // launch is mostly over before its application draws, so the scene
+        // is the window for the whole of it.
+        if ours
+            && push_warp(
+                state,
+                prepared,
+                elements,
+                pane,
+                (frame, drawn_global),
+                screen,
+                scale,
+                monitor.as_deref(),
+            )
+        {
+            continue;
+        }
         if ours {
             // Through `PANE_ORDER` as well, so a pane waiting for its
             // application is layered the same way it will be once it arrives:
@@ -5562,9 +5855,20 @@ fn panes(
         let Some(window) = window else {
             continue;
         };
-        // A refused present geometry under `failed = "hide"`: nothing of it
-        // this pass (`tests::a_refused_present_follows_its_failed_policy`).
-        if prepared.hidden(&window) {
+
+        // Drawn through its warp, if it has one this pass: the scene fading
+        // off it, if any, is in its capture (`offscreen::pane_job`), so the
+        // window and what is dissolving off it bend as one.
+        if push_warp(
+            state,
+            prepared,
+            elements,
+            pane,
+            (frame, drawn_global),
+            screen,
+            scale,
+            monitor.as_deref(),
+        ) {
             continue;
         }
 
@@ -5581,130 +5885,6 @@ fn panes(
         let Some(real) = state.real_geometry(&window) else {
             continue;
         };
-
-        // A transform that is not identity cannot be drawn as a rectangle. The
-        // window is rendered flat into a texture first — frame included — and
-        // that texture is bent, so the whole window deforms as one thing
-        // instead of the client tilting away from its own titlebar. Its popups
-        // are not in that texture (`state::tests::a_warped_panes_capture_holds_no_popups`):
-        // they are a capture of their own, bent by the same matrix and deform
-        // over their part of the pane, and drawn in front of it
-        // (`tests::a_warped_panes_popups_are_in_front_of_it`).
-        //
-        // The deform's anchor is resolved *here*, on the frame that draws it,
-        // because what it is aimed at moves — see `present::Anchor`. An anchor
-        // that resolves to nothing leaves `aimed` empty, and a window with no
-        // matrix then takes the flat path below as if it had never asked for
-        // an effect.
-        // Its grid is the one `prepare` built this pass, once for every
-        // output (`present_grid`).
-        let aimed = state.aimed_at_for(pane, frame.deform);
-        if (!frame.matrix.is_identity() || aimed.is_some())
-            && let Some(warped) = prepared.warp(&window)
-            && let Some(pane_mesh) = warp_mesh_on(
-                screen,
-                &drawn_global,
-                warped.grid.as_ref(),
-                crate::warp::UnitRect::WHOLE,
-                scale,
-            )
-        {
-            let (texture, program, id, commit) = (
-                warped.texture.clone(),
-                warped.program,
-                warped.id.clone(),
-                warped.commit,
-            );
-            // The pane's own mesh first: it can fail (a vertex behind the
-            // viewer), and then nothing of the warp is pushed and the pane
-            // falls through to the flat path below, as before. A popups' mesh
-            // that fails alone drops the popups for that frame and keeps the
-            // pane. Popups first, nearer the front:
-            // `tests::a_warped_panes_popups_are_in_front_of_it`, and
-            // `dev/present-check.sh`'s `menu` case through the real draw.
-            let mut pane_warp = Some((id, texture, pane_mesh));
-            for piece in WARP_ORDER {
-                match piece {
-                    // The popups are the client's (#296): at its alpha, and
-                    // not at all once it shows nothing, as on the flat path.
-                    WarpPiece::Over => {
-                        if frame.shows_client()
-                            && let Some(over) = prepared.over(&window)
-                            && let Some(mesh) = warp_mesh_on(
-                                screen,
-                                &drawn_global,
-                                over.grid.as_ref(),
-                                over.part,
-                                scale,
-                            )
-                        {
-                            elements.push(Element::Warped(
-                                crate::warp::Warp::new(
-                                    over.id.clone(),
-                                    over.commit,
-                                    over.texture.clone(),
-                                    mesh,
-                                    frame.client_alpha(),
-                                    over.program,
-                                )
-                                .with_pixels(over.pixels.clone()),
-                            ));
-                        }
-                    }
-                    WarpPiece::Pane => {
-                        // Its pane capture's id for life, and the commit
-                        // `prepare` moved only if the picture or the mesh
-                        // changed, so a still warp is not damaged and a moving
-                        // one is: `keyed::tests::a_warp_at_rest_keeps_its_commit`.
-                        if let Some((id, texture, mesh)) = pane_warp.take() {
-                            elements.push(Element::Warped(
-                                crate::warp::Warp::new(
-                                    id,
-                                    commit,
-                                    texture,
-                                    mesh.clone(),
-                                    frame.opacity,
-                                    program,
-                                )
-                                .with_pixels(warped.pixels.clone()),
-                            ));
-                            // Beneath the warp, in its capture's order, through
-                            // its mesh, each fragment reading the backdrop where
-                            // it is on this monitor (Ruling F37, amended
-                            // 2026-10-14): `dev/effects-check.sh motion`'s
-                            // `genie`, and wirecheck case 13i.
-                            if let Some(beneath) = state.programs.beneath_compiled() {
-                                for each in warped.under.iter().filter(|each| {
-                                    monitor.as_deref() == Some(each.monitor.as_str())
-                                }) {
-                                    let map = match each.over {
-                                        crate::effect::beneath::Over::Monitor => {
-                                            crate::effect::beneath::ScreenMap::monitor(
-                                                screen.size,
-                                                scale,
-                                            )
-                                        }
-                                        crate::effect::beneath::Over::Box(screen_box) => {
-                                            crate::effect::beneath::ScreenMap::of_box(screen_box)
-                                        }
-                                    };
-                                    elements.push(Element::Beneath(
-                                        crate::effect::beneath::Beneath::new(
-                                            each,
-                                            mesh.clone(),
-                                            map,
-                                            frame.opacity,
-                                            beneath,
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
 
         // The surface tree is built as if at its real size and then scaled,
         // which keeps subsurface offsets correct for free.
