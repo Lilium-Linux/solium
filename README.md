@@ -14,7 +14,7 @@ files you can change without rebuilding the compositor.
 
 [Documentation](https://lilium-linux.github.io/solium/) ·
 [Known limitations](docs/gaps.md) · [Roadmap](docs/roadmap.md) ·
-[Contributing](CONTRIBUTING.md)
+[Contributing](CONTRIBUTING.md) · [Discord](https://discord.gg/ATQNfHHvFa)
 
 ## Status
 
