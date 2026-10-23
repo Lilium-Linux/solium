@@ -241,8 +241,12 @@ jobs:
           section. An installed copy finds its QML and Lua wherever
           \`SOLIUM_DATADIR\` pointed when it was built, under
           \`share/solium\` beside its \`bin\` directory, or in
-          \`/usr/share/solium\`. Per-distro packaging recipes are tracked in
-          #66.
+          \`/usr/share/solium\`. Its lock screen checks a password with
+          \`solium-auth\`, which it finds in \`libexec\` beside its \`bin\`
+          directory or beside the binary, against PAM's
+          \`/etc/pam.d/solium\` (\`dev/pam/solium\`); \`solium --check\`
+          says whether both are there. Per-distro packaging recipes are
+          tracked in #66.
 
           \`\`\`sh
           tar --zstd -xf solium-$version.tar.zst

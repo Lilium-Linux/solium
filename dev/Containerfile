@@ -20,8 +20,13 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
         libdrm-devel \
         qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
+        pam \
         foot \
     && dnf clean all
+
+# `pam`, not pam-devel: solium-auth (#281) declares the few PAM functions it
+# calls itself and links libpam.so.0 by name, so the runtime library is all a
+# build needs, and its tests read that library's messages.
 
 # No Rust in the image. It comes from the user's own rustup install: dev/gate.sh
 # mounts CARGO_HOME and RUSTUP_HOME at the same paths and puts CARGO_HOME/bin on

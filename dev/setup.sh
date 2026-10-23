@@ -87,6 +87,12 @@ else
     absent=("${modules[@]}")
 fi
 command -v c++ >/dev/null 2>&1 || absent+=("a C++17 compiler (c++)")
+# solium-auth links PAM's runtime library by name (#281), and the runtime
+# package has no pkg-config file, so the dynamic linker's cache is asked.
+# Read whole first: under pipefail, grep -q leaving early fails the pipe.
+if ! grep -q 'libpam\.so\.0 ' <<<"$(PATH="$PATH:/sbin:/usr/sbin" ldconfig -p 2>/dev/null)"; then
+    absent+=("libpam.so.0 (PAM's runtime library)")
+fi
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists Qt6Gui; then
     qt_include_dir="$(pkg-config --variable=includedir Qt6Gui)"
     qt_base_version="$(pkg-config --modversion Qt6Gui)"

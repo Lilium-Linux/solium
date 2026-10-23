@@ -11,6 +11,16 @@
 mod ages;
 mod apps;
 mod assets;
+// The lock screen's state machine (#281, Task 3) is what calls a check; until
+// it lands, the startup open and `--check` are the only callers outside tests.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the native lock's checks (#281) are its other caller"
+    )
+)]
+mod auth;
 mod autoreload;
 mod capture;
 mod check;
@@ -184,6 +194,9 @@ fn main() -> Result<std::process::ExitCode> {
     // Solium starts is given. See
     // `launch::tests::a_spawned_program_gets_the_environment_solium_started_with`.
     prepare_environment();
+    // The password helper, opened while this is the only thread and held for
+    // the whole session, so an upgrade cannot swap it under the lock (`auth`).
+    auth::open_at_startup();
     // Every argument decided before anything starts: `cli::tests`, and the
     // process tests in `tests/cli.rs`.
     let command = match cli::parse(std::env::args().skip(1)) {

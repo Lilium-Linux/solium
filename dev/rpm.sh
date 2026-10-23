@@ -90,6 +90,7 @@ mkdir -p "$topdir/SOURCES"
 git -C "$root" archive --format=tar.gz --prefix="solium-$version/" \
     -o "$topdir/SOURCES/solium-$version.tar.gz" HEAD
 install -m755 "$built" "$topdir/SOURCES/solium"
+install -m755 "$root/target/install/release/solium-auth" "$topdir/SOURCES/solium-auth"
 
 log="$topdir/rpmbuild.log"
 echo "packaging solium $version with rpmbuild (log: $log)..."

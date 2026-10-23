@@ -1,0 +1,33 @@
+[package]
+name = "solium-auth"
+description = "Solium's password check: one PAM transaction, in a process of its own"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Two halves of one protocol (#281). The library is what both sides speak --
+# the handshake, the request and the answer, and the zeroised `Secret` -- and
+# is all the compositor links. The binary is the helper the compositor starts
+# for each check: the only thing in the project that links PAM, in a process
+# with no Qt, no Wayland and no DRM, which makes itself non-dumpable and ends
+# after one answer.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solium-auth"
+path = "src/main.rs"
+
+# Nothing else, on purpose: the process that holds a password should hold as
+# little code as possible. `libc` for the hardening, the descriptors and the
+# allocations PAM frees; already in the lockfile, MIT OR Apache-2.0. PAM itself
+# is declared by hand in `src/pam.rs` and linked as `libpam.so.0`, so building
+# needs only the runtime library, never pam-devel.
+[dependencies]
+libc = "0.2"

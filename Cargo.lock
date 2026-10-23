@@ -1963,6 +1963,7 @@ dependencies = [
  "signal-hook-registry",
  "smithay",
  "solium-animation",
+ "solium-auth",
  "solium-effects",
  "solium-layout",
  "tracing",
@@ -1977,6 +1978,13 @@ dependencies = [
 [[package]]
 name = "solium-animation"
 version = "0.0.0"
+
+[[package]]
+name = "solium-auth"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "solium-effects"
