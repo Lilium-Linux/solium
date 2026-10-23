@@ -194,7 +194,15 @@ bool SoliumRows::apply(const QJsonArray &ops)
                 QQmlEngine::setObjectOwnership(row, QQmlEngine::CppOwnership);
                 m_by_key.insert(key, row);
             }
-            row->assign(op.value(QStringLiteral("values")).toObject().toVariantMap());
+            /* A row carries its own key under the key role, which `key_of`
+             * and every later step read, whether or not the model repeats it
+             * among its values (`Apps` does not: #291). */
+            QVariantMap values = op.value(QStringLiteral("values")).toObject().toVariantMap();
+            const QString key_role = QString::fromUtf8(m_key_role);
+            if (!values.contains(key_role)) {
+                values.insert(key_role, key);
+            }
+            row->assign(values);
             row->present = true;
             beginInsertRows(QModelIndex(), at, at);
             m_rows.insert(at, row);
