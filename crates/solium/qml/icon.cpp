@@ -1,15 +1,20 @@
 /*
  * The `image://solium/icon/...` provider.
  *
- * **Synchronous, on purpose for this version.** 03 §3.2.14 asks for
+ * **Synchronous, on purpose.** 03 §3.2.14 asks for
  * `QQuickAsyncImageProvider` so a cold miss never blocks a frame; this is a
- * plain `QQuickImageProvider` instead, which means a lookup that has to walk
- * a theme's directories (no cache yet either -- see `icon.rs`'s module doc)
- * runs on whatever thread QML's image loading calls from. For a dock's few
- * dozen icons, scanned at most once each until the scene reloads, that is a
- * handful of `stat` calls -- not nothing, but not a frame stall either. The
- * natural P1 is both at once: an LRU in `icon.rs` and this provider moved to
- * `QQuickAsyncImageProvider`.
+ * plain `QQuickImageProvider` instead, because an asynchronous one lets icons
+ * pop in after the first frame of a desktop, which must show whole. A request
+ * runs on whatever thread QML's image loading calls from -- the GUI thread for
+ * an ordinary `Image`.
+ *
+ * **Every answer is kept** (#306), by the whole request, a miss included, up
+ * to `CACHE_KIB`: a shell shows the same icons again and again (a launcher
+ * page, a header per window in an overview, a window's icon as it flies to its
+ * launcher), and QML's own pixmap cache keeps an image nobody shows only
+ * within a small budget. Without it each of those walked the theme and
+ * rasterised the SVG again, about 5 ms for a 256 px icon, inside an animation
+ * frame. Only the first request for an icon pays.
  *
  * SVG rasterises here through Qt's own `imageformats/libqsvg` plugin, loaded
  * at runtime if the Qt installation has it (Fedora's `qt6-qtsvg` ships it);
@@ -21,8 +26,35 @@
  */
 #include "icon.h"
 
+#include <QtCore/QCache>
+#include <QtCore/QMutex>
 #include <QtCore/QUrlQuery>
 #include <QtGui/QImageReader>
+
+namespace {
+
+/* The answers kept, in KiB of pixels: room for a few hundred icons at the
+ * sizes a shell asks for, a few at a window's size. */
+constexpr qsizetype CACHE_KIB = 48 * 1024;
+
+/* QML may load from its loader threads too (`asynchronous: true`). */
+QMutex cache_lock;
+
+QCache<QString, QImage> &kept()
+{
+    static QCache<QString, QImage> cache(CACHE_KIB);
+    return cache;
+}
+
+QImage keep(const QString &key, const QImage &image)
+{
+    const qsizetype kib = image.sizeInBytes() / 1024;
+    QMutexLocker locker(&cache_lock);
+    kept().insert(key, new QImage(image), kib > 0 ? kib : 1);
+    return image;
+}
+
+} // namespace
 
 SoliumIconProvider::SoliumIconProvider() : QQuickImageProvider(QQuickImageProvider::Image) { }
 
@@ -53,10 +85,22 @@ QImage SoliumIconProvider::requestImage(const QString &id, QSize *size,
     }
     const int device_size = wanted_size * wanted_scale;
 
+    const QString key = name + QLatin1Char('@') + QString::number(device_size) + QLatin1Char('x')
+        + QString::number(wanted_scale);
+    {
+        QMutexLocker locker(&cache_lock);
+        if (const QImage *image = kept().object(key)) {
+            if (size != nullptr && !image->isNull()) {
+                *size = image->size();
+            }
+            return *image;
+        }
+    }
+
     const QByteArray utf8_name = name.toUtf8();
     char *path = solium_icon_lookup(utf8_name.constData(), device_size, wanted_scale);
     if (path == nullptr) {
-        return {};
+        return keep(key, {});
     }
     const QString file_path = QString::fromUtf8(path);
     solium_icon_lookup_free(path);
@@ -70,10 +114,10 @@ QImage SoliumIconProvider::requestImage(const QString &id, QSize *size,
     reader.setScaledSize(QSize(device_size, device_size));
     QImage image = reader.read();
     if (image.isNull()) {
-        return {};
+        return keep(key, {});
     }
     if (size != nullptr) {
         *size = image.size();
     }
-    return image;
+    return keep(key, image);
 }
