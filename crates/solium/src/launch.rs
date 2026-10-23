@@ -56,13 +56,35 @@ pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
             .map(|(name, value)| (name, value)),
     );
     // SAFETY: the hook runs in the child, between fork and exec, where only
-    // async-signal-safe calls may be made. It makes one system call, reads
+    // async-signal-safe calls may be made. It makes two system calls, reads
     // errno and allocates nothing.
     #[expect(unsafe_code, reason = "a hook that runs between fork and exec")]
     unsafe {
-        command.pre_exec(close_on_exec_above_stdio);
+        command.pre_exec(|| {
+            close_on_exec_above_stdio()?;
+            own_session()
+        });
     }
     command
+}
+
+/// Lead a session of its own, with no controlling terminal (#311).
+///
+/// A child left in Solium's session keeps Solium's terminal as its own and
+/// stays in Solium's process group: when Solium runs as a background group on
+/// a TTY, a child that touches the terminal (Electron does, starting up) gets
+/// the whole group stopped by SIGTTIN or SIGTTOU, and Solium with it. A
+/// session of its own has no terminal to touch and no group to share:
+/// `tests::a_spawned_program_leads_a_session_of_its_own`.
+fn own_session() -> std::io::Result<()> {
+    // SAFETY: takes no pointers, and changes only this process's session.
+    #[expect(unsafe_code, reason = "calling libc")]
+    let session = unsafe { libc::setsid() };
+    if session == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Mark every descriptor above stdio close-on-exec, in one system call.
@@ -141,8 +163,8 @@ mod tests {
 
     /// `$1` is the directory. `ls` runs in a process of its own and lists the
     /// shell's descriptors, so its own reading of the directory is not among
-    /// them.
-    const SCRIPT: &str = r#"env -0 > "$1/env"; ls /proc/$$/fd > "$1/fd"; : > "$1/done""#;
+    /// them. `session` is the shell's pid and its session's id.
+    const SCRIPT: &str = r#"env -0 > "$1/env"; ls /proc/$$/fd > "$1/fd"; echo "$$ $(cut -d' ' -f6 /proc/$$/stat)" > "$1/session"; : > "$1/done""#;
 
     /// Not a test of its own: the child process the tests below start.
     /// Without `SOLIUM_LAUNCH_CHILD` it does nothing.
@@ -240,6 +262,8 @@ mod tests {
         environment: HashMap<String, String>,
         descriptors: Vec<String>,
         qt: HashMap<String, String>,
+        /// Whether `sh` led a session of its own: its session's id its pid.
+        leads_session: bool,
     }
 
     /// What `sh` was given, in a child compositor playing `role`, for the test
@@ -309,6 +333,11 @@ mod tests {
                 .filter_map(|line| line.split_once('='))
                 .map(|(name, value)| (name.to_owned(), value.to_owned()))
                 .collect(),
+            leads_session: read(&directory.join("session"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair[0] == pair[1]),
         };
         let _ = std::fs::remove_dir_all(&directory);
         given
@@ -316,6 +345,22 @@ mod tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+    }
+
+    /// **A program Solium starts leads a session of its own** (#311), with
+    /// no controlling terminal: nothing it does to a terminal can stop
+    /// Solium. A program started plainly, as the control, stays in its
+    /// parent's.
+    #[test]
+    fn a_spawned_program_leads_a_session_of_its_own() {
+        assert!(
+            started_in("spawn", "session-spawn").leads_session,
+            "a spawned program shares Solium's session"
+        );
+        assert!(
+            !started_in("plain", "session-plain").leads_session,
+            "the premise: a plain child stays in its parent's session"
+        );
     }
 
     /// **A program `sol.spawn` starts gets the environment Solium started
