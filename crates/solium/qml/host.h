@@ -100,6 +100,13 @@ int solium_qml_start_gpu(const char *import_path);
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 void solium_qml_host_next_on(const char *monitor);
 
+/* Whether the next scene hosted on a monitor is one of Solium's own lock's
+ * (#281): it reads the lock's `Lock`, `SecretField` and `SecretKeypad`, and
+ * the session's models empty. Consumed by the next build, whether it
+ * succeeds or not.
+ * `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`. */
+void solium_qml_host_next_for_lock(int lock);
+
 /* Whether the next scene built says how big it is through its root item: the
  * host then never writes the root's width or height, and a root that sets
  * neither takes `width` by `height` logical pixels as its implicit size. 0 for
@@ -494,7 +501,14 @@ void solium_qml_scene_pointer_leave(SoliumQmlScene *scene);
  * `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`. */
 int solium_qml_scene_keypad_at(const SoliumQmlScene *scene, double x, double y);
 
-/* The native lock's state for the `Lock` singleton, `SecretField` and
+/* Whether a point in scene coordinates is within `margin` logical pixels of a
+ * visible `SecretKeypad`: where the pointer's motion is kept from a lock
+ * scene, so not even its way to a key is the scene's.
+ * `lock_auth::tests::the_pointer_near_the_keypad_is_kept_from_the_scene`. */
+int solium_qml_scene_keypad_near(const SoliumQmlScene *scene, double x, double y,
+                                 double margin);
+
+/* The native lock's state for the lock scenes' `Lock`, `SecretField` and
  * `SecretKeypad`, as one JSON object. 0 when Qt has not started.
  * `lock_auth::tests::the_fallback_shows_what_is_typed_as_dots`. */
 int solium_qml_lock_publish(const char *json);

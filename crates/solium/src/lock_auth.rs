@@ -31,11 +31,25 @@
 //! * `failed`: the last check said no. Typing starts again.
 //! * `lockedOut`: `lock.lockout.attempts` noes in a row shut the field for
 //!   `lock.lockout.seconds`, doubling with each lockout up to `max_seconds`.
-//! * `unavailable`: the helper could not answer, whether missing, crashed,
-//!   hung or without its PAM file. The password is kept, in its page, and
-//!   tried again after `lock.retry.seconds`, doubling up to `max_seconds`,
-//!   until an answer comes or the field is cleared. `Lock.message` gives the
-//!   way out from another console.
+//! * `unavailable`: no yes or no could be had. `Lock.message` gives the way
+//!   out from another console. Three ways there:
+//!   * PAM had the password and answered neither yes nor no: it asked for
+//!     more than one password, or ended in a status that is neither
+//!     ([`Outcome::Refused`]). That counts as a wrong attempt, toward the
+//!     lockout as a no does, and the password is wiped: a stack that asks
+//!     twice is not given unlimited guesses, nor the same one again and
+//!     again for pam_faillock to count;
+//!   * the helper could not answer and trying again cannot mend it: there is
+//!     none, it is of another install, or PAM has no `solium` service. The
+//!     password is wiped, and the field takes typing again;
+//!   * it could not answer this time: it crashed or hung. The password is
+//!     kept, in its page, and tried again after `lock.retry.seconds`,
+//!     doubling up to `max_seconds` across checks until an answer comes, at
+//!     most `lock.retry.attempts` times; then it is wiped.
+//!
+//!   `tests::a_refused_check_counts_toward_the_lockout_and_wipes_the_password`,
+//!   `tests::an_unavailable_check_is_retried_at_most_the_settings_times`,
+//!   `tests::a_lasting_cause_wipes_the_password_at_once`.
 //! * `unlocking`: the helper said yes, and Rust unlocked.
 //!
 //! `tests::a_yes_unlocks_and_a_no_counts_an_attempt`,
@@ -77,6 +91,9 @@ pub(crate) struct Settings {
     pub(crate) helper_timeout: Duration,
     /// How soon an unavailable check is tried again: `lock.retry`.
     pub(crate) retry: Backoff,
+    /// How many times it is tried again before the password is wiped:
+    /// `lock.retry.attempts`.
+    pub(crate) retries: u32,
     /// The rows `SecretKeypad` lays out: `lock.keypad`.
     pub(crate) keypad: Keypad,
 }
@@ -91,6 +108,7 @@ impl Default for Settings {
                 seconds: 2,
                 max_seconds: 60,
             },
+            retries: 5,
             keypad: Keypad::Digits,
         }
     }
@@ -504,8 +522,14 @@ pub(crate) struct LockAuth {
     streak: u32,
     /// Lockouts since the lock was taken: what doubles the next one.
     lockouts: u32,
-    /// Unavailable answers in a row: what doubles the next retry.
+    /// Unavailable answers in a row, across checks, until an answer comes:
+    /// what doubles the next retry.
     unanswered: u32,
+    /// Retries of the password kept now.
+    retried: u32,
+    /// Whether the last check was refused, so the wait that follows it ends
+    /// in `unavailable` rather than `failed`.
+    refused: bool,
     /// When the wait under way ends, on the compositor's clock: PAM's delay
     /// while checking, the lockout, or the next retry.
     until: Option<Duration>,
@@ -555,6 +579,8 @@ impl Default for LockAuth {
             streak: 0,
             lockouts: 0,
             unanswered: 0,
+            retried: 0,
+            refused: false,
             until: None,
             check: None,
             serial: 0,
@@ -601,9 +627,14 @@ impl LockAuth {
         self.typed.chars()
     }
 
-    /// Whether typing goes into the field now.
+    /// Whether typing goes into the field now: and while unavailable, once
+    /// no password is kept for a retry.
     pub(crate) fn accepting(&self) -> bool {
-        matches!(self.phase, Phase::Idle | Phase::Prompting | Phase::Failed)
+        match self.phase {
+            Phase::Idle | Phase::Prompting | Phase::Failed => true,
+            Phase::Unavailable => self.submitted.is_empty(),
+            Phase::Checking | Phase::LockedOut | Phase::Unlocking => false,
+        }
     }
 
     /// The lock was taken: a fresh field and fresh counts.
@@ -629,6 +660,8 @@ impl LockAuth {
         self.streak = 0;
         self.lockouts = 0;
         self.unanswered = 0;
+        self.retried = 0;
+        self.refused = false;
         self.until = None;
         self.pad_held = 0;
     }
@@ -720,7 +753,9 @@ impl LockAuth {
             self.phase = Phase::Idle;
             return;
         }
-        self.unanswered = 0;
+        // A new password's retries; the backoff goes on from where the last
+        // check left it, so submitting again does not hurry it.
+        self.retried = 0;
         self.start_check(now);
     }
 
@@ -743,6 +778,7 @@ impl LockAuth {
         if !copied {
             answer(Outcome::Unavailable {
                 reason: "the password could not be copied for the check".to_owned(),
+                lasting: false,
             });
             return;
         }
@@ -784,6 +820,7 @@ impl LockAuth {
                 Outcome::Failed { delay } => {
                     self.submitted.clear();
                     self.unanswered = 0;
+                    self.refused = false;
                     self.attempts = self.attempts.saturating_add(1);
                     self.streak = self.streak.saturating_add(1);
                     // Checking still, through PAM's delay: the answer shows
@@ -794,16 +831,56 @@ impl LockAuth {
                         "the lock's password check said no"
                     );
                 }
-                Outcome::Unavailable { reason } => {
-                    let wait = self.settings.retry.after(self.unanswered);
-                    self.unanswered = self.unanswered.saturating_add(1);
-                    self.phase = Phase::Unavailable;
-                    self.until = Some(now + wait);
+                Outcome::Refused { reason } => {
+                    // PAM had it: a wrong attempt, which the lockout counts,
+                    // and never tried again.
+                    self.submitted.clear();
+                    self.unanswered = 0;
+                    self.refused = true;
+                    self.attempts = self.attempts.saturating_add(1);
+                    self.streak = self.streak.saturating_add(1);
+                    self.until = Some(now);
                     tracing::warn!(
                         reason,
-                        retry_in_s = wait.as_secs(),
-                        "the lock's password could not be checked"
+                        attempts = self.attempts,
+                        "PAM would not say yes or no to the lock's password; it counts as an attempt"
                     );
+                }
+                Outcome::Unavailable {
+                    reason,
+                    lasting: true,
+                } => {
+                    self.submitted.clear();
+                    self.unanswered = 0;
+                    self.phase = Phase::Unavailable;
+                    tracing::error!(
+                        reason,
+                        "the lock's password cannot be checked, and trying again will not mend it"
+                    );
+                }
+                Outcome::Unavailable {
+                    reason,
+                    lasting: false,
+                } => {
+                    self.phase = Phase::Unavailable;
+                    let wait = self.settings.retry.after(self.unanswered);
+                    self.unanswered = self.unanswered.saturating_add(1);
+                    if self.retried < self.settings.retries {
+                        self.retried = self.retried.saturating_add(1);
+                        self.until = Some(now + wait);
+                        tracing::warn!(
+                            reason,
+                            retry_in_s = wait.as_secs(),
+                            "the lock's password could not be checked"
+                        );
+                    } else {
+                        self.submitted.clear();
+                        tracing::error!(
+                            reason,
+                            retries = self.retried,
+                            "the lock's password could not be checked, and is no longer kept"
+                        );
+                    }
                 }
             }
         }
@@ -826,9 +903,12 @@ impl LockAuth {
                         seconds = wait.as_secs(),
                         "too many wrong passwords: the lock's field is shut"
                     );
+                } else if self.refused {
+                    self.phase = Phase::Unavailable;
                 } else {
                     self.phase = Phase::Failed;
                 }
+                self.refused = false;
             }
             Phase::LockedOut => self.phase = Phase::Idle,
             Phase::Unavailable => self.start_check(now),
@@ -849,15 +929,22 @@ impl LockAuth {
         }
     }
 
-    /// The line that goes with the state.
-    fn message(&self) -> String {
+    /// The line that goes with the state. Unavailable, it is the way out
+    /// from another console: logind's `Unlock` while `lock.logind_unlock`
+    /// honours it, and ending the session while it does not.
+    fn message(&self, logind_unlock: bool) -> String {
         match self.phase {
             Phase::Failed => "Wrong password".to_owned(),
             Phase::LockedOut => "Too many attempts".to_owned(),
             Phase::Unavailable => {
-                let command = match std::env::var("XDG_SESSION_ID") {
-                    Ok(id) if !id.is_empty() => format!("loginctl unlock-session {id}"),
-                    _ => "loginctl unlock-sessions".to_owned(),
+                let id = std::env::var("XDG_SESSION_ID")
+                    .ok()
+                    .filter(|id| !id.is_empty());
+                let command = match (logind_unlock, id) {
+                    (true, Some(id)) => format!("loginctl unlock-session {id}"),
+                    (true, None) => "loginctl unlock-sessions".to_owned(),
+                    (false, Some(id)) => format!("loginctl terminate-session {id}"),
+                    (false, None) => "loginctl terminate-user $USER".to_owned(),
                 };
                 format!("From another console: {command}")
             }
@@ -911,7 +998,7 @@ impl LockAuth {
             ("exitMs", number(scene.exit_ms)),
             ("attempts", number(u64::from(self.attempts))),
             ("retryAfter", number(self.retry_after(now))),
-            ("message", text(&self.message())),
+            ("message", text(&self.message(scene.logind_unlock))),
             (
                 "user",
                 object(vec![
@@ -973,6 +1060,8 @@ struct SceneView {
     exit_ms: u64,
     /// The monitor the prompt is on: `Lock.promptOn`.
     prompt_on: String,
+    /// Whether logind's `Unlock` ends the lock: `lock.logind_unlock`.
+    logind_unlock: bool,
 }
 
 /// Overwrite `bytes` with zeros, in writes the compiler keeps.
@@ -1096,6 +1185,7 @@ impl Solium {
             exiting: self.lock.is_none() && self.lock_scenes.exiting(now),
             exit_ms: u64::try_from(exit.as_millis()).unwrap_or(u64::MAX),
             prompt_on: self.lock_prompt_on(),
+            logind_unlock: self.logind.settings().logind_unlock,
         };
         self.lock_auth.view(now, &scene)
     }
@@ -1269,7 +1359,7 @@ mod tests {
         assert!(!auth.settle(s(12)));
         assert_eq!(auth.phase(), Phase::Failed);
         assert_eq!(auth.attempts(), 1);
-        assert_eq!(auth.message(), "Wrong password");
+        assert_eq!(auth.message(true), "Wrong password");
         auth.edit(Edit::Type('a'), s(13));
         assert_eq!((auth.phase(), auth.length()), (Phase::Prompting, 1));
     }
@@ -1343,7 +1433,8 @@ mod tests {
         };
         let (mut first, shared) = auth(settings.clone());
         let unavailable = || Outcome::Unavailable {
-            reason: "no solium-auth".to_owned(),
+            reason: "solium-auth crashed".to_owned(),
+            lasting: false,
         };
         asked(&shared).scripted = [unavailable(), unavailable(), unavailable()].into();
         submit(&mut first, RIGHT, s(0));
@@ -1351,9 +1442,14 @@ mod tests {
         assert_eq!(first.phase(), Phase::Unavailable);
         assert!(!first.accepting());
         assert!(
-            first.message().contains("loginctl unlock-session"),
+            first.message(true).contains("loginctl unlock-session"),
             "no way out: {:?}",
-            first.message()
+            first.message(true)
+        );
+        assert!(
+            first.message(false).contains("loginctl terminate-"),
+            "a way out that `lock.logind_unlock = false` ignores: {:?}",
+            first.message(false)
         );
         let mut now = s(0);
         for wait in [3, 6, 7] {
@@ -1395,6 +1491,141 @@ mod tests {
             "retried after it was cleared"
         );
         assert!(second.accepting());
+    }
+
+    /// **A refused check counts toward the lockout, and wipes the
+    /// password**: PAM asking for a second password is a wrong attempt, the
+    /// field shows `unavailable` with nothing kept and takes typing again,
+    /// nothing is tried again behind the user's back, and two refusals with
+    /// `attempts = 2` shut the field as two noes do.
+    #[test]
+    fn a_refused_check_counts_toward_the_lockout_and_wipes_the_password() {
+        let settings = Settings {
+            lockout: Lockout {
+                attempts: 2,
+                wait: Backoff {
+                    seconds: 30,
+                    max_seconds: 30,
+                },
+            },
+            ..Settings::default()
+        };
+        let (mut auth, shared) = auth(settings);
+        let refused = || Outcome::Refused {
+            reason: "PAM asked for a second password".to_owned(),
+        };
+        asked(&shared).scripted = [refused(), refused()].into();
+        submit(&mut auth, RIGHT, s(0));
+        assert!(!auth.settle(s(0)), "a refusal unlocked");
+        assert_eq!(auth.phase(), Phase::Unavailable);
+        assert_eq!(auth.attempts(), 1, "a refusal is not an attempt");
+        assert_eq!(auth.wiped_for_test(), (true, true), "the password was kept");
+        assert!(auth.accepting(), "the field does not take typing again");
+        auth.settle(s(100));
+        auth.settle(s(100));
+        assert_eq!(
+            asked(&shared).timeouts.len(),
+            1,
+            "retried behind the user's back"
+        );
+
+        submit(&mut auth, RIGHT, s(100));
+        auth.settle(s(100));
+        assert_eq!(auth.attempts(), 2);
+        assert_eq!(
+            auth.phase(),
+            Phase::LockedOut,
+            "two refusals did not shut the field"
+        );
+        assert_eq!(auth.retry_after(s(100)), 30);
+    }
+
+    /// **An unavailable check is tried again at most `retry.attempts`
+    /// times**, then the password is wiped and the field takes typing again;
+    /// and a new submit does not start the backoff over: two retries after
+    /// two and four seconds, a third unavailable wipes the password, and the
+    /// next password's first retry waits sixteen.
+    #[test]
+    fn an_unavailable_check_is_retried_at_most_the_settings_times() {
+        let settings = Settings {
+            retry: Backoff {
+                seconds: 2,
+                max_seconds: 60,
+            },
+            retries: 2,
+            ..Settings::default()
+        };
+        let (mut auth, shared) = auth(settings);
+        let unavailable = || Outcome::Unavailable {
+            reason: "solium-auth crashed".to_owned(),
+            lasting: false,
+        };
+        asked(&shared).scripted = std::iter::repeat_with(unavailable).take(10).collect();
+        submit(&mut auth, RIGHT, s(0));
+        let mut now = s(0);
+        auth.settle(now);
+        for wait in [2, 4] {
+            assert_eq!(auth.phase(), Phase::Unavailable);
+            assert!(
+                !auth.accepting(),
+                "the field took typing over a kept password"
+            );
+            assert_eq!(auth.retry_after(now), wait);
+            now += s(wait);
+            auth.settle(now);
+            auth.settle(now);
+        }
+        assert_eq!(
+            asked(&shared).timeouts.len(),
+            3,
+            "the first check and two retries"
+        );
+        assert_eq!(auth.phase(), Phase::Unavailable);
+        assert_eq!(auth.retry_after(now), 0, "a third retry is waiting");
+        assert_eq!(
+            auth.wiped_for_test(),
+            (true, true),
+            "the password is still kept"
+        );
+        assert!(auth.accepting());
+        auth.settle(now + s(1000));
+        assert_eq!(asked(&shared).timeouts.len(), 3, "retried past the cap");
+        assert_eq!(auth.attempts(), 0, "an unavailable check is no attempt");
+
+        submit(&mut auth, RIGHT, now);
+        auth.settle(now);
+        assert_eq!(
+            auth.retry_after(now),
+            16,
+            "a new submit started the backoff over"
+        );
+    }
+
+    /// **A lasting cause wipes the password at once**: no helper, one of
+    /// another install, no PAM file. Nothing is kept or tried again, and the
+    /// field takes typing, so a PAM file installed meanwhile is used by the
+    /// next submit.
+    #[test]
+    fn a_lasting_cause_wipes_the_password_at_once() {
+        let (mut auth, shared) = auth(Settings::default());
+        asked(&shared).scripted = [Outcome::Unavailable {
+            reason: "no PAM service file for solium".to_owned(),
+            lasting: true,
+        }]
+        .into();
+        submit(&mut auth, RIGHT, s(0));
+        assert!(!auth.settle(s(0)));
+        assert_eq!(auth.phase(), Phase::Unavailable);
+        assert_eq!(auth.wiped_for_test(), (true, true), "the password was kept");
+        assert_eq!(auth.retry_after(s(0)), 0);
+        auth.settle(s(1000));
+        assert_eq!(asked(&shared).timeouts.len(), 1, "tried again");
+        assert!(auth.accepting());
+        type_text(&mut auth, "a", s(1000));
+        assert_eq!(auth.phase(), Phase::Prompting);
+        auth.edit(Edit::Clear, s(1000));
+        submit(&mut auth, RIGHT, s(1000));
+        assert!(auth.settle(s(1000)), "the next submit was not checked");
     }
 
     /// **The secret is zeroed after submit and on unlock**: the field's page
@@ -1810,13 +2041,16 @@ mod tests {
                         if (go === 1) Lock.submit()
                         if (go === 2) {
                             try {
-                                const lock = []
-                                for (const name in Lock) if (typeof Lock[name] !== "function"
-                                    && name !== "objectName") lock.push(name)
-                                root.write(Lock, lock)
+                                // `Lock` is an attached object, reached
+                                // through its name: every property and
+                                // method its type declares, by name.
+                                root.write(Lock, ["state", "attempts", "retryAfter",
+                                    "message", "user", "promptOn", "locked", "exitMs"])
                                 root.write(field, ["length", "selected", "accepting"])
                                 root.write(pad, ["layout", "pressed"])
-                                root.callAll(Lock)
+                                try { Lock.submit("unlock", true) } catch (error) {}
+                                try { Lock.clear("unlock", true) } catch (error) {}
+                                root.calls += 2
                                 root.callAll(field)
                                 root.callAll(pad)
                             } catch (error) {
@@ -2227,28 +2461,47 @@ mod tests {
         });
     }
 
-    /// **A lock scene reads only what a lock may show**: while Solium holds
-    /// the lock, `Solium.status`, `Apps` and `Workspaces` read empty, and the
-    /// monitor and the keyboard still read; at the unlock the rest comes back,
-    /// and at the next lock it goes again.
+    /// A scene hosted on `locked`'s monitor as any `sol.surface` is, not as
+    /// a lock's, from `source`, in the test's directory.
+    fn session_scene(locked: &Locked, source: &str) -> crate::surface::ShellSurface {
+        // A directory of its own: Qt has listed the lock scene's already.
+        let directory = locked.directory.join("session");
+        std::fs::create_dir_all(&directory).expect("a directory for the scene");
+        let path = directory.join("Session.qml");
+        std::fs::write(&path, source).expect("writing the scene");
+        crate::surface::ShellSurface::hosted(path, "{}", &locked.output.name())
+            .expect("the session's scene builds")
+    }
+
+    /// What reads the session's models, in a lock scene and in a desktop
+    /// one alike.
+    const READS_THE_SESSION: &str = r#"import QtQuick
+                import Solium
+                Item {
+                    readonly property string status: Solium.status
+                    readonly property string desktop: Solium.dirs.desktop
+                    readonly property int apps: Apps.count
+                    readonly property int workspaces: Workspaces.count
+                    readonly property int listed: list.count
+                    readonly property int arranged: Object.keys(Workspaces.arrangement).length
+                    readonly property string monitor: Solium.monitor.name
+                    readonly property int layouts: Keyboard.layouts.length
+                    WorkspaceList { id: list }
+                }"#;
+
+    /// **A lock scene reads only what a lock may show, at all times**:
+    /// `Solium.status`, `Apps`, `Workspaces`, a `WorkspaceList` and the
+    /// arrangement read empty in it while Solium holds the lock, and still
+    /// empty once it is unlocked and the scene waits, quiet, for the next
+    /// lock, while a desktop scene beside it reads them all; the monitor and
+    /// the keyboard read in both. While locked, the session's models read
+    /// empty for every scene still drawn, the pointer's among them.
     #[test]
     fn a_lock_scene_reads_only_what_a_lock_may_show() {
         use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
         crate::qml::qt_test::on_the_qt_thread(|| {
-            let mut locked = Locked::new(
-                "redacted",
-                Some(
-                    r#"import QtQuick
-                import Solium
-                Item {
-                    readonly property string status: Solium.status
-                    readonly property int apps: Apps.count
-                    readonly property int workspaces: Workspaces.count
-                    readonly property string monitor: Solium.monitor.name
-                    readonly property int layouts: Keyboard.layouts.length
-                }"#,
-                ),
-            );
+            let mut locked = Locked::new("redacted", Some(READS_THE_SESSION));
+            let mut desktop = session_scene(&locked, READS_THE_SESSION);
             let name = locked.output.name();
             locked.state.status = "a window's secret title".to_owned();
             locked.state.apps_scan_pending = false;
@@ -2287,46 +2540,250 @@ mod tests {
                 }],
                 windows: std::collections::BTreeMap::new(),
             });
-            let read = |locked: &mut Locked| {
-                locked.state.publish_models();
-                let scene = locked.scene();
+            let read = |scene: &mut crate::qml::Scene| {
                 (
                     scene.get_string_for_test("status"),
                     scene.get_int("apps"),
                     scene.get_int("workspaces"),
+                    scene.get_int("listed"),
+                    scene.get_int("arranged"),
                 )
             };
+            let empty = (String::new(), 0, 0, 0, 0);
 
-            let (status, apps, workspaces) = read(&mut locked);
-            assert_eq!(status, "", "`Solium.status` reads at the lock");
+            locked.state.publish_models();
+            assert_eq!(read(locked.scene()), empty, "the lock scene, locked");
             assert_eq!(
-                locked.scene().get_string_for_test("monitor"),
-                name,
-                "the monitor does not read at the lock"
+                read(desktop.scene_for_test()),
+                empty,
+                "a desktop scene, locked"
             );
-            assert!(
-                locked.int("layouts") > 0,
-                "the keyboard does not read at the lock"
-            );
+            for scene in [locked.scene(), desktop.scene_for_test()] {
+                assert_eq!(scene.get_string_for_test("monitor"), name);
+                assert!(scene.get_int("layouts") > 0, "the keyboard does not read");
+            }
 
             locked.state.unlock_natively();
-            let unlocked = read(&mut locked);
+            locked.state.publish_models();
+            let (status, apps, workspaces, listed, arranged) = read(desktop.scene_for_test());
+            assert_eq!(status, "a window's secret title");
+            assert!(apps >= 1 && workspaces >= 2 && listed >= 2 && arranged > 0);
             assert_eq!(
-                unlocked,
-                (
-                    "a window's secret title".to_owned(),
-                    apps + 1,
-                    workspaces + 2
-                ),
-                "the session's data did not come back at the unlock"
+                read(locked.scene()),
+                empty,
+                "the lock scene, kept for the next lock, reads the session"
             );
 
             locked.state.lock_natively();
-            assert_eq!(
-                read(&mut locked),
-                (String::new(), apps, workspaces),
-                "the session's data reads at the next lock"
-            );
+            locked.state.publish_models();
+            assert_eq!(read(locked.scene()), empty, "the lock scene, the next lock");
         });
+    }
+
+    /// **A desktop scene reads nothing of the lock, and cannot submit**:
+    /// with a password being typed at the lock, a scene hosted as any
+    /// `sol.surface` is reads `Lock.state` as `"idle"`, no attempts and no
+    /// user, its `SecretField` reads nothing and its `SecretKeypad` lays out
+    /// no key and hears no press; its `Lock.submit()` and `Lock.clear()` go
+    /// nowhere. The lock's own scene reads it all, and its own `submit()`
+    /// still checks.
+    #[test]
+    fn a_session_scene_reads_nothing_of_the_lock_and_cannot_submit() {
+        const WATCHES: &str = r#"import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    readonly property string phase: Lock.state
+                    readonly property int attempts: Lock.attempts
+                    readonly property string user: (Lock.user && Lock.user.name) || ""
+                    readonly property int length: field.length
+                    readonly property int accepting: field.accepting ? 1 : 0
+                    readonly property int keys: pad.children.length
+                    readonly property string layout: pad.layout
+                    property int keyPresses: 0
+                    property int go: 0
+                    onGoChanged: {
+                        if (go === 1) Lock.clear()
+                        if (go === 2) Lock.submit()
+                    }
+                    SecretField { id: field }
+                    SecretKeypad {
+                        id: pad
+                        width: 300
+                        height: 400
+                        onKeyPressed: root.keyPresses += 1
+                        delegate: Item {}
+                    }
+                }"#;
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::new("session", Some(WATCHES));
+            let mut desktop = session_scene(&locked, WATCHES);
+            keys(&mut locked.state, "wrong");
+            locked.state.publish_models();
+            assert_eq!(
+                locked.int("length"),
+                5,
+                "the premise: the lock scene reads it"
+            );
+            assert_eq!(locked.int("keys"), 12, "the premise: the lock's pad");
+            assert_eq!(locked.scene().get_string_for_test("phase"), "prompting");
+            let desktop_reads = |desktop: &mut crate::surface::ShellSurface| {
+                let scene = desktop.scene_for_test();
+                (
+                    scene.get_string_for_test("phase"),
+                    scene.get_int("attempts"),
+                    scene.get_string_for_test("user"),
+                    scene.get_int("length"),
+                    scene.get_int("accepting"),
+                    scene.get_int("keys"),
+                    scene.get_string_for_test("layout"),
+                )
+            };
+            let nothing = ("idle".to_owned(), 0, String::new(), 0, 0, 0, String::new());
+            assert_eq!(desktop_reads(&mut desktop), nothing);
+
+            // A key on the lock's own pad: its scene hears it, the desktop's
+            // does not.
+            let region = locked.region();
+            crate::synth::send_touch(&mut locked.state, region, (50.0, 50.0), 10);
+            locked.state.publish_models();
+            assert_eq!(locked.int("length"), 6, "the premise: the pad typed");
+            assert_eq!(desktop.scene_for_test().get_int("keyPresses"), 0);
+
+            desktop.scene_for_test().set_int("go", 1);
+            settle(&mut locked.state);
+            desktop.scene_for_test().set_int("go", 2);
+            settle(&mut locked.state);
+            settle(&mut locked.state);
+            assert_eq!(
+                locked.state.lock_auth.length(),
+                6,
+                "the desktop's clear() cleared the password"
+            );
+            assert!(
+                asked(&locked.shared).timeouts.is_empty(),
+                "the desktop's submit() checked it"
+            );
+            assert_eq!(desktop_reads(&mut desktop), nothing);
+
+            locked.scene().set_int("go", 2);
+            settle(&mut locked.state);
+            settle(&mut locked.state);
+            assert_eq!(
+                asked(&locked.shared).timeouts.len(),
+                1,
+                "the lock scene's own submit() checked nothing"
+            );
+            assert!(natively_locked(&locked.state));
+        });
+    }
+
+    /// **The pointer near the keypad is kept from the scene**: within
+    /// `lock.keypad_margin` of the pad, beside it and not on it, the scene
+    /// hears no motion and is told the pointer left; with the margin 0, the
+    /// same point is the scene's again.
+    #[test]
+    fn the_pointer_near_the_keypad_is_kept_from_the_scene() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::new(
+                "margin",
+                Some(
+                    r#"import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property int moves: 0
+                    readonly property int hovered: area.containsMouse ? 1 : 0
+                    MouseArea {
+                        id: area
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onPositionChanged: root.moves += 1
+                    }
+                    SecretKeypad { width: 300; height: 400; delegate: Item {} }
+                }"#,
+                ),
+            );
+            locked.point((600.0, 600.0));
+            locked.point((590.0, 590.0));
+            let moves = locked.int("moves");
+            assert!(moves > 0, "the premise: the scene hears the pointer");
+            assert_eq!(locked.int("hovered"), 1);
+
+            // Twenty pixels right of the pad, inside the default margin.
+            locked.point((320.0, 200.0));
+            locked.point((325.0, 210.0));
+            assert_eq!(
+                locked.int("moves"),
+                moves,
+                "the scene heard the pointer beside the pad"
+            );
+            assert_eq!(locked.int("hovered"), 0, "the scene was not told it left");
+
+            let settings = scene_settings(&locked.state, |settings| settings.keypad_margin = 0);
+            locked.state.lock_scenes.configure(settings);
+            locked.point((320.0, 220.0));
+            locked.point((330.0, 230.0));
+            assert!(
+                locked.int("moves") > moves,
+                "with no margin, the point beside the pad is still kept"
+            );
+            assert_eq!(locked.int("hovered"), 1);
+        });
+    }
+
+    /// **At the native lock a `locked` binding never takes a character**: a
+    /// letter bound with `locked = true`, plain or with Shift, goes into the
+    /// password and its handler does not run; one bound to `super` and a
+    /// letter, which types nothing there, and a media key still fire. All
+    /// four fire while unlocked.
+    #[test]
+    fn at_the_native_lock_a_locked_binding_never_takes_a_character() {
+        const SUPER: u32 = 133;
+        let (_display, mut state, _shared) = solium(0);
+        crate::keyboard_change::tests::configured(
+            &mut state,
+            "lock-auth-bindings",
+            r#"
+                sol.bind("a", function() sol.status("a") end, { locked = true })
+                sol.bind("shift+b", function() sol.status("B") end, { locked = true })
+                sol.bind("super+c", function() sol.status("c") end, { locked = true })
+                sol.bind("XF86AudioMute", function() sol.status("mute") end, { locked = true })
+            "#,
+        );
+        let mute = crate::keymap::keycode_of(&mut state, Keysym::XF86_AudioMute)
+            .expect("us,ru has a mute key")
+            .raw();
+        let fired = |state: &mut Solium, codes: &[u32]| {
+            tap(state, codes);
+            std::mem::take(&mut state.status)
+        };
+        let presses = [
+            vec![code('a')],
+            vec![SHIFT, code('b')],
+            vec![SUPER, code('c')],
+            vec![mute],
+        ];
+        let unlocked: Vec<String> = presses
+            .iter()
+            .map(|codes| fired(&mut state, codes))
+            .collect();
+        assert_eq!(unlocked, ["a", "B", "c", "mute"], "the premise, unlocked");
+
+        state.lock_natively();
+        let at_the_lock: Vec<String> = presses
+            .iter()
+            .map(|codes| fired(&mut state, codes))
+            .collect();
+        assert_eq!(
+            at_the_lock,
+            ["", "", "c", "mute"],
+            "(a, shift+b, super+c, mute) at the native lock"
+        );
+        assert_eq!(
+            state.lock_auth.length(),
+            2,
+            "the letters did not reach the password"
+        );
     }
 }

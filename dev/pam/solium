@@ -1,10 +1,14 @@
 #%PAM-1.0
 # Solium's lock screen. Solium's helper, solium-auth, checks the password a
-# locked session's user types against this service, and nothing else: it only
-# authenticates, so only the auth stack is used. It is the one the console
-# login uses, so the lock accepts exactly what logging in accepts.
+# locked session's user types against this service, and nothing else: it
+# authenticates, then asks whether the account may still come in (expired,
+# locked, outside its hours), so the auth and account stacks are used, and
+# both must be here: an empty account stack refuses everyone. They are the
+# ones the console login uses, so the lock accepts exactly what logging in
+# accepts.
 #
 # Installed as /etc/pam.d/solium: by the Fedora package, by
 # `dev/install.sh --prefix /usr`, or, for an install into your home, by the
 # sudo line dev/install.sh prints. `solium --check` says whether it is there.
 auth       include      login
+account    include      login

@@ -125,22 +125,71 @@ fn open_log() -> Option<std::sync::Arc<std::fs::File>> {
 }
 
 fn start_logging(log: Option<std::sync::Arc<std::fs::File>>) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    use tracing_subscriber::{Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+    let env = std::env::var("RUST_LOG").ok();
     // Escape codes in a redirected log break anything grepping it.
     let ansi = std::io::stderr().is_terminal();
 
     match log {
-        Some(file) => tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr.and(file))
+        Some(file) => tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr.and(file))
+                    .with_filter(log_filter(env.as_deref())),
+            )
             .init(),
-        None => tracing_subscriber::fmt()
-            .with_ansi(ansi)
-            .with_env_filter(filter)
+        None => tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(ansi)
+                    .with_filter(log_filter(env.as_deref())),
+            )
             .init(),
     }
+}
+
+/// Where a log line can name a key: smithay's keyboard, which traces each
+/// keycode and its keysym as it is pressed, and Solium's own key lines.
+const KEY_TARGETS: [&str; 3] = [
+    "smithay::input::keyboard",
+    "smithay::wayland::seat::keyboard",
+    "solium::keys",
+];
+
+/// What the log keeps: `RUST_LOG`'s directives (`env`), `info` without
+/// them, and never anything about keys below `info`, whatever they say. A
+/// password typed at the lock would otherwise be in the log a key at a time
+/// under `RUST_LOG=trace`. Capped twice: a directive per key target, which
+/// replaces one `RUST_LOG` gives for the same target, and a filter beside the
+/// `EnvFilter`, since a directive on a span's fields (`[input]=trace`) can
+/// enable what no static directive does.
+/// `tests::key_tracing_is_capped_at_info_whatever_rust_log_says`.
+fn log_filter<S>(env: Option<&str>) -> impl tracing_subscriber::layer::Filter<S> + use<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use tracing_subscriber::filter::FilterExt as _;
+    let mut filter = env
+        .and_then(|env| tracing_subscriber::EnvFilter::try_new(env).ok())
+        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("info"));
+    for target in KEY_TARGETS {
+        if let Ok(directive) = format!("{target}=info").parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
+    filter.and(tracing_subscriber::filter::filter_fn(|meta| {
+        *meta.level() <= tracing::Level::INFO || !names_keys(meta.target())
+    }))
+}
+
+/// Whether `target` is one of [`KEY_TARGETS`] or inside one.
+fn names_keys(target: &str) -> bool {
+    KEY_TARGETS.iter().any(|keys| {
+        target
+            .strip_prefix(keys)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    })
 }
 
 /// Send panics through the log as well as to stderr.
@@ -250,4 +299,88 @@ fn main() -> Result<std::process::ExitCode> {
         _ => tty::run(session::Place::Console),
     };
     ran.map(|()| std::process::ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
+
+    /// A log written into memory.
+    #[derive(Clone, Default)]
+    struct Written(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Written {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Written {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
+                .into_owned()
+        }
+    }
+
+    /// What the log keeps of a key pressed, as smithay's keyboard traces it,
+    /// and of lines beside it, under `RUST_LOG=env`.
+    fn logged(env: &str) -> String {
+        let written = Written::default();
+        let writer = written.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .with_filter(super::log_filter(Some(env))),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let span =
+                tracing::trace_span!(target: "smithay::input::keyboard", "input", keycode = 38);
+            let _entered = span.enter();
+            tracing::trace!(target: "smithay::input::keyboard", sym = "a", "Calling input filter");
+            tracing::debug!(target: "solium::keys", combo = "a", "key");
+            tracing::info!(target: "smithay::input::keyboard", "keymap loaded");
+            tracing::trace!(target: "solium::render", "a frame");
+            tracing::info!(target: "solium::input", "inside the key's span");
+        });
+        written.text()
+    }
+
+    /// **Key tracing is capped at `info`, whatever `RUST_LOG` says**: under
+    /// `trace`, under a directive naming smithay's keyboard itself, and
+    /// under one on the span's fields, no keysym, no keycode and no combo is
+    /// logged, while an `info` line from the keyboard and a `trace` line from
+    /// elsewhere still are.
+    #[test]
+    fn key_tracing_is_capped_at_info_whatever_rust_log_says() {
+        for env in [
+            "trace",
+            "smithay=trace",
+            "smithay::input::keyboard=trace,solium::keys=trace",
+            "[input]=trace",
+            "smithay::input::keyboard[input]=trace",
+            "[{keycode}]=trace",
+        ] {
+            let log = logged(env);
+            assert!(log.contains("keymap loaded"), "{env}: {log}");
+            for secret in ["Calling input filter", "sym=", "keycode", "combo"] {
+                assert!(!log.contains(secret), "{env}: {secret:?} logged: {log}");
+            }
+        }
+        let log = logged("trace");
+        assert!(
+            log.contains("a frame"),
+            "the premise: trace is on elsewhere: {log}"
+        );
+    }
 }

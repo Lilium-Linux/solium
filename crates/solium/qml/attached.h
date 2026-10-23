@@ -259,11 +259,21 @@ private:
  * `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`. */
 struct SoliumHosting
 {
-    explicit SoliumHosting(QString monitor_name) : monitor(std::move(monitor_name)) {}
+    SoliumHosting(QString monitor_name, bool for_lock)
+        : monitor(std::move(monitor_name)), lock(for_lock)
+    {
+    }
     ~SoliumHosting();
     SoliumHosting(const SoliumHosting &) = delete;
     SoliumHosting &operator=(const SoliumHosting &) = delete;
     QString monitor;
+    /* Whether it is one of Solium's own lock's scenes (#281). Only these read
+     * `Lock`, `SecretField` and `SecretKeypad`, and they read the session's
+     * models empty at all times: what a lock may show, whatever a lock scene
+     * is told while it waits, quiet, for the next lock.
+     * `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`,
+     * `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`. */
+    bool lock = false;
     SoliumSurfaceInfo surface_info;
     /* Every Grab of the scene, active or not.
      * `qml::hosted::tests::a_grab_is_held_while_active_and_dismissed_on_request`. */
@@ -360,7 +370,7 @@ public:
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
     QString status() const;
-    SoliumDirs *dirs() const { return &SoliumDirs::instance(); }
+    SoliumDirs *dirs() const;
     SoliumCursor *cursor();
     /* The object's `Solium.cursor` if anything has made it, else null.
      * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
@@ -405,6 +415,8 @@ public:
  * not hosted on a monitor.
  * `qml::hosted::tests::a_scene_hosted_on_no_monitor_reads_an_absent_monitor`. */
 SoliumHosting *solium_hosting_of(QObject *object);
+/* Whether `object` belongs to one of Solium's own lock's scenes. */
+bool solium_lock_hosted(QObject *object);
 /* Mark `context` as `hosting`'s, so solium_hosting_of finds it from every
  * object created in it or in a context below it.
  * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`. */
@@ -432,5 +444,14 @@ SoliumMonitor *solium_monitor_row(const QString &name);
 /* Register every native type, once, before the engine exists.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 void solium_qml_register_types();
+/* Give `context` the models that differ between a lock scene and every
+ * other: `Windows`, `Workspaces`, `Apps` and `Folder`. The engine's root
+ * context gets the session's (`for_lock` false); a lock scene's own context
+ * gets models that are always empty. They are context properties and not
+ * singletons because a singleton is the same object in every scene of the
+ * one engine. (`Lock` differs too, and is an attached object for it: lock.h.)
+ * `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`,
+ * `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`. */
+void solium_qml_name_scope(QQmlContext *context, bool for_lock);
 
 #endif /* SOLIUM_QML_ATTACHED_H */

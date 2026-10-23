@@ -1,5 +1,7 @@
 #include "lock.h"
 
+#include "attached.h"
+
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QJsonArray>
@@ -16,12 +18,34 @@
 
 void SoliumLock::submit()
 {
-    m_requests |= 1;
+    if (!m_blank) {
+        m_requests |= 1;
+    }
 }
 
 void SoliumLock::clear()
 {
-    m_requests |= 2;
+    if (!m_blank) {
+        m_requests |= 2;
+    }
+}
+
+SoliumLockAttached::SoliumLockAttached(QObject *object)
+    : QObject(object), m_lock(solium_lock_hosted(object) ? solium_lock() : solium_lock_blank())
+{
+    connect(m_lock, &SoliumLock::stateChanged, this, &SoliumLockAttached::stateChanged);
+    connect(m_lock, &SoliumLock::attemptsChanged, this, &SoliumLockAttached::attemptsChanged);
+    connect(m_lock, &SoliumLock::retryAfterChanged, this, &SoliumLockAttached::retryAfterChanged);
+    connect(m_lock, &SoliumLock::messageChanged, this, &SoliumLockAttached::messageChanged);
+    connect(m_lock, &SoliumLock::userChanged, this, &SoliumLockAttached::userChanged);
+    connect(m_lock, &SoliumLock::promptOnChanged, this, &SoliumLockAttached::promptOnChanged);
+    connect(m_lock, &SoliumLock::lockedChanged, this, &SoliumLockAttached::lockedChanged);
+    connect(m_lock, &SoliumLock::exitMsChanged, this, &SoliumLockAttached::exitMsChanged);
+}
+
+SoliumLockAttached *SoliumLockType::qmlAttachedProperties(QObject *object)
+{
+    return new SoliumLockAttached(object);
 }
 
 int SoliumLock::takeRequests()
@@ -149,6 +173,16 @@ SoliumLock *solium_lock()
     return instance;
 }
 
+SoliumLock *solium_lock_blank()
+{
+    static SoliumLock *instance = nullptr;
+    if (instance == nullptr) {
+        instance = new SoliumLock(true);
+        QQmlEngine::setObjectOwnership(instance, QQmlEngine::CppOwnership);
+    }
+    return instance;
+}
+
 SoliumSecretState *solium_secret_state()
 {
     static SoliumSecretState *instance = nullptr;
@@ -158,13 +192,17 @@ SoliumSecretState *solium_secret_state()
     return instance;
 }
 
-SoliumSecretField::SoliumSecretField(QQuickItem *parent) : QQuickItem(parent)
+SoliumSecretField::SoliumSecretField(QQuickItem *parent) : QQuickItem(parent) {}
+
+void SoliumSecretField::componentComplete()
 {
-    SoliumSecretState *state = solium_secret_state();
-    connect(state, &SoliumSecretState::fieldChanged, this, &SoliumSecretField::follow);
-    m_length = state->length;
-    m_selected = state->selected;
-    m_accepting = state->accepting;
+    QQuickItem::componentComplete();
+    if (!solium_lock_hosted(this)) {
+        return;
+    }
+    connect(solium_secret_state(), &SoliumSecretState::fieldChanged, this,
+            &SoliumSecretField::follow);
+    follow();
 }
 
 int SoliumSecretField::length() const
@@ -202,18 +240,7 @@ void SoliumSecretField::follow()
     }
 }
 
-SoliumSecretKeypad::SoliumSecretKeypad(QQuickItem *parent) : QQuickItem(parent)
-{
-    SoliumSecretState *state = solium_secret_state();
-    connect(state, &SoliumSecretState::keypadChanged, this, [this] {
-        emit layoutChanged();
-        if (isComponentComplete()) {
-            rebuild();
-        }
-    });
-    connect(state, &SoliumSecretState::pressedChanged, this, &SoliumSecretKeypad::pressedChanged);
-    connect(state, &SoliumSecretState::keyPressed, this, &SoliumSecretKeypad::keyPressed);
-}
+SoliumSecretKeypad::SoliumSecretKeypad(QQuickItem *parent) : QQuickItem(parent) {}
 
 SoliumSecretKeypad::~SoliumSecretKeypad()
 {
@@ -236,17 +263,29 @@ void SoliumSecretKeypad::setDelegate(QQmlComponent *delegate)
 
 QString SoliumSecretKeypad::layout() const
 {
-    return solium_secret_state()->layout;
+    return m_lock ? solium_secret_state()->layout : QString();
 }
 
 bool SoliumSecretKeypad::pressed() const
 {
-    return solium_secret_state()->pressed;
+    return m_lock && solium_secret_state()->pressed;
 }
 
 void SoliumSecretKeypad::componentComplete()
 {
     QQuickItem::componentComplete();
+    m_lock = solium_lock_hosted(this);
+    if (m_lock) {
+        SoliumSecretState *state = solium_secret_state();
+        connect(state, &SoliumSecretState::keypadChanged, this, [this] {
+            emit layoutChanged();
+            rebuild();
+        });
+        connect(state, &SoliumSecretState::pressedChanged, this,
+                &SoliumSecretKeypad::pressedChanged);
+        connect(state, &SoliumSecretState::keyPressed, this, &SoliumSecretKeypad::keyPressed);
+        emit layoutChanged();
+    }
     rebuild();
 }
 
@@ -280,6 +319,9 @@ void SoliumSecretKeypad::rebuild()
     }
     m_keys.clear();
     m_lengths.clear();
+    if (!m_lock) {
+        return;
+    }
     const SoliumSecretState *state = solium_secret_state();
     for (const QList<SoliumPadKey> &row : state->rows) {
         m_lengths.append(static_cast<int>(row.size()));
@@ -398,6 +440,26 @@ int solium_keypad_at(QQuickItem *root, QPointF at)
     return -1;
 }
 
+bool solium_keypad_near(QQuickItem *root, QPointF at, qreal margin)
+{
+    if (root == nullptr) {
+        return false;
+    }
+    if (auto *pad = qobject_cast<SoliumSecretKeypad *>(root); pad != nullptr && shown(pad)) {
+        const QPointF local = pad->mapFromScene(at);
+        if (local.x() >= -margin && local.y() >= -margin && local.x() < pad->width() + margin
+            && local.y() < pad->height() + margin) {
+            return true;
+        }
+    }
+    for (QQuickItem *child : root->childItems()) {
+        if (solium_keypad_near(child, at, margin)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* What Rust publishes once a frame when it moved: the lock's state, the
  * field and the keypad. 0 when Qt has not started, so it is sent again. */
 extern "C" int solium_qml_lock_publish(const char *json)
@@ -436,7 +498,7 @@ extern "C" const char *solium_qml_lock_api_for_test(const char *which)
     const QMetaObject *meta = nullptr;
     const QByteArray name(which != nullptr ? which : "");
     if (name == "lock") {
-        meta = &SoliumLock::staticMetaObject;
+        meta = &SoliumLockAttached::staticMetaObject;
     } else if (name == "field") {
         meta = &SoliumSecretField::staticMetaObject;
     } else if (name == "keypad") {

@@ -1,5 +1,5 @@
 /*
- * Solium's own lock, as its scenes read it (#281): the `Lock` singleton, and
+ * Solium's own lock, as its scenes read it (#281): the attached `Lock`, and
  * the two native items a lock scene builds its prompt from, `SecretField`
  * (under the shipped `SecretInput`) and `SecretKeypad`.
  *
@@ -15,6 +15,14 @@
  * methods ask Rust to check what was typed, or to clear it, and carry nothing.
  * Only Rust ends the lock, on `solium-auth`'s yes.
  * `lock_auth::tests::nothing_in_qml_can_unlock_or_read_the_secret`.
+ *
+ * **Only the lock's own scenes are told anything.** `Lock` in a lock scene is
+ * the lock's; in any other scene it is a blank one that reads "idle" and
+ * whose requests go nowhere, and a `SecretField` or `SecretKeypad` there reads
+ * nothing, lays out no key and says no key was pressed. So a bar or a widget
+ * on the desktop can neither time the keys typed at the lock nor submit for
+ * the user (attached.h, solium_qml_name_scope).
+ * `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`.
  */
 #ifndef SOLIUM_QML_LOCK_H
 #define SOLIUM_QML_LOCK_H
@@ -26,14 +34,68 @@
 #include <QtCore/QString>
 #include <QtCore/QVariantMap>
 #include <QtQml/QQmlComponent>
+#include <QtQml/qqml.h>
 #include <QtQuick/QQuickItem>
 
 class QJsonObject;
 
-/* `Lock`, in `import Solium`: the native lock's state, its counts, its line
- * of text and whose session it is. Read-only; `submit()` and `clear()` are
- * requests Rust takes once a loop (`solium_qml_lock_take_requests`). */
+/* The native lock's state as Rust publishes it: its counts, its line of
+ * text and whose session it is. Two exist: the lock's, and a blank one never
+ * published to, whose requests are dropped. Neither is given to QML itself:
+ * a scene reads one through `Lock`, below. */
 class SoliumLock : public QObject
+{
+    Q_OBJECT
+public:
+    explicit SoliumLock(bool blank = false) : m_blank(blank) {}
+    QString state() const { return m_state; }
+    int attempts() const { return m_attempts; }
+    int retryAfter() const { return m_retry_after; }
+    QString message() const { return m_message; }
+    QVariantMap user() const { return m_user; }
+    QString promptOn() const { return m_prompt_on; }
+    bool locked() const { return m_locked; }
+    int exitMs() const { return m_exit_ms; }
+
+    /* Ask Rust to check what was typed; dropped by the blank one. */
+    void submit();
+    /* Ask Rust to clear what was typed; dropped by the blank one. */
+    void clear();
+
+    void publish(const QJsonObject &next);
+    /* The requests made since the last call: 1 for submit, 2 for clear. */
+    int takeRequests();
+
+signals:
+    void stateChanged();
+    void attemptsChanged();
+    void retryAfterChanged();
+    void messageChanged();
+    void userChanged();
+    void promptOnChanged();
+    void lockedChanged();
+    void exitMsChanged();
+
+private:
+    QString m_state = QStringLiteral("idle");
+    int m_attempts = 0;
+    int m_retry_after = 0;
+    QString m_message;
+    QVariantMap m_user;
+    QString m_prompt_on;
+    bool m_locked = false;
+    int m_exit_ms = 0;
+    int m_requests = 0;
+    bool m_blank = false;
+};
+
+/* `Lock`, in `import Solium`: an attached object, so `Lock.state` read by an
+ * item is that item's scene's. In a lock scene it is the lock's; in any other
+ * it is the blank one (solium_lock_hosted). Read-only; `submit()` and
+ * `clear()` are requests Rust takes once a loop
+ * (`solium_qml_lock_take_requests`). A scene reacts to it as to any attached
+ * object: `Lock.onStateChanged: ...` on one of its items. */
+class SoliumLockAttached : public QObject
 {
     Q_OBJECT
     /* "idle", "prompting", "checking", "failed", "lockedOut", "unavailable"
@@ -62,25 +124,21 @@ class SoliumLock : public QObject
      * gone, whatever it is doing. */
     Q_PROPERTY(int exitMs READ exitMs NOTIFY exitMsChanged)
 public:
-    using QObject::QObject;
-    QString state() const { return m_state; }
-    int attempts() const { return m_attempts; }
-    int retryAfter() const { return m_retry_after; }
-    QString message() const { return m_message; }
-    QVariantMap user() const { return m_user; }
-    QString promptOn() const { return m_prompt_on; }
-    bool locked() const { return m_locked; }
-    int exitMs() const { return m_exit_ms; }
+    explicit SoliumLockAttached(QObject *object);
+    QString state() const { return m_lock->state(); }
+    int attempts() const { return m_lock->attempts(); }
+    int retryAfter() const { return m_lock->retryAfter(); }
+    QString message() const { return m_lock->message(); }
+    QVariantMap user() const { return m_lock->user(); }
+    QString promptOn() const { return m_lock->promptOn(); }
+    bool locked() const { return m_lock->locked(); }
+    int exitMs() const { return m_lock->exitMs(); }
 
     /* Ask Rust to check what was typed. Carries nothing: there is nothing in
      * Qt to carry. */
-    Q_INVOKABLE void submit();
+    Q_INVOKABLE void submit() { m_lock->submit(); }
     /* Ask Rust to clear what was typed. */
-    Q_INVOKABLE void clear();
-
-    void publish(const QJsonObject &next);
-    /* The requests made since the last call: 1 for submit, 2 for clear. */
-    int takeRequests();
+    Q_INVOKABLE void clear() { m_lock->clear(); }
 
 signals:
     void stateChanged();
@@ -93,15 +151,16 @@ signals:
     void exitMsChanged();
 
 private:
-    QString m_state = QStringLiteral("idle");
-    int m_attempts = 0;
-    int m_retry_after = 0;
-    QString m_message;
-    QVariantMap m_user;
-    QString m_prompt_on;
-    bool m_locked = false;
-    int m_exit_ms = 0;
-    int m_requests = 0;
+    SoliumLock *m_lock;
+};
+
+/* The name `Lock` in QML. It exists only to carry the attached object. */
+class SoliumLockType : public QObject
+{
+    Q_OBJECT
+    QML_ATTACHED(SoliumLockAttached)
+public:
+    static SoliumLockAttached *qmlAttachedProperties(QObject *object);
 };
 
 /* One key of the keypad, as Rust lays it out: what its face says, the
@@ -167,6 +226,10 @@ signals:
     void selectedChanged();
     void acceptingChanged();
 
+protected:
+    /* Follows the field from here on, in a lock scene only. */
+    void componentComplete() override;
+
 private:
     void follow();
     int m_length = 0;
@@ -205,11 +268,14 @@ signals:
     void keyPressed();
 
 protected:
+    /* Follows the keypad from here on, in a lock scene only. */
     void componentComplete() override;
     void geometryChange(const QRectF &next, const QRectF &old) override;
 
 private:
     void rebuild();
+    /* Whether this pad is in a lock scene: decided once, when it is built. */
+    bool m_lock = false;
     void place();
     QRectF cell(int row, int column) const;
     QQmlComponent *m_delegate = nullptr;
@@ -219,10 +285,15 @@ private:
 };
 
 SoliumLock *solium_lock();
+/* The `Lock` every scene but a lock scene reads. */
+SoliumLock *solium_lock_blank();
 SoliumSecretState *solium_secret_state();
 
 /* The keypad key at `at`, in `root`'s scene coordinates, of the first visible
  * and enabled keypad found under `root`, or -1. */
 int solium_keypad_at(QQuickItem *root, QPointF at);
+/* Whether `at`, in `root`'s scene coordinates, is within `margin` of any
+ * visible and enabled keypad under `root`. */
+bool solium_keypad_near(QQuickItem *root, QPointF at, qreal margin);
 
 #endif /* SOLIUM_QML_LOCK_H */

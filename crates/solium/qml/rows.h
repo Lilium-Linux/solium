@@ -17,6 +17,7 @@
 #include <QtCore/QSortFilterProxyModel>
 #include <QtCore/QVariant>
 #include <QtCore/QVector>
+#include <QtQml/QQmlParserStatus>
 
 #include "attached.h"
 
@@ -146,9 +147,10 @@ private:
  * left unset, keeps every window; `sort` is `""`, the order windows opened,
  * or `"mru"`, the most recently focused first (Ruling 18).
  * `qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`. */
-class SoliumWindowList : public QSortFilterProxyModel
+class SoliumWindowList : public QSortFilterProxyModel, public QQmlParserStatus
 {
     Q_OBJECT
+    Q_INTERFACES(QQmlParserStatus)
     Q_PROPERTY(QString monitor READ monitor WRITE setMonitor NOTIFY changed)
     Q_PROPERTY(QString workspace READ workspace WRITE setWorkspace NOTIFY changed)
     Q_PROPERTY(QString app READ app WRITE setApp NOTIFY changed)
@@ -168,6 +170,9 @@ public:
     QString sortBy() const { return m_sort; }
     void setSortBy(const QString &value);
     int count() const { return rowCount(); }
+    /* In a lock scene, a view of the empty `Windows` a lock scene reads. */
+    void classBegin() override;
+    void componentComplete() override {}
 signals:
     void changed();
     void countChanged();
@@ -260,9 +265,10 @@ private:
 /* `WorkspaceList { monitor }`: the workspaces of the group a monitor is in;
  * an empty `monitor` keeps every workspace.
  * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
-class SoliumWorkspaceList : public QSortFilterProxyModel
+class SoliumWorkspaceList : public QSortFilterProxyModel, public QQmlParserStatus
 {
     Q_OBJECT
+    Q_INTERFACES(QQmlParserStatus)
     Q_PROPERTY(QString monitor READ monitor WRITE setMonitor NOTIFY changed)
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 public:
@@ -270,6 +276,9 @@ public:
     QString monitor() const { return m_monitor; }
     void setMonitor(const QString &monitor);
     int count() const { return rowCount(); }
+    /* In a lock scene, a view of the empty `Workspaces` a lock scene reads. */
+    void classBegin() override;
+    void componentComplete() override {}
 signals:
     void changed();
     void countChanged();
@@ -392,5 +401,11 @@ public:
 /* The store for a SOLIUM_QML_ROWS_* number, built on first use.
  * `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`. */
 SoliumRows *solium_rows(int model);
+/* A store of the same kind that nothing is ever published to: what a lock
+ * scene reads for `Windows`, `Workspaces`, `Apps` and `Folder`, so it can
+ * never hold the session's windows, workspaces, apps or files, locked or not.
+ * Null for the monitors, which a lock scene reads as every scene does.
+ * `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`. */
+SoliumRows *solium_rows_redacted(int model);
 
 #endif /* SOLIUM_QML_ROWS_H */

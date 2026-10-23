@@ -115,20 +115,26 @@ impl Solium {
 
     /// The pointer moved to `location` while the session is locked. Solium's
     /// own lock tells the scene under it, or the scene a press went to, as Qt
-    /// does; over a keypad the scene is told the pointer left instead, so not
-    /// even where it hovers is the scene's to know. Nothing, for a lock a
-    /// client holds: smithay gives the pointer to its surfaces.
+    /// does; over a keypad, or within `lock.keypad_margin` of one, the scene
+    /// is told the pointer left instead and nothing more, so neither where it
+    /// hovers nor its way to a key is the scene's to know. Nothing, for a
+    /// lock a client holds: smithay gives the pointer to its surfaces.
     /// `lock_auth::tests::a_press_at_the_native_lock_reaches_its_scene_and_nothing_else`,
-    /// `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`.
+    /// `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`,
+    /// `lock_auth::tests::the_pointer_near_the_keypad_is_kept_from_the_scene`.
     pub(crate) fn lock_scene_motion(&mut self, location: Point<f64, Logical>) {
         if !self.lock.as_ref().is_some_and(crate::lock::Lock::is_native) {
             return;
         }
         let event = crate::input::scene_event(self, crate::qml::hosted::PointerKind::Motion);
         if let Some((monitor, area)) = self.lock_scenes.pointer.held.clone() {
-            self.lock_scenes
-                .pointer_event(&monitor, area, location, &event);
-            self.redraw = true;
+            // A press the scene holds goes on hearing the pointer, but not
+            // across the pad.
+            if !self.lock_scenes.near_keypad(&monitor, area, location) {
+                self.lock_scenes
+                    .pointer_event(&monitor, area, location, &event);
+                self.redraw = true;
+            }
             return;
         }
         if self.lock_scenes.pointer.on_pad {
@@ -150,11 +156,7 @@ impl Solium {
             return;
         };
         self.lock_scenes.pointer.on = Some(monitor.clone());
-        if self
-            .lock_scenes
-            .keypad_at(&monitor, area, location)
-            .is_some()
-        {
+        if self.lock_scenes.near_keypad(&monitor, area, location) {
             if !self.lock_scenes.pointer.hidden {
                 self.lock_scenes.leave(&monitor);
                 self.lock_scenes.pointer.hidden = true;

@@ -322,6 +322,8 @@ local defaults = {
     --   locked      fire at the lock screen as well, as those and the media
     --               keys do. There it may run programs, but nothing it asks of
     --               a window or a workspace, or to end the session, happens.
+    --               At Solium's own lock screen, a key that types a character
+    --               goes into the password instead, whatever is bound to it.
     --
     -- A binding here replaces the shipped one whole, what it asked for
     -- included: a volume key rebound as a string does not repeat.
@@ -777,6 +779,12 @@ local defaults = {
         -- to false only to stop the two overlapping.
         before_sleep = true,
 
+        -- Whether `loginctl unlock-session`, from another console or over
+        -- SSH, ends Solium's own lock screen: the way out when the password
+        -- cannot be checked. false leaves only the password, for a machine
+        -- where whoever can reach logind should not unlock this session.
+        logind_unlock = true,
+
         -- Solium's own lock screen (#281): how it takes and checks a
         -- password. The password goes to `solium-auth`, a small helper that
         -- runs PAM's `solium` service; PAM's own rules (pam_faillock) hold
@@ -799,11 +807,16 @@ local defaults = {
         -- (sssd, LDAP) can take seconds; pam_unix takes a fraction of one.
         helper_timeout_ms = 30000,
 
-        -- When the helper cannot answer at all (it is missing, crashed, or
-        -- PAM has no `solium` service), the password typed is tried again
-        -- after `seconds`, then twice as long each time, up to
-        -- `max_seconds`, until it answers or Escape clears the field.
-        retry = { seconds = 2, max_seconds = 60 },
+        -- When the helper could not answer this time (it crashed, or took
+        -- longer than `helper_timeout_ms`), the password typed is tried
+        -- again after `seconds`, then twice as long each time, up to
+        -- `max_seconds`, at most `attempts` times, until it answers or
+        -- Escape clears the field; then it is wiped and can be typed again.
+        -- When it never can (it is missing, or PAM has no `solium`
+        -- service), the password is wiped at once. When PAM had the password
+        -- and asked for more than it (a one-time code), that counts as a
+        -- wrong password, toward `lockout`.
+        retry = { seconds = 2, max_seconds = 60, attempts = 5 },
 
         -- The passcode pad a lock screen can show (`SecretKeypad`), for a
         -- touchscreen: "digits", a phone's pad; "letters", the same with
@@ -838,6 +851,12 @@ local defaults = {
         -- milliseconds; 0 removes it at once. The desktop has the keyboard
         -- and the pointer from the unlock on, so this is at most 600.
         exit_ms = 250,
+
+        -- How near a passcode pad (`SecretKeypad`), in pixels, the pointer's
+        -- movement is kept from the lock screen, as it is over the pad: the
+        -- way the pointer takes to a key says which key. 0 hides it only over
+        -- the pad itself.
+        keypad_margin = 32,
     },
 
     -- X11 windows that are refused a tile, decoration or bar entry outright

@@ -170,6 +170,9 @@ pub(crate) struct ShellSurface {
     /// for the loading window's scene.
     /// `scripted::tests::a_surface_instance_is_hosted_on_its_monitor`.
     monitor: Option<String>,
+    /// Whether it is one of Solium's own lock's scenes, built and rebuilt
+    /// as one (`qml::Scene::for_lock`).
+    lock: bool,
     newest: Option<SystemTime>,
     checked: Duration,
     /// The last hit asked of the scene.
@@ -227,27 +230,32 @@ impl ShellSurface {
         Self::with_monitor(source, properties, Some(monitor))
     }
 
-    /// [`Self::hosted`], compiled from `text` rather than read from `source`,
-    /// which only names it and is what its relative imports resolve against:
-    /// a scene compiled into the compositor, which loads when nothing on disk
-    /// does. The native lock's fallback is one.
+    /// One of Solium's own lock's scenes, from `source`, on `monitor`
+    /// (`qml::Scene::for_lock`).
+    pub(crate) fn for_lock(source: PathBuf, monitor: &str) -> Result<Self> {
+        qml::start()?;
+        let scene = build(&source, None, "{}", Some(monitor), true, 1, 1)?;
+        let newest = newest_change(&source);
+        let mut surface = Self::around(scene, source, None, "{}", Some(monitor), newest);
+        surface.lock = true;
+        Ok(surface)
+    }
+
+    /// [`Self::for_lock`], compiled from `text` rather than read from
+    /// `source`, which only names it and is what its relative imports resolve
+    /// against: a scene compiled into the compositor, which loads when
+    /// nothing on disk does. The native lock's fallback is one.
     /// `lock_scene::tests::the_fallback_is_compiled_in_and_loads_with_no_file_on_disk`.
-    pub(crate) fn compiled(
+    pub(crate) fn compiled_for_lock(
         source: PathBuf,
         text: &'static str,
-        properties: &str,
         monitor: &str,
     ) -> Result<Self> {
         qml::start()?;
-        let scene = build(&source, Some(text), properties, Some(monitor), 1, 1)?;
-        Ok(Self::around(
-            scene,
-            source,
-            Some(text),
-            properties,
-            Some(monitor),
-            None,
-        ))
+        let scene = build(&source, Some(text), "{}", Some(monitor), true, 1, 1)?;
+        let mut surface = Self::around(scene, source, Some(text), "{}", Some(monitor), None);
+        surface.lock = true;
+        Ok(surface)
     }
 
     fn with_monitor(source: PathBuf, properties: &str, monitor: Option<&str>) -> Result<Self> {
@@ -258,7 +266,7 @@ impl ShellSurface {
         // rather than a scene that does not exist until something asks for a
         // frame. Loading is where a bad QML path is worth reporting, and a
         // surface that has not built anything cannot report it.
-        let scene = build(&source, None, properties, monitor, 1, 1)?;
+        let scene = build(&source, None, properties, monitor, false, 1, 1)?;
         let newest = newest_change(&source);
         Ok(Self::around(
             scene, source, None, properties, monitor, newest,
@@ -293,6 +301,7 @@ impl ShellSurface {
             properties: properties.to_owned(),
             failing: false,
             monitor: monitor.map(str::to_owned),
+            lock: false,
             newest,
             checked: Duration::ZERO,
             hit_cache: std::cell::Cell::new(None),
@@ -372,6 +381,19 @@ impl ShellSurface {
     ) -> Option<usize> {
         let local = location - area.loc.to_f64();
         self.scene.keypad_at(local.x, local.y)
+    }
+
+    /// Whether a point in compositor coordinates is within `margin` of a
+    /// `SecretKeypad` of the scene drawn across `area`.
+    /// `lock_auth::tests::the_pointer_near_the_keypad_is_kept_from_the_scene`.
+    pub(crate) fn near_keypad(
+        &self,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+        margin: f64,
+    ) -> bool {
+        let local = location - area.loc.to_f64();
+        self.scene.keypad_near(local.x, local.y, margin)
     }
 
     /// The pointer left this scene. `qml::hosted::tests::a_left_scene_drops_its_hover`.
@@ -529,6 +551,7 @@ impl ShellSurface {
             None,
             &self.properties,
             self.monitor.as_deref(),
+            self.lock,
             width,
             height,
         ) {
@@ -746,10 +769,14 @@ fn build(
     text: Option<&str>,
     properties: &str,
     monitor: Option<&str>,
+    lock: bool,
     width: i32,
     height: i32,
 ) -> Result<qml::Scene> {
     match (monitor, text) {
+        (Some(monitor), text) if lock => {
+            qml::Scene::for_lock(source, text, width, height, Some(properties), monitor)
+        }
         (Some(monitor), Some(text)) => {
             qml::Scene::for_monitor_from(source, text, width, height, Some(properties), monitor)
         }

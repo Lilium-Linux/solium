@@ -78,6 +78,11 @@ pub(crate) const SHIPPED: &str = "Lock";
 /// fading on `exit` (160 ms) inside it.
 pub(crate) const EXIT_MS: u32 = 250;
 
+/// `lock.keypad_margin`'s default, in logical pixels: about a fingertip, so
+/// the pointer's way to a key is hidden from the scene as well as its path
+/// across the pad.
+pub(crate) const KEYPAD_MARGIN: u32 = 32;
+
 /// The longest `lock.exit_ms` may be. Input is the desktop's from the unlock
 /// on, so the exit is time spent typing into a desktop the lock still covers:
 /// long enough for an iPad's slide on a spring, and no longer than a glance.
@@ -107,6 +112,9 @@ pub(crate) struct Settings {
     /// `lock.exit_ms`: how long the scenes are drawn over the desktop after
     /// the unlock, at most [`EXIT_MAX_MS`].
     pub(crate) exit: Duration,
+    /// `lock.keypad_margin`: how far around a `SecretKeypad`, in logical
+    /// pixels, the pointer's motion is kept from the scene.
+    pub(crate) keypad_margin: u32,
 }
 
 impl Default for Settings {
@@ -116,6 +124,7 @@ impl Default for Settings {
             scene: SHIPPED.to_owned(),
             prompt_on: PromptOn::Pointer,
             exit: Duration::from_millis(u64::from(EXIT_MS)),
+            keypad_margin: KEYPAD_MARGIN,
         }
     }
 }
@@ -392,7 +401,7 @@ impl LockScenes {
                     monitor,
                     "the lock scene is not there; the shipped one stands in"
                 ),
-                Resolved::Own(path) => match ShellSurface::hosted(path.clone(), "{}", monitor) {
+                Resolved::Own(path) => match ShellSurface::for_lock(path.clone(), monitor) {
                     Ok(surface) => {
                         return Some(Instance {
                             surface,
@@ -417,7 +426,7 @@ impl LockScenes {
         }
         if from <= Kind::Shipped {
             if self.shipped.is_file() {
-                match ShellSurface::hosted(self.shipped.clone(), "{}", monitor) {
+                match ShellSurface::for_lock(self.shipped.clone(), monitor) {
                     Ok(surface) => {
                         return Some(Instance {
                             surface,
@@ -594,6 +603,21 @@ impl LockScenes {
         }
     }
 
+    /// Whether `location` on `monitor`'s scene, drawn across `area`, is
+    /// within `lock.keypad_margin` of a shown `SecretKeypad`: where the
+    /// scene is told nothing of the pointer's motion.
+    pub(crate) fn near_keypad(
+        &self,
+        monitor: &str,
+        area: Rectangle<i32, Logical>,
+        location: Point<f64, Logical>,
+    ) -> bool {
+        let margin = f64::from(self.settings.keypad_margin);
+        self.instances
+            .get(monitor)
+            .is_some_and(|instance| instance.surface.near_keypad(area, location, margin))
+    }
+
     /// The `SecretKeypad` key at `location` on `monitor`'s scene, drawn
     /// across `area`.
     pub(crate) fn keypad_at(
@@ -648,7 +672,7 @@ impl LockScenes {
 /// The compiled-in fallback for `monitor`, or `None` and a line in the log
 /// when even that will not load.
 fn fallback(monitor: &str) -> Option<Instance> {
-    match ShellSurface::compiled(fallback_path(), FALLBACK, "{}", monitor) {
+    match ShellSurface::compiled_for_lock(fallback_path(), FALLBACK, monitor) {
         Ok(surface) => Some(Instance {
             surface,
             kind: Kind::Fallback,
@@ -731,7 +755,7 @@ mod tests {
             crate::qml::start().expect("Qt starts");
             let nowhere = PathBuf::from("/nonexistent/solium/qml/lock/Fallback.qml");
             assert!(!nowhere.exists());
-            let built = ShellSurface::compiled(nowhere, FALLBACK, "{}", "fallback-test");
+            let built = ShellSurface::compiled_for_lock(nowhere, FALLBACK, "fallback-test");
             assert!(
                 built.is_ok(),
                 "the compiled-in fallback did not load: {:?}",

@@ -31,6 +31,7 @@ mod ffi {
             json_value: *const c_char,
         ) -> c_int;
         pub(super) fn solium_qml_host_next_on(monitor: *const c_char);
+        pub(super) fn solium_qml_host_next_for_lock(lock: c_int);
         pub(super) fn solium_qml_host_next_from(qml: *const c_char);
         pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_status(text: *const c_char) -> c_int;
@@ -69,6 +70,12 @@ mod ffi {
             scene: *const super::super::ffi::Scene,
             x: f64,
             y: f64,
+        ) -> c_int;
+        pub(super) fn solium_qml_scene_keypad_near(
+            scene: *const super::super::ffi::Scene,
+            x: f64,
+            y: f64,
+            margin: f64,
         ) -> c_int;
         pub(super) fn solium_qml_scene_take_reserve(
             scene: *mut super::super::ffi::Scene,
@@ -208,6 +215,34 @@ impl Scene {
             scene.label(&format!("{}@{monitor}", crate::pacing::label_of(qml_path)));
             scene
         })
+    }
+
+    /// [`Self::for_monitor`], for one of Solium's own lock's scenes (#281):
+    /// the one kind of scene that reads the lock's `Lock`, `SecretField` and
+    /// `SecretKeypad`, and that reads the session's models empty, locked or
+    /// not. `text`, when given, is what it is compiled from, as
+    /// [`Self::for_monitor_from`] has it.
+    /// `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn for_lock(
+        qml_path: &Path,
+        text: Option<&str>,
+        width: i32,
+        height: i32,
+        initial: Option<&str>,
+        monitor: &str,
+    ) -> Result<Self> {
+        // SAFETY: an integer, copied.
+        unsafe { ffi::solium_qml_host_next_for_lock(1) };
+        let built = match text {
+            Some(text) => Self::for_monitor_from(qml_path, text, width, height, initial, monitor),
+            None => Self::for_monitor(qml_path, width, height, initial, monitor),
+        };
+        // Cleared whether or not the scene was built, so no later scene is a
+        // lock's by accident.
+        // SAFETY: an integer, copied.
+        unsafe { ffi::solium_qml_host_next_for_lock(0) };
+        built
     }
 
     /// [`Self::for_monitor`], compiled from `text` rather than read from
@@ -381,6 +416,15 @@ impl Scene {
         // SAFETY: the scene is live for as long as `self`.
         let key = unsafe { ffi::solium_qml_scene_keypad_at(self.scene, x, y) };
         usize::try_from(key).ok()
+    }
+
+    /// Whether a point is within `margin` of a shown `SecretKeypad`: where
+    /// the pointer's motion is kept from a lock scene.
+    /// `lock_auth::tests::the_pointer_near_the_keypad_is_kept_from_the_scene`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn keypad_near(&self, x: f64, y: f64, margin: f64) -> bool {
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_keypad_near(self.scene, x, y, margin) != 0 }
     }
 
     /// The pointer left this scene. `tests::a_left_scene_drops_its_hover`.

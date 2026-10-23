@@ -65,25 +65,22 @@ Item {
         onTriggered: root.now = new Date()
     }
 
-    Connections {
-        target: Lock
-        function onLockedChanged() {
-            if (Lock.locked) {
-                // A new lock: the time now, everything in its place, and no
-                // exit left over from the last one.
-                root.now = new Date()
-                leaving.stop()
-                settling.stop()
-                root.out = 0
-                root.lift = 0
-            }
+    Lock.onLockedChanged: {
+        if (Lock.locked) {
+            // A new lock: the time now, everything in its place, and no exit
+            // left over from the last one.
+            root.now = new Date()
+            leaving.stop()
+            settling.stop()
+            root.out = 0
+            root.lift = 0
         }
-        function onStateChanged() {
-            if (Lock.state === "unlocking") {
-                leaving.restart()
-            } else if (Lock.state === "failed") {
-                shake.restart()
-            }
+    }
+    Lock.onStateChanged: {
+        if (Lock.state === "unlocking") {
+            leaving.restart()
+        } else if (Lock.state === "failed") {
+            shake.restart()
         }
     }
 
@@ -272,7 +269,9 @@ Item {
                             + (seconds < 10 ? "0" : "") + seconds
                     }
                     case "unavailable":
-                        return "Can't check your password right now. Retrying…\n" + Lock.message
+                        return (Lock.retryAfter > 0
+                                ? "Can't check your password right now. Retrying…\n"
+                                : "Can't check your password.\n") + Lock.message
                     default:
                         return ""
                     }

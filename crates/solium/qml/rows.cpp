@@ -309,6 +309,13 @@ SoliumWindowList::SoliumWindowList(QObject *parent) : QSortFilterProxyModel(pare
     QObject::connect(this, &QAbstractItemModel::modelReset, this, &SoliumWindowList::countChanged);
 }
 
+void SoliumWindowList::classBegin()
+{
+    if (solium_lock_hosted(this)) {
+        setSourceModel(solium_rows_redacted(SOLIUM_QML_ROWS_WINDOWS));
+    }
+}
+
 template <typename Change>
 void SoliumWindowList::refilterWith(Change &&change)
 {
@@ -469,6 +476,13 @@ SoliumWorkspaceList::SoliumWorkspaceList(QObject *parent) : QSortFilterProxyMode
                      &SoliumWorkspaceList::countChanged);
 }
 
+void SoliumWorkspaceList::classBegin()
+{
+    if (solium_lock_hosted(this)) {
+        setSourceModel(solium_rows_redacted(SOLIUM_QML_ROWS_WORKSPACES));
+    }
+}
+
 void SoliumWorkspaceList::setMonitor(const QString &monitor)
 {
     if (monitor == m_monitor) {
@@ -494,6 +508,41 @@ bool SoliumWorkspaceList::filterAcceptsRow(int source_row, const QModelIndex &) 
     }
     return m_monitor.isEmpty()
            || rows->rows().at(source_row)->value("monitors").toStringList().contains(m_monitor);
+}
+
+SoliumRows *solium_rows_redacted(int model)
+{
+    static SoliumRows *windows = nullptr;
+    static SoliumRows *workspaces = nullptr;
+    static SoliumRows *apps = nullptr;
+    static SoliumRows *folder = nullptr;
+    if (QCoreApplication::instance() == nullptr) {
+        return nullptr;
+    }
+    switch (model) {
+    case SOLIUM_QML_ROWS_WINDOWS:
+        if (windows == nullptr) {
+            windows = new SoliumWindowRows();
+        }
+        return windows;
+    case SOLIUM_QML_ROWS_WORKSPACES:
+        if (workspaces == nullptr) {
+            workspaces = new SoliumWorkspaceRows();
+        }
+        return workspaces;
+    case SOLIUM_QML_ROWS_APPS:
+        if (apps == nullptr) {
+            apps = new SoliumAppRows();
+        }
+        return apps;
+    case SOLIUM_QML_ROWS_FOLDER:
+        if (folder == nullptr) {
+            folder = new SoliumFolderRows();
+        }
+        return folder;
+    default:
+        return nullptr;
+    }
 }
 
 SoliumRows *solium_rows(int model)

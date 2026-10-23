@@ -289,6 +289,7 @@ fn press(
     //
     // Except a binding that asked to be, with `locked` (#224): the
     // volume, brightness and media keys, which are no way past anything.
+    // At Solium's own lock, only for a key that types no character there.
     // No binding that did not ask fires, and none at all while the
     // keyboard is sealed; and what one that asked does is held to the rule
     // in `script::with_pending`, which refuses whatever it asks of a window.
@@ -307,7 +308,25 @@ fn press(
     // is the last line: it drops the key if the keyboard is on
     // anything the gate would have refused, or held by any grab.
     if locked {
-        if !sealed && let Some(combo) = allowed_by(state, modifiers, &handle, |asked| asked.locked)
+        // Solium's own lock has no surface to forward to: a key is the
+        // password field's, as an edit of the buffer in Rust, and never a
+        // scene's, a client's or a log line's. A key that edits nothing goes
+        // nowhere. `lock_auth::tests::typed_text_never_reaches_the_lock_scene`.
+        let native = state
+            .lock
+            .as_ref()
+            .is_some_and(crate::lock::Lock::is_native);
+        let edit = native
+            .then(|| crate::lock_auth::edit_for(modifiers, &handle))
+            .flatten();
+        // A key that types a character there is the password's, whatever a
+        // binding asked: a `locked` binding on a letter would hand Lua the
+        // password a key at a time.
+        // `lock_auth::tests::at_the_native_lock_a_locked_binding_never_takes_a_character`.
+        let types = matches!(edit, Some(crate::lock_auth::Edit::Type(_)));
+        if !sealed
+            && !types
+            && let Some(combo) = allowed_by(state, modifiers, &handle, |asked| asked.locked)
         {
             return FilterResult::Intercept(Some(Action::Bound {
                 combo,
@@ -317,18 +336,8 @@ fn press(
         if sealed {
             return FilterResult::Intercept(None);
         }
-        // Solium's own lock has no surface to forward to: a key is the
-        // password field's, as an edit of the buffer in Rust, and never a
-        // scene's, a client's or a log line's. A key that edits nothing goes
-        // nowhere. `lock_auth::tests::typed_text_never_reaches_the_lock_scene`.
-        if state
-            .lock
-            .as_ref()
-            .is_some_and(crate::lock::Lock::is_native)
-        {
-            return FilterResult::Intercept(
-                crate::lock_auth::edit_for(modifiers, &handle).map(Action::Secret),
-            );
+        if native {
+            return FilterResult::Intercept(edit.map(Action::Secret));
         }
         return FilterResult::Forward;
     }
@@ -434,11 +443,13 @@ fn press(
     // answered this question on the first hardware run instead of the
     // fourth.
     match &claimed {
-        Some(combo) => tracing::debug!(combo, claimed = true, "key"),
+        Some(combo) => tracing::debug!(target: "solium::keys", combo, claimed = true, "key"),
         None if modifiers.logo => {
             tracing::info!(combo = spelled, or, "no script has bound this");
         }
-        None => tracing::debug!(combo = spelled, or, claimed = false, "key"),
+        None => {
+            tracing::debug!(target: "solium::keys", combo = spelled, or, claimed = false, "key")
+        }
     }
 
     if let Some(combo) = claimed {
