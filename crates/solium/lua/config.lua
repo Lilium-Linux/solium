@@ -377,6 +377,8 @@ local defaults = {
     -- below, and docs/modes.md. Pressed with either half of `us,ru` live:
     -- `the_direction_and_window_keys_fire_while_russian_is_active`.
     --
+    -- `super+ctrl+l` locks the session (`init.lua`), as `lock` below says.
+    --
     --     bindings = {
     --         ["super+ctrl+h"] = function() sol.focus_direction("left") end,
     --     },
@@ -633,6 +635,16 @@ local defaults = {
     -- daemon is needed for the screens to go dark at night.
     idle = {
         -- Seconds without a key, a click, a touch or the pointer moving
+        -- before the session is locked, the way `lock` below says: Solium's
+        -- own lock screen, or your `lock.command`. 0 never does.
+        --
+        -- Five minutes, before the screens go dark, so a machine left alone
+        -- is locked with no daemon to install and the screen that goes dark
+        -- is the lock screen. The same inhibitors as below hold it off: a
+        -- film is not locked half way through.
+        lock_after = 300,
+
+        -- Seconds without a key, a click, a touch or the pointer moving
         -- before every screen is turned off. 0 never does.
         --
         -- Ten minutes: GNOME blanks at five, but dims the screen first and
@@ -643,7 +655,8 @@ local defaults = {
         -- start in the dark. Nothing holds it off behind the lock screen,
         -- which goes dark like anything else.
         --
-        -- Running `swayidle` instead? Set this to 0 and give it the screens:
+        -- Running `swayidle` instead? Set this and `lock_after` to 0 and give
+        -- it the screens:
         --
         --     swayidle -w timeout 300 'swaylock -f' \
         --                 timeout 600 'wlopm --off \*' resume 'wlopm --on \*' \
@@ -742,21 +755,24 @@ local defaults = {
         devices = {},
     },
 
-    -- logind's `Lock` and sleep requests (#153): `loginctl lock-session`, a
-    -- power menu that locks that way, and a lid switch logind handles itself
-    -- all send `Lock`, and this is what runs on it.
+    -- Locking. `loginctl lock-session`, a power menu that locks that way, and
+    -- a lid switch logind handles itself all send logind's `Lock`; that,
+    -- sleep, `idle.lock_after`, `super+ctrl+l` and `sol.lock_now()` all lock
+    -- the session the one way this section says: with Solium's own lock
+    -- screen, unless `command` names a locker of your own.
     lock = {
-        -- The locker: nothing by default, so a machine with none installed
-        -- never has Solium try to run one. Split on whitespace, with no
-        -- quoting, like an autostart Exec= line; it runs as a client of this
-        -- compositor, the same as any other lock screen.
+        -- A locker of your own, run instead of Solium's lock screen: nothing
+        -- by default. Split on whitespace, with no quoting, like an
+        -- autostart Exec= line; it runs as a client of this compositor, the
+        -- same as any other lock screen.
         --
         --     command = "swaylock -f",
         command = nil,
 
-        -- Hold sleep until the locker above has confirmed the lock, or
-        -- logind's own InhibitDelayMaxUSec (five seconds) runs out first --
-        -- so the machine never wakes showing the desktop it was left on.
+        -- Hold sleep until the lock is on every screen, Solium's own or the
+        -- locker's, or logind's own InhibitDelayMaxUSec (five seconds) runs
+        -- out first -- so the machine never wakes showing the desktop it was
+        -- left on.
         -- `swayidle`'s own `before-sleep` keeps working either way; set this
         -- to false only to stop the two overlapping.
         before_sleep = true,

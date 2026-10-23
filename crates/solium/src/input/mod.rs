@@ -2474,6 +2474,44 @@ mod tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
+    /// **The shipped lock key locks the session with Solium's own lock, on
+    /// both halves of `us,ru`, and pressed again at the lock takes no fresh
+    /// one** (#281). The real `init.lua` and the real `sol.lock_now`, so a key
+    /// that fires but locks nothing fails here too. That it does not fire at
+    /// the lock at all is the pinned list in
+    /// `script::shipped::the_held_volume_keys_repeat_and_only_the_laptop_keys_fire_at_the_lock`. `super+l` is still focus-right: the direction
+    /// keys keep it (`the_direction_and_window_keys_fire_while_russian_is_active`).
+    #[test]
+    fn the_lock_key_locks_natively_while_either_layout_is_active() {
+        const CTRL: u32 = 37;
+        const L: u32 = 46;
+
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let script = format!(
+            "package.path = {shipped:?} .. \"/?.lua\"\ndofile({shipped:?} .. \"/init.lua\")\n"
+        );
+        for (name, group) in [("lock-key-latin", 0), ("lock-key-russian", 1)] {
+            with_keyboard(name, "us,ru", group, &script, |state| {
+                assert!(state.lock.is_none(), "group {group}: locked before the key");
+                chord(state, &[SUPER, CTRL, L]);
+                assert!(
+                    state
+                        .lock
+                        .as_ref()
+                        .is_some_and(crate::lock::Lock::is_native),
+                    "group {group}: super+ctrl+l did not lock the session natively"
+                );
+                let frame = state.lock_frame();
+                chord(state, &[SUPER, CTRL, L]);
+                assert_eq!(
+                    state.lock_frame(),
+                    frame,
+                    "group {group}: the lock key at the lock took a fresh lock"
+                );
+            });
+        }
+    }
+
     /// **Every shipped binding fires on both halves of `us,ru`.** #132.
     ///
     /// `letters_fire_while_russian_is_active` asks about chords somebody

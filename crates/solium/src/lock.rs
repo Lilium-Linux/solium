@@ -248,13 +248,6 @@ pub(crate) enum Holder {
     Client(ExtSessionLockV1),
     /// Solium itself, drawing its own lock scene. See "The native holder" in
     /// the module documentation.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the native lock is taken by `sol.lock_now` and logind's `Lock` once #281's wiring lands; until then tests take it, and logind's `Unlock` ends it"
-        )
-    )]
     Native,
 }
 
@@ -309,13 +302,6 @@ impl Lock {
 
     /// A lock Solium holds itself, with nothing on any monitor yet and
     /// `locked` not confirmed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the native lock is taken by `sol.lock_now` and logind's `Lock` once #281's wiring lands; until then tests take it, and logind's `Unlock` ends it"
-        )
-    )]
     fn native() -> Self {
         Self::held_by(Holder::Native, None)
     }
@@ -662,13 +648,6 @@ impl Solium {
     /// abandoned is taken over, as a new lock client may take it over.
     /// `a_native_lock_blanks_every_monitor_and_takes_input_before_any_scene_is_ready`,
     /// `an_abandoned_client_lock_can_be_taken_over_natively`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the native lock is taken by `sol.lock_now` and logind's `Lock` once #281's wiring lands; until then tests take it, and logind's `Unlock` ends it"
-        )
-    )]
     pub(crate) fn lock_natively(&mut self) {
         if let Some(held) = self.lock.as_ref() {
             if !held.abandoned() {

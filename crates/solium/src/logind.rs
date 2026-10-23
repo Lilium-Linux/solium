@@ -13,20 +13,30 @@
 //!
 //! ## What this module does
 //!
-//! On `Lock`, it runs `lock.command` (`sol.lock{ command = "swaylock -f" }`),
-//! unless the session already has a lock object
+//! On `Lock`, it locks the session the way [`Solium::lock_now`](crate::state::Solium::lock_now) does for every
+//! other caller (`sol.lock_now`, the shipped lock key, `idle.lock_after`):
+//! with Solium's own lock while `lock.native` is in effect, which it is
+//! unless `lock.command` names a locker
+//! (`a_lock_signal_locks_natively_unless_a_locker_is_set`), and otherwise by
+//! running `lock.command` (`sol.lock{ command = "swaylock -f" }`), unless the
+//! session already has a lock object
 //! (`a_lock_signal_while_already_locked_runs_nothing`) — running a second
 //! locker would only hear `finished` and exit, see `lock.rs`.
 //!
 //! While `lock.before_sleep` is on (the default), it holds a logind delay
 //! inhibitor for `"sleep"` at every moment the session is unlocked. On
-//! `PrepareForSleep(true)` it runs the locker the same way, and releases the
+//! `PrepareForSleep(true)` it locks the same way, and releases the
 //! inhibitor — which is what lets the machine actually suspend — the moment
-//! [`Solium::confirm_lock`](crate::state::Solium::confirm_lock) reaches the presentation-accurate `locked` event
-//! (`prepare_for_sleep_locks_before_the_inhibitor_is_released`), or when
+//! [`Solium::confirm_lock`](crate::state::Solium::confirm_lock) reaches the presentation-accurate `locked` event,
+//! the same moment for Solium's own lock as for a locker's
+//! (`before_sleep_the_inhibitor_waits_for_the_native_lock_s_locked`,
+//! `prepare_for_sleep_locks_before_the_inhibitor_is_released`), or when
 //! `InhibitDelayMaxUSec` runs out first, so a locker that never locks does not
 //! hold sleep for ever
 //! (`a_locker_that_never_locks_releases_the_inhibitor_on_logind_s_own_timeout`).
+//! With nothing to lock the session at all (`lock.native = false` and no
+//! `lock.command`), it lets go at once
+//! (`with_nothing_to_lock_with_sleep_is_not_held`).
 //! The inhibitor is retaken once the session unlocks again or the machine
 //! wakes, whichever comes first — both are what being unlocked while awake
 //! means, so one hook (`Logind::locked`) covers both.
@@ -42,8 +52,8 @@
 //! `org.freedesktop.login1.Session` — `loginctl`, a greeter — agrees with
 //! Solium about whether it is locked.
 //!
-//! `lock.command` has no default: an empty one changes nothing from before
-//! this module, and a machine without a locker installed should not have
+//! `lock.command` has no default: Solium's own lock is the session's unless
+//! one is named, and a machine without a locker installed should not have
 //! Solium try to run one every time the lid closes. `swayidle`'s own
 //! `before-sleep` keeps working exactly as before — this and it both taking a
 //! delay inhibitor only means the lock screen may be asked for twice, and
@@ -393,15 +403,45 @@ fn should_request_inhibitor_on_configure(
     before_sleep && !had_before_sleep && !held && !locked
 }
 
-/// `Lock`: run the locker unless a client already holds the session's lock.
+/// `Lock`: lock the session, as [`Solium::lock_now`](crate::state::Solium::lock_now) does.
+/// `a_lock_signal_locks_natively_unless_a_locker_is_set`,
 /// `a_lock_signal_runs_the_configured_locker_once`,
 /// `a_lock_signal_while_already_locked_runs_nothing`.
 fn on_lock(state: &mut crate::state::Solium) {
-    if !should_run_locker(state.lock.is_some()) {
-        tracing::info!("logind's Lock signal: the session is already locked");
-        return;
+    tracing::info!("logind's Lock signal");
+    state.lock_now();
+}
+
+impl crate::state::Solium {
+    /// Lock the session the way the configuration says: Solium's own lock
+    /// while `lock.native` is in effect, and otherwise `lock.command`'s
+    /// locker, unless the session already has a lock. The one way to lock
+    /// that logind's `Lock`, the moment before sleep, `idle.lock_after`,
+    /// `sol.lock_now` and the shipped lock key all share.
+    ///
+    /// Only ever locks: over a session already locked, natively or by a
+    /// client, it changes nothing, and nothing here can unlock
+    /// (`no_lua_function_unlocks_a_native_lock`).
+    ///
+    /// Whether a `locked` is still to come from it: a native lock or a lock
+    /// client's that has not shown on every monitor yet, or a locker just
+    /// started. That is what decides whether sleep waits for one.
+    pub(crate) fn lock_now(&mut self) -> bool {
+        let started = if self.lock_scenes.settings().native {
+            self.lock_natively();
+            false
+        } else if should_run_locker(self.lock.is_some()) {
+            run_locker(self)
+        } else {
+            tracing::info!("asked to lock: the session is already locked");
+            false
+        };
+        started
+            || self
+                .lock
+                .as_ref()
+                .is_some_and(|lock| lock.pending() && !lock.abandoned())
     }
-    run_locker(state);
 }
 
 /// `Unlock`: end Solium's own lock, the administrator's way out of it. A
@@ -420,29 +460,30 @@ fn on_unlock(state: &mut crate::state::Solium) {
     }
 }
 
-/// `PrepareForSleep(true)`: run the locker if nothing already has the
-/// session locked, then either bound how long the inhibitor may hold sleep
-/// (a locker is running and may yet confirm it), or let go of it at once —
-/// held or not, there is nothing left to wait for once this returns.
+/// `PrepareForSleep(true)`: lock the session as [`Solium::lock_now`](crate::state::Solium::lock_now) does,
+/// then either bound how long the inhibitor may hold sleep (a `locked` is
+/// still to come, from Solium's own lock or a locker's), or let go of it at
+/// once — held or not, there is nothing left to wait for once this returns.
+/// `before_sleep_the_inhibitor_waits_for_the_native_lock_s_locked`,
 /// `prepare_for_sleep_locks_before_the_inhibitor_is_released`,
-/// `a_locker_that_never_locks_releases_the_inhibitor_on_logind_s_own_timeout`.
+/// `a_locker_that_never_locks_releases_the_inhibitor_on_logind_s_own_timeout`,
+/// `with_nothing_to_lock_with_sleep_is_not_held`.
 fn on_sleep_imminent(state: &mut crate::state::Solium) {
     if !state.logind.settings.before_sleep {
         return;
     }
-    if should_run_locker(state.lock.is_some()) {
-        run_locker(state);
-    }
+    let coming = state.lock_now();
     if state.logind.inhibitor.is_none() {
         return;
     }
-    if state.logind.settings.command.is_none() {
-        // Nothing is going to lock the session: holding sleep off would only
-        // ever end on the timeout, which is the same outcome with a wait in
-        // front of it.
-        state.logind.inhibitor = None;
-    } else {
+    if coming {
         state.logind.release_by = Some(Instant::now() + state.logind.max_delay);
+    } else {
+        // Nothing is going to confirm a lock: the session is locked already,
+        // or nothing is set to lock it. Holding sleep off would only ever end
+        // on the timeout, which is the same outcome with a wait in front of
+        // it.
+        state.logind.inhibitor = None;
     }
 }
 
@@ -466,18 +507,20 @@ fn on_resumed(state: &mut crate::state::Solium) {
 /// Run `lock.command`, split on whitespace with no quoting, as a client of
 /// this compositor's socket — the same environment `Solium::spawn` gives a
 /// program, but without a pane: a locker asks for `ext_session_lock_v1`, never
-/// an `xdg_toplevel`, so there is no window to place or wait for.
-fn run_locker(state: &crate::state::Solium) {
+/// an `xdg_toplevel`, so there is no window to place or wait for. Whether it
+/// started.
+fn run_locker(state: &crate::state::Solium) -> bool {
     let Some(command) = state.logind.settings.command.as_deref() else {
-        tracing::info!(
-            "logind asked Solium to lock the session, but lock.command is not set: nothing runs"
+        tracing::warn!(
+            "asked to lock the session, but lock.native is false and lock.command is not set: \
+             nothing locks it"
         );
-        return;
+        return false;
     };
     let mut parts = command.split_whitespace();
     let Some(program) = parts.next() else {
         tracing::warn!("lock.command is blank; nothing runs");
-        return;
+        return false;
     };
     let args: Vec<&str> = parts.collect();
 
@@ -497,8 +540,14 @@ fn run_locker(state: &crate::state::Solium) {
         }
     }
     match process.spawn() {
-        Ok(_) => tracing::info!(command, "ran the locker (lock.command)"),
-        Err(err) => tracing::warn!(?err, command, "could not start the locker (lock.command)"),
+        Ok(_) => {
+            tracing::info!(command, "ran the locker (lock.command)");
+            true
+        }
+        Err(err) => {
+            tracing::warn!(?err, command, "could not start the locker (lock.command)");
+            false
+        }
     }
 }
 
@@ -1250,12 +1299,58 @@ mod tests {
     /// (`lock`, `socket_name`, `x11_display`) and nothing else. The same
     /// construction `session.rs`'s own
     /// `a_reload_leaves_the_session_as_it_began` uses.
+    ///
+    /// `lock.native` as `sol.lock` leaves it when only `command` is given:
+    /// Solium's own lock unless a locker is named.
     fn solium_with(logind: Logind) -> crate::state::Solium {
+        let native = logind.settings.command.is_none();
+        solium_locking(logind, native)
+    }
+
+    /// [`solium_with`], with `lock.native` as `native` says.
+    fn solium_locking(logind: Logind, native: bool) -> crate::state::Solium {
         let display = smithay::reexports::wayland_server::Display::<crate::state::Solium>::new()
             .expect("a test wayland display");
         let mut state = crate::state::Solium::new(display.handle());
         state.logind = logind;
+        state.lock_scenes.configure(crate::lock_scene::Settings {
+            native,
+            ..crate::lock_scene::Settings::default()
+        });
         state
+    }
+
+    /// A monitor in `state`'s space, which a lock waits for: until it has
+    /// shown a frame built under the lock, `locked` is owed.
+    fn monitor(state: &mut crate::state::Solium) -> smithay::output::Output {
+        use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+        let output = Output::new(
+            "logind-test".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "solium".to_owned(),
+                model: "logind".to_owned(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(Scale::Fractional(1.0)),
+            None,
+        );
+        state.space.map_output(&output, (0, 0));
+        output
+    }
+
+    fn natively_locked(state: &crate::state::Solium) -> bool {
+        state
+            .lock
+            .as_ref()
+            .is_some_and(crate::lock::Lock::is_native)
     }
 
     /// Whether `test` comes true within [`WITHIN`].
@@ -1316,6 +1411,49 @@ mod tests {
             mark.exists()
         });
         assert!(seen, "the locker never ran");
+        assert!(
+            state.lock.is_none(),
+            "Solium's own lock was taken although a locker is named"
+        );
+        let _ = std::fs::remove_file(&mark);
+    }
+
+    /// **`Lock` takes Solium's own lock unless a locker is named**, and with
+    /// `lock.native = true` beside a locker, still Solium's own, the locker
+    /// never run: `native` is what decides, and it only defaults to off when
+    /// `command` is set.
+    #[test]
+    fn a_lock_signal_locks_natively_unless_a_locker_is_set() {
+        let bus = StandIn::new(5_000_000, false);
+        let mut state = solium_with(begin(&bus, None, false));
+        bus.wait_for_subscription(SESSION_INTERFACE, "Lock");
+        bus.send_lock();
+        assert!(
+            soon(|| {
+                settle(&mut state);
+                natively_locked(&state)
+            }),
+            "logind's Lock did not take Solium's own lock"
+        );
+
+        let bus = StandIn::new(5_000_000, false);
+        let mark = marker();
+        let logind = begin(&bus, Some(&format!("touch {}", mark.display())), false);
+        let mut state = solium_locking(logind, true);
+        bus.wait_for_subscription(SESSION_INTERFACE, "Lock");
+        bus.send_lock();
+        assert!(
+            soon(|| {
+                settle(&mut state);
+                natively_locked(&state)
+            }),
+            "`lock.native = true` beside a locker did not lock natively"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !mark.exists(),
+            "the locker ran although Solium's own lock is the session's"
+        );
         let _ = std::fs::remove_file(&mark);
     }
 
@@ -1372,6 +1510,31 @@ mod tests {
             "a Lock sent while AddMatch was still in flight was lost"
         );
         let _ = std::fs::remove_file(&mark);
+    }
+
+    /// A second `Lock` over Solium's own lock changes nothing: the same lock,
+    /// still the one owed to the same monitors, not a fresh one.
+    #[test]
+    fn a_lock_signal_over_a_native_lock_takes_no_second_one() {
+        let bus = StandIn::new(5_000_000, false);
+        let mut state = solium_with(begin(&bus, None, false));
+        let _monitor = monitor(&mut state);
+        state.lock_natively();
+        let frame = state.lock_frame();
+        assert!(frame.is_some(), "the premise: natively locked");
+
+        bus.wait_for_subscription(SESSION_INTERFACE, "Lock");
+        bus.send_lock();
+        assert!(
+            soon(|| !lock(&state.logind.events).is_empty()),
+            "the second Lock was never heard"
+        );
+        settle(&mut state);
+        assert_eq!(
+            state.lock_frame(),
+            frame,
+            "a second Lock replaced the native lock"
+        );
     }
 
     /// `Lock` or sleep must not run a second locker over a session that
@@ -1527,6 +1690,78 @@ mod tests {
             "a PrepareForSleep sent while AddMatch was still in flight was lost"
         );
         let _ = std::fs::remove_file(&mark);
+    }
+
+    /// **Before sleep, with Solium's own lock: the inhibitor is released only
+    /// once the native lock's `locked` is confirmed**, which is every monitor
+    /// having shown a frame built under it, the rule a locker's lock keeps.
+    #[test]
+    fn before_sleep_the_inhibitor_waits_for_the_native_lock_s_locked() {
+        let bus = StandIn::new(5_000_000, false);
+        let mut state = solium_with(begin(&bus, None, true));
+        let monitor = monitor(&mut state);
+        assert!(
+            soon(|| {
+                settle(&mut state);
+                state.logind.holding()
+            }),
+            "the initial inhibitor was never taken"
+        );
+
+        bus.wait_for_subscription(MANAGER_INTERFACE, "PrepareForSleep");
+        bus.send_prepare_for_sleep(true);
+        assert!(
+            soon(|| {
+                settle(&mut state);
+                natively_locked(&state)
+            }),
+            "sleep did not take Solium's own lock"
+        );
+        assert!(
+            state.lock.as_ref().is_some_and(crate::lock::Lock::pending),
+            "the premise: `locked` is owed to the monitor"
+        );
+        settle(&mut state);
+        assert!(
+            state.logind.holding() && bus.inhibitor_held(),
+            "the inhibitor was released before the native lock was confirmed"
+        );
+
+        // The monitor shows a frame built under the lock: `locked`.
+        let frame = state.lock_frame();
+        state.frame_presented(&monitor, frame);
+        assert!(
+            !state.lock.as_ref().is_some_and(crate::lock::Lock::pending),
+            "the native lock was not confirmed"
+        );
+        assert!(
+            soon(|| !bus.inhibitor_held()),
+            "the inhibitor outlived the confirmed native lock"
+        );
+    }
+
+    /// **With nothing to lock the session, sleep is not held**: `lock.native
+    /// = false` and no `lock.command` means nothing will ever confirm a lock,
+    /// so the inhibitor goes at once rather than on logind's timeout.
+    #[test]
+    fn with_nothing_to_lock_with_sleep_is_not_held() {
+        let bus = StandIn::new(5_000_000, false);
+        let mut state = solium_locking(begin(&bus, None, true), false);
+        assert!(soon(|| {
+            settle(&mut state);
+            state.logind.holding()
+        }));
+
+        bus.wait_for_subscription(MANAGER_INTERFACE, "PrepareForSleep");
+        bus.send_prepare_for_sleep(true);
+        assert!(
+            soon(|| {
+                settle(&mut state);
+                !state.logind.holding()
+            }),
+            "sleep was held with nothing to lock the session"
+        );
+        assert!(state.lock.is_none(), "something locked the session");
     }
 
     /// A locker that never locks — nothing ever calls [`Logind::locked`] —

@@ -247,6 +247,15 @@ sol.bind("super+Escape", function()
     sol.take_shortcuts_back()
 end, { note = "shortcuts", inhibited = true })
 
+-- Lock the session, the way `config.lock` says: Solium's own lock screen, or
+-- `lock.command`'s locker. Not `super+l`, which is focus-right with h, j and k
+-- (`direction.lua`), nor `super+Escape` above. Not at the lock itself, which
+-- is locked already; `sol.lock_now` only ever locks.
+-- `input::tests::the_lock_key_locks_natively_while_either_layout_is_active`.
+sol.bind("super+ctrl+l", function()
+    sol.lock_now()
+end, "session")
+
 sol.log("solium configuration loaded")
 
 -- Show or hide the Developer Tweaks panel. Nothing without --debug-mode.
