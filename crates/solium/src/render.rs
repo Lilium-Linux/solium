@@ -508,6 +508,90 @@ pub(crate) fn present_pixels(
     Some((program, uniforms, pixels.names.clone()))
 }
 
+/// The resolutions a warped pane's capture is taken at, as fractions of its
+/// full one at its monitor's scale. A window flying to its icon crosses each
+/// once, so it is captured again only there and at the commits and fades it
+/// would be captured again for anyway, each a fraction of the pixels (#307).
+const CAPTURE_STEPS: [f64; 7] = [1.0, 0.75, 0.5, 0.375, 0.25, 0.1875, 0.125];
+
+/// How much of its full resolution a warped pane's capture needs this pass:
+/// the most its present magnifies any part of it on screen against the
+/// pane's own `outer` size, stepped up to one of [`CAPTURE_STEPS`].
+///
+/// A geometry's grid is measured cell by cell, so a mesh that stretches one
+/// corner keeps the pixels that corner shows; a frame with no grid is
+/// measured by its rectangle; any matrix but the identity keeps the whole
+/// resolution, which a perspective may need anywhere. A pane presented at its
+/// own size is captured whole, as it always was.
+/// `tests::a_pane_drawn_at_a_quarter_is_captured_at_a_quarter`,
+/// `tests::a_grid_that_keeps_one_cell_whole_is_captured_whole`,
+/// `tests::a_tilted_pane_is_captured_whole`.
+pub(crate) fn capture_fraction(
+    frame: &present::Frame,
+    grid: Option<&crate::warp::Grid>,
+    outer: Size<i32, Logical>,
+) -> f64 {
+    if !frame.matrix.is_identity() {
+        return 1.0;
+    }
+    let (w, h) = (f64::from(outer.w.max(1)), f64::from(outer.h.max(1)));
+    let needed = match grid {
+        Some(grid) => grid_magnification(grid, w, h),
+        None => (frame.rect.size.w / w).max(frame.rect.size.h / h),
+    };
+    CAPTURE_STEPS
+        .iter()
+        .rev()
+        .copied()
+        .find(|step| *step >= needed)
+        .unwrap_or(1.0)
+}
+
+/// The most `grid` stretches one of its cells' edges on screen, against what
+/// that edge spans of a `w` x `h` pane. 1.0 for a grid that does not hold the
+/// points its size says, which nothing should make.
+fn grid_magnification(grid: &crate::warp::Grid, w: f64, h: f64) -> f64 {
+    let (cols, rows) = (grid.cols as usize, grid.rows as usize);
+    if cols == 0 || rows == 0 || grid.points.len() != 2 * (cols + 1) * (rows + 1) {
+        return 1.0;
+    }
+    let at = |col: usize, row: usize| {
+        let index = 2 * (row * (cols + 1) + col);
+        (grid.points[index], grid.points[index + 1])
+    };
+    let length = |(ax, ay): (f64, f64), (bx, by): (f64, f64)| (bx - ax).hypot(by - ay);
+    let across = (grid.part.u1 - grid.part.u0) * w / cols as f64;
+    let down = (grid.part.v1 - grid.part.v0) * h / rows as f64;
+    let mut most = 0.0_f64;
+    for row in 0..=rows {
+        for col in 0..=cols {
+            if col < cols && across > 0.0 {
+                most = most.max(length(at(col, row), at(col + 1, row)) / across);
+            }
+            if row < rows && down > 0.0 {
+                most = most.max(length(at(col, row), at(col, row + 1)) / down);
+            }
+        }
+    }
+    most
+}
+
+/// A capture's size at the full resolution it stands for, when it was taken
+/// at `fraction` of it: what a present's pixels are given as the capture's
+/// size (`sol_size`, `sol_box_px`), so a frag's on-screen arithmetic does not
+/// move with the resolution (#307).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a capture's size in pixels is a small integer"
+)]
+fn whole_size(size: Size<i32, Physical>, fraction: f64) -> Size<i32, Physical> {
+    (
+        (f64::from(size.w) / fraction).round() as i32,
+        (f64::from(size.h) / fraction).round() as i32,
+    )
+        .into()
+}
+
 /// What `prepare` does with a pane this pass, before anything is captured.
 /// `state::tests::real_client::a_present_deform_is_a_file`.
 #[derive(Debug)]
@@ -1533,6 +1617,11 @@ impl Phases for Gpu<'_> {
                 continue;
             }
             if let (Route::Warp, Some(program), Some((frame, aimed))) = (routed, program, warp) {
+                // At the resolution its present draws it at, stepped: a window
+                // flying into its icon is not captured at its full size every
+                // time its fade or its commits make the capture stale (#307).
+                let fraction = capture_fraction(&frame, grid.as_ref(), outer.size);
+                let captured_at = scale * fraction;
                 // Its client, or the scene standing in for it, at the frame's
                 // `client_opacity` inside the capture, so a fading client is
                 // captured fading (#296); a window still loading is captured
@@ -1543,7 +1632,7 @@ impl Phases for Gpu<'_> {
                         renderer,
                         pane,
                         window,
-                        scale,
+                        captured_at,
                         slots,
                         frame.client_opacity,
                     ),
@@ -1551,19 +1640,20 @@ impl Phases for Gpu<'_> {
                         state,
                         renderer,
                         pane,
-                        scale,
+                        captured_at,
                         frame.client_opacity,
                     ),
                 };
                 // Its present geometry's pixels over the whole pane, once
-                // they compiled: the warp draws its capture through them.
+                // they compiled: the warp draws its capture through them,
+                // told the size the capture stands for.
                 let pixels = aimed.zip(job.as_ref()).and_then(|(aimed, job)| {
                     present_pixels(
                         state,
                         pane,
                         aimed.effect,
                         crate::warp::UnitRect::WHOLE,
-                        job.size,
+                        whole_size(job.size, fraction),
                     )
                 });
                 // What its mesh and its pixels are drawn from, in global
@@ -1589,14 +1679,20 @@ impl Phases for Gpu<'_> {
                 // popups undeformed, or none of them, the pane's warp kept.
                 let over = match (&captured, job.is_some()) {
                     (Captured::Client(window), true) => {
-                        crate::offscreen::over_job(state, renderer, pane, window, scale)
+                        crate::offscreen::over_job(state, renderer, pane, window, captured_at)
                     }
                     _ => None,
                 };
                 let over = match (over, aimed) {
                     (Some((job, part)), Some(aimed)) => {
                         over_grid(state, pane, &frame, aimed, part, scale).map(|grid| {
-                            let pixels = present_pixels(state, pane, aimed.effect, part, job.size);
+                            let pixels = present_pixels(
+                                state,
+                                pane,
+                                aimed.effect,
+                                part,
+                                whole_size(job.size, fraction),
+                            );
                             (job, part, grid, pixels)
                         })
                     }
@@ -7632,6 +7728,84 @@ pub(crate) mod tests {
         uncovered,
     };
     use crate::qml::qt_test::on_the_qt_thread;
+
+    /// A frame for a `w` x `h` pane, presented at `drawn`.
+    fn presented_at(w: i32, h: i32, drawn: (f64, f64)) -> crate::present::Frame {
+        let mut frame =
+            crate::present::Frame::real(smithay::utils::Rectangle::from_size((w, h).into()));
+        frame.rect.size = drawn.into();
+        frame
+    }
+
+    /// **A pane drawn at a quarter is captured at a quarter** of its full
+    /// resolution (#307), and whole again once drawn whole; a size between two
+    /// steps takes the larger, so nothing it shows is drawn from fewer pixels
+    /// than the screen has for it.
+    #[test]
+    fn a_pane_drawn_at_a_quarter_is_captured_at_a_quarter() {
+        let outer = smithay::utils::Size::from((1600, 900));
+        let fraction =
+            |drawn| super::capture_fraction(&presented_at(1600, 900, drawn), None, outer);
+        assert_eq!(fraction((400.0, 225.0)), 0.25);
+        assert_eq!(fraction((1600.0, 900.0)), 1.0);
+        assert_eq!(fraction((410.0, 120.0)), 0.375, "the larger step");
+        assert_eq!(fraction((20.0, 20.0)), 0.125, "never less than an eighth");
+        assert_eq!(
+            super::whole_size(smithay::utils::Size::from((400, 225)), 0.25),
+            smithay::utils::Size::from((1600, 900)),
+            "a present's pixels are told the size the capture stands for"
+        );
+    }
+
+    /// **A grid that keeps one cell whole is captured whole**: a mesh is
+    /// measured cell by cell, so a part it stretches keeps its pixels even
+    /// when the rest of the pane is drawn small.
+    #[test]
+    fn a_grid_that_keeps_one_cell_whole_is_captured_whole() {
+        let outer = smithay::utils::Size::from((1600, 900));
+        let frame = presented_at(1600, 900, (400.0, 225.0));
+        // Two cells by one over the whole pane: the left squeezed to a
+        // sliver, the right `right` wide against the 800 its half spans.
+        let grid = |right: f64| crate::warp::Grid {
+            cols: 2,
+            rows: 1,
+            part: crate::warp::UnitRect::WHOLE,
+            points: vec![
+                0.0,
+                0.0,
+                10.0,
+                0.0,
+                10.0 + right,
+                0.0,
+                0.0,
+                225.0,
+                10.0,
+                225.0,
+                10.0 + right,
+                225.0,
+            ],
+        };
+        assert_eq!(
+            super::capture_fraction(&frame, Some(&grid(800.0)), outer),
+            1.0
+        );
+        assert_eq!(
+            super::capture_fraction(&frame, Some(&grid(200.0)), outer),
+            0.25
+        );
+    }
+
+    /// **A tilted pane is captured whole**: a perspective may show any part
+    /// of it larger than its rectangle says.
+    #[test]
+    fn a_tilted_pane_is_captured_whole() {
+        let mut frame = presented_at(1600, 900, (400.0, 225.0));
+        frame.matrix = crate::mat4::Mat4::rotate_y(0.3);
+        assert_eq!(
+            super::capture_fraction(&frame, None, smithay::utils::Size::from((1600, 900))),
+            1.0
+        );
+    }
 
     /// **A standing-in scene is laid out at its window's own size**: the
     /// shipped loading scene, told how long it has waited on every frame as
