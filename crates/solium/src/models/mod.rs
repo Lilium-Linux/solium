@@ -258,7 +258,9 @@ fn notifications_state(view: &crate::services::notifications::View) -> String {
             ("name".to_owned(), Json::Text(owner.name.clone())),
             (
                 "pid".to_owned(),
-                owner.pid.map_or(Json::Null, |pid| Json::Number(f64::from(pid))),
+                owner
+                    .pid
+                    .map_or(Json::Null, |pid| Json::Number(f64::from(pid))),
             ),
             ("program".to_owned(), Json::Text(owner.program.clone())),
         ]))

@@ -1488,6 +1488,12 @@ sol._keeps = {}
 ---@type table<function, integer>
 sol._strikes = {}
 
+---Internal: the action functions of `sol.notify`'s own notifications, by the
+---token their command carries, until one runs (#346).
+---@type table<integer, table<string, function>>
+---@private
+sol._notify_actions = {}
+
 ---Internal: the notes `sol.bind` and `sol.unbind` were given, by combination.
 ---@private
 ---@type table<string, string>
