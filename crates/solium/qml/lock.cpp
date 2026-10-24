@@ -40,6 +40,7 @@ SoliumLockAttached::SoliumLockAttached(QObject *object)
     connect(m_lock, &SoliumLock::userChanged, this, &SoliumLockAttached::userChanged);
     connect(m_lock, &SoliumLock::promptOnChanged, this, &SoliumLockAttached::promptOnChanged);
     connect(m_lock, &SoliumLock::lockedChanged, this, &SoliumLockAttached::lockedChanged);
+    connect(m_lock, &SoliumLock::enterMsChanged, this, &SoliumLockAttached::enterMsChanged);
     connect(m_lock, &SoliumLock::exitMsChanged, this, &SoliumLockAttached::exitMsChanged);
 }
 
@@ -64,6 +65,7 @@ void SoliumLock::publish(const QJsonObject &next)
     const QVariantMap user = next.value(QStringLiteral("user")).toObject().toVariantMap();
     const QString prompt_on = next.value(QStringLiteral("promptOn")).toString(m_prompt_on);
     const bool locked = next.value(QStringLiteral("locked")).toBool(m_locked);
+    const int enter_ms = next.value(QStringLiteral("enterMs")).toInt(m_enter_ms);
     const int exit_ms = next.value(QStringLiteral("exitMs")).toInt(m_exit_ms);
 
     const bool state_moved = state != m_state;
@@ -73,6 +75,7 @@ void SoliumLock::publish(const QJsonObject &next)
     const bool user_moved = user != m_user;
     const bool prompt_moved = prompt_on != m_prompt_on;
     const bool locked_moved = locked != m_locked;
+    const bool enter_moved = enter_ms != m_enter_ms;
     const bool exit_moved = exit_ms != m_exit_ms;
     m_state = state;
     m_attempts = attempts;
@@ -81,6 +84,7 @@ void SoliumLock::publish(const QJsonObject &next)
     m_user = user;
     m_prompt_on = prompt_on;
     m_locked = locked;
+    m_enter_ms = enter_ms;
     m_exit_ms = exit_ms;
 
     if (attempts_moved) {
@@ -97,6 +101,9 @@ void SoliumLock::publish(const QJsonObject &next)
     }
     if (prompt_moved) {
         emit promptOnChanged();
+    }
+    if (enter_moved) {
+        emit enterMsChanged();
     }
     if (exit_moved) {
         emit exitMsChanged();

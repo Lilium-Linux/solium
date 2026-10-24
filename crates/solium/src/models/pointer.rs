@@ -6,6 +6,12 @@
 //! (`tests::the_published_pointer_is_its_buttons_its_motion_its_monitor_and_its_size`,
 //! `tests::a_flight_is_published_while_it_flies_and_said_to_have_landed_after`,
 //! `tests::nothing_is_published_with_no_scene`).
+//!
+//! **While Solium's own lock holds the session, no button is held and the
+//! pointer does not move**, as far as the pointer's scene is told: a press,
+//! and the way the pointer goes, are a tap on the passcode pad and the way to
+//! its key (`lock_auth.rs`), which no scene but the compositor may know
+//! (`tests::at_the_native_lock_the_pointer_scene_hears_no_press_and_no_motion`).
 
 use std::collections::BTreeMap;
 
@@ -69,11 +75,21 @@ fn values(state: &mut Solium, previous: &Published) -> (BTreeMap<String, Json>, 
         .or_else(|| previous.get("shape"))
         .unwrap_or_else(|| Json::Text("default".to_owned()));
     let now = state.clock.now();
-    // Read either way, so a movement the flight hid is not told later as
-    // if it were new.
+    // Read either way, so a movement the flight hid, or the lock, is not
+    // told later as if it were new.
     let moved = state.pointer.velocity();
     let flight = state.flight.filter(|flight| !flight.landed(now));
     let velocity = flight.map_or(moved, |flight| flight.velocity(now));
+    // At Solium's own lock: no press and no motion, from its first instant.
+    let blind = state
+        .lock
+        .as_ref()
+        .is_some_and(crate::lock::Lock::is_native);
+    let (pressed, velocity, flight) = if blind {
+        (false, smithay::utils::Point::default(), None)
+    } else {
+        (state.pointer_buttons != 0, velocity, flight)
+    };
     let point = |at: smithay::utils::Point<f64, smithay::utils::Logical>| {
         Json::Object(BTreeMap::from([
             ("x".to_owned(), Json::Number(at.x)),
@@ -96,7 +112,7 @@ fn values(state: &mut Solium, previous: &Published) -> (BTreeMap<String, Json>, 
         .map_or(1.0, |output| output.current_scale().fractional_scale());
     let values = BTreeMap::from([
         ("shape".to_owned(), shape),
-        ("pressed".to_owned(), Json::Bool(state.pointer_buttons != 0)),
+        ("pressed".to_owned(), Json::Bool(pressed)),
         (
             "velocity".to_owned(),
             Json::Object(BTreeMap::from([
@@ -287,6 +303,76 @@ pub(crate) mod tests {
             "(pressed, velocity, scale, size): placed, moving with a button held, then on \
              the 2x monitor after a pause"
         );
+    }
+
+    /// **At Solium's own lock the pointer's scene hears no press and no
+    /// motion**: a button held and the pointer moved while locked publish
+    /// `pressed` false and a still pointer, from the instant of the lock, so
+    /// the scene drawn over the lock cannot tell a tap on the passcode pad or
+    /// the way to its key; the motion is not told after the unlock either.
+    /// Unlocked, the same press and motion are told. Tested with the
+    /// Cyrillic group active (#132).
+    #[test]
+    fn at_the_native_lock_the_pointer_scene_hears_no_press_and_no_motion() {
+        let (_display, mut state) = us_ru(1);
+        monitor(&mut state, "pointer-locked", 0, 1.0);
+        with_a_scene(&mut state, 32);
+        let mut last = Published::default();
+        motion(&mut state, (100.0, 100.0), 1_000_000);
+        publish(&mut state, &mut last, taken);
+        let region = crate::monitor::union(&state.space).expect("a monitor");
+        let read = |batch: &Json| {
+            (
+                value(batch, "pressed").cloned(),
+                value(batch, "velocity").cloned(),
+            )
+        };
+        let still = Some(Json::Object(BTreeMap::from([
+            ("x".to_owned(), Json::Number(0.0)),
+            ("y".to_owned(), Json::Number(0.0)),
+        ])));
+        let _ = sent();
+
+        state.lock_natively();
+        motion(&mut state, (8.0, 0.0), 1_008_000);
+        crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 1_009_000);
+        motion(&mut state, (8.0, -4.0), 1_016_000);
+        state.redraw = false;
+        publish(&mut state, &mut last, taken);
+        let locked: Vec<_> = sent().iter().map(read).collect();
+        assert!(
+            locked.iter().all(
+                |(pressed, velocity)| *pressed == Some(Json::Bool(false)) && *velocity == still
+            ),
+            "(pressed, velocity) told while natively locked: {locked:?}"
+        );
+        assert!(
+            !state.redraw,
+            "a still pointer at the lock asked for a frame"
+        );
+        crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 1_017_000);
+
+        state.unlock_natively();
+        publish(&mut state, &mut last, taken);
+        let after: Vec<_> = sent().iter().map(read).collect();
+        assert!(
+            after.iter().all(|(_, velocity)| *velocity == still),
+            "the motion at the lock was told after the unlock: {after:?}"
+        );
+
+        // The premise: unlocked, the same press and motion are told.
+        motion(&mut state, (8.0, 0.0), 2_008_000);
+        crate::synth::send_button(&mut state, region, 0x110, ButtonState::Pressed, 2_009_000);
+        motion(&mut state, (8.0, -4.0), 2_016_000);
+        publish(&mut state, &mut last, taken);
+        let unlocked: Vec<_> = sent().iter().map(read).collect();
+        assert!(
+            unlocked
+                .iter()
+                .any(|(pressed, velocity)| *pressed == Some(Json::Bool(true)) && *velocity != still),
+            "the premise: unlocked, a press and motion are told: {unlocked:?}"
+        );
+        crate::synth::send_button(&mut state, region, 0x110, ButtonState::Released, 2_017_000);
     }
 
     /// **A flight is published while it flies, and said to have landed

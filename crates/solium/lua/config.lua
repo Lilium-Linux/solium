@@ -848,6 +848,14 @@ local defaults = {
         -- it is shown.
         prompt_on = "pointer",
 
+        -- How long the lock screen takes to come down over the desktop as
+        -- the session locks (`Lock.state` reads "locking"), in
+        -- milliseconds; 0 shows it at once. The keyboard and the pointer
+        -- are the lock's from the first instant, but the desktop is still
+        -- on screen under it until this is up, so this is at most 600. The
+        -- lock taken before sleep never comes down: it is up at once.
+        enter_ms = 350,
+
         -- How long the lock screen stays over the desktop after it unlocks,
         -- playing its exit (`Lock.state` reads "unlocking"), in
         -- milliseconds; 0 removes it at once. The desktop has the keyboard

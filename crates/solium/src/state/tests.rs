@@ -19313,6 +19313,10 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                     session.state.lock_scenes.use_scene(broken);
 
                     session.state.lock_natively();
+                    // The shipped scene that stands in comes down first.
+                    let enter = session.state.lock_scenes.settings().enter;
+                    session.state.clock.advance(enter);
+                    crate::lock_scene::settle(&mut session.state);
                     session.show_all();
                     session.app.pump(&mut session.display, &mut session.state);
 
@@ -19605,6 +19609,191 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                     );
                     assert!(natively_locked(&session));
                 });
+            }
+
+            /// **The entry** (#281): as Solium's own lock is taken its scenes
+            /// come down over the desktop for `lock.enter_ms`, like a sheet.
+            /// The lock is the lock from the first instant all the same.
+            mod entry {
+                use super::*;
+
+                /// A scene that animates nothing, which the entry brings
+                /// down all the same.
+                const STILL: &str = "import QtQuick\nItem {}\n";
+
+                /// A session on `count` monitors with an application holding
+                /// the keyboard, locked natively a moment ago, its scenes
+                /// [`STILL`] and coming down. On the Qt thread, with Qt up.
+                fn locking(name: &str, count: i32) -> Session {
+                    crate::qml::start().expect("Qt starts");
+                    let mut session = Session::with_monitors(count);
+                    session.app.open(&mut session.display, &mut session.state);
+                    assert!(
+                        session.app.client.keyboard_on.is_some(),
+                        "the premise: the application has the keyboard"
+                    );
+                    session.state.lock_scenes.use_scene(scene_file(name, STILL));
+                    session.state.lock_natively();
+                    session.app.pump(&mut session.display, &mut session.state);
+                    assert!(
+                        natively_locked(&session) && session.state.lock_scenes.entry_pending(),
+                        "the premise: the lock is taken, and coming down"
+                    );
+                    session
+                }
+
+                /// Whether a picture of the `index`th monitor drawn now has
+                /// the desktop under its lock scene; a `capture`'s or a
+                /// monitor's.
+                fn desktop(session: &Session, index: usize, capture: bool) -> bool {
+                    let now = session.state.clock.now();
+                    session
+                        .state
+                        .desktop_under_lock(&session.output(index), now, capture)
+                }
+
+                /// The clock `by` on, and the loop's check of the entry.
+                fn advance(session: &mut Session, by: Duration) {
+                    session.state.clock.advance(by);
+                    crate::lock_scene::settle(&mut session.state);
+                }
+
+                fn enter(session: &Session) -> Duration {
+                    session.state.lock_scenes.settings().enter
+                }
+
+                /// **Input is the lock's at the instant it is taken, though
+                /// the desktop is still drawn**: through the entry the
+                /// application has lost the keyboard and a key reaches it
+                /// not, while its window is still on the screen under the
+                /// scene coming down.
+                #[test]
+                fn input_is_the_locks_at_once_though_the_desktop_is_still_drawn() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let mut session = locking("entry-input", 1);
+                        assert!(
+                            desktop(&session, 0, false),
+                            "the desktop is not drawn under the scene coming down"
+                        );
+                        assert!(
+                            session.app.client.keyboard_on.is_none(),
+                            "the application kept the keyboard through the entry"
+                        );
+                        let (app, _) = session.type_key();
+                        assert!(!app, "a key typed during the entry reached the application");
+                        assert_eq!(
+                            session.state.lock_auth.length(),
+                            1,
+                            "a key typed during the entry is not the password's"
+                        );
+                        assert!(
+                            desktop(&session, 0, false),
+                            "the premise: still in the entry"
+                        );
+                    });
+                }
+
+                /// **The desktop is drawn under the scene only during
+                /// `lock.enter_ms`**, on every monitor: not a moment before
+                /// its end is it gone, and from its end it is never drawn
+                /// again. A lock taken at once, as before sleep, never
+                /// draws it.
+                #[test]
+                fn the_desktop_is_drawn_under_the_scene_only_during_enter_ms() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let mut session = locking("entry-window", 2);
+                        let enter = enter(&session);
+                        assert!(desktop(&session, 0, false) && desktop(&session, 1, false));
+                        // Half way, and then past the bound: the clock runs in
+                        // real time too, so not to the millisecond.
+                        advance(&mut session, enter / 2);
+                        assert!(
+                            desktop(&session, 0, false) && desktop(&session, 1, false),
+                            "the desktop went before `enter_ms`"
+                        );
+                        advance(&mut session, enter / 2);
+                        assert!(
+                            !desktop(&session, 0, false) && !desktop(&session, 1, false),
+                            "the desktop outlived the entry"
+                        );
+                        advance(&mut session, enter);
+                        assert!(!desktop(&session, 0, false), "the desktop came back");
+
+                        session.state.unlock_natively();
+                        session.state.lock_natively_at_once();
+                        assert!(natively_locked(&session));
+                        assert!(
+                            !session.state.lock_scenes.entry_pending()
+                                && !desktop(&session, 0, false)
+                                && !desktop(&session, 1, false),
+                            "a lock taken at once drew the desktop"
+                        );
+                    });
+                }
+
+                /// **`locked` is confirmed only after the entry**: every
+                /// monitor showing a frame built during it is not the lock
+                /// on every monitor, nor is one built during it and shown
+                /// after; a frame built after it is.
+                #[test]
+                fn locked_is_confirmed_only_after_the_entry() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let mut session = locking("entry-locked", 1);
+                        session.show_all();
+                        assert!(
+                            owed(&session),
+                            "`locked` with the desktop still under the scene"
+                        );
+                        let during = session.state.lock_frame();
+                        let enter = enter(&session);
+                        advance(&mut session, enter);
+                        assert!(
+                            owed(&session),
+                            "`locked` at the entry's end, before a frame showed the lock"
+                        );
+                        let output = session.output(0);
+                        session.state.frame_presented(&output, during);
+                        assert!(
+                            owed(&session),
+                            "a frame built during the entry and shown after it counted"
+                        );
+                        session.show_all();
+                        assert!(!owed(&session), "`locked` never came after the entry");
+                    });
+                }
+
+                /// **A capture during the entry shows no desktop**: the
+                /// picture a capture would be drawn from has the backdrop
+                /// under the scene from the lock's first instant, and a
+                /// client's capture is refused outright.
+                #[test]
+                fn a_capture_during_the_entry_shows_no_desktop() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let mut session = locking("entry-capture", 1);
+                        assert!(desktop(&session, 0, false), "the premise: the entry");
+                        assert!(
+                            !desktop(&session, 0, true),
+                            "a capture during the entry has the desktop in it"
+                        );
+                        let manager = session
+                            .app
+                            .client
+                            .screencopy
+                            .clone()
+                            .expect("zwlr_screencopy_manager_v1 bound");
+                        let output = session.app.client.output.clone().expect("wl_output bound");
+                        let _during = manager.capture_output(0, &output, &session.app.qh, ());
+                        session.app.pump(&mut session.display, &mut session.state);
+                        assert_eq!(
+                            (
+                                session.app.client.captures_offered,
+                                session.app.client.captures_failed
+                            ),
+                            (0, 1),
+                            "(offered a buffer, refused): a capture asked for during the entry"
+                        );
+                    });
+                }
             }
         }
 

@@ -1138,6 +1138,7 @@ return {
     lock = {
         scene = "Mine",          -- qml/lock/Mine.qml, yours first, then Solium's
         prompt_on = "pointer",   -- or "primary", or a monitor's name
+        enter_ms = 350,          -- the entry over the desktop, at most 600
         exit_ms = 250,           -- the exit over the desktop, at most 600
     },
 }
@@ -1149,8 +1150,10 @@ return {
 The default, `"Lock"`, is the shipped one, `crates/solium/qml/lock/Lock.qml`:
 the date and a big clock over the dimmed wallpaper, the user and the password
 field on one monitor, and on a touchscreen a swipe up that follows the finger
-to bring up a passcode pad. Copy it to `~/.config/solium/qml/lock/Lock.qml`
-and it is the one used.
+to bring up a passcode pad. All of it is one sheet, as on an iPhone or an
+iPad: it comes down from the top over the desktop as the session locks, and
+goes back up and off the top as it unlocks. Copy it to
+`~/.config/solium/qml/lock/Lock.qml` and it is the one used.
 
 `native` says whether Solium's own lock is the session's at all: true unless
 `command` names a locker. While it is, each monitor's scene is built as the
@@ -1171,11 +1174,12 @@ A scene you mend is tried again at the next lock.
 
 A lock scene has the same `import Solium` as any other, and adds:
 
-- `Lock`, read-only, an attached object any item reads: `state` (`"idle"`,
-  `"prompting"`, `"checking"`, `"failed"`, `"lockedOut"`, `"unavailable"`,
-  `"unlocking"`), `locked`, `attempts`, `retryAfter` (seconds, while locked
-  out or retrying), `message`, `user` (`name`, `realName`, `avatar`),
-  `promptOn` (the monitor `prompt_on` names) and `exitMs`. `Lock.submit()`
+- `Lock`, read-only, an attached object any item reads: `state`
+  (`"locking"`, `"idle"`, `"prompting"`, `"checking"`, `"failed"`,
+  `"lockedOut"`, `"unavailable"`, `"unlocking"`), `locked`, `attempts`,
+  `retryAfter` (seconds, while locked out or retrying), `message`, `user`
+  (`name`, `realName`, `avatar`), `promptOn` (the monitor `prompt_on` names),
+  `enterMs` and `exitMs`. `Lock.submit()`
   checks what was typed, as Return does, and `Lock.clear()` empties it, as
   Escape does; both carry nothing. React to it as to any attached object,
   with `Lock.onStateChanged: ...` on one of your items, as the example
@@ -1219,27 +1223,50 @@ at once. Either way the field takes typing again
 (`lock_auth::tests::a_refused_check_counts_toward_the_lockout_and_wipes_the_password`,
 `lock_auth::tests::an_unavailable_check_is_retried_at_most_the_settings_times`).
 
+When the session locks, it is locked at once: the keyboard and the pointer
+are the lock's from that instant, and a screenshot or a recording sees
+nothing of the session from then on
+(`state::tests::real_client::lock_focus::native::entry`). But for `enter_ms`
+the desktop is still drawn under the scene, with `Lock.state` reading
+`"locking"` and `Lock.locked` true, so the scene can come down over it like a
+sheet, or fade in, or anything else that starts transparent. At that bound
+the desktop is gone, whatever the scene is doing
+(`lock_auth::tests::the_entry_is_bounded_even_if_the_scene_never_finishes`),
+and only then is the session counted as locked: `LockedHint`, and the wait
+`before_sleep` holds, follow the first frame that shows the lock whole. What
+is typed during the entry is the password's. The lock taken because the
+machine is about to sleep has no entry, nor does one taken while every
+monitor is off: it is up on its first frame, and an entry under way when
+sleep comes ends there
+(`logind::tests::a_lock_before_sleep_has_no_entry_and_cuts_one_short`). A
+scene that fails during its entry is replaced as above, and the desktop is
+not drawn under the one that stands in for it; nor under the fallback, which
+does not move.
+
 When the password is right, Solium unlocks at once: the keyboard and the
 pointer are the desktop's from that moment. The scene stays over the desktop
-for `exit_ms` more with `Lock.state` reading `"unlocking"`, so it can lift or
-fade itself away, and at that bound it is gone, whatever it is doing
+for `exit_ms` more with `Lock.state` reading `"unlocking"`, so it can slide
+or fade itself away, and at that bound it is gone, whatever it is doing
 (`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`).
 `prompt_on` picks the one monitor whose scene shows the field; the others
 show theirs without it
 (`lock_auth::tests::the_prompt_is_on_the_monitor_prompt_on_names_and_no_other`).
 
 A minimal one: the time, the field on the prompt's monitor, what went wrong,
-and a fade at the unlock.
+and a sheet that comes down as the session locks and goes back up as it
+unlocks.
 
 ```qml
 // ~/.config/solium/qml/lock/Mine.qml
 import QtQuick
 import Solium
 
-Rectangle {
+Item {
     id: root
-    color: "#101014"
     readonly property bool prompt: Lock.promptOn === Solium.monitor.name
+
+    // How far down the sheet is: 0 above the top, 1 covering the screen.
+    property real down: 1
 
     // The time, read each minute while locked, and afresh at every lock.
     property date now: new Date()
@@ -1252,39 +1279,60 @@ Rectangle {
     Lock.onLockedChanged: {
         if (Lock.locked) {
             root.now = new Date()
-            root.opacity = 1
+            slide.stop()
+            root.down = Lock.state === "locking" ? 0 : 1
+            if (Lock.state === "locking")
+                slide.go(1, Lock.enterMs)
         }
     }
     Lock.onStateChanged: {
-        if (Lock.state === "unlocking")
-            fade.restart()
+        if (Lock.state === "unlocking") {
+            slide.go(0, Lock.exitMs)
+        } else if (Lock.locked && Lock.state !== "locking") {
+            // The entry is over, or there was none: down, whatever is left.
+            slide.stop()
+            root.down = 1
+        }
     }
     NumberAnimation {
-        id: fade
-        target: root; property: "opacity"; to: 0
-        duration: Math.min(160, Lock.exitMs)
+        id: slide
+        target: root; property: "down"
+        easing.type: Easing.OutCubic
+        function go(to, ms) {
+            stop()
+            slide.to = to
+            slide.duration = Math.max(1, ms)
+            start()
+        }
     }
 
-    Column {
-        anchors.centerIn: parent
-        spacing: 16
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: Qt.formatTime(root.now, "hh:mm")
-            color: "white"
-            font.pixelSize: 96
-        }
-        SecretInput {
-            anchors.horizontalCenter: parent.horizontalCenter
-            visible: root.prompt
-        }
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            visible: root.prompt
-            color: "#bbbbbb"
-            text: Lock.state === "failed" ? "Wrong password"
-                : Lock.state === "lockedOut" ? "Try again in " + Lock.retryAfter + " s"
-                : Lock.message
+    Rectangle {
+        width: root.width
+        height: root.height
+        y: (root.down - 1) * root.height
+        color: "#101014"
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 16
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: Qt.formatTime(root.now, "hh:mm")
+                color: "white"
+                font.pixelSize: 96
+            }
+            SecretInput {
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: root.prompt
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: root.prompt
+                color: "#bbbbbb"
+                text: Lock.state === "failed" ? "Wrong password"
+                    : Lock.state === "lockedOut" ? "Try again in " + Lock.retryAfter + " s"
+                    : Lock.message
+            }
         }
     }
 }

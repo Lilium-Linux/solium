@@ -170,9 +170,21 @@
 //! engine, built ahead and kept between locks; the shipped scene and then the
 //! compiled-in fallback whenever that scene is missing, would not load, or
 //! fails while it runs: see `lock_scene.rs`. Over a monitor whose scene has
-//! not drawn yet, the backdrop. When it ends, the session is unlocked at once
-//! and its scenes play their exit over the desktop, for `lock.exit_ms` at
-//! most. Touch reaches that scene as Qt touch events and nothing else
+//! not drawn yet, the backdrop.
+//!
+//! **Its entry and its exit.** Taken, it is the lock at once -- input is
+//! taken and nothing of the session can be captured from the first instant
+//! -- but its scenes come down over the desktop for `lock.enter_ms`, reading
+//! `Lock.state` as `"locking"`, and the desktop is still drawn under them for
+//! that long. So a frame built during the entry is not one that shows the
+//! lock: `locked` waits for the entry to end, and then for every monitor to
+//! show a frame built after it ([`Lock::renew`]). Taken before sleep, or with
+//! no monitor lit, it has no entry, and an entry under way when sleep comes
+//! is cut short ([`Solium::lock_natively_at_once`]). When it ends, the
+//! session is unlocked at once and its scenes play their exit over the
+//! desktop, for `lock.exit_ms` at most. See `lock_scene.rs`.
+//!
+//! Touch reaches the lock's scene as Qt touch events and nothing else
 //! (`a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`).
 //!
 //! It is ended only by [`Solium::unlock_natively`], which nothing in Lua, QML
@@ -382,6 +394,15 @@ impl Lock {
             .filter(|surface| surface.alive())
     }
 
+    /// Count nothing shown so far: frames built from here on carry a new
+    /// [`LockFrame`], and `locked` waits for every monitor to show one. For
+    /// the end of a native lock's entry, whose frames had the desktop under
+    /// the scenes and so did not show the lock.
+    fn renew(&mut self) {
+        self.frame = LockFrame(LOCKS.fetch_add(1, Ordering::Relaxed));
+        self.shown.clear();
+    }
+
     /// Drop surfaces whose client has gone, so a dead one is not drawn.
     fn sweep(&mut self) {
         self.surfaces.retain(|(_, surface)| surface.alive());
@@ -434,7 +455,7 @@ impl SessionLockHandler for Solium {
             }
             tracing::warn!("a new lock client took over from one that went without unlocking");
         }
-        self.take_lock(Lock::new(confirmation));
+        self.take_lock(Lock::new(confirmation), false);
     }
 
     /// The holder has unlocked.
@@ -646,9 +667,30 @@ impl Solium {
     /// Nothing if the session is already locked, natively or by a lock client
     /// that is still here: one lock at a time. A client lock that was
     /// abandoned is taken over, as a new lock client may take it over.
+    /// Its scenes come down over the desktop for `lock.enter_ms` first: see
+    /// "Its entry and its exit" in the module documentation.
+    ///
     /// `a_native_lock_blanks_every_monitor_and_takes_input_before_any_scene_is_ready`,
     /// `an_abandoned_client_lock_can_be_taken_over_natively`.
     pub(crate) fn lock_natively(&mut self) {
+        self.lock_natively_with(true);
+    }
+
+    /// Lock as [`Self::lock_natively`] does, with no entry: the lock is fully
+    /// up on the first frame. The lock taken because the machine is about to
+    /// sleep, which must not wait for a sheet to come down. Over an entry
+    /// still playing, that entry ends now.
+    /// `logind::tests::a_lock_before_sleep_has_no_entry_and_cuts_one_short`.
+    pub(crate) fn lock_natively_at_once(&mut self) {
+        if self.lock.as_ref().is_some_and(Lock::is_native) && self.lock_scenes.entry_pending() {
+            tracing::info!("the lock's entry is cut short: it is fully up at once");
+            self.end_lock_entry();
+            return;
+        }
+        self.lock_natively_with(false);
+    }
+
+    fn lock_natively_with(&mut self, entry: bool) {
         if let Some(held) = self.lock.as_ref() {
             if !held.abandoned() {
                 tracing::info!(
@@ -661,7 +703,7 @@ impl Solium {
                 "Solium's own lock took over from a lock client that went without unlocking"
             );
         }
-        self.take_lock(Lock::native());
+        self.take_lock(Lock::native(), entry);
     }
 
     /// End a native lock. Nothing for a lock a client holds, which only that
@@ -685,8 +727,9 @@ impl Solium {
     }
 
     /// Take the session lock as `lock`, whoever holds it: the half of locking
-    /// a client and Solium share.
-    fn take_lock(&mut self, lock: Lock) {
+    /// a client and Solium share. `entry`: whether a native lock's scenes
+    /// come down over the desktop first.
+    fn take_lock(&mut self, lock: Lock, entry: bool) {
         let native = lock.is_native();
         self.lock = Some(lock);
         // An unlock still waiting for its key to come up is moot now.
@@ -716,6 +759,20 @@ impl Solium {
         // quiet behind a client's lock.
         self.lock_scenes.end_exit();
         self.lock_scenes.pointer = crate::lock_scene::LockPointer::default();
+        // The entry, on the monitors that are lit: a dark one shows nothing
+        // to come down over.
+        if native && entry {
+            let now = self.clock.now();
+            let lit: Vec<String> = self
+                .space
+                .outputs()
+                .filter(|output| !self.power.is_dark(output))
+                .map(Output::name)
+                .collect();
+            self.lock_scenes.begin_entry(now, lit);
+        } else {
+            self.lock_scenes.end_entry();
+        }
         // And `Lock` says so before any scene is shown or built: locked, with
         // a fresh field, rather than whatever it said last, so a scene runs
         // its Timers from the first locked frame and draws no dots left over
@@ -727,6 +784,31 @@ impl Solium {
         // the session's open: each monitor's scene, built ahead and shown
         // now, or one down its chain (`lock_scene.rs`).
         self.sync_lock_scenes();
+        // The entry plays only where a scene came down: the fallback stays
+        // still and covers at once, and so does the backdrop. And `Lock`
+        // says so if it went.
+        if native {
+            self.lock_scenes.keep_entry_where_scenes_are();
+            if crate::scripted::builds_here() {
+                crate::lock_auth::publish(self);
+            }
+        }
+        self.confirm_lock();
+    }
+
+    /// The native lock's entry is over, at its bound or cut short: the
+    /// backdrop is under every scene from the next frame, which is the first
+    /// that shows the lock, so `locked` is waited for from that one on.
+    pub(crate) fn end_lock_entry(&mut self) {
+        self.lock_scenes.end_entry();
+        if let Some(lock) = self.lock.as_mut()
+            && lock.is_native()
+        {
+            lock.renew();
+            tracing::debug!("the lock's entry is over: `locked` waits for frames built from now");
+        }
+        self.redraw = true;
+        self.lock_auth_changed();
         self.confirm_lock();
     }
 
@@ -837,6 +919,12 @@ impl Solium {
             return;
         };
         if !lock.owed || lock.abandoned() {
+            return;
+        }
+        // A native lock's entry has the desktop under its scenes: no frame
+        // built during it shows the lock (`end_lock_entry`).
+        if lock.is_native() && self.lock_scenes.entry_pending() {
+            tracing::debug!("`locked` waits for the lock's entry to end");
             return;
         }
         let waiting: Vec<String> = self

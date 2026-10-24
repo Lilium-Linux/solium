@@ -30,6 +30,21 @@
 //! again from that one when the lock ends, so a scene that has been mended is
 //! the next lock's.
 //!
+//! **The entry.** When Solium's own lock is taken, the session is locked at
+//! once: input is the lock's, and a capture sees nothing of the session. The
+//! scenes are live from that instant and read `Lock.state` as `"locking"`
+//! for `lock.enter_ms`, so a scene can come down over the desktop like a
+//! sheet; and for that long only, the desktop is still drawn under the
+//! scenes on the monitors that were lit when the lock was taken and show a
+//! scene that is not the fallback. At the bound the entry is over whatever
+//! the scene is doing: the backdrop is under every scene, and only from then
+//! on is a monitor's frame one that shows the lock, so `locked` (logind's
+//! `LockedHint`, and the inhibitor held for sleep) waits for the entry. A
+//! scene that fails during the entry is swapped down the chain with the
+//! backdrop under its stand-in at once, and the lock taken before sleep, or
+//! with no monitor lit, has no entry at all
+//! (`state::tests::real_client::lock_focus::native::entry`).
+//!
 //! **The exit.** When Solium's own lock ends, the session is unlocked at once:
 //! input goes to the desktop and the desktop is drawn. The lock's scenes are
 //! drawn over it for `lock.exit_ms` more, reading `Lock.state` as
@@ -74,9 +89,18 @@ pub(crate) const FALLBACK: &str = include_str!("../qml/lock/Fallback.qml");
 /// The name of the scene Solium ships, which is `lock.scene`'s default.
 pub(crate) const SHIPPED: &str = "Lock";
 
-/// `lock.exit_ms`'s default: §4.16's bounded exit, the content lifting and
-/// fading on `exit` (160 ms) inside it.
+/// `lock.exit_ms`'s default: §4.16's bounded exit, which the shipped scene
+/// spends taking its sheet back up and off the top.
 pub(crate) const EXIT_MS: u32 = 250;
+
+/// `lock.enter_ms`'s default: the sheet coming down over the desktop, about
+/// as long as an iPhone's lock takes.
+pub(crate) const ENTER_MS: u32 = 350;
+
+/// The longest `lock.enter_ms` may be. Input is the lock's from the first
+/// instant, but the desktop is still on screen through the entry and
+/// `locked` waits for it, so no longer than a glance, as the exit.
+pub(crate) const ENTER_MAX_MS: u32 = 600;
 
 /// `lock.keypad_margin`'s default, in logical pixels: about a fingertip, so
 /// the pointer's way to a key is hidden from the scene as well as its path
@@ -109,6 +133,9 @@ pub(crate) struct Settings {
     pub(crate) scene: String,
     /// `lock.prompt_on`: which monitor shows the password field.
     pub(crate) prompt_on: PromptOn,
+    /// `lock.enter_ms`: how long the scenes come down over the desktop as
+    /// the lock is taken, at most [`ENTER_MAX_MS`].
+    pub(crate) enter: Duration,
     /// `lock.exit_ms`: how long the scenes are drawn over the desktop after
     /// the unlock, at most [`EXIT_MAX_MS`].
     pub(crate) exit: Duration,
@@ -123,6 +150,7 @@ impl Default for Settings {
             native: true,
             scene: SHIPPED.to_owned(),
             prompt_on: PromptOn::Pointer,
+            enter: Duration::from_millis(u64::from(ENTER_MS)),
             exit: Duration::from_millis(u64::from(EXIT_MS)),
             keypad_margin: KEYPAD_MARGIN,
         }
@@ -240,6 +268,12 @@ pub(crate) struct LockScenes {
     /// Whether every scene is to be built again once they are quiet: the
     /// configuration named another scene.
     rebuild: bool,
+    /// When the entry under way ends, on the compositor's clock.
+    enter_until: Option<Duration>,
+    /// The monitors the desktop is drawn on under the scene through the
+    /// entry: lit when the lock was taken, and showing a scene that is not
+    /// the fallback and has not failed since.
+    entering_on: HashSet<String>,
     /// When the exit under way ends, on the compositor's clock.
     exit_until: Option<Duration>,
     /// Where the pointer is, as the scenes have been told it.
@@ -259,6 +293,8 @@ impl Default for LockScenes {
             failed: HashSet::new(),
             live: false,
             rebuild: false,
+            enter_until: None,
+            entering_on: HashSet::new(),
             exit_until: None,
             pointer: LockPointer::default(),
         }
@@ -332,6 +368,7 @@ impl LockScenes {
         let names: Vec<String> = outputs.iter().map(Output::name).collect();
         self.instances.retain(|monitor, _| names.contains(monitor));
         self.failed.retain(|monitor| names.contains(monitor));
+        self.entering_on.retain(|monitor| names.contains(monitor));
         if crate::scripted::builds_here() {
             for monitor in names {
                 if self.instances.contains_key(&monitor) || self.failed.contains(&monitor) {
@@ -528,6 +565,8 @@ impl LockScenes {
                 None
             }
         };
+        // Its stand-in covers at once: no more of the desktop under it.
+        self.entering_on.remove(monitor);
         match next.and_then(|from| self.build(monitor, from)) {
             Some(mut instance) => {
                 instance.surface.set_quiet(!self.live);
@@ -541,10 +580,82 @@ impl LockScenes {
         true
     }
 
+    /// The lock was taken at `now`, on the monitors `lit` names: its scenes
+    /// come down over the desktop for `lock.enter_ms`, if it is not 0 and a
+    /// monitor is lit. Which monitors draw the desktop under their scene is
+    /// settled by [`Self::keep_entry_where_scenes_are`], once the scenes are
+    /// there.
+    pub(crate) fn begin_entry(&mut self, now: Duration, lit: Vec<String>) {
+        self.end_entry();
+        if self.settings.enter.is_zero() || lit.is_empty() {
+            return;
+        }
+        self.enter_until = Some(now + self.settings.enter);
+        self.entering_on = lit.into_iter().collect();
+    }
+
+    /// Keep the entry only on the monitors that show a scene that is not the
+    /// fallback, which stays still and covers at once; with none left, there
+    /// is no entry.
+    pub(crate) fn keep_entry_where_scenes_are(&mut self) {
+        let instances = &self.instances;
+        self.entering_on.retain(|monitor| {
+            instances
+                .get(monitor)
+                .is_some_and(|instance| instance.kind != Kind::Fallback)
+        });
+        if self.entering_on.is_empty() {
+            self.end_entry();
+        }
+    }
+
+    /// Whether the scenes are reading `"locking"` at `now`.
+    pub(crate) fn entering(&self, now: Duration) -> bool {
+        self.enter_until.is_some_and(|until| now < until)
+    }
+
+    /// Whether an entry is under way and not yet ended by [`settle`]: what
+    /// `locked` waits for, so a frame built under it is never one that shows
+    /// the lock, even one presented after its bound.
+    pub(crate) fn entry_pending(&self) -> bool {
+        self.enter_until.is_some()
+    }
+
+    /// Whether an entry under way has reached its bound by `now`.
+    fn enter_over(&self, now: Duration) -> bool {
+        self.enter_until.is_some_and(|until| now >= until)
+    }
+
+    /// End the entry, whether or not it is over.
+    pub(crate) fn end_entry(&mut self) {
+        self.enter_until = None;
+        self.entering_on.clear();
+    }
+
+    /// Whether the desktop is drawn under `monitor`'s scene at `now`: during
+    /// the entry, on a monitor it plays on, showing a scene that is not the
+    /// fallback.
+    pub(crate) fn desktop_under(&self, monitor: &str, now: Duration) -> bool {
+        self.entering(now)
+            && self.entering_on.contains(monitor)
+            && self
+                .instances
+                .get(monitor)
+                .is_some_and(|instance| instance.kind != Kind::Fallback)
+    }
+
+    /// Whether the desktop is drawn under any monitor's scene at `now`.
+    pub(crate) fn desktop_under_any(&self, now: Duration) -> bool {
+        self.entering_on
+            .iter()
+            .any(|monitor| self.desktop_under(monitor, now))
+    }
+
     /// The lock ended at `now`: its scenes stay over the desktop for
     /// `lock.exit_ms`, if there are any and it is not 0. The pointer at them
     /// is forgotten, since it is the desktop's now.
     pub(crate) fn begin_exit(&mut self, now: Duration) {
+        self.end_entry();
         self.pointer = LockPointer::default();
         if self.settings.exit.is_zero() || self.instances.is_empty() {
             self.exit_until = None;
@@ -688,11 +799,17 @@ fn fallback(monitor: &str) -> Option<Instance> {
     }
 }
 
-/// Once a loop, in both backends: an exit that has reached its bound ends,
-/// and the scenes go quiet, whatever they were doing.
+/// Once a loop, in both backends: an entry that has reached its bound ends,
+/// and the lock is then confirmed as for any frame, from the frames built
+/// after it; and an exit that has reached its bound ends, and the scenes go
+/// quiet, whatever they were doing.
+/// `lock_auth::tests::the_entry_is_bounded_even_if_the_scene_never_finishes`,
 /// `lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`.
 pub(crate) fn settle(state: &mut Solium) {
     let now = state.clock.now();
+    if state.lock_scenes.enter_over(now) {
+        state.end_lock_entry();
+    }
     if !state.lock_scenes.exit_over(now) {
         return;
     }
@@ -875,6 +992,76 @@ mod tests {
                 scenes.shown_on(&output),
                 Shown::Own,
                 "the lock ended, and the scene the configuration names was not built again"
+            );
+        });
+    }
+
+    /// **A scene that fails during the entry is swapped down the chain, and
+    /// its stand-in covers at once**: the desktop is drawn under a scene
+    /// coming down, and under no stand-in for it, though the entry goes on
+    /// for the other monitors. Nor under the fallback, which stays still,
+    /// nor on a monitor that was not lit, or not there, when the lock was
+    /// taken; and with no scene but the fallback there is no entry at all.
+    #[test]
+    fn a_scene_that_fails_during_the_entry_is_covered_at_once() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let (left, right, dark) = (
+                monitor("entry-left"),
+                monitor("entry-right"),
+                monitor("entry-dark"),
+            );
+            let all = [left.clone(), right.clone(), dark.clone()];
+            let mut scenes = LockScenes::default();
+            scenes.use_scene(scene("entry", "import QtQuick\nItem {}\n"));
+            let now = Duration::from_secs(10);
+            scenes.begin_entry(now, vec![left.name(), right.name()]);
+            scenes.sync(&all, true);
+            scenes.keep_entry_where_scenes_are();
+            let at = now + Duration::from_millis(1);
+            assert!(
+                scenes.desktop_under(&left.name(), at),
+                "the premise: an entry"
+            );
+            assert!(scenes.desktop_under(&right.name(), at));
+            assert!(
+                !scenes.desktop_under(&dark.name(), at),
+                "the desktop under a monitor that was dark at the lock"
+            );
+
+            scenes
+                .instance_for_test(&left)
+                .expect("a scene")
+                .fail_for_test();
+            assert!(scenes.after_draw(&left.name()));
+            assert_eq!(
+                scenes.shown_on(&left),
+                Shown::Shipped,
+                "the premise: a stand-in"
+            );
+            assert!(
+                !scenes.desktop_under(&left.name(), at),
+                "the desktop under the stand-in for a scene that failed in its entry"
+            );
+            assert!(
+                scenes.desktop_under(&right.name(), at),
+                "the entry ended on the monitor whose scene did not fail"
+            );
+            let plugged = monitor("entry-plugged");
+            scenes.sync(&[left.clone(), right.clone(), plugged.clone()], true);
+            assert!(
+                !scenes.desktop_under(&plugged.name(), at),
+                "the desktop under a monitor plugged in during the entry"
+            );
+
+            let mut fallback = LockScenes::default();
+            fallback.use_fallback();
+            fallback.begin_entry(now, vec![left.name()]);
+            fallback.sync(std::slice::from_ref(&left), true);
+            fallback.keep_entry_where_scenes_are();
+            assert!(
+                !fallback.entry_pending() && !fallback.desktop_under(&left.name(), at),
+                "the fallback has an entry"
             );
         });
     }
