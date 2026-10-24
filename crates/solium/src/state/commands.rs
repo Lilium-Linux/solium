@@ -571,6 +571,25 @@ impl Solium {
                 // it, and its outcome kept for the attempt's `done` (Ruling 15).
                 // `real_client::reflow_on_close::hosted::sol_act_tells_done_once_the_window_was_asked_to_close`,
                 // `real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
+                // A notifications action is the service's (#346).
+                Command::Act {
+                    attempt,
+                    action,
+                    data,
+                    ..
+                } if action.starts_with("notifications.") => {
+                    let done = crate::services::act(
+                        self,
+                        &action,
+                        &data,
+                        crate::services::notifications::Origin::Script,
+                    );
+                    self.settled_attempts.push(crate::script::Settled {
+                        attempt,
+                        ok: done.is_ok(),
+                        reason: done.err(),
+                    });
+                }
                 Command::Act {
                     attempt,
                     action,
@@ -636,6 +655,8 @@ impl Solium {
                 // reload; the nested backend never does, which is correct --
                 // it has no libinput devices to apply anything to.
                 Command::Input(config) => self.input.configure(config),
+                Command::Notifications(config) => self.services.notifications.configure(config),
+                Command::Notify(own) => crate::services::notify_own(self, &own),
                 Command::Lock(settings) => {
                     self.logind.configure(settings, self.lock.is_some());
                 }

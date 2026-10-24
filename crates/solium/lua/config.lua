@@ -684,6 +684,29 @@ local defaults = {
         dbus_inhibit = true,
     },
 
+    -- Applications' notifications (#346).
+    --
+    -- Solium answers `org.freedesktop.Notifications` on the session bus, so
+    -- what `notify-send`, a mail client or a browser sends comes to it, and a
+    -- shell draws it: a scene reads `Notifications.banners` and
+    -- `Notifications.history`, and Lua hears `sol.on("notifications")`. A
+    -- program that already has the name (mako, dunst, another desktop's
+    -- shell) keeps it, and Solium waits its turn. Nested, it is owned only on
+    -- the bus SOLIUM_SESSION_BUS names.
+    notifications = {
+        serve = true,
+
+        -- How long a banner stays when its sender leaves it to the server, in
+        -- milliseconds, by urgency; 0 is never. A banner's time stops while
+        -- it is held, while the session is locked and while the screens are
+        -- off, so nothing is missed by someone who is not there.
+        timeouts = { low = 5000, normal = 7000, critical = 0 },
+
+        -- How many notifications are kept once their banner ends, with their
+        -- actions still working. 0 keeps none.
+        history = { max = 200 },
+    },
+
     -- libinput device settings: tap-to-click, scrolling, acceleration and the
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.

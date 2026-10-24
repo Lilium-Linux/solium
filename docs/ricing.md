@@ -1512,6 +1512,81 @@ return { workspaces = { per_monitor = false } }
 Neither is more correct — the difference is whether you think of your monitors
 as two screens or as one surface you happen to have cut in half.
 
+### Notifications
+
+Solium is the notification server: what `notify-send`, a mail client or a
+browser sends comes to it, and your scenes draw it. Nothing is drawn for you;
+a banner is QML of your own. `config.lua`'s `notifications` table turns the
+server on (it is on in the shipped configuration) and says how long banners
+last and how many are kept afterwards:
+
+```lua
+return { notifications = { timeouts = { normal = 5000 }, history = { max = 50 } } }
+```
+
+A program that already has the name — mako, dunst, another desktop's shell —
+keeps it, and Solium waits its turn; `Notifications.serving` says which.
+Nested, Solium serves only on the bus `SOLIUM_SESSION_BUS` names, so a test
+run never takes your desktop's notifications.
+
+Every scene, and the lock's, can read `Notifications`: `banners` (on screen
+now) and `history` (kept once a banner ends, with its actions still working),
+both newest first, plus `dnd`, `serving` and `owner`. A banner, as a sketch:
+
+```qml
+Column {
+    anchors { top: parent.top; horizontalCenter: parent.horizontalCenter; topMargin: 12 }
+    spacing: 8
+    Repeater {
+        model: Notifications.banners
+        delegate: Rectangle {
+            required property var model
+            readonly property var n: Notifications.get(model.id)
+            width: 380; height: 72; radius: 18
+            color: "#202024"
+            HoverHandler { onHoveredChanged: hovered ? n.hold() : n.release() }
+            TapHandler { onTapped: n.invoke("default") }
+            Image { x: 14; y: 14; width: 44; height: 44; source: model.image || model.icon }
+            Column {
+                x: 70; y: 14; width: parent.width - 84
+                Text { text: model.summary; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                Text { text: model.bodyRich; textFormat: Text.StyledText; elide: Text.ElideRight; width: parent.width }
+            }
+        }
+    }
+}
+```
+
+The calls on a notification (`n.hold()`, `n.release()`, `n.dismiss()`,
+`n.invoke(key)`) and on `Notifications` (`dismissAll()`, `setDnd(on)`) go
+straight to the server. A banner's time stops while it is held, while the
+session is locked and while the screens are off. `bodyRich` is markup safe
+for `Text.StyledText`: bold, italic, underline and links only, never an
+image. `image` is the sender's picture, decoded and capped by Solium, and
+`icon` the app's theme icon.
+
+Lua decides what happens to each one, and hears what happened:
+
+```lua
+-- No banners from chat apps: they go straight to the history.
+sol.on("notification", function(n)
+    if n.category:match("^im") then return { banner = false } end
+end)
+
+-- An effect, or a sound, when something arrives.
+sol.on("notifications", function(e)
+    if e.what == "added" then sol.log("from " .. e.notification.appName) end
+end)
+
+-- The shell's own, with a button that runs Lua.
+sol.notify{ summary = "Battery low", urgency = "critical",
+            actions = { { key = "default", label = "", fn = function() sol.spawn("gnome-power-statistics") end } } }
+```
+
+`sol.act("notifications.dnd", { value = "toggle" })` turns do-not-disturb on
+and off, where only critical notifications get a banner and the rest go
+straight to the history.
+
 ### Bars, docks and wallpapers
 
 A shell — bar, dock and launcher together — can be hosted inside the

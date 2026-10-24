@@ -389,6 +389,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     solium.start_scripts(scripts);
     // After the scripts, as nested: see `winit.rs` and `screensaver.rs`.
     solium.idle.serve_dbus(place, crate::dev::session_bus());
+    solium
+        .services
+        .notifications
+        .permit(place, crate::dev::session_bus());
 
     let qt = crate::qml::wake::Wake::insert(
         &event_loop.handle(),
@@ -865,6 +869,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             crate::idle::settle(&mut state.solium);
             // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
             crate::logind::settle(&mut state.solium);
+            crate::services::settle(&mut state.solium);
             // The native lock's password check: the one place its yes unlocks.
             crate::lock_auth::settle(&mut state.solium);
             // And the end of its exit, at `lock.exit_ms` whatever the scene

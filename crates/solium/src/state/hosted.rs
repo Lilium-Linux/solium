@@ -339,6 +339,22 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::two_actions_from_one_frame_both_reach_lua_in_order`,
     /// `state::tests::real_client::a_click_on_a_hosted_button_is_acted_on_at_its_release`.
     pub(crate) fn settle_actions(&mut self) {
+        // Calls a scene made on a service's own objects (`n.dismiss()`,
+        // `Notifications.setDnd(true)`): the service's, done here and never
+        // through a `surface` listener (03 §3.1.5, the direct path), each
+        // heard by Lua as an event with `origin = "scene"` (#346).
+        while let Some((action, data)) = crate::qml::hosted::take_service_call() {
+            if action.starts_with("notifications.") {
+                if let Err(why) = crate::services::act(
+                    self,
+                    &action,
+                    &data,
+                    crate::services::notifications::Origin::Scene,
+                ) {
+                    tracing::debug!(action, why, "a scene's notifications call was not done");
+                }
+            }
+        }
         let mut asked = Vec::new();
         for surface in self.surfaces.iter_mut() {
             for (action, data) in surface.take_actions() {

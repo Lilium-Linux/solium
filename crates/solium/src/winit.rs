@@ -435,6 +435,11 @@ pub(crate) fn run() -> Result<()> {
     state
         .idle
         .serve_dbus(crate::session::Place::Nested, dev::session_bus());
+    // And org.freedesktop.Notifications, by the same rule.
+    state
+        .services
+        .notifications
+        .permit(crate::session::Place::Nested, dev::session_bus());
 
     // The screens exist and the scripts have loaded: whichever came second,
     // this is the first moment a script can be told where the monitors are.
@@ -1196,6 +1201,8 @@ pub(crate) fn run() -> Result<()> {
         crate::idle::settle(&mut state);
         // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
         crate::logind::settle(&mut state);
+        // What the services' threads heard, and their timers: `services`.
+        crate::services::settle(&mut state);
         // The native lock's password check: the one place its yes unlocks.
         crate::lock_auth::settle(&mut state);
         // And the end of its exit, at `lock.exit_ms` whatever the scene does.

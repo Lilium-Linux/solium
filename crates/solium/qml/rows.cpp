@@ -1,4 +1,5 @@
 #include "rows.h"
+#include "notifications.h"
 
 #include "host.h"
 
@@ -552,6 +553,8 @@ SoliumRows *solium_rows(int model)
     static SoliumRows *workspaces = nullptr;
     static SoliumRows *apps = nullptr;
     static SoliumRows *folder = nullptr;
+    static SoliumRows *banners = nullptr;
+    static SoliumRows *history = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -582,6 +585,16 @@ SoliumRows *solium_rows(int model)
             folder = new SoliumFolderRows();
         }
         return folder;
+    case SOLIUM_QML_ROWS_NOTIFICATION_BANNERS:
+        if (banners == nullptr) {
+            banners = new SoliumNotificationRows();
+        }
+        return banners;
+    case SOLIUM_QML_ROWS_NOTIFICATION_HISTORY:
+        if (history == nullptr) {
+            history = new SoliumNotificationRows();
+        }
+        return history;
     default:
         return nullptr;
     }

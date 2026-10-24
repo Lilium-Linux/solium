@@ -272,6 +272,81 @@ Item {
                 }
             }
 
+            // What arrived while away (#346): the newest notifications, under
+            // the clock and lifted away with it. Read only: nothing behind
+            // the lock is opened from here.
+            Column {
+                id: arrived
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: clock.y + clock.height + 28
+                width: Math.min(420, root.width - 48)
+                spacing: 8
+                opacity: 1 - root.lift
+                visible: opacity > 0.01
+
+                Repeater {
+                    model: Notifications.history
+                    delegate: Rectangle {
+                        required property int index
+                        required property var model
+                        visible: index < 3
+                        width: arrived.width
+                        height: visible ? 64 : 0
+                        radius: 16
+                        color: Theme.surface
+                        opacity: 0.92
+
+                        Image {
+                            id: picture
+                            x: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 36
+                            height: 36
+                            source: model.image || model.icon
+                            sourceSize.width: 72
+                            sourceSize.height: 72
+                            fillMode: Image.PreserveAspectFit
+                        }
+
+                        Column {
+                            anchors.left: picture.right
+                            anchors.leftMargin: 12
+                            anchors.right: parent.right
+                            anchors.rightMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 2
+
+                            Text {
+                                width: parent.width
+                                text: model.appName + "  ·  " + model.summary
+                                color: Theme.text
+                                font.pixelSize: 14
+                                font.weight: Font.DemiBold
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                width: parent.width
+                                text: model.body
+                                color: Theme.text
+                                opacity: 0.75
+                                font.pixelSize: 13
+                                elide: Text.ElideRight
+                                maximumLineCount: 1
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    visible: Notifications.history.count > 3
+                    text: "+" + (Notifications.history.count - 3)
+                    color: Theme.text
+                    opacity: 0.7
+                    font.pixelSize: 13
+                }
+            }
+
             // The user and the password, on the prompt's monitor only.
             Column {
                 id: who

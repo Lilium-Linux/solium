@@ -378,6 +378,9 @@ pub(crate) struct Snapshot {
     /// asked to be, with `locked` -- may not act on windows; see
     /// [`Command::reaches_past_the_lock`].
     pub(crate) locked: bool,
+    /// Notifications as the service holds them, for `sol.notifications()`
+    /// (#346). Shared, not copied, from one snapshot to the next.
+    pub(crate) notifications: std::rc::Rc<crate::services::notifications::View>,
 }
 
 /// One problem, as `sol.problems()` hands it over: an effect, a rule or the
@@ -816,6 +819,12 @@ pub(crate) enum Command {
     /// logind's `Lock` and sleep signals: the locker to run, and whether to
     /// hold sleep for it. See `crate::logind::Settings`.
     Lock(crate::logind::Settings),
+    /// `sol.notifications{ ... }`: whether Solium serves notifications, and
+    /// how long banners last and how much history is kept (#346). See
+    /// `crate::services::notifications::Config`.
+    Notifications(crate::services::notifications::Config),
+    /// `sol.notify{ ... }`: one of the shell's own notifications (#346).
+    Notify(crate::services::notifications::Own),
     /// How Solium's own lock checks a password: `sol.lock`'s `lockout`,
     /// `secret_layout`, `helper_timeout_ms`, `retry` and `keypad` (#281). See
     /// `crate::lock_auth::Settings`.
@@ -920,8 +929,11 @@ impl Command {
             | Self::Quit => true,
             // `sol.act`'s verbs on windows and workspaces; `apps.launch` is a
             // spawn, and `folder` opens one.
+            // `notifications.invoke` brings the sender's window forward.
             Self::Act { action, .. } => {
-                action.starts_with("windows.") || action.starts_with("workspaces.")
+                action.starts_with("windows.")
+                    || action.starts_with("workspaces.")
+                    || action == "notifications.invoke"
             }
             Self::Decoration { .. }
             | Self::PaneValues(_)
@@ -950,6 +962,8 @@ impl Command {
             | Self::Lock(_)
             | Self::LockAuth(_)
             | Self::LockScene(_)
+            | Self::Notifications(_)
+            | Self::Notify(_)
             | Self::X11(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
@@ -2734,6 +2748,66 @@ impl Scripts {
     /// its present -- the shipped one plays the genie into its slot -- in the
     /// same dispatch, and a layout takes the window out of its arrangement.
     /// The window stays drawn while that present plays out.
+    /// A notification arrived (#346): the `notification` hooks decide what
+    /// happens to it, the first that returns a table deciding (`banner`,
+    /// `keep`), each under the handler deadline. `None` when none answered,
+    /// so the shipped rule applies.
+    /// `tests::the_first_notification_hook_that_answers_decides`.
+    pub(crate) fn notification_decision(
+        &mut self,
+        arrival: &crate::json::Json,
+        snapshot: Snapshot,
+    ) -> (Option<crate::json::Json>, Outcome) {
+        let data = arrival.to_lua(&self.lua).unwrap_or(Value::Nil);
+        let decided = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = decided.clone();
+        let outcome = self.dispatch(snapshot, move |lua, _| {
+            *slot.borrow_mut() = call_deciders(lua, "notification", data.clone())?;
+            Ok(true)
+        });
+        let decided = decided.borrow_mut().take();
+        (decided, outcome)
+    }
+
+    /// Something happened to a notification (#346): `added`, `replaced`,
+    /// `closed`, `invoked`, `dnd` or `owner`, for `sol.on("notifications")`.
+    /// `tests::notification_events_reach_their_listeners_with_their_origin`.
+    pub(crate) fn notifications_event(
+        &mut self,
+        event: &crate::json::Json,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "notifications", data.clone())
+        })
+    }
+
+    /// An action of one of `sol.notify`'s own notifications was invoked: its
+    /// function runs, and the notification's functions are let go.
+    /// `tests::sol_notify_queues_one_of_the_shells_own_with_its_actions`.
+    pub(crate) fn notify_action(&mut self, token: u64, key: &str, snapshot: Snapshot) -> Outcome {
+        let key = key.to_owned();
+        self.dispatch(snapshot, move |lua, sol| {
+            let kept: Table = sol.get("_notify_actions")?;
+            let Some(functions) = kept.get::<Option<Table>>(token)? else {
+                return Ok(false);
+            };
+            kept.set(token, Value::Nil)?;
+            let Some(run) = functions.get::<Option<mlua::Function>>(key.as_str())? else {
+                return Ok(false);
+            };
+            start_clock(lua);
+            match run.call::<()>(()) {
+                Ok(()) => Ok(true),
+                Err(err) => {
+                    tracing::error!(%err, key, "a sol.notify action failed");
+                    Ok(false)
+                }
+            }
+        })
+    }
+
     pub(crate) fn minimized(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "minimize", id))
     }
@@ -3531,6 +3605,37 @@ fn call_listeners(
         }
     }
     Ok(called)
+}
+
+/// [`call_listeners`], for a decision hook: each listener in turn until one
+/// returns a table, which is the answer. A listener stopped at the deadline is
+/// struck as any other.
+fn call_deciders(
+    lua: &Lua,
+    event: &str,
+    args: impl mlua::IntoLuaMulti + Clone,
+) -> mlua::Result<Option<crate::json::Json>> {
+    let sol: Table = lua.globals().get("sol")?;
+    let handlers: Table = sol.get("_handlers")?;
+    let Value::Table(listeners) = handlers.get::<Value>(event)? else {
+        return Ok(None);
+    };
+    let strikes: Table = sol.get("_strikes")?;
+    for listener in listeners.sequence_values::<mlua::Function>() {
+        let Ok(listener) = listener else {
+            continue;
+        };
+        start_clock(lua);
+        match listener.call::<Value>(args.clone()) {
+            Ok(value @ Value::Table(_)) => return crate::json::Json::from_lua(&value),
+            Ok(_) => {}
+            Err(err) if err.to_string().contains(STOPPED) => {
+                let _ = strike(lua, &strikes, &listener, event, &err)?;
+            }
+            Err(err) => tracing::error!(%err, event, "a listener failed"),
+        }
+    }
+    Ok(None)
 }
 
 /// Turn a Lua error into one of ours.
@@ -4401,6 +4506,171 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             })
         })?,
     )?;
+
+    // Notifications (03 §3.2.11, #346). `sol.notifications{ serve = true,
+    // timeouts = { low = 5000, normal = 7000, critical = 0 }, history = { max
+    // = 200 } }` sets them, each key left out keeping its default and one of
+    // the wrong kind named in the log; a timeout of 0 is never. With no
+    // table, `sol.notifications()` answers what they are: `available`,
+    // `serving`, `dnd`, `owner`, `banners` and `history`, newest first.
+    // `tests::sol_notifications_sets_the_service_and_answers_its_rows`.
+    sol.set(
+        "notifications",
+        lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
+            let Some(options) = options else {
+                let snapshot = snapshot(lua)?;
+                let view = &snapshot.notifications;
+                let table = lua.create_table()?;
+                table.set("available", view.available)?;
+                table.set("serving", view.serving)?;
+                table.set("dnd", view.dnd)?;
+                for (key, rows) in [("banners", &view.banners), ("history", &view.history)] {
+                    let list = lua.create_table()?;
+                    for (index, row) in rows.iter().enumerate() {
+                        list.set(
+                            index + 1,
+                            crate::services::notifications::object(row).to_lua(lua)?,
+                        )?;
+                    }
+                    table.set(key, list)?;
+                }
+                if let Some(owner) = &view.owner {
+                    let row = lua.create_table()?;
+                    row.set("name", owner.name.clone())?;
+                    row.set("pid", owner.pid)?;
+                    row.set("program", owner.program.clone())?;
+                    table.set("owner", row)?;
+                }
+                return Ok(Value::Table(table));
+            };
+            let mut config = crate::services::notifications::Config::default();
+            match options.get::<Value>("serve") {
+                Ok(Value::Boolean(on)) => config.serve = on,
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(other) => tracing::warn!(
+                    value = describe(&other),
+                    "notifications.serve: true or false; keeping the default, false"
+                ),
+            }
+            let millis = |table: &mlua::Table, key: &str| -> Option<Option<Duration>> {
+                let value = table.get::<Value>(key).ok()?;
+                if matches!(value, Value::Nil) {
+                    return None;
+                }
+                match number(&value).filter(|amount| *amount >= 0.0) {
+                    Some(0.0) => Some(None),
+                    Some(amount) => Duration::try_from_secs_f64(amount / 1000.0).ok().map(Some),
+                    None => {
+                        tracing::warn!(
+                            key,
+                            value = describe(&value),
+                            "notifications.timeouts: milliseconds of zero or more; keeping the default"
+                        );
+                        None
+                    }
+                }
+            };
+            if let Ok(Value::Table(timeouts)) = options.get::<Value>("timeouts") {
+                let defaults = &mut config.settings.timeouts;
+                if let Some(low) = millis(&timeouts, "low") {
+                    defaults.low = low;
+                }
+                if let Some(normal) = millis(&timeouts, "normal") {
+                    defaults.normal = normal;
+                }
+                if let Some(critical) = millis(&timeouts, "critical") {
+                    defaults.critical = critical;
+                }
+            }
+            if let Ok(Value::Table(history)) = options.get::<Value>("history") {
+                match history.get::<Value>("max") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value).filter(|n| *n >= 0.0 && *n <= 100_000.0) {
+                        Some(max) => config.settings.history_max = max as usize,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "notifications.history.max: a count from 0 to 100000; keeping 200"
+                        ),
+                    },
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Notifications(config));
+            })?;
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    // `sol.notify{ summary, body, icon, urgency, timeout, actions = { { key,
+    // label, fn } } }`: one of the shell's own notifications, with no bus
+    // behind it, through the same decision and model as any other (03
+    // §3.2.11). An action's `fn` runs when it is invoked; `key = "default"`
+    // is a click on the body.
+    // `tests::sol_notify_queues_one_of_the_shells_own_with_its_actions`.
+    static NOTIFY_TOKENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    sol.set(
+        "notify",
+        lua.create_function(|lua, options: mlua::Table| {
+            let text = |key: &str| -> String {
+                match options.get::<Value>(key) {
+                    Ok(Value::String(text)) => text.to_string_lossy(),
+                    _ => String::new(),
+                }
+            };
+            let summary = text("summary");
+            if summary.is_empty() {
+                return Err(mlua::Error::runtime("sol.notify needs a summary"));
+            }
+            let urgency = match text("urgency").as_str() {
+                "low" => crate::services::notifications::model::Urgency::Low,
+                "critical" => crate::services::notifications::model::Urgency::Critical,
+                _ => crate::services::notifications::model::Urgency::Normal,
+            };
+            let expire_timeout = match options.get::<Value>("timeout") {
+                Ok(value) => number(&value)
+                    .filter(|ms| *ms >= 0.0 && *ms <= f64::from(i32::MAX))
+                    .map_or(-1, |ms| ms as i32),
+                Err(_) => -1,
+            };
+            let mut actions = Vec::new();
+            let functions = lua.create_table()?;
+            if let Ok(Value::Table(list)) = options.get::<Value>("actions") {
+                for entry in list.sequence_values::<mlua::Table>() {
+                    let entry = entry?;
+                    let key: String = entry.get::<Option<String>>("key")?.unwrap_or_default();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    let label: String = entry.get::<Option<String>>("label")?.unwrap_or_default();
+                    if let Ok(Value::Function(run)) = entry.get::<Value>("fn") {
+                        functions.set(key.clone(), run)?;
+                    }
+                    actions.push((key, label));
+                }
+            }
+            let token = if functions.is_empty() {
+                0
+            } else {
+                let token =
+                    NOTIFY_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let sol: Table = lua.globals().get("sol")?;
+                let kept: Table = sol.get("_notify_actions")?;
+                kept.set(token, functions)?;
+                token
+            };
+            let own = crate::services::notifications::Own {
+                summary,
+                body: text("body"),
+                icon: text("icon"),
+                urgency,
+                actions,
+                token,
+                expire_timeout,
+            };
+            with_pending(lua, |pending| pending.commands.push(Command::Notify(own)))
+        })?,
+    )?;
+    sol.set("_notify_actions", lua.create_table()?)?;
 
     // Automatic reload (#223): `config.reload`, handed over by `init.lua`.
     // `automatic` is true or false, default true; `quiet_ms` is milliseconds
@@ -7779,6 +8049,7 @@ mod tests {
 
         let snapshot = Snapshot {
             locked: false,
+            notifications: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
                 id: 7,
@@ -10966,6 +11237,7 @@ mod tests {
     fn empty_snapshot() -> Snapshot {
         Snapshot {
             locked: false,
+            notifications: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: Vec::new(),
             monitors: Vec::new(),
@@ -11451,6 +11723,7 @@ mod tests {
     fn one_screen(windows: &[u64]) -> Snapshot {
         Snapshot {
             locked: false,
+            notifications: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: windows
                 .iter()
@@ -12622,6 +12895,135 @@ mod tests {
 
     /// **`sol.act` queues the action as a command and answers an attempt id;
     /// `done` hears the outcome once** (03 §3.3.2).
+    #[test]
+    fn sol_notifications_sets_the_service_and_answers_its_rows() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-notifications",
+            r#"sol.notifications{ serve = true, timeouts = { low = 1000, normal = 9000, critical = 0 }, history = { max = 5 } }"#,
+        );
+        let configs: Vec<crate::services::notifications::Config> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Notifications(config) => Some(config),
+                _ => None,
+            })
+            .collect();
+        let [config] = configs.as_slice() else {
+            panic!("one sol.notifications: {configs:?}")
+        };
+        assert!(config.serve);
+        assert_eq!(config.settings.timeouts.low, Some(Duration::from_millis(1000)));
+        assert_eq!(config.settings.timeouts.normal, Some(Duration::from_millis(9000)));
+        assert_eq!(config.settings.timeouts.critical, None);
+        assert_eq!(config.settings.history_max, 5);
+
+        let mut snapshot = one_screen(&[]);
+        snapshot.notifications = std::rc::Rc::new(crate::services::notifications::View {
+            available: true,
+            serving: true,
+            dnd: false,
+            owner: None,
+            banners: vec![std::collections::BTreeMap::from([
+                ("id", crate::json::Json::Number(7.0)),
+                ("summary", crate::json::Json::Text("New mail".to_owned())),
+            ])],
+            history: Vec::new(),
+        });
+        assert_eq!(
+            scripts.evaluate_in(
+                snapshot,
+                "local n = sol.notifications(); return n.banners[1].summary .. ' ' .. n.banners[1].id .. ' ' .. tostring(n.serving) .. ' ' .. #n.history"
+            ),
+            "New mail 7 true 0"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_first_notification_hook_that_answers_decides() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-notification-hook",
+            r#"sol.on("notification", function(n) seen = n.summary end)
+               sol.on("notification", function(n) if n.urgency == "low" then return { banner = false } end end)
+               sol.on("notification", function(n) return { banner = true, keep = false } end)"#,
+        );
+        let arrival = |urgency: &str| {
+            crate::json::Json::Object(std::collections::BTreeMap::from([
+                ("summary".to_owned(), crate::json::Json::Text("Hi".to_owned())),
+                ("urgency".to_owned(), crate::json::Json::Text(urgency.to_owned())),
+            ]))
+        };
+        let (low, _) = scripts.notification_decision(&arrival("low"), one_screen(&[]));
+        assert_eq!(
+            low.map(|table| table.render()),
+            Some(r#"{"banner":false}"#.to_owned())
+        );
+        let (normal, _) = scripts.notification_decision(&arrival("normal"), one_screen(&[]));
+        assert_eq!(
+            normal.map(|table| table.render()),
+            Some(r#"{"banner":true,"keep":false}"#.to_owned())
+        );
+        assert_eq!(scripts.evaluate("return seen"), "Hi");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn notification_events_reach_their_listeners_with_their_origin() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-notification-events",
+            r#"sol.on("notifications", function(e) sol.status(e.what .. " " .. e.origin .. " " .. e.id .. " " .. tostring(e.reason)) end)"#,
+        );
+        let event = crate::json::Json::Object(std::collections::BTreeMap::from([
+            ("what".to_owned(), crate::json::Json::Text("closed".to_owned())),
+            ("origin".to_owned(), crate::json::Json::Text("scene".to_owned())),
+            ("id".to_owned(), crate::json::Json::Number(7.0)),
+            ("reason".to_owned(), crate::json::Json::Text("dismissed".to_owned())),
+        ]));
+        let outcome = scripts.notifications_event(&event, one_screen(&[]));
+        assert_eq!(outcome.status.as_deref(), Some("closed scene 7 dismissed"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn sol_notify_queues_one_of_the_shells_own_with_its_actions() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-notify",
+            r#"sol.on("surface", function()
+                   sol.notify{ summary = "Battery low", body = "10% left", icon = "battery-caution", urgency = "critical",
+                               actions = { { key = "open", label = "Settings", fn = function() sol.status("opened") end } } }
+               end)"#,
+        );
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        let owns: Vec<crate::services::notifications::Own> = outcome
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Notify(own) => Some(own),
+                _ => None,
+            })
+            .collect();
+        let [own] = owns.as_slice() else {
+            panic!("one sol.notify: {owns:?}")
+        };
+        assert_eq!(own.summary, "Battery low");
+        assert_eq!(own.icon, "battery-caution");
+        assert_eq!(
+            own.urgency,
+            crate::services::notifications::model::Urgency::Critical
+        );
+        assert_eq!(own.actions, [("open".to_owned(), "Settings".to_owned())]);
+        assert_ne!(own.token, 0);
+        let ran = scripts.notify_action(own.token, "open", one_screen(&[]));
+        assert_eq!(ran.status.as_deref(), Some("opened"));
+        // Run once: the functions are let go after it.
+        let again = scripts.notify_action(own.token, "open", one_screen(&[]));
+        assert_eq!(again.status, None);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[test]
     fn sol_act_returns_an_attempt_and_done_hears_the_outcome_once() {
         let (directory, mut scripts) = loaded(
