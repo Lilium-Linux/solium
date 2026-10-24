@@ -2372,6 +2372,8 @@ mod tests {
             settle(&mut locked.state);
             crate::lock_scene::settle(&mut locked.state);
             assert!(locked.state.lock.is_none(), "the yes did not unlock");
+            // The exit's first frame, which its bound is counted from.
+            crate::render::frame_tick(&mut locked.state);
             let now = locked.state.clock.now();
             assert!(
                 locked.state.lock_scenes.exiting(now),
@@ -2416,6 +2418,7 @@ mod tests {
                 locked.state.lock_scenes.configure(settings);
                 locked.state.lock_natively();
                 locked.state.unlock_natively();
+                crate::render::frame_tick(&mut locked.state);
                 let now = locked.state.clock.now();
                 assert_eq!(
                     locked.state.lock_scenes.exiting(now),
@@ -2429,6 +2432,73 @@ mod tests {
                     "exit_ms = {ms} outlived its bound"
                 );
             }
+        });
+    }
+
+    /// **The exit lasts `exit_ms` from its first frame, however late that
+    /// comes**: the scene reads `Lock.state` as `"unlocking"` from the
+    /// unlock, and through a stall before the next frame longer than the
+    /// whole exit it is still drawn over the desktop; from that frame on it
+    /// is drawn for all of `lock.exit_ms`, which a frame after it does not
+    /// start again, and gone at its bound. Illia's Surface lost most of the
+    /// slide to 290 ms of the session's scenes being built again at the
+    /// unlock, counted from the unlock.
+    #[test]
+    fn the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::new(
+                "exit-stall",
+                Some(
+                    r#"import QtQuick
+                import Solium
+                Item {
+                    readonly property int unlocking: Lock.state === "unlocking" ? 1 : 0
+                }"#,
+                ),
+            );
+            let settings = scene_settings(&locked.state, |settings| {
+                settings.exit = Duration::from_millis(400);
+            });
+            locked.state.lock_scenes.configure(settings);
+            keys(&mut locked.state, RIGHT);
+            tap(&mut locked.state, &[RETURN]);
+            settle(&mut locked.state);
+            assert!(locked.state.lock.is_none(), "the yes did not unlock");
+
+            // Nothing drawn for longer than the whole exit.
+            locked.state.clock.advance(Duration::from_millis(600));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "a stall before the exit's first frame ate the exit"
+            );
+            assert_eq!(
+                locked.int("unlocking"),
+                1,
+                "\"unlocking\" does not hold until the exit's first frame"
+            );
+
+            // Most of the way, and then to the bound: the compositor's clock
+            // runs in real time too, so not to the millisecond.
+            crate::render::frame_tick(&mut locked.state);
+            locked.state.clock.advance(Duration::from_millis(300));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "the exit ended before `exit_ms` from its first frame"
+            );
+            crate::render::frame_tick(&mut locked.state);
+            locked.state.clock.advance(Duration::from_millis(100));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                !locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "the exit outlived `exit_ms` from its first frame"
+            );
+            assert_eq!(
+                locked.int("unlocking"),
+                0,
+                "\"unlocking\" outlived the exit"
+            );
         });
     }
 
@@ -2717,6 +2787,8 @@ mod tests {
                 over_desktop(&peeked.state, &output),
                 "the scene was taken away at once, not taken back up"
             );
+            // The way back up's first frame, which its bound is counted from.
+            crate::render::frame_tick(&mut peeked.state);
             peeked.state.clock.advance(Duration::from_millis(399));
             crate::lock_scene::settle(&mut peeked.state);
             assert!(
@@ -3042,75 +3114,103 @@ mod tests {
                     WorkspaceList { id: list }
                 }"#;
 
+    /// The session as `READS_THE_SESSION` reads it: a status, an app, and
+    /// two workspaces in an arrangement on `monitor`.
+    fn fill_the_session(state: &mut Solium, monitor: &str) {
+        use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
+        state.status = "a window's secret title".to_owned();
+        state.apps_scan_pending = false;
+        state.apps = vec![crate::apps::Entry {
+            id: "solium-lock-redaction-test".to_owned(),
+            name: "Redacted".to_owned(),
+            untranslated_name: "Redacted".to_owned(),
+            generic_name: String::new(),
+            icon: String::new(),
+            exec: "true".to_owned(),
+            categories: Vec::new(),
+            keywords: Vec::new(),
+            terminal: false,
+            path: None,
+            source: PathBuf::from("/nonexistent/solium-lock-redaction-test.desktop"),
+        }];
+        state.workspaces = Some(Declared {
+            arrangement: Arrangement {
+                kind: "grid".to_owned(),
+                columns: 2,
+                rows: 1,
+            },
+            groups: vec![Group {
+                id: "lock-redaction".to_owned(),
+                monitors: vec![monitor.to_owned()],
+                showing: vec!["1".to_owned()],
+                workspaces: (1..=2)
+                    .map(|index| Workspace {
+                        id: index.to_string(),
+                        name: format!("desk {index}"),
+                        col: index,
+                        row: 1,
+                        hidden: false,
+                    })
+                    .collect(),
+            }],
+            windows: std::collections::BTreeMap::new(),
+        });
+    }
+
+    /// What a scene reading `READS_THE_SESSION` reads of the session: the
+    /// status, the apps, the workspaces, a `WorkspaceList` of them and the
+    /// arrangement.
+    fn session_read(scene: &mut crate::qml::Scene) -> (String, i32, i32, i32, i32) {
+        (
+            scene.get_string_for_test("status"),
+            scene.get_int("apps"),
+            scene.get_int("workspaces"),
+            scene.get_int("listed"),
+            scene.get_int("arranged"),
+        )
+    }
+
+    /// Whether `read` is the whole session `fill_the_session` made.
+    fn reads_it_all(read: &(String, i32, i32, i32, i32)) -> bool {
+        let (status, apps, workspaces, listed, arranged) = read;
+        status == "a window's secret title"
+            && *apps >= 1
+            && *workspaces >= 2
+            && *listed >= 2
+            && *arranged > 0
+    }
+
+    /// What a scene that reads only what a lock may show reads of it.
+    fn read_empty() -> (String, i32, i32, i32, i32) {
+        (String::new(), 0, 0, 0, 0)
+    }
+
     /// **A lock scene reads only what a lock may show, at all times**:
     /// `Solium.status`, `Apps`, `Workspaces`, a `WorkspaceList` and the
-    /// arrangement read empty in it while Solium holds the lock, and still
-    /// empty once it is unlocked and the scene waits, quiet, for the next
-    /// lock, while a desktop scene beside it reads them all; the monitor and
-    /// the keyboard read in both. While locked, the session's models read
-    /// empty for every scene still drawn, the pointer's among them.
+    /// arrangement read empty in it while Solium holds the lock, through the
+    /// entry and after it, and still empty once it is unlocked and the scene
+    /// waits, quiet, for the next lock; the monitor and the keyboard read in
+    /// it. A desktop scene beside it reads the session all along, locked or
+    /// not: it is not drawn behind the lock, and what it reads is kept for
+    /// the unlock (`state::tests::real_client::lock_focus::native::a_session_scene_keeps_its_rows_through_a_native_lock`).
+    /// What else is drawn over the lock, the pointer, reads what a lock may
+    /// show too (`the_pointer_scene_reads_only_what_a_lock_may_show`).
     #[test]
     fn a_lock_scene_reads_only_what_a_lock_may_show() {
-        use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
         crate::qml::qt_test::on_the_qt_thread(|| {
             let mut locked = Locked::new("redacted", Some(READS_THE_SESSION));
             let mut desktop = session_scene(&locked, READS_THE_SESSION);
             let name = locked.output.name();
-            locked.state.status = "a window's secret title".to_owned();
-            locked.state.apps_scan_pending = false;
-            locked.state.apps = vec![crate::apps::Entry {
-                id: "solium-lock-redaction-test".to_owned(),
-                name: "Redacted".to_owned(),
-                untranslated_name: "Redacted".to_owned(),
-                generic_name: String::new(),
-                icon: String::new(),
-                exec: "true".to_owned(),
-                categories: Vec::new(),
-                keywords: Vec::new(),
-                terminal: false,
-                path: None,
-                source: PathBuf::from("/nonexistent/solium-lock-redaction-test.desktop"),
-            }];
-            locked.state.workspaces = Some(Declared {
-                arrangement: Arrangement {
-                    kind: "grid".to_owned(),
-                    columns: 2,
-                    rows: 1,
-                },
-                groups: vec![Group {
-                    id: "lock-redaction".to_owned(),
-                    monitors: vec![name.clone()],
-                    showing: vec!["1".to_owned()],
-                    workspaces: (1..=2)
-                        .map(|index| Workspace {
-                            id: index.to_string(),
-                            name: format!("desk {index}"),
-                            col: index,
-                            row: 1,
-                            hidden: false,
-                        })
-                        .collect(),
-                }],
-                windows: std::collections::BTreeMap::new(),
-            });
-            let read = |scene: &mut crate::qml::Scene| {
-                (
-                    scene.get_string_for_test("status"),
-                    scene.get_int("apps"),
-                    scene.get_int("workspaces"),
-                    scene.get_int("listed"),
-                    scene.get_int("arranged"),
-                )
-            };
-            let empty = (String::new(), 0, 0, 0, 0);
+            fill_the_session(&mut locked.state, &name);
 
             locked.state.publish_models();
-            assert_eq!(read(locked.scene()), empty, "the lock scene, locked");
             assert_eq!(
-                read(desktop.scene_for_test()),
-                empty,
-                "a desktop scene, locked"
+                session_read(locked.scene()),
+                read_empty(),
+                "the lock scene, locked"
             );
+            let read = session_read(desktop.scene_for_test());
+            assert!(reads_it_all(&read), "a desktop scene, locked: {read:?}");
             for scene in [locked.scene(), desktop.scene_for_test()] {
                 assert_eq!(scene.get_string_for_test("monitor"), name);
                 assert!(scene.get_int("layouts") > 0, "the keyboard does not read");
@@ -3118,35 +3218,134 @@ mod tests {
 
             locked.state.unlock_natively();
             locked.state.publish_models();
-            let (status, apps, workspaces, listed, arranged) = read(desktop.scene_for_test());
-            assert_eq!(status, "a window's secret title");
-            assert!(apps >= 1 && workspaces >= 2 && listed >= 2 && arranged > 0);
+            let read = session_read(desktop.scene_for_test());
+            assert!(reads_it_all(&read), "a desktop scene, unlocked: {read:?}");
             assert_eq!(
-                read(locked.scene()),
-                empty,
+                session_read(locked.scene()),
+                read_empty(),
                 "the lock scene, kept for the next lock, reads the session"
             );
 
             locked.state.lock_natively();
             locked.state.publish_models();
-            assert_eq!(read(locked.scene()), empty, "the lock scene, the next lock");
-            // Through that lock's entry the desktop is still on the screen,
-            // under the scene coming down, and does not empty under it; from
-            // the entry's end it reads nothing.
             assert_eq!(
-                read(desktop.scene_for_test()).0,
-                "a window's secret title",
-                "a desktop scene emptied under the entry"
+                session_read(locked.scene()),
+                read_empty(),
+                "the lock scene, the next lock's entry"
             );
             let enter = locked.state.lock_scenes.settings().enter;
             locked.state.clock.advance(enter);
             crate::lock_scene::settle(&mut locked.state);
             locked.state.publish_models();
             assert_eq!(
-                read(desktop.scene_for_test()),
-                empty,
-                "a desktop scene, after the entry"
+                session_read(locked.scene()),
+                read_empty(),
+                "the lock scene, after the entry"
             );
+            let read = session_read(desktop.scene_for_test());
+            assert!(
+                reads_it_all(&read),
+                "a desktop scene, after the entry: {read:?}"
+            );
+            locked.state.unpublish_session_for_test();
+        });
+    }
+
+    /// What a pointer scene could read of the session, beside the monitors
+    /// and the keyboard, which it may.
+    const POINTER_READS: &str = r#"import QtQuick
+                import Solium
+                Item {
+                    width: 24
+                    height: 24
+                    readonly property string status: Solium.status
+                    readonly property string desktop: Solium.dirs.desktop
+                    readonly property int apps: Apps.count
+                    readonly property int workspaces: Workspaces.count
+                    readonly property int listed: list.count
+                    readonly property int arranged: Object.keys(Workspaces.arrangement).length
+                    readonly property int windows: Windows.count + windowList.count
+                    readonly property int folder: Folder.count
+                    readonly property int monitors: Monitors.count
+                    readonly property int layouts: Keyboard.layouts.length
+                    WorkspaceList { id: list }
+                    WindowList { id: windowList }
+                }"#;
+
+    /// **The pointer's scene reads only what a lock may show, at all
+    /// times**: it is drawn over Solium's own lock, the one scene of the
+    /// session that is, so `Solium.status`, `Solium.dirs`, `Apps`,
+    /// `Workspaces`, a `WorkspaceList`, the arrangement, `Windows`, a
+    /// `WindowList` and `Folder` read empty in it, unlocked, natively locked
+    /// through the entry and after it, and unlocked again, while a desktop
+    /// scene beside it reads the session; the monitors and the keyboard
+    /// read in it. The same for the configuration's pointer scene and for
+    /// the floor, `qml/cursor.qml`. Always, and not only while locked, so
+    /// nothing in it changes as the session locks.
+    #[test]
+    fn the_pointer_scene_reads_only_what_a_lock_may_show() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::unlocked("pointer-redacted", &Shows::Fallback);
+            let mut desktop = session_scene(&locked, READS_THE_SESSION);
+            let name = locked.output.name();
+            fill_the_session(&mut locked.state, &name);
+            let (directory, configured) = crate::qml::pointer::tests::written(
+                &format!("solium-lock-pointer-redacted-{}", std::process::id()),
+                POINTER_READS,
+            );
+            let floor = crate::qml::pointer::tests::beside(&directory, "Floor.qml", POINTER_READS);
+            let mut configured = crate::qml::Scene::sized_by_root(&configured, 24)
+                .expect("the configured pointer scene builds");
+            let mut floor =
+                crate::qml::Scene::for_pointer(&floor, 24, 24).expect("the floor builds");
+            let read = |scene: &mut crate::qml::Scene| {
+                (
+                    scene.get_string_for_test("status"),
+                    scene.get_string_for_test("desktop"),
+                    [
+                        scene.get_int("apps"),
+                        scene.get_int("workspaces"),
+                        scene.get_int("listed"),
+                        scene.get_int("arranged"),
+                        scene.get_int("windows"),
+                        scene.get_int("folder"),
+                    ],
+                )
+            };
+            let empty = (String::new(), String::new(), [0; 6]);
+
+            let mut check = |locked: &mut Locked, when: &str| {
+                locked.state.publish_models();
+                let session = session_read(desktop.scene_for_test());
+                assert!(
+                    reads_it_all(&session),
+                    "the premise, {when}: a desktop scene reads the session: {session:?}"
+                );
+                for (scene, which) in [(&mut configured, "configured"), (&mut floor, "floor")] {
+                    assert_eq!(read(scene), empty, "the {which} pointer scene, {when}");
+                    assert!(
+                        scene.get_int("monitors") >= 1,
+                        "the {which} pointer scene, {when}: the monitors do not read"
+                    );
+                    assert!(
+                        scene.get_int("layouts") > 0,
+                        "the {which} pointer scene, {when}: the keyboard does not read"
+                    );
+                }
+            };
+            check(&mut locked, "unlocked");
+            locked.state.lock_natively();
+            check(&mut locked, "through the entry");
+            let enter = locked.state.lock_scenes.settings().enter;
+            locked.state.clock.advance(enter);
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(natively_locked(&locked.state), "the premise: locked");
+            check(&mut locked, "natively locked");
+            locked.state.unlock_natively();
+            check(&mut locked, "unlocked again");
+            locked.state.unpublish_session_for_test();
+            drop((configured, floor));
+            let _ = std::fs::remove_dir_all(&directory);
         });
     }
 

@@ -19239,6 +19239,129 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 path
             }
 
+            /// **A session scene keeps its rows through a native lock and
+            /// its unlock**: a scene hosted as any `sol.surface` is, with a
+            /// delegate for every app and every window, as a home screen
+            /// has, loses none of them and builds none again, through the
+            /// lock's entry, the lock itself and the unlock. The session's
+            /// scenes are not drawn behind the lock, so nothing is emptied
+            /// for them; emptied, every tile and its icon was built again at
+            /// the unlock, which stalled Illia's Surface for 270 ms over the
+            /// lock's exit. What is drawn over the lock reads empty models
+            /// of its own (`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`,
+            /// `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`).
+            #[test]
+            fn a_session_scene_keeps_its_rows_through_a_native_lock() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let mut session = Session::new();
+                    session.app.open(&mut session.display, &mut session.state);
+                    session
+                        .state
+                        .lock_scenes
+                        .use_scene(scene_file("keeps-rows", "import QtQuick\nItem {}\n"));
+                    session.state.apps_scan_pending = false;
+                    session.state.apps = vec![crate::apps::Entry {
+                        id: "solium-keeps-rows-test".to_owned(),
+                        name: "Kept".to_owned(),
+                        untranslated_name: "Kept".to_owned(),
+                        generic_name: String::new(),
+                        icon: String::new(),
+                        exec: "true".to_owned(),
+                        categories: Vec::new(),
+                        keywords: Vec::new(),
+                        terminal: false,
+                        path: None,
+                        source: std::path::PathBuf::from(
+                            "/nonexistent/solium-keeps-rows-test.desktop",
+                        ),
+                    }];
+                    let directory = std::env::temp_dir().join(format!(
+                        "solium-native-lock-keeps-rows-session-{}",
+                        std::process::id()
+                    ));
+                    std::fs::create_dir_all(&directory).expect("a directory for the scene");
+                    let path = directory.join("Home.qml");
+                    std::fs::write(
+                        &path,
+                        r#"import QtQuick
+                        import Solium
+                        Item {
+                            id: root
+                            property int built: 0
+                            property int destroyed: 0
+                            readonly property int apps: Apps.count
+                            readonly property int windows: Windows.count
+                            Repeater {
+                                model: Apps
+                                delegate: Item {
+                                    Component.onCompleted: root.built += 1
+                                    Component.onDestruction: root.destroyed += 1
+                                }
+                            }
+                            Repeater {
+                                model: Windows
+                                delegate: Item {
+                                    Component.onCompleted: root.built += 1
+                                    Component.onDestruction: root.destroyed += 1
+                                }
+                            }
+                        }"#,
+                    )
+                    .expect("writing the scene");
+                    let mut home =
+                        crate::surface::ShellSurface::hosted(path, "{}", &session.output(0).name())
+                            .expect("the session's scene builds");
+                    let read = |home: &mut crate::surface::ShellSurface| {
+                        let scene = home.scene_for_test();
+                        [
+                            scene.get_int("apps"),
+                            scene.get_int("windows"),
+                            scene.get_int("built"),
+                            scene.get_int("destroyed"),
+                        ]
+                    };
+
+                    session.state.publish_models();
+                    let before = read(&mut home);
+                    assert!(
+                        before[0] >= 1 && before[1] >= 1,
+                        "the premise: an app and a window, {before:?}"
+                    );
+                    assert_eq!(
+                        (before[2], before[3]),
+                        (before[0] + before[1], 0),
+                        "the premise: a delegate for each"
+                    );
+
+                    session.state.lock_natively();
+                    crate::render::frame_tick(&mut session.state);
+                    assert_eq!(read(&mut home), before, "through the lock's entry");
+                    let enter = session.state.lock_scenes.settings().enter;
+                    session.state.clock.advance(enter);
+                    crate::lock_scene::settle(&mut session.state);
+                    session.show_all();
+                    crate::render::frame_tick(&mut session.state);
+                    assert!(natively_locked(&session), "the premise: locked");
+                    assert_eq!(
+                        read(&mut home),
+                        before,
+                        "natively locked: [apps, windows, built, destroyed]"
+                    );
+
+                    session.state.unlock_natively();
+                    crate::render::frame_tick(&mut session.state);
+                    assert_eq!(
+                        read(&mut home),
+                        before,
+                        "unlocked: [apps, windows, built, destroyed]"
+                    );
+                    session.state.unpublish_session_for_test();
+                    drop(home);
+                    let _ = std::fs::remove_dir_all(&directory);
+                });
+            }
+
             /// **A native lock blanks every monitor on the first frame and
             /// takes input away, before any scene is ready.** Off the Qt
             /// thread no scene is built, which is the moment before one is:
@@ -19911,7 +20034,14 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         .lock_scene_over_desktop(&session.output(index), now)
                 }
 
+                /// A frame, then the clock `by` on and the loop's check of
+                /// an exit: the exit's bound is counted from its first
+                /// frame, which `render::frame_tick` starts as here. Not the
+                /// whole of it: its models would be left in Qt's stores,
+                /// which every test on the Qt thread shares.
                 fn advance(session: &mut Session, by: Duration) {
+                    let now = session.state.clock.now();
+                    session.state.lock_scenes.exit_frame(now);
                     session.state.clock.advance(by);
                     crate::lock_scene::settle(&mut session.state);
                 }

@@ -404,9 +404,11 @@ written unqualified, as `Theme` is: the singletons `Theme`, `Keyboard`
 ("The keyboard, live", below) and `Monitors` ("Its monitor, live", below);
 the models `Windows` ("Windows, live", below), `Workspaces` ("Workspaces, as
 the configuration has them", below), `Apps` and `Folder`, which every scene
-reads by name, but which are no singletons: Solium's own lock scenes read
-empty ones under the same names
-(`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`); the types `Grab` ("Popups that hold the
+reads by name, but which are no singletons: Solium's own lock scenes and
+the pointer's scene, the scenes drawn over the lock, read empty ones under
+the same names
+(`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`,
+`lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`); the types `Grab` ("Popups that hold the
 pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
 ("Workspaces, as the configuration has them"); the pane-style types
 `PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
@@ -866,6 +868,12 @@ engine as every other scene and is given this
 
 It is not hosted on a monitor and takes no input: `Solium.monitor` is the
 absent row, and `Solium.send`, `Grab` and `Solium.keyboard` do nothing in it.
+It is drawn over Solium's own lock, so it reads of the session what a lock
+may show and nothing more, at all times: `Monitors` and `Keyboard` read in
+it, and `Windows`, `Workspaces`, `Apps`, `Folder`, a `WindowList` or
+`WorkspaceList`, `Solium.status` and `Solium.dirs` read empty, as in a lock
+scene; the floor, `qml/cursor.qml`, the same
+(`lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`).
 With no scene configured, nothing of this runs: the pointer is the theme, and
 then `qml/cursor.qml`, as before
 (`cursor::tests::with_no_scene_configured_the_pointer_is_drawn_as_before`).

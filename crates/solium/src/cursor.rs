@@ -281,7 +281,9 @@ impl Cursor {
         // one picture might suggest: 24 is 24 *logical* pixels, so the pointer
         // crossing onto a 2x monitor needs a 48-pixel one and the GPU path
         // rebinds onto a new buffer to get it. See `Cursor::element`.
-        let scene = qml::Scene::for_host(&qml_path(), size, size, None)?;
+        // It is drawn over Solium's own lock, so it reads of the session only
+        // what a lock may show (`qml::pointer`'s `redacted`).
+        let scene = qml::Scene::for_pointer(&qml_path(), size, size)?;
         Ok(Self {
             scene,
             backing: if qml::on_gpu() {

@@ -107,6 +107,15 @@ void solium_qml_host_next_on(const char *monitor);
  * `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`. */
 void solium_qml_host_next_for_lock(int lock);
 
+/* Whether the next scene built reads only what a lock may show, though it is
+ * no lock scene: the pointer's, which is drawn over Solium's own lock. It
+ * gets a QML context of its own whose `Windows`, `Workspaces`, `Apps` and
+ * `Folder` are always empty, as are `Solium.status`, `Solium.dirs`, a
+ * `WindowList` and a `WorkspaceList` in it. Consumed by the next build,
+ * whether it succeeds or not.
+ * `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`. */
+void solium_qml_host_next_redacted(int redacted);
+
 /* Whether the next scene built says how big it is through its root item: the
  * host then never writes the root's width or height, and a root that sets
  * neither takes `width` by `height` logical pixels as its implicit size. 0 for
