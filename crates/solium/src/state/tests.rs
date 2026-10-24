@@ -20778,6 +20778,100 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 );
             }
 
+            /// **A commit that draws nothing is still told when it may
+            /// draw.** A client paced by its frame callbacks asks for one
+            /// with a commit that carries no new buffer: Firefox's vsync
+            /// does, between the frames it paints. The damage tracker finds
+            /// nothing new in that commit, so the hardware backend queues no
+            /// frame, and no flip comes to answer the callback. Told only on
+            /// a flip, the client waits for ever, and what it draws next (a
+            /// resize) shows only once something else -- the pointer, a
+            /// scene -- flips the screen. The nested backend tells every
+            /// client on every pass, which is why it never showed.
+            ///
+            /// Played as `tty.rs` plays a pass: the window's own elements
+            /// through a real damage tracker, a frame queued only when it
+            /// finds damage, and a pass that queued none answered by
+            /// `tty::answer_in`, one refresh after the monitor last told its
+            /// clients. With a flip the only answer, fails at "never told".
+            #[test]
+            fn a_commit_that_draws_nothing_is_still_told_when_it_may_draw() {
+                use smithay::backend::renderer::damage::OutputDamageTracker;
+                use smithay::backend::renderer::element::surface::{
+                    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+                };
+                use smithay::backend::renderer::test::DummyRenderer;
+
+                let mut session = Session::new();
+                let monitor = session.output(0);
+                let (window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let root = window
+                    .wl_surface()
+                    .map(std::borrow::Cow::into_owned)
+                    .expect("the window's surface");
+                let mut tracker =
+                    OutputDamageTracker::new((1920, 1080), 1.0, smithay::utils::Transform::Normal);
+                // One pass: whether the tracker finds anything to draw, which
+                // is whether the hardware backend queues a frame.
+                let queues = |tracker: &mut OutputDamageTracker| {
+                    let drawn: Vec<WaylandSurfaceRenderElement<DummyRenderer>> =
+                        render_elements_from_surface_tree(
+                            &mut DummyRenderer,
+                            &root,
+                            (0, 0),
+                            1.0,
+                            1.0,
+                            smithay::backend::renderer::element::Kind::Unspecified,
+                        );
+                    assert!(!drawn.is_empty(), "the premise: the window is drawn");
+                    tracker
+                        .damage_output(1, &drawn)
+                        .expect("a mode")
+                        .0
+                        .is_some_and(|damage| !damage.is_empty())
+                };
+
+                // Its first picture is queued, and that frame's flip tells
+                // the monitor's clients they may draw.
+                assert!(
+                    queues(&mut tracker),
+                    "the premise: the window's first picture is drawn"
+                );
+                session.state.send_frames_on(&monitor, at(0), REFRESH);
+                let told = at(0);
+
+                // A commit with no new buffer, asking only to be told.
+                surface.frame(&session.app.qh, FrameDone);
+                surface.commit();
+                session.app.pump(&mut session.display, &mut session.state);
+                let queued = queues(&mut tracker);
+                assert!(
+                    !queued,
+                    "the premise: a commit with nothing new in it leaves the tracker nothing to \
+                     draw, so no frame is queued and no flip comes"
+                );
+
+                let now = at(5);
+                if let Some(delay) = crate::tty::answer_in(queued, Some(told), now, REFRESH) {
+                    assert_eq!(
+                        delay,
+                        at(11),
+                        "told sooner than a refresh after the monitor last told its clients"
+                    );
+                    session.state.send_frames_on(&monitor, now + delay, REFRESH);
+                }
+                assert_eq!(
+                    session
+                        .app
+                        .frames_done(&mut session.display, &mut session.state),
+                    1,
+                    "a commit that drew nothing was never told it may draw: no frame was queued, \
+                     so no flip answered it, and the client waits until something else flips \
+                     the screen"
+                );
+            }
+
             /// **A layer surface is not told it may draw by a monitor it is
             /// not on**: two monitors with a panel each, each panel's client
             /// its own, and a frame on one tells only its own panel.
