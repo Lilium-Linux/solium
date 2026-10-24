@@ -16,9 +16,12 @@
 //!
 //! **A file that cannot be trusted is no PIN** ([`read`]): one that is not a
 //! regular file of this user's, one others can write (they could put the hash
-//! of a PIN of their own there), one too long, or one that does not parse as
-//! an argon2id hash with sane parameters. The lock then asks for the password,
-//! and the log says why.
+//! of a PIN of their own there), one in a directory that is not the user's or
+//! that others can write, one too long, or one that does not parse as an
+//! argon2id hash with the parameters `solium pin set` writes or stronger
+//! within a bound. The lock then asks for the password, and the log says why.
+//! The lock's state file beside it is read the same way ([`read_private`]),
+//! and [`write_private`] refuses a directory it would not read from.
 //!
 //! The check itself ([`check`]) runs in the `solium-auth` helper, as the
 //! password's does, never in the compositor: the compositor sends the typed
@@ -54,18 +57,18 @@ pub const T_COST: u32 = 3;
 pub const P_COST: u32 = 1;
 
 /// The longest file read, in bytes: a PHC string with these parameters is
-/// about a hundred.
-const MAX_FILE: u64 = 1024;
+/// about a hundred, and the lock's state file less.
+pub const MAX_FILE: u64 = 1024;
 
-/// The most memory a stored hash may ask a check for, in KiB: 1 GiB. A file
+/// The most memory a stored hash may ask a check for, in KiB: 256 MiB. A file
 /// asking for more is refused rather than handed to the helper's allocator.
-const MAX_M_COST_KIB: u32 = 1 << 20;
+const MAX_M_COST_KIB: u32 = 256 * 1024;
 
 /// The most passes a stored hash may ask for.
-const MAX_T_COST: u32 = 64;
+const MAX_T_COST: u32 = 8;
 
 /// The most lanes a stored hash may ask for.
-const MAX_P_COST: u32 = 16;
+const MAX_P_COST: u32 = 4;
 
 /// What the PIN file holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,57 +86,104 @@ pub enum Stored {
 /// makes a file [`Stored::Unusable`].
 #[must_use]
 pub fn read(path: &Path) -> Stored {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path);
-    let file = match file {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Stored::None,
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-            return Stored::Unusable(format!("{} is a symbolic link", path.display()));
-        }
-        Err(error) => {
-            return Stored::Unusable(format!("{} would not open: {error}", path.display()));
-        }
+    let text = match read_private(path) {
+        Ok(Some(text)) => text,
+        Ok(None) => return Stored::None,
+        Err(why) => return Stored::Unusable(why),
     };
-    let meta = match file.metadata() {
-        Ok(meta) => meta,
-        Err(error) => {
-            return Stored::Unusable(format!("{} would not stat: {error}", path.display()));
-        }
-    };
-    if !meta.is_file() {
-        return Stored::Unusable(format!("{} is not a regular file", path.display()));
-    }
-    // SAFETY: `getuid` takes nothing and cannot fail.
-    #[expect(unsafe_code, reason = "calling libc")]
-    let me = unsafe { libc::getuid() };
-    if meta.uid() != me {
-        return Stored::Unusable(format!("{} belongs to someone else", path.display()));
-    }
-    if meta.mode() & 0o022 != 0 {
-        return Stored::Unusable(format!(
-            "{} can be written by others (mode {:o}); `solium pin set` writes it 0600",
-            path.display(),
-            meta.mode() & 0o777
-        ));
-    }
-    if meta.len() > MAX_FILE {
-        return Stored::Unusable(format!("{} is too long to be a PIN's hash", path.display()));
-    }
-    let mut text = String::new();
-    if let Err(error) = (&file).take(MAX_FILE).read_to_string(&mut text) {
-        return Stored::Unusable(format!("{} would not read: {error}", path.display()));
-    }
     match parse(text.trim()) {
         Ok(()) => Stored::Set(text.trim().to_owned()),
         Err(why) => Stored::Unusable(format!("{} does not hold a PIN: {why}", path.display())),
     }
 }
 
-/// Whether `text` is an argon2id hash, version 0x13, whose parameters are
-/// within the bounds above.
+/// The text of the file at `path`, read only if it can be trusted: a regular
+/// file, not a symbolic link, of this user's, that nobody else can write, at
+/// most [`MAX_FILE`] bytes, in a directory that is this user's and that
+/// nobody else can write. `None` when there is no such file; why, when there
+/// is one that cannot be trusted. What the PIN file and the lock's state file
+/// are both read with.
+pub fn read_private(path: &Path) -> Result<Option<String>, String> {
+    if let Some(dir) = path.parent() {
+        private_dir(dir)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path);
+    let file = match file {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(format!("{} is a symbolic link", path.display()));
+        }
+        Err(error) => return Err(format!("{} would not open: {error}", path.display())),
+    };
+    let meta = file
+        .metadata()
+        .map_err(|error| format!("{} would not stat: {error}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if meta.uid() != uid() {
+        return Err(format!("{} belongs to someone else", path.display()));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} can be written by others (mode {:o}); Solium writes it 0600",
+            path.display(),
+            meta.mode() & 0o777
+        ));
+    }
+    if meta.len() > MAX_FILE {
+        return Err(format!("{} is longer than it can be", path.display()));
+    }
+    let mut text = String::new();
+    (&file)
+        .take(MAX_FILE)
+        .read_to_string(&mut text)
+        .map_err(|error| format!("{} would not read: {error}", path.display()))?;
+    Ok(Some(text))
+}
+
+/// Whether `dir` is a directory of this user's that nobody else can write,
+/// not a symbolic link: `Ok(true)`, or `Ok(false)` when it is not there, or
+/// why it cannot be trusted.
+fn private_dir(dir: &Path) -> Result<bool, String> {
+    let meta = match std::fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{} would not stat: {error}", dir.display())),
+    };
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    if meta.uid() != uid() {
+        return Err(format!("{} belongs to someone else", dir.display()));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} can be written by others (mode {:o})",
+            dir.display(),
+            meta.mode() & 0o777
+        ));
+    }
+    Ok(true)
+}
+
+/// This process's user.
+fn uid() -> libc::uid_t {
+    // SAFETY: `getuid` takes nothing and cannot fail.
+    #[expect(unsafe_code, reason = "calling libc")]
+    unsafe {
+        libc::getuid()
+    }
+}
+
+/// Whether `text` is an argon2id hash, version 0x13, whose parameters are at
+/// least what `solium pin set` writes ([`M_COST_KIB`], [`T_COST`]), so a file
+/// cannot make the PIN cheap to guess, and at most the bounds above, so it
+/// cannot make a check take the machine's memory.
 fn parse(text: &str) -> Result<(), String> {
     let hash = PasswordHash::new(text).map_err(|error| format!("not a PHC string ({error})"))?;
     if hash.algorithm != Algorithm::Argon2id.ident() {
@@ -146,12 +196,13 @@ fn parse(text: &str) -> Result<(), String> {
         return Err("no salt or no hash".to_owned());
     }
     let params = Params::try_from(&hash).map_err(|error| format!("its parameters: {error}"))?;
-    if params.m_cost() > MAX_M_COST_KIB
-        || params.t_cost() > MAX_T_COST
-        || params.p_cost() > MAX_P_COST
+    if !(M_COST_KIB..=MAX_M_COST_KIB).contains(&params.m_cost())
+        || !(T_COST..=MAX_T_COST).contains(&params.t_cost())
+        || !(P_COST..=MAX_P_COST).contains(&params.p_cost())
     {
         return Err(format!(
-            "it asks for m={} KiB, t={}, p={}, more than a PIN's check may take",
+            "it asks for m={} KiB, t={}, p={}, outside m={M_COST_KIB}..={MAX_M_COST_KIB} KiB, \
+             t={T_COST}..={MAX_T_COST}, p={P_COST}..={MAX_P_COST}",
             params.m_cost(),
             params.t_cost(),
             params.p_cost()
@@ -198,14 +249,7 @@ fn verify(phc: &str, pin: &Secret) -> Answer {
 /// The PHC string for `pin`, with a fresh random salt and the parameters
 /// above: what `solium pin set` stores.
 pub fn hash(pin: &Secret) -> io::Result<String> {
-    hash_with(pin, M_COST_KIB, T_COST)
-}
-
-/// The same with `m_cost_kib` and `t_cost` of the caller's, which [`check`]
-/// reads back from the string. For the tests, which would otherwise spend a
-/// tenth of a second on every PIN they write.
-pub fn hash_with(pin: &Secret, m_cost_kib: u32, t_cost: u32) -> io::Result<String> {
-    let params = Params::new(m_cost_kib, t_cost, P_COST, None)
+    let params = Params::new(M_COST_KIB, T_COST, P_COST, None)
         .map_err(|error| io::Error::other(format!("argon2's parameters: {error}")))?;
     let mut salt = [0_u8; 16];
     random(&mut salt)?;
@@ -250,7 +294,9 @@ pub fn shaped(pin: &Secret, min: usize, max: usize) -> bool {
 /// Write `contents` to `path` atomically, readable and writable by this user
 /// alone: into a new file beside it, created 0600, synced, then renamed over
 /// `path`, and the directory synced. The directory is made, 0700, when it is
-/// not there.
+/// not there; one that is there and is not this user's, or that others can
+/// write, is refused, never mended: whoever can write it could put a file of
+/// their own in place of this one.
 pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     let Some(dir) = path.parent() else {
         return Err(io::Error::other(format!(
@@ -258,10 +304,13 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
             path.display()
         )));
     };
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
+    if !private_dir(dir).map_err(io::Error::other)? {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        private_dir(dir).map_err(io::Error::other)?;
+    }
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -312,9 +361,12 @@ mod tests {
         secret
     }
 
-    /// A hash cheap enough for a test: 64 KiB, one pass.
-    fn cheap(pin: &str) -> String {
-        hash_with(&secret(pin), 64, 1).expect("a hash")
+    /// The hash of `2580` as `solium pin set` writes it, made once for every
+    /// test here: a tenth of a second each is worth not spending again.
+    fn hash_2580() -> String {
+        static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        HASH.get_or_init(|| hash(&secret("2580")).expect("a hash"))
+            .clone()
     }
 
     /// **The file holds a hash, and never the PIN**: what `solium pin set`
@@ -378,7 +430,7 @@ mod tests {
                 reason: "no PIN is set".to_owned()
             }
         );
-        write_private(&path, cheap("2580").as_bytes()).expect("written");
+        write_private(&path, hash_2580().as_bytes()).expect("written");
         assert_eq!(check(&path, &secret("2580")), Answer::Ok);
         assert_eq!(
             check(&path, &secret("2581")),
@@ -396,13 +448,13 @@ mod tests {
     fn a_file_that_cannot_be_trusted_reads_as_no_pin() {
         let dir = dir("unusable");
         let path = dir.join("pin");
-        let good = cheap("2580");
+        let good = hash_2580();
         let argon2i = good.replacen("$argon2id$", "$argon2i$", 1);
-        let greedy = good.replacen("m=64,", "m=4194304,", 1);
+        let greedy = good.replacen("m=65536,", "m=4194304,", 1);
         for text in [
             "2580",
             "",
-            "$argon2id$v=19$m=64,t=1,p=1$c2FsdA",
+            "$argon2id$v=19$m=65536,t=3,p=1$c2FsdA",
             argon2i.as_str(),
             greedy.as_str(),
         ] {
@@ -428,6 +480,82 @@ mod tests {
         std::os::unix::fs::symlink(&path, &link).expect("a link");
         assert!(matches!(read(&link), Stored::Unusable(why) if why.contains("symbolic link")));
         assert!(matches!(read(&dir), Stored::Unusable(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The stored parameters are bounded on both sides**: a hash weaker
+    /// than what `solium pin set` writes (less memory, fewer passes) would
+    /// make the PIN cheap to guess from the file, and one stronger than
+    /// 256 MiB, 8 passes or 4 lanes would make a check take the machine. Each
+    /// reads as no PIN, with the reason; the parameters `pin set` writes, and
+    /// the bounds themselves, are taken.
+    #[test]
+    fn the_stored_parameters_are_bounded_on_both_sides() {
+        let dir = dir("bounds");
+        let path = dir.join("pin");
+        let good = hash_2580();
+        let params = format!("m={M_COST_KIB},t={T_COST},p={P_COST}");
+        assert!(good.contains(&params), "{good}");
+        for (weaker_or_stronger, why) in [
+            ("m=32768,t=3,p=1", "less memory"),
+            ("m=65535,t=3,p=1", "a KiB less memory"),
+            ("m=65536,t=2,p=1", "fewer passes"),
+            ("m=262145,t=3,p=1", "more than 256 MiB"),
+            ("m=65536,t=9,p=1", "more than 8 passes"),
+            ("m=65536,t=3,p=5", "more than 4 lanes"),
+        ] {
+            write_private(
+                &path,
+                good.replacen(&params, weaker_or_stronger, 1).as_bytes(),
+            )
+            .expect("written");
+            assert!(
+                matches!(read(&path), Stored::Unusable(reason) if reason.contains("outside")),
+                "{why}: {:?}",
+                read(&path)
+            );
+        }
+        for within in ["m=262144,t=8,p=4", params.as_str()] {
+            let text = good.replacen(&params, within, 1);
+            write_private(&path, text.as_bytes()).expect("written");
+            assert_eq!(read(&path), Stored::Set(text), "{within}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A directory others can write is neither read from nor written to**:
+    /// the PIN file in one reads as unusable, and a write into one is refused
+    /// and leaves the directory as it was, not mended; nor one that is a
+    /// symbolic link.
+    #[test]
+    fn a_directory_others_can_write_is_refused() {
+        let dir = dir("shared-dir");
+        let state = dir.join("solium");
+        let path = state.join("pin");
+        write_private(&path, hash_2580().as_bytes()).expect("written");
+        assert!(matches!(read(&path), Stored::Set(_)));
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        assert!(
+            matches!(read(&path), Stored::Unusable(why) if why.contains("written by others")),
+            "{:?}",
+            read(&path)
+        );
+        assert!(read_private(&path).is_err());
+        assert!(
+            write_private(&path, b"anything").is_err(),
+            "written into it"
+        );
+        let mode = std::fs::metadata(&state).expect("its mode").mode() & 0o777;
+        assert_eq!(
+            mode, 0o777,
+            "the directory was mended behind the user's back"
+        );
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&state, &link).expect("a link");
+        assert!(write_private(&link.join("pin"), b"anything").is_err());
+        assert!(read_private(&link.join("pin")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

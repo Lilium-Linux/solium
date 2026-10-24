@@ -952,7 +952,7 @@ mod tests {
         let file = dir.join("pin");
         let mut pin = Secret::new();
         assert!(pin.push_str("2580"));
-        let phc = solium_auth::pin::hash_with(&pin, 64, 1).expect("a hash");
+        let phc = solium_auth::pin::hash(&pin).expect("a hash");
         solium_auth::pin::write_private(&file, phc.as_bytes()).expect("written");
         let helper = stand_in_helper("answer", PathBuf::from("/nonexistent/pam.d/solium"));
         let pin_checked = |typed: &str| {

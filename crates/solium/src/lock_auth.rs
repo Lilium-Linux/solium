@@ -71,8 +71,10 @@
 //! `Lock.mode` reads `"pin"`, and what is typed goes into the same buffer as
 //! a password. Submitted, it is checked as the PIN when it has a PIN's shape
 //! (`lock.pin.min_length` to `max_length` digits), by the helper against the
-//! PIN file, and as the password otherwise, so the password unlocks whatever
-//! the mode. A wrong PIN counts toward the lockout as a wrong password does,
+//! PIN file, and, when it is not the PIN, as the password; anything else is
+//! checked as the password alone. So the password unlocks whatever the mode,
+//! a password of digits included, and one entry counts one attempt
+//! (`tests::a_password_of_digits_unlocks_in_pin_mode`). A wrong PIN counts toward the lockout as a wrong password does,
 //! and toward `lock.pin.attempts` in the state file, which outlives the lock
 //! and Solium; when the PIN is not taken (too many wrong ones, a restart since
 //! the password was last used, `lock.pin.password_after_hours`), `Lock.mode`
@@ -567,6 +569,10 @@ pub(crate) struct LockAuth {
     refused: bool,
     /// Whether the check under way, or the last one, is of a PIN.
     checking_pin: bool,
+    /// Whether what was last submitted was checked as the PIN first: a
+    /// PIN-shaped entry at a lock taking a PIN, which is checked as the
+    /// password too when it is not the PIN.
+    entry_pin: bool,
     /// Whether the lock took a PIN when the last character was typed: what
     /// the scene was showing.
     typed_as_pin: bool,
@@ -597,9 +603,9 @@ pub(crate) struct LockAuth {
     stale: bool,
     #[cfg(test)]
     stand_in: Option<StandIn>,
-    /// The wall clock a test says it is, in seconds since the epoch.
+    /// The clocks a test says it is.
     #[cfg(test)]
-    wall: Option<u64>,
+    clocks: Option<crate::pin::Clocks>,
 }
 
 /// Never the secrets: an attempt count and a state are all a log may hold.
@@ -627,6 +633,7 @@ impl Default for LockAuth {
             retried: 0,
             refused: false,
             checking_pin: false,
+            entry_pin: false,
             typed_as_pin: false,
             pin: crate::pin::Known::new(crate::pin::Paths::of_this_user()),
             until: None,
@@ -642,7 +649,7 @@ impl Default for LockAuth {
             #[cfg(test)]
             stand_in: None,
             #[cfg(test)]
-            wall: None,
+            clocks: None,
         }
     }
 }
@@ -697,17 +704,17 @@ impl LockAuth {
 
     /// What the lock takes now: a PIN, or the password and why.
     pub(crate) fn mode(&self) -> crate::pin::Mode {
-        self.pin.mode(&self.settings.pin, self.wall_now())
+        self.pin.mode(&self.settings.pin, self.clocks_now())
     }
 
-    /// Seconds since the epoch: the wall clock, which the PIN's hours are
-    /// counted on, since they outlive the compositor's own clock.
-    fn wall_now(&self) -> u64 {
+    /// The clocks the PIN's hours are counted on, which outlive the
+    /// compositor's own clock: the wall clock and `CLOCK_BOOTTIME`.
+    fn clocks_now(&self) -> crate::pin::Clocks {
         #[cfg(test)]
-        if let Some(wall) = self.wall {
-            return wall;
+        if let Some(clocks) = self.clocks {
+            return clocks;
         }
-        crate::pin::wall_now()
+        crate::pin::Clocks::now()
     }
 
     /// The lock ended, however it ended: the field and the submitted copy
@@ -731,6 +738,7 @@ impl LockAuth {
         self.retried = 0;
         self.refused = false;
         self.checking_pin = false;
+        self.entry_pin = false;
         self.until = None;
         self.pad_held = 0;
     }
@@ -809,8 +817,10 @@ impl LockAuth {
     /// helper, and the field is wiped. Nothing typed, or a field that is not
     /// taking a password, submits nothing.
     ///
-    /// Taking a PIN, what has a PIN's shape is checked as the PIN, and
-    /// anything else as the password. The PIN's files are read again first:
+    /// Taking a PIN, what has a PIN's shape is checked as the PIN, and then,
+    /// if it is not the PIN, as the password, so a password of digits always
+    /// unlocks; anything else is checked as the password alone. The PIN's
+    /// files are read again first:
     /// a PIN-shaped entry made while the lock took a PIN, which no longer
     /// does (a PIN cleared meanwhile, its hours run out), is wiped unchecked
     /// rather than tried as the password, and the message says why.
@@ -830,6 +840,7 @@ impl LockAuth {
             return;
         }
         self.checking_pin = shaped && is_pin;
+        self.entry_pin = self.checking_pin;
         self.submitted.clear();
         // The page is UTF-8 by construction: only `push_str` writes it.
         let pushed = std::str::from_utf8(self.typed.expose())
@@ -893,14 +904,20 @@ impl LockAuth {
     /// by `now`. Whether to unlock: only on the helper's yes to the check
     /// under way.
     pub(crate) fn settle(&mut self, now: Duration) -> bool {
-        let answers: Vec<(u64, Outcome)> = self
-            .answers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain(..)
-            .collect();
         let mut unlock = false;
-        for (serial, outcome) in answers {
+        // Until no answer is left: a wrong PIN starts the password's check
+        // of the same entry, whose answer may be here already.
+        loop {
+            // Taken, and the lock let go, before the answer is acted on: a
+            // check it starts answers into the same queue.
+            let next = self
+                .answers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front();
+            let Some((serial, outcome)) = next else {
+                break;
+            };
             if serial != self.serial || self.phase != Phase::Checking || self.until.is_some() {
                 continue;
             }
@@ -915,10 +932,20 @@ impl LockAuth {
                         self.pin.pin_unlocked();
                         tracing::info!("the lock's PIN check said yes");
                     } else {
-                        let wall = self.wall_now();
-                        self.pin.password_unlocked(wall);
+                        let clocks = self.clocks_now();
+                        self.pin.password_unlocked(clocks);
                         tracing::info!("the lock's password check said yes");
                     }
+                }
+                Outcome::Failed { .. } if self.checking_pin => {
+                    // Not the PIN: counted as a wrong PIN, and saved, at
+                    // once; then the same entry is checked as the password,
+                    // whose answer is the one that counts as an attempt, so
+                    // a password of digits is never shut out by a PIN.
+                    self.pin.failed();
+                    self.checking_pin = false;
+                    tracing::info!("the lock's PIN check said no; checking it as the password");
+                    self.start_check(now);
                 }
                 Outcome::Failed { delay } => {
                     self.submitted.clear();
@@ -926,15 +953,12 @@ impl LockAuth {
                     self.refused = false;
                     self.attempts = self.attempts.saturating_add(1);
                     self.streak = self.streak.saturating_add(1);
-                    if self.checking_pin {
-                        self.pin.failed();
-                    }
                     // Checking still, through PAM's delay: the answer shows
                     // when it is over.
                     self.until = Some(now + delay);
                     tracing::info!(
                         attempts = self.attempts,
-                        pin = self.checking_pin,
+                        pin = self.entry_pin,
                         "the lock's check said no"
                     );
                 }
@@ -1068,9 +1092,7 @@ impl LockAuth {
             crate::pin::Mode::Pin | crate::pin::Mode::NoPin => None,
         };
         match self.phase {
-            Phase::Failed if self.checking_pin => {
-                fallback.unwrap_or_else(|| "Wrong PIN".to_owned())
-            }
+            Phase::Failed if self.entry_pin => fallback.unwrap_or_else(|| "Wrong PIN".to_owned()),
             Phase::Failed => "Wrong password".to_owned(),
             Phase::LockedOut => "Too many attempts".to_owned(),
             Phase::Unavailable => {
@@ -1189,19 +1211,25 @@ impl LockAuth {
     }
 
     /// Read the PIN's files from `paths`, as this user's would be, and take
-    /// the wall clock to be `wall`.
+    /// both clocks to read `wall`.
     #[cfg(test)]
     pub(crate) fn use_pin_for_test(&mut self, paths: crate::pin::Paths, wall: u64) {
         self.pin = crate::pin::Known::new(Some(paths));
-        self.wall = Some(wall);
+        self.clocks = Some(crate::pin::Clocks::at(wall));
         self.pin.refresh();
         self.stale = true;
     }
 
-    /// Move the wall clock a test set on.
+    /// Move both clocks a test set on to `wall`.
     #[cfg(test)]
     pub(crate) fn set_wall_for_test(&mut self, wall: u64) {
-        self.wall = Some(wall);
+        self.clocks = Some(crate::pin::Clocks::at(wall));
+    }
+
+    /// Set the two clocks apart.
+    #[cfg(test)]
+    pub(crate) fn set_clocks_for_test(&mut self, clocks: crate::pin::Clocks) {
+        self.clocks = Some(clocks);
     }
 
     /// Whether the field's page, and the submitted copy's, are all zeroes.
@@ -1532,7 +1560,7 @@ mod tests {
     }
 
     /// [`SET_PIN`] set in a directory of the test's own, as `solium pin set`
-    /// leaves it: its hash (a cheap one), and a record of a password unlock
+    /// leaves it: its hash, and a record of a password unlock
     /// at [`WALL`] on the boot `boot-one`, which the boot id file names.
     fn pin_set(test: &str) -> (PathBuf, crate::pin::Paths) {
         let dir =
@@ -1542,13 +1570,21 @@ mod tests {
         let mut paths = crate::pin::Paths::in_dir(&dir.join("solium"));
         paths.boot_id = dir.join("boot_id");
         std::fs::write(&paths.boot_id, "boot-one\n").expect("a boot id");
-        let mut pin = Secret::new();
-        assert!(pin.push_str(SET_PIN));
-        let phc = solium_auth::pin::hash_with(&pin, 64, 1).expect("a hash");
+        // Hashed once for every test here, with the parameters `solium pin
+        // set` uses, which are the least a PIN file may have.
+        static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let phc = HASH.get_or_init(|| {
+            let mut pin = Secret::new();
+            assert!(pin.push_str(SET_PIN));
+            solium_auth::pin::hash(&pin).expect("a hash")
+        });
         solium_auth::pin::write_private(&paths.pin, phc.as_bytes()).expect("the PIN file");
-        crate::pin::Record::after_password(WALL, Some("boot-one".to_owned()))
-            .write(&paths.state)
-            .expect("the state file");
+        crate::pin::Record::after_password(
+            crate::pin::Clocks::at(WALL),
+            Some("boot-one".to_owned()),
+        )
+        .write(&paths.state)
+        .expect("the state file");
         (dir, paths)
     }
 
@@ -1914,10 +1950,16 @@ mod tests {
         assert_eq!(auth.length(), 0);
     }
 
+    /// What the checks since `from` were of.
+    fn kinds_since(shared: &Shared, from: usize) -> Vec<&'static str> {
+        asked(shared).kinds.get(from..).unwrap_or_default().to_vec()
+    }
+
     /// **A PIN is taken where one is set, and the password still is**: the
     /// lock reads `"pin"`; `min_length` to `max_length` digits are checked
-    /// as the PIN, by the helper's check of the PIN file, and anything else
-    /// as the password; the right PIN unlocks.
+    /// as the PIN, by the helper's check of the PIN file, and then, not being
+    /// the PIN, as the password; anything else as the password alone. The
+    /// right PIN unlocks on the PIN's check alone.
     #[test]
     fn a_pin_shaped_entry_is_checked_as_the_pin_and_anything_else_as_the_password() {
         let settings = Settings {
@@ -1931,23 +1973,58 @@ mod tests {
         assert_eq!(auth.mode(), crate::pin::Mode::Pin);
         assert_eq!(auth.mode().name(), "pin");
         let mut now = s(0);
-        for (typed, kind) in [
-            ("12345678", "pin"),
-            ("0000", "pin"),
-            ("123", "password"),
-            ("123456789", "password"),
-            ("13a9", "password"),
-            ("wrong", "password"),
+        for (typed, kinds) in [
+            ("12345678", &["pin", "password"][..]),
+            ("0000", &["pin", "password"]),
+            ("123", &["password"]),
+            ("123456789", &["password"]),
+            ("13a9", &["password"]),
+            ("wrong", &["password"]),
         ] {
+            let from = asked(&shared).kinds.len();
             submit(&mut auth, typed, now);
             assert!(!auth.settle(now), "{typed} unlocked");
-            assert_eq!(last_kind(&shared), kind, "{typed}");
+            assert_eq!(kinds_since(&shared, from), kinds, "{typed}");
             now += s(3);
             auth.settle(now);
         }
+        let from = asked(&shared).kinds.len();
         submit(&mut auth, SET_PIN, now);
-        assert_eq!(last_kind(&shared), "pin");
         assert!(auth.settle(now), "the right PIN did not unlock");
+        assert_eq!(kinds_since(&shared, from), ["pin"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A password of digits always unlocks**: in PIN mode, a PIN-shaped
+    /// password that is not the PIN is checked as the password after the
+    /// PIN's no, and unlocks, resetting the counts as a password unlock does;
+    /// a PIN-shaped entry that is neither counts one attempt and one wrong
+    /// PIN, not two of either.
+    #[test]
+    fn a_password_of_digits_unlocks_in_pin_mode() {
+        let (mut auth, shared, dir, paths) = pin_auth("digits", Settings::default());
+        submit(&mut auth, "0000", s(0));
+        auth.settle(s(0));
+        auth.settle(s(3));
+        assert_eq!(auth.phase(), Phase::Failed);
+        assert_eq!(auth.attempts(), 1, "one entry, counted twice");
+        assert_eq!(record(&paths).failures, 1, "one wrong PIN, counted twice");
+        assert_eq!(auth.message(true), "Wrong PIN");
+
+        auth.set_wall_for_test(WALL + 60);
+        let from = asked(&shared).kinds.len();
+        // The stand-in's other password, of digits: PIN-shaped, not the PIN.
+        submit(&mut auth, PIN, s(4));
+        assert!(auth.settle(s(4)), "a password of digits did not unlock");
+        assert_eq!(kinds_since(&shared, from), ["pin", "password"]);
+        assert_eq!(
+            record(&paths),
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL + 60),
+                Some("boot-one".to_owned())
+            ),
+            "not reset as a password unlock resets it"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1970,12 +2047,17 @@ mod tests {
             ..Settings::default()
         };
         let (mut auth, shared, dir, paths) = pin_auth("attempts", settings);
+        let mut now = s(0);
         for wrong in 1..=3 {
             assert_eq!(auth.mode(), crate::pin::Mode::Pin, "after {}", wrong - 1);
-            submit(&mut auth, "0000", s(0));
-            assert!(!auth.settle(s(0)));
-            assert_eq!(last_kind(&shared), "pin");
+            let from = asked(&shared).kinds.len();
+            submit(&mut auth, "0000", now);
+            assert!(!auth.settle(now));
+            assert_eq!(kinds_since(&shared, from), ["pin", "password"]);
             assert_eq!(record(&paths).failures, wrong, "not counted as it came");
+            assert_eq!(auth.attempts(), wrong);
+            now += s(3);
+            auth.settle(now);
         }
         assert_eq!(auth.phase(), Phase::Failed);
         assert_eq!(
@@ -1989,28 +2071,33 @@ mod tests {
             auth.message(true)
         );
 
-        submit(&mut auth, SET_PIN, s(1));
+        let from = asked(&shared).kinds.len();
+        submit(&mut auth, SET_PIN, now);
         assert_eq!(
-            last_kind(&shared),
-            "password",
+            kinds_since(&shared, from),
+            ["password"],
             "a PIN taken after the attempts"
         );
         assert!(
-            !auth.settle(s(1)),
+            !auth.settle(now),
             "the right PIN unlocked after the attempts"
         );
-        auth.settle(s(4));
+        now += s(3);
+        auth.settle(now);
         assert_eq!(
             record(&paths).failures,
             3,
             "a password's no counted as a PIN's"
         );
 
-        submit(&mut auth, RIGHT, s(5));
-        assert!(auth.settle(s(5)), "the password did not unlock");
+        submit(&mut auth, RIGHT, now);
+        assert!(auth.settle(now), "the password did not unlock");
         assert_eq!(
             record(&paths),
-            crate::pin::Record::after_password(WALL, Some("boot-one".to_owned()))
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL),
+                Some("boot-one".to_owned())
+            )
         );
         auth.begin();
         assert_eq!(auth.mode(), crate::pin::Mode::Pin);
@@ -2018,7 +2105,8 @@ mod tests {
     }
 
     /// **The lockout applies to wrong PINs too**: `lock.lockout.attempts`
-    /// wrong PINs in a row shut the field as wrong passwords do.
+    /// wrong PINs in a row shut the field as wrong passwords do, each
+    /// counted once.
     #[test]
     fn the_lockout_applies_to_wrong_pins() {
         let settings = Settings {
@@ -2034,11 +2122,14 @@ mod tests {
         let (mut auth, _, dir, _) = pin_auth("lockout", settings);
         submit(&mut auth, "0000", s(0));
         auth.settle(s(0));
+        auth.settle(s(2));
         assert_eq!(auth.phase(), Phase::Failed);
-        submit(&mut auth, "0001", s(0));
-        auth.settle(s(0));
+        submit(&mut auth, "0001", s(2));
+        auth.settle(s(2));
+        auth.settle(s(4));
         assert_eq!(auth.phase(), Phase::LockedOut);
-        assert_eq!(auth.retry_after(s(0)), 30);
+        assert_eq!(auth.attempts(), 2);
+        assert_eq!(auth.retry_after(s(4)), 30);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2123,6 +2214,18 @@ mod tests {
             crate::pin::Mode::Password(crate::pin::Fallback::Hours),
             "the setting's hours"
         );
+        // The wall clock set back to within the hours does not stretch them
+        // while `CLOCK_BOOTTIME` says they are over.
+        auth.configure(Settings::default());
+        auth.set_clocks_for_test(crate::pin::Clocks {
+            wall: WALL + 3600,
+            boottime: WALL + hours + 1,
+        });
+        assert_eq!(
+            auth.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Hours),
+            "the wall clock set back stretched the hours"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2143,10 +2246,13 @@ mod tests {
             ..Settings::default()
         };
         let (mut first, _, dir, paths) = pin_auth("restart", settings.clone());
-        for _ in 0..2 {
-            submit(&mut first, "0000", s(0));
-            first.settle(s(0));
+        for round in 0..2 {
+            let now = s(3 * round);
+            submit(&mut first, "0000", now);
+            first.settle(now);
+            first.settle(now + s(3));
         }
+        assert_eq!(record(&paths).failures, 2);
         drop(first);
 
         let (mut again, _) = auth(settings);
@@ -2172,25 +2278,33 @@ mod tests {
         let (mut auth, shared, dir, paths) = pin_auth("password", Settings::default());
         submit(&mut auth, "0000", s(0));
         auth.settle(s(0));
+        auth.settle(s(3));
         assert_eq!(record(&paths).failures, 1);
         auth.set_wall_for_test(WALL + 60);
-        submit(&mut auth, RIGHT, s(1));
+        submit(&mut auth, RIGHT, s(3));
         assert_eq!(last_kind(&shared), "password");
-        assert!(auth.settle(s(1)), "the password did not unlock in PIN mode");
+        assert!(auth.settle(s(3)), "the password did not unlock in PIN mode");
         assert_eq!(
             record(&paths),
-            crate::pin::Record::after_password(WALL + 60, Some("boot-one".to_owned()))
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL + 60),
+                Some("boot-one".to_owned())
+            )
         );
 
         auth.begin();
-        submit(&mut auth, "0000", s(2));
-        auth.settle(s(2));
+        submit(&mut auth, "0000", s(4));
+        auth.settle(s(4));
+        auth.settle(s(7));
         auth.set_wall_for_test(WALL + 120);
-        submit(&mut auth, SET_PIN, s(3));
-        assert!(auth.settle(s(3)), "the right PIN did not unlock");
+        submit(&mut auth, SET_PIN, s(7));
+        assert!(auth.settle(s(7)), "the right PIN did not unlock");
         assert_eq!(
             record(&paths),
-            crate::pin::Record::after_password(WALL + 60, Some("boot-one".to_owned())),
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL + 60),
+                Some("boot-one".to_owned())
+            ),
             "the PIN moved the password's time, or kept the wrong one"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2201,18 +2315,20 @@ mod tests {
     #[test]
     fn the_secret_is_zeroed_after_a_pin_check() {
         let (mut auth, shared, dir, _) = pin_auth("zeroed", Settings::default());
-        for pin in ["0000", SET_PIN] {
-            type_text(&mut auth, pin, s(0));
+        for (round, pin) in [(0, "0000"), (1, SET_PIN)] {
+            let now = s(3 * round);
+            type_text(&mut auth, pin, now);
             assert_eq!(auth.wiped_for_test(), (false, true));
-            auth.edit(Edit::Submit, s(0));
+            auth.edit(Edit::Submit, now);
             assert_eq!(last_kind(&shared), "pin");
             assert!(auth.wiped_for_test().0, "the field after submit");
-            auth.settle(s(0));
+            auth.settle(now);
             assert_eq!(
                 auth.wiped_for_test(),
                 (true, true),
                 "after the answer to {pin}"
             );
+            auth.settle(now + s(3));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

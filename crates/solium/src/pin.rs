@@ -7,10 +7,14 @@
 //! to know whether a PIN is set; the check is the `solium-auth` helper's.
 //!
 //! **The state file** beside it (`pin-state`, 0600, written atomically) holds
-//! three things: the wrong PINs in a row, when the password last unlocked the
-//! lock, and the boot that was ([`Record`]). So restarting Solium does not
-//! give anyone a fresh run of guesses
-//! (`lock_auth::tests::the_pin_counts_survive_a_restart`).
+//! the wrong PINs in a row, and when the password last unlocked the lock, by
+//! the wall clock and by `CLOCK_BOOTTIME`, with the boot that was
+//! ([`Record`]). So restarting Solium does not give anyone a fresh run of
+//! guesses (`lock_auth::tests::the_pin_counts_survive_a_restart`). It is read
+//! only as the PIN file is (`solium_auth::pin::read_private`): a file that is
+//! a link, not this user's, writable by others or too long, or in a directory
+//! that is not this user's or that others can write, is no record, and the
+//! password is needed.
 //!
 //! **When a PIN is set, the lock takes it** ([`Mode::Pin`]), unless one of
 //! these says the password is needed instead ([`Fallback`]):
@@ -19,8 +23,12 @@
 //! * the machine has started since the password last unlocked it: the
 //!   kernel's boot id is not the one recorded then;
 //! * more than `lock.pin.password_after_hours` since the password last
-//!   unlocked it, or a clock that says the password was used in the future;
-//! * the state could not be written, so a wrong PIN might not be counted.
+//!   unlocked it, by either clock: `CLOCK_BOOTTIME`, which counts suspend and
+//!   which nobody can set, and the wall clock; or a clock that says the
+//!   password was used in the future. Setting the wall clock back cannot
+//!   stretch the hours;
+//! * the state could not be written, or cannot be trusted, so a wrong PIN
+//!   might not be counted.
 //!
 //! A state file that is missing or does not parse records no password
 //! unlock, so the password is needed: a PIN is never taken on less than a
@@ -59,6 +67,13 @@ pub(crate) const MIN_LENGTH: usize = 4;
 
 /// The most digits any PIN may have, whatever `lock.pin.max_length` says.
 pub(crate) const MAX_LENGTH: usize = 64;
+
+/// The most wrong PINs `lock.pin.attempts` may allow before the password is
+/// needed.
+pub(crate) const MAX_ATTEMPTS: u32 = 10;
+
+/// The longest `lock.pin.password_after_hours` may be: three days.
+pub(crate) const MAX_PASSWORD_AFTER_HOURS: u32 = 72;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -115,6 +130,37 @@ impl Paths {
     }
 }
 
+/// Now, by the two clocks the PIN's hours are counted on, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Clocks {
+    /// Since the epoch: survives a restart, but anyone at the session can set
+    /// it.
+    pub(crate) wall: u64,
+    /// `CLOCK_BOOTTIME`: since this boot, suspend included, and settable by
+    /// nobody. Only comparable within one boot, which the boot id says.
+    pub(crate) boottime: u64,
+}
+
+impl Clocks {
+    /// The two clocks now.
+    pub(crate) fn now() -> Self {
+        Self {
+            wall: wall_now(),
+            boottime: boottime_now(),
+        }
+    }
+
+    /// A test's: both clocks reading `seconds`, so moving one test clock
+    /// moves both.
+    #[cfg(test)]
+    pub(crate) const fn at(seconds: u64) -> Self {
+        Self {
+            wall: seconds,
+            boottime: seconds,
+        }
+    }
+}
+
 /// What the state file records.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -122,16 +168,19 @@ pub(crate) struct Record {
     pub(crate) failures: u32,
     /// When the password last unlocked the lock, in seconds since the epoch.
     pub(crate) password_at: Option<u64>,
+    /// The same moment by `CLOCK_BOOTTIME`, on the boot `boot` names.
+    pub(crate) password_boottime: Option<u64>,
     /// The boot id then.
     pub(crate) boot: Option<String>,
 }
 
 impl Record {
     /// What a password unlock leaves: no wrong PINs, now, this boot.
-    pub(crate) fn after_password(now: u64, boot: Option<String>) -> Self {
+    pub(crate) fn after_password(now: Clocks, boot: Option<String>) -> Self {
         Self {
             failures: 0,
-            password_at: Some(now),
+            password_at: Some(now.wall),
+            password_boottime: Some(now.boottime),
             boot,
         }
     }
@@ -143,6 +192,9 @@ impl Record {
         text.push_str(&format!("failures {}\n", self.failures));
         if let Some(at) = self.password_at {
             text.push_str(&format!("password_at {at}\n"));
+        }
+        if let Some(at) = self.password_boottime {
+            text.push_str(&format!("password_boottime {at}\n"));
         }
         if let Some(boot) = &self.boot {
             text.push_str(&format!("boot {boot}\n"));
@@ -176,6 +228,13 @@ impl Record {
                             .map_err(|_| format!("password_at {value:?} is not a time"))?,
                     );
                 }
+                "password_boottime" => {
+                    record.password_boottime = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("password_boottime {value:?} is not a time"))?,
+                    );
+                }
                 "boot" => {
                     if value.is_empty() || value.contains(char::is_whitespace) {
                         return Err(format!("boot {value:?} is not a boot id"));
@@ -192,22 +251,20 @@ impl Record {
     }
 
     /// The state file at `path`: a missing one is a fresh record, which
-    /// records no password unlock; one that does not parse is the same,
-    /// with why.
+    /// records no password unlock; one that cannot be trusted
+    /// (`solium_auth::pin::read_private`) or does not parse is the same, with
+    /// why.
     pub(crate) fn read(path: &Path) -> (Self, Option<String>) {
-        match std::fs::read_to_string(path) {
-            Ok(text) => match Self::parse(&text) {
+        match solium_auth::pin::read_private(path) {
+            Ok(Some(text)) => match Self::parse(&text) {
                 Ok(record) => (record, None),
                 Err(why) => (
                     Self::default(),
                     Some(format!("{} does not parse: {why}", path.display())),
                 ),
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
-            Err(error) => (
-                Self::default(),
-                Some(format!("{} would not read: {error}", path.display())),
-            ),
+            Ok(None) => (Self::default(), None),
+            Err(why) => (Self::default(), Some(why)),
         }
     }
 
@@ -230,6 +287,19 @@ pub(crate) fn wall_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+/// Seconds of `CLOCK_BOOTTIME`, now: since this boot, suspend included.
+pub(crate) fn boottime_now() -> u64 {
+    // SAFETY: `timespec` is plain data; `clock_gettime` writes into it and
+    // its answer is checked.
+    #[expect(unsafe_code, reason = "calling libc")]
+    let now = unsafe {
+        let mut now: libc::timespec = std::mem::zeroed();
+        (libc::clock_gettime(libc::CLOCK_BOOTTIME, &raw mut now) == 0).then_some(now)
+    };
+    now.and_then(|now| u64::try_from(now.tv_sec).ok())
+        .unwrap_or(0)
 }
 
 /// Why the lock asks for the password where it would take a PIN.
@@ -294,6 +364,9 @@ pub(crate) struct Known {
     pub(crate) boot: Option<String>,
     /// Whether a wrong PIN could not be recorded this run.
     pub(crate) unsaved: bool,
+    /// Whether the state file, when last read, could not be trusted or did
+    /// not parse.
+    pub(crate) untrusted: bool,
     /// Why the PIN file or the state file was passed over, last time they
     /// were read: logged when it changes.
     complaint: Option<String>,
@@ -323,6 +396,7 @@ impl Known {
             }
         };
         let (record, why) = Record::read(&paths.state);
+        self.untrusted = why.is_some();
         complaints.extend(why);
         self.record = record;
         self.boot = boot_id(&paths.boot_id);
@@ -338,12 +412,12 @@ impl Known {
         }
     }
 
-    /// What the lock takes now, at `now` seconds since the epoch.
-    pub(crate) fn mode(&self, settings: &Settings, now: u64) -> Mode {
+    /// What the lock takes now.
+    pub(crate) fn mode(&self, settings: &Settings, now: Clocks) -> Mode {
         if !settings.enabled || !self.set {
             return Mode::NoPin;
         }
-        if self.unsaved {
+        if self.unsaved || self.untrusted {
             return Mode::Password(Fallback::Unsaved);
         }
         if self.record.failures >= settings.attempts.max(1) {
@@ -353,10 +427,19 @@ impl Known {
             (Some(this), Some(then)) if this == then => {}
             _ => return Mode::Password(Fallback::Boot),
         }
-        match self.record.password_at {
-            Some(at) if at <= now && now - at <= settings.password_after.as_secs() => Mode::Pin,
-            Some(_) => Mode::Password(Fallback::Hours),
-            None => Mode::Password(Fallback::Boot),
+        // Within the hours by both clocks; the boot id above already says the
+        // boottime recorded is this boot's.
+        let hours = settings.password_after.as_secs();
+        let within = |at: u64, now: u64| at <= now && now - at <= hours;
+        match (self.record.password_at, self.record.password_boottime) {
+            (Some(wall), Some(boottime)) => {
+                if within(wall, now.wall) && within(boottime, now.boottime) {
+                    Mode::Pin
+                } else {
+                    Mode::Password(Fallback::Hours)
+                }
+            }
+            _ => Mode::Password(Fallback::Boot),
         }
     }
 
@@ -392,18 +475,21 @@ impl Known {
 
     /// The password unlocked the lock: a fresh record, now and on this boot,
     /// which lets a PIN be taken again. Written only where a PIN is set.
-    pub(crate) fn password_unlocked(&mut self, now: u64) {
+    pub(crate) fn password_unlocked(&mut self, now: Clocks) {
         if !self.set {
             return;
         }
         self.record = Record::after_password(now, self.boot.clone());
         self.unsaved = false;
+        self.untrusted = false;
         self.save();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::*;
 
     #[test]
@@ -411,6 +497,7 @@ mod tests {
         let record = Record {
             failures: 3,
             password_at: Some(1_761_300_000),
+            password_boottime: Some(86_400),
             boot: Some("0b5e7c2a-6d1f-4c39-9d0e-6f1a2b3c4d5e".to_owned()),
         };
         assert_eq!(Record::parse(&record.render()), Ok(record));
@@ -422,6 +509,7 @@ mod tests {
             "",
             "failures many\n",
             "failures 1\npassword_at yesterday\n",
+            "failures 1\npassword_boottime -5\n",
             "failures 1\nboot \n",
             "failures 1\nunlocks 7\n",
             "failures\n",
@@ -438,43 +526,196 @@ mod tests {
             password_after: Duration::from_secs(10 * 3600),
             ..Settings::default()
         };
+        let at = Clocks::at;
         let mut known = Known {
             set: true,
-            record: Record::after_password(1000, Some("a".to_owned())),
+            record: Record::after_password(at(1000), Some("a".to_owned())),
             boot: Some("a".to_owned()),
             ..Known::default()
         };
-        assert_eq!(known.mode(&settings, 1000), Mode::Pin);
-        assert_eq!(known.mode(&settings, 1000 + 10 * 3600), Mode::Pin);
+        assert_eq!(known.mode(&settings, at(1000)), Mode::Pin);
+        assert_eq!(known.mode(&settings, at(1000 + 10 * 3600)), Mode::Pin);
         assert_eq!(
-            known.mode(&settings, 1001 + 10 * 3600),
+            known.mode(&settings, at(1001 + 10 * 3600)),
             Mode::Password(Fallback::Hours)
         );
         assert_eq!(
-            known.mode(&settings, 999),
+            known.mode(&settings, at(999)),
             Mode::Password(Fallback::Hours),
             "a password unlock in the future"
         );
         known.boot = Some("b".to_owned());
-        assert_eq!(known.mode(&settings, 1000), Mode::Password(Fallback::Boot));
+        assert_eq!(
+            known.mode(&settings, at(1000)),
+            Mode::Password(Fallback::Boot)
+        );
         known.boot = None;
-        assert_eq!(known.mode(&settings, 1000), Mode::Password(Fallback::Boot));
+        assert_eq!(
+            known.mode(&settings, at(1000)),
+            Mode::Password(Fallback::Boot)
+        );
         known.boot = Some("a".to_owned());
         known.record.failures = 2;
         assert_eq!(
-            known.mode(&settings, 1000),
+            known.mode(&settings, at(1000)),
             Mode::Password(Fallback::Attempts)
         );
         known.record.failures = 0;
+        known.record.password_boottime = None;
+        assert_eq!(
+            known.mode(&settings, at(1000)),
+            Mode::Password(Fallback::Boot)
+        );
+        known.record.password_boottime = Some(1000);
         known.record.password_at = None;
-        assert_eq!(known.mode(&settings, 1000), Mode::Password(Fallback::Boot));
+        assert_eq!(
+            known.mode(&settings, at(1000)),
+            Mode::Password(Fallback::Boot)
+        );
+        known.record.password_at = Some(1000);
+        known.untrusted = true;
+        assert_eq!(
+            known.mode(&settings, at(1000)),
+            Mode::Password(Fallback::Unsaved)
+        );
+        known.untrusted = false;
         known.set = false;
-        assert_eq!(known.mode(&settings, 1000), Mode::NoPin);
+        assert_eq!(known.mode(&settings, at(1000)), Mode::NoPin);
         known.set = true;
         let off = Settings {
             enabled: false,
             ..settings
         };
-        assert_eq!(known.mode(&off, 1000), Mode::NoPin);
+        assert_eq!(known.mode(&off, at(1000)), Mode::NoPin);
+    }
+
+    /// **The hours are measured by a clock nobody can set as well**: with
+    /// the wall clock set back to an hour after the password unlock while
+    /// `CLOCK_BOOTTIME` says 49 hours have passed on this boot, the password
+    /// is needed; and the other way round, a wall clock run forward past the
+    /// hours needs it too, whichever is stricter.
+    #[test]
+    fn the_hours_are_counted_on_boottime_as_well_as_the_wall_clock() {
+        let settings = Settings::default();
+        let known = Known {
+            set: true,
+            record: Record::after_password(
+                Clocks {
+                    wall: 1_000_000,
+                    boottime: 500,
+                },
+                Some("a".to_owned()),
+            ),
+            boot: Some("a".to_owned()),
+            ..Known::default()
+        };
+        let hour = 3600;
+        let now = |wall: u64, boottime: u64| Clocks { wall, boottime };
+        assert_eq!(
+            known.mode(&settings, now(1_000_000 + hour, 500 + hour)),
+            Mode::Pin
+        );
+        assert_eq!(
+            known.mode(&settings, now(1_000_000 + hour, 500 + 49 * hour)),
+            Mode::Password(Fallback::Hours),
+            "the wall clock set back stretched the hours"
+        );
+        assert_eq!(
+            known.mode(&settings, now(1_000_000 + 49 * hour, 500 + hour)),
+            Mode::Password(Fallback::Hours)
+        );
+        assert_eq!(
+            known.mode(&settings, now(1_000_000 + hour, 499)),
+            Mode::Password(Fallback::Hours),
+            "a boottime before the unlock"
+        );
+        assert!(boottime_now() > 0, "CLOCK_BOOTTIME reads nothing");
+    }
+
+    /// **The state file is read only as the PIN file is**: a symbolic link,
+    /// one others can write, one too long, one in a directory others can
+    /// write: each is no record, and with a PIN set, the password is needed;
+    /// a save into that directory is refused, logged and leaves the PIN off.
+    #[test]
+    fn a_state_file_that_cannot_be_trusted_needs_the_password() {
+        let dir = std::env::temp_dir().join(format!("solium-pin-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let mut paths = Paths::in_dir(&dir.join("solium"));
+        paths.boot_id = dir.join("boot_id");
+        std::fs::write(&paths.boot_id, "a\n").expect("a boot id");
+        let mut pin = solium_auth::Secret::new();
+        assert!(pin.push_str("1379"));
+        let phc = solium_auth::pin::hash(&pin).expect("a hash");
+        solium_auth::pin::write_private(&paths.pin, phc.as_bytes()).expect("the PIN");
+        let good = Record::after_password(Clocks::at(1000), Some("a".to_owned()));
+        good.write(&paths.state).expect("the state");
+        let settings = Settings::default();
+        let mut known = Known::new(Some(paths.clone()));
+        known.refresh();
+        assert_eq!(
+            known.mode(&settings, Clocks::at(1000)),
+            Mode::Pin,
+            "the premise"
+        );
+
+        // A link to a file that says the same.
+        let elsewhere = dir.join("elsewhere");
+        std::fs::write(&elsewhere, good.render()).expect("written");
+        std::fs::remove_file(&paths.state).expect("removed");
+        std::os::unix::fs::symlink(&elsewhere, &paths.state).expect("a link");
+        known.refresh();
+        assert_eq!(
+            known.mode(&settings, Clocks::at(1000)),
+            Mode::Password(Fallback::Unsaved),
+            "a symbolic link was read"
+        );
+        std::fs::remove_file(&paths.state).expect("removed");
+
+        // Writable by others.
+        good.write(&paths.state).expect("the state");
+        std::fs::set_permissions(&paths.state, std::fs::Permissions::from_mode(0o666))
+            .expect("chmod");
+        known.refresh();
+        assert_eq!(
+            known.mode(&settings, Clocks::at(1000)),
+            Mode::Password(Fallback::Unsaved),
+            "a file others can write was read"
+        );
+        std::fs::remove_file(&paths.state).expect("removed");
+
+        // Too long.
+        let long = format!("{}{}", good.render(), "#".repeat(2048));
+        solium_auth::pin::write_private(&paths.state, long.as_bytes()).expect("written");
+        known.refresh();
+        assert_eq!(
+            known.mode(&settings, Clocks::at(1000)),
+            Mode::Password(Fallback::Unsaved),
+            "a file too long was read"
+        );
+
+        // A directory others can write: a save into it is refused, and the
+        // PIN is off; read again, the PIN in it is no PIN.
+        good.write(&paths.state).expect("the state");
+        known.refresh();
+        assert_eq!(known.mode(&settings, Clocks::at(1000)), Mode::Pin);
+        let state_dir = dir.join("solium");
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod");
+        known.password_unlocked(Clocks::at(2000));
+        assert!(known.unsaved, "a save into a directory others can write");
+        assert_eq!(
+            known.mode(&settings, Clocks::at(2000)),
+            Mode::Password(Fallback::Unsaved)
+        );
+        known.refresh();
+        assert_eq!(known.mode(&settings, Clocks::at(2000)), Mode::NoPin);
+        let mode = std::fs::metadata(&state_dir)
+            .expect("its mode")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o777, "the directory was mended silently");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

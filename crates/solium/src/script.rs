@@ -1410,8 +1410,10 @@ fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
 
 /// `lock.pin` (#281): `enabled` (true or false), `min_length` (a whole number
 /// of digits, at least `pin::MIN_LENGTH`), `max_length` (at least
-/// `min_length`, at most `pin::MAX_LENGTH`), `attempts` (at least 1) and
-/// `password_after_hours` (at least 1). Each one absent keeps its default;
+/// `min_length`, at most `pin::MAX_LENGTH`), `attempts` (1 to
+/// `pin::MAX_ATTEMPTS`) and `password_after_hours` (1 to
+/// `pin::MAX_PASSWORD_AFTER_HOURS`), a number past either cap taken as the
+/// cap, with the log saying so. Each one absent keeps its default;
 /// each one of the wrong kind is named in the log and keeps its default. A
 /// `max_length` under `min_length` is taken as `min_length`.
 /// `tests::sol_lock_parses_the_pins_settings`.
@@ -1419,7 +1421,7 @@ fn pin_settings(
     table: &mlua::Table,
     whole: &dyn Fn(&Value, u32) -> Option<u32>,
 ) -> crate::pin::Settings {
-    use crate::pin::{MAX_LENGTH, MIN_LENGTH, Settings};
+    use crate::pin::{MAX_ATTEMPTS, MAX_LENGTH, MAX_PASSWORD_AFTER_HOURS, MIN_LENGTH, Settings};
     let mut settings = Settings::default();
     match table.get::<Value>("enabled") {
         Ok(Value::Boolean(on)) => settings.enabled = on,
@@ -1453,10 +1455,22 @@ fn pin_settings(
         settings.max_length = usize::try_from(length).unwrap_or(MAX_LENGTH);
     }
     settings.max_length = settings.max_length.max(settings.min_length);
-    if let Some(attempts) = number("attempts", 1, u32::MAX, 5) {
+    // These two only ever loosen the PIN, so they are capped: a number past
+    // the cap is taken as the cap, and the log says so.
+    let capped = |key: &str, cap: u32, default: u32| -> Option<u32> {
+        let number = number(key, 1, u32::MAX, default)?;
+        if number > cap {
+            tracing::warn!(
+                value = number,
+                "lock.pin.{key} is at most {cap}; taking {cap}"
+            );
+        }
+        Some(number.min(cap))
+    };
+    if let Some(attempts) = capped("attempts", MAX_ATTEMPTS, 5) {
         settings.attempts = attempts;
     }
-    if let Some(hours) = number("password_after_hours", 1, u32::MAX, 48) {
+    if let Some(hours) = capped("password_after_hours", MAX_PASSWORD_AFTER_HOURS, 48) {
         settings.password_after = std::time::Duration::from_secs(u64::from(hours) * 3600);
     }
     settings
@@ -9860,6 +9874,18 @@ mod tests {
         );
         let longer = configured("sol.lock({ pin = { min_length = 9 } })");
         assert_eq!((longer.min_length, longer.max_length), (9, 9));
+        // Past the caps, the caps: ten wrong PINs, three days.
+        let loose =
+            configured("sol.lock({ pin = { attempts = 50, password_after_hours = 1000 } })");
+        assert_eq!(
+            (loose.attempts, loose.password_after),
+            (10, Duration::from_secs(72 * 3600))
+        );
+        let edge = configured("sol.lock({ pin = { attempts = 10, password_after_hours = 72 } })");
+        assert_eq!(
+            (edge.attempts, edge.password_after),
+            (10, Duration::from_secs(72 * 3600))
+        );
         for source in [
             "sol.lock({})",
             "sol.lock({ pin = true })",

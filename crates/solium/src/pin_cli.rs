@@ -5,9 +5,12 @@
 //! for it and send it to `solium-auth`, the same helper and the same PAM
 //! service the lock screen uses, opened at the top of `main` as the
 //! compositor opens it; nothing changes unless it says yes
-//! (`tests::a_wrong_password_changes_nothing_and_asks_for_no_pin`). Someone at
-//! an unlocked session who does not know the password cannot set a PIN to
-//! unlock it with later, nor clear one.
+//! (`tests::a_wrong_password_changes_nothing_and_asks_for_no_pin`). That keeps
+//! a PIN from being set or cleared by mistake, or by a script. It does not
+//! stop someone already at the unlocked session, who runs as the user and can
+//! write the PIN's files directly; that is no more than such a person can do
+//! anyway, as `loginctl unlock-session` from inside that session already
+//! unlocks it.
 //!
 //! **Then the PIN, twice**, `lock.pin.min_length` to `max_length` digits, and
 //! only its argon2id hash is stored, atomically and 0600
@@ -83,12 +86,9 @@ pub(crate) fn run(action: PinAction) -> ExitCode {
         PinAction::Set => set(
             &mut tty,
             &mut check,
-            &Store {
-                paths: &paths,
-                hash: solium_auth::pin::hash,
-            },
+            &Store { paths: &paths },
             &settings.pin,
-            crate::pin::wall_now(),
+            crate::pin::Clocks::now(),
         ),
         PinAction::Clear => clear(&mut tty, &mut check, &paths),
     };
@@ -155,11 +155,9 @@ trait Terminal {
     fn say(&mut self, text: &str);
 }
 
-/// Where the PIN goes, and how it is hashed: [`solium_auth::pin::hash`], or a
-/// test's cheaper one.
+/// Where the PIN goes.
 struct Store<'a> {
     paths: &'a Paths,
-    hash: fn(&Secret) -> io::Result<String>,
 }
 
 /// Ask for the password and check it; `Ok` once it is the user's.
@@ -197,7 +195,7 @@ fn set(
     check: &mut dyn FnMut(Secret) -> Outcome,
     store: &Store<'_>,
     settings: &crate::pin::Settings,
-    now: u64,
+    now: crate::pin::Clocks,
 ) -> Result<String, String> {
     terminal.say("Setting the lock screen's PIN. Your password first.");
     password_first(terminal, check)?;
@@ -217,7 +215,7 @@ fn set(
         return Err("The two PINs are not the same; nothing was changed.".to_owned());
     }
     drop(again);
-    let hash = (store.hash)(&first)
+    let hash = solium_auth::pin::hash(&first)
         .map_err(|error| format!("The PIN could not be hashed ({error}); nothing was changed."))?;
     drop(first);
     solium_auth::pin::write_private(&store.paths.pin, hash.as_bytes()).map_err(|error| {
@@ -500,10 +498,6 @@ mod tests {
         }
     }
 
-    fn cheap(pin: &Secret) -> io::Result<String> {
-        solium_auth::pin::hash_with(pin, 64, 1)
-    }
-
     /// A directory of the test's own, with a boot id in it.
     fn paths(test: &str) -> (PathBuf, Paths) {
         let dir =
@@ -533,16 +527,13 @@ mod tests {
         let (dir, paths) = paths("set");
         let mut terminal = scripted(&[RIGHT, PIN, PIN]);
         let mut asked = 0;
-        let store = Store {
-            paths: &paths,
-            hash: cheap,
-        };
+        let store = Store { paths: &paths };
         let outcome = set(
             &mut terminal,
             &mut stand_in(&mut asked),
             &store,
             &crate::pin::Settings::default(),
-            1_000,
+            crate::pin::Clocks::at(1_000),
         );
         assert!(outcome.is_ok(), "{outcome:?}");
         assert_eq!(asked, 1);
@@ -563,7 +554,7 @@ mod tests {
         assert_eq!(
             Record::read(&paths.state),
             (
-                Record::after_password(1_000, Some("boot-one".to_owned())),
+                Record::after_password(crate::pin::Clocks::at(1_000), Some("boot-one".to_owned())),
                 None
             )
         );
@@ -577,10 +568,7 @@ mod tests {
     #[test]
     fn a_wrong_password_changes_nothing_and_asks_for_no_pin() {
         let (dir, paths) = paths("wrong");
-        let store = Store {
-            paths: &paths,
-            hash: cheap,
-        };
+        let store = Store { paths: &paths };
         for answers in [&["wrong", PIN, PIN][..], &["", PIN, PIN], &[]] {
             let mut terminal = scripted(answers);
             let mut asked = 0;
@@ -589,7 +577,7 @@ mod tests {
                 &mut stand_in(&mut asked),
                 &store,
                 &crate::pin::Settings::default(),
-                1_000,
+                crate::pin::Clocks::at(1_000),
             );
             assert!(outcome.is_err(), "{answers:?}: {outcome:?}");
             assert_eq!(
@@ -606,10 +594,7 @@ mod tests {
     #[test]
     fn a_pin_out_of_shape_or_typed_differently_stores_nothing() {
         let (dir, paths) = paths("shape");
-        let store = Store {
-            paths: &paths,
-            hash: cheap,
-        };
+        let store = Store { paths: &paths };
         for answers in [
             [RIGHT, "123", "123"],
             [RIGHT, "123456789", "123456789"],
@@ -623,7 +608,7 @@ mod tests {
                 &mut stand_in(&mut asked),
                 &store,
                 &crate::pin::Settings::default(),
-                1_000,
+                crate::pin::Clocks::at(1_000),
             );
             assert!(outcome.is_err(), "{answers:?}");
             assert!(!paths.pin.exists(), "{answers:?}");
@@ -640,7 +625,7 @@ mod tests {
             &mut stand_in(&mut asked),
             &store,
             &three,
-            1_000,
+            crate::pin::Clocks::at(1_000),
         );
         assert!(outcome.is_ok(), "{outcome:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -652,17 +637,14 @@ mod tests {
     #[test]
     fn clear_needs_the_password() {
         let (dir, paths) = paths("clear");
-        let store = Store {
-            paths: &paths,
-            hash: cheap,
-        };
+        let store = Store { paths: &paths };
         let mut asked = 0;
         set(
             &mut scripted(&[RIGHT, PIN, PIN]),
             &mut stand_in(&mut asked),
             &store,
             &crate::pin::Settings::default(),
-            1_000,
+            crate::pin::Clocks::at(1_000),
         )
         .expect("set");
         let outcome = clear(&mut scripted(&["wrong"]), &mut stand_in(&mut asked), &paths);

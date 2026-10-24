@@ -1422,10 +1422,13 @@ solium pin clear    # asks for your password
 ```
 
 Both ask for your account password first and check it exactly as the lock
-does, through `solium-auth` and PAM, so someone at your unlocked desk cannot
-set a PIN to come back with, nor clear yours. Neither echoes what you type,
-and both refuse to run without a terminal, so a PIN cannot be piped in from a
-script or left in a file. Only an argon2id hash of the PIN is stored, in
+does, through `solium-auth` and PAM. That keeps a PIN from being set or
+cleared by mistake or by a script. It does not stop someone already at your
+unlocked session: they run as you and can write the PIN's files directly,
+which is no more than they could do anyway, since `loginctl unlock-session`
+from inside that session unlocks it. Lock the session when you leave it.
+Neither command echoes what you type, and both refuse to run without a
+terminal, so a PIN cannot be piped in from a script or left in a file. Only an argon2id hash of the PIN is stored, in
 `~/.local/state/solium/pin` (`$XDG_STATE_HOME/solium/pin`), mode 0600; the PIN
 itself is written nowhere (`solium_auth::pin::tests::the_file_holds_a_hash_and_never_the_pin`),
 and is checked by `solium-auth` too, never by the compositor.
@@ -1436,8 +1439,9 @@ on the keyboard or tap it on the pad, and Return or OK. **Your password still
 works**: whatever you type that is not 4 to 8 digits (`lock.pin.min_length`
 and `max_length`) is checked as your password instead
 (`lock_auth::tests::the_password_unlocks_in_pin_mode_and_resets_the_counts`).
-A password that is itself 4 to 8 digits is checked as a PIN, so it works only
-while the lock is asking for the password.
+A password that is itself 4 to 8 digits works too: what is not the PIN is
+then checked as the password, and one wrong entry counts once
+(`lock_auth::tests::a_password_of_digits_unlocks_in_pin_mode`).
 
 The lock asks for your password instead, `Lock.mode` reading `"password"` and
 `Lock.message` saying why:
@@ -1450,12 +1454,21 @@ The lock asks for your password instead, `Lock.mode` reading `"password"` and
 - the first time the lock is unlocked after the computer starts
   (`lock_auth::tests::a_restart_needs_the_password`);
 - when the password has not unlocked it for `lock.pin.password_after_hours`
-  (48) (`lock_auth::tests::the_password_is_needed_after_password_after_hours`).
+  (48), counted both on the wall clock and on `CLOCK_BOOTTIME`, which
+  includes sleep and which setting the time does not move, so turning the
+  clock back does not stretch it
+  (`lock_auth::tests::the_password_is_needed_after_password_after_hours`).
+
+Resuming from suspend or from hibernation is not a restart: the kernel's boot
+id survives both, so the PIN keeps working, within the same hours.
 
 Entering the password resets all three. Wrong PINs count toward
 `lock.lockout` as wrong passwords do, on top of these. A PIN file that is not
 yours, that others can write, or that does not hold such a hash is no PIN at
-all: the lock asks for the password, and the log says why.
+all: the lock asks for the password, and the log says why. The same goes for
+`pin-state`, and for the `solium` directory they are in: one that is not
+yours or that others can write is never written to, nor mended, and the PIN
+is not used until you fix it.
 
 ```lua
 return {
@@ -1464,8 +1477,8 @@ return {
             enabled = true,             -- false keeps a PIN that is set from being used
             min_length = 6,             -- the fewest digits, 4 or more
             max_length = 8,             -- the most, up to 64
-            attempts = 5,               -- wrong PINs before the password is needed
-            password_after_hours = 48,  -- the password at least this often
+            attempts = 5,               -- wrong PINs before the password is needed, at most 10
+            password_after_hours = 48,  -- the password at least this often, at most 72
         },
     },
 }

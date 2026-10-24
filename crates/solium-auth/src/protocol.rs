@@ -531,7 +531,7 @@ mod tests {
         let file = dir.join("solium/pin");
         let mut pin = Secret::new();
         assert!(pin.push_str("2580"));
-        let phc = crate::pin::hash_with(&pin, 64, 1).expect("a hash");
+        let phc = crate::pin::hash(&pin).expect("a hash");
         crate::pin::write_private(&file, phc.as_bytes()).expect("written");
 
         let (asked, seen) = ask_pin(&file, "2580");
@@ -580,10 +580,13 @@ mod tests {
         });
         write_hello(&mut ours, VERSION).expect("written");
         assert_eq!(read_hello(&mut ours).expect("its hello"), VERSION);
-        ours.write_all(&[PIN]).expect("written");
-        ours.write_all(&3u16.to_le_bytes()).expect("written");
-        ours.write_all(b"pin").expect("written");
-        ours.write_all(&0u16.to_le_bytes()).expect("written");
+        // In one write, so the helper refusing the path at once cannot close
+        // the socket under the rest of it.
+        let mut request = vec![PIN];
+        request.extend_from_slice(&3u16.to_le_bytes());
+        request.extend_from_slice(b"pin");
+        request.extend_from_slice(&0u16.to_le_bytes());
+        ours.write_all(&request).expect("written");
         let answer = read_answer(&mut ours).expect("an answer");
         assert!(
             matches!(&answer, Answer::Unavailable { reason } if reason.contains("PIN file")),

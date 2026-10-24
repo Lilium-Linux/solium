@@ -12,10 +12,7 @@ use std::{
     time::Duration,
 };
 
-use solium_auth::{
-    Answer, Request, Secret,
-    protocol::{VERSION, ask, read_hello, write_hello},
-};
+use solium_auth::protocol::{VERSION, read_hello, write_hello};
 
 const HELPER: &str = env!("CARGO_BIN_EXE_solium-auth");
 
@@ -90,35 +87,4 @@ fn the_helper_is_not_dumpable() {
     // No request: the helper reads the end of the stream and stops there.
     drop(ours);
     assert_eq!(child.wait().expect("it ends").code(), Some(3));
-}
-
-/// **The helper itself answers a PIN request** from the PIN file it is
-/// named, with no PAM anywhere: the right PIN is yes and exits 0, another is
-/// no, and a file that does not parse is unavailable.
-#[test]
-fn the_helper_checks_a_pin_against_the_pin_file() {
-    let dir = std::env::temp_dir().join(format!("solium-auth-helper-pin-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let file = dir.join("pin");
-    let secret = |text: &str| {
-        let mut secret = Secret::new();
-        assert!(secret.push_str(text));
-        secret
-    };
-    let phc = solium_auth::pin::hash_with(&secret("2580"), 64, 1).expect("a hash");
-    solium_auth::pin::write_private(&file, phc.as_bytes()).expect("written");
-    let checked = |pin: &str| {
-        let (mut child, mut ours) = start();
-        let answer = ask(&mut ours, Request::Pin { file: &file }, &secret(pin)).expect("an answer");
-        assert_eq!(child.wait().expect("it ends").code(), Some(0));
-        answer
-    };
-    assert_eq!(checked("2580"), Answer::Ok);
-    assert_eq!(checked("2581"), Answer::Failed { delay_ms: 0 });
-    solium_auth::pin::write_private(&file, b"not a hash").expect("written");
-    assert!(
-        matches!(checked("2580"), Answer::Unavailable { .. }),
-        "a file that does not parse"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
 }

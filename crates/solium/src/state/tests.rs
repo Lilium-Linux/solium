@@ -19541,11 +19541,14 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 std::fs::write(&paths.boot_id, "boot-one\n").expect("a boot id");
                 let mut pin = crate::auth::Secret::new();
                 assert!(pin.push_str("1379"));
-                let phc = solium_auth::pin::hash_with(&pin, 64, 1).expect("a hash");
+                let phc = solium_auth::pin::hash(&pin).expect("a hash");
                 solium_auth::pin::write_private(&paths.pin, phc.as_bytes()).expect("the PIN");
-                crate::pin::Record::after_password(1_000, Some("boot-one".to_owned()))
-                    .write(&paths.state)
-                    .expect("the state");
+                crate::pin::Record::after_password(
+                    crate::pin::Clocks::at(1_000),
+                    Some("boot-one".to_owned()),
+                )
+                .write(&paths.state)
+                .expect("the state");
                 session.state.lock_auth.use_pin_for_test(paths, 1_000);
 
                 session.state.lock_natively();

@@ -410,8 +410,8 @@
 ---@field enabled? boolean Whether a PIN that is set is taken at all. Default true.
 ---@field min_length? integer The fewest digits a PIN has, from 4 to 64. Default 4.
 ---@field max_length? integer The most digits a PIN has, from `min_length` to 64. Default 8.
----@field attempts? integer Wrong PINs in a row, kept across locks and restarts, after which only the password unlocks until it has. At least 1. Default 5.
----@field password_after_hours? integer How long after the password last unlocked the lock a PIN is still taken, in hours; the first unlock after the computer starts always needs the password. At least 1. Default 48.
+---@field attempts? integer Wrong PINs in a row, kept across locks and restarts, after which only the password unlocks until it has. 1 to 10; more is taken as 10. Default 5.
+---@field password_after_hours? integer How long after the password last unlocked the lock a PIN is still taken, in hours; the first unlock after the computer starts always needs the password. Counted on a clock that setting the time does not move, as well as the wall clock. 1 to 72; more is taken as 72. Default 48.
 
 ---@class sol.RetryOptions: sol.BackoffOptions
 ---@field attempts? integer How many times a password is tried again before it is wiped, at least 0.

@@ -843,7 +843,9 @@ local defaults = {
         --   * the first time the lock is unlocked after the computer starts;
         --   * when it has not unlocked the lock for `password_after_hours`.
         --
-        -- `enabled = false` keeps a PIN that is set from being used.
+        -- `attempts` is at most 10 and `password_after_hours` at most 72;
+        -- more is taken as that. `enabled = false` keeps a PIN that is set
+        -- from being used.
         pin = {
             enabled = true,
             min_length = 4,
