@@ -19212,6 +19212,350 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
             session.assert_unlocks(lock);
         }
 
+        /// **#281: Solium's own lock**, held by no client: `lock_natively`,
+        /// `unlock_natively`, and what every rule of `lock.rs` makes of it.
+        mod native {
+            use super::*;
+            use crate::lock::Lock;
+            use crate::lock_scene::Shown;
+
+            /// Whether Solium holds the lock itself.
+            fn natively_locked(session: &Session) -> bool {
+                session.state.lock.as_ref().is_some_and(Lock::is_native)
+            }
+
+            /// Whether `locked` is still owed.
+            fn owed(session: &Session) -> bool {
+                session.state.lock.as_ref().is_some_and(Lock::pending)
+            }
+
+            /// A scene file of `source`, in a directory of the test's own.
+            fn scene_file(name: &str, source: &str) -> std::path::PathBuf {
+                let directory = std::env::temp_dir()
+                    .join(format!("solium-native-lock-{name}-{}", std::process::id()));
+                std::fs::create_dir_all(&directory).expect("a directory for the scene");
+                let path = directory.join("Lock.qml");
+                std::fs::write(&path, source).expect("writing the scene");
+                path
+            }
+
+            /// **A native lock blanks every monitor on the first frame and
+            /// takes input away, before any scene is ready.** Off the Qt
+            /// thread no scene is built, which is the moment before one is:
+            /// every frame built is the lock's, every monitor shows the
+            /// backdrop, and the keyboard is on nothing. `locked` waits for
+            /// every monitor, as it does for a client.
+            #[test]
+            fn a_native_lock_blanks_every_monitor_and_takes_input_before_any_scene_is_ready() {
+                let mut session = Session::with_monitors(2);
+                session.app.open(&mut session.display, &mut session.state);
+                assert!(
+                    session.app.client.keyboard_on.is_some(),
+                    "the premise: the application has the keyboard"
+                );
+
+                session.state.lock_natively();
+                session.app.pump(&mut session.display, &mut session.state);
+
+                assert!(
+                    natively_locked(&session),
+                    "the session did not lock natively"
+                );
+                assert!(
+                    session.state.lock_frame().is_some(),
+                    "a frame built now is not the lock's, so it is the desktop"
+                );
+                for index in 0..2 {
+                    let output = session.output(index);
+                    assert_eq!(
+                        session.state.lock_scenes.shown_on(&output),
+                        Shown::Backdrop,
+                        "monitor {index}: no scene is ready, and the backdrop is what shows"
+                    );
+                }
+                assert!(
+                    session.app.client.keyboard_on.is_none(),
+                    "the application kept the keyboard at the native lock"
+                );
+                let (app, _) = session.type_key();
+                assert!(
+                    !app,
+                    "a key typed at the native lock reached the application"
+                );
+
+                assert!(
+                    owed(&session),
+                    "`locked` before any monitor showed the lock"
+                );
+                let first = session.output(0);
+                session.show(&first);
+                assert!(
+                    owed(&session),
+                    "`locked` with one monitor of two showing the lock"
+                );
+                session.show_all();
+                assert!(
+                    !owed(&session),
+                    "`locked` never came with every monitor showing it"
+                );
+            }
+
+            /// **A scene that fails to load shows the fallback on its monitor,
+            /// and the session stays locked.**
+            #[test]
+            fn a_scene_that_fails_to_load_shows_the_fallback_and_the_session_stays_locked() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let mut session = Session::new();
+                    session.app.open(&mut session.display, &mut session.state);
+                    let broken = scene_file("broken", "import QtQuick\nItem { not QML at all }\n");
+                    session.state.lock_scenes.use_scene(Some(broken));
+
+                    session.state.lock_natively();
+                    session.show_all();
+                    session.app.pump(&mut session.display, &mut session.state);
+
+                    let output = session.output(0);
+                    assert_eq!(
+                        session.state.lock_scenes.shown_on(&output),
+                        Shown::Fallback,
+                        "a scene that will not load is not replaced by the fallback"
+                    );
+                    assert!(
+                        natively_locked(&session),
+                        "a broken scene unlocked the session"
+                    );
+                    assert!(
+                        !owed(&session),
+                        "and the fallback's lock is confirmed like any"
+                    );
+                    let (app, _) = session.type_key();
+                    assert!(!app, "a key reached the application behind the fallback");
+                });
+            }
+
+            /// **A client asking to lock while natively locked is refused**:
+            /// told `finished`, never `locked`, its surfaces never shown or
+            /// given the keyboard, and its unlock is `invalid_unlock` and
+            /// unlocks nothing.
+            #[test]
+            fn a_client_asking_to_lock_while_natively_locked_is_refused() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                session.state.lock_natively();
+                session.show_all();
+
+                let (lock, _surfaces) =
+                    session
+                        .locker
+                        .ask_lock(&mut session.display, &mut session.state, true);
+                session
+                    .locker
+                    .pump(&mut session.display, &mut session.state);
+                let id = wayland_client::Proxy::id(&lock);
+                assert!(
+                    session.locker.client.finished.contains(&id),
+                    "a client asking to lock over the native lock was not told `finished`"
+                );
+                assert!(!session.locker.client.locked.contains(&id));
+                assert!(natively_locked(&session), "the client took the native lock");
+                assert_eq!(
+                    session
+                        .state
+                        .lock
+                        .as_ref()
+                        .map_or(0, |held| held.surfaces().count()),
+                    0,
+                    "the refused client's surfaces are the lock's"
+                );
+                assert!(
+                    session.locker.client.keyboard_on.is_none(),
+                    "the refused client was given the keyboard"
+                );
+
+                lock.unlock_and_destroy();
+                let error = session
+                    .locker
+                    .pump_or_error(&mut session.display, &mut session.state);
+                assert!(
+                    natively_locked(&session),
+                    "the refused client unlocked the session"
+                );
+                assert_eq!(
+                    error.map(|error| error.code),
+                    Some(ext_session_lock_v1::Error::InvalidUnlock as u32),
+                    "its unlock was not `invalid_unlock`"
+                );
+            }
+
+            /// **An abandoned client lock can be taken over natively**, as a
+            /// new lock client may take it over, and a live one cannot. The
+            /// native lock is then confirmed and ended like its own.
+            #[test]
+            fn an_abandoned_client_lock_can_be_taken_over_natively() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                let _lock = session.lock();
+
+                session.state.lock_natively();
+                assert!(
+                    !natively_locked(&session),
+                    "a native lock took the session from a lock client that is still here"
+                );
+
+                // The lock client crashes.
+                let recovery = Side::connect(&mut session.display, &mut session.state);
+                drop(std::mem::replace(&mut session.locker, recovery));
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.state.lock.as_ref().is_some_and(Lock::abandoned),
+                    "the premise: the lock is abandoned"
+                );
+
+                session.state.lock_natively();
+                assert!(
+                    natively_locked(&session),
+                    "the abandoned lock was not taken over"
+                );
+                assert!(
+                    session
+                        .state
+                        .lock
+                        .as_ref()
+                        .is_some_and(|held| !held.abandoned()),
+                    "the native lock reads as abandoned"
+                );
+                assert!(owed(&session), "the new lock's `locked` is owed anew");
+                session.show_all();
+                assert!(!owed(&session), "and confirmed once every monitor shows it");
+                let (app, _) = session.type_key();
+                assert!(!app, "a key reached the application through the take-over");
+
+                session.state.unlock_natively();
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    session.state.lock.is_none(),
+                    "the native unlock did not unlock"
+                );
+                assert!(
+                    session.app.client.keyboard_on.is_some(),
+                    "the application was not given the keyboard back"
+                );
+            }
+
+            /// Calls every function `sol` has, and every one in a table it
+            /// has, but its private ones, with no argument, an empty table and
+            /// `true`, each under `pcall`; then says how many calls it made.
+            /// Never a string or a number: those would start programs.
+            const EVERY_SOL_FUNCTION: &str = r#"
+                sol.bind("super+shift+f12", function()
+                    local seen, calls = {}, 0
+                    local function walk(table_, depth)
+                        if seen[table_] or depth > 2 then return end
+                        seen[table_] = true
+                        local names = {}
+                        for name in pairs(table_) do
+                            if type(name) == "string" and name:sub(1, 1) ~= "_" then
+                                names[#names + 1] = name
+                            end
+                        end
+                        table.sort(names)
+                        for _, name in ipairs(names) do
+                            local value = table_[name]
+                            if type(value) == "function" then
+                                pcall(value)
+                                pcall(value, {})
+                                pcall(value, true)
+                                calls = calls + 3
+                            elseif type(value) == "table" then
+                                walk(value, depth + 1)
+                            end
+                        end
+                    end
+                    walk(sol, 0)
+                    sol.status(tostring(calls))
+                end, { locked = true })
+            "#;
+
+            /// **No Lua function unlocks a native lock**: every `sol` function
+            /// there is, called from a binding allowed at the lock with the
+            /// shipped configuration loaded, leaves the session locked.
+            #[test]
+            fn no_lua_function_unlocks_a_native_lock() {
+                let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+                let script = format!(
+                    "package.path = {shipped:?} .. \"/?.lua\"\n\
+                     dofile({shipped:?} .. \"/init.lua\")\n{EVERY_SOL_FUNCTION}"
+                );
+                let mut session = Session::new();
+                session
+                    .state
+                    .start_scripts(Some(super::super::fullscreen_glides::script_at(
+                        "native-unlock",
+                        &script,
+                    )));
+                session.state.lock_natively();
+                session.show_all();
+
+                assert!(
+                    session.state.trigger("super+shift+f12"),
+                    "the binding did not run"
+                );
+                session.app.pump(&mut session.display, &mut session.state);
+                let now = session.state.clock.now();
+                session.state.settle(now);
+
+                let calls: usize = std::mem::take(&mut session.state.status)
+                    .parse()
+                    .unwrap_or_default();
+                assert!(
+                    calls > 100,
+                    "the walk did not get through `sol`: {calls} calls"
+                );
+                assert!(
+                    natively_locked(&session),
+                    "a Lua function unlocked the native lock"
+                );
+                assert!(
+                    !owed(&session),
+                    "and it is still the lock that was confirmed"
+                );
+            }
+
+            /// **A monitor plugged in mid-lock gets the scene or the
+            /// fallback, never the desktop**: its frames are the lock's from
+            /// the hotplug on, it has a scene before its first frame, and
+            /// `locked` waits for it.
+            #[test]
+            fn a_monitor_plugged_in_while_natively_locked_gets_a_scene_never_the_desktop() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let mut session = Session::new();
+                    session.app.open(&mut session.display, &mut session.state);
+                    session.state.lock_natively();
+                    session.show_all();
+                    let first = session.output(0);
+                    assert_eq!(
+                        session.state.lock_scenes.shown_on(&first),
+                        Shown::Fallback,
+                        "the premise: the first monitor has its scene"
+                    );
+
+                    let plugged = session.plug();
+                    assert!(
+                        session.state.lock_frame().is_some(),
+                        "a frame built for the new monitor is not the lock's"
+                    );
+                    assert_ne!(
+                        session.state.lock_scenes.shown_on(&plugged),
+                        Shown::Backdrop,
+                        "the monitor plugged in mid-lock has no scene"
+                    );
+                    assert!(natively_locked(&session));
+                });
+            }
+        }
+
         /// **#54: turning a monitor off** -- over `wlr-output-power-management`,
         /// from a script, and on its own when nobody is there -- and what the
         /// lock does with a monitor that is dark.
@@ -32787,6 +33131,116 @@ end)
                         );
                     },
                 );
+            }
+
+            /// **#281: a finger at Solium's own lock reaches its scene, as Qt
+            /// touch events, and nothing else**: not the window under it, not
+            /// a scene of the session's over it, and not `sol.on("touch")`,
+            /// which stays silent while locked. Each of the three is shown to
+            /// hear the same finger first, unlocked.
+            #[test]
+            fn a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else() {
+                const TAPS: &str = r"import QtQuick
+                    Item {
+                        property int taps: 0
+                        TapHandler { onTapped: parent.taps += 1 }
+                    }";
+                with_real_touch_scene("native-lock-touch", TAPS, |desk, id, output| {
+                    desk.install(
+                        r#"touches = 0
+                        sol.on("touch", function() touches = touches + 1 end)"#,
+                    );
+                    let region = region(desk);
+                    let (over_scene, over_window) = ((620.0, 520.0), (720.0, 520.0));
+                    let scene_taps = |desk: &mut Desk| {
+                        desk.state
+                            .surfaces
+                            .get_mut(id)
+                            .and_then(|s| s.instance_mut(output))
+                            .expect("the session's scene")
+                            .scene_for_test()
+                            .get_int("taps")
+                    };
+                    let downs = |desk: &Desk| {
+                        desk.client
+                            .touches
+                            .iter()
+                            .filter(|event| matches!(event, wl_touch::Event::Down { .. }))
+                            .count()
+                    };
+                    let heard = |desk: &Desk| {
+                        desk.state
+                            .scripts
+                            .as_ref()
+                            .map(|scripts| scripts.evaluate("return tostring(touches)"))
+                            .unwrap_or_default()
+                    };
+
+                    crate::synth::send_touch(&mut desk.state, region, over_scene, 10);
+                    crate::synth::send_touch(&mut desk.state, region, over_window, 20);
+                    desk.pump();
+                    assert_eq!(
+                        scene_taps(desk),
+                        1,
+                        "the premise: the session's scene hears a finger"
+                    );
+                    assert_eq!(downs(desk), 1, "the premise: the window hears a finger");
+                    let before = heard(desk);
+                    assert_ne!(
+                        before, "0",
+                        "the premise: `sol.on(\"touch\")` hears a finger"
+                    );
+
+                    let lock_scene = std::env::temp_dir().join(format!(
+                        "solium-native-lock-touch-{}.qml",
+                        std::process::id()
+                    ));
+                    std::fs::write(&lock_scene, TAPS).expect("writing the lock scene");
+                    desk.state.lock_scenes.use_scene(Some(lock_scene.clone()));
+                    desk.state.lock_natively();
+                    desk.state
+                        .lock_scenes
+                        .instance_for_test(output)
+                        .expect("the lock scene")
+                        .scene_for_test()
+                        .resize(1920, 1080, 1.0);
+                    desk.pump();
+                    desk.client.touches.clear();
+
+                    crate::synth::send_touch(&mut desk.state, region, over_scene, 30);
+                    crate::synth::send_touch(&mut desk.state, region, over_window, 40);
+                    desk.pump();
+
+                    let lock_taps = desk
+                        .state
+                        .lock_scenes
+                        .instance_for_test(output)
+                        .expect("the lock scene")
+                        .scene_for_test()
+                        .get_int("taps");
+                    assert_eq!(
+                        lock_taps, 2,
+                        "the native lock's scene did not hear both fingers"
+                    );
+                    assert_eq!(
+                        scene_taps(desk),
+                        1,
+                        "a scene of the session heard a finger at the lock"
+                    );
+                    assert_eq!(downs(desk), 0, "a window behind the lock heard a finger");
+                    assert_eq!(
+                        heard(desk),
+                        before,
+                        "`sol.on(\"touch\")` heard a finger at the lock"
+                    );
+
+                    desk.state.unlock_natively();
+                    assert!(
+                        desk.state.lock.is_none(),
+                        "the native unlock did not unlock"
+                    );
+                    let _ = std::fs::remove_file(lock_scene);
+                });
             }
 
             fn with_touch_window(

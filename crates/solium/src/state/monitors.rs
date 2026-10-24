@@ -532,6 +532,9 @@ impl Solium {
         // A monitor that arrived gets its scenes here rather than at its first
         // frame: `scripted::tests::an_instance_goes_with_its_monitor_and_comes_with_a_new_one`.
         self.sync_instances();
+        // And the native lock's, if it is held: a monitor that arrived shows
+        // its scene, or the fallback, from its first frame.
+        self.sync_lock_scenes();
         // And what the held handlers' `sol.act`s came to, which no dispatch
         // inside the hold could tell
         // (`a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`).

@@ -923,12 +923,12 @@ impl Surfaces {
 /// Whether a scene may be built on this thread. In a test binary, only on the
 /// Qt thread: `tests::a_surface_synced_off_the_qt_thread_builds_nothing`.
 #[cfg(not(test))]
-const fn builds_here() -> bool {
+pub(crate) const fn builds_here() -> bool {
     true
 }
 
 #[cfg(test)]
-fn builds_here() -> bool {
+pub(crate) fn builds_here() -> bool {
     crate::qml::qt_test::is_the_qt_thread()
 }
 

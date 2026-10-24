@@ -152,6 +152,31 @@
 //! session"). Without it the only way out of a crashed lock screen would be
 //! ending the session, and everything in it with it. The one lock that is
 //! never granted is a second one while the holder is still there.
+//!
+//! ## The native holder
+//!
+//! The lock can also be Solium's own: [`Holder::Native`], taken by
+//! [`Solium::lock_natively`]. Every rule above holds for it as it holds for a
+//! client. The session is blanked and input is taken at once, before any
+//! scene is ready (`a_native_lock_blanks_every_monitor_and_takes_input_before_any_scene_is_ready`);
+//! `locked` -- `LockedHint`, and the inhibitor held for sleep -- waits for
+//! every monitor to show a frame built under it; and there is one lock at a
+//! time, so a client asking to lock over it is answered `finished`
+//! (`a_client_asking_to_lock_while_natively_locked_is_refused`), and a client
+//! lock that was abandoned is taken over natively as a new client may take it
+//! over (`an_abandoned_client_lock_can_be_taken_over_natively`).
+//!
+//! What it draws on each monitor is a QML scene on the lock band, in the one
+//! engine, and the compiled-in fallback whenever that scene is missing, would
+//! not load, or fails while it runs: see `lock_scene.rs`. Over a monitor whose
+//! scene has not drawn yet, the backdrop. Touch reaches that scene as Qt touch
+//! events and nothing else (`a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`).
+//!
+//! It is ended only by [`Solium::unlock_natively`], which nothing in Lua, QML
+//! or JavaScript can reach (`no_lua_function_unlocks_a_native_lock`). Its one
+//! caller is logind's `Unlock`, the administrator's way out
+//! (`logind::tests::an_unlock_signal_unlocks_a_native_lock`); an authentication
+//! that succeeded will be the other.
 
 use smithay::{
     backend::renderer::element::Id,
@@ -206,17 +231,38 @@ pub(crate) struct LockFrame(u64);
 /// `a_flip_already_in_flight_at_the_lock_does_not_count`).
 static LOCKS: AtomicU64 = AtomicU64::new(0);
 
-/// The session lock, while there is one.
+/// Who holds the session lock.
 #[derive(Debug)]
-pub(crate) struct Lock {
+pub(crate) enum Holder {
     /// The lock object that was granted the session, and the only one whose
     /// requests are acted on. See the module documentation.
     ///
     /// Held for as long as the session is locked, including after it has died:
     /// a dead holder is what [`Lock::abandoned`] reads, and it is what lets a
     /// new lock client take over rather than being refused as a second lock.
-    holder: ExtSessionLockV1,
-    /// The `locked` event, until every monitor has shown this lock.
+    Client(ExtSessionLockV1),
+    /// Solium itself, drawing its own lock scene. See "The native holder" in
+    /// the module documentation.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the native lock is taken by `sol.lock_now` and logind's `Lock` once #281's wiring lands; until then tests take it, and logind's `Unlock` ends it"
+        )
+    )]
+    Native,
+}
+
+/// The session lock, while there is one.
+#[derive(Debug)]
+pub(crate) struct Lock {
+    /// Who holds it.
+    holder: Holder,
+    /// Whether `locked` is still owed: not every monitor has shown this lock
+    /// yet. See [`Solium::confirm_lock`].
+    owed: bool,
+    /// A client holder's `locked` event, until every monitor has shown this
+    /// lock; `None` for a native one, which has nobody to tell.
     ///
     /// `None` once it is sent. Kept, and never sent, if the holder goes
     /// without it: see `destroyed` in the `Dispatch` for
@@ -250,9 +296,30 @@ impl Lock {
     /// A lock granted to `confirmation`'s lock object, with nothing on any
     /// monitor yet and `locked` not sent.
     fn new(confirmation: SessionLocker) -> Self {
+        Self::held_by(
+            Holder::Client(confirmation.ext_session_lock().clone()),
+            Some(confirmation),
+        )
+    }
+
+    /// A lock Solium holds itself, with nothing on any monitor yet and
+    /// `locked` not confirmed.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the native lock is taken by `sol.lock_now` and logind's `Lock` once #281's wiring lands; until then tests take it, and logind's `Unlock` ends it"
+        )
+    )]
+    fn native() -> Self {
+        Self::held_by(Holder::Native, None)
+    }
+
+    fn held_by(holder: Holder, confirmation: Option<SessionLocker>) -> Self {
         Self {
-            holder: confirmation.ext_session_lock().clone(),
-            confirmation: Some(confirmation),
+            holder,
+            owed: true,
+            confirmation,
             frame: LockFrame(LOCKS.fetch_add(1, Ordering::Relaxed)),
             shown: Vec::new(),
             surfaces: Vec::new(),
@@ -260,14 +327,21 @@ impl Lock {
         }
     }
 
-    /// Whether `lock` is the lock object holding the session.
+    /// Whether `lock` is the lock object holding the session. Never, for a
+    /// native lock.
     pub(crate) fn is_held_by(&self, lock: &ExtSessionLockV1) -> bool {
-        self.holder == *lock
+        matches!(&self.holder, Holder::Client(holder) if holder == lock)
     }
 
-    /// Whether `locked` is still owed: the holder has not been told it.
+    /// Whether Solium holds the lock itself.
+    pub(crate) const fn is_native(&self) -> bool {
+        matches!(self.holder, Holder::Native)
+    }
+
+    /// Whether `locked` is still owed: not every monitor has shown this lock,
+    /// so the holder has not been told it and logind has not heard it.
     pub(crate) fn pending(&self) -> bool {
-        self.confirmation.is_some()
+        self.owed
     }
 
     /// Whether the holder has gone without unlocking.
@@ -281,8 +355,14 @@ impl Lock {
     /// off, or gave up", and the session is still locked -- see the module
     /// documentation for what follows, and
     /// `a_lock_client_that_goes_before_locked_leaves_the_session_locked`.
+    ///
+    /// Never, for a native lock: Solium cannot go without the session going
+    /// with it.
     pub(crate) fn abandoned(&self) -> bool {
-        !self.holder.is_alive()
+        match &self.holder {
+            Holder::Client(holder) => !holder.is_alive(),
+            Holder::Native => false,
+        }
     }
 
     /// The identity to draw the backdrop under.
@@ -354,28 +434,16 @@ impl SessionLockHandler for Solium {
     fn lock(&mut self, confirmation: SessionLocker) {
         if let Some(held) = self.lock.as_ref() {
             if !held.abandoned() {
-                tracing::info!("refused a second session lock: the session is already locked");
+                tracing::info!(
+                    native = held.is_native(),
+                    "refused a second session lock: the session is already locked"
+                );
                 drop(confirmation);
                 return;
             }
             tracing::warn!("a new lock client took over from one that went without unlocking");
         }
-        self.lock = Some(Lock::new(confirmation));
-        // An unlock still waiting for its key to come up is moot now.
-        self.refocus_on_release = false;
-        // And a binding held down at the desktop stops repeating, even one
-        // allowed at the lock: its key went down before there was one.
-        // `state::tests::real_client::lock_focus::held::the_lock_stops_a_held_binding_repeating`.
-        self.held_binding = None;
-        // Input is pointed at whatever the user was doing a moment ago, and it
-        // stays pointed there until something moves. Between the lock and the
-        // client's first surface -- which is a client starting up, so tens of
-        // milliseconds at best -- every keystroke would go into that
-        // application. The first thing typed at a lock screen is a password.
-        blind(self);
-        self.redraw = true;
-        tracing::info!("session locking: `locked` waits for every monitor to show the lock");
-        self.confirm_lock();
+        self.take_lock(Lock::new(confirmation));
     }
 
     /// The holder has unlocked.
@@ -385,38 +453,7 @@ impl SessionLockHandler for Solium {
     /// an unlock on any lock object at all; the `Dispatch` below answers every
     /// other one itself and never passes it on.
     fn unlock(&mut self) {
-        // First, and the order is load-bearing: `settle_focus` below asks the
-        // gate in `focus.rs`, and the gate refuses every window for as long as
-        // `lock` is `Some`. Cleared after, the session would unlock with the
-        // keyboard on nothing.
-        self.lock = None;
-        self.redraw = true;
-        // logind's `LockedHint` follows, and a fresh delay inhibitor for sleep
-        // is asked for if `lock.before_sleep` holds one: see `logind.rs`.
-        self.logind.locked(false);
-        // Cleared before it is re-aimed: keyboard focus is still on a lock
-        // surface that is about to be destroyed, and the pointer still thinks
-        // it is over one. `settle_focus` then gives the keyboard to whatever
-        // the user was using, because a session that unlocks and ignores
-        // typing until you move the mouse reads as one that did not unlock.
-        blind(self);
-        // Unless a key is still down, which at this moment it nearly always
-        // is: the Enter that submitted the password, still under the user's
-        // finger while the lock client checked it. Handed the keyboard now, the
-        // window would be told in `wl_keyboard.enter` that Enter is held -- a
-        // key it never saw pressed, typed at the lock screen. So the keyboard
-        // stays on nothing until every key is up, a tenth of a second, and
-        // `input::key` settles it then. The release itself goes to nobody.
-        let held = self
-            .seat
-            .get_keyboard()
-            .is_some_and(|keyboard| !keyboard.pressed_keys().is_empty());
-        if held {
-            self.refocus_on_release = true;
-        } else {
-            self.settle_focus();
-        }
-        tracing::info!("session unlocked");
+        self.release_lock();
     }
 
     /// A surface for one monitor, from the holder.
@@ -607,6 +644,129 @@ impl Dispatch<ExtSessionLockSurfaceV1, Unheld> for Solium {
 }
 
 impl Solium {
+    /// Lock the session with Solium's own lock screen.
+    ///
+    /// Locked at once, as a client's lock is: input is taken away and every
+    /// frame from here on is the lock's, all before this returns, and
+    /// `locked` is confirmed once every monitor has shown it. Each monitor
+    /// gets its lock scene, or the fallback (`lock_scene.rs`), and until one
+    /// has drawn, the backdrop.
+    ///
+    /// Nothing if the session is already locked, natively or by a lock client
+    /// that is still here: one lock at a time. A client lock that was
+    /// abandoned is taken over, as a new lock client may take it over.
+    /// `a_native_lock_blanks_every_monitor_and_takes_input_before_any_scene_is_ready`,
+    /// `an_abandoned_client_lock_can_be_taken_over_natively`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the native lock is taken by `sol.lock_now` and logind's `Lock` once #281's wiring lands; until then tests take it, and logind's `Unlock` ends it"
+        )
+    )]
+    pub(crate) fn lock_natively(&mut self) {
+        if let Some(held) = self.lock.as_ref() {
+            if !held.abandoned() {
+                tracing::info!(
+                    native = held.is_native(),
+                    "a native lock asked for over a session that is already locked: nothing to do"
+                );
+                return;
+            }
+            tracing::warn!(
+                "Solium's own lock took over from a lock client that went without unlocking"
+            );
+        }
+        self.take_lock(Lock::native());
+    }
+
+    /// End a native lock. Nothing for a lock a client holds, which only that
+    /// client may end, or for none.
+    ///
+    /// `pub(crate)` and reached from nowhere a script, a scene or a client can
+    /// get to: logind's `Unlock` is its caller, and an authentication that
+    /// succeeded will be the other. Not from `locked` on: the administrator's
+    /// way out works on a lock still waiting for a monitor too.
+    /// `logind::tests::an_unlock_signal_unlocks_a_native_lock`,
+    /// `no_lua_function_unlocks_a_native_lock`.
+    pub(crate) fn unlock_natively(&mut self) {
+        if !self.lock.as_ref().is_some_and(Lock::is_native) {
+            tracing::info!("a native unlock with no native lock: nothing to do");
+            return;
+        }
+        self.release_lock();
+    }
+
+    /// Take the session lock as `lock`, whoever holds it: the half of locking
+    /// a client and Solium share.
+    fn take_lock(&mut self, lock: Lock) {
+        let native = lock.is_native();
+        self.lock = Some(lock);
+        // An unlock still waiting for its key to come up is moot now.
+        self.refocus_on_release = false;
+        // And a binding held down at the desktop stops repeating, even one
+        // allowed at the lock: its key went down before there was one.
+        // `state::tests::real_client::lock_focus::held::the_lock_stops_a_held_binding_repeating`.
+        self.held_binding = None;
+        // Input is pointed at whatever the user was doing a moment ago, and it
+        // stays pointed there until something moves. Between the lock and the
+        // client's first surface -- which is a client starting up, so tens of
+        // milliseconds at best -- every keystroke would go into that
+        // application. The first thing typed at a lock screen is a password.
+        // Solium's own lock has no surface for the keyboard at all.
+        blind(self);
+        self.redraw = true;
+        tracing::info!(
+            native,
+            "session locking: `locked` waits for every monitor to show the lock"
+        );
+        // After input is taken, so a scene slow to build holds nothing of
+        // the session's open: each monitor's scene, or its fallback.
+        self.sync_lock_scenes();
+        self.confirm_lock();
+    }
+
+    /// End the lock, whoever holds it: the half of unlocking a client and
+    /// Solium share.
+    fn release_lock(&mut self) {
+        // First, and the order is load-bearing: `settle_focus` below asks the
+        // gate in `focus.rs`, and the gate refuses every window for as long as
+        // `lock` is `Some`. Cleared after, the session would unlock with the
+        // keyboard on nothing.
+        self.lock = None;
+        self.redraw = true;
+        // logind's `LockedHint` follows, and a fresh delay inhibitor for sleep
+        // is asked for if `lock.before_sleep` holds one: see `logind.rs`.
+        self.logind.locked(false);
+        // Cleared before it is re-aimed: keyboard focus is still on a lock
+        // surface that is about to be destroyed, and the pointer still thinks
+        // it is over one. `settle_focus` then gives the keyboard to whatever
+        // the user was using, because a session that unlocks and ignores
+        // typing until you move the mouse reads as one that did not unlock.
+        // A finger held on the native lock's scene is cancelled there.
+        blind(self);
+        // The lock's scenes go with it, so nothing of the lock runs while the
+        // session does.
+        self.sync_lock_scenes();
+        // Unless a key is still down, which at this moment it nearly always
+        // is: the Enter that submitted the password, still under the user's
+        // finger while the lock client checked it. Handed the keyboard now, the
+        // window would be told in `wl_keyboard.enter` that Enter is held -- a
+        // key it never saw pressed, typed at the lock screen. So the keyboard
+        // stays on nothing until every key is up, a tenth of a second, and
+        // `input::key` settles it then. The release itself goes to nobody.
+        let held = self
+            .seat
+            .get_keyboard()
+            .is_some_and(|keyboard| !keyboard.pressed_keys().is_empty());
+        if held {
+            self.refocus_on_release = true;
+        } else {
+            self.settle_focus();
+        }
+        tracing::info!("session unlocked");
+    }
+
     /// Which lock a frame built now is built under, if the session is locked.
     ///
     /// Asked by a backend as it builds a monitor's frame, and handed back to
@@ -661,7 +821,7 @@ impl Solium {
         let Some(lock) = self.lock.as_mut() else {
             return;
         };
-        if !lock.pending() || lock.abandoned() {
+        if !lock.owed || lock.abandoned() {
             return;
         }
         let waiting: Vec<String> = self
@@ -677,15 +837,20 @@ impl Solium {
             );
             return;
         }
+        lock.owed = false;
+        lock.shown.clear();
+        // A client is told; Solium's own lock has nobody to tell but logind.
         if let Some(confirmation) = lock.confirmation.take() {
-            lock.shown.clear();
             confirmation.lock();
-            tracing::info!("session locked: every monitor is showing the lock");
-            // The presentation-accurate moment `logind.rs` waits for: it
-            // releases the delay inhibitor held for sleep, if any, and sets
-            // `LockedHint`.
-            self.logind.locked(true);
         }
+        tracing::info!(
+            native = lock.is_native(),
+            "session locked: every monitor is showing the lock"
+        );
+        // The presentation-accurate moment `logind.rs` waits for: it
+        // releases the delay inhibitor held for sleep, if any, and sets
+        // `LockedHint`.
+        self.logind.locked(true);
     }
 
     /// A surface has been destroyed; if it was one of the lock screen's, the

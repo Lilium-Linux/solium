@@ -5265,17 +5265,26 @@ pub(crate) fn elements(
     // Note that this is also what a *capture* of a locked screen gets:
     // screencopy goes through the same function, so a client recording the
     // screen sees the lock screen and not what is behind it.
+    //
+    // Solium's own lock draws its scene for this monitor here instead, and the
+    // backdrop goes under that too: a scene that has not drawn yet, or draws
+    // with holes in it, shows the backdrop through them (`lock_scene.rs`).
     if let Some(lock) = state.lock.as_ref() {
-        if let Some(output) = state.output_for(screen)
-            && let Some(surface) = lock.surface_for(&output)
-        {
+        let blank = lock.blank();
+        let native = lock.is_native();
+        let output = state.output_for(screen);
+        let client = output
+            .as_ref()
+            .and_then(|output| lock.surface_for(output))
+            .map(|surface| surface.wl_surface().clone());
+        if let Some(surface) = client {
             elements.extend(
                 render_elements_from_surface_tree::<
                     GlesRenderer,
                     WaylandSurfaceRenderElement<GlesRenderer>,
                 >(
                     renderer,
-                    surface.wl_surface(),
+                    &surface,
                     (0, 0),
                     output_scale,
                     1.0,
@@ -5284,10 +5293,24 @@ pub(crate) fn elements(
                 .into_iter()
                 .map(Element::Window2),
             );
+        } else if native && let Some(output) = output.as_ref() {
+            let painted = state.lock_scenes.element(
+                renderer,
+                output,
+                smithay::utils::Rectangle::from_size(screen.size),
+                now,
+                crate::surface::Raster::at(scale),
+            );
+            // Still moving, or swapped for the fallback: the next frame is
+            // asked for, as `scripted` asks.
+            if painted.animating {
+                state.redraw = true;
+            }
+            elements.extend(painted.element);
         }
         elements.push(Element::Solid(
             smithay::backend::renderer::element::solid::SolidColorRenderElement::new(
-                lock.blank(),
+                blank,
                 smithay::utils::Rectangle::from_size(screen.size).to_physical_precise_round(scale),
                 CommitCounter::default(),
                 crate::lock::BLANK,

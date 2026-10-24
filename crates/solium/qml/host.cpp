@@ -710,6 +710,19 @@ extern "C" void solium_qml_host_next_sized_by_root(int width, int height)
     g_next_root_height = width > 0 && height > 0 ? height : 0;
 }
 
+namespace {
+/* What solium_qml_host_next_from handed over, for the next scene only: the
+ * QML text it is compiled from, when it is not read from its file. */
+bool g_next_from_set = false;
+QByteArray g_next_from;
+} // namespace
+
+extern "C" void solium_qml_host_next_from(const char *qml)
+{
+    g_next_from_set = qml != nullptr;
+    g_next_from = qml != nullptr ? QByteArray(qml) : QByteArray();
+}
+
 extern "C" int solium_qml_scene_root_size(const SoliumQmlScene *scene, double *width,
                                           double *height)
 {
@@ -819,8 +832,24 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
     g_next_root_width = 0;
     g_next_root_height = 0;
 
-    scene->component =
-        new QQmlComponent(g_engine, QUrl::fromLocalFile(QString::fromUtf8(qml_path)));
+    /* Taken now as well, for the same reason: compiled from text handed over
+     * rather than read from the file, which only names it. */
+    const bool from_text = g_next_from_set;
+    const QByteArray text = g_next_from;
+    g_next_from_set = false;
+    g_next_from.clear();
+
+    const QUrl url = QUrl::fromLocalFile(QString::fromUtf8(qml_path));
+    if (from_text) {
+        scene->component = new QQmlComponent(g_engine);
+        scene->component->setData(text, url);
+    } else {
+        scene->component = new QQmlComponent(g_engine, url);
+    }
+    if (scene->component->isLoading()) {
+        return fail("the QML did not compile at once: a scene compiled from text may import only "
+                    "what the engine already has");
+    }
     if (scene->component->isError()) {
         // Static, because the pointer outlives this frame: the caller frees the
         // scene — and with it the component the string came from — before it

@@ -156,7 +156,16 @@ pub(crate) struct ShellSurface {
     scene: qml::Scene,
     backing: Backing,
     source: PathBuf,
+    /// The QML text the scene is compiled from, for a scene compiled into the
+    /// compositor; `None` for one read from `source`. A compiled-in scene is
+    /// never reloaded: there is nothing on disk to watch.
+    /// `lock_scene::tests::the_fallback_is_compiled_in_and_loads_with_no_file_on_disk`.
+    text: Option<&'static str>,
     properties: String,
+    /// Whether the scene has failed to render since it last rendered: what
+    /// [`Self::failing`] says on the software path. The GPU path keeps its
+    /// own, in [`Gpu`].
+    failing: bool,
     /// The monitor the scene is hosted on, for a `sol.surface` instance; `None`
     /// for the loading window's scene.
     /// `scripted::tests::a_surface_instance_is_hosted_on_its_monitor`.
@@ -218,6 +227,29 @@ impl ShellSurface {
         Self::with_monitor(source, properties, Some(monitor))
     }
 
+    /// [`Self::hosted`], compiled from `text` rather than read from `source`,
+    /// which only names it and is what its relative imports resolve against:
+    /// a scene compiled into the compositor, which loads when nothing on disk
+    /// does. The native lock's fallback is one.
+    /// `lock_scene::tests::the_fallback_is_compiled_in_and_loads_with_no_file_on_disk`.
+    pub(crate) fn compiled(
+        source: PathBuf,
+        text: &'static str,
+        properties: &str,
+        monitor: &str,
+    ) -> Result<Self> {
+        qml::start()?;
+        let scene = build(&source, Some(text), properties, Some(monitor), 1, 1)?;
+        Ok(Self::around(
+            scene,
+            source,
+            Some(text),
+            properties,
+            Some(monitor),
+            None,
+        ))
+    }
+
     fn with_monitor(source: PathBuf, properties: &str, monitor: Option<&str>) -> Result<Self> {
         qml::start()?;
         // 1x1 and not the real size, which is not known until the first draw:
@@ -226,9 +258,23 @@ impl ShellSurface {
         // rather than a scene that does not exist until something asks for a
         // frame. Loading is where a bad QML path is worth reporting, and a
         // surface that has not built anything cannot report it.
-        let scene = build(&source, properties, monitor, 1, 1)?;
+        let scene = build(&source, None, properties, monitor, 1, 1)?;
         let newest = newest_change(&source);
-        Ok(Self {
+        Ok(Self::around(
+            scene, source, None, properties, monitor, newest,
+        ))
+    }
+
+    /// A surface around a scene just built.
+    fn around(
+        scene: qml::Scene,
+        source: PathBuf,
+        text: Option<&'static str>,
+        properties: &str,
+        monitor: Option<&str>,
+        newest: Option<SystemTime>,
+    ) -> Self {
+        Self {
             scene,
             backing: if qml::on_gpu() {
                 // `(0, 0)` and not the 1x1 the scene really is, so the first
@@ -243,13 +289,26 @@ impl ShellSurface {
                 }
             },
             source,
+            text,
             properties: properties.to_owned(),
+            failing: false,
             monitor: monitor.map(str::to_owned),
             newest,
             checked: Duration::ZERO,
             hit_cache: std::cell::Cell::new(None),
             scene_reserve: SceneReserve::default(),
-        })
+        }
+    }
+
+    /// Whether the scene failed to render the last time it was asked to, and
+    /// has not rendered since: a scene that fails at run time. Drawn, it shows
+    /// its last good picture or nothing.
+    /// `lock_scene::tests::a_scene_that_fails_at_run_time_is_swapped_for_the_fallback`.
+    pub(crate) fn failing(&self) -> bool {
+        match &self.backing {
+            Backing::Memory { .. } => self.failing,
+            Backing::Gpu(gpu) => gpu.failing(),
+        }
     }
 
     /// Deliver one pointer event, in compositor coordinates, to the scene
@@ -397,6 +456,12 @@ impl ShellSurface {
         bag.clone_into(&mut self.properties);
     }
 
+    /// Fail as a render that failed does, for a test that has no renderer.
+    #[cfg(test)]
+    pub(crate) fn fail_for_test(&mut self) {
+        self.failing = true;
+    }
+
     #[cfg(test)]
     pub(crate) fn scene_for_test(&mut self) -> &mut qml::Scene {
         &mut self.scene
@@ -413,7 +478,7 @@ impl ShellSurface {
     /// tree. State the shell was holding is lost, which is the honest cost of
     /// reloading.
     fn reload_if_changed(&mut self, now: Duration, wanted: (i32, i32)) {
-        if now.saturating_sub(self.checked) < RELOAD_INTERVAL {
+        if self.text.is_some() || now.saturating_sub(self.checked) < RELOAD_INTERVAL {
             return;
         }
         self.checked = now;
@@ -442,6 +507,7 @@ impl ShellSurface {
         // `tests::a_reloaded_scene_stays_hosted_on_its_monitor`.
         match build(
             &self.source,
+            None,
             &self.properties,
             self.monitor.as_deref(),
             width,
@@ -584,9 +650,11 @@ impl ShellSurface {
             Ok(rendered) => rendered,
             Err(err) => {
                 tracing::warn!(?err, "the shell surface did not render");
+                self.failing = true;
                 return None;
             }
         };
+        self.failing = false;
 
         let Backing::Memory {
             buffer: slot,
@@ -656,14 +724,20 @@ impl ShellSurface {
 /// it for themselves is the bug that sharing it fixed.
 fn build(
     source: &Path,
+    text: Option<&str>,
     properties: &str,
     monitor: Option<&str>,
     width: i32,
     height: i32,
 ) -> Result<qml::Scene> {
-    match monitor {
-        Some(monitor) => qml::Scene::for_monitor(source, width, height, Some(properties), monitor),
-        None => qml::Scene::for_host(source, width, height, Some(properties)),
+    match (monitor, text) {
+        (Some(monitor), Some(text)) => {
+            qml::Scene::for_monitor_from(source, text, width, height, Some(properties), monitor)
+        }
+        (Some(monitor), None) => {
+            qml::Scene::for_monitor(source, width, height, Some(properties), monitor)
+        }
+        (None, _) => qml::Scene::for_host(source, width, height, Some(properties)),
     }
 }
 
