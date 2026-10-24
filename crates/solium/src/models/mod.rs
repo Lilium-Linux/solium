@@ -52,20 +52,17 @@ impl crate::state::Solium {
         // What Solium's own lock shows of its password: never the password.
         // `lock_auth::tests::typed_text_never_reaches_the_lock_scene`.
         crate::lock_auth::publish(self);
-        // The lock's own scenes never read these models: theirs are always
-        // empty (`qml/attached.h`, `solium_qml_name_scope`). While Solium's
-        // own lock holds the session, the scenes still drawn over it that
-        // are not the lock's -- the pointer's -- read only what a lock may
-        // show too: the monitors and the keyboard. Everything else reads
-        // empty, and comes back at the unlock. What a lock may show of the
-        // rest, redacted in place, is a later issue (#281's plan).
-        // `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`.
-        //
-        // Not through the lock's entry, while the desktop is still drawn
-        // under its scenes: what is on screen then is the desktop, and it
-        // must not empty under the sheet coming down. From the entry's end.
-        let redacted = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native)
-            && !self.lock_scenes.entry_pending();
+        // Every scene reads the session's own models, locked or not: a scene
+        // of the session is not drawn behind Solium's own lock, and emptying
+        // its models there would destroy every item it builds from them, to
+        // be built again at the unlock, over the lock's exit (#281's slide).
+        // What is drawn over the lock reads empty ones of its own at all
+        // times: the lock's scenes and the pointer's (`qml/attached.h`,
+        // `solium_redacted`), the monitors and the keyboard as anywhere.
+        // `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`,
+        // `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`,
+        // `state::tests::real_client::lock_focus::native::a_session_scene_keeps_its_rows_through_a_native_lock`.
+
         // Apps: scanned once, lazily, on the first call this process ever
         // makes here, and again whenever a reload asked for one
         // (`state/commands.rs`'s `reload_from`). No worker thread and no
@@ -81,11 +78,7 @@ impl crate::state::Solium {
                 self.published.apps_ready = true;
             }
         }
-        let apps = if redacted {
-            Vec::new()
-        } else {
-            apps::rows(&self.apps)
-        };
+        let apps = apps::rows(&self.apps);
         publish(
             Model::Apps,
             &mut self.published.apps,
@@ -116,11 +109,7 @@ impl crate::state::Solium {
                 .map(|dir| crate::folder::scan(dir, &self.folder_trust))
                 .unwrap_or_default();
         }
-        let folder = if redacted {
-            Vec::new()
-        } else {
-            folder::rows(&self.folder)
-        };
+        let folder = folder::rows(&self.folder);
         publish(
             Model::Folder,
             &mut self.published.folder,
@@ -130,7 +119,6 @@ impl crate::state::Solium {
         let dirs_desktop = self
             .folder_dir
             .as_deref()
-            .filter(|_| !redacted)
             .and_then(|dir| dir.to_str())
             .unwrap_or("")
             .to_owned();
@@ -146,13 +134,8 @@ impl crate::state::Solium {
             monitors,
             crate::qml::hosted::apply_rows,
         );
-        let (windows, workspaces) = if redacted {
-            (Vec::new(), Vec::new())
-        } else {
-            let windows = windows::rows(self);
-            let workspaces = workspaces::joined(self, &windows);
-            (windows, workspaces)
-        };
+        let windows = windows::rows(self);
+        let workspaces = workspaces::joined(self, &windows);
         publish(
             Model::Windows,
             &mut self.published.windows,
@@ -168,19 +151,16 @@ impl crate::state::Solium {
             workspaces,
             crate::qml::hosted::apply_rows,
         );
-        let status = if redacted { "" } else { self.status.as_str() };
+        let status = self.status.as_str();
         if self.published.status.as_deref() != Some(status)
             && crate::qml::hosted::set_status(status)
         {
             self.published.status = Some(status.to_owned());
         }
-        let arrangement = if redacted {
-            Some("{}".to_owned())
-        } else {
-            self.workspaces
-                .as_ref()
-                .map(|declared| declared.arrangement_json().render())
-        };
+        let arrangement = self
+            .workspaces
+            .as_ref()
+            .map(|declared| declared.arrangement_json().render());
         if let Some(arrangement) = arrangement
             && self.published.arrangement.as_deref() != Some(arrangement.as_str())
             && crate::qml::hosted::set_arrangement(&arrangement)
@@ -198,6 +178,31 @@ impl crate::state::Solium {
         let mut pointer = std::mem::take(&mut self.published.pointer);
         pointer::publish(self, &mut pointer, crate::qml::pointer::publish);
         self.published.pointer = pointer;
+    }
+
+    /// Take back from Qt the session's rows, status and arrangement this
+    /// `Solium` published. Qt's stores are the process's, shared by every
+    /// test on the Qt thread, so a test that publishes a session leaves none
+    /// of it for the next.
+    #[cfg(test)]
+    pub(crate) fn unpublish_session_for_test(&mut self) {
+        for (model, last) in [
+            (Model::Apps, &mut self.published.apps),
+            (Model::Folder, &mut self.published.folder),
+            (Model::Windows, &mut self.published.windows),
+            (Model::Workspaces, &mut self.published.workspaces),
+        ] {
+            publish(model, last, Vec::new(), crate::qml::hosted::apply_rows);
+        }
+        if crate::qml::hosted::set_status("") {
+            self.published.status = Some(String::new());
+        }
+        if crate::qml::hosted::set_arrangement("{}") {
+            self.published.arrangement = Some("{}".to_owned());
+        }
+        if crate::qml::hosted::set_dirs_desktop("") {
+            self.published.dirs_desktop = Some(String::new());
+        }
     }
 }
 

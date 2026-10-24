@@ -47,10 +47,14 @@
 //!
 //! **The exit.** When Solium's own lock ends, the session is unlocked at once:
 //! input goes to the desktop and the desktop is drawn. The lock's scenes are
-//! drawn over it for `lock.exit_ms` more, reading `Lock.state` as
-//! `"unlocking"`, so a scene can slide or fade itself away; at that bound they
-//! are gone, whatever the scene is doing
-//! (`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`).
+//! drawn over it, reading `Lock.state` as `"unlocking"` from that instant, so
+//! a scene can slide or fade itself away, for `lock.exit_ms` counted from the
+//! first frame built after the unlock: a stall before that frame cannot eat
+//! the exit, whose bound starts on the instant its animation does
+//! (`render::frame_tick`). At that bound they are gone, whatever the scene is
+//! doing. With no monitor lit there is no exit, as there is no entry
+//! (`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`,
+//! `lock_auth::tests::the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes`).
 //!
 //! **The peek.** While the session is unlocked, the configuration can pull
 //! the lock's scenes down over the desktop with a finger, as an iPhone's lock
@@ -293,8 +297,9 @@ pub(crate) struct LockScenes {
     /// Where the entry under way started, from 0 to 1: the peek it took the
     /// lock from (`Lock.progress` through it), 0 for a lock taken from none.
     enter_from: f64,
-    /// When the exit under way ends, on the compositor's clock.
-    exit_until: Option<Duration>,
+    /// The exit under way: waiting for its first frame, or drawn until its
+    /// bound.
+    exit: Option<Exit>,
     /// Whether the exit under way ends a peek rather than a lock, so the
     /// fallback, which a peek never draws, is not drawn through it either.
     exit_after_peek: bool,
@@ -303,6 +308,17 @@ pub(crate) struct LockScenes {
     peek: Option<f64>,
     /// Where the pointer is, as the scenes have been told it.
     pub(crate) pointer: LockPointer,
+}
+
+/// An exit of the lock's scenes over the desktop, after an unlock or a peek.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Exit {
+    /// Begun, and no frame built since: `Lock.state` reads `"unlocking"`,
+    /// and its bound starts at its first frame ([`LockScenes::exit_frame`]).
+    Waiting,
+    /// Drawn since its first frame, until this instant on the compositor's
+    /// clock: `lock.exit_ms` after that frame.
+    Until(Duration),
 }
 
 impl Default for LockScenes {
@@ -321,7 +337,7 @@ impl Default for LockScenes {
             enter_until: None,
             entering_on: HashSet::new(),
             enter_from: 0.0,
-            exit_until: None,
+            exit: None,
             exit_after_peek: false,
             peek: None,
             pointer: LockPointer::default(),
@@ -705,19 +721,37 @@ impl LockScenes {
             .any(|monitor| self.desktop_under(monitor, now))
     }
 
-    /// The lock ended at `now`: its scenes stay over the desktop for
-    /// `lock.exit_ms`, if there are any and it is not 0. The pointer at them
-    /// is forgotten, since it is the desktop's now.
-    pub(crate) fn begin_exit(&mut self, now: Duration) {
+    /// The lock ended: its scenes stay over the desktop for `lock.exit_ms`
+    /// from the exit's first frame ([`Self::exit_frame`]), if there are any,
+    /// it is not 0 and a monitor is `lit` to draw it on; a dark one shows
+    /// nothing to go back up from, as it has nothing to come down over. The
+    /// pointer at them is forgotten, since it is the desktop's now.
+    pub(crate) fn begin_exit(&mut self, lit: bool) {
         self.end_entry();
         self.peek = None;
         self.exit_after_peek = false;
         self.pointer = LockPointer::default();
-        if self.settings.exit.is_zero() || self.instances.is_empty() {
-            self.exit_until = None;
+        if self.settings.exit.is_zero() || self.instances.is_empty() || !lit {
+            self.exit = None;
             return;
         }
-        self.exit_until = Some(now + self.settings.exit);
+        self.exit = Some(Exit::Waiting);
+    }
+
+    /// A frame is being built at `now`, ahead of anything drawn in it: an
+    /// exit waiting for its first frame is drawn from this one, for
+    /// `lock.exit_ms`. So a stall between the unlock and the next frame,
+    /// such as the session's scenes building what they show, cannot eat the
+    /// exit: its bound and the scene's own animation both start here, the
+    /// animation on the tick that follows at this same instant
+    /// (`render::frame_tick`). Whether it started one.
+    /// `lock_auth::tests::the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes`.
+    pub(crate) fn exit_frame(&mut self, now: Duration) -> bool {
+        if self.exit != Some(Exit::Waiting) {
+            return false;
+        }
+        self.exit = Some(Exit::Until(now + self.settings.exit));
+        true
     }
 
     /// Pull the scenes `progress` of the way down over the unlocked desktop
@@ -726,7 +760,7 @@ impl LockScenes {
     /// now, from where they are. For [`Solium::lock_peek`], which decides
     /// whether a peek may be.
     pub(crate) fn peek(&mut self, progress: f64) {
-        self.exit_until = None;
+        self.exit = None;
         self.exit_after_peek = false;
         self.peek = Some(progress.clamp(0.0, 1.0));
     }
@@ -736,13 +770,13 @@ impl LockScenes {
         self.peek
     }
 
-    /// End the peek at `now`, if there is one: its scenes go back up through
-    /// the exit, for `lock.exit_ms` at most. Where it was, or `None` with no
-    /// peek.
-    pub(crate) fn end_peek(&mut self, now: Duration) -> Option<f64> {
+    /// End the peek, if there is one: its scenes go back up through the
+    /// exit, for `lock.exit_ms` at most from its first frame. Where it was,
+    /// or `None` with no peek. A peek is drawn, so a monitor is lit.
+    pub(crate) fn end_peek(&mut self) -> Option<f64> {
         let was = self.peek?;
-        self.begin_exit(now);
-        self.exit_after_peek = self.exit_until.is_some();
+        self.begin_exit(true);
+        self.exit_after_peek = self.exit.is_some();
         Some(was)
     }
 
@@ -766,19 +800,25 @@ impl LockScenes {
         self.exiting(now) && (moves || !self.exit_after_peek)
     }
 
-    /// Whether the scenes are being drawn over the desktop at `now`.
+    /// Whether the scenes are being drawn over the desktop at `now`: from
+    /// the unlock, through an exit waiting for its first frame, to its bound.
     pub(crate) fn exiting(&self, now: Duration) -> bool {
-        self.exit_until.is_some_and(|until| now < until)
+        match self.exit {
+            Some(Exit::Waiting) => true,
+            Some(Exit::Until(until)) => now < until,
+            None => false,
+        }
     }
 
-    /// Whether an exit under way has reached its bound by `now`.
+    /// Whether an exit under way has reached its bound by `now`. Never one
+    /// still waiting for its first frame.
     fn exit_over(&self, now: Duration) -> bool {
-        self.exit_until.is_some_and(|until| now >= until)
+        matches!(self.exit, Some(Exit::Until(until)) if now >= until)
     }
 
     /// End the exit, whether or not it is over: the session locked again.
     pub(crate) fn end_exit(&mut self) {
-        self.exit_until = None;
+        self.exit = None;
         self.exit_after_peek = false;
     }
 
@@ -1175,6 +1215,47 @@ mod tests {
         });
     }
 
+    /// **An exit waits for its first frame, and plays only on a lit
+    /// monitor**: begun, the scenes are drawn over the desktop however long
+    /// no frame comes, and its bound is never reached; from its first frame
+    /// they are drawn for `lock.exit_ms` and no longer, and a later frame
+    /// does not start it again. With no monitor lit there is no exit.
+    #[test]
+    fn an_exit_waits_for_its_first_frame_and_plays_only_on_a_lit_monitor() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let output = monitor("exit-first-frame");
+            let mut scenes = LockScenes::default();
+            scenes.use_scene(scene("exit-first-frame", "import QtQuick\nItem {}\n"));
+            scenes.sync(std::slice::from_ref(&output), true);
+            let exit = scenes.settings().exit;
+            let unlocked = Duration::from_secs(10);
+
+            scenes.begin_exit(true);
+            let late = unlocked + exit * 3;
+            assert!(scenes.exiting(late), "the exit ended with no frame drawn");
+            assert!(
+                !scenes.exit_over(late),
+                "its bound passed with no frame drawn"
+            );
+            assert!(scenes.exit_frame(late), "its first frame did not start it");
+            assert!(
+                !scenes.exit_frame(late + exit / 2),
+                "a later frame started it again"
+            );
+            assert!(scenes.exiting(late + exit - Duration::from_millis(1)));
+            assert!(
+                !scenes.exiting(late + exit) && scenes.exit_over(late + exit),
+                "the exit outlived `exit_ms` from its first frame"
+            );
+
+            scenes.end_exit();
+            scenes.begin_exit(false);
+            assert!(!scenes.exiting(unlocked), "an exit with no monitor lit");
+            assert!(!scenes.exit_frame(unlocked));
+        });
+    }
+
     /// **A peek draws a scene that moves, and never the fallback**: pulled
     /// down, a monitor showing a scene is drawn over the desktop and one
     /// showing the fallback, which would cover it all at the first pixel, is
@@ -1211,7 +1292,7 @@ mod tests {
                 "the fallback is drawn in a peek"
             );
             for scenes in [&mut own, &mut fallback] {
-                assert_eq!(scenes.end_peek(now), Some(0.4));
+                assert_eq!(scenes.end_peek(), Some(0.4));
             }
             let at = now + Duration::from_millis(1);
             assert!(own.over_desktop(&output.name(), at), "no way back up");
@@ -1222,7 +1303,7 @@ mod tests {
 
             // After a lock, the exit draws either; a peek then takes it over.
             fallback.end_exit();
-            fallback.begin_exit(now);
+            fallback.begin_exit(true);
             assert!(
                 fallback.over_desktop(&output.name(), at),
                 "the exit after a lock does not draw the fallback"

@@ -2,8 +2,11 @@
 //! `Solium.cursor`, published from here once a frame
 //! (`tests::a_published_pointer_reaches_solium_cursor`); a scene whose root
 //! item says how big it is (`tests::a_scene_sized_by_its_root_keeps_its_own_size`);
-//! and the hotspot that root sets
-//! (`tests::the_hotspot_the_root_sets_is_the_scenes`).
+//! the hotspot that root sets
+//! (`tests::the_hotspot_the_root_sets_is_the_scenes`); and what a pointer
+//! scene reads of the session, which is what a lock may show and nothing
+//! more, since it is drawn over Solium's own lock
+//! (`lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`).
 
 use std::{ffi::CString, path::Path};
 
@@ -18,6 +21,7 @@ mod ffi {
     unsafe extern "C" {
         pub(super) fn solium_qml_pointer_publish(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_host_next_sized_by_root(width: c_int, height: c_int);
+        pub(super) fn solium_qml_host_next_redacted(redacted: c_int);
         pub(super) fn solium_qml_scene_root_size(
             scene: *const super::super::ffi::Scene,
             width: *mut f64,
@@ -45,18 +49,52 @@ pub(crate) fn publish(json: &str) -> bool {
     unsafe { ffi::solium_qml_pointer_publish(json.as_ptr()) != 0 }
 }
 
+/// Build a scene with `build` that reads of the session only what a lock may
+/// show: the monitors and the keyboard, with `Windows`, `Workspaces`, `Apps`,
+/// `Folder`, `Solium.status` and `Solium.dirs` empty in it at all times.
+///
+/// Every pointer scene is built this way, the configuration's and the floor
+/// alike, because the pointer is drawn over Solium's own lock: the one scene
+/// of the session that is (`render::elements`). Always, and not only while
+/// locked, so nothing changes in it when the session locks, and the
+/// session's own scenes, which are not drawn behind the lock, keep their
+/// models through it. A pointer has no business with the session's windows.
+/// `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+fn redacted(build: impl FnOnce() -> Result<Scene>) -> Result<Scene> {
+    // SAFETY: touches only process-global state, consumed by the next build.
+    unsafe { ffi::solium_qml_host_next_redacted(1) };
+    let built = build();
+    // Cleared whether or not the scene was built, so no later scene reads
+    // what a lock may show by accident.
+    // SAFETY: as above.
+    unsafe { ffi::solium_qml_host_next_redacted(0) };
+    built
+}
+
 impl Scene {
+    /// The floor's pointer, `qml/cursor.qml`: a scene the host sizes,
+    /// `width` by `height`, that reads of the session only what a lock may
+    /// show (`redacted`).
+    /// `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`.
+    pub(crate) fn for_pointer(qml_path: &Path, width: i32, height: i32) -> Result<Self> {
+        redacted(|| Self::for_host(qml_path, width, height, None))
+    }
+
     /// A scene whose root item says how big it is: the compositor never writes
     /// the root's width or height, so a binding on either survives every
     /// resize, and a root that sets neither is `default` logical pixels square.
-    /// `tests::a_scene_sized_by_its_root_keeps_its_own_size`.
+    /// The pointer's scene, so it reads of the session only what a lock may
+    /// show (`redacted`).
+    /// `tests::a_scene_sized_by_its_root_keeps_its_own_size`,
+    /// `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`.
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn sized_by_root(qml_path: &Path, default: i32) -> Result<Self> {
         let default = default.max(1);
         // SAFETY: touches only process-global state, consumed by the next
         // build.
         unsafe { ffi::solium_qml_host_next_sized_by_root(default, default) };
-        let built = Self::for_host(qml_path, default, default, None);
+        let built = redacted(|| Self::for_host(qml_path, default, default, None));
         // Cleared whether or not the scene was built, so no later scene is
         // sized by its root by accident, as `for_monitor` clears its monitor.
         // `tests::a_scene_built_after_one_sized_by_its_root_is_sized_by_the_host`.

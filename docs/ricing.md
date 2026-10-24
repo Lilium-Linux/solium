@@ -1201,7 +1201,12 @@ the monitors, the keyboard layout and its own clock, and `Windows`,
 waits, kept, for the next lock included
 (`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`). A scene
 you got from someone else can show a clock and a field, and nothing of what
-you were doing. The other way round, no other scene sees the lock: in a bar
+you were doing. The pointer's scene, the one other scene drawn over the lock,
+reads the session the same way, at all times
+(`lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`); your
+bar, dock and home screen keep theirs through the lock, since they are not
+drawn behind it, and nothing in them is built again at the unlock
+(`state::tests::real_client::lock_focus::native::a_session_scene_keeps_its_rows_through_a_native_lock`). The other way round, no other scene sees the lock: in a bar
 or a widget, `Lock` reads `"idle"`, `Lock.submit()` and `Lock.clear()` do
 nothing, a `SecretField` reads nothing and a `SecretKeypad` lays out no key,
 so nothing on the desktop can time what is typed at the lock or submit for
@@ -1246,9 +1251,12 @@ does not move.
 
 When the password is right, Solium unlocks at once: the keyboard and the
 pointer are the desktop's from that moment. The scene stays over the desktop
-for `exit_ms` more with `Lock.state` reading `"unlocking"`, so it can slide
-or fade itself away, and at that bound it is gone, whatever it is doing
-(`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`).
+with `Lock.state` reading `"unlocking"`, so it can slide or fade itself away,
+for `exit_ms` counted from the first frame drawn after the unlock, so a
+slow frame cannot eat the slide; at that bound it is gone, whatever it is
+doing
+(`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`,
+`lock_auth::tests::the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes`).
 `prompt_on` picks the one monitor whose scene shows the field; the others
 show theirs without it
 (`lock_auth::tests::the_prompt_is_on_the_monitor_prompt_on_names_and_no_other`).

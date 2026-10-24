@@ -106,7 +106,6 @@ impl Solium {
             tracing::debug!("a peek over a session already locked: nothing to do");
             return;
         }
-        let now = self.clock.now();
         match progress {
             Some(progress) => {
                 if !self.lock_scenes.settings().native {
@@ -125,7 +124,7 @@ impl Solium {
                 }
             }
             None => {
-                if self.lock_scenes.end_peek(now).is_none() {
+                if self.lock_scenes.end_peek().is_none() {
                     return;
                 }
                 tracing::debug!("the peek is over: the lock's scenes go back up");

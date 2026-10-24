@@ -311,7 +311,7 @@ SoliumWindowList::SoliumWindowList(QObject *parent) : QSortFilterProxyModel(pare
 
 void SoliumWindowList::classBegin()
 {
-    if (solium_lock_hosted(this)) {
+    if (solium_redacted(this)) {
         setSourceModel(solium_rows_redacted(SOLIUM_QML_ROWS_WINDOWS));
     }
 }
@@ -478,7 +478,7 @@ SoliumWorkspaceList::SoliumWorkspaceList(QObject *parent) : QSortFilterProxyMode
 
 void SoliumWorkspaceList::classBegin()
 {
-    if (solium_lock_hosted(this)) {
+    if (solium_redacted(this)) {
         setSourceModel(solium_rows_redacted(SOLIUM_QML_ROWS_WORKSPACES));
     }
 }

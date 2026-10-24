@@ -22,6 +22,11 @@ namespace {
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 constexpr const char kHosting[] = "_soliumHosting";
 
+/* The dynamic property the context of a scene that reads only what a lock
+ * may show carries, when it is no lock scene: the pointer's.
+ * `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`. */
+constexpr const char kRedacted[] = "_soliumRedacted";
+
 /* The item Qt draws a Qt Quick Controls `Popup` as: its child of type
  * QQuickPopupItem, which the popup makes with itself, so it is there from
  * the popup's first binding, before any content item is; null for any
@@ -85,6 +90,25 @@ bool solium_lock_hosted(QObject *object)
 void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting)
 {
     context->setProperty(kHosting, QVariant::fromValue(static_cast<void *>(hosting)));
+}
+
+bool solium_redacted(QObject *object)
+{
+    if (solium_lock_hosted(object)) {
+        return true;
+    }
+    for (QQmlContext *context = object != nullptr ? qmlContext(object) : nullptr;
+         context != nullptr; context = context->parentContext()) {
+        if (context->property(kRedacted).toBool()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void solium_redacted_mark(QQmlContext *context)
+{
+    context->setProperty(kRedacted, true);
 }
 
 SoliumMonitor *solium_monitor_row(const QString &name)
@@ -339,7 +363,7 @@ SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item)
 QString SoliumAttached::status() const
 {
     // `sol.status` is the session's: a window's title, say.
-    if (solium_lock_hosted(m_item)) {
+    if (solium_redacted(m_item)) {
         return QString();
     }
     return SoliumStatus::instance().text;
@@ -347,7 +371,7 @@ QString SoliumAttached::status() const
 
 SoliumDirs *SoliumAttached::dirs() const
 {
-    if (solium_lock_hosted(m_item)) {
+    if (solium_redacted(m_item)) {
         static SoliumDirs *none = nullptr;
         if (none == nullptr) {
             none = new SoliumDirs();
@@ -725,10 +749,10 @@ void solium_qml_register_types()
     qmlRegisterAnonymousType<SoliumFolderRows>(SOLIUM_NATIVE_URI, 1);
 }
 
-void solium_qml_name_scope(QQmlContext *context, bool for_lock)
+void solium_qml_name_scope(QQmlContext *context, bool redacted)
 {
-    const auto rows = [for_lock](int model) -> QObject * {
-        QObject *store = for_lock ? solium_rows_redacted(model) : solium_rows(model);
+    const auto rows = [redacted](int model) -> QObject * {
+        QObject *store = redacted ? solium_rows_redacted(model) : solium_rows(model);
         QQmlEngine::setObjectOwnership(store, QQmlEngine::CppOwnership);
         return store;
     };

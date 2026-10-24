@@ -832,13 +832,18 @@ impl Solium {
         self.lock = None;
         self.redraw = true;
         // Solium's own lock: its scenes play their exit over the desktop for
-        // `lock.exit_ms`, reading `Lock.state` as "unlocking"; input is the
-        // desktop's from here on all the same (`lock_scene.rs`). Then what
-        // was typed is wiped, a check under way is cancelled, and the layout
-        // that was live before the lock is again, before any window is given
-        // the keyboard.
+        // `lock.exit_ms` from its first frame, reading `Lock.state` as
+        // "unlocking" from now; on a monitor that is lit, as the entry plays
+        // only there. Input is the desktop's from here on all the same
+        // (`lock_scene.rs`). Then what was typed is wiped, a check under way
+        // is cancelled, and the layout that was live before the lock is
+        // again, before any window is given the keyboard.
         if native {
-            self.lock_scenes.begin_exit(self.clock.now());
+            let lit = self
+                .space
+                .outputs()
+                .any(|output| !self.power.is_dark(output));
+            self.lock_scenes.begin_exit(lit);
             self.end_lock_auth();
         }
         // logind's `LockedHint` follows, and a fresh delay inhibitor for sleep

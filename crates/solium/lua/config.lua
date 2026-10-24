@@ -858,8 +858,9 @@ local defaults = {
 
         -- How long the lock screen stays over the desktop after it unlocks,
         -- playing its exit (`Lock.state` reads "unlocking"), in
-        -- milliseconds; 0 removes it at once. The desktop has the keyboard
-        -- and the pointer from the unlock on, so this is at most 900.
+        -- milliseconds, counted from the first frame drawn after the unlock;
+        -- 0 removes it at once. The desktop has the keyboard and the pointer
+        -- from the unlock on, so this is at most 900.
         exit_ms = 450,
 
         -- How near a passcode pad (`SecretKeypad`), in pixels, the pointer's
