@@ -253,8 +253,12 @@ pub(crate) fn take_service_call() -> Option<(String, Json)> {
     // call, copied here before any.
     let (action, data) = unsafe {
         (
-            std::ffi::CStr::from_ptr(action).to_string_lossy().into_owned(),
-            std::ffi::CStr::from_ptr(data).to_string_lossy().into_owned(),
+            std::ffi::CStr::from_ptr(action)
+                .to_string_lossy()
+                .into_owned(),
+            std::ffi::CStr::from_ptr(data)
+                .to_string_lossy()
+                .into_owned(),
         )
     };
     Some((action, Json::parse(&data).unwrap_or(Json::Null)))

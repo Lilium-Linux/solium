@@ -344,24 +344,25 @@ impl Solium {
         // through a `surface` listener (03 §3.1.5, the direct path), each
         // heard by Lua as an event with `origin = "scene"` (#346).
         while let Some((action, data)) = crate::qml::hosted::take_service_call() {
-            if action.starts_with("audio.") {
-                if let Err(why) = crate::services::act_audio(
+            let done = if action.starts_with("audio.") {
+                crate::services::act_audio(
                     self,
                     &action,
                     &data,
                     crate::services::audio::volume::Origin::Scene,
-                ) {
-                    tracing::debug!(action, why, "a scene's audio call was not done");
-                }
+                )
             } else if action.starts_with("notifications.") {
-                if let Err(why) = crate::services::act(
+                crate::services::act(
                     self,
                     &action,
                     &data,
                     crate::services::notifications::Origin::Scene,
-                ) {
-                    tracing::debug!(action, why, "a scene's notifications call was not done");
-                }
+                )
+            } else {
+                Err("unknown-service")
+            };
+            if let Err(why) = done {
+                tracing::debug!(action, why, "a scene's call on a service was not done");
             }
         }
         let mut asked = Vec::new();

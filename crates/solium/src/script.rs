@@ -3621,8 +3621,8 @@ fn call_listeners(
     Ok(called)
 }
 
-/// [`call_listeners`], for a decision hook: each listener in turn until one
-/// returns a table, which is the answer. A listener stopped at the deadline is
+/// The listeners of a decision hook, each in turn until one returns a
+/// table, which is the answer. A listener stopped at the deadline is
 /// struck as any other.
 fn call_deciders(
     lua: &Lua,
@@ -3669,6 +3669,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // Each `sol.act`'s `done`, by attempt id, until its outcome is known.
     // `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
     sol.set("_attempts", lua.create_table()?)?;
+    // `sol.notify`'s action functions, by token, until one runs (#346).
+    sol.set("_notify_actions", lua.create_table()?)?;
     sol.set("_keeps", lua.create_table()?)?;
     // How many times each listener or `done` was stopped at the deadline, by
     // function. `tests::a_listener_stopped_three_times_is_taken_out`,
@@ -4714,8 +4716,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let token = if functions.is_empty() {
                 0
             } else {
-                let token =
-                    NOTIFY_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let token = NOTIFY_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let sol: Table = lua.globals().get("sol")?;
                 let kept: Table = sol.get("_notify_actions")?;
                 kept.set(token, functions)?;
@@ -4733,8 +4734,6 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             with_pending(lua, |pending| pending.commands.push(Command::Notify(own)))
         })?,
     )?;
-    sol.set("_notify_actions", lua.create_table()?)?;
-
     // Automatic reload (#223): `config.reload`, handed over by `init.lua`.
     // `automatic` is true or false, default true; `quiet_ms` is milliseconds
     // of zero or more, default 300 -- long enough that an editor's own
@@ -12980,8 +12979,14 @@ mod tests {
             panic!("one sol.notifications: {configs:?}")
         };
         assert!(config.serve);
-        assert_eq!(config.settings.timeouts.low, Some(Duration::from_millis(1000)));
-        assert_eq!(config.settings.timeouts.normal, Some(Duration::from_millis(9000)));
+        assert_eq!(
+            config.settings.timeouts.low,
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            config.settings.timeouts.normal,
+            Some(Duration::from_millis(9000))
+        );
         assert_eq!(config.settings.timeouts.critical, None);
         assert_eq!(config.settings.history_max, 5);
 
@@ -13017,8 +13022,14 @@ mod tests {
         );
         let arrival = |urgency: &str| {
             crate::json::Json::Object(std::collections::BTreeMap::from([
-                ("summary".to_owned(), crate::json::Json::Text("Hi".to_owned())),
-                ("urgency".to_owned(), crate::json::Json::Text(urgency.to_owned())),
+                (
+                    "summary".to_owned(),
+                    crate::json::Json::Text("Hi".to_owned()),
+                ),
+                (
+                    "urgency".to_owned(),
+                    crate::json::Json::Text(urgency.to_owned()),
+                ),
             ]))
         };
         let (low, _) = scripts.notification_decision(&arrival("low"), one_screen(&[]));
@@ -13042,10 +13053,19 @@ mod tests {
             r#"sol.on("notifications", function(e) sol.status(e.what .. " " .. e.origin .. " " .. e.id .. " " .. tostring(e.reason)) end)"#,
         );
         let event = crate::json::Json::Object(std::collections::BTreeMap::from([
-            ("what".to_owned(), crate::json::Json::Text("closed".to_owned())),
-            ("origin".to_owned(), crate::json::Json::Text("scene".to_owned())),
+            (
+                "what".to_owned(),
+                crate::json::Json::Text("closed".to_owned()),
+            ),
+            (
+                "origin".to_owned(),
+                crate::json::Json::Text("scene".to_owned()),
+            ),
             ("id".to_owned(), crate::json::Json::Number(7.0)),
-            ("reason".to_owned(), crate::json::Json::Text("dismissed".to_owned())),
+            (
+                "reason".to_owned(),
+                crate::json::Json::Text("dismissed".to_owned()),
+            ),
         ]));
         let outcome = scripts.notifications_event(&event, one_screen(&[]));
         assert_eq!(outcome.status.as_deref(), Some("closed scene 7 dismissed"));
@@ -14983,15 +15003,22 @@ mod shipped {
         let Some(production) = SOURCE.split("#[cfg(test)]").next() else {
             panic!("script.rs is empty, which cannot be");
         };
+        // Decision hooks (`sol.on("notification")`) are dispatched by
+        // `call_deciders`, and are events like any other.
         let dispatched: Vec<String> = named(production, "call_listeners(lua,")
             .into_iter()
+            .chain(named(production, "call_deciders(lua,"))
             .map(|(_, name)| name)
             .collect();
 
         // The scrape has to see every dispatch there is, or it narrows the
         // vocabulary in silence and this test starts agreeing with anything.
         // One `call_listeners` is the definition; the rest are calls.
-        let calls = production.matches("call_listeners").count() - 1;
+        let calls = production.matches("call_listeners").count() - 1
+            + production
+                .matches("call_deciders")
+                .count()
+                .saturating_sub(1);
         assert_eq!(
             dispatched.len(),
             calls,

@@ -67,7 +67,10 @@ pub(crate) fn body(markup: &str) -> Body {
             push_text("<", &mut plain, &mut rich);
             rest = after;
             continue;
-        } else if tag.trim_matches(|c: char| c == '/' || c.is_whitespace()).eq_ignore_ascii_case("br") {
+        } else if tag
+            .trim_matches(|c: char| c == '/' || c.is_whitespace())
+            .eq_ignore_ascii_case("br")
+        {
             plain.push('\n');
             rich.push_str("<br>");
         }
@@ -297,7 +300,7 @@ pub(crate) fn image_data(
 pub(crate) fn image_path(text: &str) -> Option<Result<Image, Refused>> {
     let path = text
         .strip_prefix("file://")
-        .map(|rest| percent_decode(rest))
+        .map(percent_decode)
         .or_else(|| text.starts_with('/').then(|| text.to_owned()))?;
     Some(read_png(Path::new(&path)))
 }
@@ -361,11 +364,15 @@ fn decode_png(bytes: &[u8]) -> Result<Image, Refused> {
     let rgba = match frame.color_type {
         png::ColorType::Rgba => samples.to_vec(),
         png::ColorType::Rgb => samples
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         png::ColorType::GrayscaleAlpha => samples
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
         png::ColorType::Grayscale => samples.iter().flat_map(|&g| [g, g, g, 255]).collect(),
@@ -425,7 +432,9 @@ mod tests {
 
     #[test]
     fn markup_keeps_bold_italic_underline_and_links() {
-        let body = body("<b>Bold</b> <i>it</i> <u>u</u> <a href=\"https://x.org/?a=1&amp;b=2\" onclick=\"evil()\">link</a>");
+        let body = body(
+            "<b>Bold</b> <i>it</i> <u>u</u> <a href=\"https://x.org/?a=1&amp;b=2\" onclick=\"evil()\">link</a>",
+        );
         assert_eq!(body.plain, "Bold it u link");
         assert_eq!(
             body.rich,
@@ -435,7 +444,9 @@ mod tests {
 
     #[test]
     fn an_image_tag_is_dropped_and_its_text_is_not() {
-        let body = body("look <img src=\"https://tracker.example/x.png\"/> here <span style=\"color:red\">red</span>");
+        let body = body(
+            "look <img src=\"https://tracker.example/x.png\"/> here <span style=\"color:red\">red</span>",
+        );
         assert_eq!(body.plain, "look  here red");
         assert!(!body.rich.contains("img"), "{}", body.rich);
         assert!(!body.rich.contains("tracker"), "{}", body.rich);
@@ -505,14 +516,23 @@ mod tests {
             image_data(2, 2, 7, true, 8, 4, &[0; 64]),
             Err(Refused::Shape)
         );
-        assert_eq!(image_data(0, 2, 8, true, 8, 4, &[0; 64]), Err(Refused::Shape));
+        assert_eq!(
+            image_data(0, 2, 8, true, 8, 4, &[0; 64]),
+            Err(Refused::Shape)
+        );
         assert_eq!(
             image_data(-1, 2, 8, true, 8, 4, &[0; 64]),
             Err(Refused::Shape)
         );
+        // A huge canvas claimed with a few bytes.
         assert_eq!(
-            image_data(i32::MAX, i32::MAX, i32::MAX, true, 8, 4, &[0; 64]),
+            image_data(100_000, 100_000, 400_000, true, 8, 4, &[0; 64]),
             Err(Refused::Short)
+        );
+        // A row wider than its stride.
+        assert_eq!(
+            image_data(i32::MAX, 2, i32::MAX, true, 8, 4, &[0; 64]),
+            Err(Refused::Shape)
         );
     }
 

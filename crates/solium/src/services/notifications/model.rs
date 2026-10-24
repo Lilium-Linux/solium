@@ -177,7 +177,10 @@ pub(crate) struct Item {
 
 impl Item {
     pub(crate) fn has_default(&self) -> bool {
-        self.incoming.actions.iter().any(|(key, _)| key == "default")
+        self.incoming
+            .actions
+            .iter()
+            .any(|(key, _)| key == "default")
     }
 }
 
@@ -215,6 +218,7 @@ impl Notifications {
         self.dnd = on;
     }
 
+    #[cfg(test)]
     pub(crate) fn items(&self) -> &[Item] {
         &self.items
     }
@@ -318,6 +322,7 @@ impl Notifications {
     }
 
     /// When the next banner ends, if one will.
+    #[cfg(test)]
     pub(crate) fn next_deadline(&self) -> Option<Duration> {
         self.items
             .iter()
@@ -617,7 +622,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
-        model.expire(ms(7000));
+        model.expire(ms(7010));
         assert_eq!(banner_ids(&model), [1], "the replaced one runs from 5000");
         model.expire(ms(12_000));
         assert!(banner_ids(&model).is_empty());

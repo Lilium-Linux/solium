@@ -140,11 +140,7 @@ fn settle_notifications(state: &mut Solium) {
 
 /// One arrival: joined to its window and app, decided by Lua (or the shipped
 /// rule), then given to the model.
-pub(crate) fn arrive(
-    state: &mut Solium,
-    incoming: notifications::model::Incoming,
-    origin: Origin,
-) {
+pub(crate) fn arrive(state: &mut Solium, incoming: notifications::model::Incoming, origin: Origin) {
     let now = state.clock.now();
     let joined = join(state, &incoming);
     let dnd = state.services.notifications.model.dnd();
@@ -209,7 +205,12 @@ fn parent_of(pid: u32) -> Option<u32> {
 
 /// A notifications action from Lua or a scene (`sol.act("notifications.…")`),
 /// done here. Returns why it could not be done.
-pub(crate) fn act(state: &mut Solium, action: &str, data: &Json, origin: Origin) -> Result<(), &'static str> {
+pub(crate) fn act(
+    state: &mut Solium,
+    action: &str,
+    data: &Json,
+    origin: Origin,
+) -> Result<(), &'static str> {
     let now = state.clock.now();
     let id = || {
         data.get("id")

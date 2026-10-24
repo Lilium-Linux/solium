@@ -27,20 +27,11 @@ use model::{Decision, Effect, Incoming, Item, Notifications, Shown, Urgency};
 use server::{Owner, Registry, Server, Signal};
 
 /// What the configuration says: `sol.notifications{ ... }`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Config {
     /// Own `org.freedesktop.Notifications`.
     pub(crate) serve: bool,
     pub(crate) settings: model::Settings,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            serve: false,
-            settings: model::Settings::default(),
-        }
-    }
 }
 
 /// Which bus the name may be owned on, as `session::speaks` decides: a nested
@@ -117,7 +108,10 @@ impl Event {
     pub(crate) fn to_json(&self, view: &View) -> Json {
         let mut fields = BTreeMap::from([
             ("what".to_owned(), Json::Text(self.what.to_owned())),
-            ("origin".to_owned(), Json::Text(self.origin.name().to_owned())),
+            (
+                "origin".to_owned(),
+                Json::Text(self.origin.name().to_owned()),
+            ),
         ]);
         if self.id != 0 {
             fields.insert("id".to_owned(), Json::Number(f64::from(self.id)));
@@ -215,7 +209,10 @@ impl Service {
         let base = std::env::var_os("XDG_STATE_HOME")
             .filter(|dir| !dir.is_empty())
             .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state")))?;
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| std::path::PathBuf::from(home).join(".local/state"))
+            })?;
         Some(base.join("solium").join("notification-id"))
     }
 
@@ -265,6 +262,7 @@ impl Service {
     }
 
     /// Whether the server is running at all.
+    #[cfg(test)]
     pub(crate) fn available(&self) -> bool {
         self.server.is_some()
     }
@@ -544,10 +542,16 @@ pub(crate) fn arrival_json(incoming: &Incoming, joined: &Joined, dnd: bool) -> J
     Json::Object(BTreeMap::from([
         ("id".to_owned(), Json::Number(f64::from(incoming.id))),
         ("appName".to_owned(), Json::Text(incoming.app_name.clone())),
-        ("desktopId".to_owned(), Json::Text(incoming.desktop_entry.clone())),
+        (
+            "desktopId".to_owned(),
+            Json::Text(incoming.desktop_entry.clone()),
+        ),
         ("summary".to_owned(), Json::Text(incoming.summary.clone())),
         ("body".to_owned(), Json::Text(incoming.body.plain.clone())),
-        ("urgency".to_owned(), Json::Text(incoming.urgency.name().to_owned())),
+        (
+            "urgency".to_owned(),
+            Json::Text(incoming.urgency.name().to_owned()),
+        ),
         ("category".to_owned(), Json::Text(incoming.category.clone())),
         ("actions".to_owned(), Json::List(actions)),
         ("transient".to_owned(), Json::Bool(incoming.transient)),
@@ -590,7 +594,9 @@ impl Own {
     pub(crate) fn incoming(&self, id: u32) -> Incoming {
         let received = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
         Incoming {
             id,
             sender: String::new(),
@@ -678,7 +684,9 @@ mod tests {
         );
         assert_eq!(
             view.banners[0].get("icon"),
-            Some(&Json::Text("image://solium/icon/dialog-information".to_owned()))
+            Some(&Json::Text(
+                "image://solium/icon/dialog-information".to_owned()
+            ))
         );
         let effects = service.model.dismiss(id);
         service.apply_effects(effects, Origin::Scene, None);

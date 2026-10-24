@@ -89,7 +89,10 @@ pub(crate) enum Fact {
 /// What the event loop asks the emitter to say.
 #[derive(Debug)]
 pub(crate) enum Signal {
-    Closed { id: u32, reason: u32 },
+    Closed {
+        id: u32,
+        reason: u32,
+    },
     /// `ActivationToken(id, token)` when there is a token, then
     /// `ActionInvoked(id, key)`.
     Invoked {
@@ -314,7 +317,11 @@ fn run(
     let connection = match crate::session::connect(address) {
         Ok(connection) => connection,
         Err(err) => {
-            tracing::warn!(?err, bus = address, "no session bus: notifications are not received");
+            tracing::warn!(
+                ?err,
+                bus = address,
+                "no session bus: notifications are not received"
+            );
             let _ = facts.send(Fact::Down);
             return;
         }
@@ -362,7 +369,9 @@ fn serve(
     // `another_owner_keeps_the_name_and_is_named`.
     let flags = zbus::fdo::RequestNameFlags::AllowReplacement.into();
     match connection.request_name_with_flags(NAME, flags) {
-        Ok(zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner) => {
+        Ok(
+            zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner,
+        ) => {
             tracing::info!("owning {NAME}: Solium is the notification server");
             let _ = facts.send(Fact::Serving(true));
         }
@@ -432,19 +441,34 @@ fn answer(
 ) {
     let header = message.header();
     let interface = header.interface().map(|i| i.as_str().to_owned());
-    let member = header.member().map(|m| m.as_str().to_owned()).unwrap_or_default();
-    let path = header.path().map(|p| p.as_str().to_owned()).unwrap_or_default();
-    let sender = header.sender().map(|s| s.as_str().to_owned()).unwrap_or_default();
+    let member = header
+        .member()
+        .map(|m| m.as_str().to_owned())
+        .unwrap_or_default();
+    let path = header
+        .path()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_default();
+    let sender = header
+        .sender()
+        .map(|s| s.as_str().to_owned())
+        .unwrap_or_default();
     let result = match (interface.as_deref(), member.as_str()) {
-        (Some("org.freedesktop.DBus.Peer"), "Ping") => connection.reply(&message.header(), &()).map(drop),
+        (Some("org.freedesktop.DBus.Peer"), "Ping") => {
+            connection.reply(&message.header(), &()).map(drop)
+        }
         (Some("org.freedesktop.DBus.Introspectable"), "Introspect") => {
-            let xml = if path == PATH { INTROSPECTION } else { EMPTY_NODE };
+            let xml = if path == PATH {
+                INTROSPECTION
+            } else {
+                EMPTY_NODE
+            };
             connection.reply(&message.header(), &xml).map(drop)
         }
         (Some(NAME) | None, _) if path != PATH => unknown_object(connection, message),
-        (Some(NAME) | None, "GetCapabilities") => {
-            connection.reply(&message.header(), &CAPABILITIES.to_vec()).map(drop)
-        }
+        (Some(NAME) | None, "GetCapabilities") => connection
+            .reply(&message.header(), &CAPABILITIES.to_vec())
+            .map(drop),
         (Some(NAME) | None, "GetServerInformation") => connection
             .reply(
                 &message.header(),
@@ -452,26 +476,31 @@ fn answer(
             )
             .map(drop),
         (Some(NAME) | None, "Notify") => notify(connection, message, &sender, registry, work),
-        (Some(NAME) | None, "CloseNotification") => {
-            match message.body().deserialize::<u32>() {
-                Ok(id) => {
-                    let allowed = lock(registry).may_close(id, &sender);
-                    let replied = connection.reply(&message.header(), &()).map(drop);
-                    if allowed {
-                        let _ = work.send(Work::Close { id });
-                    } else {
-                        tracing::debug!(id, sender, "CloseNotification of another's notification: ignored");
-                    }
-                    replied
+        (Some(NAME) | None, "CloseNotification") => match message.body().deserialize::<u32>() {
+            Ok(id) => {
+                let allowed = lock(registry).may_close(id, &sender);
+                let replied = connection.reply(&message.header(), &()).map(drop);
+                if allowed {
+                    let _ = work.send(Work::Close { id });
+                } else {
+                    tracing::debug!(
+                        id,
+                        sender,
+                        "CloseNotification of another's notification: ignored"
+                    );
                 }
-                Err(err) => invalid_args(connection, message, &err.to_string()),
+                replied
             }
-        }
+            Err(err) => invalid_args(connection, message, &err.to_string()),
+        },
         _ => connection
             .reply_error(
                 &message.header(),
                 "org.freedesktop.DBus.Error.UnknownMethod",
-                &format!("no method {member} on {}", interface.as_deref().unwrap_or("")),
+                &format!(
+                    "no method {member} on {}",
+                    interface.as_deref().unwrap_or("")
+                ),
             )
             .map(drop),
     };
@@ -537,7 +566,11 @@ fn invalid_args(
     why: &str,
 ) -> zbus::Result<()> {
     connection
-        .reply_error(&message.header(), "org.freedesktop.DBus.Error.InvalidArgs", &why)
+        .reply_error(
+            &message.header(),
+            "org.freedesktop.DBus.Error.InvalidArgs",
+            &why,
+        )
         .map(drop)
 }
 
@@ -651,9 +684,9 @@ fn spawn_worker(
             for each in work {
                 let fact = match each {
                     Work::Notify { id, sender, call } => {
-                        let pid = *pids
-                            .entry(sender.clone())
-                            .or_insert_with(|| proxy.as_ref().and_then(|proxy| pid_of(proxy, &sender)));
+                        let pid = *pids.entry(sender.clone()).or_insert_with(|| {
+                            proxy.as_ref().and_then(|proxy| pid_of(proxy, &sender))
+                        });
                         Fact::Notify(Box::new(incoming(id, sender, pid, call)))
                     }
                     Work::Close { id } => Fact::Close { id },
@@ -696,16 +729,25 @@ fn owner(proxy: &zbus::blocking::fdo::DBusProxy<'_>) -> Option<Owner> {
 fn incoming(id: u32, sender: String, pid: Option<u32>, call: NotifyCall) -> Incoming {
     let hints = &call.hints;
     let mut image = hint_image_data(hints);
+    // `image-path` names a file or a theme icon: `notify-send -i mail-unread`
+    // sends the icon this way, not as `app_icon`.
+    let mut named = None;
     if image.is_none()
-        && let Some(path) = hint_string(hints, "image-path").or_else(|| hint_string(hints, "image_path"))
+        && let Some(path) =
+            hint_string(hints, "image-path").or_else(|| hint_string(hints, "image_path"))
     {
         match content::image_path(&path) {
             Some(Ok(decoded)) => image = Some(decoded),
             Some(Err(why)) => tracing::debug!(?why, "a notification's image-path was refused"),
-            None => {}
+            None => named = Some(path).filter(|name| !name.is_empty()),
         }
     }
     let mut app_icon = call.app_icon;
+    if app_icon.is_empty()
+        && let Some(name) = named
+    {
+        app_icon = name;
+    }
     if let Some(read) = content::image_path(&app_icon) {
         if image.is_none() {
             image = read.ok();
@@ -714,12 +756,16 @@ fn incoming(id: u32, sender: String, pid: Option<u32>, call: NotifyCall) -> Inco
     }
     let actions = call
         .actions
-        .chunks_exact(2)
-        .map(|pair| (pair[0].clone(), pair[1].clone()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[key, label]| (key.clone(), label.clone()))
         .collect();
     let received = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
     Incoming {
         id,
         sender,
@@ -829,7 +875,10 @@ mod tests {
         let mut registry = Registry::new(None);
         let (id, replaced) = registry.allocate("org.gnome.Fractal", ":1.4", 0);
         assert!(!replaced);
-        assert_eq!(registry.allocate("org.gnome.Fractal", ":1.4", id), (id, true));
+        assert_eq!(
+            registry.allocate("org.gnome.Fractal", ":1.4", id),
+            (id, true)
+        );
         let (other, replaced) = registry.allocate("evil", ":1.9", id);
         assert!(!replaced);
         assert_ne!(other, id);
@@ -958,7 +1007,7 @@ mod tests {
             /// A call from `from` to the server, and its answer.
             fn call<B>(&mut self, from: &str, member: &str, body: &B) -> zbus::Result<Message>
             where
-                B: serde::Serialize + zbus::zvariant::DynamicType,
+                B: zbus::export::serde::Serialize + zbus::zvariant::DynamicType,
             {
                 let peer = self.peer();
                 let call = Message::method_call(PATH, member)?
@@ -987,14 +1036,29 @@ mod tests {
                 }
             }
 
-            fn notify(&mut self, from: &str, app: &str, replaces: u32, actions: &[&str]) -> zbus::Result<u32> {
+            fn notify(
+                &mut self,
+                from: &str,
+                app: &str,
+                replaces: u32,
+                actions: &[&str],
+            ) -> zbus::Result<u32> {
                 let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
                     HashMap::from([("urgency", zbus::zvariant::Value::U8(2))]);
                 let actions: Vec<&str> = actions.to_vec();
                 self.call(
                     from,
                     "Notify",
-                    &(app, replaces, "mail-unread", "<b>New</b> mail", "from &lt;Ann&gt;", actions, hints, -1i32),
+                    &(
+                        app,
+                        replaces,
+                        "mail-unread",
+                        "<b>New</b> mail",
+                        "from &lt;Ann&gt;",
+                        actions,
+                        hints,
+                        -1i32,
+                    ),
                 )?
                 .body()
                 .deserialize::<u32>()
@@ -1018,23 +1082,31 @@ mod tests {
             None
         }
 
-        fn started(bus: &StandIn) -> Server {
-            Server::start(
+        /// The server, once it has asked for the name and heard the answer:
+        /// a real bus sends a connection nothing before its `Hello` is
+        /// answered, so neither does a test. Whether it got the name.
+        fn started(bus: &StandIn) -> (Server, bool) {
+            let server = Server::start(
                 Some(bus.address.clone()),
                 Arc::new(Mutex::new(Registry::new(None))),
             )
-            .expect("a server")
+            .expect("a server");
+            let Some(Fact::Serving(serving)) =
+                next_fact(&server, |fact| matches!(fact, Fact::Serving(_)))
+            else {
+                panic!("the server never heard whether it has the name");
+            };
+            (server, serving)
         }
 
         #[test]
         fn notify_is_answered_with_an_id_and_reaches_the_loop_after_its_reply() {
             let mut bus = StandIn::new("notify", false);
-            let server = started(&bus);
-            assert!(matches!(
-                next_fact(&server, |fact| matches!(fact, Fact::Serving(_))),
-                Some(Fact::Serving(true))
-            ));
-            let id = bus.notify(":1.7", "Mail", 0, &["default", "", "reply", "Reply"]).expect("an id");
+            let (server, serving) = started(&bus);
+            assert!(serving);
+            let id = bus
+                .notify(":1.7", "Mail", 0, &["default", "", "reply", "Reply"])
+                .expect("an id");
             assert_ne!(id, 0);
             let Some(Fact::Notify(incoming)) =
                 next_fact(&server, |fact| matches!(fact, Fact::Notify(_)))
@@ -1072,10 +1144,12 @@ mod tests {
         #[test]
         fn only_the_sender_closes_and_its_close_follows_its_notify() {
             let mut bus = StandIn::new("close", false);
-            let server = started(&bus);
+            let (server, _) = started(&bus);
             let id = bus.notify(":1.7", "Mail", 0, &[]).expect("an id");
-            bus.call(":1.9", "CloseNotification", &id).expect("answered");
-            bus.call(":1.7", "CloseNotification", &id).expect("answered");
+            bus.call(":1.9", "CloseNotification", &id)
+                .expect("answered");
+            bus.call(":1.7", "CloseNotification", &id)
+                .expect("answered");
             let mut seen = Vec::new();
             while let Some(fact) = next_fact(&server, |fact| {
                 matches!(fact, Fact::Notify(_) | Fact::Close { .. })
@@ -1109,14 +1183,19 @@ mod tests {
                 .body()
                 .deserialize()
                 .expect("four strings");
-            assert_eq!((name.as_str(), vendor.as_str(), spec.as_str()), ("Solium", "Lilium-Linux", "1.3"));
+            assert_eq!(
+                (name.as_str(), vendor.as_str(), spec.as_str()),
+                ("Solium", "Lilium-Linux", "1.3")
+            );
         }
 
         #[test]
         fn an_invoke_says_its_token_before_its_action() {
             let mut bus = StandIn::new("invoke", false);
-            let server = started(&bus);
-            let id = bus.notify(":1.7", "Mail", 0, &["default", ""]).expect("an id");
+            let (server, _) = started(&bus);
+            let id = bus
+                .notify(":1.7", "Mail", 0, &["default", ""])
+                .expect("an id");
             let peer = bus.peer();
             let heard = zbus::blocking::MessageIterator::from(&peer);
             server.say(Signal::Invoked {
@@ -1130,23 +1209,27 @@ mod tests {
                 if message.message_type() != Type::Signal {
                     continue;
                 }
-                let member = message.header().member().map(|m| m.to_string()).unwrap_or_default();
+                let member = message
+                    .header()
+                    .member()
+                    .map(|m| m.to_string())
+                    .unwrap_or_default();
                 signals.push(member);
                 if signals.len() == 3 {
                     break;
                 }
             }
-            assert_eq!(signals, ["ActivationToken", "ActionInvoked", "NotificationClosed"]);
+            assert_eq!(
+                signals,
+                ["ActivationToken", "ActionInvoked", "NotificationClosed"]
+            );
         }
 
         #[test]
         fn another_owner_keeps_the_name_and_is_named() {
             let bus = StandIn::new("taken", true);
-            let server = started(&bus);
-            assert!(matches!(
-                next_fact(&server, |fact| matches!(fact, Fact::Serving(_))),
-                Some(Fact::Serving(false))
-            ));
+            let (server, serving) = started(&bus);
+            assert!(!serving);
             let Some(Fact::Owner(Some(owner))) =
                 next_fact(&server, |fact| matches!(fact, Fact::Owner(_)))
             else {
@@ -1159,7 +1242,8 @@ mod tests {
         #[test]
         fn a_flood_of_calls_does_not_hold_a_notify_back() {
             let mut bus = StandIn::new("flood", false);
-            let _server = started(&bus);
+            let (_server, serving) = started(&bus);
+            assert!(serving);
             let peer = bus.peer();
             for _ in 0..2000 {
                 let junk = Message::method_call(PATH, "Nonsense")
@@ -1178,6 +1262,30 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    #[test]
+    fn an_image_path_that_names_an_icon_is_the_icon() {
+        let hints = HashMap::from([(
+            "image-path".to_owned(),
+            OwnedValue::try_from(Value::from("battery-caution")).expect("a value"),
+        )]);
+        let n = incoming(
+            7,
+            ":1.4".to_owned(),
+            None,
+            NotifyCall {
+                app_name: "Battery".to_owned(),
+                app_icon: String::new(),
+                summary: "Battery low".to_owned(),
+                body: String::new(),
+                actions: Vec::new(),
+                hints,
+                expire_timeout: -1,
+            },
+        );
+        assert_eq!(n.app_icon, "battery-caution");
+        assert!(n.image.is_none());
     }
 
     #[test]

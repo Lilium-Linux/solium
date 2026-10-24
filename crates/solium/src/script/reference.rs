@@ -280,12 +280,16 @@ fn sol_lua_documents_exactly_the_api_the_compositor_registers() {
             events.insert(event.to_owned());
         }
     }
-    let marker = "call_listeners(lua, \"";
-    let dispatched: BTreeSet<String> = production_script()
-        .match_indices(marker)
-        .filter_map(|(at, _)| {
-            let rest = &production_script()[at + marker.len()..];
-            rest.split_once('"').map(|(event, _)| event.to_owned())
+    // Events, and decision hooks (`call_deciders`), which are events too.
+    let dispatched: BTreeSet<String> = ["call_listeners(lua, \"", "call_deciders(lua, \""]
+        .into_iter()
+        .flat_map(|marker| {
+            production_script()
+                .match_indices(marker)
+                .filter_map(move |(at, _)| {
+                    let rest = &production_script()[at + marker.len()..];
+                    rest.split_once('"').map(|(event, _)| event.to_owned())
+                })
         })
         .collect();
     assert!(
