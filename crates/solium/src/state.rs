@@ -867,6 +867,9 @@ pub(crate) struct Solium {
     /// `tests::real_client::a_gliding_windows_t2_place_is_measured_at_the_passs_instant`.
     pub(crate) presented: crate::render::Presented,
 
+    /// Acquire transactions and GPU-completion ownership for explicit buffers.
+    pub(crate) explicit_sync: crate::explicit_sync::State,
+
     /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
     ///
     /// The global itself is created by whichever backend has a renderer, since
@@ -1480,6 +1483,7 @@ impl Solium {
             fullscreen_covers: crate::stack::Covers::default(),
             redraw: true,
             animating: false,
+            explicit_sync: crate::explicit_sync::State::default(),
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             request: None,

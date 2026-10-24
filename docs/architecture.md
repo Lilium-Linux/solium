@@ -124,6 +124,15 @@ effect passes and Qt's EGL/dmabuf imports. Another renderer would require a
 port of these pieces. The [Vulkan spike](spikes/2026-08-27-vulkan-on-smithay.md)
 records the earlier investigation; it is not the current implementation.
 
+Explicit DRM synchronization uses Smithay's timeline protocol and buffer
+ownership. Each acquire point blocks its surface transaction through an eventfd
+source in the compositor event loop; it never waits on the render thread.
+Composed frames retain their source buffers through a GPU completion fence,
+including offscreen captures and retained pictures of departed clients. DRM
+scanout keeps Smithay's own buffer ownership through page flips. The global is
+advertised only alongside dmabuf on a device with syncobj-eventfd support;
+nested uses the renderer's render node and never opens a primary node.
+
 ## Hosted scenes and models
 
 Qt Quick runs inside the compositor through a C ABI shim and

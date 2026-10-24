@@ -76,7 +76,8 @@ Tracking: [touch/form factors](https://github.com/Lilium-Linux/solium/issues/7),
 
 ## Graphics and gaming compatibility
 
-Add explicit sync, multi-GPU output and color management/HDR. Improve fullscreen
+Validate explicit sync on real sessions; add multi-GPU output and color
+management/HDR. Improve fullscreen
 presentation, shortcut inhibition, VR support and game-streaming workflows.
 These need real driver and device checks alongside automated coverage.
 

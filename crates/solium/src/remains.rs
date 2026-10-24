@@ -229,6 +229,11 @@ pub(crate) struct Picture {
 }
 
 impl Picture {
+    /// Client storage read by a frame that draws this departed picture.
+    pub(crate) fn buffers(&self) -> impl Iterator<Item = Buffer> + '_ {
+        self.surfaces.iter().map(|surface| surface._buffer.clone())
+    }
+
     /// Take the picture of `window`'s surfaces, as imported under `textures`.
     ///
     /// Walks the tree the way `render_elements_from_surface_tree` does, so the

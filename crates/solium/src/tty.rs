@@ -350,6 +350,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     solium.socket_name = start_socket(&mut event_loop, display)?;
 
     let loop_handle = event_loop.handle();
+    solium.explicit_sync.sender = Some(crate::explicit_sync::install(
+        &loop_handle,
+        |state: &mut State| &mut state.solium,
+    )?);
     let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
     let config = Scripts::config_path();
@@ -1452,6 +1456,11 @@ impl State {
         self.solium.textures = Some(crate::remains::Textures::Gles(
             smithay::backend::renderer::Renderer::context_id(&renderer),
         ));
+        self.solium.explicit_sync.enable(
+            &self.solium.display_handle,
+            device.device_fd().clone(),
+            self.solium.dmabuf_global.is_some(),
+        );
         self.renderer = Some(renderer);
         self.node = Some(node);
         self.gbm = Some(gbm);
@@ -1524,6 +1533,12 @@ impl State {
         let pictures = steps
             .iter()
             .any(|step| matches!(step, Some(Step::Draw | Step::Wake)));
+
+        let source_buffers = if pictures {
+            crate::explicit_sync::snapshot(&mut self.solium)
+        } else {
+            Vec::new()
+        };
 
         // `SOLIUM_PACING`. Off, a pass reads the clock twice and counts
         // itself and its miss (`pacing::tests::a_miss_is_counted_with_the_knob_off`),
@@ -1736,6 +1751,10 @@ impl State {
             if !queued {
                 self.answer_unqueued(index);
             }
+        }
+
+        if let Some(renderer) = self.renderer.as_mut() {
+            crate::explicit_sync::submitted(&mut self.solium, renderer, source_buffers);
         }
 
         {

@@ -2872,6 +2872,7 @@ fn a_point_nothing_covers_still_descends() {
 /// The module was one test's and was named after it. It is two now, and the
 /// fixture was always the expensive part of it.
 mod real_client {
+    include!("tests/explicit_sync.rs");
     use super::*;
     use smithay::output::{Mode, PhysicalProperties, Subpixel};
     use smithay::reexports::wayland_server::Display;
@@ -2959,6 +2960,8 @@ mod real_client {
     /// anything more, and none of what follows needs one.
     #[derive(Debug, Default)]
     struct Client {
+        syncobj: Option<explicit_sync::WpLinuxDrmSyncobjManagerV1>,
+        dmabuf: Option<explicit_sync::ZwpLinuxDmabufV1>,
         compositor: Option<wl_compositor::WlCompositor>,
         wm_base: Option<xdg_wm_base::XdgWmBase>,
         shm: Option<wl_shm::WlShm>,
@@ -3308,6 +3311,10 @@ mod real_client {
                 _ => return,
             };
             match interface.as_str() {
+                "wp_linux_drm_syncobj_manager_v1" => {
+                    state.syncobj = Some(registry.bind(name, 1, qh, ()))
+                }
+                "zwp_linux_dmabuf_v1" => state.dmabuf = Some(registry.bind(name, 3, qh, ())),
                 "zwlr_output_power_manager_v1" => {
                     state.output_power = Some(registry.bind(name, 1, qh, ()));
                 }
