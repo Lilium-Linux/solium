@@ -659,6 +659,18 @@ as a `notifications` event with `origin = "scene"`. Unlike the other models,
 the lock's scenes and the pointer's read it in full: notifications show on the
 lock. [ricing.md](ricing.md#notifications) has a banner, and the Lua side.
 
+**Audio, live** (#347). `Audio` is what Solium reads of PipeWire:
+`output` and `input`, facades that are never null and follow the default
+device, `outputs` and `inputs`, row models of every sink and source, and
+`available` and `ready`. An endpoint has `id` (Solium's, kept by
+`node.name` across replugs), `name`, `label`, `kind`, `icon`, `volume`
+(perceptual, as `wpctl` shows it), `muted`, `pending`, `max`, `step`,
+`isDefault`, `portLabel`, `portKind`, `state` and `direction`. Its calls
+(`setVolume`, `adjust`, `setMuted`, `toggleMuted`, `makeDefault`) go straight
+to the service, which writes one change at a time per device, the newest, and
+tells Lua with `origin = "scene"`. [ricing.md](ricing.md#volume) has a slider
+and the Lua side.
+
 A scene asks the compositor to do something about one entry the same way it
 asks anything else, `Solium.send(action, data)`, answered by `lua/actions.lua`
 forwarding to `sol.act` (the `folder` service alongside `windows`,

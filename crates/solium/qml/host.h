@@ -594,6 +594,9 @@ int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
 /* `Notifications.banners` and `.history` (#346, notifications.h). */
 #define SOLIUM_QML_ROWS_NOTIFICATION_BANNERS 5
 #define SOLIUM_QML_ROWS_NOTIFICATION_HISTORY 6
+/* `Audio.outputs` and `.inputs` (#347, audio.h). */
+#define SOLIUM_QML_ROWS_AUDIO_OUTPUTS 7
+#define SOLIUM_QML_ROWS_AUDIO_INPUTS 8
 
 /* Apply one batch of row operations, rendered by `crate::models::diff::render`,
  * to a model: in order, every row's values written before any row is

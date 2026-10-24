@@ -31,6 +31,10 @@ pub(crate) struct Published {
     notification_banners: Vec<diff::Row>,
     notification_history: Vec<diff::Row>,
     notifications_state: Option<String>,
+    /// `Audio.outputs` and `.inputs`, and its own values, as last taken (#347).
+    audio_outputs: Vec<diff::Row>,
+    audio_inputs: Vec<diff::Row>,
+    audio_state: Option<String>,
     /// What `Solium.status`, `Workspaces.arrangement` and `Solium.dirs.desktop`
     /// last took.
     /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
@@ -124,6 +128,26 @@ impl crate::state::Solium {
             && crate::qml::hosted::set_notifications_state(&state)
         {
             self.published.notifications_state = Some(state);
+        }
+        // Audio (#347): its endpoints, and the default output and input.
+        let audio = self.services.audio.view();
+        publish(
+            Model::AudioOutputs,
+            &mut self.published.audio_outputs,
+            rows(&audio.outputs),
+            crate::qml::hosted::apply_rows,
+        );
+        publish(
+            Model::AudioInputs,
+            &mut self.published.audio_inputs,
+            rows(&audio.inputs),
+            crate::qml::hosted::apply_rows,
+        );
+        let state = audio_state(&audio);
+        if self.published.audio_state.as_deref() != Some(state.as_str())
+            && crate::qml::hosted::set_audio_state(&state)
+        {
+            self.published.audio_state = Some(state);
         }
         // `Folder`: the desktop directory, resolved once (again on a
         // reload) and rescanned wholesale whenever `folder_scan_pending`
@@ -250,6 +274,22 @@ impl crate::state::Solium {
 /// before it has started, leaves `last` as it was, so the next frame sends the
 /// difference from what Qt really has:
 /// `tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+/// `Audio`'s own values, as the JSON object the host reads.
+fn audio_state(view: &crate::services::audio::View) -> String {
+    use crate::json::Json;
+    let facade = |row: &Option<std::collections::BTreeMap<&'static str, Json>>| {
+        row.as_ref()
+            .map_or(Json::Null, crate::services::notifications::object)
+    };
+    Json::Object(std::collections::BTreeMap::from([
+        ("available".to_owned(), Json::Bool(view.available)),
+        ("ready".to_owned(), Json::Bool(view.ready)),
+        ("output".to_owned(), facade(&view.output)),
+        ("input".to_owned(), facade(&view.input)),
+    ]))
+    .render()
+}
+
 /// `Notifications`' own values, as the JSON object the host reads.
 fn notifications_state(view: &crate::services::notifications::View) -> String {
     use crate::json::Json;

@@ -498,6 +498,7 @@
 ---| "close" # The window is gone: `(id)`.
 ---| "notification" # A notification arrived or was replaced, over the bus or from `sol.notify`: `(n)`, a `sol.Arrival`. A decision hook: the first listener that returns a table decides, `{ banner = boolean, keep = boolean }`, each left out taking the shipped rule (a banner unless do-not-disturb is on, where only a critical one gets one; kept unless the sender said it is transient). With none answering, the shipped rule decides.
 ---| "notifications" # Something happened to a notification: `(event)`, a `sol.NotificationEvent`.
+---| "audio" # Something changed in audio: `(event)`, a `sol.AudioEvent`, with who changed it.
 ---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
@@ -811,6 +812,54 @@ function sol.monitor_power(which, mode) end
 ---@param options sol.NotificationsOptions
 ---@return nil
 function sol.notifications(options) end
+
+---@class sol.AudioEndpoint
+---@field id integer Solium's id, the same for a device for the whole session, across replugs.
+---@field name string PipeWire's `node.name`.
+---@field label string Its short name, else its description.
+---@field kind "speakers"|"headphones"|"headset"|"hdmi"|"bluetooth"|"usb"|"virtual"|"other"
+---@field icon string `image://solium/icon/<name>`.
+---@field volume number Perceptual, as `wpctl` shows it: 1.0 is 100%. While a write of Solium's is pending, the newest request.
+---@field muted boolean
+---@field pending boolean A write of Solium's has not been echoed by PipeWire yet.
+---@field step number `audio.step`.
+---@field max number `audio.max`.
+---@field isDefault boolean
+---@field portLabel string The active port: "Speakers", "Headphones".
+---@field portKind string Its type, as the card says: `speaker`, `headphones`, `hdmi`...
+---@field state "running"|"idle"|"suspended"|"error"
+---@field direction "output"|"input"
+
+---@class sol.AudioState
+---@field available boolean Whether PipeWire is reachable.
+---@field ready boolean Whether the first full picture has arrived.
+---@field output? sol.AudioEndpoint The default output.
+---@field input? sol.AudioEndpoint The default input.
+---@field outputs sol.AudioEndpoint[]
+---@field inputs sol.AudioEndpoint[]
+
+---@class sol.AudioEvent
+---@field what "volume"|"mute"|"default"|"added"|"removed"
+---@field target integer The endpoint's id.
+---@field direction "output"|"input"
+---@field output boolean Whether it is the default output.
+---@field value number Its volume now.
+---@field muted boolean
+---@field origin "binding"|"scene"|"script"|"external" Who changed it: a key binding's handler, a scene's control, Lua, or not Solium at all (the device's own buttons, another mixer).
+---@field bus string Its kind, as `sol.AudioEndpoint.kind`: an OSD can tell a headset's own button (`external` on `bluetooth`) from a mixer.
+
+---@class sol.AudioOptions
+---@field max? number The loudest anything may set, 1.0 being 100%; up to 1.5. 1.0 by default.
+---@field step? number How far a step moves it. 0.05 by default.
+
+---Audio (#347): with a table, its limits; with none, what it is now. Either
+---starts it. Changes go through `sol.act`: `audio.volume { target = "output"
+---| "input" | id, value = v }` or `{ target, by = d }`, `audio.mute { target,
+---value = true | false | "toggle" }`, `audio.default { endpoint = id }`.
+---@overload fun(): sol.AudioState
+---@param options sol.AudioOptions
+---@return nil
+function sol.audio(options) end
 
 ---@class sol.NotifyAction
 ---@field key string `default` for a click on the body.
@@ -1452,6 +1501,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
 ---@overload fun(event: "notification", handler: fun(n: sol.Arrival): { banner?: boolean, keep?: boolean }|nil)
 ---@overload fun(event: "notifications", handler: fun(event: sol.NotificationEvent))
+---@overload fun(event: "audio", handler: fun(event: sol.AudioEvent))
 ---@param event sol.Event
 ---@param handler function
 ---@return nil

@@ -344,7 +344,16 @@ impl Solium {
         // through a `surface` listener (03 §3.1.5, the direct path), each
         // heard by Lua as an event with `origin = "scene"` (#346).
         while let Some((action, data)) = crate::qml::hosted::take_service_call() {
-            if action.starts_with("notifications.") {
+            if action.starts_with("audio.") {
+                if let Err(why) = crate::services::act_audio(
+                    self,
+                    &action,
+                    &data,
+                    crate::services::audio::volume::Origin::Scene,
+                ) {
+                    tracing::debug!(action, why, "a scene's audio call was not done");
+                }
+            } else if action.starts_with("notifications.") {
                 if let Err(why) = crate::services::act(
                     self,
                     &action,

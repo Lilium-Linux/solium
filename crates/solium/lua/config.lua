@@ -707,6 +707,16 @@ local defaults = {
         history = { max = 200 },
     },
 
+    -- Audio (#347): Solium reads PipeWire itself, so a shell's slider is
+    -- live and a volume key's change is known to be the key's.
+    audio = {
+        -- The loudest the volume keys, a slider or a script may set, as
+        -- `wpctl` shows it: 1.0 is 100%. Up to 1.5 amplifies past it.
+        max = 1.0,
+        -- How far a volume key moves it.
+        step = 0.05,
+    },
+
     -- libinput device settings: tap-to-click, scrolling, acceleration and the
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.
