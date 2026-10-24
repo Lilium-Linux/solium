@@ -796,6 +796,34 @@ local defaults = {
         -- the phone letters under the digits; or "keyboard", the digits and
         -- the letters a-z.
         keypad = "digits",
+
+        -- Whether Solium's own lock screen is the one used. Unset, it is,
+        -- unless `command` above names a locker. While it is, each monitor's
+        -- lock screen is built as the session starts, and kept, so the
+        -- first locked frame is already it; it costs nothing while you work.
+        native = nil,
+
+        -- The lock screen itself: a QML file, by path ("~/my-lock.qml"), or
+        -- by name, looked for as `qml/lock/<name>.qml` in your
+        -- ~/.config/solium/qml/ and then in Solium's. "Lock" is the one
+        -- Solium ships. A scene that is missing, will not load, or fails
+        -- while it runs is replaced by the shipped one, and that by a
+        -- compiled-in fallback, never by the desktop; the log says why.
+        -- See docs/ricing.md, "Your own lock screen".
+        scene = "Lock",
+
+        -- Which monitor shows the password field: "pointer", the one the
+        -- pointer is on; "primary"; or a monitor's name, like "DP-2" (the
+        -- primary one while it is not plugged in). The others show their
+        -- lock screen without it. Typing goes into the password wherever
+        -- it is shown.
+        prompt_on = "pointer",
+
+        -- How long the lock screen stays over the desktop after it unlocks,
+        -- playing its exit (`Lock.state` reads "unlocking"), in
+        -- milliseconds; 0 removes it at once. The desktop has the keyboard
+        -- and the pointer from the unlock on, so this is at most 600.
+        exit_ms = 250,
     },
 
     -- X11 windows that are refused a tile, decoration or bar entry outright

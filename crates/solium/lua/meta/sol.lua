@@ -384,6 +384,10 @@
 ---@field helper_timeout_ms? integer Solium's own lock: how long `solium-auth` has to answer, at least 100. Default 30000.
 ---@field retry? sol.BackoffOptions Solium's own lock: when the helper cannot answer, the password is tried again after `seconds`, doubling up to `max_seconds`. Default `{ seconds = 2, max_seconds = 60 }`.
 ---@field keypad? "digits"|"letters"|"keyboard" Solium's own lock: the keys `SecretKeypad` lays out. Default `"digits"`.
+---@field native? boolean Whether Solium's own lock screen is the session's. Its scenes are built as the session starts and kept, quiet, between locks, so the first locked frame is the scene's. Default true unless `command` is set.
+---@field scene? string Solium's own lock: the lock screen's QML, a path (`"~/my-lock.qml"`) or a name looked for as `qml/lock/<name>.qml` in your QML directory and then in Solium's. One that is missing, will not load or fails while it runs is replaced by the shipped one, then by a compiled-in fallback. Default `"Lock"`, the shipped one.
+---@field prompt_on? string Solium's own lock: the monitor `Lock.promptOn` names, where the scene shows the password field: `"pointer"` (the default), `"primary"`, or a monitor's name, the primary one while it is not plugged in.
+---@field exit_ms? integer Solium's own lock: how long its scenes stay over the desktop after the unlock, reading `Lock.state` as `"unlocking"`; input is the desktop's from the unlock on. 0 to 600; longer is taken as 600. Default 250.
 
 ---@class sol.BackoffOptions
 ---@field seconds? integer The first wait, at least 1.

@@ -172,6 +172,9 @@ mod ffi {
         ) -> *const c_char;
         pub(super) fn solium_qml_scene_dirty(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_animating(scene: *const Scene) -> c_int;
+        pub(super) fn solium_qml_scene_set_quiet(scene: *mut Scene, quiet: c_int);
+        #[cfg(test)]
+        pub(super) fn solium_qml_scene_ticking(scene: *const Scene) -> c_int;
         pub(super) fn solium_qml_scene_pointer(
             scene: *mut Scene,
             x: c_double,
@@ -1552,6 +1555,25 @@ impl Scene {
     pub(crate) fn animation_in_flight(&self) -> bool {
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         unsafe { ffi::solium_qml_scene_animating(self.scene) != 0 }
+    }
+
+    /// Keep the scene but stop it ticking, or start it again: its running
+    /// Timers stopped and root animations paused, to start again when it is
+    /// shown, and its changes asking for no frame. A native lock's scenes
+    /// while the session is unlocked (`lock_scene.rs`).
+    /// `lock_scene::tests::a_kept_scene_neither_ticks_nor_wakes_while_unlocked`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn set_quiet(&mut self, quiet: bool) {
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`.
+        unsafe { ffi::solium_qml_scene_set_quiet(self.scene, c_int::from(quiet)) }
+    }
+
+    /// Whether a Timer or an animation in the scene is running.
+    #[cfg(test)]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn ticking_for_test(&self) -> bool {
+        // SAFETY: `self.scene` is non-null for the lifetime of `self`.
+        unsafe { ffi::solium_qml_scene_ticking(self.scene) != 0 }
     }
 
     /// Render the scene if it has changed, then hand back its pixels.

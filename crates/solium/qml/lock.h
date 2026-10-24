@@ -50,8 +50,17 @@ class SoliumLock : public QObject
     /* `{ name, realName, avatar }`: the login name, the name from the passwd
      * entry, and a `file://` URL of AccountsService's picture, or "". */
     Q_PROPERTY(QVariantMap user READ user NOTIFY userChanged)
-    /* The monitor the prompt is on. */
+    /* The monitor the prompt is on: `lock.prompt_on`'s. */
     Q_PROPERTY(QString promptOn READ promptOn NOTIFY promptOnChanged)
+    /* Whether the session is locked by Solium's own lock. False from the
+     * unlock on, while the scene plays its exit (`state` reads "unlocking"),
+     * and while the scene is kept for the next lock: a scene runs its Timers
+     * and loops only while this is true. */
+    Q_PROPERTY(bool locked READ locked NOTIFY lockedChanged)
+    /* How long the exit lasts, in milliseconds: `lock.exit_ms`. The scene is
+     * drawn over the desktop for this long after the unlock, and then it is
+     * gone, whatever it is doing. */
+    Q_PROPERTY(int exitMs READ exitMs NOTIFY exitMsChanged)
 public:
     using QObject::QObject;
     QString state() const { return m_state; }
@@ -60,6 +69,8 @@ public:
     QString message() const { return m_message; }
     QVariantMap user() const { return m_user; }
     QString promptOn() const { return m_prompt_on; }
+    bool locked() const { return m_locked; }
+    int exitMs() const { return m_exit_ms; }
 
     /* Ask Rust to check what was typed. Carries nothing: there is nothing in
      * Qt to carry. */
@@ -78,6 +89,8 @@ signals:
     void messageChanged();
     void userChanged();
     void promptOnChanged();
+    void lockedChanged();
+    void exitMsChanged();
 
 private:
     QString m_state = QStringLiteral("idle");
@@ -86,6 +99,8 @@ private:
     QString m_message;
     QVariantMap m_user;
     QString m_prompt_on;
+    bool m_locked = false;
+    int m_exit_ms = 0;
     int m_requests = 0;
 };
 

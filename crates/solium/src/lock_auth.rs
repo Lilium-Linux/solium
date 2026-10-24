@@ -886,8 +886,8 @@ impl LockAuth {
     }
 
     /// What `Lock`, `SecretField` and `SecretKeypad` read, as one JSON
-    /// object: `prompt_on` is the monitor the prompt is on.
-    fn view(&self, now: Duration, prompt_on: &str) -> String {
+    /// object: `scene` is what the scenes are told of the lock itself.
+    fn view(&self, now: Duration, scene: &SceneView) -> String {
         let text = |value: &str| Json::Text(value.to_owned());
         let object = |pairs: Vec<(&str, Json)>| {
             Json::Object(
@@ -898,8 +898,17 @@ impl LockAuth {
             )
         };
         let number = |value: u64| Json::Number(value as f64);
+        // Through the exit the session is unlocked, and the state is the
+        // one that says so, whatever the field was reset to.
+        let state = if scene.exiting {
+            Phase::Unlocking.name()
+        } else {
+            self.phase.name()
+        };
         object(vec![
-            ("state", text(self.phase.name())),
+            ("state", text(state)),
+            ("locked", Json::Bool(scene.locked)),
+            ("exitMs", number(scene.exit_ms)),
             ("attempts", number(u64::from(self.attempts))),
             ("retryAfter", number(self.retry_after(now))),
             ("message", text(&self.message())),
@@ -911,7 +920,7 @@ impl LockAuth {
                     ("avatar", text(&self.user.avatar)),
                 ]),
             ),
-            ("promptOn", text(prompt_on)),
+            ("promptOn", text(&scene.prompt_on)),
             (
                 "field",
                 object(vec![
@@ -933,6 +942,12 @@ impl LockAuth {
         .render()
     }
 
+    /// What the scenes read may have moved while Solium does not hold the
+    /// lock: the exit ended.
+    pub(crate) fn touch(&mut self) {
+        self.stale = true;
+    }
+
     /// Answer every check with `stand_in` rather than the helper.
     #[cfg(test)]
     pub(crate) fn use_stand_in(&mut self, stand_in: StandIn) {
@@ -944,6 +959,20 @@ impl LockAuth {
     pub(crate) fn wiped_for_test(&self) -> (bool, bool) {
         (self.typed.is_wiped(), self.submitted.is_wiped())
     }
+}
+
+/// What the lock's scenes are told of the lock itself, beside the password's
+/// state.
+struct SceneView {
+    /// Whether Solium holds the lock: `Lock.locked`.
+    locked: bool,
+    /// Whether its exit is playing over the desktop, which reads as
+    /// `"unlocking"`.
+    exiting: bool,
+    /// `lock.exit_ms`: `Lock.exitMs`.
+    exit_ms: u64,
+    /// The monitor the prompt is on: `Lock.promptOn`.
+    prompt_on: String,
 }
 
 /// Overwrite `bytes` with zeros, in writes the compiler keeps.
@@ -1060,11 +1089,15 @@ pub(crate) fn publish(state: &mut Solium) {
 impl Solium {
     /// What the lock's scenes would read now.
     fn lock_view(&self) -> String {
-        let prompt_on = self
-            .active_output()
-            .map(|output| output.name())
-            .unwrap_or_default();
-        self.lock_auth.view(self.clock.now(), &prompt_on)
+        let now = self.clock.now();
+        let exit = self.lock_scenes.settings().exit;
+        let scene = SceneView {
+            locked: self.lock.as_ref().is_some_and(crate::lock::Lock::is_native),
+            exiting: self.lock.is_none() && self.lock_scenes.exiting(now),
+            exit_ms: u64::try_from(exit.as_millis()).unwrap_or(u64::MAX),
+            prompt_on: self.lock_prompt_on(),
+        };
+        self.lock_auth.view(now, &scene)
     }
 
     /// Ask for a frame if what the lock's scenes read has moved: a count
@@ -1527,7 +1560,8 @@ mod tests {
     }
 
     /// A native lock with `source` as its scene, or the fallback, on one
-    /// 1920x1080 monitor, built on the Qt thread and published to.
+    /// 1920x1080 monitor, built on the Qt thread and published to. The
+    /// scene's file is in a directory of the test's own.
     struct Locked {
         _display: Display<Solium>,
         state: Solium,
@@ -1567,7 +1601,9 @@ mod tests {
                 std::fs::create_dir_all(&directory).expect("a directory for the scene");
                 let path = directory.join("Lock.qml");
                 std::fs::write(&path, source).expect("writing the scene");
-                state.lock_scenes.use_scene(Some(path));
+                state.lock_scenes.use_scene(path);
+            } else {
+                state.lock_scenes.use_fallback();
             }
             state.lock_natively();
             state
@@ -1964,6 +2000,333 @@ mod tests {
             assert_eq!(locked.int("secretLength"), 3);
             tap(&mut locked.state, &[ESCAPE]);
             assert_eq!(locked.int("secretLength"), 0);
+        });
+    }
+
+    /// The lock's scene settings, with `change` made to them.
+    fn scene_settings(
+        state: &Solium,
+        change: impl FnOnce(&mut crate::lock_scene::Settings),
+    ) -> crate::lock_scene::Settings {
+        let mut settings = state.lock_scenes.settings().clone();
+        change(&mut settings);
+        settings
+    }
+
+    /// **The exit plays over the desktop for `lock.exit_ms`, and input is the
+    /// desktop's at once**: from the yes on the session is unlocked, a click
+    /// reaches no lock scene, and the scene reads `Lock.state` as
+    /// `"unlocking"` and `Lock.locked` false; it is drawn over the desktop
+    /// until `lock.exit_ms` is up, though it animates nothing, and is gone at
+    /// the bound, reading `"idle"` again. A shorter `exit_ms` is a shorter
+    /// exit, and 0 none at all.
+    #[test]
+    fn the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::new(
+                "exit",
+                Some(
+                    r#"import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    property int presses: 0
+                    readonly property int unlocking: Lock.state === "unlocking" ? 1 : 0
+                    readonly property int locked: Lock.locked ? 1 : 0
+                    readonly property int exitMs: Lock.exitMs
+                    MouseArea { anchors.fill: parent; onPressed: root.presses += 1 }
+                }"#,
+                ),
+            );
+            let settings = scene_settings(&locked.state, |settings| {
+                settings.exit = Duration::from_millis(400);
+            });
+            locked.state.lock_scenes.configure(settings);
+            assert_eq!(locked.int("locked"), 1);
+            assert_eq!(
+                locked.int("exitMs"),
+                400,
+                "`Lock.exitMs` is not the setting"
+            );
+            locked.click((100.0, 100.0));
+            assert_eq!(
+                locked.int("presses"),
+                1,
+                "the premise: the scene hears a click"
+            );
+
+            keys(&mut locked.state, RIGHT);
+            tap(&mut locked.state, &[RETURN]);
+            settle(&mut locked.state);
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(locked.state.lock.is_none(), "the yes did not unlock");
+            let now = locked.state.clock.now();
+            assert!(
+                locked.state.lock_scenes.exiting(now),
+                "the scenes are not drawn over the desktop"
+            );
+            assert_eq!(
+                locked.int("unlocking"),
+                1,
+                "the exit does not read \"unlocking\""
+            );
+            assert_eq!(locked.int("locked"), 0, "`Lock.locked` through the exit");
+            locked.click((100.0, 100.0));
+            assert_eq!(
+                locked.int("presses"),
+                1,
+                "a click during the exit reached the lock's scene, not the desktop"
+            );
+
+            locked.state.clock.advance(Duration::from_millis(399));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "the exit ended before `exit_ms`"
+            );
+            locked.state.clock.advance(Duration::from_millis(1));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                !locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "the exit outlived `exit_ms`"
+            );
+            assert_eq!(
+                locked.int("unlocking"),
+                0,
+                "\"unlocking\" outlived the exit"
+            );
+
+            // Shorter, and none.
+            for (ms, lasts) in [(100, true), (0, false)] {
+                let settings = scene_settings(&locked.state, |settings| {
+                    settings.exit = Duration::from_millis(ms);
+                });
+                locked.state.lock_scenes.configure(settings);
+                locked.state.lock_natively();
+                locked.state.unlock_natively();
+                let now = locked.state.clock.now();
+                assert_eq!(
+                    locked.state.lock_scenes.exiting(now),
+                    lasts,
+                    "exit_ms = {ms}"
+                );
+                locked.state.clock.advance(Duration::from_millis(ms));
+                crate::lock_scene::settle(&mut locked.state);
+                assert!(
+                    !locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                    "exit_ms = {ms} outlived its bound"
+                );
+            }
+        });
+    }
+
+    /// **The prompt is on the monitor `lock.prompt_on` names, and no
+    /// other**: with the shipped scene on two monitors, `"pointer"` puts it
+    /// where the pointer is and follows the pointer, `"primary"` on the
+    /// primary monitor, and a name on that monitor, or on the primary one
+    /// while no monitor has that name.
+    #[test]
+    fn the_prompt_is_on_the_monitor_prompt_on_names_and_no_other() {
+        use crate::lock_scene::PromptOn;
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let _ = take_requests();
+            let (_display, mut state, _shared) = solium(0);
+            let monitor = |name: &str| {
+                let output = Output::new(
+                    name.to_owned(),
+                    PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: Subpixel::Unknown,
+                        make: "solium".to_owned(),
+                        model: "lock-prompt".to_owned(),
+                    },
+                );
+                output.change_current_state(
+                    Some(Mode {
+                        size: (1920, 1080).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    Some(Scale::Fractional(1.0)),
+                    None,
+                );
+                output
+            };
+            let (left, right) = (monitor("lock-prompt-left"), monitor("lock-prompt-right"));
+            state.space.map_output(&left, (0, 0));
+            state.space.map_output(&right, (1920, 0));
+            state.lock_natively();
+            for output in [&left, &right] {
+                assert_eq!(
+                    state.lock_scenes.shown_on(output),
+                    crate::lock_scene::Shown::Shipped,
+                    "the premise: the shipped scene"
+                );
+                state
+                    .lock_scenes
+                    .instance_for_test(output)
+                    .expect("the scene")
+                    .scene_for_test()
+                    .resize(1920, 1080, 1.0);
+            }
+            let prompted = |state: &mut Solium| -> (bool, bool) {
+                state.publish_models();
+                let mut on = |output: &Output| {
+                    state
+                        .lock_scenes
+                        .instance_for_test(output)
+                        .expect("the scene")
+                        .scene_for_test()
+                        .get_bool("prompt")
+                };
+                (on(&left), on(&right))
+            };
+            let region = Rectangle::from_size((3840, 1080).into());
+            let point = |state: &mut Solium, to: (f64, f64)| {
+                let was = state
+                    .seat
+                    .get_pointer()
+                    .map(|pointer| pointer.current_location())
+                    .unwrap_or_default();
+                crate::synth::send_motion(state, region, Point::from(to) - was, 1);
+            };
+
+            point(&mut state, (100.0, 100.0));
+            assert_eq!(
+                prompted(&mut state),
+                (true, false),
+                "\"pointer\", on the left"
+            );
+            point(&mut state, (2000.0, 100.0));
+            assert_eq!(
+                prompted(&mut state),
+                (false, true),
+                "\"pointer\", moved right"
+            );
+
+            for (prompt_on, expected) in [
+                (PromptOn::Primary, (true, false)),
+                (
+                    PromptOn::Monitor("lock-prompt-right".to_owned()),
+                    (false, true),
+                ),
+                (PromptOn::Monitor("unplugged".to_owned()), (true, false)),
+            ] {
+                let settings = scene_settings(&state, |settings| {
+                    settings.prompt_on = prompt_on.clone();
+                });
+                state.lock_scenes.configure(settings);
+                assert_eq!(prompted(&mut state), expected, "{prompt_on:?}");
+            }
+            // Nothing is typed here: each character is a dot that scales in
+            // on a `Behavior`, and a scene freed with one in flight leaves
+            // the animation clock running into the next test on the Qt
+            // thread (`qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`).
+            // `typed_text_never_reaches_the_lock_scene` counts the dots.
+        });
+    }
+
+    /// **A lock scene reads only what a lock may show**: while Solium holds
+    /// the lock, `Solium.status`, `Apps` and `Workspaces` read empty, and the
+    /// monitor and the keyboard still read; at the unlock the rest comes back,
+    /// and at the next lock it goes again.
+    #[test]
+    fn a_lock_scene_reads_only_what_a_lock_may_show() {
+        use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::new(
+                "redacted",
+                Some(
+                    r#"import QtQuick
+                import Solium
+                Item {
+                    readonly property string status: Solium.status
+                    readonly property int apps: Apps.count
+                    readonly property int workspaces: Workspaces.count
+                    readonly property string monitor: Solium.monitor.name
+                    readonly property int layouts: Keyboard.layouts.length
+                }"#,
+                ),
+            );
+            let name = locked.output.name();
+            locked.state.status = "a window's secret title".to_owned();
+            locked.state.apps_scan_pending = false;
+            locked.state.apps = vec![crate::apps::Entry {
+                id: "solium-lock-redaction-test".to_owned(),
+                name: "Redacted".to_owned(),
+                untranslated_name: "Redacted".to_owned(),
+                generic_name: String::new(),
+                icon: String::new(),
+                exec: "true".to_owned(),
+                categories: Vec::new(),
+                keywords: Vec::new(),
+                terminal: false,
+                path: None,
+                source: PathBuf::from("/nonexistent/solium-lock-redaction-test.desktop"),
+            }];
+            locked.state.workspaces = Some(Declared {
+                arrangement: Arrangement {
+                    kind: "grid".to_owned(),
+                    columns: 2,
+                    rows: 1,
+                },
+                groups: vec![Group {
+                    id: "lock-redaction".to_owned(),
+                    monitors: vec![name.clone()],
+                    showing: vec!["1".to_owned()],
+                    workspaces: (1..=2)
+                        .map(|index| Workspace {
+                            id: index.to_string(),
+                            name: format!("desk {index}"),
+                            col: index,
+                            row: 1,
+                            hidden: false,
+                        })
+                        .collect(),
+                }],
+                windows: std::collections::BTreeMap::new(),
+            });
+            let read = |locked: &mut Locked| {
+                locked.state.publish_models();
+                let scene = locked.scene();
+                (
+                    scene.get_string_for_test("status"),
+                    scene.get_int("apps"),
+                    scene.get_int("workspaces"),
+                )
+            };
+
+            let (status, apps, workspaces) = read(&mut locked);
+            assert_eq!(status, "", "`Solium.status` reads at the lock");
+            assert_eq!(
+                locked.scene().get_string_for_test("monitor"),
+                name,
+                "the monitor does not read at the lock"
+            );
+            assert!(
+                locked.int("layouts") > 0,
+                "the keyboard does not read at the lock"
+            );
+
+            locked.state.unlock_natively();
+            let unlocked = read(&mut locked);
+            assert_eq!(
+                unlocked,
+                (
+                    "a window's secret title".to_owned(),
+                    apps + 1,
+                    workspaces + 2
+                ),
+                "the session's data did not come back at the unlock"
+            );
+
+            locked.state.lock_natively();
+            assert_eq!(
+                read(&mut locked),
+                (String::new(), apps, workspaces),
+                "the session's data reads at the next lock"
+            );
         });
     }
 }

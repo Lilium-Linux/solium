@@ -1,7 +1,7 @@
-// What the native lock shows on a monitor when its own scene is missing, would
-// not load, or failed while it ran: the time, the date, "Locked", and the
-// password field, so the session can still be unlocked; nothing of the
-// session.
+// What the native lock shows on a monitor when its own scene and the shipped
+// one (`Lock.qml`) are missing, would not load, or failed while they ran: the
+// time, the date, "Locked", and the password field, so the session can still
+// be unlocked; nothing of the session.
 //
 // Compiled into the compositor (`lock_scene.rs`, `include_str!`), so it loads
 // when nothing on disk does: a broken install, a deleted configuration, a
@@ -31,14 +31,25 @@ Rectangle {
 
     // The wall clock, read again at the start of every minute: once a minute
     // is all a clock showing minutes needs, and a lock screen on a desk all
-    // night should not wake the compositor every second.
+    // night should not wake the compositor every second. Only while locked:
+    // a lock's scene is built ahead and kept between locks, and while the
+    // session is unlocked it must not tick at all (`lock_scene.rs`). Read
+    // afresh as each lock begins.
     property date now: new Date()
 
     Timer {
-        interval: 60000 - root.now.getSeconds() * 1000 - root.now.getMilliseconds()
-        running: true
+        interval: Math.max(1000, 60000 - root.now.getSeconds() * 1000 - root.now.getMilliseconds())
+        running: Lock.locked
         repeat: true
         onTriggered: root.now = new Date()
+    }
+
+    Connections {
+        target: Lock
+        function onLockedChanged() {
+            if (Lock.locked)
+                root.now = new Date()
+        }
     }
 
     Column {

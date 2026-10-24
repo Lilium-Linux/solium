@@ -1,6 +1,6 @@
 //! The keyboard while the session is locked: pointing it at the lock surface on the monitor the
 //! user is working on, or at any lock surface, and `settle_focus`'s answer while locked. And the
-//! native lock's scenes, one per monitor, and the pointer at them.
+//! native lock's scenes, one per monitor, the monitor its prompt is on, and the pointer at them.
 
 use super::*;
 
@@ -69,15 +69,38 @@ impl Solium {
         }
     }
 
-    /// Give every monitor its native lock scene while Solium holds the lock,
-    /// and take them away when it does not: when the lock is taken or ends,
-    /// and when the monitors change, so one plugged in while locked gets its
-    /// scene or the fallback, never the desktop. See `lock_scene.rs`.
-    /// `a_monitor_plugged_in_while_natively_locked_gets_a_scene_never_the_desktop`.
+    /// Give every monitor its native lock scene: live while Solium holds the
+    /// lock and through its exit, and kept quiet for the next lock otherwise,
+    /// while `lock.native` is on. Asked when the lock is taken or ends, when
+    /// the exit ends, when the settings change, and when the monitors change,
+    /// so one plugged in gets its scene ahead of the next lock and one
+    /// plugged in while locked gets its scene or the fallback, never the
+    /// desktop. See `lock_scene.rs`.
+    /// `a_monitor_plugged_in_while_natively_locked_gets_a_scene_never_the_desktop`,
+    /// `lock_scene::tests::the_scenes_are_built_ahead_kept_between_locks_and_follow_the_monitors`.
     pub(crate) fn sync_lock_scenes(&mut self) {
         let native = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
+        let exiting = self.lock.is_none() && self.lock_scenes.exiting(self.clock.now());
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
-        self.lock_scenes.sync(&outputs, native);
+        self.lock_scenes.sync(&outputs, native || exiting);
+    }
+
+    /// The monitor `Lock.promptOn` names, as `lock.prompt_on` says: the
+    /// primary one, the one the pointer is on, or one by name while it is
+    /// plugged in and the primary one while it is not.
+    /// `lock_auth::tests::the_prompt_is_on_the_monitor_prompt_on_names_and_no_other`.
+    pub(crate) fn lock_prompt_on(&self) -> String {
+        let output = match &self.lock_scenes.settings().prompt_on {
+            crate::lock_scene::PromptOn::Primary => self.primary_output(),
+            crate::lock_scene::PromptOn::Pointer => self.active_output(),
+            crate::lock_scene::PromptOn::Monitor(name) => self
+                .space
+                .outputs()
+                .find(|output| output.name() == *name)
+                .cloned()
+                .or_else(|| self.primary_output()),
+        };
+        output.map(|output| output.name()).unwrap_or_default()
     }
 
     /// The monitor under `location`, by name, and where it is drawn.

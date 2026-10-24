@@ -167,10 +167,13 @@
 //! over (`an_abandoned_client_lock_can_be_taken_over_natively`).
 //!
 //! What it draws on each monitor is a QML scene on the lock band, in the one
-//! engine, and the compiled-in fallback whenever that scene is missing, would
-//! not load, or fails while it runs: see `lock_scene.rs`. Over a monitor whose
-//! scene has not drawn yet, the backdrop. Touch reaches that scene as Qt touch
-//! events and nothing else (`a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`).
+//! engine, built ahead and kept between locks; the shipped scene and then the
+//! compiled-in fallback whenever that scene is missing, would not load, or
+//! fails while it runs: see `lock_scene.rs`. Over a monitor whose scene has
+//! not drawn yet, the backdrop. When it ends, the session is unlocked at once
+//! and its scenes play their exit over the desktop, for `lock.exit_ms` at
+//! most. Touch reaches that scene as Qt touch events and nothing else
+//! (`a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`).
 //!
 //! It is ended only by [`Solium::unlock_natively`], which nothing in Lua, QML
 //! or JavaScript can reach (`no_lua_function_unlocks_a_native_lock`,
@@ -730,8 +733,20 @@ impl Solium {
         if native {
             self.begin_lock_auth();
         }
+        // An exit still playing is over: the scenes are the lock's again, or
+        // quiet behind a client's lock.
+        self.lock_scenes.end_exit();
+        self.lock_scenes.pointer = crate::lock_scene::LockPointer::default();
+        // And `Lock` says so before any scene is shown or built: locked, with
+        // a fresh field, rather than whatever it said last, so a scene runs
+        // its Timers from the first locked frame and draws no dots left over
+        // from a password typed at the last lock. Where scenes are built.
+        if native && crate::scripted::builds_here() {
+            crate::lock_auth::publish(self);
+        }
         // After input is taken, so a scene slow to build holds nothing of
-        // the session's open: each monitor's scene, or its fallback.
+        // the session's open: each monitor's scene, built ahead and shown
+        // now, or one down its chain (`lock_scene.rs`).
         self.sync_lock_scenes();
         self.confirm_lock();
     }
@@ -746,10 +761,14 @@ impl Solium {
         let native = self.lock.as_ref().is_some_and(Lock::is_native);
         self.lock = None;
         self.redraw = true;
-        // Solium's own lock: what was typed is wiped, a check under way is
-        // cancelled, and the layout that was live before the lock is again,
-        // before any window is given the keyboard.
+        // Solium's own lock: its scenes play their exit over the desktop for
+        // `lock.exit_ms`, reading `Lock.state` as "unlocking"; input is the
+        // desktop's from here on all the same (`lock_scene.rs`). Then what
+        // was typed is wiped, a check under way is cancelled, and the layout
+        // that was live before the lock is again, before any window is given
+        // the keyboard.
         if native {
+            self.lock_scenes.begin_exit(self.clock.now());
             self.end_lock_auth();
         }
         // logind's `LockedHint` follows, and a fresh delay inhibitor for sleep
@@ -762,8 +781,8 @@ impl Solium {
         // typing until you move the mouse reads as one that did not unlock.
         // A finger held on the native lock's scene is cancelled there.
         blind(self);
-        // The lock's scenes go with it, so nothing of the lock runs while the
-        // session does.
+        // The lock's scenes stay through the exit, and are quiet after it, so
+        // nothing of the lock runs while the session does.
         self.sync_lock_scenes();
         // Unless a key is still down, which at this moment it nearly always
         // is: the Enter that submitted the password, still under the user's

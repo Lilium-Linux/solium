@@ -344,6 +344,16 @@ int solium_qml_scene_dirty(const SoliumQmlScene *scene);
 int solium_qml_scene_animating(const SoliumQmlScene *scene);
 
 /*
+ * Keep a scene but stop it ticking (`quiet` non-zero), or start it again: its
+ * running Timers stopped and root animations paused, and its changes asking
+ * for no frame. A native lock's scenes while the session is unlocked.
+ */
+void solium_qml_scene_set_quiet(SoliumQmlScene *scene, int quiet);
+
+/* Whether a Timer or an animation in the scene is running: for tests. */
+int solium_qml_scene_ticking(const SoliumQmlScene *scene);
+
+/*
  * The pixels of the last render: premultiplied ARGB32, `*stride` bytes per row.
  *
  * Owned by the scene and valid until the next render or resize.
