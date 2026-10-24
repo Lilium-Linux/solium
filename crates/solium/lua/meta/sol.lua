@@ -83,6 +83,7 @@
 ---@field class? string Its X11 `WM_CLASS` class, or absent for a Wayland window, which has no such property. `config.x11.hidden` matches against this and `instance` to decide whether the window was shown at all (#221).
 ---@field instance? string Its X11 `WM_CLASS` instance, or absent for a Wayland window. See `class`.
 ---@field content_type "none"|"photo"|"video"|"game" What the window says it is showing, through `wp_content_type_v1`, as it last committed it; `"none"` for a window that never said, which includes every X11 window. The compositor decides nothing with it: it is for a script deciding tearing, a refresh rate or keeping the screen awake for the one window that is a game or a film.
+---@field pid? integer The process the window belongs to: a Wayland window's connection, as the kernel reports it; an X11 window's own X connection, as Xwayland reports it, or the `_NET_WM_PID` it set -- never Xwayland's. Absent when it cannot be told, and for a window whose application has not arrived.
 
 ---One row of `sol.apps()`: an installed, visible application.
 ---@class sol.App
@@ -1041,6 +1042,35 @@ function sol.click(x, y) end
 ---@param warp? sol.Warp
 ---@return nil
 function sol.warp(target, warp) end
+
+---Press a button or a key on a window and let it go, as a device would: the
+---window's application hears it, and nothing of the compositor's does -- no
+---binding fires, no click focuses or raises, no scene hears it. A
+---configuration's "back" is this: a tablet shell's edge swipe sends `side`,
+---the mouse's back button, or `alt+Left`, or `Escape`, as it decides.
+---
+---`{ button = name }` is `left`, `right`, `middle`, `side` (`BTN_SIDE`, a
+---mouse's back) or `extra` (`BTN_EXTRA`, forward). The window is given the
+---pointer at its centre for the click, without the pointer moving or its
+---picture changing, and the pointer goes straight back to what is under it;
+---the keyboard stays where it is. Nothing is clicked while a button, a drag,
+---a menu or a scene holds the pointer, or while a client holds it (a game's
+---locked pointer) unless the window is that client's and already has it.
+---
+---`{ key = combo }` is a key, spelled as `sol.bind` spells it: `"Escape"`,
+---`"alt+Left"`, `"ctrl+shift+t"`, its key any xkb keysym name in any case,
+---found in the live keymap whichever layout is active. A key to a window is
+---the window being typed into, so a window without the keyboard is focused
+---first, as `sol.focus` would, and keeps it.
+---
+---With no id, the focused window; with nothing focused, nothing happens. A
+---window that is not in `sol.windows()`, or is leaving or minimized, is an
+---error, as is a spec that is not one of the two. Nothing is pressed behind
+---the lock, and a binding allowed at the lock cannot ask for it.
+---@param id? integer
+---@param spec { button?: "left"|"right"|"middle"|"side"|"extra", key?: string }
+---@return nil
+function sol.press(id, spec) end
 
 ---What the handler running now is answering, in the `"focus"` event's words:
 ---what a `sol.focus` made here would be told with. For a policy that acts

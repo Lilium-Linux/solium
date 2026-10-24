@@ -140,7 +140,7 @@ pub(crate) fn land(state: &mut Solium) {
 /// Whether a client holds the pointer: a locked or confined pointer it was
 /// granted. A game that locked the pointer to turn its camera keeps it.
 /// `tests::real_client::follow::a_held_pointer_is_not_warped`.
-fn held_by_a_client(pointer: &PointerHandle<Solium>) -> bool {
+pub(crate) fn held_by_a_client(pointer: &PointerHandle<Solium>) -> bool {
     let Some(surface) = pointer.current_focus() else {
         return false;
     };

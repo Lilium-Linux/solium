@@ -207,6 +207,22 @@ impl Solium {
         u32::try_from(credentials.pid).ok()
     }
 
+    /// Which process a window belongs to, as `sol.windows()` and the
+    /// `Windows` model both say it: a Wayland window's connection, as the
+    /// kernel reports it ([`Self::client_pid`]); an X11 window's own X
+    /// connection, as Xwayland reports it, or failing that the
+    /// `_NET_WM_PID` the window set -- and never its Wayland connection's,
+    /// which is Xwayland itself for every X11 window. `None` when it cannot
+    /// be told. `crate::models::windows::tests::an_x11_window_is_never_given_the_pid_of_its_connection`.
+    pub(crate) fn window_pid(&self, window: &Window) -> Option<u32> {
+        crate::models::windows::pid_of(
+            window
+                .x11_surface()
+                .map(|x11| crate::xwayland::client_pid(x11).or_else(|| x11.pid())),
+            || self.client_pid(window),
+        )
+    }
+
     /// Move a client into the window that was opened for its launch.
     ///
     /// The late half of adoption. `new_toplevel` matches on the process and

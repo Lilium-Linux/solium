@@ -514,6 +514,7 @@ impl Solium {
                         self.minimize(pane);
                     }
                 }
+                Command::Press { id, press, source } => self.press(id, &press, source),
                 Command::Unminimize { id } => {
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
                         self.show_again(pane);

@@ -838,6 +838,14 @@ impl Pointer {
         self.status.clone()
     }
 
+    /// What the client sources and the compositor's own last said, without
+    /// the chrome's override and without [`Pointer::showing`]'s write: for a
+    /// caller that lends the pointer's focus away and takes it back, and puts
+    /// back with [`Pointer::show`] what was showing before (`Solium::press`).
+    pub(crate) fn said(&self) -> CursorImageStatus {
+        self.status.clone()
+    }
+
     /// The named shape [`Pointer::showing`] would draw now, without its write:
     /// the compositor's over its chrome, a client's named one, and the arrow
     /// for a cursor surface that has died. `None` while a client's own cursor
