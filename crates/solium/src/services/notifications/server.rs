@@ -729,6 +729,9 @@ fn owner(proxy: &zbus::blocking::fdo::DBusProxy<'_>) -> Option<Owner> {
 fn incoming(id: u32, sender: String, pid: Option<u32>, call: NotifyCall) -> Incoming {
     let hints = &call.hints;
     let mut image = hint_image_data(hints);
+    // `image-path` names a file or a theme icon: `notify-send -i mail-unread`
+    // sends the icon this way, not as `app_icon`.
+    let mut named = None;
     if image.is_none()
         && let Some(path) =
             hint_string(hints, "image-path").or_else(|| hint_string(hints, "image_path"))
@@ -736,10 +739,15 @@ fn incoming(id: u32, sender: String, pid: Option<u32>, call: NotifyCall) -> Inco
         match content::image_path(&path) {
             Some(Ok(decoded)) => image = Some(decoded),
             Some(Err(why)) => tracing::debug!(?why, "a notification's image-path was refused"),
-            None => {}
+            None => named = Some(path).filter(|name| !name.is_empty()),
         }
     }
     let mut app_icon = call.app_icon;
+    if app_icon.is_empty()
+        && let Some(name) = named
+    {
+        app_icon = name;
+    }
     if let Some(read) = content::image_path(&app_icon) {
         if image.is_none() {
             image = read.ok();
@@ -1254,6 +1262,30 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    #[test]
+    fn an_image_path_that_names_an_icon_is_the_icon() {
+        let hints = HashMap::from([(
+            "image-path".to_owned(),
+            OwnedValue::try_from(Value::from("battery-caution")).expect("a value"),
+        )]);
+        let n = incoming(
+            7,
+            ":1.4".to_owned(),
+            None,
+            NotifyCall {
+                app_name: "Battery".to_owned(),
+                app_icon: String::new(),
+                summary: "Battery low".to_owned(),
+                body: String::new(),
+                actions: Vec::new(),
+                hints,
+                expire_timeout: -1,
+            },
+        );
+        assert_eq!(n.app_icon, "battery-caution");
+        assert!(n.image.is_none());
     }
 
     #[test]
