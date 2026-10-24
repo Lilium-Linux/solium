@@ -29,6 +29,7 @@ file is out of date.
 | `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |
 | `crates/animation/`, `crates/layout/`, `crates/effects/` | Crates with no compositor in them: curves and springs, the window arrangements, and the effect format |
+| `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
 | `dev/` | Setup, the gate, the build image, and the nested and TTY harnesses |
 | `docs/` | The documentation site |
@@ -50,7 +51,7 @@ cannot do it itself.
 | check a change, as every pull request must | `dev/gate.sh`, or `SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 dev/gate.sh` in the image |
 | build | `cargo build` |
 | run the tests whose names contain a phrase | `cargo test -p solium <phrase>` (the crate is a binary: there is no `--lib`) |
-| test another crate | `cargo test -p solium-animation`, `-p solium-layout`, `-p solium-effects` |
+| test another crate | `cargo test -p solium-animation`, `-p solium-layout`, `-p solium-effects`, `-p solium-auth` |
 | check that the Lua configuration loads | `./target/debug/solium --check` |
 | format | `cargo fmt --all` |
 | build the documentation site | `dev/docs.sh` |

@@ -698,6 +698,34 @@ fn render_node() -> Option<smithay::backend::renderer::gles::GlesRenderer> {
     unsafe { GlesRenderer::new(context) }.ok()
 }
 
+/// Whether the lock screen can check a password: the `solium-auth` this binary
+/// opened at startup, and PAM's service file for it (`auth.rs`).
+///
+/// Said, never failed. Both are the installation's rather than the
+/// configuration's, and the lock does not fail open without them: it stays
+/// locked, says why, and `loginctl unlock-session` still opens it. A checkout
+/// or a home install has no `/etc/pam.d/solium` until the line
+/// `dev/install.sh` prints is run, and a check that failed there would fail
+/// every install and every gate on a machine that is fine.
+/// `tests::the_lock_says_where_its_helper_and_pam_file_are`,
+/// `tests::the_lock_says_what_it_is_missing_and_still_passes`.
+pub(crate) fn lock(report: &mut Report, helper: Result<&Path, &str>, pam: Option<&Path>) {
+    report.line("the lock screen's password check");
+    match helper {
+        Ok(path) => report.line(&format!("  solium-auth  {}", path.display())),
+        Err(reason) => report.line(&format!("  solium-auth  missing: {reason}")),
+    }
+    match pam {
+        Some(path) => report.line(&format!("  PAM service  {}", path.display())),
+        None => report.line(&format!(
+            "  PAM service  missing: no {}, so the lock screen cannot check a password. \
+             Install dev/pam/solium as {}",
+            crate::auth::PAM_FILES.join(" or "),
+            crate::auth::PAM_FILES[0]
+        )),
+    }
+}
+
 /// `solium --check [<file>]`: the configuration, one QML file, or one effect
 /// folder; the exit status is the report's.
 /// `tests/cli.rs`'s `check_qml_on_a_broken_file_exits_one`,
@@ -779,6 +807,11 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                     Err(err) => report.fail(&format!("  Qt would not start: {err:#}")),
                 }
             }
+            lock(
+                &mut report,
+                crate::auth::helper().map(crate::auth::Helper::path),
+                crate::auth::pam_file(),
+            );
         }
     }
     if report.passed() {
@@ -792,7 +825,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Report, config, effect_folder, effects, knobs, qml_file, styles_in};
+    use super::{Report, config, effect_folder, effects, knobs, lock, qml_file, styles_in};
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -816,6 +849,51 @@ mod tests {
             &crate::qml::renderer::Configured::default(),
         );
         crate::qml::start().expect("Qt starts");
+    }
+
+    #[test]
+    fn the_lock_says_where_its_helper_and_pam_file_are() {
+        let (passed, text) = reported(|report| {
+            lock(
+                report,
+                Ok(Path::new("/usr/libexec/solium-auth")),
+                Some(Path::new("/etc/pam.d/solium")),
+            );
+        });
+        assert!(passed, "{text}");
+        assert!(
+            text.contains("  solium-auth  /usr/libexec/solium-auth\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  PAM service  /etc/pam.d/solium\n"),
+            "{text}"
+        );
+    }
+
+    /// Missing pieces are named, and the report still passes: see `lock`.
+    #[test]
+    fn the_lock_says_what_it_is_missing_and_still_passes() {
+        let (passed, text) = reported(|report| {
+            lock(
+                report,
+                Err("no solium-auth at /x/libexec/solium-auth"),
+                None,
+            );
+        });
+        assert!(passed, "{text}");
+        assert!(
+            text.contains("  solium-auth  missing: no solium-auth at /x/libexec/solium-auth"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  PAM service  missing: no /etc/pam.d/solium or /usr/lib/pam.d/solium"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Install dev/pam/solium as /etc/pam.d/solium"),
+            "{text}"
+        );
     }
 
     /// A configuration that does not load fails, and says why.

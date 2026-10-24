@@ -33,6 +33,7 @@ URL:            https://github.com/Lilium-Linux/solium
 Source0:        solium-%{version}.tar.gz
 %if %{with prebuilt}
 Source1:        solium
+Source2:        solium-auth
 %endif
 
 BuildRequires:  systemd-rpm-macros
@@ -72,6 +73,11 @@ Requires:       util-linux-core
 Recommends:     xdg-desktop-portal
 Recommends:     xdg-desktop-portal-gtk
 Recommends:     xdg-desktop-portal-wlr
+# The lock screen's password check (#281): PAM's modules and configuration,
+# and the `login` service dev/pam/solium includes. rpm finds libpam.so.0 itself
+# (pam-libs), but not these: the same check.
+Requires:       pam
+Requires:       util-linux
 # A terminal from init.lua's list, which super+return opens. The shipped
 # configuration has no launcher, and Fedora Workstation's ptyxis is not in the
 # list, so without one a session there can start no program: the same check.
@@ -89,13 +95,14 @@ for starting Solium from the login screen or a text console.
 %autosetup
 %if %{with prebuilt}
 install -Dm755 %{SOURCE1} target/install/release/solium
+install -Dm755 %{SOURCE2} target/install/release/solium-auth
 %endif
 
 %build
 %if %{without prebuilt}
 export SOLIUM_DATADIR=%{_datadir}/solium
 export CARGO_TARGET_DIR=target/install
-cargo build --locked --release -p solium
+cargo build --locked --release -p solium -p solium-auth
 %endif
 
 %install
@@ -116,6 +123,8 @@ XDG_CONFIG_HOME="$PWD/check-config" target/install/release/solium --check
 %doc README.md THIRD_PARTY.md
 %{_bindir}/solium
 %{_bindir}/solium-session
+%{_libexecdir}/solium-auth
+%config(noreplace) %{_sysconfdir}/pam.d/solium
 %{_datadir}/solium/
 %{_datadir}/wayland-sessions/solium.desktop
 %{_userunitdir}/solium-session.target

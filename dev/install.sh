@@ -3,12 +3,13 @@
 # Install Solium from this checkout, so the login screen can start it.
 #
 # Builds a release binary in the build container, copies it, the
-# solium-session script the login screen starts, and the shipped QML and Lua
-# into a prefix (~/.local by default), and writes a session file for the
-# display manager. The systemd user units Solium starts and its portal choice
-# (#146) go into the user's configuration directory. It never uses sudo:
-# the session file has to go somewhere only root can write, so the script
-# prints the one line that puts it there. `--uninstall` takes all of it back
+# solium-session script the login screen starts, the solium-auth helper the
+# lock screen checks a password with (#281), and the shipped QML and Lua into a
+# prefix (~/.local by default), and writes a session file for the display
+# manager. The systemd user units Solium starts and its portal choice (#146) go
+# into the user's configuration directory. It never uses sudo: the session file
+# and the PAM service file have to go where only root can write, so the script
+# prints the lines that put them there. `--uninstall` takes all of it back
 # out. `dev/install-check.sh` runs an install and an uninstall into /tmp and
 # checks every step.
 #
@@ -17,7 +18,9 @@
 # the prefix, the units in lib/systemd/user, the portal choice in
 # share/xdg-desktop-portal and the session file in share/wayland-sessions,
 # where systemd, xdg-desktop-portal and the display manager read system files,
-# and nothing goes into the user's configuration. dev/install-check.sh's
+# the PAM service file in /etc/pam.d, the one place PAM reads an
+# administrator's services from, and nothing goes into the user's
+# configuration. dev/install-check.sh's
 # "a system prefix" checks that layout, and that it is the spec's file list.
 set -euo pipefail
 
@@ -30,16 +33,18 @@ usage: dev/install.sh [options]
 
   --prefix DIR        where to install (default: \$HOME/.local)
                         DIR/bin/{solium,solium-session},
-                        DIR/share/solium/{qml,lua,effects,solium.desktop}
+                        DIR/libexec/solium-auth,
+                        DIR/share/solium/{qml,lua,effects,solium.desktop,solium.pam}
                         and into \$XDG_CONFIG_HOME (default: \$HOME/.config):
                         systemd/user/solium-{session,autostart}.target
                         and xdg-desktop-portal/lilium-portals.conf
                       /usr and /usr/local are system prefixes, all of it
-                        under DIR: bin/{solium,solium-session},
-                        share/solium/{qml,lua,effects},
+                        under DIR but the PAM file: bin/{solium,solium-session},
+                        libexec/solium-auth, share/solium/{qml,lua,effects},
                         share/wayland-sessions/solium.desktop,
                         lib/systemd/user/solium-{session,autostart}.target
-                        and share/xdg-desktop-portal/lilium-portals.conf
+                        and share/xdg-desktop-portal/lilium-portals.conf,
+                        and /etc/pam.d/solium
   --session-dir DIR   where the display manager reads Wayland sessions
                         (default: /usr/local/share/wayland-sessions); the
                         printed sudo line installs the session file there.
@@ -149,12 +154,20 @@ bin="$dest/bin/solium"
 # What the session file starts: `solium --tty --session`, and the clean-up
 # after a Solium that could not do its own (dev/session/solium-session).
 wrapper="$dest/bin/solium-session"
+# What the lock screen checks a password with (#281): started by solium, from
+# <prefix>/libexec beside <prefix>/bin (auth.rs's `candidates`).
+helper="$dest/libexec/solium-auth"
 share="$dest/share/solium"
 session_file="$session_dir/solium.desktop"
+# PAM's service file, which PAM reads only from /etc/pam.d (or the
+# distribution's /usr/lib/pam.d), whatever the prefix.
+pam_file="/etc/pam.d/solium"
 if [[ $system -eq 1 ]]; then
     staged_session="$destdir$session_file"
+    staged_pam="$destdir$pam_file"
 else
     staged_session="$share/solium.desktop"
+    staged_pam="$share/solium.pam"
 fi
 
 # What goes into the user's configuration rather than the prefix, as
@@ -219,6 +232,7 @@ esac
 # the installed copy reads the QML and Lua beside it rather than this
 # checkout's: the check after installing asserts it.
 built="$root/target/install/release/solium"
+built_helper="$root/target/install/release/solium-auth"
 
 # Processes of this user running the binary at $1. /proc/<pid>/exe is how
 # fuser answers the same question; a binary replaced while it runs reads
@@ -264,13 +278,13 @@ if [[ $uninstall -eq 1 ]]; then
         rm -f "$manifest"
         removed+=("$manifest")
     fi
-    for path in "$bin" "$wrapper"; do
+    for path in "$bin" "$wrapper" "$helper"; do
         if [[ -e "$path" ]]; then
             rm -f "$path"
             removed+=("$path")
         fi
     done
-    for path in "$share/qml" "$share/lua" "$share/effects" "$staged_session"; do
+    for path in "$share/qml" "$share/lua" "$share/effects" "$staged_session" "$staged_pam"; do
         if [[ -e "$path" ]]; then
             rm -rf "$path"
             removed+=("$path")
@@ -296,6 +310,13 @@ if [[ $uninstall -eq 1 ]]; then
         echo
         echo "  sudo rm -f $session_file"
     fi
+    if [[ $system -eq 0 && -e "$pam_file" ]]; then
+        echo
+        echo "PAM still has Solium's service file. Unless a Solium package is installed"
+        echo "too, which owns it, remove it as root:"
+        echo
+        echo "  sudo rm -f $pam_file"
+    fi
     echo
     echo "Kept, because they are yours rather than the installation's:"
     echo "  configuration  ${XDG_CONFIG_HOME:-$HOME/.config}/solium"
@@ -318,22 +339,26 @@ source_wrapper="$root/dev/session/solium-session"
 for entry in "${config_files[@]}"; do
     [[ -f "$root/dev/session/${entry%%:*}" ]] || die "missing $root/dev/session/${entry%%:*}"
 done
+source_pam="$root/dev/pam/solium"
+[[ -f "$source_pam" ]] || die "missing $source_pam"
 
 if [[ $build -eq 1 ]]; then
     "$root/dev/build-release.sh" --jobs "$jobs" --image "$image" || die "the build failed"
 fi
 [[ -x "$built" ]] || die "no release build at $built; run without --no-build"
+[[ -x "$built_helper" ]] || die "no release build at $built_helper; run without --no-build"
 
 # Again, now that the build is over: a session may have started from the old
 # install while it ran. dev/install-check.sh starts one from inside a stand-in
 # build and asserts that nothing is replaced or created.
 refuse_if_running
 
-mkdir -p "$dest/bin" "$share" 2>/dev/null \
+mkdir -p "$dest/bin" "$dest/libexec" "$share" 2>/dev/null \
     || die "cannot write to $dest. This script never uses sudo: choose a --prefix you own"
 
 install -m755 "$built" "$bin"
 install -m755 "$source_wrapper" "$wrapper"
+install -m755 "$built_helper" "$helper"
 # Copied, not linked, so a later `git checkout` cannot change a running
 # session. dev/install-check.sh diffs the copy against the checkout and asserts
 # there are no symlinks in it.
@@ -356,6 +381,16 @@ chmod 644 "$staged_tmp"
 mv -f "$staged_tmp" "$staged_session"
 grep -qx "Exec=$prefix/bin/solium-session" "$staged_session" \
     || die "the generated session file has no absolute Exec line: $staged_session"
+
+# The PAM service file, written the same way. Under a system prefix it goes
+# where PAM reads it; otherwise it is staged in share/solium for the sudo line.
+mkdir -p "$(dirname "$staged_pam")" 2>/dev/null \
+    || die "cannot write to $(dirname "$staged_pam"). This script never uses sudo: \
+with --prefix $prefix it needs to write $pam_file"
+staged_tmp="$(mktemp "$(dirname "$staged_pam")/.solium.pam.XXXXXX")"
+cp "$source_pam" "$staged_tmp"
+chmod 644 "$staged_tmp"
+mv -f "$staged_tmp" "$staged_pam"
 
 # The units and the portal choice. Each written beside its target and renamed
 # over it, like the session file, so a link is replaced rather than written
@@ -439,6 +474,15 @@ if [[ $run_check -eq 1 ]]; then
         die "the installed binary took its QML and Lua from '${chosen:-nowhere}', not \
 $expected. $not_checked"
     fi
+    # And the password helper beside it, which the binary finds the same way
+    # (auth.rs's `candidates`): a lock that found another one, or none, would
+    # use a helper this install did not put there.
+    found_helper="$(sed -n 's/^  solium-auth  \(\/.*\)$/\1/p' "$check_log" | head -1)"
+    if [[ -z "$found_helper" || "$(realpath -m "$found_helper")" != "$(realpath "$helper")" ]]; then
+        cat "$check_log" >&2
+        die "the installed binary found its solium-auth at '${found_helper:-nowhere}', not \
+$helper. $not_checked"
+    fi
     checked="$(grep -m1 '^  ok:' "$check_log" || true)"
     check_line="$bin --check passed${checked:+ (${checked#  })}, using $chosen"
 fi
@@ -477,8 +521,9 @@ again to replace it.
 fi
 
 # Under a system prefix the session file is already where the display manager
-# looks, so there is no sudo line (dev/install-check.sh's "a system prefix").
-uninstall_note=", which prints the matching sudo line for the session file"
+# looks, and the PAM file where PAM looks, so there is no sudo line
+# (dev/install-check.sh's "a system prefix").
+uninstall_note=", which prints the matching sudo lines for the session and PAM files"
 if [[ $system -eq 1 ]]; then
     uninstall_note=""
     login_note="The session file is in $session_dir, where the login screen looks
@@ -491,7 +536,12 @@ script does not run it:
 
 Then log out and pick Solium from the session list. Plasma Login, Fedora 44
 KDE's display manager, reads /usr/local/share/wayland-sessions and
-/usr/share/wayland-sessions when its greeter starts."
+/usr/share/wayland-sessions when its greeter starts.
+
+For Solium's own lock screen to check your password, PAM needs its service
+file. This line puts it there, and needs root too:
+
+  sudo install -Dm644 $staged_pam $pam_file"
 fi
 
 if [[ -z "$destdir" ]]; then
@@ -513,6 +563,8 @@ cat <<EOF
 Installed Solium into $dest
   binary        $bin
   started by    $wrapper
+  lock helper   $helper
+  PAM service   $staged_pam
   QML, Lua and effects   $share/qml, $share/lua, $share/effects
                          (copies: rebuilding or checking out another branch does not change them)
   session file  $staged_session

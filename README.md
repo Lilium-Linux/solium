@@ -54,8 +54,11 @@ multi-GPU output, compositor touch/gestures and end-to-end portal validation.
 
 
 Solium needs **Rust 1.88 or newer** (edition 2024), a C++17 compiler, **Qt 6.5
-or newer** (Qt Quick and Qml), and the development files for Wayland,
-libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm.
+or newer** (Qt Quick and Qml), the development files for Wayland,
+libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm, and PAM's runtime
+library, `libpam.so.0`, which every distribution installs by default: the lock
+screen's password helper, `solium-auth`, declares the few PAM calls it makes
+itself, so no PAM development package is needed.
 Lua is compiled in and needs nothing installed. The build also runs Qt's `moc`
 on the headers of Solium's own QML types; `QT_MOC` names it when the build
 cannot find it, and [dev/README.md](dev/README.md#building) says where it
@@ -73,14 +76,15 @@ works too if it is new enough. The system packages:
 ```sh
 sudo dnf install gcc gcc-c++ pkgconf-pkg-config wayland-devel libinput-devel \
     systemd-devel libseat-devel libxkbcommon-devel mesa-libgbm-devel \
-    mesa-libEGL-devel libdrm-devel qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel
+    mesa-libEGL-devel libdrm-devel qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
+    pam
 ```
 
 **Arch Linux**
 
 ```sh
 sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
-    libxkbcommon mesa libdrm qt6-base qt6-declarative
+    libxkbcommon mesa libdrm qt6-base qt6-declarative pam
 ```
 
 **Debian 13 and Ubuntu 24.10 or newer** (older releases ship a Qt older than
@@ -89,7 +93,7 @@ sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
 ```sh
 sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
     libudev-dev libseat-dev libxkbcommon-dev libgbm-dev libegl-dev libdrm-dev \
-    qt6-base-dev qt6-base-private-dev qt6-declarative-dev
+    qt6-base-dev qt6-base-private-dev qt6-declarative-dev libpam0g
 ```
 
 **openSUSE Tumbleweed**
@@ -98,13 +102,13 @@ sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
 sudo zypper install gcc-c++ pkgconf qt6-base-devel qt6-base-private-devel qt6-declarative-devel \
     'pkgconfig(wayland-server)' 'pkgconfig(libinput)' 'pkgconfig(libudev)' \
     'pkgconfig(libseat)' 'pkgconfig(xkbcommon)' 'pkgconfig(gbm)' 'pkgconfig(egl)' \
-    'pkgconfig(libdrm)'
+    'pkgconfig(libdrm)' pam
 ```
 
 Then, from the checkout:
 
 ```sh
-cargo build            # target/debug/solium; add --release for an optimised build
+cargo build            # target/debug/solium and solium-auth; add --release for an optimised build
 ```
 
 **Or in a container, on Fedora without the development packages.** The image
@@ -189,10 +193,13 @@ release, not Rust or the build container.
 ```sh
 dev/install.sh
 sudo install -Dm644 ~/.local/share/solium/solium.desktop /usr/local/share/wayland-sessions/solium.desktop
+sudo install -Dm644 ~/.local/share/solium/solium.pam /etc/pam.d/solium
 ```
 
 The script installs into `~/.local`, validates the installed configuration and
-prints the session-file command. Use `--prefix` for another location. Log out
+prints the session-file command, and the one that gives PAM the `solium`
+service Solium's own lock screen checks a password against
+(`solium --check` says whether it is there). Use `--prefix` for another location. Log out
 and select Solium at the login screen. Choose either the RPM or the local
 install to avoid duplicate session entries. The container must match your
 system libraries; see [installation details](dev/README.md#installing-it)

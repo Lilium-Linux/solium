@@ -446,7 +446,7 @@ that should not be.
 | `dev/fence-check.sh` | skipping a capture's CPU fence wait (`SOLIUM_FENCE_WAIT=off`) changes no pixel |
 | `dev/pulse-control.sh [env…]` | the renderer is not frozen: a focused window in the `pulse` style moves in 150 ms |
 | `dev/effects-check.sh [section]…` | effects on screen, nested, one compositor per section, each judged beside `dev/pulse-control.sh`; `overlay` breaks the configuration and reloads it, and the problems overlay appears in the top-right corner while nothing else changes; `t0` draws a generated ring behind a window; `blur` blurs a video player's own pixels through a rule; `none` shows nothing captured and nothing run with no rules; `fail` shows every part drawn when every effect fails; `tilt` shows a blurred player still blurred while it tilts and while it genies; `genie` shows the `genie` folder drawing what the Rust genie draws, on one debug build; `xray` shows a terminal with the wallpaper blurred behind it, the xray built once at rest, and a plate's backdrop blurred in the first frame drawn |
-| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. `--no-check` skipping the installed binary's check. A system prefix (`--prefix /usr` and `/usr/local`): everything under the prefix and nothing in `XDG_CONFIG_HOME`, no `config.sha256` and no `sudo` line, `--session-dir` refused, and `--check` passing from the staged `/usr/share/solium` with a broken user configuration. The Fedora package: `dev/rpm/solium.spec`'s `%files` against that install both ways; its `License` naming every installed `.license`; each `Requires` and `Recommends` naming the package that has the file (the Qt QML modules the shipped QML imports with the Qt version clause, Xwayland, flock, xdg-desktop-portal and the backends `lilium-portals.conf` names, and foot); and the spec refusing to parse without `commit` and `commitdate`. See *Installing it* and *A Fedora package* |
+| `dev/install-check.sh [--no-build]` | `dev/install.sh` installs into a `DESTDIR` under `/tmp`: every file (the `solium-auth` helper, the PAM service file, the systemd units and the portal configuration included), the absolute `Exec`, the printed `sudo` lines, `--check` from the installed copy using its own `share/solium` and finding its own `libexec/solium-auth`, refusing while it runs (a session started during the build included), refusing to delete through a link, refusing `/` and a `DESTDIR` with a space, saying so when the check fails after the files are in place, keeping a unit or portal configuration of the user's own through an install and an uninstall, `solium-session` cleaning up after a stand-in Solium that crashed (and only then, and only once it has gone, and unsetting the variables after one that crashed before starting its target while no other desktop holds `graphical-session.target`) and refusing a second session while one runs, a reinstall saying when the login screen's session file is stale, and an uninstall that leaves nothing. `--no-check` skipping the installed binary's check. A system prefix (`--prefix /usr` and `/usr/local`): everything under the prefix and nothing in `XDG_CONFIG_HOME`, no `config.sha256` and no `sudo` line, `--session-dir` refused, and `--check` passing from the staged `/usr/share/solium` with a broken user configuration. The Fedora package: `dev/rpm/solium.spec`'s `%files` against that install both ways; its `License` naming every installed `.license`; each `Requires` and `Recommends` naming the package that has the file (the Qt QML modules the shipped QML imports with the Qt version clause, Xwayland, flock, PAM's modules and the `login` service `dev/pam/solium` includes, xdg-desktop-portal and the backends `lilium-portals.conf` names, and foot); and the spec refusing to parse without `commit` and `commitdate`. See *Installing it* and *A Fedora package* |
 | `dev/rpm.sh [--jobs N] [--image IMAGE]` | the package built from the commit checked out, unpacked without installing, passes `solium --check` with an empty configuration and takes its QML and Lua from its own `usr/share/solium`. See *A Fedora package* |
 
 And the tools that measure rather than assert:
@@ -1362,20 +1362,21 @@ builds an RPM of the checkout instead. There is no COPR or `PKGBUILD` yet
 (#66).
 
 ```sh
-dev/install.sh                 # build, install into ~/.local, check, print the sudo line
+dev/install.sh                 # build, install into ~/.local, check, print the sudo lines
 sudo install -Dm644 ~/.local/share/solium/solium.desktop /usr/local/share/wayland-sessions/solium.desktop
-dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for the session file
+sudo install -Dm644 ~/.local/share/solium/solium.pam /etc/pam.d/solium
+dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for both files
 ```
 
 | | |
 |---|---|
-| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/share/solium/{qml,lua,effects}`, and the generated `DIR/share/solium/solium.desktop`. `/usr` and `/usr/local` are system prefixes, below |
+| `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/libexec/solium-auth` (the lock screen's password helper, #281, which `solium` looks for there), `DIR/share/solium/{qml,lua,effects}`, the generated `DIR/share/solium/solium.desktop`, and `DIR/share/solium/solium.pam`, a copy of `dev/pam/solium` for the printed `sudo` line to put in `/etc/pam.d/solium`. `/usr` and `/usr/local` are system prefixes, below |
 | `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`: `systemd/user/solium-session.target`, `systemd/user/solium-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
 | `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there. Refused with a system prefix |
 | `--no-build` | install the release binary already in `target/install` |
 | `--no-check` | skip the installed binary's `--check`: for a package built from source, whose binary still finds its build tree during `%install` and would fail the asset check |
 | `--jobs N`, `--image IMAGE` | the build's cargo jobs (2) and container (`localhost/solium-build:fc44`) |
-| `--uninstall` | remove `bin/solium`, `bin/solium-session`, `share/solium/{qml,lua,effects}` and the generated `solium.desktop` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
+| `--uninstall` | remove `bin/solium`, `bin/solium-session`, `libexec/solium-auth`, `share/solium/{qml,lua,effects}` and the generated `solium.desktop` and `solium.pam` under the same `--prefix`, whatever put them there, and the three files in `XDG_CONFIG_HOME` only while they are what install wrote |
 | `DESTDIR=` | stage the prefix and `XDG_CONFIG_HOME` under this directory instead; the session file's `Exec` still names the real prefix. `--session-dir` is used as given, so a test can point it at `/tmp`. It may contain a `~`, as rpmbuild's buildroot does |
 | `SOLIUM_BUILD_LOCK=`, `SOLIUM_BUILD_MEMORY=` | the lock the build takes (`$XDG_CACHE_HOME/solium-build.lock`, or `~/.cache/solium-build.lock` when `XDG_CACHE_HOME` is unset) and the container's memory cap (`6g`). `dev/build-release.sh` reads both, so they apply to `dev/rpm.sh` too |
 
@@ -1386,8 +1387,9 @@ package installs, and what the Fedora package's `%install` runs. Everything
 goes under the prefix and nothing into `XDG_CONFIG_HOME`: the units in
 `DIR/lib/systemd/user`, the portal choice in `DIR/share/xdg-desktop-portal`
 and the session file in `DIR/share/wayland-sessions`, where systemd,
-xdg-desktop-portal and the display manager read system files, so there is no
-`sudo` line. Those files are the installation's, like the binary, so there is
+xdg-desktop-portal and the display manager read system files, and the PAM
+service file in `/etc/pam.d/solium` (under `DESTDIR`), the one directory PAM
+reads an administrator's services from, so there is no `sudo` line. Those files are the installation's, like the binary, so there is
 no `config.sha256` and uninstall removes them whatever put them there. The
 check after installing runs with an empty configuration directory, because
 what every user gets is the shipped configuration, not yours.
@@ -1431,7 +1433,8 @@ works from any prefix, a `DESTDIR` staging area included.
 
 `dev/build-release.sh [--jobs N] [--image IMAGE]` is that build on its own
 (defaults `2` and `localhost/solium-build:fc44`), and it builds
-`target/install/release/solium`. It runs `cargo build --release -p solium` in
+`target/install/release/solium` and `target/install/release/solium-auth`. It
+runs `cargo build --release -p solium -p solium-auth` in
 the build image, with the checkout mounted at `/solium-src` and
 `CARGO_TARGET_DIR` at `/solium-src/target/install`, under
 `nice -n 19 ionice -c 3`. It holds the shared lock `SOLIUM_BUILD_LOCK`
@@ -1456,7 +1459,8 @@ disk) is fine, and the staged session file is written beside its target and
 renamed over it, so it never writes through a link. **After:** the installed
 `solium --check` has to pass, the gate's scripts check, and the asset root it
 logs (`RUST_LOG=solium::assets=debug`, `shipped assets root=…`) has to be the
-installed `share/solium`. If either fails, the new files are already in place,
+installed `share/solium`, and the `solium-auth` it names has to be the
+installed `libexec/solium-auth`. If either fails, the new files are already in place,
 and it says so and prints the uninstall line. It also warns if the `solium` on
 `PATH` is not the one it installed.
 
@@ -1559,6 +1563,8 @@ another release needs its own build, and COPR is where that will happen.
 `dev/rpm/solium.spec` drives `%install` through
 `dev/install.sh --no-build --prefix /usr`, the system layout, so the package
 holds exactly what that installs: `/usr/bin/{solium,solium-session}`,
+`/usr/libexec/solium-auth`, `/etc/pam.d/solium` (`%config(noreplace)`, so an
+administrator's edit survives an upgrade),
 `/usr/share/solium/{qml,lua,effects}`, `/usr/share/wayland-sessions/solium.desktop`
 with `Exec=/usr/bin/solium-session`, the two units in `/usr/lib/systemd/user`
 and `lilium-portals.conf` in `/usr/share/xdg-desktop-portal`, plus the licences
@@ -1569,9 +1575,11 @@ automatic library dependencies: `Requires` qt6-qtdeclarative (the QtQuick and
 QtQuick.Shapes modules the shipped QML imports), no older than the build
 image's Qt, since rpm's own dependencies take any Qt 6 (a Fedora 44 installed
 from the release image and never updated has 6.10, and dnf brings the newer
-one from updates), xorg-x11-server-Xwayland and
-util-linux-core (`solium-session`'s `flock`), each the package that has the
-file here, and `Recommends` xdg-desktop-portal and each backend
+one from updates), xorg-x11-server-Xwayland,
+util-linux-core (`solium-session`'s `flock`), pam (the modules and
+configuration behind `libpam.so.0`, which rpm finds itself) and util-linux
+(`/etc/pam.d/login`, which `dev/pam/solium` includes), each the package that
+has the file here, and `Recommends` xdg-desktop-portal and each backend
 `lilium-portals.conf` names, gtk and wlr, and foot: the shipped configuration
 has no launcher, so `super+return`'s terminal is how a program starts, and
 none of the terminals `init.lua` looks for is on Fedora Workstation.
