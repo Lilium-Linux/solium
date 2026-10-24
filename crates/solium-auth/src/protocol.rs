@@ -10,8 +10,8 @@
 //! 2. **One request:** the user name and the secret, each a little-endian
 //!    `u16` length and the bytes.
 //! 3. **One answer:** a tag byte, then [`Answer::Failed`]'s delay as a `u32`
-//!    of milliseconds, or [`Answer::Unavailable`]'s reason as a `u16` length
-//!    and UTF-8.
+//!    of milliseconds, or [`Answer::Refused`]'s or [`Answer::Unavailable`]'s
+//!    reason as a `u16` length and UTF-8.
 //!
 //! The helper then ends: one PAM transaction per process. The round trip is
 //! `tests::a_round_trip_reaches_the_authenticator_and_back`.
@@ -24,8 +24,9 @@ use crate::secret::{MAX_LEN, Secret};
 /// that is not the compositor's) is told apart from one of another version.
 pub const MAGIC: &[u8; 11] = b"solium-auth";
 
-/// The protocol's version. Changed whenever a message changes shape.
-pub const VERSION: u32 = 1;
+/// The protocol's version. Changed whenever a message changes shape: 2 added
+/// [`Answer::Refused`].
+pub const VERSION: u32 = 2;
 
 /// The longest user name: `LOGIN_NAME_MAX`.
 pub const MAX_USER: usize = 256;
@@ -36,6 +37,7 @@ pub const MAX_REASON: usize = 1024;
 const OK: u8 = 0;
 const FAILED: u8 = 1;
 const UNAVAILABLE: u8 = 2;
+const REFUSED: u8 = 3;
 
 /// What the helper answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,8 +47,13 @@ pub enum Answer {
     /// It is not. `delay_ms` is the delay PAM's modules asked for before the
     /// next attempt, which the helper reports instead of sleeping through.
     Failed { delay_ms: u32 },
-    /// No answer could be had: PAM is misconfigured, a module failed, or it
-    /// asked for something other than one password.
+    /// PAM was given the secret and would not say yes or no: it asked for
+    /// something besides the one password (a second password, a one-time
+    /// code), or ended with a status that is neither. The secret reached the
+    /// modules, so this counts as a wrong attempt, as pam_faillock counts it.
+    Refused { reason: String },
+    /// No answer could be had before the secret reached PAM: PAM would not
+    /// start, or the request was out of shape.
     Unavailable { reason: String },
 }
 
@@ -208,6 +215,10 @@ fn write_answer(to: &mut impl Write, answer: &Answer) -> Result<(), Error> {
             to.write_all(&[FAILED])?;
             to.write_all(&delay_ms.to_le_bytes())?;
         }
+        Answer::Refused { reason } => {
+            to.write_all(&[REFUSED])?;
+            write_bytes(to, cut(reason, MAX_REASON).as_bytes())?;
+        }
         Answer::Unavailable { reason } => {
             to.write_all(&[UNAVAILABLE])?;
             write_bytes(to, cut(reason, MAX_REASON).as_bytes())?;
@@ -229,19 +240,24 @@ fn read_answer(from: &mut impl Read) -> Result<Answer, Error> {
                 delay_ms: u32::from_le_bytes(delay),
             })
         }
-        UNAVAILABLE => {
-            let len = read_len(from)?;
-            if len > MAX_REASON {
-                return Err(Error::Malformed("answer: reason length"));
-            }
-            let mut reason = vec![0; len];
-            from.read_exact(&mut reason)?;
-            Ok(Answer::Unavailable {
-                reason: String::from_utf8_lossy(&reason).into_owned(),
-            })
-        }
+        UNAVAILABLE => Ok(Answer::Unavailable {
+            reason: read_reason(from)?,
+        }),
+        REFUSED => Ok(Answer::Refused {
+            reason: read_reason(from)?,
+        }),
         _ => Err(Error::Malformed("answer")),
     }
+}
+
+fn read_reason(from: &mut impl Read) -> Result<String, Error> {
+    let len = read_len(from)?;
+    if len > MAX_REASON {
+        return Err(Error::Malformed("answer: reason length"));
+    }
+    let mut reason = vec![0; len];
+    from.read_exact(&mut reason)?;
+    Ok(String::from_utf8_lossy(&reason).into_owned())
 }
 
 /// `text`, cut to at most `max` bytes at a character boundary.
@@ -274,6 +290,9 @@ mod tests {
                 ("illia", b"correct horse") => Answer::Ok,
                 ("illia", b"") => Answer::Unavailable {
                     reason: "no password".into(),
+                },
+                ("illia", b"otp") => Answer::Refused {
+                    reason: "a one-time code".into(),
                 },
                 _ => Answer::Failed { delay_ms: 2000 },
             }
@@ -313,6 +332,14 @@ mod tests {
             asked.expect("an answer"),
             Answer::Unavailable {
                 reason: "no password".into()
+            }
+        );
+
+        let (asked, _) = exchange("illia", "otp");
+        assert_eq!(
+            asked.expect("an answer"),
+            Answer::Refused {
+                reason: "a one-time code".into()
             }
         );
     }

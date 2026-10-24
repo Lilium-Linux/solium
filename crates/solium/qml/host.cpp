@@ -584,6 +584,7 @@ static bool start_common(const char *import_path)
 
     solium_qml_register_types();
     g_engine = new QQmlEngine();
+    solium_qml_name_scope(g_engine->rootContext(), false);
     add_import_paths(g_engine, import_path);
     // `image://solium/icon/...` (03 §3.2.14): the engine takes ownership.
     g_engine->addImageProvider(QStringLiteral("solium"), new SoliumIconProvider());
@@ -695,15 +696,22 @@ extern "C" void solium_qml_clear_cache()
 }
 
 namespace {
-/* What solium_qml_host_next_on handed over, for the next scene only. */
+/* What solium_qml_host_next_on and solium_qml_host_next_for_lock handed
+ * over, for the next scene only. */
 bool g_next_hosted = false;
 QString g_next_monitor;
+bool g_next_lock = false;
 } // namespace
 
 extern "C" void solium_qml_host_next_on(const char *monitor)
 {
     g_next_hosted = monitor != nullptr;
     g_next_monitor = monitor != nullptr ? QString::fromUtf8(monitor) : QString();
+}
+
+extern "C" void solium_qml_host_next_for_lock(int lock)
+{
+    g_next_lock = lock != 0;
 }
 
 namespace {
@@ -830,11 +838,15 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
      * its monitor for the next scene.
      * `qml::hosted::tests::the_host_consumes_the_monitor_even_for_a_build_that_fails`. */
     if (g_next_hosted) {
-        scene->hosting = new SoliumHosting(g_next_monitor);
+        scene->hosting = new SoliumHosting(g_next_monitor, g_next_lock);
         scene->context = new QQmlContext(g_engine->rootContext());
         solium_hosting_mark(scene->context, scene->hosting);
+        if (g_next_lock) {
+            solium_qml_name_scope(scene->context, true);
+        }
         g_next_hosted = false;
     }
+    g_next_lock = false;
     /* The same for a root that says how big it is.
      * `qml::pointer::tests::a_scene_built_after_one_sized_by_its_root_is_sized_by_the_host`. */
     const int own_width = g_next_root_width;
@@ -3291,6 +3303,15 @@ extern "C" int solium_qml_scene_keypad_at(const SoliumQmlScene *scene, double x,
         return -1;
     }
     return solium_keypad_at(scene->root, QPointF(x, y));
+}
+
+extern "C" int solium_qml_scene_keypad_near(const SoliumQmlScene *scene, double x, double y,
+                                            double margin)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return 0;
+    }
+    return solium_keypad_near(scene->root, QPointF(x, y), margin) ? 1 : 0;
 }
 
 extern "C" void solium_qml_scene_pointer_leave(SoliumQmlScene *scene)

@@ -44,12 +44,9 @@ Rectangle {
         onTriggered: root.now = new Date()
     }
 
-    Connections {
-        target: Lock
-        function onLockedChanged() {
-            if (Lock.locked)
-                root.now = new Date()
-        }
+    Lock.onLockedChanged: {
+        if (Lock.locked)
+            root.now = new Date()
     }
 
     Column {
@@ -118,7 +115,9 @@ Rectangle {
             text: Lock.state === "lockedOut"
                 ? "Try again in " + Lock.retryAfter + " s"
                 : Lock.state === "unavailable"
-                    ? "Can't check your password right now. Retrying\u2026\n" + Lock.message
+                    ? (Lock.retryAfter > 0
+                        ? "Can't check your password right now. Retrying\u2026\n"
+                        : "Can't check your password.\n") + Lock.message
                     : Lock.message
             horizontalAlignment: Text.AlignHCenter
             color: "#b3b3b3"

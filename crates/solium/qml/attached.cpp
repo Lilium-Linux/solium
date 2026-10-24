@@ -76,6 +76,12 @@ SoliumHosting *solium_hosting_of(QObject *object)
     return nullptr;
 }
 
+bool solium_lock_hosted(QObject *object)
+{
+    const SoliumHosting *hosting = solium_hosting_of(object);
+    return hosting != nullptr && hosting->lock;
+}
+
 void solium_hosting_mark(QQmlContext *context, SoliumHosting *hosting)
 {
     context->setProperty(kHosting, QVariant::fromValue(static_cast<void *>(hosting)));
@@ -332,7 +338,24 @@ SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item)
 
 QString SoliumAttached::status() const
 {
+    // `sol.status` is the session's: a window's title, say.
+    if (solium_lock_hosted(m_item)) {
+        return QString();
+    }
     return SoliumStatus::instance().text;
+}
+
+SoliumDirs *SoliumAttached::dirs() const
+{
+    if (solium_lock_hosted(m_item)) {
+        static SoliumDirs *none = nullptr;
+        if (none == nullptr) {
+            none = new SoliumDirs();
+            QQmlEngine::setObjectOwnership(none, QQmlEngine::CppOwnership);
+        }
+        return none;
+    }
+    return &SoliumDirs::instance();
 }
 
 SoliumKeyboard *SoliumAttached::keyboard()
@@ -657,10 +680,16 @@ void solium_qml_register_types()
     /* `Keyboard`, unqualified like `Theme`, in every scene.
      * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`. */
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Keyboard", solium_keyboard());
-    /* Solium's own lock (#281): `Lock`, read-only, and the two native items
-     * a lock scene's prompt is made of, named since a scene writes them.
-     * `lock_auth::tests::nothing_in_qml_can_unlock_or_read_the_secret`. */
-    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Lock", solium_lock());
+    /* Solium's own lock (#281): `Lock`, an attached object read-only but for
+     * its two requests, so each scene reads its own (lock.h), and the two
+     * native items a lock scene's prompt is made of, named since a scene
+     * writes them. A registered name, so a scene's own `Lock.qml` beside it,
+     * as the shipped one is, does not hide it.
+     * `lock_auth::tests::nothing_in_qml_can_unlock_or_read_the_secret`,
+     * `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`. */
+    qmlRegisterUncreatableType<SoliumLockType>(
+        SOLIUM_NATIVE_URI, 1, 0, "Lock",
+        QStringLiteral("Lock is an attached object: read Lock.state on any item"));
     qmlRegisterType<SoliumSecretField>(SOLIUM_NATIVE_URI, 1, 0, "SecretField");
     qmlRegisterType<SoliumSecretKeypad>(SOLIUM_NATIVE_URI, 1, 0, "SecretKeypad");
     /* The models, as singletons, each the one store Rust publishes into.
@@ -669,11 +698,11 @@ void solium_qml_register_types()
                                  solium_rows(SOLIUM_QML_ROWS_MONITORS));
     /* A window's row is nameless like a monitor's: a named `Window` would
      * hide Qt Quick's `Window` in every scene that imports both.
-     * `qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`. */
+     * `qml::hosted::tests::a_quick_window_is_still_qt_quicks_beside_the_windows_model`.
+     * `Windows`, `Workspaces`, `Apps` and `Folder` themselves are no
+     * singletons: see solium_qml_name_scope. */
     qmlRegisterAnonymousType<SoliumWindow>(SOLIUM_NATIVE_URI, 1);
-    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Windows",
-                                 qobject_cast<SoliumWindowRows *>(
-                                     solium_rows(SOLIUM_QML_ROWS_WINDOWS)));
+    qmlRegisterAnonymousType<SoliumWindowRows>(SOLIUM_NATIVE_URI, 1);
     /* Named, since a scene writes one: `WindowList { ... }`.
      * `qml::hosted::tests::the_windows_model_filters_sorts_and_keeps_its_facades`. */
     qmlRegisterType<SoliumWindowList>(SOLIUM_NATIVE_URI, 1, 0, "WindowList");
@@ -681,25 +710,32 @@ void solium_qml_register_types()
      * `Workspace.qml` is its own.
      * `qml::hosted::tests::a_shell_file_named_like_a_workspace_is_still_the_shells`. */
     qmlRegisterAnonymousType<SoliumWorkspace>(SOLIUM_NATIVE_URI, 1);
-    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Workspaces",
-                                 qobject_cast<SoliumWorkspaceRows *>(
-                                     solium_rows(SOLIUM_QML_ROWS_WORKSPACES)));
+    qmlRegisterAnonymousType<SoliumWorkspaceRows>(SOLIUM_NATIVE_URI, 1);
     /* Named, since a scene writes one: `WorkspaceList { ... }`.
      * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
     qmlRegisterType<SoliumWorkspaceList>(SOLIUM_NATIVE_URI, 1, 0, "WorkspaceList");
     /* An app's row is nameless like a monitor's or a window's, so a shell's
      * own `App.qml` is its own (03 §3.2.13, Ruling 1a). */
     qmlRegisterAnonymousType<SoliumApp>(SOLIUM_NATIVE_URI, 1);
-    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Apps",
-                                 qobject_cast<SoliumAppRows *>(
-                                     solium_rows(SOLIUM_QML_ROWS_APPS)));
+    qmlRegisterAnonymousType<SoliumAppRows>(SOLIUM_NATIVE_URI, 1);
     /* A folder entry's row is nameless like an app's or a window's, so a
      * shell's own `Folder.qml`, if it ever wrote one, would still be its
      * own (04-ui.md §4.9). */
     qmlRegisterAnonymousType<SoliumFolderEntry>(SOLIUM_NATIVE_URI, 1);
-    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Folder",
-                                 qobject_cast<SoliumFolderRows *>(
-                                     solium_rows(SOLIUM_QML_ROWS_FOLDER)));
+    qmlRegisterAnonymousType<SoliumFolderRows>(SOLIUM_NATIVE_URI, 1);
+}
+
+void solium_qml_name_scope(QQmlContext *context, bool for_lock)
+{
+    const auto rows = [for_lock](int model) -> QObject * {
+        QObject *store = for_lock ? solium_rows_redacted(model) : solium_rows(model);
+        QQmlEngine::setObjectOwnership(store, QQmlEngine::CppOwnership);
+        return store;
+    };
+    context->setContextProperty(QStringLiteral("Windows"), rows(SOLIUM_QML_ROWS_WINDOWS));
+    context->setContextProperty(QStringLiteral("Workspaces"), rows(SOLIUM_QML_ROWS_WORKSPACES));
+    context->setContextProperty(QStringLiteral("Apps"), rows(SOLIUM_QML_ROWS_APPS));
+    context->setContextProperty(QStringLiteral("Folder"), rows(SOLIUM_QML_ROWS_FOLDER));
 }
 
 /* What `Solium.status` reads: the text `sol.status` set.

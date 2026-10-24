@@ -401,9 +401,12 @@ same clock, so one beside an animation nothing draws still fires.
 **The `Solium` QML module.** `Theme` above all: the colours, fonts and
 metrics the frames are drawn with. Everything `import Solium` brings is
 written unqualified, as `Theme` is: the singletons `Theme`, `Keyboard`
-("The keyboard, live", below), `Monitors` ("Its monitor, live", below),
-`Windows` ("Windows, live", below) and `Workspaces` ("Workspaces, as the
-configuration has them", below); the types `Grab` ("Popups that hold the
+("The keyboard, live", below) and `Monitors` ("Its monitor, live", below);
+the models `Windows` ("Windows, live", below), `Workspaces` ("Workspaces, as
+the configuration has them", below), `Apps` and `Folder`, which every scene
+reads by name, but which are no singletons: Solium's own lock scenes read
+empty ones under the same names
+(`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`); the types `Grab` ("Popups that hold the
 pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
 ("Workspaces, as the configuration has them"); the pane-style types
 `PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
@@ -437,6 +440,9 @@ A shell's own file named like a type or singleton the compositor registers
 scene is the `Monitors` model there, and a scene that creates one does not
 build, so name such a file otherwise
 (`qml::hosted::tests::a_shell_file_named_like_a_singleton_is_hidden_by_it`).
+It is the other way round for the models that are no singletons: a
+`Windows.qml` beside a scene hides the `Windows` model in it, so name that
+otherwise too.
 A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
 override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).

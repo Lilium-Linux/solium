@@ -380,15 +380,17 @@
 ---@class sol.LockOptions
 ---@field command? string A locker of your own, run instead of Solium's own lock screen on `Lock`, before sleep, after `idle.lock_after` and by `sol.lock_now`: `"swaylock -f"`, say. Split on whitespace, with no quoting. Setting it turns `native` off unless `native` is set too. Unset (the default) runs nothing.
 ---@field before_sleep? boolean Hold sleep until the lock -- Solium's own or the locker's -- is on every monitor, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
+---@field logind_unlock? boolean Whether logind's `Unlock` (`loginctl unlock-session`) ends Solium's own lock: the way out from another console when the password cannot be checked. false leaves only the password. Default true.
 ---@field lockout? sol.LockoutOptions Solium's own lock: after `attempts` wrong passwords in a row the field is shut for `seconds`, doubling with each lockout up to `max_seconds`. Default `{ attempts = 3, seconds = 30, max_seconds = 300 }`.
 ---@field secret_layout? "first"|"current" Solium's own lock: the layout a password is typed in. `"first"` (the default) switches to the first layout that types Latin letters while locked, and back after; `"current"` keeps whatever is live.
 ---@field helper_timeout_ms? integer Solium's own lock: how long `solium-auth` has to answer, at least 100. Default 30000.
----@field retry? sol.BackoffOptions Solium's own lock: when the helper cannot answer, the password is tried again after `seconds`, doubling up to `max_seconds`. Default `{ seconds = 2, max_seconds = 60 }`.
+---@field retry? sol.RetryOptions Solium's own lock: when the helper could not answer this time (it crashed or timed out), the password is tried again after `seconds`, doubling up to `max_seconds`, at most `attempts` times, then wiped. A cause no retry mends (no helper, no PAM service) wipes it at once; PAM asking for more than the password counts as a wrong attempt. Default `{ seconds = 2, max_seconds = 60, attempts = 5 }`.
 ---@field keypad? "digits"|"letters"|"keyboard" Solium's own lock: the keys `SecretKeypad` lays out. Default `"digits"`.
 ---@field native? boolean Whether Solium's own lock screen is the session's. Its scenes are built as the session starts and kept, quiet, between locks, so the first locked frame is the scene's. Default true unless `command` is set.
 ---@field scene? string Solium's own lock: the lock screen's QML, a path (`"~/my-lock.qml"`) or a name looked for as `qml/lock/<name>.qml` in your QML directory and then in Solium's. One that is missing, will not load or fails while it runs is replaced by the shipped one, then by a compiled-in fallback. Default `"Lock"`, the shipped one.
 ---@field prompt_on? string Solium's own lock: the monitor `Lock.promptOn` names, where the scene shows the password field: `"pointer"` (the default), `"primary"`, or a monitor's name, the primary one while it is not plugged in.
 ---@field exit_ms? integer Solium's own lock: how long its scenes stay over the desktop after the unlock, reading `Lock.state` as `"unlocking"`; input is the desktop's from the unlock on. 0 to 600; longer is taken as 600. Default 250.
+---@field keypad_margin? integer Solium's own lock: how near a `SecretKeypad`, in logical pixels, the pointer's motion is kept from the lock scene, as it is over the pad itself. 0 or more. Default 32.
 
 ---@class sol.BackoffOptions
 ---@field seconds? integer The first wait, at least 1.
@@ -396,6 +398,9 @@
 
 ---@class sol.LockoutOptions: sol.BackoffOptions
 ---@field attempts? integer Wrong passwords in a row before the field is shut, at least 1.
+
+---@class sol.RetryOptions: sol.BackoffOptions
+---@field attempts? integer How many times a password is tried again before it is wiped, at least 0.
 
 ---X11 windows refused a tile, decoration or bar entry outright (#221). A key
 ---left out, or the whole table left out, keeps the default rather than
@@ -1229,7 +1234,7 @@ function sol.bind(combo, handler, note) end
 ---@field note? string Where the binding came from, which `solium --check` prints beside it.
 ---@field repeating? boolean While the key is held, the handler runs again at the keyboard's repeat delay and rate (`sol.keyboard()`'s `repeat_delay` and `repeat_rate`), as an application repeats a letter. It stops when the key comes up or any other key goes down or up, when the keyboard moves to another window by anything but the handler itself, at a VT switch, when the session locks, and when the handler fails. A modifier or a group toggle never repeats, nor anything on a keyboard whose rate is 0. A loop that looks late runs it once, not once for every repeat it missed. Spelled `repeating` because `repeat` is a word of Lua's own.
 ---@field inhibited? boolean It fires while a window holds the compositor's shortcuts as well -- a virtual machine or a remote desktop that asked for every key -- over which no other binding does. For the key that takes them back, `sol.take_shortcuts_back`. Off unless asked.
----@field locked? boolean It fires while the session is locked as well: for a key that is no way past the lock, such as volume, brightness and media. There its handler may not act on a window or a workspace, or end the session -- a `sol` call that would is an error the handler can catch -- and anything else, `sol.spawn` included, it may. Off unless asked.
+---@field locked? boolean It fires while the session is locked as well: for a key that is no way past the lock, such as volume, brightness and media. There its handler may not act on a window or a workspace, or end the session -- a `sol` call that would is an error the handler can catch -- and anything else, `sol.spawn` included, it may. At Solium's own lock screen it fires only for a key that types no character there: a letter, a digit or a symbol, with Shift or without, always goes into the password. Off unless asked.
 
 ---Whether a combination is bound, in whatever spelling it is given.
 ---@param combo string

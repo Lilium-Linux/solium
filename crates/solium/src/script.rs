@@ -1267,7 +1267,8 @@ fn describe(value: &Value) -> String {
 /// `sol.lock`'s settings for Solium's own lock (#281): `lockout` (a table of
 /// `attempts`, `seconds` and `max_seconds`, whole numbers of at least 1),
 /// `secret_layout` (`"first"` or `"current"`), `helper_timeout_ms` (a whole
-/// number of at least 100), `retry` (`seconds` and `max_seconds`) and
+/// number of at least 100), `retry` (`seconds` and `max_seconds`, and
+/// `attempts`, a whole number of at least 0) and
 /// `keypad` (`"digits"`, `"letters"` or `"keyboard"`). Each one absent keeps
 /// its default; each one of the wrong kind is named in the log and keeps its
 /// default. A `max_seconds` under its `seconds` is taken as `seconds`.
@@ -1332,11 +1333,23 @@ fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
         ),
     }
     match options.get::<Value>("retry") {
-        Ok(Value::Table(table)) => settings.retry = backoff(&table, "retry", settings.retry),
+        Ok(Value::Table(table)) => {
+            settings.retry = backoff(&table, "retry", settings.retry);
+            match table.get::<Value>("attempts") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match whole(&value, 0) {
+                    Some(attempts) => settings.retries = attempts,
+                    None => tracing::warn!(
+                        value = describe(&value),
+                        "lock.retry.attempts is a whole number, 0 or more; keeping the default, 5"
+                    ),
+                },
+            }
+        }
         Ok(Value::Nil) | Err(_) => {}
         Ok(other) => tracing::warn!(
             value = describe(&other),
-            "lock.retry is a table, like {{ seconds = 2, max_seconds = 60 }}; keeping the default"
+            "lock.retry is a table, like {{ seconds = 2, max_seconds = 60, attempts = 5 }}; keeping the default"
         ),
     }
     match options.get::<Value>("secret_layout") {
@@ -1383,16 +1396,17 @@ fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
 /// `sol.lock`'s settings for what Solium's own lock shows (#281): `native`
 /// (true or false; unset, true unless `command` names a locker, as
 /// `has_command` says), `scene` (a path or a name, not empty), `prompt_on`
-/// (`"primary"`, `"pointer"` or a monitor's name) and `exit_ms` (a whole number
+/// (`"primary"`, `"pointer"` or a monitor's name), `exit_ms` (a whole number
 /// of milliseconds, 0 for none, at most `lock_scene::EXIT_MAX_MS`, a longer one
-/// taken as that). Each one absent keeps its default; each one of the wrong
-/// kind is named in the log and keeps its default.
+/// taken as that) and `keypad_margin` (a whole number of pixels, 0 or more).
+/// Each one absent keeps its default; each one of the wrong kind is named in
+/// the log and keeps its default.
 /// `tests::sol_lock_parses_what_the_native_lock_shows`.
 fn lock_scene_settings(
     options: Option<&mlua::Table>,
     has_command: bool,
 ) -> crate::lock_scene::Settings {
-    use crate::lock_scene::{EXIT_MAX_MS, EXIT_MS, PromptOn, SHIPPED, Settings};
+    use crate::lock_scene::{EXIT_MAX_MS, EXIT_MS, KEYPAD_MARGIN, PromptOn, SHIPPED, Settings};
     let mut settings = Settings {
         native: !has_command,
         ..Settings::default()
@@ -1460,6 +1474,30 @@ fn lock_scene_settings(
                 None => tracing::warn!(
                     value = describe(&value),
                     "lock.exit_ms is a whole number of milliseconds, 0 or more; keeping the default, {EXIT_MS}"
+                ),
+            }
+        }
+    }
+    match options.get::<Value>("keypad_margin") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(value) => {
+            let whole = match &value {
+                Value::Integer(number) => u32::try_from(*number).ok(),
+                Value::Number(number) if number.fract() == 0.0 && number.is_finite() => {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "a whole number, bounded by the conversion below"
+                    )]
+                    let whole = *number as i64;
+                    u32::try_from(whole).ok()
+                }
+                _ => None,
+            };
+            match whole {
+                Some(margin) => settings.keypad_margin = margin,
+                None => tracing::warn!(
+                    value = describe(&value),
+                    "lock.keypad_margin is a whole number of pixels, 0 or more; keeping the default, {KEYPAD_MARGIN}"
                 ),
             }
         }
@@ -4228,8 +4266,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `init.lua`. `command` is a program and its arguments, split on
     // whitespace with no quoting, like an autostart `Exec=` line; absent or
     // not a string, nothing runs on `Lock` or before sleep, which is the
-    // default — see `logind.rs` for why. `before_sleep` is true or false,
-    // default true; anything else is named in the log and the default kept.
+    // default — see `logind.rs` for why. `before_sleep` and `logind_unlock`
+    // are true or false, default true; anything else is named in the log and
+    // the default kept.
     // The rest is how Solium's own lock checks a password (#281),
     // `lock_auth_settings`, and what it shows, `lock_scene_settings`.
     sol.set(
@@ -4257,6 +4296,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     Ok(other) => tracing::warn!(
                         value = describe(&other),
                         "lock.before_sleep is true or false; keeping the default, true"
+                    ),
+                }
+                match options.get::<Value>("logind_unlock") {
+                    Ok(Value::Boolean(on)) => settings.logind_unlock = on,
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "lock.logind_unlock is true or false; keeping the default, true"
                     ),
                 }
             }
@@ -9470,7 +9517,8 @@ mod tests {
     }
 
     /// `sol.lock`'s own parsing: a string `command`, a boolean
-    /// `before_sleep`, an absent table keeping both defaults, and a value of
+    /// `before_sleep` and `logind_unlock`, an absent table keeping the
+    /// defaults, and a value of
     /// the wrong kind named in the log with the default kept. See
     /// `crate::logind::Settings`.
     #[test]
@@ -9498,6 +9546,7 @@ mod tests {
             crate::logind::Settings {
                 command: Some("swaylock -f".to_owned()),
                 before_sleep: true,
+                logind_unlock: true,
             }
         );
         assert_eq!(
@@ -9505,13 +9554,22 @@ mod tests {
             crate::logind::Settings {
                 command: None,
                 before_sleep: false,
+                logind_unlock: true,
+            }
+        );
+        assert_eq!(
+            configured("sol.lock({ logind_unlock = false })"),
+            crate::logind::Settings {
+                command: None,
+                before_sleep: true,
+                logind_unlock: false,
             }
         );
         // Said nothing, two ways, and said something of the wrong kind.
         for source in [
             "sol.lock()",
             "sol.lock({})",
-            "sol.lock({ command = 5, before_sleep = \"no\" })",
+            "sol.lock({ command = 5, before_sleep = \"no\", logind_unlock = 1 })",
         ] {
             assert_eq!(
                 configured(source),
@@ -9554,7 +9612,7 @@ mod tests {
                     lockout = { attempts = 5, seconds = 10, max_seconds = 40 },
                     secret_layout = "current",
                     helper_timeout_ms = 5000,
-                    retry = { seconds = 1, max_seconds = 8 },
+                    retry = { seconds = 1, max_seconds = 8, attempts = 3 },
                     keypad = "keyboard",
                 })"#
             ),
@@ -9572,6 +9630,7 @@ mod tests {
                     seconds: 1,
                     max_seconds: 8,
                 },
+                retries: 3,
                 keypad: Keypad::Keyboard,
             }
         );
@@ -9601,7 +9660,7 @@ mod tests {
                 lockout = 3,
                 secret_layout = "dvorak",
                 helper_timeout_ms = 5,
-                retry = { seconds = 0, max_seconds = "a minute" },
+                retry = { seconds = 0, max_seconds = "a minute", attempts = -1 },
                 keypad = 7,
             })"#,
             "sol.lock({ lockout = { attempts = 0, seconds = 1.5 } })",
@@ -9673,6 +9732,7 @@ mod tests {
                     scene = "~/my-lock.qml",
                     prompt_on = "DP-2",
                     exit_ms = 400,
+                    keypad_margin = 0,
                 })"#
             ),
             Settings {
@@ -9680,6 +9740,7 @@ mod tests {
                 scene: "~/my-lock.qml".to_owned(),
                 prompt_on: PromptOn::Monitor("DP-2".to_owned()),
                 exit: Duration::from_millis(400),
+                keypad_margin: 0,
             }
         );
         assert_eq!(
@@ -9707,8 +9768,8 @@ mod tests {
         for source in [
             "sol.lock()",
             "sol.lock({})",
-            r#"sol.lock({ native = "yes", scene = "", prompt_on = 3, exit_ms = -5 })"#,
-            "sol.lock({ scene = 7, exit_ms = 12.5 })",
+            r#"sol.lock({ native = "yes", scene = "", prompt_on = 3, exit_ms = -5, keypad_margin = -1 })"#,
+            "sol.lock({ scene = 7, exit_ms = 12.5, keypad_margin = \"wide\" })",
         ] {
             assert_eq!(configured(source), Settings::default(), "{source:?}");
         }

@@ -1,13 +1,17 @@
 //! The compositor's side of `solium-auth`, the helper that checks a password
 //! for Solium's own lock screen (#281).
 //!
-//! **Opened once.** [`open_at_startup`] runs at the top of `main`, before any
-//! thread starts, and holds the helper as an `O_PATH` descriptor for the whole
-//! session. Every check starts that file, whatever has happened to the path
-//! since: a package upgrade cannot swap the helper under a running session,
-//! and nothing chooses another one. The helper is `<prefix>/libexec/solium-auth`
-//! beside an installed `<prefix>/bin/solium`, or `solium-auth` beside the
-//! binary in a build tree ([`candidates`]).
+//! **Copied once.** [`open_at_startup`] runs at the top of `main`, before any
+//! thread starts, and copies the helper into a sealed memfd held for the whole
+//! session: no write, no growing or shrinking, no change of its mode, and no
+//! seal taken off ([`sealed_copy`]). Every check starts that copy, whatever has
+//! happened to the file since: a package upgrade cannot swap the helper under
+//! a running session, a helper in a home install that the user's own programs
+//! can write cannot be changed under it either, and nothing chooses another
+//! one (`tests::the_helper_runs_from_a_sealed_copy_taken_at_startup`). The
+//! helper is `<prefix>/libexec/solium-auth` beside an installed
+//! `<prefix>/bin/solium`, or `solium-auth` beside the binary in a build tree
+//! ([`candidates`]).
 //!
 //! **One process per check.** [`Helper::check`] starts the helper with
 //! `posix_spawn`, a socketpair as its standard input, `/dev/null` as its
@@ -16,10 +20,13 @@
 //! loop never waits on PAM. The outcome arrives through a callback, exactly
 //! once, unless the check is cancelled first.
 //!
-//! **Every failure is [`Outcome::Unavailable`], never a yes.** No PAM service
-//! file, no helper, a helper that cannot start, crashes, speaks another
-//! version, or does not answer within the timeout (it is killed): each says
-//! why, and none unlocks. Cancelling kills the helper with `SIGKILL`.
+//! **Every failure is [`Outcome::Refused`] or [`Outcome::Unavailable`], never
+//! a yes.** PAM given the password and answering neither yes nor no is
+//! refused, which counts as a wrong attempt. No PAM service file, no helper,
+//! a helper that cannot start, crashes, speaks another version, or does not
+//! answer within the timeout (it is killed) is unavailable, and says why,
+//! and whether trying again could mend it (`lasting`). None unlocks.
+//! Cancelling kills the helper with `SIGKILL`.
 //!
 //! **The secret** stays in a [`Secret`], moved into the check and overwritten
 //! when the request has been written. It is never formatted, so it cannot
@@ -38,7 +45,10 @@ use std::{
     io::{self, Read, Write},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
-        unix::{ffi::OsStrExt as _, fs::PermissionsExt as _, net::UnixStream},
+        unix::{
+            fs::{OpenOptionsExt as _, PermissionsExt as _},
+            net::UnixStream,
+        },
     },
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, PoisonError},
@@ -63,8 +73,14 @@ pub(crate) enum Outcome {
     /// It is not. `delay` is how long PAM's modules asked for before the next
     /// attempt.
     Failed { delay: Duration },
-    /// No answer could be had, and why: never a reason to unlock.
-    Unavailable { reason: String },
+    /// PAM had the password and would say neither yes nor no, and why: it
+    /// asked for more than a password, or ended in a status that is neither.
+    /// It counts as a wrong attempt.
+    Refused { reason: String },
+    /// No answer could be had, and why: never a reason to unlock. `lasting`
+    /// when trying the same password again cannot mend it: no helper, one of
+    /// another install, no PAM service file.
+    Unavailable { reason: String, lasting: bool },
 }
 
 /// The helper opened at startup, or why there is none.
@@ -107,6 +123,7 @@ fn check_on(
         Err(reason) => {
             done(Outcome::Unavailable {
                 reason: reason.to_owned(),
+                lasting: true,
             });
             Check {
                 shared: Arc::default(),
@@ -159,7 +176,7 @@ fn find(exe: Option<&Path>) -> Result<Helper, String> {
 
 /// The helper, held open: what every check starts.
 pub(crate) struct Helper {
-    /// The file, as an `O_PATH` descriptor above the ones a child is given.
+    /// The sealed copy of the file, above the descriptors a child is given.
     exe: Arc<OwnedFd>,
     path: PathBuf,
     /// Where PAM's service file is looked for: [`PAM_FILES`], or a test's.
@@ -179,7 +196,19 @@ impl std::fmt::Debug for Helper {
 }
 
 impl Helper {
+    /// The helper at `path`, copied into a sealed memfd: the file itself is
+    /// read once, here, and never started.
     fn open(path: &Path) -> io::Result<Self> {
+        let copy = sealed_copy(path)
+            .map_err(|error| io::Error::other(format!("no sealed copy of it: {error}")))?;
+        Ok(Self::around(copy, path))
+    }
+
+    /// The file at `path` itself, as an `O_PATH` descriptor, for the tests'
+    /// stand-in: this test binary, too big to copy for every test.
+    #[cfg(test)]
+    fn open_in_place(path: &Path) -> io::Result<Self> {
+        use std::os::unix::ffi::OsStrExt as _;
         let name = CString::new(path.as_os_str().as_bytes())?;
         // SAFETY: a NUL-terminated path; the result is checked before use.
         #[expect(unsafe_code, reason = "calling libc")]
@@ -190,13 +219,17 @@ impl Helper {
         // SAFETY: a descriptor just opened, owned by nothing else.
         #[expect(unsafe_code, reason = "taking ownership of a raw descriptor")]
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        Ok(Self {
-            exe: Arc::new(above_stdio(&fd)?),
+        Ok(Self::around(above_stdio(&fd)?, path))
+    }
+
+    fn around(exe: OwnedFd, path: &Path) -> Self {
+        Self {
+            exe: Arc::new(exe),
             path: path.to_owned(),
             pam_files: PAM_FILES.iter().map(PathBuf::from).collect(),
             args: vec![CString::from(c"solium-auth")],
             env: Vec::new(),
-        })
+        }
     }
 
     /// Where it was found when it was opened.
@@ -240,6 +273,7 @@ impl Helper {
                 &shared,
                 Outcome::Unavailable {
                     reason: format!("no thread for the check: {error}"),
+                    lasting: false,
                 },
             );
         }
@@ -327,7 +361,14 @@ impl Job {
 
     fn exchange(self) -> Outcome {
         let deadline = Instant::now() + self.timeout;
-        let unavailable = |reason: String| Outcome::Unavailable { reason };
+        let unavailable = |reason: String| Outcome::Unavailable {
+            reason,
+            lasting: false,
+        };
+        let lasting = |reason: String| Outcome::Unavailable {
+            reason,
+            lasting: true,
+        };
         // Without its service file PAM falls back to `other`, which on most
         // systems refuses everything: every password would look wrong.
         if !self.pam_files.iter().any(|path| path.is_file()) {
@@ -336,7 +377,7 @@ impl Job {
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect();
-            return unavailable(format!(
+            return lasting(format!(
                 "no PAM service file for solium ({}): install dev/pam/solium as {}",
                 looked.join(" or "),
                 PAM_FILES[0]
@@ -352,6 +393,16 @@ impl Job {
         };
         let pid = match spawn(self.exe.as_fd(), theirs.as_fd(), &self.args, &self.env) {
             Ok(pid) => pid,
+            // Not a program, or one the kernel will not run: the copy is
+            // sealed, so no retry will find it otherwise.
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOEXEC | libc::EACCES | libc::ENOENT)
+                ) =>
+            {
+                return lasting(format!("solium-auth would not start: {error}"));
+            }
             Err(error) => return unavailable(format!("solium-auth would not start: {error}")),
         };
         drop(theirs);
@@ -397,6 +448,7 @@ impl Job {
             Ok(Answer::Failed { delay_ms }) => Outcome::Failed {
                 delay: Duration::from_millis(u64::from(delay_ms)),
             },
+            Ok(Answer::Refused { reason }) => Outcome::Refused { reason },
             Ok(Answer::Unavailable { reason }) => unavailable(reason),
             Err(protocol::Error::Io(error)) if error.kind() == io::ErrorKind::TimedOut => {
                 unavailable(format!(
@@ -413,16 +465,71 @@ impl Job {
                 }
                 Ended::Unknown => format!("solium-auth stopped answering: {error}"),
             }),
-            Err(protocol::Error::Version { theirs }) => unavailable(format!(
+            Err(protocol::Error::Version { theirs }) => lasting(format!(
                 "solium-auth speaks version {theirs} and this Solium version {}: they are from different installs",
                 protocol::VERSION
             )),
-            Err(protocol::Error::NotTheProtocol) => unavailable(
-                "the program opened as solium-auth does not speak its protocol".to_owned(),
-            ),
-            Err(protocol::Error::Malformed(what)) => unavailable(format!("malformed {what}")),
+            Err(protocol::Error::NotTheProtocol) => {
+                lasting("the program opened as solium-auth does not speak its protocol".to_owned())
+            }
+            Err(protocol::Error::Malformed(what)) => lasting(format!("malformed {what}")),
         }
     }
+}
+
+/// The file at `path`, copied into a memfd sealed against writing, growing,
+/// shrinking, a change of mode and any seal taken off, reopened read-only so
+/// no descriptor that could write it is left open, and numbered above the
+/// descriptors a child is given. What is started from it is what was read
+/// here, whatever becomes of the file.
+/// `tests::the_helper_runs_from_a_sealed_copy_taken_at_startup`.
+fn sealed_copy(path: &Path) -> io::Result<OwnedFd> {
+    let mut source = std::fs::File::open(path)?;
+    // SAFETY: a NUL-terminated name and flags; the result is checked. With
+    // `MFD_EXEC`, a kernel whose `vm.memfd_noexec` asks for it still runs the
+    // copy; a kernel before 6.3 refuses the flag, and runs any memfd.
+    #[expect(unsafe_code, reason = "calling libc")]
+    let made = unsafe {
+        let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+        let fd = libc::memfd_create(c"solium-auth".as_ptr(), flags | libc::MFD_EXEC);
+        if fd < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+            libc::memfd_create(c"solium-auth".as_ptr(), flags)
+        } else {
+            fd
+        }
+    };
+    if made < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a descriptor just made, owned by nothing else.
+    #[expect(unsafe_code, reason = "taking ownership of a raw descriptor")]
+    let mut copy = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(made) });
+    io::copy(&mut source, &mut copy)?;
+    drop(source);
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
+    // SAFETY: seals on a descriptor this process owns; checked. `F_SEAL_EXEC`
+    // is refused before Linux 6.3, which then keeps the mode as it is anyway
+    // for want of a way to change it through a sealed memfd.
+    #[expect(unsafe_code, reason = "calling libc")]
+    let sealed = unsafe {
+        let fd = copy.as_raw_fd();
+        if libc::fcntl(fd, libc::F_ADD_SEALS, seals | libc::F_SEAL_EXEC) == 0 {
+            0
+        } else {
+            libc::fcntl(fd, libc::F_ADD_SEALS, seals)
+        }
+    };
+    if sealed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A descriptor open for writing would make `execve` refuse the file
+    // (ETXTBSY), sealed or not: keep one that only reads.
+    let reopened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{}", copy.as_raw_fd()))?;
+    drop(copy);
+    above_stdio(&OwnedFd::from(reopened))
 }
 
 /// A duplicate of `fd` numbered above every descriptor a child is given, so
@@ -737,7 +844,7 @@ mod tests {
     /// This test binary as the helper, running the stand-in in `mode`.
     fn stand_in_helper(mode: &str, pam: PathBuf) -> Helper {
         let exe = std::env::current_exe().expect("this test binary");
-        let mut helper = Helper::open(&exe).expect("this test binary opens");
+        let mut helper = Helper::open_in_place(&exe).expect("this test binary opens");
         helper.pam_files = vec![pam];
         helper.args = [
             "solium-auth",
@@ -770,9 +877,14 @@ mod tests {
 
     fn unavailable(outcome: &Outcome) -> &str {
         match outcome {
-            Outcome::Unavailable { reason } => reason,
+            Outcome::Unavailable { reason, .. } => reason,
             other => panic!("not unavailable: {other:?}"),
         }
+    }
+
+    /// Whether an unavailable outcome says no retry can mend it.
+    fn lasting(outcome: &Outcome) -> bool {
+        matches!(outcome, Outcome::Unavailable { lasting: true, .. })
     }
 
     /// Whether `pid` is gone, reaped and all: a zombie still answers a kill.
@@ -808,6 +920,7 @@ mod tests {
             unavailable(&outcome).contains("different installs"),
             "{outcome:?}"
         );
+        assert!(lasting(&outcome), "another install is mended by no retry");
     }
 
     #[test]
@@ -819,6 +932,7 @@ mod tests {
             unavailable(&outcome).contains(&format!("signal {}", libc::SIGABRT)),
             "{outcome:?}"
         );
+        assert!(!lasting(&outcome), "a crash may not happen again");
         assert!(reaped(check.pid().expect("it started")));
     }
 
@@ -864,6 +978,7 @@ mod tests {
         );
         let outcome = outcome.recv_timeout(LONG).expect("an outcome");
         assert_eq!(unavailable(&outcome), reason);
+        assert!(lasting(&outcome), "no helper is mended by no retry");
 
         // One found, but not a program.
         let text = pam_file("not-a-program");
@@ -875,6 +990,7 @@ mod tests {
             unavailable(&outcome).contains("would not start"),
             "{outcome:?}"
         );
+        assert!(lasting(&outcome), "not a program, and sealed so");
     }
 
     /// Checked before anything starts: a stand-in that would say yes is never
@@ -888,7 +1004,54 @@ mod tests {
             unavailable(&outcome).contains("install dev/pam/solium as /etc/pam.d/solium"),
             "{outcome:?}"
         );
+        assert!(lasting(&outcome), "no PAM file is mended by no retry");
         assert_eq!(check.pid(), None);
+    }
+
+    /// **The helper runs from a sealed copy taken at startup**: the memfd it
+    /// is copied into refuses writes, growth and shrinking, a change of mode
+    /// and a seal taken off, and is open read-only; and the file changed in
+    /// place afterwards -- as the user's own programs can change a helper in
+    /// a home install -- is not what runs: the copy of `true` does, and ends
+    /// without answering, where the changed file would not have started.
+    #[test]
+    fn the_helper_runs_from_a_sealed_copy_taken_at_startup() {
+        let path = std::env::temp_dir().join(format!("solium-auth-sealed-{}", std::process::id()));
+        std::fs::copy("/usr/bin/true", &path).expect("a copy of true");
+        let mut helper = Helper::open(&path).expect("it opens");
+        helper.pam_files = vec![pam_file("sealed")];
+
+        let fd = helper.exe.as_raw_fd();
+        // SAFETY: reads the seals of a descriptor the helper owns.
+        #[expect(unsafe_code, reason = "calling libc")]
+        let seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
+        let wanted =
+            libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
+        assert_eq!(seals & wanted, wanted, "seals {seals:#x}");
+        // SAFETY: the access mode of a descriptor the helper owns.
+        #[expect(unsafe_code, reason = "calling libc")]
+        let mode = unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE;
+        assert_eq!(mode, libc::O_RDONLY, "a descriptor that can write the copy");
+        let reopened = std::fs::OpenOptions::new()
+            .write(true)
+            .open(format!("/proc/self/fd/{fd}"));
+        if let Ok(mut writable) = reopened {
+            assert!(
+                writable.write_all(b"#!/bin/false\n").is_err(),
+                "the copy took a write"
+            );
+        }
+
+        // Changed in place, the same file and inode, to something no kernel
+        // runs.
+        std::fs::write(&path, "not a program\n").expect("changed in place");
+        let (_check, outcome) = checked(&helper, "illia", "correct horse", LONG);
+        let outcome = outcome.recv_timeout(LONG).expect("an outcome");
+        assert!(
+            unavailable(&outcome).contains("ended (status 0) without answering"),
+            "{outcome:?}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

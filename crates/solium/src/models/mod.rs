@@ -52,12 +52,13 @@ impl crate::state::Solium {
         // What Solium's own lock shows of its password: never the password.
         // `lock_auth::tests::typed_text_never_reaches_the_lock_scene`.
         crate::lock_auth::publish(self);
-        // While Solium's own lock holds the session, the scenes read only
-        // what a lock may show: the monitors, the keyboard and the clock (the
-        // scene's own). Everything else reads empty, because the lock's
-        // scenes read the same models as the desktop's, and comes back at
-        // the unlock. What a lock may show of the rest, redacted in place,
-        // is a later issue (#281's plan).
+        // The lock's own scenes never read these models: theirs are always
+        // empty (`qml/attached.h`, `solium_qml_name_scope`). While Solium's
+        // own lock holds the session, the scenes still drawn over it that
+        // are not the lock's -- the pointer's -- read only what a lock may
+        // show too: the monitors and the keyboard. Everything else reads
+        // empty, and comes back at the unlock. What a lock may show of the
+        // rest, redacted in place, is a later issue (#281's plan).
         // `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`.
         let redacted = self.lock.as_ref().is_some_and(crate::lock::Lock::is_native);
         // Apps: scanned once, lazily, on the first call this process ever

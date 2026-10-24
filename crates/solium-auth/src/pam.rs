@@ -1,6 +1,8 @@
 //! PAM, as the helper uses it: one `pam_authenticate` against the `solium`
 //! service, with a conversation that answers the one hidden prompt with the
-//! secret and refuses anything else.
+//! secret and refuses anything else, and then `pam_acct_mgmt`, so an account
+//! that is expired or locked is not let in by its right password
+//! ([`verdict`]).
 //!
 //! Declared here by hand rather than generated from `security/pam_appl.h`, so
 //! building needs only the runtime library and never pam-devel. The handful of
@@ -26,6 +28,7 @@ const PAM_AUTH_ERR: c_int = 7;
 const PAM_CRED_INSUFFICIENT: c_int = 8;
 const PAM_USER_UNKNOWN: c_int = 10;
 const PAM_MAXTRIES: c_int = 11;
+const PAM_NEW_AUTHTOK_REQD: c_int = 12;
 const PAM_CONV_ERR: c_int = 19;
 
 /// `pam_setcred`'s flag for credentials that already exist and are renewed,
@@ -98,9 +101,18 @@ mod ffi {
             conversation: *const Conversation,
             handle: *mut *mut Handle,
         ) -> c_int;
+        #[cfg(test)]
+        pub(super) fn pam_start_confdir(
+            service: *const c_char,
+            user: *const c_char,
+            conversation: *const Conversation,
+            confdir: *const c_char,
+            handle: *mut *mut Handle,
+        ) -> c_int;
         pub(super) fn pam_set_item(handle: *mut Handle, item: c_int, value: *const c_void)
         -> c_int;
         pub(super) fn pam_authenticate(handle: *mut Handle, flags: c_int) -> c_int;
+        pub(super) fn pam_acct_mgmt(handle: *mut Handle, flags: c_int) -> c_int;
         pub(super) fn pam_setcred(handle: *mut Handle, flags: c_int) -> c_int;
         pub(super) fn pam_end(handle: *mut Handle, status: c_int) -> c_int;
         pub(super) fn pam_strerror(handle: *mut Handle, status: c_int) -> *const c_char;
@@ -124,6 +136,79 @@ struct Talk<'a> {
 /// The authenticator the helper runs: PAM.
 pub(crate) struct Pam;
 
+/// The two questions one transaction asks, in [`verdict`]'s order: PAM's
+/// own, and a test's stand-in for it.
+trait Transaction {
+    /// `pam_authenticate`'s status.
+    fn authenticate(&mut self) -> c_int;
+    /// `pam_acct_mgmt`'s status.
+    fn acct_mgmt(&mut self) -> c_int;
+    /// Why the conversation refused a prompt, when it did.
+    fn refused(&self) -> Option<&'static str>;
+    /// The failure delay a module asked for, in microseconds.
+    fn delay_us(&self) -> u32;
+}
+
+/// A live transaction, between `pam_start` and `pam_end`.
+struct Live<'a> {
+    handle: *mut Handle,
+    talk: *const Talk<'a>,
+}
+
+impl Transaction for Live<'_> {
+    fn authenticate(&mut self) -> c_int {
+        // SAFETY: a handle `pam_start` returned and `pam_end` has not closed.
+        #[expect(unsafe_code, reason = "calling PAM")]
+        unsafe {
+            ffi::pam_authenticate(self.handle, 0)
+        }
+    }
+
+    fn acct_mgmt(&mut self) -> c_int {
+        // SAFETY: as above.
+        #[expect(unsafe_code, reason = "calling PAM")]
+        unsafe {
+            ffi::pam_acct_mgmt(self.handle, 0)
+        }
+    }
+
+    fn refused(&self) -> Option<&'static str> {
+        // SAFETY: the `Talk` the conversation writes through, alive for the
+        // transaction; PAM is not inside a call while this reads it.
+        #[expect(unsafe_code, reason = "reading what the conversation wrote")]
+        unsafe {
+            (*self.talk).refused
+        }
+    }
+
+    fn delay_us(&self) -> u32 {
+        DELAY_US.load(Ordering::Relaxed)
+    }
+}
+
+/// What a transaction comes to: authenticated, and then, only on a yes, the
+/// account checked. An account that is expired, locked or not allowed in now
+/// fails on the right password; one whose password must be changed is let
+/// in, since the lock cannot change it and the session is already the
+/// user's.
+fn verdict(transaction: &mut impl Transaction) -> (Answer, c_int) {
+    let status = transaction.authenticate();
+    let answer = judge(status, transaction.refused(), transaction.delay_us());
+    if answer != Answer::Ok {
+        return (answer, status);
+    }
+    let account = transaction.acct_mgmt();
+    match account {
+        PAM_SUCCESS | PAM_NEW_AUTHTOK_REQD => (Answer::Ok, PAM_SUCCESS),
+        _ => (
+            Answer::Failed {
+                delay_ms: transaction.delay_us() / 1000,
+            },
+            account,
+        ),
+    }
+}
+
 impl Authenticator for Pam {
     fn authenticate(&mut self, user: &str, secret: &Secret) -> Answer {
         // The protocol refuses a user name with a NUL in it already.
@@ -145,6 +230,23 @@ impl Authenticator for Pam {
         // `pam_end` closes before this returns.
         #[expect(unsafe_code, reason = "calling PAM")]
         unsafe {
+            #[cfg(test)]
+            let started = match tests::CONFDIR.with(|dir| dir.borrow().clone()) {
+                Some(dir) => ffi::pam_start_confdir(
+                    SERVICE.as_ptr(),
+                    user.as_ptr(),
+                    &raw const conversation,
+                    dir.as_ptr(),
+                    &raw mut handle,
+                ),
+                None => ffi::pam_start(
+                    SERVICE.as_ptr(),
+                    user.as_ptr(),
+                    &raw const conversation,
+                    &raw mut handle,
+                ),
+            };
+            #[cfg(not(test))]
             let started = ffi::pam_start(
                 SERVICE.as_ptr(),
                 user.as_ptr(),
@@ -158,8 +260,11 @@ impl Authenticator for Pam {
             }
             let delay: Delay = note_delay;
             ffi::pam_set_item(handle, PAM_FAIL_DELAY, delay as *const c_void);
-            let status = ffi::pam_authenticate(handle, 0);
-            let answer = judge(status, talk.refused, DELAY_US.load(Ordering::Relaxed));
+            let mut live = Live {
+                handle,
+                talk: &raw const talk,
+            };
+            let (answer, status) = verdict(&mut live);
             if answer == Answer::Ok {
                 // What it says is not the question asked: the password was
                 // right, and a ticket that could not be renewed does not make
@@ -172,13 +277,15 @@ impl Authenticator for Pam {
     }
 }
 
-/// The answer `pam_authenticate`'s `status` gives. A refused prompt makes
-/// any failure unavailable rather than wrong: the password was never the
-/// whole question.
+/// The answer `pam_authenticate`'s `status` gives. The secret has reached
+/// PAM's modules whatever the status, so anything but a yes counts as an
+/// attempt: a known failure is a no, and a refused prompt or a status that
+/// is neither yes nor a known no is [`Answer::Refused`], which says why and
+/// counts as a no.
 fn judge(status: c_int, refused: Option<&'static str>, delay_us: u32) -> Answer {
     match (status, refused) {
         (PAM_SUCCESS, _) => Answer::Ok,
-        (_, Some(refused)) => Answer::Unavailable {
+        (_, Some(refused)) => Answer::Refused {
             reason: refused.to_owned(),
         },
         (
@@ -191,7 +298,7 @@ fn judge(status: c_int, refused: Option<&'static str>, delay_us: u32) -> Answer 
         ) => Answer::Failed {
             delay_ms: delay_us / 1000,
         },
-        (status, None) => Answer::Unavailable {
+        (status, None) => Answer::Refused {
             reason: message(status),
         },
     }
@@ -332,10 +439,23 @@ unsafe fn drop_answers(answers: *mut Response, count: usize) {
 #[cfg(test)]
 mod tests {
     //! The conversation is tested by calling it as PAM does, with messages of
-    //! the test's own. No test starts a PAM transaction: that would check a
-    //! real password of a real account.
+    //! the test's own. A PAM transaction is started only against a service
+    //! of the test's own, in a directory of its own, whose stacks are
+    //! `pam_permit` and `pam_deny`: no test checks a real password of a real
+    //! account.
+
+    use std::cell::RefCell;
 
     use super::*;
+
+    thread_local! {
+        /// Where `pam_start_confdir` reads the `solium` service, for a test
+        /// that runs a transaction against stacks of its own.
+        pub(super) static CONFDIR: RefCell<Option<CString>> = const { RefCell::new(None) };
+    }
+
+    /// `pam_acct_mgmt`'s answer for an account past its expiry date.
+    const PAM_ACCT_EXPIRED: c_int = 13;
 
     /// The values declared by hand are the library's: its message for each
     /// is the one Linux-PAM gives that status.
@@ -357,6 +477,11 @@ mod tests {
             "Have exhausted maximum number of retries for service"
         );
         assert_eq!(message(PAM_CONV_ERR), "Conversation error");
+        assert_eq!(
+            message(PAM_NEW_AUTHTOK_REQD),
+            "Authentication token is no longer valid; new one required"
+        );
+        assert_eq!(message(PAM_ACCT_EXPIRED), "User account has expired");
     }
 
     /// One call of the conversation with `styles`: its status, the replies'
@@ -453,17 +578,135 @@ mod tests {
             judge(PAM_USER_UNKNOWN, None, 0),
             Answer::Failed { delay_ms: 0 }
         );
+        // A refused prompt, or a status that is neither yes nor a known no,
+        // is refused: the password reached the modules, so it counts.
         assert_eq!(
             judge(PAM_AUTH_ERR, Some("PAM asked for a second password"), 0),
-            Answer::Unavailable {
+            Answer::Refused {
                 reason: "PAM asked for a second password".into()
             }
         );
         assert_eq!(
             judge(PAM_CONV_ERR, None, 0),
-            Answer::Unavailable {
+            Answer::Refused {
                 reason: "Conversation error".into()
             }
         );
+    }
+
+    /// A transaction of the test's own: the statuses its two calls return,
+    /// and which of them were made.
+    struct Scripted {
+        auth: c_int,
+        account: c_int,
+        asked_account: bool,
+    }
+
+    impl Transaction for Scripted {
+        fn authenticate(&mut self) -> c_int {
+            self.auth
+        }
+        fn acct_mgmt(&mut self) -> c_int {
+            self.asked_account = true;
+            self.account
+        }
+        fn refused(&self) -> Option<&'static str> {
+            None
+        }
+        fn delay_us(&self) -> u32 {
+            0
+        }
+    }
+
+    /// **The account is checked after the password**: a right password on
+    /// an account `pam_acct_mgmt` refuses (expired, locked, outside its
+    /// hours) fails, one whose password must be changed is let in, and a
+    /// wrong password never asks about the account at all.
+    #[test]
+    fn a_right_password_on_a_refused_account_fails() {
+        let run = |auth, account| {
+            let mut transaction = Scripted {
+                auth,
+                account,
+                asked_account: false,
+            };
+            let (answer, _) = verdict(&mut transaction);
+            (answer, transaction.asked_account)
+        };
+        assert_eq!(run(PAM_SUCCESS, PAM_SUCCESS), (Answer::Ok, true));
+        assert_eq!(
+            run(PAM_SUCCESS, PAM_ACCT_EXPIRED),
+            (Answer::Failed { delay_ms: 0 }, true)
+        );
+        assert_eq!(
+            run(PAM_SUCCESS, PAM_PERM_DENIED),
+            (Answer::Failed { delay_ms: 0 }, true)
+        );
+        assert_eq!(run(PAM_SUCCESS, PAM_NEW_AUTHTOK_REQD), (Answer::Ok, true));
+        assert_eq!(
+            run(PAM_AUTH_ERR, PAM_SUCCESS),
+            (Answer::Failed { delay_ms: 0 }, false)
+        );
+    }
+
+    /// One check by the real `Pam`, against a `solium` service whose file
+    /// is `stacks`, in a directory of the test's own.
+    fn checked_against(name: &str, stacks: &str) -> Answer {
+        let dir =
+            std::env::temp_dir().join(format!("solium-auth-pam-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        std::fs::write(dir.join("solium"), stacks).expect("the service");
+        let path = CString::new(dir.to_string_lossy().into_owned()).expect("a path");
+        CONFDIR.with(|confdir| *confdir.borrow_mut() = Some(path));
+        let mut secret = Secret::new();
+        assert!(secret.push_str("not checked by pam_permit"));
+        let answer = Pam.authenticate("nobody", &secret);
+        CONFDIR.with(|confdir| *confdir.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+        answer
+    }
+
+    /// **libpam's own `pam_acct_mgmt` decides after a yes**: a stack whose
+    /// account says no fails a password its auth says yes to, and so does a
+    /// service with no account stack at all, which is why the shipped
+    /// `dev/pam/solium` has one.
+    #[test]
+    fn the_account_stack_is_asked_after_a_yes() {
+        let permit = "auth required pam_permit.so\n";
+        assert_eq!(
+            checked_against(
+                "permit",
+                &format!("{permit}account required pam_permit.so\n")
+            ),
+            Answer::Ok
+        );
+        assert_eq!(
+            checked_against("deny", &format!("{permit}account required pam_deny.so\n")),
+            Answer::Failed { delay_ms: 0 }
+        );
+        assert_eq!(
+            checked_against("none", permit),
+            Answer::Failed { delay_ms: 0 },
+            "a service with no account stack let the password in"
+        );
+        assert!(
+            matches!(
+                checked_against(
+                    "auth-deny",
+                    "auth required pam_deny.so\naccount required pam_permit.so\n"
+                ),
+                Answer::Failed { .. }
+            ),
+            "a no from auth"
+        );
+        let shipped = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dev/pam/solium"));
+        for stack in ["auth", "account"] {
+            assert!(
+                shipped
+                    .lines()
+                    .any(|line| line.split_whitespace().next() == Some(stack)),
+                "dev/pam/solium has no {stack} stack"
+            );
+        }
     }
 }

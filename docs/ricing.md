@@ -1080,7 +1080,17 @@ return { idle = { lock_after = 900 } }   -- seconds; 0 never does it
 
 A second lock over a session already locked changes nothing. Only the
 password, checked by PAM, unlocks it, or `loginctl unlock-session` from
-another console or over SSH, which is the way out when PAM cannot answer.
+another console or over SSH, which is the way out when PAM cannot answer. On
+a machine where whoever can reach logind should not be able to unlock your
+session, turn that off and leave only the password
+(`logind::tests::with_logind_unlock_off_an_unlock_signal_is_ignored`):
+
+```lua
+return { lock = { logind_unlock = false } }
+```
+
+The lock screen then names `loginctl terminate-session` as the way out
+instead, which ends the session rather than unlocking it.
 
 **A locker of your own instead.** Name it, and it is what all five run:
 
@@ -1161,13 +1171,15 @@ A scene you mend is tried again at the next lock.
 
 A lock scene has the same `import Solium` as any other, and adds:
 
-- `Lock`, read-only: `state` (`"idle"`, `"prompting"`, `"checking"`,
-  `"failed"`, `"lockedOut"`, `"unavailable"`, `"unlocking"`), `locked`,
-  `attempts`, `retryAfter` (seconds, while locked out or retrying),
-  `message`, `user` (`name`, `realName`, `avatar`), `promptOn` (the
-  monitor `prompt_on` names) and `exitMs`. `Lock.submit()` checks what was
-  typed, as Return does, and `Lock.clear()` empties it, as Escape does; both
-  carry nothing.
+- `Lock`, read-only, an attached object any item reads: `state` (`"idle"`,
+  `"prompting"`, `"checking"`, `"failed"`, `"lockedOut"`, `"unavailable"`,
+  `"unlocking"`), `locked`, `attempts`, `retryAfter` (seconds, while locked
+  out or retrying), `message`, `user` (`name`, `realName`, `avatar`),
+  `promptOn` (the monitor `prompt_on` names) and `exitMs`. `Lock.submit()`
+  checks what was typed, as Return does, and `Lock.clear()` empties it, as
+  Escape does; both carry nothing. React to it as to any attached object,
+  with `Lock.onStateChanged: ...` on one of your items, as the example
+  below does.
 - `SecretInput`, the password field: a dot for each character typed and a
   caret. Keys go into it whichever item has focus, with no click first.
   Its colours, sizes and spacing are properties. `SecretField` is the
@@ -1177,12 +1189,35 @@ A lock scene has the same `import Solium` as any other, and adds:
   types it; your scene is told only that a key was pressed
   (`keyPressed()`), never which.
 
-While locked, a lock scene reads only what a lock may show: the monitors, the
-keyboard layout, and its own clock. `Windows`, `Workspaces`, `Apps`,
-`Folder` and `Solium.status` read empty until the unlock
-(`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`). Keys never
-reach the scene; the pointer and fingers on its monitor do, as Qt events, so
-its buttons and swipes work.
+A lock scene never sees the session, whether it is locked or not: it reads
+the monitors, the keyboard layout and its own clock, and `Windows`,
+`Workspaces`, `Apps`, `Folder`, a `WindowList` or `WorkspaceList`,
+`Solium.status` and `Solium.dirs` read empty in it at all times, the hours it
+waits, kept, for the next lock included
+(`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`). A scene
+you got from someone else can show a clock and a field, and nothing of what
+you were doing. The other way round, no other scene sees the lock: in a bar
+or a widget, `Lock` reads `"idle"`, `Lock.submit()` and `Lock.clear()` do
+nothing, a `SecretField` reads nothing and a `SecretKeypad` lays out no key,
+so nothing on the desktop can time what is typed at the lock or submit for
+you (`lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`).
+Keys never reach the scene; the pointer and fingers on its monitor do, as Qt
+events, so its buttons and swipes work. Over a `SecretKeypad`, and within
+`lock.keypad_margin` pixels of it (32 by default), the scene is told the
+pointer left and nothing more, since the way the pointer takes to a key says
+which key it is
+(`lock_auth::tests::the_pointer_near_the_keypad_is_kept_from_the_scene`).
+
+When the password cannot be checked, `Lock.state` reads `"unavailable"` and
+`Lock.message` says how to unlock from another console. If PAM had the
+password and asked for more than it, such as a one-time code, that counts as
+a wrong password toward `lock.lockout`. If the helper crashed or took too
+long, the same password is tried again, at most `lock.retry.attempts` times
+(`Lock.retryAfter` counting down to each), and then wiped; if it never can
+answer (it is missing, or PAM has no `solium` service), the password is wiped
+at once. Either way the field takes typing again
+(`lock_auth::tests::a_refused_check_counts_toward_the_lockout_and_wipes_the_password`,
+`lock_auth::tests::an_unavailable_check_is_retried_at_most_the_settings_times`).
 
 When the password is right, Solium unlocks at once: the keyboard and the
 pointer are the desktop's from that moment. The scene stays over the desktop
@@ -1214,18 +1249,15 @@ Rectangle {
         repeat: true
         onTriggered: root.now = new Date()
     }
-    Connections {
-        target: Lock
-        function onLockedChanged() {
-            if (Lock.locked) {
-                root.now = new Date()
-                root.opacity = 1
-            }
+    Lock.onLockedChanged: {
+        if (Lock.locked) {
+            root.now = new Date()
+            root.opacity = 1
         }
-        function onStateChanged() {
-            if (Lock.state === "unlocking")
-                fade.restart()
-        }
+    }
+    Lock.onStateChanged: {
+        if (Lock.state === "unlocking")
+            fade.restart()
     }
     NumberAnimation {
         id: fade
@@ -1706,7 +1738,10 @@ at the lock screen as well, as those and the media keys do:
 A binding here replaces the shipped one whole, so a volume key you rebind
 repeats only if your list says so. At the lock screen a binding may run
 programs and change the keyboard, but not touch a window or a workspace, or
-end the session. A function from your own `init.lua` asks the same through
+end the session. At Solium's own lock screen it fires only for a key that
+types no character there: a letter, a digit or a symbol, with Shift or
+without, always goes into the password, so no binding can read it a key at a
+time (`lock_auth::tests::at_the_native_lock_a_locked_binding_never_takes_a_character`). A function from your own `init.lua` asks the same through
 `sol.bind`'s third argument, `{ repeating = true, locked = true }`; see the
 [Lua API](https://lilium-linux.github.io/solium/generated/reference/lua-api.html).
 

@@ -43,7 +43,10 @@
 //!
 //! On `Unlock` (`loginctl unlock-session`, from another console or over
 //! SSH), it ends Solium's own lock, which is the administrator's way out of
-//! it (`an_unlock_signal_unlocks_a_native_lock`). A lock a client holds is
+//! it (`an_unlock_signal_unlocks_a_native_lock`), unless `lock.logind_unlock`
+//! is false: then only the password ends it, for a machine where whoever can
+//! reach logind should not be able to unlock this session
+//! (`with_logind_unlock_off_an_unlock_signal_is_ignored`). A lock a client holds is
 //! left to that client: the protocol gives only the holder the unlock, and a
 //! crashed lock client is recovered by starting another, which takes over.
 //!
@@ -142,6 +145,9 @@ pub(crate) struct Settings {
     /// point of this module is that a laptop lid closing locks the screen,
     /// and that should not need finding a setting first.
     pub(crate) before_sleep: bool,
+    /// Whether logind's `Unlock` ends Solium's own lock: `lock.logind_unlock`.
+    /// On by default, as the way out when the password cannot be checked.
+    pub(crate) logind_unlock: bool,
 }
 
 impl Default for Settings {
@@ -149,6 +155,7 @@ impl Default for Settings {
         Self {
             command: None,
             before_sleep: true,
+            logind_unlock: true,
         }
     }
 }
@@ -251,6 +258,11 @@ impl Logind {
     ///
     /// `locked` is the caller's own `Solium::lock.is_some()`: this module
     /// cannot read that itself, `state/commands.rs` hands it over.
+    /// The settings in effect.
+    pub(crate) fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     pub(crate) fn configure(&mut self, settings: Settings, locked: bool) {
         let had_before_sleep = self.settings.before_sleep;
         self.settings = settings;
@@ -444,12 +456,19 @@ impl crate::state::Solium {
     }
 }
 
-/// `Unlock`: end Solium's own lock, the administrator's way out of it. A
-/// lock a client holds is that client's to end, so it is left alone.
-/// `an_unlock_signal_unlocks_a_native_lock`.
+/// `Unlock`: end Solium's own lock, the administrator's way out of it,
+/// unless `lock.logind_unlock` is false. A lock a client holds is that
+/// client's to end, so it is left alone.
+/// `an_unlock_signal_unlocks_a_native_lock`,
+/// `with_logind_unlock_off_an_unlock_signal_is_ignored`.
 fn on_unlock(state: &mut crate::state::Solium) {
     match state.lock.as_ref() {
         None => tracing::info!("logind's Unlock signal: the session is not locked"),
+        Some(lock) if lock.is_native() && !state.logind.settings.logind_unlock => {
+            tracing::warn!(
+                "logind's Unlock signal: ignored, as lock.logind_unlock is false; only the password ends Solium's own lock"
+            );
+        }
         Some(lock) if lock.is_native() => {
             tracing::info!("logind's Unlock signal: ending Solium's own lock");
             state.unlock_natively();
@@ -1278,6 +1297,7 @@ mod tests {
             Settings {
                 command: command.map(str::to_owned),
                 before_sleep,
+                ..Settings::default()
             },
         );
         logind
@@ -1380,6 +1400,7 @@ mod tests {
             Settings {
                 command: Some("true".to_owned()),
                 before_sleep: true,
+                ..Settings::default()
             },
             false,
         );
@@ -1481,6 +1502,36 @@ mod tests {
             state.lock.is_none()
         });
         assert!(unlocked, "logind's Unlock did not end the native lock");
+    }
+
+    /// **With `lock.logind_unlock` off, `Unlock` is ignored**: the native lock
+    /// stays, and only the password ends it.
+    #[test]
+    fn with_logind_unlock_off_an_unlock_signal_is_ignored() {
+        let bus = StandIn::new(5_000_000, false);
+        let mut logind = begin(&bus, None, false);
+        logind.settings.logind_unlock = false;
+        let mut state = solium_with(logind);
+        state.lock_natively();
+        bus.wait_for_subscription(SESSION_INTERFACE, "Unlock");
+        bus.send_unlock();
+        // As long as `an_unlock_signal_unlocks_a_native_lock` ever needs, and
+        // more.
+        let until = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < until {
+            settle(&mut state);
+            assert!(
+                state.lock.is_some(),
+                "logind's Unlock ended the native lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            state
+                .lock
+                .as_ref()
+                .is_some_and(crate::lock::Lock::is_native)
+        );
     }
 
     /// #225: a `Lock` a real bus sends the instant the listener's `AddMatch`

@@ -1,15 +1,31 @@
 //! [`Secret`]: a password on its way to PAM, held where it cannot leak.
 //!
-//! The bytes live in one page of their own that never moves, so no
-//! reallocation leaves a copy behind; the page is locked out of swap where the
-//! limits allow it, and every byte of it is overwritten when the secret is
-//! cleared or dropped. The type has no `Debug`, no `Display` and no `Clone`
+//! The bytes live in a page of their own, mapped for the secret alone, that
+//! never moves, so no reallocation leaves a copy behind. The page is
+//!
+//! * locked out of swap where the limits allow it;
+//! * left out of any core dump (`MADV_DONTDUMP`), and given to a forked child
+//!   as zeroes (`MADV_WIPEONFORK`):
+//!   `tests::the_page_is_left_out_of_a_core_dump_and_wiped_in_a_fork`;
+//! * overwritten, every byte of it, when the secret is cleared or dropped.
+//!
+//! And while any secret in the process holds a byte, the process is not
+//! dumpable (`PR_SET_DUMPABLE` 0): no core dump is written, and no process
+//! of the same user can attach to it or read its memory through `/proc`.
+//! When the last one is emptied, it is dumpable again as it was before
+//! (`tests/dumpable.rs`).
+//!
+//! The type has no `Debug`, no `Display` and no `Clone`
 //! (`tests::a_secret_cannot_be_formatted_or_copied`), so it cannot reach a log
 //! line by accident, and the one way to read it is [`Secret::expose`].
 
 use std::{
     io::Read,
-    sync::atomic::{Ordering, compiler_fence},
+    ptr::NonNull,
+    sync::{
+        Mutex, PoisonError,
+        atomic::{Ordering, compiler_fence},
+    },
 };
 
 /// The longest secret, in bytes: `PAM_MAX_RESP_SIZE`, the most a PAM
@@ -17,10 +33,135 @@ use std::{
 /// one could never be the right one.
 pub const MAX_LEN: usize = 512;
 
-/// The page a secret lives in, aligned so that it is a page of its own: locking
-/// and unlocking it never touches memory belonging to anything else.
-#[repr(C, align(4096))]
-struct Page([u8; MAX_LEN]);
+/// The page a secret lives in: an anonymous private mapping of its own, so
+/// that locking it and advising the kernel about it never touches memory
+/// belonging to anything else.
+struct Page {
+    at: NonNull<u8>,
+    /// The mapping's length: one page, whatever the page size is.
+    len: usize,
+}
+
+impl Page {
+    fn new() -> Self {
+        // SAFETY: `sysconf` reads a constant of the system.
+        #[expect(unsafe_code, reason = "calling libc")]
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let len = usize::try_from(page).unwrap_or(4096).max(MAX_LEN);
+        // SAFETY: a fresh anonymous mapping, checked before use. Its memory is
+        // zeroed by the kernel.
+        #[expect(unsafe_code, reason = "calling libc")]
+        let mapped = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        let Some(at) = NonNull::new(mapped.cast::<u8>()).filter(|_| mapped != libc::MAP_FAILED)
+        else {
+            // What a `Box` does when there is no memory for it.
+            std::alloc::handle_alloc_error(std::alloc::Layout::new::<[u8; MAX_LEN]>());
+        };
+        // SAFETY: the range is the mapping just made. Each of these failing
+        // (RLIMIT_MEMLOCK spent, a kernel without the advice) leaves the page
+        // as it was, which is the "where it can" of the spec, not a reason to
+        // refuse a password.
+        #[expect(unsafe_code, reason = "calling libc")]
+        unsafe {
+            libc::mlock(at.as_ptr().cast(), len);
+            libc::madvise(at.as_ptr().cast(), len, libc::MADV_DONTDUMP);
+            libc::madvise(at.as_ptr().cast(), len, libc::MADV_WIPEONFORK);
+        }
+        Self { at, len }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the mapping is `len >= MAX_LEN` bytes, readable, alive as
+        // long as `self`, and only reached through `self`.
+        #[expect(unsafe_code, reason = "a slice over the mapping")]
+        unsafe {
+            std::slice::from_raw_parts(self.at.as_ptr(), MAX_LEN)
+        }
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as `bytes`, and `&mut self` makes it the only reference.
+        #[expect(unsafe_code, reason = "a slice over the mapping")]
+        unsafe {
+            std::slice::from_raw_parts_mut(self.at.as_ptr(), MAX_LEN)
+        }
+    }
+}
+
+impl Drop for Page {
+    fn drop(&mut self) {
+        wipe(self.bytes_mut());
+        // SAFETY: the mapping this page made, unmapped once, here.
+        #[expect(unsafe_code, reason = "calling libc")]
+        unsafe {
+            libc::munlock(self.at.as_ptr().cast(), self.len);
+            libc::munmap(self.at.as_ptr().cast(), self.len);
+        }
+    }
+}
+
+// SAFETY: the page is owned by its secret alone, as a `Box` would be: moving
+// the secret to another thread moves the only way to it, and a shared
+// reference only reads.
+#[expect(unsafe_code, reason = "a raw pointer owned like a Box")]
+unsafe impl Send for Page {}
+// SAFETY: as above; nothing mutates through a shared reference.
+#[expect(unsafe_code, reason = "a raw pointer owned like a Box")]
+unsafe impl Sync for Page {}
+
+/// How many secrets in this process hold a byte, and whether the process was
+/// dumpable before the first of them did.
+struct Held {
+    count: usize,
+    before: Option<libc::c_int>,
+}
+
+static HELD: Mutex<Held> = Mutex::new(Held {
+    count: 0,
+    before: None,
+});
+
+/// One more secret holds a byte: the first makes the process non-dumpable.
+fn hold() {
+    let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+    if held.count == 0 {
+        // SAFETY: `prctl` with these options reads or sets a flag of this
+        // process and takes no pointers.
+        #[expect(unsafe_code, reason = "calling libc")]
+        unsafe {
+            held.before = Some(libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0));
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        }
+    }
+    held.count = held.count.saturating_add(1);
+}
+
+/// One fewer: after the last, the process is as dumpable as it was before
+/// the first. A process that was not (the helper, which makes itself so)
+/// stays not.
+fn release() {
+    let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+    held.count = held.count.saturating_sub(1);
+    if held.count == 0
+        && let Some(before) = held.before.take()
+        && before > 0
+    {
+        // SAFETY: as in `hold`.
+        #[expect(unsafe_code, reason = "calling libc")]
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, before, 0, 0, 0);
+        }
+    }
+}
 
 /// A password, or a passcode, being typed or being checked.
 ///
@@ -31,8 +172,10 @@ struct Page([u8; MAX_LEN]);
     reason = "a secret is never formatted: tests::a_secret_cannot_be_formatted_or_copied"
 )]
 pub struct Secret {
-    page: Box<Page>,
+    page: Page,
     len: usize,
+    /// Whether this secret counts in [`HELD`]: it holds a byte.
+    holding: bool,
 }
 
 impl Default for Secret {
@@ -42,29 +185,39 @@ impl Default for Secret {
 }
 
 impl Secret {
-    /// An empty secret, its page locked in memory where the limits allow it.
+    /// An empty secret, in a page of its own (see the module documentation).
     #[must_use]
     pub fn new() -> Self {
-        let page = Box::new(Page([0; MAX_LEN]));
-        // SAFETY: the range is the page this secret owns, alive for the call.
-        // A failure (RLIMIT_MEMLOCK spent) leaves it unlocked, which is the
-        // "where it can" of the spec, not a reason to refuse a password.
-        #[expect(unsafe_code, reason = "calling libc")]
-        unsafe {
-            libc::mlock(page.0.as_ptr().cast(), MAX_LEN);
+        Self {
+            page: Page::new(),
+            len: 0,
+            holding: false,
         }
-        Self { page, len: 0 }
+    }
+
+    /// Count in [`HELD`] exactly while holding a byte.
+    fn settle_hold(&mut self) {
+        let holding = self.len > 0;
+        if holding != self.holding {
+            if holding {
+                hold();
+            } else {
+                release();
+            }
+            self.holding = holding;
+        }
     }
 
     /// Append `text`. False, and the secret unchanged, when it would not fit
     /// in [`MAX_LEN`] bytes.
     pub fn push_str(&mut self, text: &str) -> bool {
         let end = self.len.saturating_add(text.len());
-        let Some(room) = self.page.0.get_mut(self.len..end) else {
+        let Some(room) = self.page.bytes_mut().get_mut(self.len..end) else {
             return false;
         };
         room.copy_from_slice(text.as_bytes());
         self.len = end;
+        self.settle_hold();
         true
     }
 
@@ -79,17 +232,19 @@ impl Secret {
             return false;
         };
         let end = self.len;
-        if let Some(gone) = self.page.0.get_mut(last..end) {
+        if let Some(gone) = self.page.bytes_mut().get_mut(last..end) {
             wipe(gone);
         }
         self.len = last;
+        self.settle_hold();
         true
     }
 
     /// Empty it, overwriting every byte of the page.
     pub fn clear(&mut self) {
-        wipe(&mut self.page.0);
+        wipe(self.page.bytes_mut());
         self.len = 0;
+        self.settle_hold();
     }
 
     /// Its length in bytes.
@@ -119,18 +274,19 @@ impl Secret {
     /// compositor's lock asks of its buffers after a submit and an unlock.
     #[must_use]
     pub fn is_wiped(&self) -> bool {
-        self.page.0.iter().all(|byte| *byte == 0)
+        self.page.bytes().iter().all(|byte| *byte == 0)
     }
 
     /// The bytes themselves, for the one place that hands them on: the
     /// request to the helper, and the helper's answer to PAM.
     #[must_use]
     pub fn expose(&self) -> &[u8] {
-        self.page.0.get(..self.len).unwrap_or_default()
+        self.page.bytes().get(..self.len).unwrap_or_default()
     }
 
     fn as_bytes_mut(&mut self) -> &mut [u8] {
-        self.page.0.get_mut(..self.len).unwrap_or_default()
+        let len = self.len;
+        self.page.bytes_mut().get_mut(..len).unwrap_or_default()
     }
 
     /// Replace it with exactly `len` bytes read from `from`, straight into the
@@ -138,7 +294,7 @@ impl Secret {
     /// the read fails, or when `len` is more than [`MAX_LEN`].
     pub(crate) fn read_from(&mut self, from: &mut impl Read, len: usize) -> std::io::Result<()> {
         self.clear();
-        let Some(into) = self.page.0.get_mut(..len) else {
+        let Some(into) = self.page.bytes_mut().get_mut(..len) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "longer than a secret can be",
@@ -149,24 +305,21 @@ impl Secret {
             return Err(error);
         }
         self.len = len;
+        self.settle_hold();
         Ok(())
     }
 
     /// The whole page, cleared bytes included, for the tests that it is clear.
     #[cfg(test)]
     pub(crate) fn page(&self) -> &[u8] {
-        &self.page.0
+        self.page.bytes()
     }
 }
 
 impl Drop for Secret {
     fn drop(&mut self) {
+        // The page wipes and unmaps itself; this lets go of the hold.
         self.clear();
-        // SAFETY: the page this secret owns, still alive until this returns.
-        #[expect(unsafe_code, reason = "calling libc")]
-        unsafe {
-            libc::munlock(self.page.0.as_ptr().cast(), MAX_LEN);
-        }
     }
 }
 
@@ -242,6 +395,60 @@ mod tests {
         assert!(!secret.debug(), "Secret implements Debug");
         assert!(!secret.display(), "Secret implements Display");
         assert!(!secret.copies(), "Secret implements Clone");
+    }
+
+    /// The `VmFlags` of the mapping `at` is in, from `/proc/self/smaps`.
+    fn vm_flags(at: *const u8) -> Vec<String> {
+        let smaps = std::fs::read_to_string("/proc/self/smaps").expect("smaps");
+        let at = at as usize;
+        let mut inside = false;
+        for line in smaps.lines() {
+            // A mapping's first line starts with its range, `start-end` in
+            // hex; the lines about it after that start with a `Name:`.
+            let range = line
+                .split_whitespace()
+                .next()
+                .and_then(|range| range.split_once('-'))
+                .and_then(|(start, end)| {
+                    Some((
+                        usize::from_str_radix(start, 16).ok()?,
+                        usize::from_str_radix(end, 16).ok()?,
+                    ))
+                });
+            if let Some((start, end)) = range {
+                inside = start <= at && at < end;
+            } else if inside && let Some(flags) = line.strip_prefix("VmFlags:") {
+                return flags.split_whitespace().map(str::to_owned).collect();
+            }
+        }
+        panic!("no mapping holds the page");
+    }
+
+    /// **Left out of a core dump, and zeroes in a fork**: the page's mapping
+    /// carries `dd` (`MADV_DONTDUMP`) and `wf` (`MADV_WIPEONFORK`), so a
+    /// crash's core file has none of it and a child forked while it holds a
+    /// password has nothing of it.
+    #[test]
+    fn the_page_is_left_out_of_a_core_dump_and_wiped_in_a_fork() {
+        let mut secret = Secret::new();
+        assert!(secret.push_str("hunter2"));
+        let flags = vm_flags(secret.page().as_ptr());
+        assert!(flags.iter().any(|flag| flag == "dd"), "{flags:?}");
+        assert!(flags.iter().any(|flag| flag == "wf"), "{flags:?}");
+    }
+
+    /// **Holding a byte, the process is not dumpable**: no core file, and no
+    /// `/proc/<pid>/mem` for another process of the user. Whether it comes
+    /// back once nothing is held is `tests/dumpable.rs`, a process of its
+    /// own, as the tests here run beside each other.
+    #[test]
+    fn a_process_holding_a_secret_is_not_dumpable() {
+        let mut secret = Secret::new();
+        assert!(secret.push_str("x"));
+        // SAFETY: reads a flag of this process.
+        #[expect(unsafe_code, reason = "calling libc")]
+        let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+        assert_eq!(dumpable, 0);
     }
 
     #[test]
