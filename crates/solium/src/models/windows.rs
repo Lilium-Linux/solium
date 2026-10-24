@@ -98,6 +98,7 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
                         },
                     ),
                     ("state", Json::Text(shown.to_owned())),
+                    ("minimized", Json::Bool(info.minimized)),
                     ("onStage", Json::Bool(state.pane_on_stage(pane_id))),
                 ]),
             })

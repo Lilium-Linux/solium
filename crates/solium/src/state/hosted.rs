@@ -359,7 +359,8 @@ impl Solium {
     /// One of the compositor's verbs, as the command that does it, or why it
     /// cannot be done: an action it does not know, logged once by name, data
     /// with no window's id, a window that is not there (Ruling 15), a focus
-    /// the lock refuses, or a fullscreen or maximise of an X11 window, which
+    /// the lock refuses, a minimize or unminimize behind the lock (#30), or
+    /// a fullscreen or maximise of an X11 window, which
     /// has no xdg toplevel to take it. Only `windows.close` reaches a window
     /// still loading: the others act on its client, which it does not have
     /// yet.
@@ -367,7 +368,8 @@ impl Solium {
     /// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`,
     /// `state::tests::real_client::reflow_on_close::hosted::sol_act_on_a_window_still_loading_answers_unknown_window_but_closes_it`,
     /// `state::tests::real_client::reflow_on_close::hosted::windows_focus_from_a_scene_focuses_the_window`,
-    /// `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
+    /// `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`,
+    /// `state::tests::real_client::reflow_on_close::minimize::sol_act_minimizes_and_unminimizes_a_window`.
     pub(crate) fn act(
         &mut self,
         action: &str,
@@ -476,10 +478,13 @@ impl Solium {
             },
             "windows.close" => Command::Close { id },
             "windows.fullscreen" => Command::ToggleFullscreen { id },
+            "windows.minimize" => Command::Minimize { id },
+            "windows.unminimize" => Command::Unminimize { id },
             _ => Command::ToggleMaximize { id },
         };
         match action {
-            "windows.focus" | "windows.close" | "windows.fullscreen" | "windows.maximize" => {}
+            "windows.focus" | "windows.close" | "windows.fullscreen" | "windows.maximize"
+            | "windows.minimize" | "windows.unminimize" => {}
             _ => {
                 if self.unknown_actions.insert(action.to_owned()) {
                     tracing::warn!(action, "sol.act: no such action");
@@ -503,6 +508,12 @@ impl Solium {
             // it was done.
             // `state::tests::real_client::lock_focus::sol_act_focus_behind_the_lock_is_answered_locked`.
             ("windows.focus", Some(window)) if !self.may_focus(&window) => Err("locked"),
+            // Nor is a window minimized or shown again behind it (#30), as
+            // no window is focused there.
+            // `state::tests::real_client::lock_focus::sol_act_minimize_behind_the_lock_is_answered_locked`.
+            ("windows.minimize" | "windows.unminimize", Some(_)) if self.lock.is_some() => {
+                Err("locked")
+            }
             // An X11 window has no xdg toplevel, and `ToggleFullscreen` and
             // `toggle_maximize` leave a window without one as it is, so
             // `done` hears `unsupported` and not that it was done. No test

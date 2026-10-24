@@ -1097,6 +1097,7 @@ mod desk {
             modal: false,
             parent: crate::script::Parentage::None,
             leaving: false,
+            minimized: false,
             app_id: String::new(),
             min: None,
             max: None,

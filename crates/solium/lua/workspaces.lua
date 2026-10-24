@@ -144,10 +144,15 @@ function workspaces.on_active(id, monitor)
 end
 
 -- Windows on the workspace their own monitor is showing, in the order given.
-function workspaces.visible(windows)
+--
+-- Not a minimized one (#30), which is on its desk and not on screen, unless
+-- `minimized` is true: the overview shows those too.
+function workspaces.visible(windows, minimized)
     local out = {}
     for _, window in ipairs(windows or sol.windows()) do
-        if workspaces.on_active(window.id, window.monitor) then
+        if workspaces.on_active(window.id, window.monitor)
+            and (minimized or not window.minimized)
+        then
             out[#out + 1] = window
         end
     end
@@ -282,9 +287,11 @@ function workspaces.go(index, monitor)
     -- left monitor must not take focus off the right one's window if there is
     -- nothing on the left to take it.
     local switched = workspaces.settings.per_monitor and held or nil
+    -- Not a minimized window, which focusing would show again (#30).
     for _, window in ipairs(sol.windows()) do
         if (not switched or window.monitor == switched)
             and workspaces.on_active(window.id, window.monitor)
+            and not window.minimized
         then
             sol.focus(window.id)
             -- A switch away to an empty workspace leaves the keyboard on the
@@ -587,6 +594,8 @@ sol.on("activate", function(id, why)
             if window.leaving then
                 return
             end
+            -- A minimized window is shown again by the focus: relaunching its
+            -- application is asking for it, as a dock's click is (#30).
             workspaces.go(workspaces.at(id, window.monitor), window.monitor)
             sol.focus(id)
             return

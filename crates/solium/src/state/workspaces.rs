@@ -363,6 +363,10 @@ impl Solium {
     /// monitor.
     /// `stacking::a_window_is_lifted_as_it_starts_to_grow_and_dropped_once_it_has_shrunk`.
     ///
+    /// **A minimized window is never lifted** (#30), even while the present
+    /// that takes it away plays out: the bars come back over a fullscreen
+    /// window the moment it is minimized.
+    ///
     /// Read by the renderer (`render::stacked`) and by the hit tests
     /// ([`Self::topmost_above`], `panes_front_first`), which is what makes the
     /// window drawn over the bars the one that is clicked there.
@@ -371,7 +375,8 @@ impl Solium {
         crate::stack::lifted(
             self.panes.iter().rev().map(|pane| {
                 let shown = crate::render::drawn_on(self.pane_outer(pane), screen)
-                    && !self.carried_by_a_selection(pane.id());
+                    && !self.carried_by_a_selection(pane.id())
+                    && !pane.minimized();
                 let candidate = crate::stack::Candidate {
                     shown,
                     fullscreen: pane.client().is_some_and(fullscreen)

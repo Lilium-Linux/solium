@@ -101,6 +101,7 @@ class SoliumWindow : public SoliumRow
     Q_PROPERTY(int parent READ parentWindow NOTIFY changed)
     Q_PROPERTY(QString state READ state NOTIFY changed)
     Q_PROPERTY(bool onStage READ onStage NOTIFY changed)
+    Q_PROPERTY(bool minimized READ minimized NOTIFY changed)
 public:
     using SoliumRow::SoliumRow;
     bool isPresent() const { return present; }
@@ -120,6 +121,7 @@ public:
     int parentWindow() const { return value("parent").toInt(); }
     QString state() const { return value("state").toString(); }
     bool onStage() const { return value("onStage").toBool(); }
+    bool minimized() const { return value("minimized").toBool(); }
     void announce() override { emit changed(); }
 signals:
     void changed();

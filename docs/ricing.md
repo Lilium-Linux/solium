@@ -1593,7 +1593,14 @@ require("bindings")
 it up -- `super+shift+k` is the keyboard layout. At the edge of a screen both go
 on to the next one. `super+f` is fullscreen, `super+shift+m` maximised and
 `super+shift+space` floats a window over the layout; each key again puts it
-back, and fullscreen and maximised glide there and back
+back, and fullscreen and maximised glide there and back. `super+m` minimizes
+the focused window into a strip at the bottom of the monitor with the genie;
+focusing it -- a click in the overview, its application asking -- brings it
+back out. `minimize` in `config.lua` sets how long that takes, how much of the
+window trails behind, and the size of the strip
+(`state::tests::real_client::reflow_on_close::minimize::config_minimize_motion_is_how_long_the_genie_plays`,
+`state::tests::real_client::reflow_on_close::minimize::config_minimize_spread_is_the_genies_spread`,
+`state::tests::real_client::reflow_on_close::minimize::config_minimize_slot_is_the_strip_the_window_goes_into`)
 ([Your own animation feel](#your-own-animation-feel) times them). Rebind any
 of them in `bindings`:
 

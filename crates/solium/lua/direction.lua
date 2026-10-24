@@ -216,11 +216,14 @@ local function focused(windows)
     return nil
 end
 
--- The windows in `windows` on monitor `name`, but `except` and any leaving.
+-- The windows in `windows` on monitor `name`, but `except` and any leaving
+-- or minimized: focusing a minimized window would show it again (#30).
 local function windows_on(windows, name, except)
     local out = {}
     for _, window in ipairs(windows) do
-        if window.monitor == name and window.id ~= except and not window.leaving then
+        if window.monitor == name and window.id ~= except and not window.leaving
+            and not window.minimized
+        then
             out[#out + 1] = window
         end
     end

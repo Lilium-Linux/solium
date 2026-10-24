@@ -15,7 +15,12 @@ local monitors = require("monitors")
 -- Kept across `super+shift+r`, because the grab and the thumbnails outlive a
 -- reload: a fresh `false` here left an overview Escape could not leave.
 -- `escape_leaves_the_overview_after_a_reload`.
-local kept = sol.keep("overview", { active = false })
+--
+-- `shown` is the minimized windows the overview is showing anyway, by id, with
+-- the thumbnail each is drawn as (#30): what a click there is measured
+-- against, since no pointer reaches a minimized window.
+local kept = sol.keep("overview", { active = false, shown = {} })
+kept.shown = kept.shown or {}
 
 local overview = { active = kept.active }
 
@@ -33,7 +38,8 @@ local function showing(active)
     end
 end
 
--- The windows on the desk in front of you, if there are desks.
+-- The windows on the desk in front of you, if there are desks, minimized ones
+-- included: the overview shows those too, and choosing one shows it again.
 --
 -- Asked of `package.loaded` rather than `require`d, deliberately: requiring
 -- `workspaces` here would register nine workspace bindings in a configuration
@@ -45,7 +51,7 @@ local function on_this_desk(windows)
     if not workspaces then
         return windows
     end
-    return workspaces.visible(windows)
+    return workspaces.visible(windows, true)
 end
 
 local PADDING = 24
@@ -96,6 +102,13 @@ function overview.enter()
                 padding = PADDING,
             })
             for index, window in ipairs(each.windows) do
+                -- A minimized window is drawn only while a present on it
+                -- plays, unless it is shown anyway, which is what a thumbnail
+                -- of one is (#30).
+                if window.minimized then
+                    sol.show_minimized(window.id, true)
+                    kept.shown[window.id] = slots[index]
+                end
                 sol.present(window.id, slots[index])
             end
         end
@@ -106,17 +119,40 @@ function overview.enter()
     showing(true)
 end
 
-function overview.leave()
+-- `chosen` is the window a click chose, which is being focused and so shown
+-- again if it was minimized: it goes back to its own rectangle like the rest.
+function overview.leave(chosen)
     if not overview.active then
         return
     end
 
     -- Every window, not only the ones entered with: a window opened while
     -- overview was up has a transform too, and leaving must clear all of them.
+    --
+    -- But a minimized window the overview was showing goes back where
+    -- minimizing put it, and is drawn until it is there (#30): into its slot
+    -- with `minimize.lua`'s genie, or at once without that file. One still
+    -- minimized that the overview was not showing -- minimized while it was
+    -- up -- is already there.
     sol.animate(LEAVE)
+    local away = {}
     for _, window in ipairs(sol.windows()) do
-        sol.present_clear(window.id)
+        if window.minimized and window.id ~= chosen then
+            if kept.shown[window.id] then
+                away[#away + 1] = window.id
+            end
+        else
+            sol.present_clear(window.id)
+        end
     end
+    local minimize = package.loaded["minimize"]
+    for _, id in ipairs(away) do
+        sol.show_minimized(id, false)
+        if minimize then
+            minimize.into(id)
+        end
+    end
+    kept.shown = {}
 
     sol.grab_input(false)
     sol.status("")
@@ -142,18 +178,32 @@ if overview.active then
     showing(true)
 end
 
+-- The minimized window whose thumbnail is at `x`, `y`, if one is: no pointer
+-- reaches a minimized window, so `window_at` never names one, and the
+-- overview asks its own thumbnails.
+local function shown_at(x, y)
+    for id, slot in pairs(kept.shown) do
+        if x >= slot.x and x < slot.x + slot.w and y >= slot.y and y < slot.y + slot.h then
+            return id
+        end
+    end
+    return nil
+end
+
 -- Clicking a thumbnail focuses that window and leaves. `window_at` asks the
 -- compositor, which hit-tests against where windows are *drawn* -- so this
--- works without the script knowing anything about the transform it set.
+-- works without the script knowing anything about the transform it set. A
+-- minimized window chosen is shown again by the focus (#30).
+-- `the_overview_shows_a_minimized_window_and_choosing_it_shows_it_again`.
 sol.on("click", function(x, y)
     if not overview.active then
         return
     end
-    local id = sol.window_at(x, y)
+    local id = sol.window_at(x, y) or shown_at(x, y)
     if id then
         sol.focus(id)
     end
-    overview.leave()
+    overview.leave(id)
 end)
 
 return overview

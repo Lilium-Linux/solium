@@ -42,8 +42,19 @@ local follow = require("follow")
 -- `leaving` is, for each window being closed, which strip it was in and the
 -- windows either side of it there: what a refused close puts it back beside.
 -- See the `closing` and `refused` handlers.
-local kept = sol.keep("scrolling", { views = {} })
-local scrolling = { active = false, views = kept.views, exiled = {}, leaving = {} }
+--
+-- `minimized` is the same for each window minimized out of a strip (#30): what
+-- it is put back beside when it is shown again. Kept beside the strips, so it
+-- outlives a reload as they do.
+local kept = sol.keep("scrolling", { views = {}, minimized = {} })
+kept.minimized = kept.minimized or {}
+local scrolling = {
+    active = false,
+    views = kept.views,
+    exiled = {},
+    leaving = {},
+    minimized = kept.minimized,
+}
 
 -- A strip that came across a reload keeps its columns and takes this file's
 -- widths. `scrolling.widths` and `default_width` are configuration, read where
@@ -216,6 +227,10 @@ function scrolling.adopt()
             -- reason, as `tiling.adopt`.
             if window.leaving and reflow_on_close() ~= "when_gone" then
                 -- Nothing: see above.
+            -- A minimized window is in no strip, for the same reason, and
+            -- `unminimize` is what puts it back (#30).
+            elseif window.minimized then
+                -- Nothing: see above.
             -- A dialog is deliberately absent from every strip, so `adopt` --
             -- whose whole job is to put back whatever is missing -- has to be
             -- told that this one is missing on purpose.
@@ -307,7 +322,10 @@ end)
 -- strip nobody is using is not on screen, and one rearranged anyway comes back
 -- with its focus on the refused window -- which `scrolling.started` hands the
 -- keyboard to when the user switches here.
-local function take_out(id)
+--
+-- `into` is where its neighbours are kept: `scrolling.leaving` for a close,
+-- and `scrolling.minimized` for a window minimized (#30).
+local function take_out(id, into)
     local kept
     for key, view in pairs(scrolling.views) do
         if view:contains(id) then
@@ -324,7 +342,7 @@ local function take_out(id)
     -- the setting changed between `closing` and `close_landed` -- does not
     -- forget where the first found it.
     if kept then
-        scrolling.leaving[id] = kept
+        (into or scrolling.leaving)[id] = kept
     end
     scrolling.apply(config.scrolling.snap)
 end
@@ -369,14 +387,17 @@ end
 -- `close_landed`, whatever the setting says now, or missing from a strip that
 -- is in charge; beside its old neighbours only if it still belongs in the strip
 -- it left.
-sol.on("refused", function(id)
-    local kept = scrolling.leaving[id]
-    scrolling.leaving[id] = nil
+--
+-- A minimized window shown again comes back by the same rule (#30), beside
+-- the neighbours `minimize` found: `bring_back`.
+local function bring_back(id, kept)
     if not kept and not scrolling.active then
         return
     end
     local window = dialogs.by_id(id)
-    if not window or dialogs.floats(window) then
+    -- A window refused its close while minimized stays put away, out of
+    -- the arrangement until `unminimize` (#30).
+    if not window or window.minimized or dialogs.floats(window) then
         return
     end
     for _, view in pairs(scrolling.views) do
@@ -403,6 +424,28 @@ sol.on("refused", function(id)
         view:insert(id, area)
     end
     scrolling.apply(config.scrolling.snap)
+end
+
+sol.on("refused", function(id)
+    local kept = scrolling.leaving[id]
+    scrolling.leaving[id] = nil
+    bring_back(id, kept)
+end)
+
+-- Minimized (#30): out of its strip, which closes up, as for a close. Only
+-- while this layout is in charge, as there.
+sol.on("minimize", function(id)
+    if scrolling.active then
+        take_out(id, scrolling.minimized)
+    end
+end)
+
+-- Shown again: back beside its old neighbours.
+-- `the_layouts_leave_a_minimized_window_out_and_take_it_back_where_it_was`.
+sol.on("unminimize", function(id)
+    local kept = scrolling.minimized[id]
+    scrolling.minimized[id] = nil
+    bring_back(id, kept)
 end)
 
 -- The window is gone. Unchanged by `reflow_on_close`: this is the one event
@@ -416,6 +459,7 @@ sol.on("close", function(id)
     -- window back -- it would simply accumulate for the life of the session.
     scrolling.exiled[id] = nil
     scrolling.leaving[id] = nil
+    scrolling.minimized[id] = nil
     dialogs.forget(id)
     scrolling.apply(config.scrolling.snap)
 end)

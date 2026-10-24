@@ -107,6 +107,9 @@ require("direction")
 require("floating")
 -- Desktop finger bindings; independent of the Rust input profile.
 require("touch")
+-- Minimize (#30): `super+m`, and the genie into a slot at the bottom of the
+-- monitor and back out. `minimize` in config.lua.
+require("minimize")
 
 -- Programs. `sol.spawn` starts them as clients of this compositor, whatever
 -- session the compositor itself happens to be nested in.
@@ -278,42 +281,6 @@ end)
 -- binding, a gap, a decoration, a whole layout mode -- and press it.
 sol.bind("super+shift+r", function()
     sol.reload()
-end)
-
--- Dev: the genie. `deform` names an effect folder -- `genie` ships, and
--- your copy in ~/.config/solium/effects/genie/ is used instead -- and `to`
--- is what the window is pulled into. This demonstration uses a fixed rect.
--- The preview dock exists, but a live icon anchor is not exposed yet;
--- following an icon while it moves needs that integration.
---
--- `axis` is which edge leads, so a dock down the side of the screen is
--- `"left"` and the compositor turns the mesh to match; `"auto"` picks the
--- side the target lies on when the window starts to move. `spread` is the
--- folder's param: how much of the window is in motion at once, 0 pulling it
--- in rigidly, larger values drawing the tail out behind it. Composes with a
--- transform -- add `rotate_y` here and the window tilts while it is sucked
--- in.
-sol.bind("super+m", function()
-    local area = sol.monitor()
-    for _, window in ipairs(sol.windows()) do
-        if window.focused then
-            sol.animate({ duration = 520, easing = "inOutCubic" })
-            sol.present(window.id, {
-                deform = {
-                    effect = "genie",
-                    axis = "down",
-                    spread = 1.4,
-                    to = {
-                        x = area.x + area.w / 2 - 60,
-                        y = area.y + area.h - 24,
-                        w = 120,
-                        h = 24,
-                    },
-                },
-            })
-            return
-        end
-    end
 end)
 
 -- A tilted window, to see the compositor draw one as geometry rather than as

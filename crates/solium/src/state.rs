@@ -105,6 +105,7 @@ mod hit_test;
 mod hosted;
 mod keyboard;
 mod lock_screen;
+mod minimize;
 mod monitors;
 mod open;
 mod placement;
@@ -1788,14 +1789,25 @@ impl Solium {
     /// habit.** The renderer and a press pass the present; the focus questions
     /// pass [`Self::settling`]. [`workspaces::SETTLED`] states it and names the tests on
     /// both sides of it.
+    ///
+    /// **A minimized window put away is drawn at no opacity** (#30), once
+    /// the present that took it away has landed: so every reader here -- the
+    /// renderer's cull, `on_stage` and the focus questions, `sol.windows()`'s
+    /// `drawn` -- agrees it is not on screen. See [`Self::minimized_away`].
     pub(crate) fn drawn_at(
         &self,
         pane: &Pane,
         real: Rectangle<i32, Logical>,
         now: std::time::Duration,
     ) -> Frame {
-        self.carried_at(pane, real, now)
-            .apply(present::frame(pane, real, now))
+        let frame = self
+            .carried_at(pane, real, now)
+            .apply(present::frame(pane, real, now));
+        if self.minimized_away(pane, now) {
+            frame.with_opacity(0.0)
+        } else {
+            frame
+        }
     }
 
     /// Turn a deform's anchor into the rectangle it is aimed at *this frame*.
@@ -2420,9 +2432,10 @@ impl Solium {
     /// third review,
     /// `on_two_monitors_a_window_on_the_left_monitors_hidden_workspace_is_not_on_stage`).
     ///
-    /// Being the drawn rect also settles the cases that have not arrived yet
-    /// in the same breath: a thumbnail in overview is visible, and a window
-    /// minimised to nothing (#30) will not be.
+    /// Being the drawn rect also settles a thumbnail in overview, which is
+    /// visible. A minimized window is not, once the present that took it
+    /// away has landed (#30, [`Self::minimized_away`]): a video minimized
+    /// does not hold the machine awake.
     ///
     /// Windows only. A layer surface could hold an inhibitor too, and if one
     /// ever does this is where it would be answered -- but a bar is not what
@@ -2435,6 +2448,7 @@ impl Solium {
                 window
                     .wl_surface()
                     .is_some_and(|owned| owned.as_ref() == surface)
+                    && !self.minimized_away(pane, now)
                     && {
                         let slot = self.pane_outer(pane);
                         let drawn = self.drawn_at(pane, slot, now).rect;

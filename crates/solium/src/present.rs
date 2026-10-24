@@ -1154,6 +1154,18 @@ pub(crate) fn geometries(pane: &Pane, now: Duration) -> Vec<Geometry> {
     .unwrap_or_default()
 }
 
+/// Whether a transform on this pane is still under way: what keeps a
+/// minimized window drawn while a present started on it plays out, so a genie
+/// into a dock slot finishes before the window goes (#30). A transform that
+/// has landed, held or not, is not playing.
+/// `state::tests::real_client::reflow_on_close::minimize::a_minimized_window_is_drawn_until_its_present_lands`.
+pub(crate) fn playing(pane: &Pane, now: Duration) -> bool {
+    with_slot(pane, |slot| {
+        slot.is_some_and(|transform| !transform.finished(now))
+    })
+    .unwrap_or(false)
+}
+
 /// Where a pane's transform is headed, for a test to read what a present
 /// asked for.
 #[cfg(test)]

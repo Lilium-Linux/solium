@@ -1921,13 +1921,19 @@ impl Phases for Gpu<'_> {
 }
 
 /// Whether any monitor shows a pane, asked of the rectangle `elements` asks
-/// it of: `prepare`'s cull, which [`build_slots`] makes too. `prepare`'s walk
+/// it of: `prepare`'s cull, which [`build_slots`] makes too. A minimized
+/// window put away is shown on none, so it is neither captured nor given a
+/// slot, and a capture it held is handed back (#30, `Solium::minimized_away`). `prepare`'s walk
 /// says at length why the slot and not the client's rectangle.
 /// `state::tests::real_client::a_pane_no_monitor_shows_gathers_no_fact_and_wants_no_slot`.
 fn shown(state: &Solium, pane: crate::pane::PaneId) -> bool {
     state
         .pane_outer_of(pane)
         .is_some_and(|slot| state.on_any_output(slot))
+        && !state
+            .panes
+            .get(pane)
+            .is_some_and(|held| state.minimized_away(held, state.clock.now()))
 }
 
 /// What a capture becomes once drawn: `dev/fence-check.sh` has two warps,
@@ -5614,6 +5620,14 @@ pub(crate) fn stacked(
     let mut order: Vec<(Node, f32)> = state
         .on_screen()
         .into_iter()
+        // A minimized window, once the present that took it away has landed,
+        // is drawn nowhere (#30). See `Solium::minimized_away`.
+        .filter(|(pane, _)| {
+            !state
+                .panes
+                .get(*pane)
+                .is_some_and(|held| state.minimized_away(held, now))
+        })
         .filter_map(|(pane, window)| {
             let global = state.pane_outer_of(pane)?;
             let frame = state.drawn_id_at(pane, global, now);
