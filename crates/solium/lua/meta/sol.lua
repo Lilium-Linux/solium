@@ -752,6 +752,21 @@ function sol.lock(options) end
 ---@return nil
 function sol.lock_now() end
 
+---Pull Solium's own lock screen `progress` of the way down over the desktop,
+---from 0 (not at all) to 1 (covering it), as an iPhone's lock follows the
+---finger pulled down from the top; numbers outside are held to that. Call it
+---as your own gesture moves (`sol.on("touch")`), then `sol.lock_now()` to lock
+---from there, the lock's entry going on from `progress` for what is left of
+---`lock.enter_ms`, or `sol.lock_peek(false)` to let it go back up through the
+---exit (`lock.exit_ms` at most). The lock scene reads `Lock.state` as
+---`"peeking"` and `Lock.progress` as how far. A picture and nothing more:
+---nothing is locked, the keyboard, pointer and fingers stay the session's,
+---and nothing typed reaches the lock. Over a session already locked, or with
+---`lock.native` off, it does nothing.
+---@param progress number|false|nil
+---@return nil
+function sol.lock_peek(progress) end
+
 ---X11 windows refused a tile, decoration or bar entry outright: `config.x11`,
 ---which the shipped `init.lua` hands over. See #221.
 ---@param options? sol.X11Options

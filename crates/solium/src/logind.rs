@@ -1917,6 +1917,71 @@ mod tests {
         });
     }
 
+    /// **A peek is no lock to logind**: the lock's scenes pulled down over the
+    /// desktop and let go again leave `LockedHint` alone and the inhibitor
+    /// for sleep held, since nothing is locked; the lock taken from a peek
+    /// then sets it as any lock does, once a frame shows it whole.
+    #[test]
+    fn a_peek_is_no_lock_to_logind() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory =
+                std::env::temp_dir().join(format!("solium-logind-peek-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("a directory for the scene");
+            let scene = directory.join("Lock.qml");
+            std::fs::write(&scene, "import QtQuick\nItem {}\n").expect("writing the scene");
+
+            let bus = StandIn::new(5_000_000, false);
+            let mut state = solium_with(begin(&bus, None, true));
+            state.lock_scenes.use_scene(scene);
+            let monitor = monitor(&mut state);
+            state.sync_lock_scenes();
+            assert!(
+                soon(|| {
+                    settle(&mut state);
+                    state.logind.holding()
+                }),
+                "the initial inhibitor was never taken"
+            );
+            let hinted = |bus: &StandIn| {
+                bus.heard
+                    .lock()
+                    .expect("the list")
+                    .iter()
+                    .any(|call| call.starts_with("SetLockedHint"))
+            };
+
+            state.lock_peek(Some(0.8));
+            let now = state.clock.now();
+            assert!(
+                state.lock_scene_over_desktop(&monitor, now),
+                "the premise: a peek"
+            );
+            state.lock_peek(None);
+            settle(&mut state);
+            std::thread::sleep(Duration::from_millis(100));
+            settle(&mut state);
+            assert!(!hinted(&bus), "a peek set `LockedHint`");
+            assert!(
+                state.logind.holding(),
+                "a peek released the inhibitor for sleep"
+            );
+
+            state.lock_peek(Some(0.8));
+            assert!(state.lock_now(), "the lock from a peek owes no `locked`");
+            let enter = state.lock_scenes.settings().enter;
+            state.clock.advance(enter);
+            crate::lock_scene::settle(&mut state);
+            let frame = state.lock_frame();
+            state.frame_presented(&monitor, frame);
+            assert!(
+                soon(|| hinted(&bus)),
+                "the lock taken from a peek never set `LockedHint`"
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
     /// **With nothing to lock the session, sleep is not held**: `lock.native
     /// = false` and no `lock.command` means nothing will ever confirm a lock,
     /// so the inhibitor goes at once rather than on logind's timeout.

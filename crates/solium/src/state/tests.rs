@@ -19478,7 +19478,15 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         end
                     end
                     walk(sol, 0)
-                    sol.status(tostring(calls))
+                    -- And the peek by name, with what a gesture would give it
+                    -- and what it would not: at a lock it is nothing.
+                    local peek = type(sol.lock_peek) == "function"
+                    for _, value in ipairs({ 0.5, 1, 0, -1, 2, 0 / 0, 1 / 0, false }) do
+                        pcall(sol.lock_peek, value)
+                        calls = calls + 1
+                    end
+                    pcall(sol.lock_peek)
+                    sol.status(tostring(calls) .. (peek and " peek" or ""))
                 end, { locked = true })
             "#;
 
@@ -19510,12 +19518,23 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 let now = session.state.clock.now();
                 session.state.settle(now);
 
-                let calls: usize = std::mem::take(&mut session.state.status)
-                    .parse()
+                let status = std::mem::take(&mut session.state.status);
+                let calls: usize = status
+                    .split(' ')
+                    .next()
+                    .and_then(|calls| calls.parse().ok())
                     .unwrap_or_default();
                 assert!(
                     calls > 100,
                     "the walk did not get through `sol`: {calls} calls"
+                );
+                assert!(
+                    status.ends_with(" peek"),
+                    "the walk did not call `sol.lock_peek`: {status:?}"
+                );
+                assert!(
+                    session.state.lock_scenes.peeking().is_none(),
+                    "a peek is under way at the lock"
                 );
                 assert!(
                     natively_locked(&session),
@@ -19792,6 +19811,291 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                             (0, 1),
                             "(offered a buffer, refused): a capture asked for during the entry"
                         );
+                    });
+                }
+            }
+
+            /// **The peek** (#281): a configuration's own gesture pulls the
+            /// lock's scenes down over the unlocked desktop with
+            /// `sol.lock_peek`, a picture that locks nothing, and locks from
+            /// there with `sol.lock_now`.
+            mod peek {
+                use super::*;
+
+                /// A scene that says whether it reads `"peeking"`.
+                const PEEKING: &str = r#"import QtQuick
+                import Solium
+                Item {
+                    readonly property int peeking: Lock.state === "peeking" ? 1 : 0
+                }"#;
+
+                /// The pull from the top edge that docs/ricing.md ("Your own
+                /// lock screen") gives, as it is printed there: the one Lua
+                /// block in it that calls `sol.lock_peek`.
+                fn documented_gesture() -> String {
+                    let docs = include_str!("../../../../docs/ricing.md");
+                    docs.split("```lua\n")
+                        .skip(1)
+                        .filter_map(|block| block.split("```").next())
+                        .find(|block| block.contains("sol.lock_peek"))
+                        .expect("docs/ricing.md shows a gesture calling sol.lock_peek")
+                        .to_owned()
+                }
+
+                /// A session on `count` monitors with an application holding
+                /// the keyboard, its lock scenes `source`, and `script` as its
+                /// configuration. On the Qt thread, with Qt up.
+                fn session(name: &str, count: i32, source: &str, script: &str) -> Session {
+                    crate::qml::start().expect("Qt starts");
+                    let mut session = Session::with_monitors(count);
+                    session.app.open(&mut session.display, &mut session.state);
+                    assert!(
+                        session.app.client.keyboard_on.is_some(),
+                        "the premise: the application has the keyboard"
+                    );
+                    session
+                        .state
+                        .lock_scenes
+                        .use_scene(scene_file(name, source));
+                    session.state.sync_lock_scenes();
+                    session.state.start_scripts(Some(
+                        super::super::super::fullscreen_glides::script_at(name, script),
+                    ));
+                    session
+                }
+
+                /// The first monitor's whole area, which the fingers are on.
+                fn region(session: &Session) -> Rectangle<i32, Logical> {
+                    let output = session.output(0);
+                    session
+                        .state
+                        .space
+                        .output_geometry(&output)
+                        .expect("a monitor in the space")
+                }
+
+                /// A finger from the top edge of the first monitor, `to`
+                /// of its height down, and held there.
+                fn pull(session: &mut Session, to: f64) {
+                    let region = region(session);
+                    crate::synth::touch_down(&mut session.state, region, 0, (960.0, 4.0), 10_000);
+                    crate::synth::touch_frame(&mut session.state, region);
+                    for step in 1_u32..=4 {
+                        let y = 4.0 + (1080.0 * to - 4.0) * f64::from(step) / 4.0;
+                        crate::synth::touch_motion(
+                            &mut session.state,
+                            region,
+                            0,
+                            (960.0, y),
+                            10_000 + 40_000 * u64::from(step),
+                        );
+                        crate::synth::touch_frame(&mut session.state, region);
+                    }
+                    session.app.pump(&mut session.display, &mut session.state);
+                }
+
+                /// That finger let go.
+                fn let_go(session: &mut Session) {
+                    let region = region(session);
+                    crate::synth::touch_up(&mut session.state, region, 0, 400_000);
+                    crate::synth::touch_frame(&mut session.state, region);
+                    session.app.pump(&mut session.display, &mut session.state);
+                }
+
+                /// Whether the `index`th monitor's lock scene is drawn over
+                /// the unlocked desktop now.
+                fn over(session: &Session, index: usize) -> bool {
+                    let now = session.state.clock.now();
+                    session
+                        .state
+                        .lock_scene_over_desktop(&session.output(index), now)
+                }
+
+                fn advance(session: &mut Session, by: Duration) {
+                    session.state.clock.advance(by);
+                    crate::lock_scene::settle(&mut session.state);
+                }
+
+                /// **A peek draws the lock scene over the desktop and leaves
+                /// input with the session**: `sol.lock_peek` from a binding
+                /// draws every monitor's scene over the desktop, and locks
+                /// nothing: no lock and no frame of one, the application
+                /// keeps the keyboard and hears a key typed, and the
+                /// password field hears nothing.
+                #[test]
+                fn a_peek_draws_the_scene_over_the_desktop_and_leaves_input_with_the_session() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let mut session = session(
+                            "peek-draws",
+                            2,
+                            PEEKING,
+                            r#"sol.bind("super+shift+f9", function() sol.lock_peek(0.4) end)"#,
+                        );
+                        assert!(!over(&session, 0) && !over(&session, 1), "the premise");
+                        assert!(session.state.trigger("super+shift+f9"));
+                        session.app.pump(&mut session.display, &mut session.state);
+                        assert_eq!(session.state.lock_scenes.peeking(), Some(0.4));
+                        assert!(
+                            over(&session, 0) && over(&session, 1),
+                            "a monitor's scene is not drawn over the desktop in a peek"
+                        );
+                        assert!(
+                            session.state.lock.is_none() && session.state.lock_frame().is_none(),
+                            "a peek locked"
+                        );
+                        assert!(
+                            session.app.client.keyboard_on.is_some(),
+                            "the application lost the keyboard to a peek"
+                        );
+                        let (app, _) = session.type_key();
+                        assert!(app, "a key typed in a peek did not reach the application");
+                        assert_eq!(
+                            session.state.lock_auth.length(),
+                            0,
+                            "a key typed in a peek reached the password"
+                        );
+                        assert!(over(&session, 0), "the premise: still peeking");
+                    });
+                }
+
+                /// **The documented pull locks from where the finger let go**:
+                /// a finger from the top edge pulls the scene down after it
+                /// with nothing locked; let go past halfway, `sol.lock_now`
+                /// takes the lock at once, input with it, and the entry goes
+                /// on from the peek for what is left of `enter_ms`, after
+                /// which, and only after which, `locked` is confirmed.
+                #[test]
+                fn sol_lock_now_from_a_peek_continues_from_its_progress() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let gesture = documented_gesture();
+                        let mut session = session("peek-lock", 1, PEEKING, &gesture);
+                        pull(&mut session, 0.6);
+                        let peek = session.state.lock_scenes.peeking().unwrap_or_default();
+                        assert!(
+                            (peek - 0.6).abs() < 0.01,
+                            "the scene did not follow the finger: {peek}"
+                        );
+                        assert!(over(&session, 0));
+                        assert!(
+                            session.state.lock.is_none()
+                                && session.app.client.keyboard_on.is_some(),
+                            "the pull locked, or took the keyboard"
+                        );
+
+                        let_go(&mut session);
+                        assert!(
+                            natively_locked(&session),
+                            "letting go past halfway did not lock"
+                        );
+                        assert!(
+                            session.state.lock_scenes.peeking().is_none(),
+                            "the peek outlived the lock"
+                        );
+                        assert!(
+                            session.app.client.keyboard_on.is_none(),
+                            "the application kept the keyboard as the lock was taken"
+                        );
+                        let (app, _) = session.type_key();
+                        assert!(!app, "a key reached the application at the lock");
+                        assert_eq!(session.state.lock_auth.length(), 1);
+                        assert!(session.state.lock_scenes.entry_pending());
+                        let now = session.state.clock.now();
+                        assert!(
+                            session
+                                .state
+                                .desktop_under_lock(&session.output(0), now, false),
+                            "the entry from a peek has no desktop under it"
+                        );
+
+                        let enter = session.state.lock_scenes.settings().enter;
+                        let left = enter.mul_f64(1.0 - peek);
+                        session.show_all();
+                        assert!(owed(&session), "`locked` during the entry from a peek");
+                        advance(&mut session, left / 2);
+                        assert!(
+                            session.state.lock_scenes.entry_pending(),
+                            "the entry from a peek ended before what was left of it"
+                        );
+                        advance(&mut session, left / 2);
+                        assert!(
+                            !session.state.lock_scenes.entry_pending(),
+                            "the entry from a peek lasted longer than what was left of it"
+                        );
+                        assert!(owed(&session), "`locked` before a frame showed the lock");
+                        session.show_all();
+                        assert!(!owed(&session), "`locked` never came after the entry");
+                    });
+                }
+
+                /// **The documented pull let go early locks nothing**: the
+                /// scene goes back up through the exit, over a desktop that
+                /// had its input all along, and is then drawn no more.
+                #[test]
+                fn a_pull_let_go_early_goes_back_up_and_locks_nothing() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let gesture = documented_gesture();
+                        let mut session = session("peek-early", 1, PEEKING, &gesture);
+                        pull(&mut session, 0.3);
+                        assert!(over(&session, 0), "the premise: a peek");
+                        let_go(&mut session);
+                        assert!(session.state.lock.is_none(), "letting go early locked");
+                        assert!(
+                            session.state.lock_scenes.peeking().is_none() && over(&session, 0),
+                            "the scene did not go back up through the exit"
+                        );
+                        let exit = session.state.lock_scenes.settings().exit;
+                        advance(&mut session, exit);
+                        assert!(!over(&session, 0), "the scene outlived its exit");
+                        assert!(
+                            session.app.client.keyboard_on.is_some(),
+                            "the application lost the keyboard"
+                        );
+                        let (app, _) = session.type_key();
+                        assert!(app);
+                    });
+                }
+
+                /// **A monitor plugged in during a peek gets the peeking
+                /// scene**: built live, reading `"peeking"`, and drawn over
+                /// the desktop like the others; when the peek ends, it goes
+                /// back up with them and is drawn on no monitor after.
+                #[test]
+                fn a_monitor_plugged_in_during_a_peek_gets_the_peeking_scene() {
+                    crate::qml::qt_test::on_the_qt_thread(|| {
+                        let mut session = session(
+                            "peek-plug",
+                            1,
+                            PEEKING,
+                            r#"sol.bind("super+shift+f9", function() sol.lock_peek(0.4) end)
+                               sol.bind("super+shift+f10", function() sol.lock_peek(false) end)"#,
+                        );
+                        assert!(session.state.trigger("super+shift+f9"));
+                        let plugged = session.plug();
+                        assert_eq!(
+                            session.state.lock_scenes.shown_on(&plugged),
+                            Shown::Own,
+                            "the monitor plugged in during a peek has no scene"
+                        );
+                        session.state.publish_models();
+                        let peeking = session
+                            .state
+                            .lock_scenes
+                            .instance_for_test(&plugged)
+                            .expect("its scene")
+                            .scene_for_test()
+                            .get_int("peeking");
+                        assert_eq!(peeking, 1, "its scene does not read \"peeking\"");
+                        assert!(over(&session, 0) && over(&session, 1));
+
+                        assert!(session.state.trigger("super+shift+f10"));
+                        assert!(over(&session, 1), "no way back up on the new monitor");
+                        let exit = session.state.lock_scenes.settings().exit;
+                        advance(&mut session, exit);
+                        assert!(
+                            !over(&session, 0) && !over(&session, 1),
+                            "a scene outlived the peek's exit"
+                        );
+                        assert!(session.state.lock.is_none());
                     });
                 }
             }

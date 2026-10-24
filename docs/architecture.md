@@ -166,7 +166,10 @@ its scenes come down over the still-drawn desktop for at most
 `lock.enter_ms`; `locked` waits for that entry to end. The password is typed
 into Rust and checked by the `solium-auth` PAM helper; only its yes, or
 logind's `Unlock`, ends the lock, and the scene then plays its exit over the
-unlocked desktop for at most `lock.exit_ms`. Every way of locking goes
+unlocked desktop for at most `lock.exit_ms`. Before any of that, a
+configuration's own gesture can pull the scenes down over the unlocked,
+interactive desktop with `sol.lock_peek`, a picture that locks nothing; a
+lock taken from it continues the entry from there. Every way of locking goes
 through one function, `Solium::lock_now` (before sleep, with no entry):
 logind's `Lock` and `PrepareForSleep`, `idle.lock_after`,
 `sol.lock_now` and the shipped `super+ctrl+l`. It takes the native lock, or,

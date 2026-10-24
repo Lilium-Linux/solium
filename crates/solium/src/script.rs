@@ -590,6 +590,10 @@ pub(crate) enum Command {
     TakeShortcutsBack,
     /// Lock the session, as `lock.*` says: `sol.lock_now`. Only ever locks.
     LockNow,
+    /// Pull Solium's own lock scenes this far down over the unlocked
+    /// desktop, 0 to 1, or let them go back up: `sol.lock_peek`. A picture
+    /// only: it never locks or unlocks. See `Solium::lock_peek`.
+    LockPeek(Option<f64>),
     /// Where the monitors are, relative to each other.
     Monitors(crate::monitor::Arrangement),
     /// Which layouts the keyboard has, which is live, and how keys repeat.
@@ -809,6 +813,8 @@ impl Command {
             | Self::TakeShortcutsBack
             // Over a lock, it changes nothing.
             | Self::LockNow
+            // Nor does a peek, which is nothing over a lock.
+            | Self::LockPeek(_)
             | Self::Monitors(_)
             | Self::Keyboard(_)
             | Self::Surface(_)
@@ -4647,6 +4653,43 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::LockNow);
+            })
+        })?,
+    )?;
+
+    // Pull Solium's own lock scenes down over the unlocked desktop, following
+    // a finger, as an iPhone's lock does: a number from 0 to 1 (held to
+    // that), or `false` or nothing to let them go back up (#281). A picture
+    // and nothing more: it never locks, never unlocks, and at a lock does
+    // nothing; `sol.lock_now()` takes the lock from it. Anything else is an
+    // error, and a number that is not one (NaN, an infinity) is ignored.
+    // `state::tests::real_client::lock_focus::native::peek`,
+    // `no_lua_function_unlocks_a_native_lock`.
+    sol.set(
+        "lock_peek",
+        lua.create_function(|lua, progress: Value| {
+            let progress = match progress {
+                Value::Nil | Value::Boolean(false) => None,
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a whole number of the way down is 0 or 1 once held"
+                )]
+                Value::Integer(number) => Some(number as f64),
+                Value::Number(number) if number.is_finite() => Some(number),
+                Value::Number(number) => {
+                    tracing::warn!("sol.lock_peek takes a number from 0 to 1; ignoring {number}");
+                    return Ok(());
+                }
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "sol.lock_peek takes a number from 0 to 1, or false, not {}",
+                        describe(&other)
+                    )));
+                }
+            };
+            let progress = progress.map(|progress| progress.clamp(0.0, 1.0));
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::LockPeek(progress));
             })
         })?,
     )?;

@@ -5267,9 +5267,16 @@ pub(crate) fn elements(
     // doing (`lock_scene.rs`). A frame is asked for every frame of it, so the
     // bound is met even by a scene that does nothing.
     // `tests::the_lock_s_exit_is_drawn_over_the_session_and_under_the_pointer`.
+    //
+    // The same over a peek (`sol.lock_peek`): the scene pulled down over the
+    // desktop by the configuration's own gesture, while the session is
+    // unlocked and its input the session's. Frames are asked for as the
+    // scene animates and as the peek moves, not every frame, so a peek left
+    // standing costs nothing.
     if state.lock.is_none()
-        && state.lock_scenes.exiting(now)
+        && (state.lock_scenes.peeking().is_some() || state.lock_scenes.exiting(now))
         && let Some(output) = state.output_for(screen)
+        && state.lock_scene_over_desktop(&output, now)
     {
         let painted = state.lock_scenes.element(
             renderer,
@@ -5278,7 +5285,9 @@ pub(crate) fn elements(
             now,
             crate::surface::Raster::at(scale),
         );
-        state.redraw = true;
+        if painted.animating || state.lock_scenes.exiting(now) {
+            state.redraw = true;
+        }
         elements.extend(painted.element);
     }
 
@@ -10129,7 +10138,7 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("`elements` no longer has {needle:?}"))
         };
         let pointer = at("elements.extend(cursor(");
-        let exit = at("&& state.lock_scenes.exiting(now)");
+        let exit = at("&& state.lock_scene_over_desktop(&output, now)");
         let lock = at("if let Some(lock) = state.lock.as_ref() {");
         let icon = at("elements.extend(drag_icon(");
         assert!(

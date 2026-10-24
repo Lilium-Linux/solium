@@ -182,7 +182,9 @@
 //! no monitor lit, it has no entry, and an entry under way when sleep comes
 //! is cut short ([`Solium::lock_natively_at_once`]). When it ends, the
 //! session is unlocked at once and its scenes play their exit over the
-//! desktop, for `lock.exit_ms` at most. See `lock_scene.rs`.
+//! desktop, for `lock.exit_ms` at most. Taken from a peek
+//! ([`Solium::lock_peek`]), the entry goes on from where the peek was, for
+//! what is left of `lock.enter_ms`. See `lock_scene.rs`.
 //!
 //! Touch reaches the lock's scene as Qt touch events and nothing else
 //! (`a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`).
@@ -756,11 +758,17 @@ impl Solium {
             self.begin_lock_auth();
         }
         // An exit still playing is over: the scenes are the lock's again, or
-        // quiet behind a client's lock.
+        // quiet behind a client's lock. So is a peek, whose scenes are the
+        // lock's from here on, coming down from where the finger left them.
         self.lock_scenes.end_exit();
+        let peeked = self.lock_scenes.take_peek();
+        if peeked.is_some() {
+            tracing::info!(?peeked, "the lock is taken from a peek");
+            self.lock_auth.touch();
+        }
         self.lock_scenes.pointer = crate::lock_scene::LockPointer::default();
         // The entry, on the monitors that are lit: a dark one shows nothing
-        // to come down over.
+        // to come down over. From a peek, only what is left of it.
         if native && entry {
             let now = self.clock.now();
             let lit: Vec<String> = self
@@ -769,7 +777,8 @@ impl Solium {
                 .filter(|output| !self.power.is_dark(output))
                 .map(Output::name)
                 .collect();
-            self.lock_scenes.begin_entry(now, lit);
+            self.lock_scenes
+                .begin_entry(now, lit, peeked.unwrap_or_default());
         } else {
             self.lock_scenes.end_entry();
         }

@@ -55,6 +55,7 @@ public:
     QVariantMap user() const { return m_user; }
     QString promptOn() const { return m_prompt_on; }
     bool locked() const { return m_locked; }
+    double progress() const { return m_progress; }
     int enterMs() const { return m_enter_ms; }
     int exitMs() const { return m_exit_ms; }
 
@@ -75,6 +76,7 @@ signals:
     void userChanged();
     void promptOnChanged();
     void lockedChanged();
+    void progressChanged();
     void enterMsChanged();
     void exitMsChanged();
 
@@ -86,6 +88,7 @@ private:
     QVariantMap m_user;
     QString m_prompt_on;
     bool m_locked = false;
+    double m_progress = 0;
     int m_enter_ms = 0;
     int m_exit_ms = 0;
     int m_requests = 0;
@@ -101,8 +104,8 @@ private:
 class SoliumLockAttached : public QObject
 {
     Q_OBJECT
-    /* "locking", "idle", "prompting", "checking", "failed", "lockedOut",
-     * "unavailable" or "unlocking". */
+    /* "peeking", "locking", "idle", "prompting", "checking", "failed",
+     * "lockedOut", "unavailable" or "unlocking". */
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     /* Wrong passwords since the lock was taken. */
     Q_PROPERTY(int attempts READ attempts NOTIFY attemptsChanged)
@@ -128,6 +131,12 @@ class SoliumLockAttached : public QObject
      * desktop is gone, whatever the scene is doing. Input is the lock's from
      * the start. A lock taken before sleep has no entry. */
     Q_PROPERTY(int enterMs READ enterMs NOTIFY enterMsChanged)
+    /* How far down the configuration has pulled the scene, from 0 to 1,
+     * while `state` is "peeking" (`sol.lock_peek`): nothing is locked then,
+     * and the scene is drawn over the desktop, which keeps its input. Through
+     * a "locking" entry taken from a peek, where that peek was: the entry
+     * then lasts `enterMs * (1 - progress)`. 0 otherwise. */
+    Q_PROPERTY(double progress READ progress NOTIFY progressChanged)
     /* How long the exit lasts, in milliseconds: `lock.exit_ms`. The scene is
      * drawn over the desktop for this long after the unlock, and then it is
      * gone, whatever it is doing. */
@@ -141,6 +150,7 @@ public:
     QVariantMap user() const { return m_lock->user(); }
     QString promptOn() const { return m_lock->promptOn(); }
     bool locked() const { return m_lock->locked(); }
+    double progress() const { return m_lock->progress(); }
     int enterMs() const { return m_lock->enterMs(); }
     int exitMs() const { return m_lock->exitMs(); }
 
@@ -158,6 +168,7 @@ signals:
     void userChanged();
     void promptOnChanged();
     void lockedChanged();
+    void progressChanged();
     void enterMsChanged();
     void exitMsChanged();
 
