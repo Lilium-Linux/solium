@@ -32,6 +32,12 @@
 //! when the request has been written. It is never formatted, so it cannot
 //! reach a log line.
 //!
+//! **A PIN goes the same way** ([`Kind::Pin`]): to the same helper, in the
+//! same kind of process, as a [`Secret`], with the PIN file to check it
+//! against. The helper reads the file and checks it there, so the compositor
+//! never runs the hash, and PAM is never asked; nor is its service file
+//! looked for. `tests::a_pin_is_checked_by_the_helper_against_the_pin_file`.
+//!
 //! `tests::a_right_password_is_ok_and_a_wrong_one_failed`,
 //! `tests::a_helper_of_another_version_is_unavailable`,
 //! `tests::a_helper_that_crashes_is_unavailable`,
@@ -56,7 +62,7 @@ use std::{
 };
 
 pub(crate) use solium_auth::Secret;
-use solium_auth::{Answer, protocol};
+use solium_auth::{Answer, Request, protocol};
 
 /// Where PAM reads the `solium` service, in the order it looks: the
 /// administrator's directory, then the distribution's.
@@ -83,6 +89,24 @@ pub(crate) enum Outcome {
     Unavailable { reason: String, lasting: bool },
 }
 
+/// What a check is of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// The account password of this user, by PAM.
+    Password { user: String },
+    /// The PIN whose hash is in this file (`solium_auth::pin`).
+    Pin { file: PathBuf },
+}
+
+impl Kind {
+    fn request(&self) -> Request<'_> {
+        match self {
+            Self::Password { user } => Request::Password { user },
+            Self::Pin { file } => Request::Pin { file },
+        }
+    }
+}
+
 /// The helper opened at startup, or why there is none.
 static HELPER: OnceLock<Result<Helper, String>> = OnceLock::new();
 
@@ -100,26 +124,26 @@ pub(crate) fn helper() -> Result<&'static Helper, &'static str> {
         .map_err(String::as_str)
 }
 
-/// Check `secret` for `user` with the helper opened at startup. See
+/// Check `secret` as `kind` says with the helper opened at startup. See
 /// [`Helper::check`]; without a helper, `done` is called at once with why.
 pub(crate) fn check(
-    user: &str,
+    kind: Kind,
     secret: Secret,
     timeout: Duration,
     done: impl FnOnce(Outcome) + Send + 'static,
 ) -> Check {
-    check_on(helper(), user, secret, timeout, done)
+    check_on(helper(), kind, secret, timeout, done)
 }
 
 fn check_on(
     helper: Result<&Helper, &str>,
-    user: &str,
+    kind: Kind,
     secret: Secret,
     timeout: Duration,
     done: impl FnOnce(Outcome) + Send + 'static,
 ) -> Check {
     match helper {
-        Ok(helper) => helper.check(user, secret, timeout, done),
+        Ok(helper) => helper.check(kind, secret, timeout, done),
         Err(reason) => {
             done(Outcome::Unavailable {
                 reason: reason.to_owned(),
@@ -237,7 +261,7 @@ impl Helper {
         &self.path
     }
 
-    /// Check `secret` for `user`, on a thread of its own.
+    /// Check `secret` as `kind` says, on a thread of its own.
     ///
     /// `done` is called once with the outcome, from that thread, unless the
     /// check is cancelled first: after [`Check::cancel`] returns, it is never
@@ -246,7 +270,7 @@ impl Helper {
     /// the [`Check`] cancels it.
     pub(crate) fn check(
         &self,
-        user: &str,
+        kind: Kind,
         secret: Secret,
         timeout: Duration,
         done: impl FnOnce(Outcome) + Send + 'static,
@@ -260,7 +284,7 @@ impl Helper {
             pam_files: self.pam_files.clone(),
             args: self.args.clone(),
             env: self.env.clone(),
-            user: user.to_owned(),
+            kind,
             secret,
             timeout,
             shared: Arc::clone(&shared),
@@ -346,7 +370,7 @@ struct Job {
     pam_files: Vec<PathBuf>,
     args: Vec<CString>,
     env: Vec<CString>,
-    user: String,
+    kind: Kind,
     secret: Secret,
     timeout: Duration,
     shared: Arc<Mutex<Shared>>,
@@ -370,8 +394,10 @@ impl Job {
             lasting: true,
         };
         // Without its service file PAM falls back to `other`, which on most
-        // systems refuses everything: every password would look wrong.
-        if !self.pam_files.iter().any(|path| path.is_file()) {
+        // systems refuses everything: every password would look wrong. A PIN
+        // never reaches PAM.
+        let password = matches!(self.kind, Kind::Password { .. });
+        if password && !self.pam_files.iter().any(|path| path.is_file()) {
             let looked: Vec<String> = self
                 .pam_files
                 .iter()
@@ -437,7 +463,7 @@ impl Job {
             stream: &ours,
             until: deadline,
         };
-        let asked = protocol::ask(&mut conn, &self.user, &self.secret);
+        let asked = protocol::ask(&mut conn, self.kind.request(), &self.secret);
         drop(self.secret);
         drop(ours);
         let status = process.reap(deadline);
@@ -869,7 +895,10 @@ mod tests {
         let (sender, outcome) = mpsc::channel();
         let mut secret = Secret::new();
         assert!(secret.push_str(password));
-        let check = helper.check(user, secret, timeout, move |outcome| {
+        let kind = Kind::Password {
+            user: user.to_owned(),
+        };
+        let check = helper.check(kind, secret, timeout, move |outcome| {
             let _ = sender.send(outcome);
         });
         (check, outcome)
@@ -909,6 +938,45 @@ mod tests {
             matches!(outcome, Outcome::Failed { delay } if delay == Duration::from_millis(1234)),
             "{outcome:?}"
         );
+    }
+
+    /// **A PIN is checked by the helper against the PIN file**, in a process
+    /// of its own as a password is: the right PIN is yes and another no, and
+    /// no PAM service file is needed for it, where a password without one is
+    /// refused before the helper starts.
+    #[test]
+    fn a_pin_is_checked_by_the_helper_against_the_pin_file() {
+        let dir =
+            std::env::temp_dir().join(format!("solium-auth-pin-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("pin");
+        let mut pin = Secret::new();
+        assert!(pin.push_str("2580"));
+        let phc = solium_auth::pin::hash_with(&pin, 64, 1).expect("a hash");
+        solium_auth::pin::write_private(&file, phc.as_bytes()).expect("written");
+        let helper = stand_in_helper("answer", PathBuf::from("/nonexistent/pam.d/solium"));
+        let pin_checked = |typed: &str| {
+            let (sender, outcome) = mpsc::channel();
+            let mut secret = Secret::new();
+            assert!(secret.push_str(typed));
+            let kind = Kind::Pin { file: file.clone() };
+            let check = helper.check(kind, secret, LONG, move |outcome| {
+                let _ = sender.send(outcome);
+            });
+            let outcome = outcome.recv_timeout(LONG).expect("an outcome");
+            (outcome, check.pid())
+        };
+        let (outcome, pid) = pin_checked("2580");
+        assert_eq!(outcome, Outcome::Ok);
+        assert!(pid.is_some(), "checked in this process, not the helper");
+        let (outcome, _) = pin_checked("0000");
+        assert_eq!(
+            outcome,
+            Outcome::Failed {
+                delay: Duration::ZERO
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -969,7 +1037,9 @@ mod tests {
         let (sender, outcome) = mpsc::channel();
         let _check = check_on(
             Err(reason.as_str()),
-            "illia",
+            Kind::Password {
+                user: "illia".to_owned(),
+            },
             Secret::new(),
             LONG,
             move |outcome| {
@@ -1087,7 +1157,10 @@ mod tests {
             panic!("a solium-auth beside the test binary");
         };
         let (sender, outcome) = mpsc::channel();
-        let _check = check("illia", Secret::new(), LONG, move |outcome| {
+        let kind = Kind::Password {
+            user: "illia".to_owned(),
+        };
+        let _check = check(kind, Secret::new(), LONG, move |outcome| {
             let _ = sender.send(outcome);
         });
         let outcome = outcome.recv_timeout(LONG).expect("an outcome");

@@ -1397,6 +1397,68 @@ fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
             ),
         },
     }
+    match options.get::<Value>("pin") {
+        Ok(Value::Table(table)) => settings.pin = pin_settings(&table, &whole),
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(other) => tracing::warn!(
+            value = describe(&other),
+            "lock.pin is a table, like {{ enabled = true, min_length = 4, max_length = 8, attempts = 5, password_after_hours = 48 }}; keeping the default"
+        ),
+    }
+    settings
+}
+
+/// `lock.pin` (#281): `enabled` (true or false), `min_length` (a whole number
+/// of digits, at least `pin::MIN_LENGTH`), `max_length` (at least
+/// `min_length`, at most `pin::MAX_LENGTH`), `attempts` (at least 1) and
+/// `password_after_hours` (at least 1). Each one absent keeps its default;
+/// each one of the wrong kind is named in the log and keeps its default. A
+/// `max_length` under `min_length` is taken as `min_length`.
+/// `tests::sol_lock_parses_the_pins_settings`.
+fn pin_settings(
+    table: &mlua::Table,
+    whole: &dyn Fn(&Value, u32) -> Option<u32>,
+) -> crate::pin::Settings {
+    use crate::pin::{MAX_LENGTH, MIN_LENGTH, Settings};
+    let mut settings = Settings::default();
+    match table.get::<Value>("enabled") {
+        Ok(Value::Boolean(on)) => settings.enabled = on,
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(other) => tracing::warn!(
+            value = describe(&other),
+            "lock.pin.enabled is true or false; keeping the default, true"
+        ),
+    }
+    let number = |key: &str, least: u32, most: u32, default: u32| -> Option<u32> {
+        match table.get::<Value>(key) {
+            Ok(Value::Nil) | Err(_) => None,
+            Ok(value) => match whole(&value, least).filter(|number| *number <= most) {
+                Some(number) => Some(number),
+                None => {
+                    tracing::warn!(
+                        value = describe(&value),
+                        "lock.pin.{key} is a whole number from {least} to {most}; keeping the default, {default}"
+                    );
+                    None
+                }
+            },
+        }
+    };
+    let min = u32::try_from(MIN_LENGTH).unwrap_or(4);
+    let max = u32::try_from(MAX_LENGTH).unwrap_or(64);
+    if let Some(length) = number("min_length", min, max, 4) {
+        settings.min_length = usize::try_from(length).unwrap_or(MIN_LENGTH);
+    }
+    if let Some(length) = number("max_length", min, max, 8) {
+        settings.max_length = usize::try_from(length).unwrap_or(MAX_LENGTH);
+    }
+    settings.max_length = settings.max_length.max(settings.min_length);
+    if let Some(attempts) = number("attempts", 1, u32::MAX, 5) {
+        settings.attempts = attempts;
+    }
+    if let Some(hours) = number("password_after_hours", 1, u32::MAX, 48) {
+        settings.password_after = std::time::Duration::from_secs(u64::from(hours) * 3600);
+    }
     settings
 }
 
@@ -9708,6 +9770,7 @@ mod tests {
                 },
                 retries: 3,
                 keypad: Keypad::Keyboard,
+                pin: crate::pin::Settings::default(),
             }
         );
         assert_eq!(
@@ -9744,6 +9807,70 @@ mod tests {
             assert_eq!(configured(source), Settings::default(), "{source:?}");
         }
 
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `lock.pin` (#281): every key read, one alone keeping the others'
+    /// defaults, a `max_length` under `min_length` taken as `min_length`, and
+    /// a value of the wrong kind or out of bounds (a PIN shorter than four
+    /// digits, no attempts, no hours) named in the log with the default kept.
+    /// See `crate::pin::Settings`.
+    #[test]
+    fn sol_lock_parses_the_pins_settings() {
+        use crate::pin::Settings;
+        use std::time::Duration;
+        let directory = std::env::temp_dir().join("solium-script-test-lock-pin");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::LockAuth(settings) => Some(settings.pin),
+                    _ => None,
+                })
+                .expect("one Command::LockAuth")
+        };
+        assert_eq!(
+            configured(
+                r#"sol.lock({ pin = {
+                    enabled = false, min_length = 6, max_length = 10,
+                    attempts = 3, password_after_hours = 12,
+                } })"#
+            ),
+            Settings {
+                enabled: false,
+                min_length: 6,
+                max_length: 10,
+                attempts: 3,
+                password_after: Duration::from_secs(12 * 3600),
+            }
+        );
+        assert_eq!(
+            configured("sol.lock({ pin = { attempts = 9 } })"),
+            Settings {
+                attempts: 9,
+                ..Settings::default()
+            }
+        );
+        let longer = configured("sol.lock({ pin = { min_length = 9 } })");
+        assert_eq!((longer.min_length, longer.max_length), (9, 9));
+        for source in [
+            "sol.lock({})",
+            "sol.lock({ pin = true })",
+            r#"sol.lock({ pin = {
+                enabled = "yes", min_length = 3, max_length = 65,
+                attempts = 0, password_after_hours = 0.5,
+            } })"#,
+            "sol.lock({ pin = { password_after_hours = -1, attempts = \"five\" } })",
+        ] {
+            assert_eq!(configured(source), Settings::default(), "{source:?}");
+        }
         let _ = std::fs::remove_dir_all(&directory);
     }
 

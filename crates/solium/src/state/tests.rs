@@ -19450,11 +19450,30 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
 
             /// Calls every function `sol` has, and every one in a table it
             /// has, but its private ones, with no argument, an empty table and
-            /// `true`, each under `pcall`; then says how many calls it made.
+            /// `true`, each under `pcall`; then says how many calls it made,
+            /// and how many of their answers held the digits typed at the
+            /// lock, `97531864`, as text or as a number.
             /// Never a string or a number: those would start programs.
             const EVERY_SOL_FUNCTION: &str = r#"
                 sol.bind("super+shift+f12", function()
-                    local seen, calls = {}, 0
+                    local seen, calls, leaks = {}, 0, 0
+                    local function look(value, depth)
+                        if type(value) == "string" then
+                            if value:find("97531864", 1, true) then leaks = leaks + 1 end
+                        elseif type(value) == "number" then
+                            if value == 97531864 then leaks = leaks + 1 end
+                        elseif type(value) == "table" and depth < 4 then
+                            for key, inner in pairs(value) do
+                                look(key, depth + 1)
+                                look(inner, depth + 1)
+                            end
+                        end
+                    end
+                    local function answered(ok, ...)
+                        for index = 1, select('#', ...) do
+                            look((select(index, ...)), 0)
+                        end
+                    end
                     local function walk(table_, depth)
                         if seen[table_] or depth > 2 then return end
                         seen[table_] = true
@@ -19468,9 +19487,9 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         for _, name in ipairs(names) do
                             local value = table_[name]
                             if type(value) == "function" then
-                                pcall(value)
-                                pcall(value, {})
-                                pcall(value, true)
+                                answered(pcall(value))
+                                answered(pcall(value, {}))
+                                answered(pcall(value, true))
                                 calls = calls + 3
                             elseif type(value) == "table" then
                                 walk(value, depth + 1)
@@ -19486,13 +19505,17 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         calls = calls + 1
                     end
                     pcall(sol.lock_peek)
-                    sol.status(tostring(calls) .. (peek and " peek" or ""))
+                    sol.status(tostring(calls) .. " leaks=" .. tostring(leaks)
+                        .. (peek and " peek" or ""))
                 end, { locked = true })
             "#;
 
-            /// **No Lua function unlocks a native lock**: every `sol` function
-            /// there is, called from a binding allowed at the lock with the
-            /// shipped configuration loaded, leaves the session locked.
+            /// **No Lua function unlocks a native lock, or reads what is
+            /// typed at it**: with a PIN set and the lock taking it, and
+            /// digits typed, every `sol` function there is, called from a
+            /// binding allowed at the lock with the shipped configuration
+            /// loaded, leaves the session locked, checks nothing, and answers
+            /// nothing that holds the digits.
             #[test]
             fn no_lua_function_unlocks_a_native_lock() {
                 let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
@@ -19507,8 +19530,35 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         "native-unlock",
                         &script,
                     )));
+                // A PIN set, as `solium pin set` leaves it, in a directory of
+                // the test's own.
+                let dir = std::env::temp_dir()
+                    .join(format!("solium-lua-walk-pin-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).expect("a directory");
+                let mut paths = crate::pin::Paths::in_dir(&dir);
+                paths.boot_id = dir.join("boot_id");
+                std::fs::write(&paths.boot_id, "boot-one\n").expect("a boot id");
+                let mut pin = crate::auth::Secret::new();
+                assert!(pin.push_str("1379"));
+                let phc = solium_auth::pin::hash_with(&pin, 64, 1).expect("a hash");
+                solium_auth::pin::write_private(&paths.pin, phc.as_bytes()).expect("the PIN");
+                crate::pin::Record::after_password(1_000, Some("boot-one".to_owned()))
+                    .write(&paths.state)
+                    .expect("the state");
+                session.state.lock_auth.use_pin_for_test(paths, 1_000);
+
                 session.state.lock_natively();
                 session.show_all();
+                assert_eq!(
+                    session.state.lock_auth.mode(),
+                    crate::pin::Mode::Pin,
+                    "the premise: the lock takes the PIN"
+                );
+                for c in "97531864".chars() {
+                    session.state.secret_edit(crate::lock_auth::Edit::Type(c));
+                }
+                assert_eq!(session.state.lock_auth.length(), 8);
 
                 assert!(
                     session.state.trigger("super+shift+f12"),
@@ -19532,6 +19582,16 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                     status.ends_with(" peek"),
                     "the walk did not call `sol.lock_peek`: {status:?}"
                 );
+                assert!(
+                    status.contains(" leaks=0 "),
+                    "a Lua function answered with the digits typed: {status:?}"
+                );
+                assert_eq!(
+                    session.state.lock_auth.length(),
+                    8,
+                    "a Lua function submitted or cleared what was typed"
+                );
+                let _ = std::fs::remove_dir_all(&dir);
                 assert!(
                     session.state.lock_scenes.peeking().is_none(),
                     "a peek is under way at the lock"

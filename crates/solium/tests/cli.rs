@@ -224,3 +224,47 @@ fn check_exits_1_on_a_broken_user_effect_folder() {
     assert_eq!(broken, 1, "{out}{err}");
     assert!(out.contains("api2/effect.lua"), "{out}");
 }
+
+/// **`solium pin set` and `solium pin clear` need a terminal**: with
+/// standard input not one, each exits 1 saying so, before asking for anything
+/// or writing anything, and `pin` with any other word is refused like any
+/// unknown argument, exit 2.
+#[test]
+fn pin_without_a_terminal_is_refused_and_writes_nothing() {
+    for word in ["set", "clear"] {
+        let dir =
+            std::env::temp_dir().join(format!("solium-cli-test-{}-pin-{word}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory of the test's own");
+        let output = Command::new(env!("CARGO_BIN_EXE_solium"))
+            .args(["pin", word])
+            .env("WAYLAND_DISPLAY", "solium-cli-test-no-such-socket")
+            .env_remove("DISPLAY")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env("HOME", &dir)
+            .env("XDG_CONFIG_HOME", &dir)
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("XDG_STATE_HOME", &dir)
+            .env("SOLIUM_LUA_INIT", dir.join("init.lua"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("solium runs");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "pin {word}: {err}");
+        assert!(err.contains("terminal"), "pin {word}: {err}");
+        assert!(
+            !err.contains("starting solium"),
+            "pin {word}: it started: {err}"
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("listed")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(left.is_empty(), "pin {word} wrote {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let (code, _out, err) = run_args(&["pin", "show"], "pin-show");
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("pin show"), "{err}");
+}

@@ -49,6 +49,7 @@ class SoliumLock : public QObject
 public:
     explicit SoliumLock(bool blank = false) : m_blank(blank) {}
     QString state() const { return m_state; }
+    QString mode() const { return m_mode; }
     int attempts() const { return m_attempts; }
     int retryAfter() const { return m_retry_after; }
     QString message() const { return m_message; }
@@ -70,6 +71,7 @@ public:
 
 signals:
     void stateChanged();
+    void modeChanged();
     void attemptsChanged();
     void retryAfterChanged();
     void messageChanged();
@@ -82,6 +84,7 @@ signals:
 
 private:
     QString m_state = QStringLiteral("idle");
+    QString m_mode = QStringLiteral("password");
     int m_attempts = 0;
     int m_retry_after = 0;
     QString m_message;
@@ -107,13 +110,20 @@ class SoliumLockAttached : public QObject
     /* "peeking", "locking", "idle", "prompting", "checking", "failed",
      * "lockedOut", "unavailable" or "unlocking". */
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
-    /* Wrong passwords since the lock was taken. */
+    /* What unlocks it: "pin" while a PIN set with `solium pin set` is taken
+     * (the password still is: what is not a PIN's digits is checked as the
+     * password), "password" otherwise. A lock that stops taking the PIN --
+     * too many wrong ones, a restart, `lock.pin.password_after_hours` --
+     * reads "password", and `message` says why. */
+    Q_PROPERTY(QString mode READ mode NOTIFY modeChanged)
+    /* Wrong passwords and PINs since the lock was taken. */
     Q_PROPERTY(int attempts READ attempts NOTIFY attemptsChanged)
     /* Whole seconds until the field takes a password again, while locked
      * out, or until the next try, while unavailable; 0 otherwise. */
     Q_PROPERTY(int retryAfter READ retryAfter NOTIFY retryAfterChanged)
-    /* The line that goes with the state: "Wrong password", or the way out
-     * while the check is unavailable. Empty otherwise. */
+    /* The line that goes with the state: "Wrong password" or "Wrong PIN",
+     * the way out while the check is unavailable, or why the password is
+     * needed where a PIN would be taken. Empty otherwise. */
     Q_PROPERTY(QString message READ message NOTIFY messageChanged)
     /* `{ name, realName, avatar }`: the login name, the name from the passwd
      * entry, and a `file://` URL of AccountsService's picture, or "". */
@@ -144,6 +154,7 @@ class SoliumLockAttached : public QObject
 public:
     explicit SoliumLockAttached(QObject *object);
     QString state() const { return m_lock->state(); }
+    QString mode() const { return m_lock->mode(); }
     int attempts() const { return m_lock->attempts(); }
     int retryAfter() const { return m_lock->retryAfter(); }
     QString message() const { return m_lock->message(); }
@@ -162,6 +173,7 @@ public:
 
 signals:
     void stateChanged();
+    void modeChanged();
     void attemptsChanged();
     void retryAfterChanged();
     void messageChanged();

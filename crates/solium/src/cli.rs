@@ -3,6 +3,10 @@
 //! Every argument is read here and every one must be known: an unknown flag,
 //! `--help` included, used to start a compositor (#156). The backend word may
 //! come anywhere, once. `tests::help_and_version_are_answered_without_a_backend`.
+//!
+//! One word is not a flag: `pin`, followed by `set` or `clear`, which sets or
+//! clears the lock screen's PIN from a terminal (`pin_cli.rs`). Any other word
+//! is refused as before. `tests::pin_set_and_pin_clear_are_the_only_words`.
 
 use std::path::PathBuf;
 
@@ -18,8 +22,19 @@ pub(crate) enum Command {
     Probe,
     ProbeQmlGpu,
     Tty,
+    /// `solium pin set` or `solium pin clear`.
+    Pin(PinAction),
     /// Nested when there is a display to nest in, on the hardware otherwise.
     Start,
+}
+
+/// What `solium pin` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PinAction {
+    /// Ask for the password, then a new PIN twice, and store its hash.
+    Set,
+    /// Ask for the password, then remove the PIN.
+    Clear,
 }
 
 /// Why an argument list was refused.
@@ -95,6 +110,17 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Comma
             other if other == crate::qml::renderer::PROBE => {
                 Some((crate::qml::renderer::PROBE, Command::ProbeQmlGpu))
             }
+            "pin" => match arguments.next().as_deref() {
+                Some("set") => Some(("pin", Command::Pin(PinAction::Set))),
+                Some("clear") => Some(("pin", Command::Pin(PinAction::Clear))),
+                Some(other) => return Err(Refused::Unknown(format!("pin {other}"))),
+                None => {
+                    return Err(Refused::Missing {
+                        flag: "pin",
+                        what: "set or clear",
+                    });
+                }
+            },
             other => return Err(Refused::Unknown(other.to_owned())),
         };
         if let Some((name, command)) = backend {
@@ -118,8 +144,12 @@ pub(crate) fn help() -> String {
     let mut out = String::from(
         "solium: a configurable Wayland compositor\n\n\
          Usage: solium [--tty [--session]] [--debug-mode] [--qml <mode>]\n       \
-         solium --check [<file.qml> | <effect folder>] | --probe | --help | --version\n\n\
-         Nested when WAYLAND_DISPLAY or DISPLAY is set, on the hardware otherwise.\n",
+         solium --check [<file.qml> | <effect folder>] | --probe | --help | --version\n       \
+         solium pin set | solium pin clear\n\n\
+         Nested when WAYLAND_DISPLAY or DISPLAY is set, on the hardware otherwise.\n\n\
+         pin set     set the lock screen's PIN, from a terminal: asks for your\n             \
+         password, then the new PIN twice (lock.pin, docs/ricing.md)\n\
+         pin clear   remove it: asks for your password\n",
     );
     let mut wanted = false;
     for line in include_str!("../environment.txt").lines() {
@@ -251,6 +281,54 @@ mod tests {
             parse(args(&[crate::qml::renderer::PROBE])),
             Ok(Command::ProbeQmlGpu)
         );
+    }
+
+    /// **`pin set` and `pin clear` are the only words**: each is a command
+    /// of its own; `pin` without one, `pin` with another, and any other word
+    /// are refused as before; and `pin` with a backend is two commands.
+    #[test]
+    fn pin_set_and_pin_clear_are_the_only_words() {
+        use super::PinAction;
+        assert_eq!(
+            parse(args(&["pin", "set"])),
+            Ok(Command::Pin(PinAction::Set))
+        );
+        assert_eq!(
+            parse(args(&["pin", "clear"])),
+            Ok(Command::Pin(PinAction::Clear))
+        );
+        assert_eq!(
+            parse(args(&["pin"])),
+            Err(Refused::Missing {
+                flag: "pin",
+                what: "set or clear"
+            })
+        );
+        assert_eq!(
+            parse(args(&["pin", "show"])),
+            Err(Refused::Unknown("pin show".to_owned()))
+        );
+        for word in ["set", "clear", "lock", "pins", "PIN"] {
+            assert_eq!(
+                parse(args(&[word])),
+                Err(Refused::Unknown(word.to_owned())),
+                "{word}"
+            );
+        }
+        assert_eq!(
+            parse(args(&["pin", "set", "1234"])),
+            Err(Refused::Unknown("1234".to_owned())),
+            "a PIN on the command line"
+        );
+        assert_eq!(
+            parse(args(&["--tty", "pin", "set"])),
+            Err(Refused::Twice("--tty", "pin"))
+        );
+        assert_eq!(
+            parse(args(&["pin", "clear", "--check"])),
+            Err(Refused::Twice("pin", "--check"))
+        );
+        assert!(help().contains("solium pin set | solium pin clear"));
     }
 
     #[test]

@@ -1176,7 +1176,9 @@ A lock scene has the same `import Solium` as any other, and adds:
 
 - `Lock`, read-only, an attached object any item reads: `state`
   (`"peeking"`, `"locking"`, `"idle"`, `"prompting"`, `"checking"`,
-  `"failed"`, `"lockedOut"`, `"unavailable"`, `"unlocking"`), `locked`,
+  `"failed"`, `"lockedOut"`, `"unavailable"`, `"unlocking"`), `mode`
+  (`"pin"` while a PIN is taken, `"password"` otherwise; the next section),
+  `locked`,
   `progress` (0 to 1, below), `attempts`, `retryAfter` (seconds, while
   locked out or retrying), `message`, `user` (`name`, `realName`,
   `avatar`), `promptOn` (the monitor `prompt_on` names), `enterMs` and
@@ -1408,6 +1410,70 @@ Item {
     }
 }
 ```
+
+### A PIN
+
+Solium's own lock screen can take a PIN, a few digits, in place of your
+password. There is none until you set one, from a terminal:
+
+```sh
+solium pin set      # asks for your password, then the new PIN twice
+solium pin clear    # asks for your password
+```
+
+Both ask for your account password first and check it exactly as the lock
+does, through `solium-auth` and PAM, so someone at your unlocked desk cannot
+set a PIN to come back with, nor clear yours. Neither echoes what you type,
+and both refuse to run without a terminal, so a PIN cannot be piped in from a
+script or left in a file. Only an argon2id hash of the PIN is stored, in
+`~/.local/state/solium/pin` (`$XDG_STATE_HOME/solium/pin`), mode 0600; the PIN
+itself is written nowhere (`solium_auth::pin::tests::the_file_holds_a_hash_and_never_the_pin`),
+and is checked by `solium-auth` too, never by the compositor.
+
+While a PIN is set, the lock asks for it: `Lock.mode` reads `"pin"`, and the
+shipped lock screen says "Enter PIN" with its digit pad already up. Type it
+on the keyboard or tap it on the pad, and Return or OK. **Your password still
+works**: whatever you type that is not 4 to 8 digits (`lock.pin.min_length`
+and `max_length`) is checked as your password instead
+(`lock_auth::tests::the_password_unlocks_in_pin_mode_and_resets_the_counts`).
+A password that is itself 4 to 8 digits is checked as a PIN, so it works only
+while the lock is asking for the password.
+
+The lock asks for your password instead, `Lock.mode` reading `"password"` and
+`Lock.message` saying why:
+
+- after `lock.pin.attempts` wrong PINs in a row (5), until the password is
+  entered. The count is kept in `~/.local/state/solium/pin-state`, so
+  restarting Solium does not start it again
+  (`lock_auth::tests::a_wrong_pin_counts_and_after_attempts_only_the_password_unlocks`,
+  `lock_auth::tests::the_pin_counts_survive_a_restart`);
+- the first time the lock is unlocked after the computer starts
+  (`lock_auth::tests::a_restart_needs_the_password`);
+- when the password has not unlocked it for `lock.pin.password_after_hours`
+  (48) (`lock_auth::tests::the_password_is_needed_after_password_after_hours`).
+
+Entering the password resets all three. Wrong PINs count toward
+`lock.lockout` as wrong passwords do, on top of these. A PIN file that is not
+yours, that others can write, or that does not hold such a hash is no PIN at
+all: the lock asks for the password, and the log says why.
+
+```lua
+return {
+    lock = {
+        pin = {
+            enabled = true,             -- false keeps a PIN that is set from being used
+            min_length = 6,             -- the fewest digits, 4 or more
+            max_length = 8,             -- the most, up to 64
+            attempts = 5,               -- wrong PINs before the password is needed
+            password_after_hours = 48,  -- the password at least this often
+        },
+    },
+}
+```
+
+A lock screen of your own can follow `Lock.mode` the same way: show a
+`SecretKeypad` for `"pin"`, a `SecretInput` either way, and `Lock.message`
+when it is not empty.
 
 ### One workspace per screen, or one for the desk
 
