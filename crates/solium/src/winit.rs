@@ -85,6 +85,7 @@ pub(crate) fn run() -> Result<()> {
     // X11 clients, if XWayland is installed. Started before the socket source
     // so that a client launched from a script's startup has a display to find.
     let loop_handle = event_loop.handle();
+    state.explicit_sync.sender = Some(crate::explicit_sync::install(&loop_handle, |state| state)?);
     let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
     event_loop
@@ -315,6 +316,31 @@ pub(crate) fn run() -> Result<()> {
                 .dmabuf_state
                 .create_global::<Solium>(&display_handle, formats),
         );
+    }
+
+    if state.dmabuf_global.is_some() {
+        let device = (|| -> anyhow::Result<_> {
+            let device = smithay::backend::egl::EGLDevice::device_for_display(
+                backend.renderer().egl_context().display(),
+            )?;
+            let node = device
+                .try_get_render_node()?
+                .ok_or_else(|| anyhow::anyhow!("renderer has no DRM render node"))?;
+            let path = node
+                .dev_path()
+                .ok_or_else(|| anyhow::anyhow!("render node has no device path"))?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?;
+            Ok(smithay::backend::drm::DrmDeviceFd::new(
+                smithay::utils::DeviceFd::from(std::os::fd::OwnedFd::from(file)),
+            ))
+        })();
+        match device {
+            Ok(device) => state.explicit_sync.enable(&display_handle, device, true),
+            Err(err) => tracing::info!(?err, "nested explicit sync unavailable"),
+        }
     }
 
     let size = backend.window_size();
@@ -846,6 +872,11 @@ pub(crate) fn run() -> Result<()> {
         // Before the output buffer is bound: this pass binds framebuffers of
         // its own, and doing that underneath a bound output redirects the
         // whole frame into a texture. See `render::Prepared`.
+        let source_buffers = if wanted && pictures {
+            crate::explicit_sync::snapshot(&mut state)
+        } else {
+            Vec::new()
+        };
         let prepared = if wanted && pictures {
             render::prepare(&mut state, backend.renderer())
         } else {
@@ -1083,6 +1114,31 @@ pub(crate) fn run() -> Result<()> {
                 0,
                 smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
             );
+        }
+
+        if !source_buffers.is_empty() {
+            crate::explicit_sync::submitted(&mut state, backend.renderer(), source_buffers);
+            // bind() only describes a target. An empty frame actually makes
+            // its host EGL surface current again, without changing its pixels.
+            // The completion fence above already covers every client read.
+            let size = backend.window_size();
+            match backend.bind() {
+                Ok((renderer, mut target)) => {
+                    use smithay::backend::renderer::Frame as _;
+                    let restored = renderer
+                        .render(&mut target, size, Transform::Normal)
+                        .and_then(|frame| frame.finish());
+                    if let Err(err) = restored {
+                        tracing::warn!(
+                            ?err,
+                            "restoring the nested output after its completion fence"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "binding the nested output after its completion fence")
+                }
+            }
         }
 
         // The nested stand-in for the hardware's DRM commit: handing the frame

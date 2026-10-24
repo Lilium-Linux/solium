@@ -45,7 +45,7 @@ several are missing:
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| Explicit sync | linux-drm-syncobj is not implemented; modern Vulkan/NVIDIA client compatibility needs this work. | [#59](https://github.com/Lilium-Linux/solium/issues/59) |
+| Explicit sync | linux-drm-syncobj-v1 is conditional on dmabuf and DRM syncobj-eventfd support. Vulkan/NVIDIA session, scanout and resume validation remains a hardware check; use `dev/explicit-sync-tty.sh`. | [#59](https://github.com/Lilium-Linux/solium/issues/59) |
 | Multiple GPUs | Outputs on another GPU are not supported by the current single-GPU path. | [#63](https://github.com/Lilium-Linux/solium/issues/63) |
 | Monitor identity and mirroring | Configuration matches connectors; stable panel identity and mirrored outputs remain open. | [#44](https://github.com/Lilium-Linux/solium/issues/44), [#45](https://github.com/Lilium-Linux/solium/issues/45) |
 | Runtime rotation | Output transform is applied when an output is added; automatic/runtime rotation is incomplete. | [#80](https://github.com/Lilium-Linux/solium/issues/80) |
