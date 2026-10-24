@@ -53,6 +53,20 @@ SecretField {
         anchors.margins: field.padding
         clip: true
 
+        // One entry per character, added and taken away one at a time: a
+        // count as the model would build every dot again on each key, and
+        // every dot would pop in again with it.
+        ListModel { id: typed }
+        function follow() {
+            while (typed.count < field.length) typed.append({})
+            while (typed.count > field.length) typed.remove(typed.count - 1)
+        }
+        Connections {
+            target: field
+            function onLengthChanged() { track.follow() }
+        }
+        Component.onCompleted: track.follow()
+
         Row {
             id: dots
             anchors.verticalCenter: parent.verticalCenter
@@ -61,17 +75,21 @@ SecretField {
             spacing: field.spacing
 
             Repeater {
-                model: field.length
+                model: typed
                 Rectangle {
+                    id: dot
                     width: field.dotSize
                     height: field.dotSize
                     radius: width / 2
                     color: field.accepting ? field.color : field.dimColor
-                    opacity: field.selected ? 0.5 : 1
-                    scale: 0.4
-                    Component.onCompleted: scale = 1
-                    Behavior on scale {
-                        NumberAnimation { duration: Theme.quick; easing.type: Easing.OutBack }
+                    // Only the new dot appears, quickly and without a bounce:
+                    // the others stay as they are.
+                    property real shown: 0
+                    opacity: (field.selected ? 0.5 : 1) * dot.shown
+                    scale: 0.6 + 0.4 * dot.shown
+                    Component.onCompleted: dot.shown = 1
+                    Behavior on shown {
+                        NumberAnimation { duration: 110; easing.type: Easing.OutCubic }
                     }
                 }
             }

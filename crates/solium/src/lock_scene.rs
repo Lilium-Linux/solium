@@ -104,9 +104,10 @@ pub(crate) const FALLBACK: &str = include_str!("../qml/lock/Fallback.qml");
 /// The name of the scene Solium ships, which is `lock.scene`'s default.
 pub(crate) const SHIPPED: &str = "Lock";
 
-/// `lock.exit_ms`'s default: §4.16's bounded exit, which the shipped scene
-/// spends taking its sheet back up and off the top.
-pub(crate) const EXIT_MS: u32 = 250;
+/// `lock.exit_ms`'s default: the shipped scene's sheet going back up and off
+/// the top, long enough to be seen to slide rather than vanish (Illia, on the
+/// Surface: 250 read as the lock disappearing).
+pub(crate) const EXIT_MS: u32 = 450;
 
 /// `lock.enter_ms`'s default: the sheet coming down over the desktop, about
 /// as long as an iPhone's lock takes.
@@ -125,7 +126,7 @@ pub(crate) const KEYPAD_MARGIN: u32 = 32;
 /// The longest `lock.exit_ms` may be. Input is the desktop's from the unlock
 /// on, so the exit is time spent typing into a desktop the lock still covers:
 /// long enough for an iPad's slide on a spring, and no longer than a glance.
-pub(crate) const EXIT_MAX_MS: u32 = 600;
+pub(crate) const EXIT_MAX_MS: u32 = 900;
 
 /// What names the fallback: the file it is compiled from, where Solium's QML
 /// ships. Nothing is read from it; it is what the log and the pacing report

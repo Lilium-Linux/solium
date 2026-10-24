@@ -1139,7 +1139,7 @@ return {
         scene = "Mine",          -- qml/lock/Mine.qml, yours first, then Solium's
         prompt_on = "pointer",   -- or "primary", or a monitor's name
         enter_ms = 350,          -- the entry over the desktop, at most 600
-        exit_ms = 250,           -- the exit over the desktop, at most 600
+        exit_ms = 450,           -- the exit over the desktop, at most 900
     },
 }
 ```

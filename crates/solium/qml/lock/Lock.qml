@@ -154,7 +154,8 @@ Item {
     }
 
     // The sheet going back up and off the top, from wherever it is, for all
-    // of `lock.exit_ms`: quick away at first, so the desktop shows at once.
+    // of `lock.exit_ms`: easing out of place and into its way up, then
+    // slowing as it leaves, so it is seen to slide off rather than vanish.
     NumberAnimation {
         id: leaving
         target: root
@@ -162,7 +163,7 @@ Item {
         to: 0
         duration: Math.max(1, Lock.exitMs)
         easing.type: Easing.BezierSpline
-        easing.bezierCurve: [0.32, 0.72, 0, 1, 1, 1]
+        easing.bezierCurve: [0.4, 0, 0.2, 1, 1, 1]
     }
 
     // The pad going up or down after the finger lets go, on `snappy`'s curve.
@@ -187,12 +188,16 @@ Item {
         height: root.height
         y: -(1 - root.down) * root.height
 
-        // Its shadow, on the desktop just under its lower edge, while it moves.
+        // Its shadow, on the desktop just under its lower edge, while it moves:
+        // faded in over the first fifth of the way down and out over the last
+        // tenth, so a pull just begun casts none by the clock, and a sheet
+        // all but down does not leave a band along the bottom.
         Rectangle {
             anchors.top: parent.bottom
             width: parent.width
             height: 48
-            visible: root.moving
+            opacity: Math.min(1, root.down / 0.2) * Math.min(1, (1 - root.down) / 0.1)
+            visible: root.moving && opacity > 0.01
             gradient: Gradient {
                 GradientStop { position: 0; color: "#59000000" }
                 GradientStop { position: 1; color: "#00000000" }
