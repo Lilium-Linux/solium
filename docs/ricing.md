@@ -831,6 +831,9 @@ with no daemon to install. It is one number:
 return { idle = { screens_off_after = 300 } }   -- seconds; 0 never does it
 ```
 
+The session is locked before that, after five minutes (`idle.lock_after`, see
+"Locking and sleep" below), so the screen that goes dark is the lock screen.
+
 Ten minutes and not GNOME's five, because GNOME dims first and Solium does not:
 here the first you know of it is the screen going dark. Anything that plays --
 a film, a call, a presentation -- holds an idle inhibitor, and while that window
@@ -881,10 +884,10 @@ sol.bind("super+shift+F12", function() sol.monitor_power("DP-2", "off") end)
 
 **Or leave it to `swayidle`.** Solium speaks `wlr-output-power-management`, so
 `wlopm` works, and `swayidle` drives it without needing `swaymsg`. Turn the
-built-in one off so the two do not both do it:
+built-in blank and lock off so the two do not both do it:
 
 ```lua
-return { idle = { screens_off_after = 0 } }
+return { idle = { screens_off_after = 0, lock_after = 0 } }
 ```
 
 ```sh
@@ -1059,9 +1062,27 @@ window inside another compositor, only the host's own pointer and keyboard.
 
 ### Locking and sleep
 
-`loginctl lock-session`, a power menu that locks that way, and a lid switch
-logind handles itself all send the same signal: `Lock`. By default Solium does
-nothing with it — set a locker to run:
+Solium locks the session with a lock screen of its own (the next section),
+with nothing to install. Five things lock it, and all of them the same way:
+
+- `super+ctrl+l` (`super+l` is focus-right, with `h`, `j` and `k`);
+- `sol.lock_now()`, from a binding or a script of your own. It only ever
+  locks: nothing in Lua unlocks;
+- five minutes with nobody at the machine, `idle.lock_after`, held off like
+  the screens going dark by a film or a call that holds an idle inhibitor;
+- logind's `Lock`, which `loginctl lock-session`, a power menu that locks that
+  way, and a lid switch logind handles itself all send;
+- the machine going to sleep (below).
+
+```lua
+return { idle = { lock_after = 900 } }   -- seconds; 0 never does it
+```
+
+A second lock over a session already locked changes nothing. Only the
+password, checked by PAM, unlocks it, or `loginctl unlock-session` from
+another console or over SSH, which is the way out when PAM cannot answer.
+
+**A locker of your own instead.** Name it, and it is what all five run:
 
 ```lua
 return { lock = { command = "swaylock -f" } }
@@ -1069,13 +1090,14 @@ return { lock = { command = "swaylock -f" } }
 
 Split on whitespace, with no quoting, like an autostart `Exec=` line. It runs
 as a client of this compositor, so it asks for `ext_session_lock_v1` the same
-way any other lock screen would, and a second `Lock` while it is already
-locked runs nothing more — the second locker would only be told `finished`
-and exit.
+way any other lock screen would, and a second ask while it is already locked
+runs nothing more — the second locker would only be told `finished` and exit.
+Setting `command` turns Solium's own lock screen off; `native = true` beside it
+keeps Solium's, and `native = false` with no `command` locks nothing at all.
 
-**Before suspending, Solium holds sleep for the lock.** With `lock.command`
-set, closing the lid or `systemctl suspend`-ing holds a logind delay
-inhibitor until the locker has confirmed the lock on every screen, or five
+**Before suspending, Solium holds sleep for the lock.** Closing the lid or
+`systemctl suspend`-ing locks the session and holds a logind delay inhibitor
+until the lock is on every screen, Solium's own or the locker's, or five
 seconds pass (`InhibitDelayMaxUSec`, logind's own limit — not Solium's to
 raise), so the machine never shows the desktop again on waking. Turn it off,
 say because `swayidle`'s own `before-sleep` already does this:
@@ -1086,7 +1108,7 @@ return { lock = { command = "swaylock -f", before_sleep = false } }
 
 `swayidle` keeps working exactly as before either way — the two only overlap
 in that the lock screen may be asked for twice, and a second ask is refused as
-above.
+above. Set `idle.lock_after` to 0 when `swayidle` locks on its own timeout.
 
 `loginctl show-session $XDG_SESSION_ID -p LockedHint` reads `yes` or `no`
 following whatever is actually locked, for a greeter or `loginctl` itself to
@@ -1097,9 +1119,9 @@ read.
 Solium has a lock screen of its own (#281), drawn by a QML scene on every
 monitor, with the password checked by `solium-auth`, a small helper that runs
 PAM's `solium` service. The scene shows things and nothing more: the password
-never reaches it, and nothing in it can unlock. Until the rest of #281 lands,
-nothing takes it yet: logind's `Lock` (`loginctl lock-session`) still runs
-`lock.command`. The settings below already decide what it shows.
+never reaches it, and nothing in it can unlock. It is the session's lock
+unless `lock.command` names another, and the settings below decide what it
+shows.
 
 ```lua
 return {

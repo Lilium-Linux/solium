@@ -211,8 +211,9 @@ for removing the session entry. Remove the RPM with `sudo dnf remove solium`.
 Your configuration and logs remain.
 
 The session wrapper starts graphical-session services and XDG autostart.
-External programs provide services such as portals, authentication and locking;
-configure a locker with `lock.command`. See
+External programs provide services such as portals and authentication. Solium
+locks the session with its own lock screen, checked through PAM by
+`solium-auth`; `lock.command` runs an external locker instead. See
 [session integration](docs/shell-boundary.md#how-the-rest-of-the-desktop-starts)
 for setup and the legacy desktop identifiers currently used for compatibility.
 

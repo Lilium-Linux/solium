@@ -588,6 +588,8 @@ pub(crate) enum Command {
     Reload,
     /// Take back the compositor's shortcuts from the window holding them.
     TakeShortcutsBack,
+    /// Lock the session, as `lock.*` says: `sol.lock_now`. Only ever locks.
+    LockNow,
     /// Where the monitors are, relative to each other.
     Monitors(crate::monitor::Arrangement),
     /// Which layouts the keyboard has, which is live, and how keys repeat.
@@ -804,6 +806,8 @@ impl Command {
             // No window holds the shortcuts at the lock, and taking them back
             // gives a window nothing.
             | Self::TakeShortcutsBack
+            // Over a lock, it changes nothing.
+            | Self::LockNow
             | Self::Monitors(_)
             | Self::Keyboard(_)
             | Self::Surface(_)
@@ -4064,10 +4068,10 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // The idle blank and what a window on a dark screen is told:
-    // `config.idle`, handed over by `init.lua`. `screens_off_after` is in
-    // seconds and `off_frame_interval` in milliseconds; 0 is "never" for
-    // both. An absent table or key keeps the default, for the reason
+    // The idle lock, the idle blank and what a window on a dark screen is
+    // told: `config.idle`, handed over by `init.lua`. `lock_after` and
+    // `screens_off_after` are in seconds and `off_frame_interval` in
+    // milliseconds; 0 is "never" for each. An absent table or key keeps the default, for the reason
     // `sol.resize` gives, and a value that is not a number of zero or more is
     // named in the log and the default kept.
     // `the_idle_blank_turns_every_screen_off_after_the_timeout`.
@@ -4100,6 +4104,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         }
                     }
                 };
+                if let Some(after) = read("lock_after", 1.0) {
+                    idle.lock_after = after;
+                }
                 if let Some(after) = read("screens_off_after", 1.0) {
                     idle.screens_off_after = after;
                 }
@@ -4548,6 +4555,19 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         "reload",
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| pending.commands.push(Command::Reload))
+        })?,
+    )?;
+
+    // Lock the session now, the way `config.lock` says: Solium's own lock, or
+    // `lock.command`'s locker (#281). It takes nothing and only ever locks;
+    // nothing in Lua unlocks (`no_lua_function_unlocks_a_native_lock`).
+    // `sol_lock_now_locks_and_never_unlocks`.
+    sol.set(
+        "lock_now",
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::LockNow);
+            })
         })?,
     )?;
 
@@ -8798,6 +8818,55 @@ mod tests {
                 Some(Duration::from_secs(1))
             );
         }
+    }
+
+    /// **The shipped configuration locks after five minutes**, the number the
+    /// compositor holds for a configuration that says nothing; a `user.lua`
+    /// can say 0, and one that says something that is not a number of 0 or
+    /// more keeps the five minutes. See `crate::idle::Settings`.
+    #[test]
+    fn the_shipped_configuration_locks_after_five_minutes() {
+        for (user, after) in [
+            ("return {}", Duration::from_secs(300)),
+            ("return { idle = { lock_after = 0 } }", Duration::ZERO),
+            (
+                "return { idle = { lock_after = 90 } }",
+                Duration::from_secs(90),
+            ),
+            (
+                "return { idle = { lock_after = \"soon\" } }",
+                Duration::from_secs(300),
+            ),
+            (
+                "return { idle = { lock_after = -1 } }",
+                Duration::from_secs(300),
+            ),
+        ] {
+            let Some((directory, mut scripts)) =
+                shipped_init_with_user("solium-script-test-idle-lock", user)
+            else {
+                return;
+            };
+            let after_seen: Vec<Duration> = scripts
+                .startup()
+                .commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Idle(settings) => Some(settings.lock_after),
+                    _ => None,
+                })
+                .collect();
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                after_seen,
+                [after],
+                "{user}: the shipped init.lua did not hand `idle.lock_after` over as it says"
+            );
+        }
+        assert_eq!(
+            crate::idle::Settings::default().lock_after,
+            Duration::from_secs(300)
+        );
     }
 
     fn input_config(outcome: Outcome) -> Option<InputConfig> {
@@ -14458,6 +14527,8 @@ mod shipped {
             // #150's, from `direction.lua` and `modes.lua` by way of `init.lua`.
             "super+left".to_owned(),
             "super+l".to_owned(),
+            // #281's lock key, from `init.lua`.
+            "ctrl+super+l".to_owned(),
             "shift+super+down".to_owned(),
             "shift+super+h".to_owned(),
             "alt+super+k".to_owned(),

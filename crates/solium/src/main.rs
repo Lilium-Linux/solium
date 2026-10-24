@@ -11,15 +11,6 @@
 mod ages;
 mod apps;
 mod assets;
-// The lock screen's state machine (#281, Task 3) is what calls a check; until
-// it lands, the startup open and `--check` are the only callers outside tests.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the native lock's checks (#281) are its other caller"
-    )
-)]
 mod auth;
 mod autoreload;
 mod capture;

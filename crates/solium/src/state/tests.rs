@@ -19523,6 +19523,57 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 );
             }
 
+            /// **`sol.lock_now` locks, natively by default, and never
+            /// unlocks**: called unlocked it takes Solium's own lock, called
+            /// again at that lock it changes nothing, not even which lock is
+            /// confirmed, and with `lock.native` off and no locker named it
+            /// locks nothing.
+            #[test]
+            fn sol_lock_now_locks_and_never_unlocks() {
+                let script = r#"
+                    sol.bind("super+shift+f11", function() sol.lock_now() end, { locked = true })
+                "#;
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                session
+                    .state
+                    .start_scripts(Some(super::super::fullscreen_glides::script_at(
+                        "lock-now", script,
+                    )));
+
+                assert!(session.state.trigger("super+shift+f11"));
+                assert!(natively_locked(&session), "sol.lock_now did not lock");
+                session.show_all();
+                let frame = session.state.lock_frame();
+                assert!(!owed(&session), "the premise: the lock is confirmed");
+
+                assert!(session.state.trigger("super+shift+f11"));
+                assert!(
+                    natively_locked(&session),
+                    "sol.lock_now at the lock unlocked it"
+                );
+                assert_eq!(
+                    session.state.lock_frame(),
+                    frame,
+                    "sol.lock_now at the lock took a fresh lock"
+                );
+                assert!(!owed(&session), "and owes `locked` again");
+
+                session.state.unlock_natively();
+                session
+                    .state
+                    .lock_scenes
+                    .configure(crate::lock_scene::Settings {
+                        native: false,
+                        ..crate::lock_scene::Settings::default()
+                    });
+                assert!(session.state.trigger("super+shift+f11"));
+                assert!(
+                    session.state.lock.is_none(),
+                    "locked with `lock.native` off and no locker named"
+                );
+            }
+
             /// **A monitor plugged in mid-lock gets the scene or the
             /// fallback, never the desktop**: its frames are the lock's from
             /// the hotplug on, it has a scene before its first frame, and
@@ -19699,6 +19750,17 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         zwlr_output_power_v1::Mode::Off
                     });
                     self.app.pump(&mut self.display, &mut self.state);
+                }
+
+                /// `idle.lock_after = 0`, for a test of the blank that would
+                /// otherwise be locked half way through, and its keys given to
+                /// the lock.
+                fn without_the_idle_lock(&mut self) {
+                    let settings = self.state.idle.settings();
+                    self.state.idle.configure(crate::idle::Settings {
+                        lock_after: Duration::ZERO,
+                        ..settings
+                    });
                 }
 
                 /// Time passes with nobody touching anything, and a frame runs.
@@ -19947,6 +20009,118 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 );
             }
 
+            /// **The idle lock locks the session after `idle.lock_after`** --
+            /// five minutes when nothing says otherwise -- with Solium's own
+            /// lock, as `lock.*` says by default. Once per absence: a session
+            /// unlocked from elsewhere with nobody at the machine is not locked
+            /// again at once. Input starts the count again, and zero never
+            /// does it.
+            ///
+            /// With the lock left out of `idle::settle`, fails at "nobody
+            /// there"; with it not remembering that it has run, at "locked
+            /// again".
+            #[test]
+            fn the_idle_lock_locks_after_lock_after_once_per_absence() {
+                let mut session = Session::new();
+                session.app.open(&mut session.display, &mut session.state);
+                assert_eq!(
+                    session.state.idle.settings().lock_after,
+                    Duration::from_secs(300),
+                    "the default is not the five minutes `idle::Settings` argues for"
+                );
+                let natively_locked = |session: &Session| {
+                    session
+                        .state
+                        .lock
+                        .as_ref()
+                        .is_some_and(crate::lock::Lock::is_native)
+                };
+                // What `input::handle` does for every event from a device.
+                let stir = |session: &mut Session| {
+                    let now = session.state.clock.now();
+                    session.state.idle.stir(now);
+                };
+
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(299));
+                assert!(
+                    session.state.lock.is_none(),
+                    "locked before idle.lock_after"
+                );
+                session.wait(Duration::from_secs(2));
+                assert!(
+                    natively_locked(&session),
+                    "five minutes with nobody there, and the session is not locked"
+                );
+
+                // logind's `Unlock`, from another console: nobody at this one.
+                session.state.unlock_natively();
+                session.wait(Duration::from_secs(1_000));
+                assert!(
+                    session.state.lock.is_none(),
+                    "locked again with nobody having touched anything since"
+                );
+
+                stir(&mut session);
+                session.wait(Duration::from_secs(299));
+                assert!(
+                    session.state.lock.is_none(),
+                    "input did not start the count again"
+                );
+                session.wait(Duration::from_secs(2));
+                assert!(natively_locked(&session), "a second absence was not locked");
+
+                session.state.unlock_natively();
+                session.state.idle.configure(crate::idle::Settings {
+                    lock_after: Duration::ZERO,
+                    ..crate::idle::Settings::default()
+                });
+                stir(&mut session);
+                session.wait(Duration::from_secs(10_000));
+                assert!(
+                    session.state.lock.is_none(),
+                    "idle.lock_after = 0 locked the session"
+                );
+            }
+
+            /// **An idle inhibitor holds the idle lock off**, as it holds the
+            /// blank: a film is not locked half way through, and the count
+            /// starts from when it lets go.
+            #[test]
+            fn an_idle_inhibitor_holds_the_idle_lock_off() {
+                let mut session = Session::new();
+                let (_window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let film = session
+                    .app
+                    .client
+                    .inhibit
+                    .clone()
+                    .expect("zwp_idle_inhibit_manager_v1 bound")
+                    .create_inhibitor(&surface, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+
+                session.wait(Duration::ZERO);
+                session.wait(Duration::from_secs(3_600));
+                assert!(
+                    session.state.lock.is_none(),
+                    "a film holding an idle inhibitor was locked"
+                );
+
+                film.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                session.wait(Duration::from_secs(299));
+                assert!(
+                    session.state.lock.is_none(),
+                    "locked before five minutes after the film ended"
+                );
+                session.wait(Duration::from_secs(2));
+                assert!(
+                    session.state.lock.is_some(),
+                    "five minutes after the film ended, and not locked"
+                );
+            }
+
             /// **An idle inhibitor holds the idle blank off**, for as long as
             /// it is held on a window that is on screen: a film does not go
             /// dark. Let go, and the count starts again from then, as smithay's
@@ -19963,6 +20137,7 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
             #[test]
             fn an_idle_inhibitor_holds_the_idle_blank_off() {
                 let mut session = Session::new();
+                session.without_the_idle_lock();
                 let (_window, _toplevel, surface, _xdg) =
                     session.app.open(&mut session.display, &mut session.state);
                 let monitor = session.output(0);
@@ -20286,6 +20461,7 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
             #[test]
             fn input_wakes_every_screen_the_idle_blank_turned_off() {
                 let mut session = Session::with_monitors(2);
+                session.without_the_idle_lock();
                 session.app.open(&mut session.display, &mut session.state);
                 let (left, right) = (session.output(0), session.output(1));
                 let both = [&left, &right];
@@ -20776,7 +20952,7 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                     &entry,
                     format!(
                         r#"
-                        sol.idle{{ screens_off_after = 90, off_frame_interval = 250 }}
+                        sol.idle{{ lock_after = 45, screens_off_after = 90, off_frame_interval = 250 }}
                         sol.bind("super+o", function() sol.monitor_power("all", "off") end)
                         sol.bind("super+p", function() sol.monitor_power({left:?}, "on") end)
                         sol.bind("super+i", function() sol.monitor_power("all", "dim") end)
@@ -20794,6 +20970,7 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 assert_eq!(
                     session.state.idle.settings(),
                     crate::idle::Settings {
+                        lock_after: Duration::from_secs(45),
                         screens_off_after: Duration::from_secs(90),
                         off_frame_interval: Duration::from_millis(250),
                         dbus_inhibit: true,

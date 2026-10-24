@@ -13,6 +13,10 @@
 //! lock the screen half way through a film, and the person it happens to will
 //! turn the whole feature off rather than find out which half was missing.
 //!
+//! Solium also acts on idleness itself, with no daemon: it locks the session
+//! after `idle.lock_after` and turns the screens off after
+//! `idle.screens_off_after`, both held off by the same inhibitors.
+//!
 //! ## Written out by hand
 //!
 //! Smithay has an `IdleNotifierState`, and it keeps its own timers, so it
@@ -91,10 +95,15 @@ pub(crate) struct Notification {
     idle: bool,
 }
 
-/// What `config.lua`'s `idle` section says: the idle blank, and what a window
-/// on a screen that is off is told.
+/// What `config.lua`'s `idle` section says: the idle lock, the idle blank,
+/// and what a window on a screen that is off is told.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
+    /// How long without input before the session is locked, the way
+    /// `lock.*` says to lock it (`Solium::lock_now`). Zero never does. See
+    /// [`Settings::default`] for the number.
+    /// `the_idle_lock_locks_after_lock_after_once_per_absence`.
+    pub(crate) lock_after: Duration,
     /// How long without input before every screen is turned off. Zero never
     /// does. See [`Settings::default`] for the number and the reason for it.
     /// `the_idle_blank_turns_every_screen_off_after_the_timeout`.
@@ -126,8 +135,16 @@ impl Default for Settings {
     /// (`an_idle_inhibitor_holds_the_idle_blank_off`). Someone running
     /// `swayidle` to do it their own way sets it to 0. `config.lua` says the
     /// same number (`the_shipped_configuration_turns_the_screens_off_after_ten_minutes`).
+    ///
+    /// **The lock at five minutes**, before the screens go dark: a machine
+    /// left alone is locked with no daemon to install, and the screen that
+    /// goes dark later is the lock screen, never the desktop. The same
+    /// inhibitors hold it off, so a film is not locked half way through.
+    /// Someone running `swayidle` sets it to 0 too
+    /// (`the_shipped_configuration_locks_after_five_minutes`).
     fn default() -> Self {
         Self {
+            lock_after: Duration::from_secs(300),
             screens_off_after: Duration::from_secs(600),
             off_frame_interval: Duration::from_secs(1),
             dbus_inhibit: true,
@@ -171,6 +188,11 @@ pub(crate) struct Idle {
     /// inhibitor taken and let go again is an absence of its own
     /// (`an_idle_inhibitor_holds_the_idle_blank_off`).
     blanked: bool,
+    /// The idle lock has locked the session, and nothing has kept the
+    /// machine awake since: so it locks once per absence, and a session
+    /// unlocked from elsewhere (logind's `Unlock`) with nobody at the machine
+    /// is not locked again at once.
+    locked: bool,
     settings: Settings,
     /// The inhibitors that come over the session bus (#152).
     screensaver: crate::screensaver::ScreenSaver,
@@ -235,6 +257,9 @@ pub(crate) fn settle(state: &mut Solium) {
     if inhibited {
         state.idle.held = Some(now);
     }
+    // The lock before the blank, so that when both are due together the
+    // screens go dark over the lock screen.
+    lock(state, now);
     blank(state, now);
     if state.idle.notifications.is_empty() {
         return;
@@ -301,6 +326,37 @@ fn blank(state: &mut Solium, now: Duration) {
         "nobody is here: every screen off (idle.screens_off_after)"
     );
     state.power_all(false);
+}
+
+/// The idle lock: the session locked once nobody has touched anything for
+/// `idle.lock_after`, unless something visible is holding the machine awake,
+/// counted as the blank below counts it. Locked the way every other lock is,
+/// `Solium::lock_now`: Solium's own lock, or `lock.command`'s locker.
+/// `the_idle_lock_locks_after_lock_after_once_per_absence`,
+/// `an_idle_inhibitor_holds_the_idle_lock_off`.
+fn lock(state: &mut Solium, now: Duration) {
+    let after = state.idle.settings.lock_after;
+    if after.is_zero() {
+        return;
+    }
+    let began = *state.idle.began.get_or_insert(now);
+    let since = state.idle.since.unwrap_or(began);
+    if quiet(now, since, state.idle.held) < after {
+        state.idle.locked = false;
+        return;
+    }
+    if state.idle.locked {
+        return;
+    }
+    state.idle.locked = true;
+    if state.lock.is_some() {
+        return;
+    }
+    tracing::info!(
+        seconds = after.as_secs(),
+        "nobody is here: locking the session (idle.lock_after)"
+    );
+    state.lock_now();
 }
 
 /// How long nothing has kept the machine awake: since the last input, or

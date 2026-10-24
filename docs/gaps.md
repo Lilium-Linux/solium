@@ -39,7 +39,7 @@ several are missing:
 | External background effects | Compositor effects exist, but clients cannot request blur through ext-background-effect. | [#78](https://github.com/Lilium-Linux/solium/issues/78) |
 | Portals | Screencopy and session portal configuration exist; screen sharing and the wider portal flow still need end-to-end validation. | [#83](https://github.com/Lilium-Linux/solium/issues/83) |
 | Preview desktop services | The preview has a bar, dock, search and desktop icons. Service-backed desktop features and widgets are unfinished. | [#169](https://github.com/Lilium-Linux/solium/issues/169) |
-| Native lock screen | Solium's own lock, its scenes and its PAM check exist, but nothing takes it yet: logind's `Lock` runs `lock.command`, and idle and a key binding come with the rest of the issue. While it is held a scene sees no windows, workspaces or apps at all: what a lock may show of them (redaction in place), media and notifications on the lock, fingerprint, and glass behind the passcode are later work. | [#281](https://github.com/Lilium-Linux/solium/issues/281) |
+| Native lock screen | Solium's own lock is the session's by default, taken by logind's `Lock`, sleep, `idle.lock_after`, `sol.lock_now` and `super+ctrl+l`, but it has not yet been run on hardware from a text console. While it is held a scene sees no windows, workspaces or apps at all: what a lock may show of them (redaction in place), media and notifications on the lock, fingerprint, and glass behind the passcode are later work. | [#281](https://github.com/Lilium-Linux/solium/issues/281) |
 
 ## Displays, rendering and gaming
 
@@ -82,9 +82,9 @@ several are missing:
 | Distribution packages | Checkout installation and Fedora RPM builds exist; a published package repository and Arch packaging remain open. | [#66](https://github.com/Lilium-Linux/solium/issues/66) |
 | Test reliability | Parallel test crashes and timing-sensitive scenarios can undermine gate confidence and need investigation. | [#237](https://github.com/Lilium-Linux/solium/issues/237), [#241](https://github.com/Lilium-Linux/solium/issues/241), [#256](https://github.com/Lilium-Linux/solium/issues/256) |
 
-Logind lock/sleep handling is implemented, as is the input-startup fix. Set
-`lock.command` to a locker; Solium's own lock screen is built and configurable
-(`lock.scene`) but is not yet what logind's `Lock` takes (#281).
+Logind lock/sleep handling is implemented, as is the input-startup fix. logind's
+`Lock` and sleep take Solium's own lock screen (#281), or run `lock.command`
+when one is set.
 Their implementation does not replace suspend/resume testing on each machine.
 
 For protocol validation, use the [external probes](../dev/README.md#wl-probe)

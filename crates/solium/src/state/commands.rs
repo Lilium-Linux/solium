@@ -786,6 +786,9 @@ impl Solium {
                 }
                 Command::Reload => self.request = Some(Request::Reload),
                 Command::TakeShortcutsBack => self.take_shortcuts_back(),
+                Command::LockNow => {
+                    self.lock_now();
+                }
                 Command::Keyboard(request) => {
                     let keymap = self.keymap.clone();
                     if crate::keymap::apply(self, &request) {

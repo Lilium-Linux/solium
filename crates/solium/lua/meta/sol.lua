@@ -318,9 +318,10 @@
 ---@field decorated? boolean Whether its frame is drawn while it waits.
 ---@field fade? integer Milliseconds the scene takes to fade off the application.
 
----The idle blank. A key left out, or one that is not a number of 0 or more,
----keeps the default.
+---The idle lock and the idle blank. A key left out, or one that is not a
+---number of 0 or more, keeps the default.
 ---@class sol.IdleOptions
+---@field lock_after? number Seconds with nobody at the machine before the session is locked, as `sol.lock_now` locks it. Held off by the same inhibitors as the blank. 0 never does. Default 300.
 ---@field screens_off_after? number Seconds with nobody at the machine before every screen is turned off. 0 never does.
 ---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
 ---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
@@ -377,8 +378,8 @@
 ---logind's `Lock` and sleep requests (#153). A key left out keeps the
 ---default.
 ---@class sol.LockOptions
----@field command? string The locker to run on `Lock`, and before sleep: `"swaylock -f"`, say. Split on whitespace, with no quoting. Unset (the default) runs nothing.
----@field before_sleep? boolean Hold sleep until the locker above has confirmed the lock, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
+---@field command? string A locker of your own, run instead of Solium's own lock screen on `Lock`, before sleep, after `idle.lock_after` and by `sol.lock_now`: `"swaylock -f"`, say. Split on whitespace, with no quoting. Setting it turns `native` off unless `native` is set too. Unset (the default) runs nothing.
+---@field before_sleep? boolean Hold sleep until the lock -- Solium's own or the locker's -- is on every monitor, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
 ---@field lockout? sol.LockoutOptions Solium's own lock: after `attempts` wrong passwords in a row the field is shut for `seconds`, doubling with each lockout up to `max_seconds`. Default `{ attempts = 3, seconds = 30, max_seconds = 300 }`.
 ---@field secret_layout? "first"|"current" Solium's own lock: the layout a password is typed in. `"first"` (the default) switches to the first layout that types Latin letters while locked, and back after; `"current"` keeps whatever is live.
 ---@field helper_timeout_ms? integer Solium's own lock: how long `solium-auth` has to answer, at least 100. Default 30000.
@@ -736,6 +737,14 @@ function sol.input(options) end
 ---@param options? sol.LockOptions
 ---@return nil
 function sol.lock(options) end
+
+---Lock the session now, the way `config.lock` says: Solium's own lock screen,
+---or `lock.command`'s locker when `native` is off. logind's `Lock`, sleep and
+---`idle.lock_after` lock the same way. Over a session already locked it
+---changes nothing. It only ever locks: no `sol` function unlocks. The shipped
+---`super+ctrl+l` calls it.
+---@return nil
+function sol.lock_now() end
 
 ---X11 windows refused a tile, decoration or bar entry outright: `config.x11`,
 ---which the shipped `init.lua` hands over. See #221.
