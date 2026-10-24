@@ -826,6 +826,34 @@ local defaults = {
         -- the letters a-z.
         keypad = "digits",
 
+        -- A PIN, for unlocking with a few digits instead of the password.
+        -- There is none until you set one, from a terminal:
+        --
+        --     solium pin set      (asks for your password, then the PIN twice)
+        --     solium pin clear    (asks for your password)
+        --
+        -- Only an argon2id hash of it is stored, in
+        -- ~/.local/state/solium/pin. While a PIN is set, the lock screen asks
+        -- for it (`Lock.mode` reads "pin") and the password still works:
+        -- whatever is typed that is not `min_length` to `max_length` digits
+        -- is checked as the password. The password is needed instead, with
+        -- the reason on the lock screen:
+        --
+        --   * after `attempts` wrong PINs in a row, until it is entered;
+        --   * the first time the lock is unlocked after the computer starts;
+        --   * when it has not unlocked the lock for `password_after_hours`.
+        --
+        -- `attempts` is at most 10 and `password_after_hours` at most 72;
+        -- more is taken as that. `enabled = false` keeps a PIN that is set
+        -- from being used.
+        pin = {
+            enabled = true,
+            min_length = 4,
+            max_length = 8,
+            attempts = 5,
+            password_after_hours = 48,
+        },
+
         -- Whether Solium's own lock screen is the one used. Unset, it is,
         -- unless `command` above names a locker. While it is, each monitor's
         -- lock screen is built as the session starts, and kept, so the
@@ -858,8 +886,9 @@ local defaults = {
 
         -- How long the lock screen stays over the desktop after it unlocks,
         -- playing its exit (`Lock.state` reads "unlocking"), in
-        -- milliseconds; 0 removes it at once. The desktop has the keyboard
-        -- and the pointer from the unlock on, so this is at most 900.
+        -- milliseconds, counted from the first frame drawn after the unlock;
+        -- 0 removes it at once. The desktop has the keyboard and the pointer
+        -- from the unlock on, so this is at most 900.
         exit_ms = 450,
 
         -- How near a passcode pad (`SecretKeypad`), in pixels, the pointer's

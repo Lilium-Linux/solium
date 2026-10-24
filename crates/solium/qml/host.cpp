@@ -701,6 +701,8 @@ namespace {
 bool g_next_hosted = false;
 QString g_next_monitor;
 bool g_next_lock = false;
+/* What solium_qml_host_next_redacted handed over, for the next scene only. */
+bool g_next_redacted = false;
 } // namespace
 
 extern "C" void solium_qml_host_next_on(const char *monitor)
@@ -712,6 +714,11 @@ extern "C" void solium_qml_host_next_on(const char *monitor)
 extern "C" void solium_qml_host_next_for_lock(int lock)
 {
     g_next_lock = lock != 0;
+}
+
+extern "C" void solium_qml_host_next_redacted(int redacted)
+{
+    g_next_redacted = redacted != 0;
 }
 
 namespace {
@@ -847,6 +854,17 @@ static bool load_component(SoliumQmlScene *scene, const char *qml_path,
         g_next_hosted = false;
     }
     g_next_lock = false;
+    /* A scene drawn over the lock that is no lock scene, the pointer's:
+     * hosted or not, a context of its own reading only what a lock may show.
+     * `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`. */
+    if (g_next_redacted) {
+        if (scene->context == nullptr) {
+            scene->context = new QQmlContext(g_engine->rootContext());
+        }
+        solium_redacted_mark(scene->context);
+        solium_qml_name_scope(scene->context, true);
+    }
+    g_next_redacted = false;
     /* The same for a root that says how big it is.
      * `qml::pointer::tests::a_scene_built_after_one_sized_by_its_root_is_sized_by_the_host`. */
     const int own_width = g_next_root_width;

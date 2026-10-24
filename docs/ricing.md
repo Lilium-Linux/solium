@@ -1176,7 +1176,9 @@ A lock scene has the same `import Solium` as any other, and adds:
 
 - `Lock`, read-only, an attached object any item reads: `state`
   (`"peeking"`, `"locking"`, `"idle"`, `"prompting"`, `"checking"`,
-  `"failed"`, `"lockedOut"`, `"unavailable"`, `"unlocking"`), `locked`,
+  `"failed"`, `"lockedOut"`, `"unavailable"`, `"unlocking"`), `mode`
+  (`"pin"` while a PIN is taken, `"password"` otherwise; the next section),
+  `locked`,
   `progress` (0 to 1, below), `attempts`, `retryAfter` (seconds, while
   locked out or retrying), `message`, `user` (`name`, `realName`,
   `avatar`), `promptOn` (the monitor `prompt_on` names), `enterMs` and
@@ -1201,7 +1203,12 @@ the monitors, the keyboard layout and its own clock, and `Windows`,
 waits, kept, for the next lock included
 (`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`). A scene
 you got from someone else can show a clock and a field, and nothing of what
-you were doing. The other way round, no other scene sees the lock: in a bar
+you were doing. The pointer's scene, the one other scene drawn over the lock,
+reads the session the same way, at all times
+(`lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`); your
+bar, dock and home screen keep theirs through the lock, since they are not
+drawn behind it, and nothing in them is built again at the unlock
+(`state::tests::real_client::lock_focus::native::a_session_scene_keeps_its_rows_through_a_native_lock`). The other way round, no other scene sees the lock: in a bar
 or a widget, `Lock` reads `"idle"`, `Lock.submit()` and `Lock.clear()` do
 nothing, a `SecretField` reads nothing and a `SecretKeypad` lays out no key,
 so nothing on the desktop can time what is typed at the lock or submit for
@@ -1246,9 +1253,12 @@ does not move.
 
 When the password is right, Solium unlocks at once: the keyboard and the
 pointer are the desktop's from that moment. The scene stays over the desktop
-for `exit_ms` more with `Lock.state` reading `"unlocking"`, so it can slide
-or fade itself away, and at that bound it is gone, whatever it is doing
-(`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`).
+with `Lock.state` reading `"unlocking"`, so it can slide or fade itself away,
+for `exit_ms` counted from the first frame drawn after the unlock, so a
+slow frame cannot eat the slide; at that bound it is gone, whatever it is
+doing
+(`lock_auth::tests::the_exit_plays_over_the_desktop_for_exit_ms_and_input_is_the_desktops_at_once`,
+`lock_auth::tests::the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes`).
 `prompt_on` picks the one monitor whose scene shows the field; the others
 show theirs without it
 (`lock_auth::tests::the_prompt_is_on_the_monitor_prompt_on_names_and_no_other`).
@@ -1408,6 +1418,83 @@ Item {
     }
 }
 ```
+
+### A PIN
+
+Solium's own lock screen can take a PIN, a few digits, in place of your
+password. There is none until you set one, from a terminal:
+
+```sh
+solium pin set      # asks for your password, then the new PIN twice
+solium pin clear    # asks for your password
+```
+
+Both ask for your account password first and check it exactly as the lock
+does, through `solium-auth` and PAM. That keeps a PIN from being set or
+cleared by mistake or by a script. It does not stop someone already at your
+unlocked session: they run as you and can write the PIN's files directly,
+which is no more than they could do anyway, since `loginctl unlock-session`
+from inside that session unlocks it. Lock the session when you leave it.
+Neither command echoes what you type, and both refuse to run without a
+terminal, so a PIN cannot be piped in from a script or left in a file. Only an argon2id hash of the PIN is stored, in
+`~/.local/state/solium/pin` (`$XDG_STATE_HOME/solium/pin`), mode 0600; the PIN
+itself is written nowhere (`solium_auth::pin::tests::the_file_holds_a_hash_and_never_the_pin`),
+and is checked by `solium-auth` too, never by the compositor.
+
+While a PIN is set, the lock asks for it: `Lock.mode` reads `"pin"`, and the
+shipped lock screen says "Enter PIN" with its digit pad already up. Type it
+on the keyboard or tap it on the pad, and Return or OK. **Your password still
+works**: whatever you type that is not 4 to 8 digits (`lock.pin.min_length`
+and `max_length`) is checked as your password instead
+(`lock_auth::tests::the_password_unlocks_in_pin_mode_and_resets_the_counts`).
+A password that is itself 4 to 8 digits works too: what is not the PIN is
+then checked as the password, and one wrong entry counts once
+(`lock_auth::tests::a_password_of_digits_unlocks_in_pin_mode`).
+
+The lock asks for your password instead, `Lock.mode` reading `"password"` and
+`Lock.message` saying why:
+
+- after `lock.pin.attempts` wrong PINs in a row (5), until the password is
+  entered. The count is kept in `~/.local/state/solium/pin-state`, so
+  restarting Solium does not start it again
+  (`lock_auth::tests::a_wrong_pin_counts_and_after_attempts_only_the_password_unlocks`,
+  `lock_auth::tests::the_pin_counts_survive_a_restart`);
+- the first time the lock is unlocked after the computer starts
+  (`lock_auth::tests::a_restart_needs_the_password`);
+- when the password has not unlocked it for `lock.pin.password_after_hours`
+  (48), counted both on the wall clock and on `CLOCK_BOOTTIME`, which
+  includes sleep and which setting the time does not move, so turning the
+  clock back does not stretch it
+  (`lock_auth::tests::the_password_is_needed_after_password_after_hours`).
+
+Resuming from suspend or from hibernation is not a restart: the kernel's boot
+id survives both, so the PIN keeps working, within the same hours.
+
+Entering the password resets all three. Wrong PINs count toward
+`lock.lockout` as wrong passwords do, on top of these. A PIN file that is not
+yours, that others can write, or that does not hold such a hash is no PIN at
+all: the lock asks for the password, and the log says why. The same goes for
+`pin-state`, and for the `solium` directory they are in: one that is not
+yours or that others can write is never written to, nor mended, and the PIN
+is not used until you fix it.
+
+```lua
+return {
+    lock = {
+        pin = {
+            enabled = true,             -- false keeps a PIN that is set from being used
+            min_length = 6,             -- the fewest digits, 4 or more
+            max_length = 8,             -- the most, up to 64
+            attempts = 5,               -- wrong PINs before the password is needed, at most 10
+            password_after_hours = 48,  -- the password at least this often, at most 72
+        },
+    },
+}
+```
+
+A lock screen of your own can follow `Lock.mode` the same way: show a
+`SecretKeypad` for `"pin"`, a `SecretInput` either way, and `Lock.message`
+when it is not empty.
 
 ### One workspace per screen, or one for the desk
 

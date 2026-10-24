@@ -41,22 +41,25 @@ are all MIT too. Lua comes from `mlua`
 bus is spoken through `zbus` and the `zvariant` crates (MIT), on the `async-io`
 family of crates (MIT OR Apache-2.0). The signals that end a session are caught
 through `signal-hook-registry` (MIT OR Apache-2.0), which that family already
-uses.
+uses. The lock screen's PIN is hashed with RustCrypto's `argon2`, with its
+`password-hash`, `blake2` and `base64ct` (MIT OR Apache-2.0) and `subtle`
+(BSD-3-Clause).
 
 | Licence | Crates |
 |---|---|
-| MIT OR Apache-2.0 (in any of its spellings) | 161 |
+| MIT OR Apache-2.0 (in any of its spellings) | 167 |
 | MIT | 92 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (`rustix`, `linux-raw-sys`, `io-lifetimes`, `wasip2`, `wit-bindgen`) | 8 |
 | Apache-2.0 (`winit`, `cgmath`, `approx`, `gl_generator`, `khronos_api`, `gethostname`) | 6 |
 | Other choices that include MIT: with Unlicense, Zlib, BSD-2-Clause or BSD-3-Clause | 15 |
-| ISC (`libloading`) | 1 |
+| ISC (`libloading`, `inotify`, `inotify-sys`) | 3 |
+| BSD-3-Clause (`subtle`) | 1 |
 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` (`encoding_rs`) | 1 |
 | `(MIT OR Apache-2.0) AND Unicode-3.0` (`unicode-ident`) | 1 |
 | `Apache-2.0 AND MIT` (`dpi`) | 1 |
 | MIT OR Apache-2.0 OR LGPL-2.1-or-later (`r-efi`, two versions) | 2 |
 
-That is all 288 crates the lock file names. None is GPL- or AGPL-only, and
+That is all 297 crates the lock file names. None is GPL- or AGPL-only, and
 none has an unknown licence. The one entry that mentions a GPL-family licence,
 `r-efi`, offers MIT and Apache-2.0 as alternatives, and is a dependency of
 `getrandom` only on UEFI targets, so no Linux build compiles it.

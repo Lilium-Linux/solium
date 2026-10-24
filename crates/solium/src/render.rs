@@ -1162,13 +1162,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
     // on monitors of different refresh rates by different amounts.
     {
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
-        // The models hosted scenes read, one batch each, ahead of the tick
-        // and measured with it as Qt's, because applying a row runs every
-        // binding and handler on it:
-        // `models::tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
-        // `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`.
-        state.publish_models();
-        crate::qml::tick(state.clock.now());
+        frame_tick(state);
     }
 
     // Twice the largest monitor's bytes may wait on the pool's free list
@@ -1214,6 +1208,33 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         held,
         now: state.presented.at(),
     }
+}
+
+/// Qt's share of a frame, ahead of anything drawn in it, and measured as
+/// Qt's.
+///
+/// The models hosted scenes read, one batch each, ahead of the tick, because
+/// applying a row runs every binding and handler on it
+/// (`models::tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
+/// `qml::hosted::tests::a_published_monitor_reaches_solium_monitor_in_its_scene`).
+/// Then the instant the frame is built at, read once, after them: an exit of
+/// Solium's own lock that waits for its first frame is drawn from it
+/// (`lock_scene::LockScenes::exit_frame`), and every animation is advanced to
+/// it, so the scene's own exit animation, which the publish above started,
+/// begins at it too: Qt starts an animation where its clock is when the
+/// events that start it are delivered, and the tick delivers them there, or
+/// at the next frame's tick inside its 16 ms throttle
+/// (`CompositorAnimationDriver` and `solium_qml_tick` in `qml/host.cpp`).
+/// However long the publish took, the exit's bound and its animation start
+/// together.
+/// `lock_auth::tests::the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes`.
+pub(crate) fn frame_tick(state: &mut Solium) {
+    state.publish_models();
+    let now = state.clock.now();
+    if state.lock_scenes.exit_frame(now) {
+        tracing::debug!("the lock's exit is drawn from this frame");
+    }
+    crate::qml::tick(now);
 }
 
 /// The first desktop frame's gate (`warm::Warm`, spec C14), asked once a

@@ -67,6 +67,25 @@
 //! `tests::an_unavailable_check_is_retried_with_backoff_and_recovers`,
 //! `tests::the_secret_is_zeroed_after_submit_and_on_unlock`.
 //!
+//! **A PIN, where one is set** (`crate::pin`). While the lock takes one,
+//! `Lock.mode` reads `"pin"`, and what is typed goes into the same buffer as
+//! a password. Submitted, it is checked as the PIN when it has a PIN's shape
+//! (`lock.pin.min_length` to `max_length` digits), by the helper against the
+//! PIN file, and, when it is not the PIN, as the password; anything else is
+//! checked as the password alone. So the password unlocks whatever the mode,
+//! a password of digits included, and one entry counts one attempt
+//! (`tests::a_password_of_digits_unlocks_in_pin_mode`). A wrong PIN counts toward the lockout as a wrong password does,
+//! and toward `lock.pin.attempts` in the state file, which outlives the lock
+//! and Solium; when the PIN is not taken (too many wrong ones, a restart since
+//! the password was last used, `lock.pin.password_after_hours`), `Lock.mode`
+//! reads `"password"` and `Lock.message` says why, and only the password's
+//! unlock lets a PIN be taken again.
+//! `tests::a_wrong_pin_counts_and_after_attempts_only_the_password_unlocks`,
+//! `tests::a_restart_needs_the_password`,
+//! `tests::the_password_is_needed_after_password_after_hours`,
+//! `tests::the_pin_counts_survive_a_restart`,
+//! `tests::the_password_unlocks_in_pin_mode_and_resets_the_counts`.
+//!
 //! **The layout a password is typed in.** With `lock.secret_layout = "first"`
 //! (the default), taking the lock switches to the keymap's first layout that
 //! types Latin letters, and ending it switches back, so a password is not
@@ -105,6 +124,8 @@ pub(crate) struct Settings {
     pub(crate) retries: u32,
     /// The rows `SecretKeypad` lays out: `lock.keypad`.
     pub(crate) keypad: Keypad,
+    /// Whether, and when, a PIN is taken: `lock.pin`.
+    pub(crate) pin: crate::pin::Settings,
 }
 
 impl Default for Settings {
@@ -119,6 +140,7 @@ impl Default for Settings {
             },
             retries: 5,
             keypad: Keypad::Digits,
+            pin: crate::pin::Settings::default(),
         }
     }
 }
@@ -468,6 +490,12 @@ impl User {
     }
 }
 
+/// The login name of the user this process runs as: what a password is
+/// checked against.
+pub(crate) fn login_name() -> String {
+    User::current().name
+}
+
 /// This process's passwd entry: the login name, the name before the first
 /// comma of its comment field, and its home.
 #[expect(unsafe_code, reason = "reading the passwd entry through libc")]
@@ -508,10 +536,10 @@ fn passwd() -> Option<(String, String, String)> {
 /// The answers the helper's thread hands back, with the check each is for.
 type Answers = Arc<Mutex<VecDeque<(u64, Outcome)>>>;
 
-/// A stand-in for the helper, for a test: the answer to a check of a secret
-/// for a user, given the timeout the check would have had.
+/// A stand-in for the helper, for a test: the answer to a check of a secret,
+/// as a password or a PIN, given the timeout the check would have had.
 #[cfg(test)]
-pub(crate) type StandIn = Box<dyn FnMut(&str, &Secret, Duration) -> Outcome + Send>;
+pub(crate) type StandIn = Box<dyn FnMut(&crate::auth::Kind, &Secret, Duration) -> Outcome + Send>;
 
 /// The native lock's password, its check, and what the lock's scenes are
 /// told of them. See the module documentation.
@@ -539,6 +567,17 @@ pub(crate) struct LockAuth {
     /// Whether the last check was refused, so the wait that follows it ends
     /// in `unavailable` rather than `failed`.
     refused: bool,
+    /// Whether the check under way, or the last one, is of a PIN.
+    checking_pin: bool,
+    /// Whether what was last submitted was checked as the PIN first: a
+    /// PIN-shaped entry at a lock taking a PIN, which is checked as the
+    /// password too when it is not the PIN.
+    entry_pin: bool,
+    /// Whether the lock took a PIN when the last character was typed: what
+    /// the scene was showing.
+    typed_as_pin: bool,
+    /// What is known of the PIN: whether one is set, and its counts.
+    pin: crate::pin::Known,
     /// When the wait under way ends, on the compositor's clock: PAM's delay
     /// while checking, the lockout, or the next retry.
     until: Option<Duration>,
@@ -564,6 +603,9 @@ pub(crate) struct LockAuth {
     stale: bool,
     #[cfg(test)]
     stand_in: Option<StandIn>,
+    /// The clocks a test says it is.
+    #[cfg(test)]
+    clocks: Option<crate::pin::Clocks>,
 }
 
 /// Never the secrets: an attempt count and a state are all a log may hold.
@@ -590,6 +632,10 @@ impl Default for LockAuth {
             unanswered: 0,
             retried: 0,
             refused: false,
+            checking_pin: false,
+            entry_pin: false,
+            typed_as_pin: false,
+            pin: crate::pin::Known::new(crate::pin::Paths::of_this_user()),
             until: None,
             check: None,
             serial: 0,
@@ -602,6 +648,8 @@ impl Default for LockAuth {
             stale: true,
             #[cfg(test)]
             stand_in: None,
+            #[cfg(test)]
+            clocks: None,
         }
     }
 }
@@ -646,9 +694,27 @@ impl LockAuth {
         }
     }
 
-    /// The lock was taken: a fresh field and fresh counts.
+    /// The lock was taken: a fresh field and fresh counts, and the PIN's
+    /// files read again, so a PIN set or cleared since is seen, and the counts
+    /// a restart did not reset.
     pub(crate) fn begin(&mut self) {
         self.reset();
+        self.pin.refresh();
+    }
+
+    /// What the lock takes now: a PIN, or the password and why.
+    pub(crate) fn mode(&self) -> crate::pin::Mode {
+        self.pin.mode(&self.settings.pin, self.clocks_now())
+    }
+
+    /// The clocks the PIN's hours are counted on, which outlive the
+    /// compositor's own clock: the wall clock and `CLOCK_BOOTTIME`.
+    fn clocks_now(&self) -> crate::pin::Clocks {
+        #[cfg(test)]
+        if let Some(clocks) = self.clocks {
+            return clocks;
+        }
+        crate::pin::Clocks::now()
     }
 
     /// The lock ended, however it ended: the field and the submitted copy
@@ -671,6 +737,8 @@ impl LockAuth {
         self.unanswered = 0;
         self.retried = 0;
         self.refused = false;
+        self.checking_pin = false;
+        self.entry_pin = false;
         self.until = None;
         self.pad_held = 0;
     }
@@ -692,6 +760,7 @@ impl LockAuth {
                 // that long is anyone's (`solium_auth::MAX_LEN`).
                 let _ = self.typed.push_str(c.encode_utf8(&mut bytes));
                 wipe(&mut bytes);
+                self.typed_as_pin = self.mode() == crate::pin::Mode::Pin;
                 self.phase = Phase::Prompting;
             }
             Edit::Erase => {
@@ -747,10 +816,31 @@ impl LockAuth {
     /// Return, a keypad's OK, or `Lock.submit()`: what is typed goes to the
     /// helper, and the field is wiped. Nothing typed, or a field that is not
     /// taking a password, submits nothing.
+    ///
+    /// Taking a PIN, what has a PIN's shape is checked as the PIN, and then,
+    /// if it is not the PIN, as the password, so a password of digits always
+    /// unlocks; anything else is checked as the password alone. The PIN's
+    /// files are read again first:
+    /// a PIN-shaped entry made while the lock took a PIN, which no longer
+    /// does (a PIN cleared meanwhile, its hours run out), is wiped unchecked
+    /// rather than tried as the password, and the message says why.
     fn submit(&mut self, now: Duration) {
         if !self.accepting() || self.typed.is_empty() {
             return;
         }
+        let pin = &self.settings.pin;
+        let shaped = solium_auth::pin::shaped(&self.typed, pin.min_length, pin.max_length);
+        self.pin.refresh();
+        let is_pin = self.mode() == crate::pin::Mode::Pin;
+        if shaped && self.typed_as_pin && !is_pin {
+            self.typed.clear();
+            self.selected = false;
+            self.phase = Phase::Idle;
+            tracing::info!("the lock stopped taking a PIN as one was typed; it was not checked");
+            return;
+        }
+        self.checking_pin = shaped && is_pin;
+        self.entry_pin = self.checking_pin;
         self.submitted.clear();
         // The page is UTF-8 by construction: only `push_str` writes it.
         let pushed = std::str::from_utf8(self.typed.expose())
@@ -792,28 +882,42 @@ impl LockAuth {
             return;
         }
         let timeout = self.settings.helper_timeout;
+        let kind = match (&self.pin.paths, self.checking_pin) {
+            (Some(paths), true) => crate::auth::Kind::Pin {
+                file: paths.pin.clone(),
+            },
+            _ => crate::auth::Kind::Password {
+                user: self.user.name.clone(),
+            },
+        };
         #[cfg(test)]
         if let Some(stand_in) = self.stand_in.as_mut() {
-            let outcome = stand_in(&self.user.name, &secret, timeout);
+            let outcome = stand_in(&kind, &secret, timeout);
             drop(secret);
             answer(outcome);
             return;
         }
-        self.check = Some(crate::auth::check(&self.user.name, secret, timeout, answer));
+        self.check = Some(crate::auth::check(kind, secret, timeout, answer));
     }
 
     /// The answers that came since the last call, and the waits that ended
     /// by `now`. Whether to unlock: only on the helper's yes to the check
     /// under way.
     pub(crate) fn settle(&mut self, now: Duration) -> bool {
-        let answers: Vec<(u64, Outcome)> = self
-            .answers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain(..)
-            .collect();
         let mut unlock = false;
-        for (serial, outcome) in answers {
+        // Until no answer is left: a wrong PIN starts the password's check
+        // of the same entry, whose answer may be here already.
+        loop {
+            // Taken, and the lock let go, before the answer is acted on: a
+            // check it starts answers into the same queue.
+            let next = self
+                .answers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front();
+            let Some((serial, outcome)) = next else {
+                break;
+            };
             if serial != self.serial || self.phase != Phase::Checking || self.until.is_some() {
                 continue;
             }
@@ -824,7 +928,24 @@ impl LockAuth {
                     self.typed.clear();
                     self.phase = Phase::Unlocking;
                     unlock = true;
-                    tracing::info!("the lock's password check said yes");
+                    if self.checking_pin {
+                        self.pin.pin_unlocked();
+                        tracing::info!("the lock's PIN check said yes");
+                    } else {
+                        let clocks = self.clocks_now();
+                        self.pin.password_unlocked(clocks);
+                        tracing::info!("the lock's password check said yes");
+                    }
+                }
+                Outcome::Failed { .. } if self.checking_pin => {
+                    // Not the PIN: counted as a wrong PIN, and saved, at
+                    // once; then the same entry is checked as the password,
+                    // whose answer is the one that counts as an attempt, so
+                    // a password of digits is never shut out by a PIN.
+                    self.pin.failed();
+                    self.checking_pin = false;
+                    tracing::info!("the lock's PIN check said no; checking it as the password");
+                    self.start_check(now);
                 }
                 Outcome::Failed { delay } => {
                     self.submitted.clear();
@@ -837,8 +958,18 @@ impl LockAuth {
                     self.until = Some(now + delay);
                     tracing::info!(
                         attempts = self.attempts,
-                        "the lock's password check said no"
+                        pin = self.entry_pin,
+                        "the lock's check said no"
                     );
+                }
+                Outcome::Unavailable { reason, .. } if self.pin_gone() => {
+                    // No PIN to check it against any more: it was cleared, or
+                    // its file was spoiled, since the lock was taken. Nothing
+                    // to try again; the password is asked for.
+                    self.submitted.clear();
+                    self.unanswered = 0;
+                    self.phase = Phase::Idle;
+                    tracing::warn!(reason, "the lock's PIN could not be checked");
                 }
                 Outcome::Refused { reason } => {
                     // PAM had it: a wrong attempt, which the lockout counts,
@@ -926,6 +1057,16 @@ impl LockAuth {
         false
     }
 
+    /// After a PIN check that could not be answered: whether that is because
+    /// there is no PIN to check against any more, read from the files again.
+    fn pin_gone(&mut self) -> bool {
+        if !self.checking_pin {
+            return false;
+        }
+        self.pin.refresh();
+        self.mode() != crate::pin::Mode::Pin
+    }
+
     /// Whole seconds until the wait under way ends, for a state that shows
     /// one: locked out, or unavailable until the next try.
     fn retry_after(&self, now: Duration) -> u64 {
@@ -941,8 +1082,17 @@ impl LockAuth {
     /// The line that goes with the state. Unavailable, it is the way out
     /// from another console: logind's `Unlock` while `lock.logind_unlock`
     /// honours it, and ending the session while it does not.
+    ///
+    /// While the lock asks for the password where it would take a PIN, the
+    /// line says why, in place of nothing; a wrong PIN is "Wrong PIN", unless
+    /// it was the last one the lock takes.
     fn message(&self, logind_unlock: bool) -> String {
+        let fallback = match self.mode() {
+            crate::pin::Mode::Password(fallback) => Some(fallback.message(&self.settings.pin)),
+            crate::pin::Mode::Pin | crate::pin::Mode::NoPin => None,
+        };
         match self.phase {
+            Phase::Failed if self.entry_pin => fallback.unwrap_or_else(|| "Wrong PIN".to_owned()),
             Phase::Failed => "Wrong password".to_owned(),
             Phase::LockedOut => "Too many attempts".to_owned(),
             Phase::Unavailable => {
@@ -957,7 +1107,8 @@ impl LockAuth {
                 };
                 format!("From another console: {command}")
             }
-            Phase::Idle | Phase::Prompting | Phase::Checking | Phase::Unlocking => String::new(),
+            Phase::Idle | Phase::Prompting | Phase::Checking => fallback.unwrap_or_default(),
+            Phase::Unlocking => String::new(),
         }
     }
 
@@ -1009,6 +1160,7 @@ impl LockAuth {
         };
         object(vec![
             ("state", text(state)),
+            ("mode", text(self.mode().name())),
             ("locked", Json::Bool(scene.locked)),
             ("progress", Json::Number(scene.progress)),
             ("enterMs", number(scene.enter_ms)),
@@ -1056,6 +1208,28 @@ impl LockAuth {
     #[cfg(test)]
     pub(crate) fn use_stand_in(&mut self, stand_in: StandIn) {
         self.stand_in = Some(stand_in);
+    }
+
+    /// Read the PIN's files from `paths`, as this user's would be, and take
+    /// both clocks to read `wall`.
+    #[cfg(test)]
+    pub(crate) fn use_pin_for_test(&mut self, paths: crate::pin::Paths, wall: u64) {
+        self.pin = crate::pin::Known::new(Some(paths));
+        self.clocks = Some(crate::pin::Clocks::at(wall));
+        self.pin.refresh();
+        self.stale = true;
+    }
+
+    /// Move both clocks a test set on to `wall`.
+    #[cfg(test)]
+    pub(crate) fn set_wall_for_test(&mut self, wall: u64) {
+        self.clocks = Some(crate::pin::Clocks::at(wall));
+    }
+
+    /// Set the two clocks apart.
+    #[cfg(test)]
+    pub(crate) fn set_clocks_for_test(&mut self, clocks: crate::pin::Clocks) {
+        self.clocks = Some(clocks);
     }
 
     /// Whether the field's page, and the submitted copy's, are all zeroes.
@@ -1318,9 +1492,15 @@ mod tests {
     use super::*;
     use crate::keymap::tests::{ALT, SHIFT, tap, us_ru};
 
-    /// The one password the stand-in says yes to, and the one passcode.
+    /// The passwords the stand-in says yes to: a phrase, and digits typed on
+    /// a keypad.
     const RIGHT: &str = "correct horse";
     const PIN: &str = "2580";
+    /// The PIN a test that sets one sets, which is not the password.
+    const SET_PIN: &str = "1379";
+    /// The wall clock a test with a PIN starts at, and the password unlock
+    /// its record says happened then.
+    const WALL: u64 = 1_761_300_000;
 
     /// What the stand-in was asked, and what it is to answer first.
     #[derive(Default)]
@@ -1329,6 +1509,8 @@ mod tests {
         timeouts: Vec<Duration>,
         /// Answers to give, in order, before judging by the password.
         scripted: VecDeque<Outcome>,
+        /// What each check was of: `"password"` or `"pin"`.
+        kinds: Vec<&'static str>,
     }
 
     type Shared = Arc<Mutex<Asked>>;
@@ -1337,24 +1519,91 @@ mod tests {
         shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A stand-in for the helper: yes to [`RIGHT`] and [`PIN`], no with PAM's
-    /// two-second delay to anything else, unless an answer is scripted.
+    /// A stand-in for the helper, unless an answer is scripted: as a
+    /// password, yes to [`RIGHT`] and [`PIN`] and no with PAM's two-second
+    /// delay to anything else; as a PIN, what the helper's own check of the
+    /// PIN file says (`solium_auth::pin::check`), which no PAM is part of.
     fn stand_in(shared: &Shared) -> StandIn {
         let shared = Arc::clone(shared);
-        Box::new(move |_user, secret, timeout| {
+        Box::new(move |kind, secret, timeout| {
             let mut asked = asked(&shared);
             asked.timeouts.push(timeout);
+            asked.kinds.push(match kind {
+                crate::auth::Kind::Password { .. } => "password",
+                crate::auth::Kind::Pin { .. } => "pin",
+            });
             if let Some(outcome) = asked.scripted.pop_front() {
                 return outcome;
             }
-            if secret.expose() == RIGHT.as_bytes() || secret.expose() == PIN.as_bytes() {
-                Outcome::Ok
-            } else {
-                Outcome::Failed {
-                    delay: Duration::from_secs(2),
+            match kind {
+                crate::auth::Kind::Pin { file } => match solium_auth::pin::check(file, secret) {
+                    solium_auth::Answer::Ok => Outcome::Ok,
+                    solium_auth::Answer::Failed { delay_ms } => Outcome::Failed {
+                        delay: Duration::from_millis(u64::from(delay_ms)),
+                    },
+                    solium_auth::Answer::Refused { reason } => Outcome::Refused { reason },
+                    solium_auth::Answer::Unavailable { reason } => Outcome::Unavailable {
+                        reason,
+                        lasting: false,
+                    },
+                },
+                crate::auth::Kind::Password { .. }
+                    if secret.expose() == RIGHT.as_bytes() || secret.expose() == PIN.as_bytes() =>
+                {
+                    Outcome::Ok
                 }
+                crate::auth::Kind::Password { .. } => Outcome::Failed {
+                    delay: Duration::from_secs(2),
+                },
             }
         })
+    }
+
+    /// [`SET_PIN`] set in a directory of the test's own, as `solium pin set`
+    /// leaves it: its hash, and a record of a password unlock
+    /// at [`WALL`] on the boot `boot-one`, which the boot id file names.
+    fn pin_set(test: &str) -> (PathBuf, crate::pin::Paths) {
+        let dir =
+            std::env::temp_dir().join(format!("solium-lock-pin-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let mut paths = crate::pin::Paths::in_dir(&dir.join("solium"));
+        paths.boot_id = dir.join("boot_id");
+        std::fs::write(&paths.boot_id, "boot-one\n").expect("a boot id");
+        // Hashed once for every test here, with the parameters `solium pin
+        // set` uses, which are the least a PIN file may have.
+        static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let phc = HASH.get_or_init(|| {
+            let mut pin = Secret::new();
+            assert!(pin.push_str(SET_PIN));
+            solium_auth::pin::hash(&pin).expect("a hash")
+        });
+        solium_auth::pin::write_private(&paths.pin, phc.as_bytes()).expect("the PIN file");
+        crate::pin::Record::after_password(
+            crate::pin::Clocks::at(WALL),
+            Some("boot-one".to_owned()),
+        )
+        .write(&paths.state)
+        .expect("the state file");
+        (dir, paths)
+    }
+
+    /// A lock's password state with [`SET_PIN`] set, at [`WALL`].
+    fn pin_auth(test: &str, settings: Settings) -> (LockAuth, Shared, PathBuf, crate::pin::Paths) {
+        let (mut auth, shared) = auth(settings);
+        let (dir, paths) = pin_set(test);
+        auth.use_pin_for_test(paths.clone(), WALL);
+        auth.begin();
+        (auth, shared, dir, paths)
+    }
+
+    /// The record in the state file now.
+    fn record(paths: &crate::pin::Paths) -> crate::pin::Record {
+        crate::pin::Record::read(&paths.state).0
+    }
+
+    fn last_kind(shared: &Shared) -> &'static str {
+        asked(shared).kinds.last().copied().unwrap_or("none")
     }
 
     /// A lock's password state on its own, with `settings` and the stand-in,
@@ -1701,6 +1950,434 @@ mod tests {
         assert_eq!(auth.length(), 0);
     }
 
+    /// What the checks since `from` were of.
+    fn kinds_since(shared: &Shared, from: usize) -> Vec<&'static str> {
+        asked(shared).kinds.get(from..).unwrap_or_default().to_vec()
+    }
+
+    /// **A PIN is taken where one is set, and the password still is**: the
+    /// lock reads `"pin"`; `min_length` to `max_length` digits are checked
+    /// as the PIN, by the helper's check of the PIN file, and then, not being
+    /// the PIN, as the password; anything else as the password alone. The
+    /// right PIN unlocks on the PIN's check alone.
+    #[test]
+    fn a_pin_shaped_entry_is_checked_as_the_pin_and_anything_else_as_the_password() {
+        let settings = Settings {
+            lockout: Lockout {
+                attempts: 100,
+                ..Lockout::default()
+            },
+            ..Settings::default()
+        };
+        let (mut auth, shared, dir, _) = pin_auth("shape", settings);
+        assert_eq!(auth.mode(), crate::pin::Mode::Pin);
+        assert_eq!(auth.mode().name(), "pin");
+        let mut now = s(0);
+        for (typed, kinds) in [
+            ("12345678", &["pin", "password"][..]),
+            ("0000", &["pin", "password"]),
+            ("123", &["password"]),
+            ("123456789", &["password"]),
+            ("13a9", &["password"]),
+            ("wrong", &["password"]),
+        ] {
+            let from = asked(&shared).kinds.len();
+            submit(&mut auth, typed, now);
+            assert!(!auth.settle(now), "{typed} unlocked");
+            assert_eq!(kinds_since(&shared, from), kinds, "{typed}");
+            now += s(3);
+            auth.settle(now);
+        }
+        let from = asked(&shared).kinds.len();
+        submit(&mut auth, SET_PIN, now);
+        assert!(auth.settle(now), "the right PIN did not unlock");
+        assert_eq!(kinds_since(&shared, from), ["pin"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A password of digits always unlocks**: in PIN mode, a PIN-shaped
+    /// password that is not the PIN is checked as the password after the
+    /// PIN's no, and unlocks, resetting the counts as a password unlock does;
+    /// a PIN-shaped entry that is neither counts one attempt and one wrong
+    /// PIN, not two of either.
+    #[test]
+    fn a_password_of_digits_unlocks_in_pin_mode() {
+        let (mut auth, shared, dir, paths) = pin_auth("digits", Settings::default());
+        submit(&mut auth, "0000", s(0));
+        auth.settle(s(0));
+        auth.settle(s(3));
+        assert_eq!(auth.phase(), Phase::Failed);
+        assert_eq!(auth.attempts(), 1, "one entry, counted twice");
+        assert_eq!(record(&paths).failures, 1, "one wrong PIN, counted twice");
+        assert_eq!(auth.message(true), "Wrong PIN");
+
+        auth.set_wall_for_test(WALL + 60);
+        let from = asked(&shared).kinds.len();
+        // The stand-in's other password, of digits: PIN-shaped, not the PIN.
+        submit(&mut auth, PIN, s(4));
+        assert!(auth.settle(s(4)), "a password of digits did not unlock");
+        assert_eq!(kinds_since(&shared, from), ["pin", "password"]);
+        assert_eq!(
+            record(&paths),
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL + 60),
+                Some("boot-one".to_owned())
+            ),
+            "not reset as a password unlock resets it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A wrong PIN counts, and after `lock.pin.attempts` only the password
+    /// unlocks**: each wrong PIN is counted in the state file as it comes;
+    /// after the third, the lock reads `"password"` with the reason, and the
+    /// right PIN is checked as the password, which it is not, so it does not
+    /// unlock; the password then does, and the count starts again.
+    #[test]
+    fn a_wrong_pin_counts_and_after_attempts_only_the_password_unlocks() {
+        let settings = Settings {
+            lockout: Lockout {
+                attempts: 100,
+                ..Lockout::default()
+            },
+            pin: crate::pin::Settings {
+                attempts: 3,
+                ..crate::pin::Settings::default()
+            },
+            ..Settings::default()
+        };
+        let (mut auth, shared, dir, paths) = pin_auth("attempts", settings);
+        let mut now = s(0);
+        for wrong in 1..=3 {
+            assert_eq!(auth.mode(), crate::pin::Mode::Pin, "after {}", wrong - 1);
+            let from = asked(&shared).kinds.len();
+            submit(&mut auth, "0000", now);
+            assert!(!auth.settle(now));
+            assert_eq!(kinds_since(&shared, from), ["pin", "password"]);
+            assert_eq!(record(&paths).failures, wrong, "not counted as it came");
+            assert_eq!(auth.attempts(), wrong);
+            now += s(3);
+            auth.settle(now);
+        }
+        assert_eq!(auth.phase(), Phase::Failed);
+        assert_eq!(
+            auth.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Attempts)
+        );
+        assert_eq!(auth.mode().name(), "password");
+        assert!(
+            auth.message(true).contains("Too many wrong PINs"),
+            "{:?}",
+            auth.message(true)
+        );
+
+        let from = asked(&shared).kinds.len();
+        submit(&mut auth, SET_PIN, now);
+        assert_eq!(
+            kinds_since(&shared, from),
+            ["password"],
+            "a PIN taken after the attempts"
+        );
+        assert!(
+            !auth.settle(now),
+            "the right PIN unlocked after the attempts"
+        );
+        now += s(3);
+        auth.settle(now);
+        assert_eq!(
+            record(&paths).failures,
+            3,
+            "a password's no counted as a PIN's"
+        );
+
+        submit(&mut auth, RIGHT, now);
+        assert!(auth.settle(now), "the password did not unlock");
+        assert_eq!(
+            record(&paths),
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL),
+                Some("boot-one".to_owned())
+            )
+        );
+        auth.begin();
+        assert_eq!(auth.mode(), crate::pin::Mode::Pin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The lockout applies to wrong PINs too**: `lock.lockout.attempts`
+    /// wrong PINs in a row shut the field as wrong passwords do, each
+    /// counted once.
+    #[test]
+    fn the_lockout_applies_to_wrong_pins() {
+        let settings = Settings {
+            lockout: Lockout {
+                attempts: 2,
+                wait: Backoff {
+                    seconds: 30,
+                    max_seconds: 30,
+                },
+            },
+            ..Settings::default()
+        };
+        let (mut auth, _, dir, _) = pin_auth("lockout", settings);
+        submit(&mut auth, "0000", s(0));
+        auth.settle(s(0));
+        auth.settle(s(2));
+        assert_eq!(auth.phase(), Phase::Failed);
+        submit(&mut auth, "0001", s(2));
+        auth.settle(s(2));
+        auth.settle(s(4));
+        assert_eq!(auth.phase(), Phase::LockedOut);
+        assert_eq!(auth.attempts(), 2);
+        assert_eq!(auth.retry_after(s(4)), 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A restart needs the password**: with another boot id than the one
+    /// the last password unlock recorded, the lock reads `"password"` with
+    /// the reason and checks the PIN as the password; the password unlocks
+    /// and records this boot, and the next lock takes the PIN again.
+    #[test]
+    fn a_restart_needs_the_password() {
+        let (mut auth, shared, dir, paths) = pin_auth("boot", Settings::default());
+        assert_eq!(auth.mode(), crate::pin::Mode::Pin);
+        std::fs::write(&paths.boot_id, "boot-two\n").expect("another boot");
+        auth.begin();
+        assert_eq!(
+            auth.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Boot)
+        );
+        assert!(
+            auth.message(true).contains("restart"),
+            "{:?}",
+            auth.message(true)
+        );
+        submit(&mut auth, SET_PIN, s(0));
+        assert_eq!(last_kind(&shared), "password");
+        assert!(!auth.settle(s(0)), "the PIN unlocked after a restart");
+        auth.settle(s(3));
+        submit(&mut auth, RIGHT, s(3));
+        assert!(auth.settle(s(3)));
+        assert_eq!(record(&paths).boot.as_deref(), Some("boot-two"));
+        auth.begin();
+        assert_eq!(auth.mode(), crate::pin::Mode::Pin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The password is needed after `password_after_hours`**: a PIN is
+    /// taken up to 48 hours after the last password unlock and not a second
+    /// later, nor when the clock says that unlock is still to come; a PIN
+    /// typed while it was taken and submitted after is wiped unchecked.
+    #[test]
+    fn the_password_is_needed_after_password_after_hours() {
+        let (mut auth, shared, dir, _) = pin_auth("hours", Settings::default());
+        let hours = 48 * 3600;
+        auth.set_wall_for_test(WALL + hours);
+        assert_eq!(auth.mode(), crate::pin::Mode::Pin);
+        type_text(&mut auth, SET_PIN, s(0));
+        auth.set_wall_for_test(WALL + hours + 1);
+        assert_eq!(
+            auth.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Hours)
+        );
+        assert!(
+            auth.message(true).contains("every 48 hours"),
+            "{:?}",
+            auth.message(true)
+        );
+        auth.edit(Edit::Submit, s(0));
+        assert!(
+            asked(&shared).kinds.is_empty(),
+            "checked as the mode changed"
+        );
+        assert_eq!((auth.phase(), auth.length()), (Phase::Idle, 0));
+        submit(&mut auth, SET_PIN, s(0));
+        assert_eq!(last_kind(&shared), "password");
+        assert!(!auth.settle(s(0)));
+        auth.set_wall_for_test(WALL - 1);
+        assert_eq!(
+            auth.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Hours),
+            "a password unlock in the future"
+        );
+        let short = Settings {
+            pin: crate::pin::Settings {
+                password_after: Duration::from_secs(3600),
+                ..crate::pin::Settings::default()
+            },
+            ..Settings::default()
+        };
+        auth.configure(short);
+        auth.set_wall_for_test(WALL + 3601);
+        assert_eq!(
+            auth.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Hours),
+            "the setting's hours"
+        );
+        // The wall clock set back to within the hours does not stretch them
+        // while `CLOCK_BOOTTIME` says they are over.
+        auth.configure(Settings::default());
+        auth.set_clocks_for_test(crate::pin::Clocks {
+            wall: WALL + 3600,
+            boottime: WALL + hours + 1,
+        });
+        assert_eq!(
+            auth.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Hours),
+            "the wall clock set back stretched the hours"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The counts survive a restart**: two wrong PINs, then a new
+    /// `LockAuth`, as a restarted Solium has, reads them from the state file,
+    /// and one more wrong PIN is the third of three.
+    #[test]
+    fn the_pin_counts_survive_a_restart() {
+        let settings = Settings {
+            lockout: Lockout {
+                attempts: 100,
+                ..Lockout::default()
+            },
+            pin: crate::pin::Settings {
+                attempts: 3,
+                ..crate::pin::Settings::default()
+            },
+            ..Settings::default()
+        };
+        let (mut first, _, dir, paths) = pin_auth("restart", settings.clone());
+        for round in 0..2 {
+            let now = s(3 * round);
+            submit(&mut first, "0000", now);
+            first.settle(now);
+            first.settle(now + s(3));
+        }
+        assert_eq!(record(&paths).failures, 2);
+        drop(first);
+
+        let (mut again, _) = auth(settings);
+        again.use_pin_for_test(paths.clone(), WALL);
+        again.begin();
+        assert_eq!(again.mode(), crate::pin::Mode::Pin);
+        submit(&mut again, "0000", s(0));
+        again.settle(s(0));
+        assert_eq!(
+            again.mode(),
+            crate::pin::Mode::Password(crate::pin::Fallback::Attempts),
+            "a restart gave a fresh run of guesses"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The password unlocks in PIN mode, and resets the counts**: after a
+    /// wrong PIN, the password, checked as the password, unlocks and leaves
+    /// a fresh record; the right PIN unlocks too and ends a run of wrong
+    /// ones without touching the password's time.
+    #[test]
+    fn the_password_unlocks_in_pin_mode_and_resets_the_counts() {
+        let (mut auth, shared, dir, paths) = pin_auth("password", Settings::default());
+        submit(&mut auth, "0000", s(0));
+        auth.settle(s(0));
+        auth.settle(s(3));
+        assert_eq!(record(&paths).failures, 1);
+        auth.set_wall_for_test(WALL + 60);
+        submit(&mut auth, RIGHT, s(3));
+        assert_eq!(last_kind(&shared), "password");
+        assert!(auth.settle(s(3)), "the password did not unlock in PIN mode");
+        assert_eq!(
+            record(&paths),
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL + 60),
+                Some("boot-one".to_owned())
+            )
+        );
+
+        auth.begin();
+        submit(&mut auth, "0000", s(4));
+        auth.settle(s(4));
+        auth.settle(s(7));
+        auth.set_wall_for_test(WALL + 120);
+        submit(&mut auth, SET_PIN, s(7));
+        assert!(auth.settle(s(7)), "the right PIN did not unlock");
+        assert_eq!(
+            record(&paths),
+            crate::pin::Record::after_password(
+                crate::pin::Clocks::at(WALL + 60),
+                Some("boot-one".to_owned())
+            ),
+            "the PIN moved the password's time, or kept the wrong one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The secret is zeroed after a PIN check**, right or wrong: the field
+    /// as it is submitted, the copy as the helper answers.
+    #[test]
+    fn the_secret_is_zeroed_after_a_pin_check() {
+        let (mut auth, shared, dir, _) = pin_auth("zeroed", Settings::default());
+        for (round, pin) in [(0, "0000"), (1, SET_PIN)] {
+            let now = s(3 * round);
+            type_text(&mut auth, pin, now);
+            assert_eq!(auth.wiped_for_test(), (false, true));
+            auth.edit(Edit::Submit, now);
+            assert_eq!(last_kind(&shared), "pin");
+            assert!(auth.wiped_for_test().0, "the field after submit");
+            auth.settle(now);
+            assert_eq!(
+                auth.wiped_for_test(),
+                (true, true),
+                "after the answer to {pin}"
+            );
+            auth.settle(now + s(3));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A PIN file that does not parse is no PIN**: the lock reads
+    /// `"password"` with nothing to say, and digits are checked as the
+    /// password. Nor is a PIN taken with `lock.pin.enabled` off.
+    #[test]
+    fn an_unparsable_pin_file_or_enabled_off_is_no_pin() {
+        let (mut auth, shared, dir, paths) = pin_auth("unparsable", Settings::default());
+        assert_eq!(auth.mode(), crate::pin::Mode::Pin, "the premise");
+        solium_auth::pin::write_private(&paths.pin, b"1379\n").expect("spoiled");
+        auth.begin();
+        assert_eq!(auth.mode(), crate::pin::Mode::NoPin);
+        assert_eq!(auth.message(true), "");
+        submit(&mut auth, SET_PIN, s(0));
+        assert_eq!(last_kind(&shared), "password");
+        assert!(!auth.settle(s(0)));
+
+        let (mut off, shared, other, _) = pin_auth(
+            "enabled-off",
+            Settings {
+                pin: crate::pin::Settings {
+                    enabled: false,
+                    ..crate::pin::Settings::default()
+                },
+                ..Settings::default()
+            },
+        );
+        assert_eq!(off.mode(), crate::pin::Mode::NoPin);
+        submit(&mut off, SET_PIN, s(0));
+        assert_eq!(last_kind(&shared), "password");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// A PIN cleared while the lock is up: the PIN typed is not checked as
+    /// one, and the lock asks for the password.
+    #[test]
+    fn a_pin_cleared_under_the_lock_is_not_checked() {
+        let (mut auth, shared, dir, paths) = pin_auth("cleared", Settings::default());
+        type_text(&mut auth, SET_PIN, s(0));
+        std::fs::remove_file(&paths.pin).expect("cleared");
+        auth.edit(Edit::Submit, s(0));
+        assert!(asked(&shared).kinds.is_empty());
+        assert_eq!(auth.mode(), crate::pin::Mode::NoPin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The xkb keycode of each character a test types, on `us`.
     fn code(c: char) -> u32 {
         let row = |keys: &str, first: u32, c: char| {
@@ -2027,7 +2704,9 @@ mod tests {
     /// keypad's `delegate` can be written. A scene that writes every one of
     /// them and calls every function there is leaves the session locked,
     /// finds nothing typed in any of them, and its `submit()` checks what
-    /// was typed like Return does: a wrong password counts an attempt.
+    /// was typed like Return does: a wrong password counts an attempt. With
+    /// a PIN set, the same: `Lock.mode` reads `"pin"` and cannot be written,
+    /// the digits typed are nowhere to be read, and the PIN is not.
     #[test]
     fn nothing_in_qml_can_unlock_or_read_the_secret() {
         crate::qml::qt_test::on_the_qt_thread(|| {
@@ -2082,6 +2761,7 @@ mod tests {
                     property int calls: 0
                     SecretField { id: field }
                     SecretKeypad { id: pad; width: 300; height: 400; delegate: Item {} }
+                    property string mode: ""
                     function look(value) {
                         let text = ""
                         try {
@@ -2090,7 +2770,9 @@ mod tests {
                         } catch (error) {
                             text = String(value)
                         }
-                        if (typeof text === "string" && text.indexOf("wrong") >= 0)
+                        if (typeof text === "string"
+                                && (text.indexOf("wrong") >= 0 || text.indexOf("1357") >= 0
+                                    || text.indexOf("1379") >= 0))
                             root.leaked += 1
                     }
                     function write(target, names) {
@@ -2116,12 +2798,13 @@ mod tests {
                     property string failure: ""
                     onGoChanged: {
                         if (go === 1) Lock.submit()
-                        if (go === 2) {
+                        if (go === 3) root.mode = Lock.mode
+                        if (go === 2 || go === 3) {
                             try {
                                 // `Lock` is an attached object, reached
                                 // through its name: every property and
                                 // method its type declares, by name.
-                                root.write(Lock, ["state", "attempts", "retryAfter",
+                                root.write(Lock, ["state", "mode", "attempts", "retryAfter",
                                     "message", "user", "promptOn", "locked", "progress",
                                     "enterMs", "exitMs"])
                                 root.write(field, ["length", "selected", "accepting"])
@@ -2175,6 +2858,69 @@ mod tests {
                 1,
                 "the walk's clear() and submit() checked something"
             );
+
+            // A PIN set, and digits typed: the walk again.
+            let (dir, paths) = pin_set("qml-walk");
+            locked.state.lock_auth.use_pin_for_test(paths, WALL);
+            locked.state.lock_auth_changed();
+            assert_eq!(locked.state.lock_auth.mode(), crate::pin::Mode::Pin);
+            locked.scene().set_int("calls", 0);
+            keys(&mut locked.state, "1357");
+            locked.state.publish_models();
+            locked.scene().set_int("go", 3);
+            settle(&mut locked.state);
+            settle(&mut locked.state);
+            assert_eq!(
+                locked.scene().take_string("mode").as_deref(),
+                Some("pin"),
+                "Lock.mode does not read \"pin\""
+            );
+            assert!(locked.int("calls") > 10, "the walk did not get through");
+            assert_eq!(locked.int("took"), 0, "a property took a write");
+            assert_eq!(locked.int("leaked"), 0, "the PIN typed was readable");
+            assert!(natively_locked(&locked.state), "a call from QML unlocked");
+            assert_eq!(
+                asked(&locked.shared).timeouts.len(),
+                1,
+                "the walk checked the PIN"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **The shipped scene asks for the PIN with its pad up, while a PIN is
+    /// taken**: it says "Enter PIN" and shows the digit pad as the lock
+    /// arrives; once the lock stops taking the PIN, the pad goes down and it
+    /// asks for the password.
+    #[test]
+    fn the_shipped_scene_asks_for_a_pin_with_the_pad_up() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::unlocked("pin-shipped", &Shows::Shipped);
+            let (dir, paths) = pin_set("shipped");
+            locked.state.lock_auth.use_pin_for_test(paths.clone(), WALL);
+            locked.state.lock_natively();
+            locked.state.publish_models();
+            let enter = locked.state.lock_scenes.settings().enter;
+            locked.state.clock.advance(enter);
+            crate::lock_scene::settle(&mut locked.state);
+            locked.state.publish_models();
+            assert!(
+                locked.scene().get_bool("prompt"),
+                "the premise: the prompt is here"
+            );
+            assert!(locked.scene().get_bool("asksForPin"), "no \"Enter PIN\"");
+            assert!(locked.scene().get_bool("padShown"), "the pad is not up");
+
+            locked.state.lock_auth.set_wall_for_test(WALL + 49 * 3600);
+            locked.state.lock_auth_changed();
+            locked.state.publish_models();
+            run_qml_clock(400);
+            locked.state.publish_models();
+            assert!(!locked.scene().get_bool("asksForPin"));
+            assert!(!locked.scene().get_bool("padShown"), "the pad stayed up");
+
+            locked.state.unlock_natively();
+            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 
@@ -2372,6 +3118,8 @@ mod tests {
             settle(&mut locked.state);
             crate::lock_scene::settle(&mut locked.state);
             assert!(locked.state.lock.is_none(), "the yes did not unlock");
+            // The exit's first frame, which its bound is counted from.
+            crate::render::frame_tick(&mut locked.state);
             let now = locked.state.clock.now();
             assert!(
                 locked.state.lock_scenes.exiting(now),
@@ -2416,6 +3164,7 @@ mod tests {
                 locked.state.lock_scenes.configure(settings);
                 locked.state.lock_natively();
                 locked.state.unlock_natively();
+                crate::render::frame_tick(&mut locked.state);
                 let now = locked.state.clock.now();
                 assert_eq!(
                     locked.state.lock_scenes.exiting(now),
@@ -2429,6 +3178,73 @@ mod tests {
                     "exit_ms = {ms} outlived its bound"
                 );
             }
+        });
+    }
+
+    /// **The exit lasts `exit_ms` from its first frame, however late that
+    /// comes**: the scene reads `Lock.state` as `"unlocking"` from the
+    /// unlock, and through a stall before the next frame longer than the
+    /// whole exit it is still drawn over the desktop; from that frame on it
+    /// is drawn for all of `lock.exit_ms`, which a frame after it does not
+    /// start again, and gone at its bound. Illia's Surface lost most of the
+    /// slide to 290 ms of the session's scenes being built again at the
+    /// unlock, counted from the unlock.
+    #[test]
+    fn the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::new(
+                "exit-stall",
+                Some(
+                    r#"import QtQuick
+                import Solium
+                Item {
+                    readonly property int unlocking: Lock.state === "unlocking" ? 1 : 0
+                }"#,
+                ),
+            );
+            let settings = scene_settings(&locked.state, |settings| {
+                settings.exit = Duration::from_millis(400);
+            });
+            locked.state.lock_scenes.configure(settings);
+            keys(&mut locked.state, RIGHT);
+            tap(&mut locked.state, &[RETURN]);
+            settle(&mut locked.state);
+            assert!(locked.state.lock.is_none(), "the yes did not unlock");
+
+            // Nothing drawn for longer than the whole exit.
+            locked.state.clock.advance(Duration::from_millis(600));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "a stall before the exit's first frame ate the exit"
+            );
+            assert_eq!(
+                locked.int("unlocking"),
+                1,
+                "\"unlocking\" does not hold until the exit's first frame"
+            );
+
+            // Most of the way, and then to the bound: the compositor's clock
+            // runs in real time too, so not to the millisecond.
+            crate::render::frame_tick(&mut locked.state);
+            locked.state.clock.advance(Duration::from_millis(300));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "the exit ended before `exit_ms` from its first frame"
+            );
+            crate::render::frame_tick(&mut locked.state);
+            locked.state.clock.advance(Duration::from_millis(100));
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(
+                !locked.state.lock_scenes.exiting(locked.state.clock.now()),
+                "the exit outlived `exit_ms` from its first frame"
+            );
+            assert_eq!(
+                locked.int("unlocking"),
+                0,
+                "\"unlocking\" outlived the exit"
+            );
         });
     }
 
@@ -2717,6 +3533,8 @@ mod tests {
                 over_desktop(&peeked.state, &output),
                 "the scene was taken away at once, not taken back up"
             );
+            // The way back up's first frame, which its bound is counted from.
+            crate::render::frame_tick(&mut peeked.state);
             peeked.state.clock.advance(Duration::from_millis(399));
             crate::lock_scene::settle(&mut peeked.state);
             assert!(
@@ -3042,75 +3860,103 @@ mod tests {
                     WorkspaceList { id: list }
                 }"#;
 
+    /// The session as `READS_THE_SESSION` reads it: a status, an app, and
+    /// two workspaces in an arrangement on `monitor`.
+    fn fill_the_session(state: &mut Solium, monitor: &str) {
+        use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
+        state.status = "a window's secret title".to_owned();
+        state.apps_scan_pending = false;
+        state.apps = vec![crate::apps::Entry {
+            id: "solium-lock-redaction-test".to_owned(),
+            name: "Redacted".to_owned(),
+            untranslated_name: "Redacted".to_owned(),
+            generic_name: String::new(),
+            icon: String::new(),
+            exec: "true".to_owned(),
+            categories: Vec::new(),
+            keywords: Vec::new(),
+            terminal: false,
+            path: None,
+            source: PathBuf::from("/nonexistent/solium-lock-redaction-test.desktop"),
+        }];
+        state.workspaces = Some(Declared {
+            arrangement: Arrangement {
+                kind: "grid".to_owned(),
+                columns: 2,
+                rows: 1,
+            },
+            groups: vec![Group {
+                id: "lock-redaction".to_owned(),
+                monitors: vec![monitor.to_owned()],
+                showing: vec!["1".to_owned()],
+                workspaces: (1..=2)
+                    .map(|index| Workspace {
+                        id: index.to_string(),
+                        name: format!("desk {index}"),
+                        col: index,
+                        row: 1,
+                        hidden: false,
+                    })
+                    .collect(),
+            }],
+            windows: std::collections::BTreeMap::new(),
+        });
+    }
+
+    /// What a scene reading `READS_THE_SESSION` reads of the session: the
+    /// status, the apps, the workspaces, a `WorkspaceList` of them and the
+    /// arrangement.
+    fn session_read(scene: &mut crate::qml::Scene) -> (String, i32, i32, i32, i32) {
+        (
+            scene.get_string_for_test("status"),
+            scene.get_int("apps"),
+            scene.get_int("workspaces"),
+            scene.get_int("listed"),
+            scene.get_int("arranged"),
+        )
+    }
+
+    /// Whether `read` is the whole session `fill_the_session` made.
+    fn reads_it_all(read: &(String, i32, i32, i32, i32)) -> bool {
+        let (status, apps, workspaces, listed, arranged) = read;
+        status == "a window's secret title"
+            && *apps >= 1
+            && *workspaces >= 2
+            && *listed >= 2
+            && *arranged > 0
+    }
+
+    /// What a scene that reads only what a lock may show reads of it.
+    fn read_empty() -> (String, i32, i32, i32, i32) {
+        (String::new(), 0, 0, 0, 0)
+    }
+
     /// **A lock scene reads only what a lock may show, at all times**:
     /// `Solium.status`, `Apps`, `Workspaces`, a `WorkspaceList` and the
-    /// arrangement read empty in it while Solium holds the lock, and still
-    /// empty once it is unlocked and the scene waits, quiet, for the next
-    /// lock, while a desktop scene beside it reads them all; the monitor and
-    /// the keyboard read in both. While locked, the session's models read
-    /// empty for every scene still drawn, the pointer's among them.
+    /// arrangement read empty in it while Solium holds the lock, through the
+    /// entry and after it, and still empty once it is unlocked and the scene
+    /// waits, quiet, for the next lock; the monitor and the keyboard read in
+    /// it. A desktop scene beside it reads the session all along, locked or
+    /// not: it is not drawn behind the lock, and what it reads is kept for
+    /// the unlock (`state::tests::real_client::lock_focus::native::a_session_scene_keeps_its_rows_through_a_native_lock`).
+    /// What else is drawn over the lock, the pointer, reads what a lock may
+    /// show too (`the_pointer_scene_reads_only_what_a_lock_may_show`).
     #[test]
     fn a_lock_scene_reads_only_what_a_lock_may_show() {
-        use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
         crate::qml::qt_test::on_the_qt_thread(|| {
             let mut locked = Locked::new("redacted", Some(READS_THE_SESSION));
             let mut desktop = session_scene(&locked, READS_THE_SESSION);
             let name = locked.output.name();
-            locked.state.status = "a window's secret title".to_owned();
-            locked.state.apps_scan_pending = false;
-            locked.state.apps = vec![crate::apps::Entry {
-                id: "solium-lock-redaction-test".to_owned(),
-                name: "Redacted".to_owned(),
-                untranslated_name: "Redacted".to_owned(),
-                generic_name: String::new(),
-                icon: String::new(),
-                exec: "true".to_owned(),
-                categories: Vec::new(),
-                keywords: Vec::new(),
-                terminal: false,
-                path: None,
-                source: PathBuf::from("/nonexistent/solium-lock-redaction-test.desktop"),
-            }];
-            locked.state.workspaces = Some(Declared {
-                arrangement: Arrangement {
-                    kind: "grid".to_owned(),
-                    columns: 2,
-                    rows: 1,
-                },
-                groups: vec![Group {
-                    id: "lock-redaction".to_owned(),
-                    monitors: vec![name.clone()],
-                    showing: vec!["1".to_owned()],
-                    workspaces: (1..=2)
-                        .map(|index| Workspace {
-                            id: index.to_string(),
-                            name: format!("desk {index}"),
-                            col: index,
-                            row: 1,
-                            hidden: false,
-                        })
-                        .collect(),
-                }],
-                windows: std::collections::BTreeMap::new(),
-            });
-            let read = |scene: &mut crate::qml::Scene| {
-                (
-                    scene.get_string_for_test("status"),
-                    scene.get_int("apps"),
-                    scene.get_int("workspaces"),
-                    scene.get_int("listed"),
-                    scene.get_int("arranged"),
-                )
-            };
-            let empty = (String::new(), 0, 0, 0, 0);
+            fill_the_session(&mut locked.state, &name);
 
             locked.state.publish_models();
-            assert_eq!(read(locked.scene()), empty, "the lock scene, locked");
             assert_eq!(
-                read(desktop.scene_for_test()),
-                empty,
-                "a desktop scene, locked"
+                session_read(locked.scene()),
+                read_empty(),
+                "the lock scene, locked"
             );
+            let read = session_read(desktop.scene_for_test());
+            assert!(reads_it_all(&read), "a desktop scene, locked: {read:?}");
             for scene in [locked.scene(), desktop.scene_for_test()] {
                 assert_eq!(scene.get_string_for_test("monitor"), name);
                 assert!(scene.get_int("layouts") > 0, "the keyboard does not read");
@@ -3118,35 +3964,134 @@ mod tests {
 
             locked.state.unlock_natively();
             locked.state.publish_models();
-            let (status, apps, workspaces, listed, arranged) = read(desktop.scene_for_test());
-            assert_eq!(status, "a window's secret title");
-            assert!(apps >= 1 && workspaces >= 2 && listed >= 2 && arranged > 0);
+            let read = session_read(desktop.scene_for_test());
+            assert!(reads_it_all(&read), "a desktop scene, unlocked: {read:?}");
             assert_eq!(
-                read(locked.scene()),
-                empty,
+                session_read(locked.scene()),
+                read_empty(),
                 "the lock scene, kept for the next lock, reads the session"
             );
 
             locked.state.lock_natively();
             locked.state.publish_models();
-            assert_eq!(read(locked.scene()), empty, "the lock scene, the next lock");
-            // Through that lock's entry the desktop is still on the screen,
-            // under the scene coming down, and does not empty under it; from
-            // the entry's end it reads nothing.
             assert_eq!(
-                read(desktop.scene_for_test()).0,
-                "a window's secret title",
-                "a desktop scene emptied under the entry"
+                session_read(locked.scene()),
+                read_empty(),
+                "the lock scene, the next lock's entry"
             );
             let enter = locked.state.lock_scenes.settings().enter;
             locked.state.clock.advance(enter);
             crate::lock_scene::settle(&mut locked.state);
             locked.state.publish_models();
             assert_eq!(
-                read(desktop.scene_for_test()),
-                empty,
-                "a desktop scene, after the entry"
+                session_read(locked.scene()),
+                read_empty(),
+                "the lock scene, after the entry"
             );
+            let read = session_read(desktop.scene_for_test());
+            assert!(
+                reads_it_all(&read),
+                "a desktop scene, after the entry: {read:?}"
+            );
+            locked.state.unpublish_session_for_test();
+        });
+    }
+
+    /// What a pointer scene could read of the session, beside the monitors
+    /// and the keyboard, which it may.
+    const POINTER_READS: &str = r#"import QtQuick
+                import Solium
+                Item {
+                    width: 24
+                    height: 24
+                    readonly property string status: Solium.status
+                    readonly property string desktop: Solium.dirs.desktop
+                    readonly property int apps: Apps.count
+                    readonly property int workspaces: Workspaces.count
+                    readonly property int listed: list.count
+                    readonly property int arranged: Object.keys(Workspaces.arrangement).length
+                    readonly property int windows: Windows.count + windowList.count
+                    readonly property int folder: Folder.count
+                    readonly property int monitors: Monitors.count
+                    readonly property int layouts: Keyboard.layouts.length
+                    WorkspaceList { id: list }
+                    WindowList { id: windowList }
+                }"#;
+
+    /// **The pointer's scene reads only what a lock may show, at all
+    /// times**: it is drawn over Solium's own lock, the one scene of the
+    /// session that is, so `Solium.status`, `Solium.dirs`, `Apps`,
+    /// `Workspaces`, a `WorkspaceList`, the arrangement, `Windows`, a
+    /// `WindowList` and `Folder` read empty in it, unlocked, natively locked
+    /// through the entry and after it, and unlocked again, while a desktop
+    /// scene beside it reads the session; the monitors and the keyboard
+    /// read in it. The same for the configuration's pointer scene and for
+    /// the floor, `qml/cursor.qml`. Always, and not only while locked, so
+    /// nothing in it changes as the session locks.
+    #[test]
+    fn the_pointer_scene_reads_only_what_a_lock_may_show() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::unlocked("pointer-redacted", &Shows::Fallback);
+            let mut desktop = session_scene(&locked, READS_THE_SESSION);
+            let name = locked.output.name();
+            fill_the_session(&mut locked.state, &name);
+            let (directory, configured) = crate::qml::pointer::tests::written(
+                &format!("solium-lock-pointer-redacted-{}", std::process::id()),
+                POINTER_READS,
+            );
+            let floor = crate::qml::pointer::tests::beside(&directory, "Floor.qml", POINTER_READS);
+            let mut configured = crate::qml::Scene::sized_by_root(&configured, 24)
+                .expect("the configured pointer scene builds");
+            let mut floor =
+                crate::qml::Scene::for_pointer(&floor, 24, 24).expect("the floor builds");
+            let read = |scene: &mut crate::qml::Scene| {
+                (
+                    scene.get_string_for_test("status"),
+                    scene.get_string_for_test("desktop"),
+                    [
+                        scene.get_int("apps"),
+                        scene.get_int("workspaces"),
+                        scene.get_int("listed"),
+                        scene.get_int("arranged"),
+                        scene.get_int("windows"),
+                        scene.get_int("folder"),
+                    ],
+                )
+            };
+            let empty = (String::new(), String::new(), [0; 6]);
+
+            let mut check = |locked: &mut Locked, when: &str| {
+                locked.state.publish_models();
+                let session = session_read(desktop.scene_for_test());
+                assert!(
+                    reads_it_all(&session),
+                    "the premise, {when}: a desktop scene reads the session: {session:?}"
+                );
+                for (scene, which) in [(&mut configured, "configured"), (&mut floor, "floor")] {
+                    assert_eq!(read(scene), empty, "the {which} pointer scene, {when}");
+                    assert!(
+                        scene.get_int("monitors") >= 1,
+                        "the {which} pointer scene, {when}: the monitors do not read"
+                    );
+                    assert!(
+                        scene.get_int("layouts") > 0,
+                        "the {which} pointer scene, {when}: the keyboard does not read"
+                    );
+                }
+            };
+            check(&mut locked, "unlocked");
+            locked.state.lock_natively();
+            check(&mut locked, "through the entry");
+            let enter = locked.state.lock_scenes.settings().enter;
+            locked.state.clock.advance(enter);
+            crate::lock_scene::settle(&mut locked.state);
+            assert!(natively_locked(&locked.state), "the premise: locked");
+            check(&mut locked, "natively locked");
+            locked.state.unlock_natively();
+            check(&mut locked, "unlocked again");
+            locked.state.unpublish_session_for_test();
+            drop((configured, floor));
+            let _ = std::fs::remove_dir_all(&directory);
         });
     }
 

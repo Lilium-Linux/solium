@@ -34,6 +34,7 @@ SoliumLockAttached::SoliumLockAttached(QObject *object)
     : QObject(object), m_lock(solium_lock_hosted(object) ? solium_lock() : solium_lock_blank())
 {
     connect(m_lock, &SoliumLock::stateChanged, this, &SoliumLockAttached::stateChanged);
+    connect(m_lock, &SoliumLock::modeChanged, this, &SoliumLockAttached::modeChanged);
     connect(m_lock, &SoliumLock::attemptsChanged, this, &SoliumLockAttached::attemptsChanged);
     connect(m_lock, &SoliumLock::retryAfterChanged, this, &SoliumLockAttached::retryAfterChanged);
     connect(m_lock, &SoliumLock::messageChanged, this, &SoliumLockAttached::messageChanged);
@@ -60,6 +61,7 @@ int SoliumLock::takeRequests()
 void SoliumLock::publish(const QJsonObject &next)
 {
     const QString state = next.value(QStringLiteral("state")).toString(m_state);
+    const QString mode = next.value(QStringLiteral("mode")).toString(m_mode);
     const int attempts = next.value(QStringLiteral("attempts")).toInt(m_attempts);
     const int retry_after = next.value(QStringLiteral("retryAfter")).toInt(m_retry_after);
     const QString message = next.value(QStringLiteral("message")).toString(m_message);
@@ -72,6 +74,7 @@ void SoliumLock::publish(const QJsonObject &next)
     const int exit_ms = next.value(QStringLiteral("exitMs")).toInt(m_exit_ms);
 
     const bool state_moved = state != m_state;
+    const bool mode_moved = mode != m_mode;
     const bool attempts_moved = attempts != m_attempts;
     const bool retry_moved = retry_after != m_retry_after;
     const bool message_moved = message != m_message;
@@ -82,6 +85,7 @@ void SoliumLock::publish(const QJsonObject &next)
     const bool enter_moved = enter_ms != m_enter_ms;
     const bool exit_moved = exit_ms != m_exit_ms;
     m_state = state;
+    m_mode = mode;
     m_attempts = attempts;
     m_retry_after = retry_after;
     m_message = message;
@@ -92,6 +96,9 @@ void SoliumLock::publish(const QJsonObject &next)
     m_enter_ms = enter_ms;
     m_exit_ms = exit_ms;
 
+    if (mode_moved) {
+        emit modeChanged();
+    }
     if (attempts_moved) {
         emit attemptsChanged();
     }

@@ -7,16 +7,24 @@
 //!    it differently; a helper given another version answers with its own and
 //!    ends (`tests::a_helper_of_another_version_is_refused_before_the_secret`,
 //!    `tests::a_client_of_another_version_is_told_and_refused`).
-//! 2. **One request:** the user name and the secret, each a little-endian
-//!    `u16` length and the bytes.
+//! 2. **One request:** a byte for its kind, then for a password
+//!    ([`Request::Password`]) the user name and the secret, and for a PIN
+//!    ([`Request::Pin`]) the path of the PIN file and the secret, each a
+//!    little-endian `u16` length and the bytes.
 //! 3. **One answer:** a tag byte, then [`Answer::Failed`]'s delay as a `u32`
 //!    of milliseconds, or [`Answer::Refused`]'s or [`Answer::Unavailable`]'s
 //!    reason as a `u16` length and UTF-8.
 //!
-//! The helper then ends: one PAM transaction per process. The round trip is
-//! `tests::a_round_trip_reaches_the_authenticator_and_back`.
+//! The helper then ends: one check per process. A password goes to the
+//! [`Authenticator`], PAM in the helper; a PIN is checked by the helper itself
+//! against the PIN file (`crate::pin`), and never reaches PAM. The round trips
+//! are `tests::a_round_trip_reaches_the_authenticator_and_back` and
+//! `tests::a_pin_request_is_checked_against_the_pin_file`.
 
-use std::io::{self, Read, Write};
+use std::{
+    io::{self, Read, Write},
+    path::Path,
+};
 
 use crate::secret::{MAX_LEN, Secret};
 
@@ -25,11 +33,28 @@ use crate::secret::{MAX_LEN, Secret};
 pub const MAGIC: &[u8; 11] = b"solium-auth";
 
 /// The protocol's version. Changed whenever a message changes shape: 2 added
-/// [`Answer::Refused`].
-pub const VERSION: u32 = 2;
+/// [`Answer::Refused`], 3 the request's kind and [`Request::Pin`].
+pub const VERSION: u32 = 3;
 
 /// The longest user name: `LOGIN_NAME_MAX`.
 pub const MAX_USER: usize = 256;
+
+/// The longest path of a PIN file, in bytes: `PATH_MAX`.
+pub const MAX_PATH: usize = 4096;
+
+const PASSWORD: u8 = 0;
+const PIN: u8 = 1;
+
+/// What a secret is to be checked as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request<'a> {
+    /// The account password of `user`, by PAM.
+    Password { user: &'a str },
+    /// The PIN whose hash is in `file`, by the helper itself (`crate::pin`).
+    /// The compositor names the file; the helper, running as the user,
+    /// reads it.
+    Pin { file: &'a Path },
+}
 
 /// The longest reason an [`Answer::Unavailable`] carries, in bytes.
 pub const MAX_REASON: usize = 1024;
@@ -139,7 +164,7 @@ pub fn serve(
     }
     let mut secret = Secret::new();
     let answer = match read_request(conn, &mut secret) {
-        Ok(user) => {
+        Ok(Asked::Password(user)) => {
             // A NUL ends the C string PAM is handed, so a secret with one in
             // it would be checked as a shorter one: it is never the password.
             if secret.expose().contains(&0) {
@@ -148,6 +173,7 @@ pub fn serve(
                 auth.authenticate(&user, &secret)
             }
         }
+        Ok(Asked::Pin(file)) => crate::pin::check(Path::new(&file), &secret),
         Err(Error::Malformed(what)) => Answer::Unavailable {
             reason: format!("malformed {what}"),
         },
@@ -160,19 +186,43 @@ pub fn serve(
 
 /// The compositor's side: the handshake, then, only once the helper has
 /// answered it with this version, the request, and the answer.
-pub fn ask(conn: &mut (impl Read + Write), user: &str, secret: &Secret) -> Result<Answer, Error> {
-    if user.is_empty() || user.len() > MAX_USER || user.contains('\0') {
-        return Err(Error::Malformed("user name"));
-    }
+pub fn ask(
+    conn: &mut (impl Read + Write),
+    request: Request<'_>,
+    secret: &Secret,
+) -> Result<Answer, Error> {
+    let (kind, named): (u8, &[u8]) = match request {
+        Request::Password { user } => {
+            if user.is_empty() || user.len() > MAX_USER || user.contains('\0') {
+                return Err(Error::Malformed("user name"));
+            }
+            (PASSWORD, user.as_bytes())
+        }
+        Request::Pin { file } => {
+            let Some(file) = file.to_str().filter(|file| {
+                file.starts_with('/') && file.len() <= MAX_PATH && !file.contains('\0')
+            }) else {
+                return Err(Error::Malformed("PIN file"));
+            };
+            (PIN, file.as_bytes())
+        }
+    };
     write_hello(conn, VERSION)?;
     let theirs = read_hello(conn)?;
     if theirs != VERSION {
         return Err(Error::Version { theirs });
     }
-    write_bytes(conn, user.as_bytes())?;
+    conn.write_all(&[kind])?;
+    write_bytes(conn, named)?;
     write_bytes(conn, secret.expose())?;
     conn.flush()?;
     read_answer(conn)
+}
+
+/// A request as the helper read it.
+enum Asked {
+    Password(String),
+    Pin(String),
 }
 
 fn write_bytes(to: &mut impl Write, bytes: &[u8]) -> Result<(), Error> {
@@ -188,24 +238,36 @@ fn read_len(from: &mut impl Read) -> Result<usize, Error> {
     Ok(usize::from(u16::from_le_bytes(len)))
 }
 
-/// The request: the user name returned, the secret read into `secret`.
-fn read_request(from: &mut impl Read, secret: &mut Secret) -> Result<String, Error> {
+/// The request: its kind with the user name or the PIN file returned, the
+/// secret read into `secret`.
+fn read_request(from: &mut impl Read, secret: &mut Secret) -> Result<Asked, Error> {
+    let mut kind = [0];
+    from.read_exact(&mut kind)?;
+    let (max, what) = match kind[0] {
+        PASSWORD => (MAX_USER, "request: user name"),
+        PIN => (MAX_PATH, "request: PIN file"),
+        _ => return Err(Error::Malformed("request: kind")),
+    };
     let len = read_len(from)?;
-    if len == 0 || len > MAX_USER {
-        return Err(Error::Malformed("request: user name length"));
+    if len == 0 || len > max {
+        return Err(Error::Malformed(what));
     }
-    let mut user = vec![0; len];
-    from.read_exact(&mut user)?;
-    let user = String::from_utf8(user).map_err(|_| Error::Malformed("request: user name"))?;
-    if user.contains('\0') {
-        return Err(Error::Malformed("request: user name"));
+    let mut named = vec![0; len];
+    from.read_exact(&mut named)?;
+    let named = String::from_utf8(named).map_err(|_| Error::Malformed(what))?;
+    if named.contains('\0') || (kind[0] == PIN && !named.starts_with('/')) {
+        return Err(Error::Malformed(what));
     }
     let len = read_len(from)?;
     if len > MAX_LEN {
         return Err(Error::Malformed("request: secret length"));
     }
     secret.read_from(from, len)?;
-    Ok(user)
+    Ok(if kind[0] == PIN {
+        Asked::Pin(named)
+    } else {
+        Asked::Password(named)
+    })
 }
 
 fn write_answer(to: &mut impl Write, answer: &Answer) -> Result<(), Error> {
@@ -310,7 +372,7 @@ mod tests {
         });
         let mut secret = Secret::new();
         assert!(secret.push_str(password));
-        let asked = ask(&mut ours, user, &secret);
+        let asked = ask(&mut ours, Request::Password { user }, &secret);
         let (served, seen) = helper.join().expect("the helper's thread");
         if let Ok(answer) = &asked {
             assert_eq!(served.as_ref(), Some(answer), "both sides agree");
@@ -376,7 +438,7 @@ mod tests {
         });
         let mut secret = Secret::new();
         assert!(secret.push_str("correct horse"));
-        let asked = ask(&mut ours, "illia", &secret);
+        let asked = ask(&mut ours, Request::Password { user: "illia" }, &secret);
         assert!(
             matches!(asked, Err(Error::Version { theirs }) if theirs == VERSION + 1),
             "{asked:?}"
@@ -422,7 +484,9 @@ mod tests {
         });
         write_hello(&mut ours, VERSION).expect("written");
         assert_eq!(read_hello(&mut ours).expect("its hello"), VERSION);
-        // A user name, then a secret longer than any secret can be.
+        // A password's request: a user name, then a secret longer than any
+        // secret can be.
+        ours.write_all(&[PASSWORD]).expect("written");
         ours.write_all(&5u16.to_le_bytes()).expect("written");
         ours.write_all(b"illia").expect("written");
         ours.write_all(&u16::try_from(MAX_LEN + 1).expect("fits").to_le_bytes())
@@ -437,6 +501,100 @@ mod tests {
         assert_eq!(seen, None);
     }
 
+    /// What the helper answers a PIN request, and what the stand-in saw.
+    fn ask_pin(file: &Path, pin: &str) -> (Result<Answer, Error>, Seen) {
+        let (mut ours, mut theirs) = UnixStream::pair().expect("a socketpair");
+        let helper = thread::spawn(move || {
+            let mut stand_in = StandIn { seen: None };
+            let served = serve(&mut theirs, &mut stand_in);
+            (served.ok(), stand_in.seen)
+        });
+        let mut secret = Secret::new();
+        assert!(secret.push_str(pin));
+        let asked = ask(&mut ours, Request::Pin { file }, &secret);
+        let (served, seen) = helper.join().expect("the helper's thread");
+        if let Ok(answer) = &asked {
+            assert_eq!(served.as_ref(), Some(answer), "both sides agree");
+        }
+        (asked, seen)
+    }
+
+    /// **A PIN request is checked against the PIN file, by the helper
+    /// itself**: the right PIN is yes and another no, with PAM's
+    /// authenticator never asked; a file that does not parse, and no file,
+    /// are unavailable, never a yes.
+    #[test]
+    fn a_pin_request_is_checked_against_the_pin_file() {
+        let dir =
+            std::env::temp_dir().join(format!("solium-auth-pin-protocol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("solium/pin");
+        let mut pin = Secret::new();
+        assert!(pin.push_str("2580"));
+        let phc = crate::pin::hash(&pin).expect("a hash");
+        crate::pin::write_private(&file, phc.as_bytes()).expect("written");
+
+        let (asked, seen) = ask_pin(&file, "2580");
+        assert_eq!(asked.expect("an answer"), Answer::Ok);
+        assert_eq!(seen, None, "the PIN reached the password's authenticator");
+        let (asked, _) = ask_pin(&file, "0000");
+        assert_eq!(asked.expect("an answer"), Answer::Failed { delay_ms: 0 });
+
+        crate::pin::write_private(&file, b"2580\n").expect("written");
+        let (asked, seen) = ask_pin(&file, "2580");
+        assert!(
+            matches!(&asked, Ok(Answer::Unavailable { reason }) if reason.contains("does not hold a PIN")),
+            "{asked:?}"
+        );
+        assert_eq!(seen, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let (asked, _) = ask_pin(&file, "2580");
+        assert!(
+            matches!(&asked, Ok(Answer::Unavailable { reason }) if reason == "no PIN is set"),
+            "{asked:?}"
+        );
+    }
+
+    /// A PIN file named by a relative path is never sent, and one the helper
+    /// is sent anyway is refused.
+    #[test]
+    fn a_relative_pin_file_is_refused_on_both_sides() {
+        let (mut ours, _theirs) = UnixStream::pair().expect("a socketpair");
+        let secret = Secret::new();
+        assert!(matches!(
+            ask(
+                &mut ours,
+                Request::Pin {
+                    file: Path::new("pin")
+                },
+                &secret
+            ),
+            Err(Error::Malformed(_))
+        ));
+
+        let (mut ours, mut theirs) = UnixStream::pair().expect("a socketpair");
+        let helper = thread::spawn(move || {
+            let mut stand_in = StandIn { seen: None };
+            serve(&mut theirs, &mut stand_in).ok()
+        });
+        write_hello(&mut ours, VERSION).expect("written");
+        assert_eq!(read_hello(&mut ours).expect("its hello"), VERSION);
+        // In one write, so the helper refusing the path at once cannot close
+        // the socket under the rest of it.
+        let mut request = vec![PIN];
+        request.extend_from_slice(&3u16.to_le_bytes());
+        request.extend_from_slice(b"pin");
+        request.extend_from_slice(&0u16.to_le_bytes());
+        ours.write_all(&request).expect("written");
+        let answer = read_answer(&mut ours).expect("an answer");
+        assert!(
+            matches!(&answer, Answer::Unavailable { reason } if reason.contains("PIN file")),
+            "{answer:?}"
+        );
+        assert_eq!(helper.join().expect("the helper's thread"), Some(answer));
+    }
+
     /// The compositor's side refuses a user name the helper would refuse.
     #[test]
     fn a_user_name_out_of_shape_is_never_sent() {
@@ -444,7 +602,7 @@ mod tests {
         let secret = Secret::new();
         for user in ["", "a\0b", "u".repeat(MAX_USER + 1).as_str()] {
             assert!(matches!(
-                ask(&mut ours, user, &secret),
+                ask(&mut ours, Request::Password { user }, &secret),
                 Err(Error::Malformed(_))
             ));
         }

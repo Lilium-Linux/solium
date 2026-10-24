@@ -48,6 +48,8 @@ mod offscreen;
 mod pacing;
 mod pane;
 mod pass;
+mod pin;
+mod pin_cli;
 mod pool;
 mod power;
 mod present;
@@ -259,6 +261,9 @@ fn main() -> Result<std::process::ExitCode> {
         }
         // Before logging starts: the probe's child answers in one line.
         cli::Command::ProbeQmlGpu => qml::renderer::probe_child(),
+        // Before logging starts too: nothing it reads is logged, and it
+        // starts nothing but the helper.
+        cli::Command::Pin(action) => return Ok(pin_cli::run(action)),
         _ => {}
     }
     // On the hardware the screen belongs to the compositor, so anything printed

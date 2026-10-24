@@ -417,6 +417,17 @@ public:
 SoliumHosting *solium_hosting_of(QObject *object);
 /* Whether `object` belongs to one of Solium's own lock's scenes. */
 bool solium_lock_hosted(QObject *object);
+/* Whether `object` belongs to a scene that reads only what a lock may show:
+ * one of Solium's own lock's scenes, or the pointer's, which is drawn over
+ * the lock. Its `Windows`, `Workspaces`, `Apps`, `Folder`, `WindowList`,
+ * `WorkspaceList`, `Solium.status` and `Solium.dirs` read empty at all
+ * times; its monitors and its keyboard read as anywhere.
+ * `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`,
+ * `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`. */
+bool solium_redacted(QObject *object);
+/* Mark `context` as a scene's that reads only what a lock may show, though
+ * it is no lock scene (solium_redacted). */
+void solium_redacted_mark(QQmlContext *context);
 /* Mark `context` as `hosting`'s, so solium_hosting_of finds it from every
  * object created in it or in a context below it.
  * `qml::hosted::tests::every_object_of_a_hosted_scene_finds_its_monitor_after_the_build`. */
@@ -444,14 +455,17 @@ SoliumMonitor *solium_monitor_row(const QString &name);
 /* Register every native type, once, before the engine exists.
  * `qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`. */
 void solium_qml_register_types();
-/* Give `context` the models that differ between a lock scene and every
- * other: `Windows`, `Workspaces`, `Apps` and `Folder`. The engine's root
- * context gets the session's (`for_lock` false); a lock scene's own context
- * gets models that are always empty. They are context properties and not
- * singletons because a singleton is the same object in every scene of the
- * one engine. (`Lock` differs too, and is an attached object for it: lock.h.)
+/* Give `context` the models that differ between a scene that reads only
+ * what a lock may show (solium_redacted) and every other: `Windows`,
+ * `Workspaces`, `Apps` and `Folder`. The engine's root context gets the
+ * session's (`redacted` false); a lock scene's own context, and the
+ * pointer's, get models that are always empty. They are context properties
+ * and not singletons because a singleton is the same object in every scene
+ * of the one engine. (`Lock` differs between a lock scene and the rest too,
+ * and is an attached object for it: lock.h.)
  * `lock_auth::tests::a_session_scene_reads_nothing_of_the_lock_and_cannot_submit`,
- * `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`. */
-void solium_qml_name_scope(QQmlContext *context, bool for_lock);
+ * `lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`,
+ * `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`. */
+void solium_qml_name_scope(QQmlContext *context, bool redacted);
 
 #endif /* SOLIUM_QML_ATTACHED_H */

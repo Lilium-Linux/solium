@@ -17,6 +17,12 @@
 // * on a touchscreen, a swipe up that follows the finger lifts the clock away
 //   and brings up the passcode pad (`SecretKeypad`, laid out as
 //   `lock.keypad` says); a swipe down puts it away;
+// * while a PIN is taken (`Lock.mode === "pin"`, after `solium pin set`), the
+//   pad is up from the start and the prompt says "Enter PIN". Typing works as
+//   ever, and the password is still taken; when the lock stops taking the PIN
+//   (too many wrong ones, a restart, `lock.pin.password_after_hours`), the pad
+//   goes down, the prompt says "Enter password", and the line under the field
+//   says why;
 // * all of it on one sheet, as an iPhone's or an iPad's lock is. As the
 //   session locks (`Lock.state === "locking"`) the sheet comes down from the
 //   top over the desktop, which Solium draws under it for `lock.enter_ms`,
@@ -57,6 +63,12 @@ Item {
     readonly property int secretLength: field.length
     // Whether the passcode pad can be shown and typed on.
     readonly property bool padShown: root.prompt && root.lift > 0.01
+    // What the prompt above the field asks for.
+    readonly property string promptText: Lock.mode === "pin" ? "Enter PIN" : "Enter password"
+    // Whether it asks for the PIN: what a test reads.
+    readonly property bool asksForPin: root.promptText === "Enter PIN"
+    // Whether the pad is up when the lock arrives: while a PIN is taken.
+    readonly property bool padFirst: root.prompt && Lock.mode === "pin"
 
     // How far the passcode pad is up, from 0 (the clock) to 1 (the pad):
     // the finger's, while a swipe lasts.
@@ -85,7 +97,7 @@ Item {
     function arrive() {
         root.now = new Date()
         settling.stop()
-        root.lift = 0
+        root.lift = root.padFirst ? 1 : 0
         const exiting = leaving.running
         leaving.stop()
         if (Lock.state === "locking") {
@@ -121,6 +133,10 @@ Item {
         }
     }
     Lock.onLockedChanged: if (Lock.locked) root.arrive()
+    // The PIN taken, or no longer: the pad up for it, or down for the
+    // password. Read from `Lock` itself, which `padFirst` may not have
+    // caught up with yet when this runs.
+    Lock.onModeChanged: if (Lock.locked) root.settle(root.prompt && Lock.mode === "pin")
     Lock.onProgressChanged: root.peek()
     Lock.onStateChanged: {
         if (Lock.state === "peeking") {
@@ -304,6 +320,15 @@ Item {
                     font.pixelSize: 18
                 }
 
+                // What to type: the PIN, or the password.
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: root.promptText
+                    color: Theme.text
+                    opacity: 0.7
+                    font.pixelSize: 14
+                }
+
                 // The field, which shakes at a wrong password and pulses while
                 // the password is checked.
                 Item {
@@ -348,7 +373,7 @@ Item {
                     text: {
                         switch (Lock.state) {
                         case "failed":
-                            return "Wrong password · " + Lock.attempts
+                            return Lock.message + " · " + Lock.attempts
                                 + (Lock.attempts === 1 ? " attempt" : " attempts")
                         case "lockedOut": {
                             const left = Lock.retryAfter
@@ -361,7 +386,9 @@ Item {
                                     ? "Can't check your password right now. Retrying…\n"
                                     : "Can't check your password.\n") + Lock.message
                         default:
-                            return ""
+                            // Why the password is needed where a PIN would
+                            // be taken, or nothing.
+                            return Lock.message
                         }
                     }
                 }
@@ -430,7 +457,7 @@ Item {
 
     // The swipe: a finger dragged up lifts the pad into view and follows the
     // finger; let go past a third of the way, it goes up, and back down
-    // otherwise. Down puts it away the same way. Only on the prompt's monitor,
+    // otherwise. Down puts it away the same way, the PIN's pad too. Only on the prompt's monitor,
     // only for a finger, and only while locked.
     DragHandler {
         id: swipe

@@ -387,11 +387,12 @@
 ---@field helper_timeout_ms? integer Solium's own lock: how long `solium-auth` has to answer, at least 100. Default 30000.
 ---@field retry? sol.RetryOptions Solium's own lock: when the helper could not answer this time (it crashed or timed out), the password is tried again after `seconds`, doubling up to `max_seconds`, at most `attempts` times, then wiped. A cause no retry mends (no helper, no PAM service) wipes it at once; PAM asking for more than the password counts as a wrong attempt. Default `{ seconds = 2, max_seconds = 60, attempts = 5 }`.
 ---@field keypad? "digits"|"letters"|"keyboard" Solium's own lock: the keys `SecretKeypad` lays out. Default `"digits"`.
+---@field pin? sol.PinOptions Solium's own lock: a PIN set with `solium pin set` unlocks it in place of the password, while these allow it; the password always does. Default `{ enabled = true, min_length = 4, max_length = 8, attempts = 5, password_after_hours = 48 }`.
 ---@field native? boolean Whether Solium's own lock screen is the session's. Its scenes are built as the session starts and kept, quiet, between locks, so the first locked frame is the scene's. Default true unless `command` is set.
 ---@field scene? string Solium's own lock: the lock screen's QML, a path (`"~/my-lock.qml"`) or a name looked for as `qml/lock/<name>.qml` in your QML directory and then in Solium's. One that is missing, will not load or fails while it runs is replaced by the shipped one, then by a compiled-in fallback. Default `"Lock"`, the shipped one.
 ---@field prompt_on? string Solium's own lock: the monitor `Lock.promptOn` names, where the scene shows the password field: `"pointer"` (the default), `"primary"`, or a monitor's name, the primary one while it is not plugged in.
 ---@field enter_ms? integer Solium's own lock: how long its scenes take to come down over the desktop as the session locks, reading `Lock.state` as `"locking"`; input is the lock's from the first instant, and the desktop is drawn under the scenes only until this is up. The lock taken before sleep has none. 0 to 600; longer is taken as 600. Default 350.
----@field exit_ms? integer Solium's own lock: how long its scenes stay over the desktop after the unlock, reading `Lock.state` as `"unlocking"`; input is the desktop's from the unlock on. 0 to 900; longer is taken as 900. Default 450.
+---@field exit_ms? integer Solium's own lock: how long its scenes stay over the desktop after the unlock, counted from the first frame drawn after it, reading `Lock.state` as `"unlocking"` from the unlock; input is the desktop's from the unlock on. 0 to 900; longer is taken as 900. Default 450.
 ---@field keypad_margin? integer Solium's own lock: how near a `SecretKeypad`, in logical pixels, the pointer's motion is kept from the lock scene, as it is over the pad itself. 0 or more. Default 32.
 
 ---@class sol.BackoffOptions
@@ -400,6 +401,18 @@
 
 ---@class sol.LockoutOptions: sol.BackoffOptions
 ---@field attempts? integer Wrong passwords in a row before the field is shut, at least 1.
+
+---Solium's own lock's PIN (#281), set and cleared from a terminal with
+---`solium pin set` and `solium pin clear`, which ask for the password first.
+---While one is set and these allow it, `Lock.mode` reads `"pin"`; whatever is
+---typed that is not `min_length` to `max_length` digits is checked as the
+---password. A key left out keeps the default.
+---@class sol.PinOptions
+---@field enabled? boolean Whether a PIN that is set is taken at all. Default true.
+---@field min_length? integer The fewest digits a PIN has, from 4 to 64. Default 4.
+---@field max_length? integer The most digits a PIN has, from `min_length` to 64. Default 8.
+---@field attempts? integer Wrong PINs in a row, kept across locks and restarts, after which only the password unlocks until it has. 1 to 10; more is taken as 10. Default 5.
+---@field password_after_hours? integer How long after the password last unlocked the lock a PIN is still taken, in hours; the first unlock after the computer starts always needs the password. Counted on a clock that setting the time does not move, as well as the wall clock. 1 to 72; more is taken as 72. Default 48.
 
 ---@class sol.RetryOptions: sol.BackoffOptions
 ---@field attempts? integer How many times a password is tried again before it is wiped, at least 0.
