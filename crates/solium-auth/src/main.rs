@@ -1,6 +1,7 @@
-//! The `solium-auth` helper: one PAM transaction, then it ends (#281).
+//! The `solium-auth` helper: one check, then it ends (#281).
 //!
-//! Solium starts it for each password its lock screen checks, with a socket as
+//! Solium starts it for each password or PIN its lock screen checks, and for
+//! the password `solium pin set` and `solium pin clear` ask for, with a socket as
 //! its standard input, standard output and error on `/dev/null`, an empty
 //! environment, and nothing else open. It hardens itself before it reads a
 //! byte ([`harden`]), answers the handshake and the one request in

@@ -24,10 +24,16 @@ path = "src/lib.rs"
 name = "solium-auth"
 path = "src/main.rs"
 
-# Nothing else, on purpose: the process that holds a password should hold as
+# Little else, on purpose: the process that holds a password should hold as
 # little code as possible. `libc` for the hardening, the descriptors and the
 # allocations PAM frees; already in the lockfile, MIT OR Apache-2.0. PAM itself
 # is declared by hand in `src/pam.rs` and linked as `libpam.so.0`, so building
 # needs only the runtime library, never pam-devel.
 [dependencies]
 libc = "0.2"
+# The PIN's hash (`src/pin.rs`): argon2id, from RustCrypto, which brings its
+# PHC string format (`password-hash`), BLAKE2 and base64ct, all MIT OR
+# Apache-2.0, and pure Rust. No `rand`: the salt is read from `getrandom(2)`
+# through `libc`. `zeroize` so the memory blocks a hash is computed in are
+# overwritten before they are freed.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
