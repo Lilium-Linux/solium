@@ -379,6 +379,18 @@
 ---@class sol.LockOptions
 ---@field command? string The locker to run on `Lock`, and before sleep: `"swaylock -f"`, say. Split on whitespace, with no quoting. Unset (the default) runs nothing.
 ---@field before_sleep? boolean Hold sleep until the locker above has confirmed the lock, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
+---@field lockout? sol.LockoutOptions Solium's own lock: after `attempts` wrong passwords in a row the field is shut for `seconds`, doubling with each lockout up to `max_seconds`. Default `{ attempts = 3, seconds = 30, max_seconds = 300 }`.
+---@field secret_layout? "first"|"current" Solium's own lock: the layout a password is typed in. `"first"` (the default) switches to the first layout that types Latin letters while locked, and back after; `"current"` keeps whatever is live.
+---@field helper_timeout_ms? integer Solium's own lock: how long `solium-auth` has to answer, at least 100. Default 30000.
+---@field retry? sol.BackoffOptions Solium's own lock: when the helper cannot answer, the password is tried again after `seconds`, doubling up to `max_seconds`. Default `{ seconds = 2, max_seconds = 60 }`.
+---@field keypad? "digits"|"letters"|"keyboard" Solium's own lock: the keys `SecretKeypad` lays out. Default `"digits"`.
+
+---@class sol.BackoffOptions
+---@field seconds? integer The first wait, at least 1.
+---@field max_seconds? integer The longest, at least `seconds`.
+
+---@class sol.LockoutOptions: sol.BackoffOptions
+---@field attempts? integer Wrong passwords in a row before the field is shut, at least 1.
 
 ---X11 windows refused a tile, decoration or bar entry outright (#221). A key
 ---left out, or the whole table left out, keeps the default rather than

@@ -65,6 +65,11 @@ mod ffi {
             y: f64,
         ) -> c_int;
         pub(super) fn solium_qml_scene_pointer_leave(scene: *mut super::super::ffi::Scene);
+        pub(super) fn solium_qml_scene_keypad_at(
+            scene: *const super::super::ffi::Scene,
+            x: f64,
+            y: f64,
+        ) -> c_int;
         pub(super) fn solium_qml_scene_take_reserve(
             scene: *mut super::super::ffi::Scene,
             edges: *mut c_int,
@@ -366,6 +371,16 @@ impl Scene {
             1 => Hit::Hover,
             _ => Hit::Nothing,
         }
+    }
+
+    /// The `SecretKeypad` key at a point, counted row by row from 0: what
+    /// a press or a finger there types, and why it never reaches the scene.
+    /// `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn keypad_at(&self, x: f64, y: f64) -> Option<usize> {
+        // SAFETY: the scene is live for as long as `self`.
+        let key = unsafe { ffi::solium_qml_scene_keypad_at(self.scene, x, y) };
+        usize::try_from(key).ok()
     }
 
     /// The pointer left this scene. `tests::a_left_scene_drops_its_hover`.

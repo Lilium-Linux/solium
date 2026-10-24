@@ -33243,6 +33243,131 @@ end)
                 });
             }
 
+            /// **#281: a press at Solium's own lock reaches its scene, as a Qt
+            /// mouse event, and nothing else**: not the window under it and
+            /// not a scene of the session's over it. Both are shown to hear
+            /// the same press first, unlocked, and the lock's scene hears
+            /// the pointer move as well as press.
+            #[test]
+            fn a_press_at_the_native_lock_reaches_its_scene_and_nothing_else() {
+                const PRESSES: &str = r"import QtQuick
+                    Item {
+                        property int presses: 0
+                        property int moves: 0
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onPressed: parent.presses += 1
+                            onPositionChanged: parent.moves += 1
+                        }
+                    }";
+                with_real_touch_scene("native-lock-pointer", PRESSES, |desk, id, output| {
+                    let _pointer = desk.client.seat_pointer(&desk.qh);
+                    desk.pump();
+                    let (over_scene, over_window) = ((620.0, 520.0), (720.0, 520.0));
+                    let click = |desk: &mut Desk, at: (f64, f64), time: u64| {
+                        move_pointer(&mut desk.state, (at.0 - 5.0, at.1), time);
+                        move_pointer(&mut desk.state, at, time + 1);
+                        let region = region(desk);
+                        for (state, offset) in
+                            [(ButtonState::Pressed, 2), (ButtonState::Released, 3)]
+                        {
+                            crate::synth::send_button(
+                                &mut desk.state,
+                                region,
+                                0x110,
+                                state,
+                                time + offset,
+                            );
+                        }
+                        desk.pump();
+                    };
+                    let scene_presses = |desk: &mut Desk| {
+                        desk.state
+                            .surfaces
+                            .get_mut(id)
+                            .and_then(|s| s.instance_mut(output))
+                            .expect("the session's scene")
+                            .scene_for_test()
+                            .get_int("presses")
+                    };
+
+                    click(desk, over_scene, 10);
+                    click(desk, over_window, 20);
+                    assert_eq!(
+                        scene_presses(desk),
+                        1,
+                        "the premise: the session's scene hears a press"
+                    );
+                    assert!(
+                        desk.client.buttons.iter().any(|(_, pressed)| *pressed),
+                        "the premise: the window hears a press"
+                    );
+
+                    // A directory of its own: a scene file loose in the
+                    // temporary directory shares its implicit import with
+                    // whatever other tests left there.
+                    let lock_directory = std::env::temp_dir()
+                        .join(format!("solium-native-lock-pointer-{}", std::process::id()));
+                    std::fs::create_dir_all(&lock_directory)
+                        .expect("a directory for the lock scene");
+                    let lock_scene = lock_directory.join("Lock.qml");
+                    std::fs::write(&lock_scene, PRESSES).expect("writing the lock scene");
+                    desk.state.lock_scenes.use_scene(Some(lock_scene.clone()));
+                    desk.state.lock_natively();
+                    desk.state
+                        .lock_scenes
+                        .instance_for_test(output)
+                        .expect("the lock scene")
+                        .scene_for_test()
+                        .resize(1920, 1080, 1.0);
+                    desk.pump();
+                    desk.client.buttons.clear();
+
+                    click(desk, over_scene, 30);
+                    click(desk, over_window, 40);
+
+                    let lock = |desk: &mut Desk, name: &str| {
+                        desk.state
+                            .lock_scenes
+                            .instance_for_test(output)
+                            .expect("the lock scene")
+                            .scene_for_test()
+                            .get_int(name)
+                    };
+                    assert_eq!(
+                        desk.state.lock_scenes.shown_on(output),
+                        crate::lock_scene::Shown::Scene,
+                        "the premise: the lock shows its scene"
+                    );
+                    assert_eq!(
+                        lock(desk, "presses"),
+                        2,
+                        "the native lock's scene did not hear both presses"
+                    );
+                    assert!(
+                        lock(desk, "moves") > 0,
+                        "the native lock's scene did not hear the pointer move"
+                    );
+                    assert_eq!(
+                        scene_presses(desk),
+                        1,
+                        "a scene of the session heard a press at the lock"
+                    );
+                    assert!(
+                        desk.client.buttons.is_empty(),
+                        "a window behind the lock heard a press"
+                    );
+
+                    desk.state.unlock_natively();
+                    assert!(
+                        desk.state.lock.is_none(),
+                        "the native unlock did not unlock"
+                    );
+                    let _ = std::fs::remove_dir_all(lock_directory);
+                });
+            }
+
             fn with_touch_window(
                 framed: bool,
                 run: impl FnOnce(&mut Desk, &Opened, Window, Rectangle<i32, Logical>) + Send + 'static,

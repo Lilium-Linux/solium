@@ -114,6 +114,14 @@ impl Secret {
             .count()
     }
 
+    /// Whether every byte of its page is zero: it holds nothing, and nothing
+    /// it held is left behind. Says nothing a length does not: what the
+    /// compositor's lock asks of its buffers after a submit and an unlock.
+    #[must_use]
+    pub fn is_wiped(&self) -> bool {
+        self.page.0.iter().all(|byte| *byte == 0)
+    }
+
     /// The bytes themselves, for the one place that hands them on: the
     /// request to the helper, and the helper's answer to PAM.
     #[must_use]

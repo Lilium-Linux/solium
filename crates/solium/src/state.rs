@@ -414,6 +414,9 @@ pub(crate) struct Solium {
     /// What Solium's own lock draws on each monitor while it holds the lock.
     /// See `lock_scene.rs`.
     pub(crate) lock_scenes: crate::lock_scene::LockScenes,
+    /// The native lock's password: what is typed at it, its check, and what
+    /// its scenes are told. See `lock_auth.rs`.
+    pub(crate) lock_auth: crate::lock_auth::LockAuth,
 
     pub(crate) space: Space<Window>,
 
@@ -1410,6 +1413,7 @@ impl Solium {
             session_lock_state: crate::lock::state(&display_handle),
             lock: None,
             lock_scenes: crate::lock_scene::LockScenes::default(),
+            lock_auth: crate::lock_auth::LockAuth::default(),
             rescan_outputs: false,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),

@@ -2,6 +2,7 @@
 
 #include "host.h"
 #include "keyboard.h"
+#include "lock.h"
 #include "rows.h"
 
 #include <QtQml/QQmlContext>
@@ -656,6 +657,12 @@ void solium_qml_register_types()
     /* `Keyboard`, unqualified like `Theme`, in every scene.
      * `models::keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`. */
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Keyboard", solium_keyboard());
+    /* Solium's own lock (#281): `Lock`, read-only, and the two native items
+     * a lock scene's prompt is made of, named since a scene writes them.
+     * `lock_auth::tests::nothing_in_qml_can_unlock_or_read_the_secret`. */
+    qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Lock", solium_lock());
+    qmlRegisterType<SoliumSecretField>(SOLIUM_NATIVE_URI, 1, 0, "SecretField");
+    qmlRegisterType<SoliumSecretKeypad>(SOLIUM_NATIVE_URI, 1, 0, "SecretKeypad");
     /* The models, as singletons, each the one store Rust publishes into.
      * `qml::hosted::tests::the_monitors_model_lists_every_row_and_changes_one_role_at_a_time`. */
     qmlRegisterSingletonInstance(SOLIUM_NATIVE_URI, 1, 0, "Monitors",

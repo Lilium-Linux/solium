@@ -693,6 +693,10 @@ pub(crate) enum Command {
     /// logind's `Lock` and sleep signals: the locker to run, and whether to
     /// hold sleep for it. See `crate::logind::Settings`.
     Lock(crate::logind::Settings),
+    /// How Solium's own lock checks a password: `sol.lock`'s `lockout`,
+    /// `secret_layout`, `helper_timeout_ms`, `retry` and `keypad` (#281). See
+    /// `crate::lock_auth::Settings`.
+    LockAuth(crate::lock_auth::Settings),
     /// Which `WM_CLASS` names are refused a tile, decoration or bar entry
     /// outright: `sol.x11`, from `config.x11` (#221). See
     /// `crate::xwayland::Settings`.
@@ -812,6 +816,7 @@ impl Command {
             | Self::AutoReload(_)
             | Self::Input(_)
             | Self::Lock(_)
+            | Self::LockAuth(_)
             | Self::X11(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
@@ -1249,6 +1254,122 @@ fn describe(value: &Value) -> String {
         Value::String(text) => text.to_string_lossy(),
         other => format!("<{}>", other.type_name()),
     }
+}
+
+/// `sol.lock`'s settings for Solium's own lock (#281): `lockout` (a table of
+/// `attempts`, `seconds` and `max_seconds`, whole numbers of at least 1),
+/// `secret_layout` (`"first"` or `"current"`), `helper_timeout_ms` (a whole
+/// number of at least 100), `retry` (`seconds` and `max_seconds`) and
+/// `keypad` (`"digits"`, `"letters"` or `"keyboard"`). Each one absent keeps
+/// its default; each one of the wrong kind is named in the log and keeps its
+/// default. A `max_seconds` under its `seconds` is taken as `seconds`.
+/// `tests::sol_lock_parses_the_native_locks_settings`.
+fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
+    let mut settings = crate::lock_auth::Settings::default();
+    let whole = |value: &Value, least: u32| -> Option<u32> {
+        let number = match value {
+            Value::Integer(number) => *number,
+            Value::Number(number) if number.fract() == 0.0 && number.is_finite() => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a whole number, bounded by the conversion below"
+                )]
+                let whole = *number as i64;
+                whole
+            }
+            _ => return None,
+        };
+        u32::try_from(number).ok().filter(|number| *number >= least)
+    };
+    let backoff = |table: &mlua::Table,
+                   name: &str,
+                   mut wait: crate::lock_auth::Backoff|
+     -> crate::lock_auth::Backoff {
+        for (key, slot) in [
+            ("seconds", &mut wait.seconds),
+            ("max_seconds", &mut wait.max_seconds),
+        ] {
+            match table.get::<Value>(key) {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match whole(&value, 1) {
+                    Some(number) => *slot = number,
+                    None => tracing::warn!(
+                        value = describe(&value),
+                        "lock.{name}.{key} is a whole number of seconds, 1 or more; keeping the default"
+                    ),
+                },
+            }
+        }
+        wait.max_seconds = wait.max_seconds.max(wait.seconds);
+        wait
+    };
+    match options.get::<Value>("lockout") {
+        Ok(Value::Table(table)) => {
+            settings.lockout.wait = backoff(&table, "lockout", settings.lockout.wait);
+            match table.get::<Value>("attempts") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match whole(&value, 1) {
+                    Some(attempts) => settings.lockout.attempts = attempts,
+                    None => tracing::warn!(
+                        value = describe(&value),
+                        "lock.lockout.attempts is a whole number, 1 or more; keeping the default, 3"
+                    ),
+                },
+            }
+        }
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(other) => tracing::warn!(
+            value = describe(&other),
+            "lock.lockout is a table, like {{ attempts = 3, seconds = 30, max_seconds = 300 }}; keeping the default"
+        ),
+    }
+    match options.get::<Value>("retry") {
+        Ok(Value::Table(table)) => settings.retry = backoff(&table, "retry", settings.retry),
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(other) => tracing::warn!(
+            value = describe(&other),
+            "lock.retry is a table, like {{ seconds = 2, max_seconds = 60 }}; keeping the default"
+        ),
+    }
+    match options.get::<Value>("secret_layout") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(value) => match value
+            .as_string()
+            .and_then(|name| name.to_str().ok().map(|name| name.to_owned()))
+            .and_then(|name| crate::lock_auth::SecretLayout::named(&name))
+        {
+            Some(layout) => settings.secret_layout = layout,
+            None => tracing::warn!(
+                value = describe(&value),
+                "lock.secret_layout is \"first\" or \"current\"; keeping the default, \"first\""
+            ),
+        },
+    }
+    match options.get::<Value>("helper_timeout_ms") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(value) => match whole(&value, 100) {
+            Some(ms) => settings.helper_timeout = std::time::Duration::from_millis(u64::from(ms)),
+            None => tracing::warn!(
+                value = describe(&value),
+                "lock.helper_timeout_ms is a whole number of milliseconds, 100 or more; keeping the default, 30000"
+            ),
+        },
+    }
+    match options.get::<Value>("keypad") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(value) => match value
+            .as_string()
+            .and_then(|name| name.to_str().ok().map(|name| name.to_owned()))
+            .and_then(|name| crate::lock_auth::Keypad::named(&name))
+        {
+            Some(keypad) => settings.keypad = keypad,
+            None => tracing::warn!(
+                value = describe(&value),
+                "lock.keypad is \"digits\", \"letters\" or \"keyboard\"; keeping the default, \"digits\""
+            ),
+        },
+    }
+    settings
 }
 
 /// A `devices` entry's `vendor` or `product`: a whole number from 0 to
@@ -4011,10 +4132,13 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // not a string, nothing runs on `Lock` or before sleep, which is the
     // default — see `logind.rs` for why. `before_sleep` is true or false,
     // default true; anything else is named in the log and the default kept.
+    // The rest is how Solium's own lock checks a password (#281):
+    // `lock_auth_settings`.
     sol.set(
         "lock",
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let mut settings = crate::logind::Settings::default();
+            let auth = options.as_ref().map(lock_auth_settings).unwrap_or_default();
             if let Some(options) = options {
                 match options.get::<Value>("command") {
                     Ok(Value::String(command)) => match command.to_str() {
@@ -4040,6 +4164,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Lock(settings));
+                pending.commands.push(Command::LockAuth(auth));
             })
         })?,
     )?;
@@ -9234,6 +9359,122 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// `sol.lock`'s settings for Solium's own lock (#281): every one read,
+    /// one alone keeping the others' defaults, a `max_seconds` under its
+    /// `seconds` taken as `seconds`, and a value of the wrong kind named in
+    /// the log with the default kept. See `crate::lock_auth::Settings`.
+    #[test]
+    fn sol_lock_parses_the_native_locks_settings() {
+        use crate::lock_auth::{Backoff, Keypad, Lockout, SecretLayout, Settings};
+        let directory = std::env::temp_dir().join("solium-script-test-lock-auth");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::LockAuth(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::LockAuth")
+        };
+
+        assert_eq!(
+            configured(
+                r#"sol.lock({
+                    lockout = { attempts = 5, seconds = 10, max_seconds = 40 },
+                    secret_layout = "current",
+                    helper_timeout_ms = 5000,
+                    retry = { seconds = 1, max_seconds = 8 },
+                    keypad = "keyboard",
+                })"#
+            ),
+            Settings {
+                lockout: Lockout {
+                    attempts: 5,
+                    wait: Backoff {
+                        seconds: 10,
+                        max_seconds: 40,
+                    },
+                },
+                secret_layout: SecretLayout::Current,
+                helper_timeout: std::time::Duration::from_millis(5000),
+                retry: Backoff {
+                    seconds: 1,
+                    max_seconds: 8,
+                },
+                keypad: Keypad::Keyboard,
+            }
+        );
+        assert_eq!(
+            configured("sol.lock({ lockout = { attempts = 4 }, keypad = \"letters\" })"),
+            Settings {
+                lockout: Lockout {
+                    attempts: 4,
+                    ..Lockout::default()
+                },
+                keypad: Keypad::Letters,
+                ..Settings::default()
+            }
+        );
+        assert_eq!(
+            configured("sol.lock({ retry = { seconds = 50, max_seconds = 10 } })").retry,
+            Backoff {
+                seconds: 50,
+                max_seconds: 50,
+            }
+        );
+        // Said nothing, two ways, and said everything of the wrong kind.
+        for source in [
+            "sol.lock()",
+            "sol.lock({})",
+            r#"sol.lock({
+                lockout = 3,
+                secret_layout = "dvorak",
+                helper_timeout_ms = 5,
+                retry = { seconds = 0, max_seconds = "a minute" },
+                keypad = 7,
+            })"#,
+            "sol.lock({ lockout = { attempts = 0, seconds = 1.5 } })",
+        ] {
+            assert_eq!(configured(source), Settings::default(), "{source:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped configuration's native lock settings match
+    /// `lock_auth::Settings`'s own default**, as its locker settings match
+    /// `logind::Settings`'s below.
+    #[test]
+    fn the_shipped_configuration_s_native_lock_settings_match_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-lock-auth-default", "return {}")
+        else {
+            return;
+        };
+        let settings: Vec<crate::lock_auth::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::LockAuth(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            settings,
+            [crate::lock_auth::Settings::default()],
+            "the shipped init.lua did not hand config.lock over as it says"
+        );
     }
 
     /// **The shipped configuration's `lock` table matches `logind::Settings`'s

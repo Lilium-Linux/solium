@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 /// The headers moc runs on, in crates/solium/qml: the same list as
 /// `MOC_HEADERS` in crates/solium/build.rs.
-const MOC_HEADERS: &[&str] = &["attached.h", "rows.h", "keyboard.h", "pointer.h"];
+const MOC_HEADERS: &[&str] = &["attached.h", "rows.h", "keyboard.h", "pointer.h", "lock.h"];
 
 /// The repository this harness belongs to: two levels up from `dev/wirecheck`.
 ///
@@ -58,6 +58,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", qml.join("pointer.h").display());
     println!("cargo:rerun-if-changed={}", qml.join("icon.cpp").display());
     println!("cargo:rerun-if-changed={}", qml.join("icon.h").display());
+    println!("cargo:rerun-if-changed={}", qml.join("lock.cpp").display());
+    println!("cargo:rerun-if-changed={}", qml.join("lock.h").display());
     println!("cargo:rerun-if-env-changed=WIRECHECK_HOST_CPP");
     println!("cargo:rerun-if-env-changed=QT_MOC");
     // Our own C++ too. cc-rs does not always emit these, and a stale object
@@ -78,14 +80,15 @@ fn main() {
         // once, from this checkout, unmodified.
         .file("src/host_tu.cpp")
         // host.cpp includes attached.h and calls into attached.cpp, which
-        // calls into rows.cpp, keyboard.cpp, pointer.cpp and icon.cpp, so the
-        // real ones are compiled beside it, with their moc output below: the
-        // gate's wirecheck step links only with all of them.
+        // calls into rows.cpp, keyboard.cpp, pointer.cpp, icon.cpp and
+        // lock.cpp, so the real ones are compiled beside it, with their moc
+        // output below: the gate's wirecheck step links only with all of them.
         .file(qml.join("attached.cpp"))
         .file(qml.join("rows.cpp"))
         .file(qml.join("keyboard.cpp"))
         .file(qml.join("pointer.cpp"))
-        .file(qml.join("icon.cpp"));
+        .file(qml.join("icon.cpp"))
+        .file(qml.join("lock.cpp"));
     // Overridable only so a deliberately broken copy can be compiled as a
     // negative control; the default is always the host.cpp beside this crate.
     let host = std::env::var_os("WIRECHECK_HOST_CPP")

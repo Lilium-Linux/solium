@@ -57,6 +57,7 @@
 
 #include "attached.h"
 #include "icon.h"
+#include "lock.h"
 
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
@@ -3164,6 +3165,14 @@ extern "C" int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, doubl
         }
     }
     return claim;
+}
+
+extern "C" int solium_qml_scene_keypad_at(const SoliumQmlScene *scene, double x, double y)
+{
+    if (scene == nullptr || scene->root == nullptr) {
+        return -1;
+    }
+    return solium_keypad_at(scene->root, QPointF(x, y));
 }
 
 extern "C" void solium_qml_scene_pointer_leave(SoliumQmlScene *scene)

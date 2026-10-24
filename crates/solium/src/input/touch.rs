@@ -27,6 +27,10 @@ pub(crate) enum TouchTarget {
     /// rectangle, which hears the finger as Qt touch events and is the only
     /// thing that does (`lock_scene.rs`).
     LockScene(String, Rectangle<i32, Logical>),
+    /// A key of the native lock's `SecretKeypad`, typed into the password
+    /// when the finger went down. Nothing hears the finger, its scene least
+    /// of all (`lock_auth.rs`).
+    Keypad,
     Grab(ScenePress),
     Scene(ScenePress),
     Frame(PaneId),
@@ -124,7 +128,10 @@ fn hit(state: &Solium, target: &TouchTarget, location: Point<f64, Logical>) -> H
         }
         TouchTarget::Scene(_) | TouchTarget::Grab(_) => hit.target = "scene",
         TouchTarget::Script => hit.target = "script",
-        TouchTarget::Lock | TouchTarget::LockScene(..) | TouchTarget::Swallowed => {
+        TouchTarget::Lock
+        | TouchTarget::LockScene(..)
+        | TouchTarget::Keypad
+        | TouchTarget::Swallowed => {
             hit.target = "blocked";
         }
         TouchTarget::Move(_) | TouchTarget::Resize(_) => {}
@@ -141,7 +148,10 @@ pub(crate) fn claim(state: &mut Solium, slot: i32, action: crate::script::TouchA
     if state.lock.is_some()
         || matches!(
             contact.target,
-            TouchTarget::Lock | TouchTarget::LockScene(..) | TouchTarget::Swallowed
+            TouchTarget::Lock
+                | TouchTarget::LockScene(..)
+                | TouchTarget::Keypad
+                | TouchTarget::Swallowed
         )
     {
         return;
@@ -193,10 +203,16 @@ fn target(state: &mut Solium, location: Point<f64, Logical>) -> TouchTarget {
         // nothing else -- no client, no scene of the session's. A finger on
         // no monitor goes to the seat with nothing under it, which is nobody.
         // `state::tests::real_client::reflow_on_close::hosted::a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`.
+        // A finger on a keypad key types it, and the scene never hears it:
+        // `lock_auth::tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`.
         if lock.is_native()
             && let Some(output) = crate::monitor::at(&state.space, location)
             && let Some(area) = state.space.output_geometry(&output)
         {
+            if let Some(key) = state.lock_scenes.keypad_at(&output.name(), area, location) {
+                state.keypad_down(key);
+                return TouchTarget::Keypad;
+            }
             return TouchTarget::LockScene(output.name(), area);
         }
         return TouchTarget::Lock;
@@ -459,7 +475,7 @@ fn queue(state: &mut Solium, contact: &Contact, kind: &'static str, slot: i32) {
     if state.lock.is_some()
         || matches!(
             contact.target,
-            TouchTarget::Lock | TouchTarget::LockScene(..)
+            TouchTarget::Lock | TouchTarget::LockScene(..) | TouchTarget::Keypad
         )
     {
         return;
@@ -514,6 +530,13 @@ fn deliver(
             state.lock_scenes.touch(monitor, *area, location, &event);
             // What a finger does to a scene shows on the next frame.
             state.redraw = true;
+        }
+        // Typed when it went down, in `target`; let go, the pad is not
+        // pressed by it any more.
+        TouchTarget::Keypad => {
+            if matches!(kind, TouchKind::Up | TouchKind::Cancel) {
+                state.keypad_up();
+            }
         }
         TouchTarget::Scene(held) | TouchTarget::Grab(held) => {
             if let Some(surface) = state.surfaces.get_mut(held.surface) {
