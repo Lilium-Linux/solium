@@ -205,8 +205,15 @@ through its `containmentMask`, so a rounded popup's corners pass clicks
 through; a mask written in QML has to be typed,
 `function contains(point: point): bool`, or Qt ignores it, and it answers for
 the whole item, its bounds too. A disabled handler takes nothing
-(`qml::hosted::tests::a_disabled_handler_claims_nothing`), and an open Qt
-Quick Controls popup, a `Popup`, a `Menu` or a `ComboBox`'s list, takes the
+(`qml::hosted::tests::a_disabled_handler_claims_nothing`), and neither does a
+`MouseArea` with `enabled: false`, though its `enabled` is its own rather than
+the item's, so what is in it and a pointer handler on it still take their own
+(`qml::hosted::tests::a_disabled_mouse_area_claims_nothing_of_its_own`): a
+full-screen background `MouseArea` that is switched off leaves a touch and a
+click to what is under its scene
+(`state::tests::real_client::reflow_on_close::hosted::a_disabled_mouse_area_over_a_scene_leaves_its_touch_and_its_click_to_the_scene_under_it`,
+`state::tests::real_client::reflow_on_close::hosted::a_mouse_area_enabled_again_over_a_scene_takes_its_touch_and_its_click_again`).
+An open Qt Quick Controls popup, a `Popup`, a `Menu` or a `ComboBox`'s list, takes the
 points it is drawn on, though Qt draws it in the window's overlay rather than
 under the scene's root
 (`qml::hosted::tests::an_open_controls_popup_claims_its_press`), and

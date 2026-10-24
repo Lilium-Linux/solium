@@ -33948,6 +33948,158 @@ end)
                 );
             }
 
+            /// A real full-screen scene on the overlay layer whose only item is
+            /// a `MouseArea` over all of it, disabled while `catching` is
+            /// false, and under it a real scene on the bottom layer with a
+            /// `TapHandler` over 100..164 x 100..164 of the screen: the shell
+            /// of #322, an overlay that holds nothing but a background meant
+            /// to catch presses only when it is turned on, over a dock's icon.
+            fn disabled_mouse_area_over_a_scene(
+                name: &'static str,
+                run: impl FnOnce(&mut Desk, crate::scripted::SurfaceId, crate::scripted::SurfaceId)
+                + Send
+                + 'static,
+            ) {
+                crate::qml::qt_test::on_the_qt_thread(move || {
+                    crate::qml::start().expect("Qt starts");
+                    let mut desk = Desk::new();
+                    let directory = std::env::temp_dir().join(format!("solium-disabled-{name}"));
+                    let _ = std::fs::remove_dir_all(&directory);
+                    let output = desk.state.space.outputs().next().cloned().expect("monitor");
+                    let scenes = [
+                        (
+                            "overlay",
+                            Scripted::Overlay,
+                            crate::scripted::On::EveryMonitor,
+                            (1920, 1080),
+                            r"import QtQuick
+                            Item {
+                                id: root
+                                property bool catching: false
+                                property int caught: 0
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: root.catching
+                                    onPressed: root.caught += 1
+                                }
+                            }",
+                        ),
+                        (
+                            "dock",
+                            Scripted::Bottom,
+                            crate::scripted::On::Rect(Rectangle::new(
+                                (100, 100).into(),
+                                (64, 64).into(),
+                            )),
+                            (64, 64),
+                            r"import QtQuick
+                            Item { property int taps: 0; TapHandler { onTapped: parent.taps += 1 } }",
+                        ),
+                    ];
+                    let mut ids = Vec::new();
+                    for (scene, layer, on, (width, height), source) in scenes {
+                        let folder = directory.join(scene);
+                        std::fs::create_dir_all(&folder).expect("directory");
+                        let path = folder.join("Scene.qml");
+                        std::fs::write(&path, source).expect("scene source");
+                        let declared = format!("{name}-{scene}");
+                        desk.state
+                            .declare_surface(crate::scripted::Declaration::for_test(
+                                &declared, path, layer, on,
+                            ));
+                        let id = desk.state.surfaces.named(&declared).expect("declared");
+                        desk.state
+                            .surfaces
+                            .get_mut(id)
+                            .and_then(|s| s.instance_mut(&output))
+                            .expect("real scene")
+                            .scene_for_test()
+                            .resize(width, height, 1.0);
+                        ids.push(id);
+                    }
+                    let _touch = desk.client.seat_touch(&desk.qh);
+                    desk.pump();
+                    run(&mut desk, ids[0], ids[1]);
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(directory);
+                });
+            }
+
+            /// An integer property of a real scene's root.
+            fn scene_int(desk: &mut Desk, id: crate::scripted::SurfaceId, name: &str) -> i32 {
+                let output = desk.state.space.outputs().next().cloned().expect("monitor");
+                desk.state
+                    .surfaces
+                    .get_mut(id)
+                    .and_then(|s| s.instance_mut(&output))
+                    .expect("scene")
+                    .scene_for_test()
+                    .get_int(name)
+            }
+
+            /// **A disabled `MouseArea` over a scene leaves its touch and its
+            /// click to the scene under it** (#322, Ruling 6): a disabled
+            /// handler takes nothing, and a `MouseArea`'s `enabled` is its
+            /// own, not the item's, so a full-screen overlay holding only a
+            /// disabled one is not in the way of the dock's icon under it, for
+            /// a finger or for the mouse.
+            #[test]
+            fn a_disabled_mouse_area_over_a_scene_leaves_its_touch_and_its_click_to_the_scene_under_it()
+             {
+                disabled_mouse_area_over_a_scene("off", |desk, overlay, dock| {
+                    let region = region(desk);
+                    crate::synth::send_touch(&mut desk.state, region, (130.0, 130.0), 10);
+                    desk.pump();
+                    let after_the_touch = scene_int(desk, dock, "taps");
+                    click(desk, (130.0, 130.0), 10_000);
+                    desk.pump();
+                    assert_eq!(
+                        (
+                            after_the_touch,
+                            scene_int(desk, dock, "taps"),
+                            scene_int(desk, overlay, "caught")
+                        ),
+                        (1, 2, 0),
+                        "(the dock's taps after the touch, after the click too, the presses \
+                         the overlay caught)"
+                    );
+                });
+            }
+
+            /// **A `MouseArea` enabled again over a scene takes its touch and
+            /// its click again**: the overlay of the test before, turned on,
+            /// catches both presses, and the dock's icon under it hears
+            /// neither.
+            #[test]
+            fn a_mouse_area_enabled_again_over_a_scene_takes_its_touch_and_its_click_again() {
+                disabled_mouse_area_over_a_scene("on", |desk, overlay, dock| {
+                    let output = desk.state.space.outputs().next().cloned().expect("monitor");
+                    desk.state
+                        .surfaces
+                        .get_mut(overlay)
+                        .and_then(|s| s.instance_mut(&output))
+                        .expect("scene")
+                        .scene_for_test()
+                        .set_bool("catching", true);
+                    let region = region(desk);
+                    crate::synth::send_touch(&mut desk.state, region, (130.0, 130.0), 10);
+                    desk.pump();
+                    let after_the_touch = scene_int(desk, overlay, "caught");
+                    click(desk, (130.0, 130.0), 10_000);
+                    desk.pump();
+                    assert_eq!(
+                        (
+                            after_the_touch,
+                            scene_int(desk, overlay, "caught"),
+                            scene_int(desk, dock, "taps")
+                        ),
+                        (1, 2, 0),
+                        "(the presses the overlay caught after the touch, after the click too, \
+                         the dock's taps)"
+                    );
+                });
+            }
+
             /// **A scene hears the pointer leave when it moves off its
             /// items**, so what it hovered is hovered no longer.
             #[test]

@@ -485,6 +485,19 @@ bool takes_presses_itself(const QQuickItem *item)
     return false;
 }
 
+/* Whether an item is a MouseArea switched off. A MouseArea's `enabled`
+ * overrides Item.enabled with a flag of its own (QQuickMouseArea::setEnabled
+ * never calls QQuickItem::setEnabled), so QQuickItem::isEnabled stays true,
+ * the item still accepts the left button and its hover, and its children
+ * stay enabled, while its own press, release and hover handlers let every
+ * event go by. The property, read through the meta-object, is the
+ * MouseArea's.
+ * `qml::hosted::tests::a_disabled_mouse_area_claims_nothing_of_its_own`. */
+bool switched_off_mouse_area(const QQuickItem *item)
+{
+    return item->inherits("QQuickMouseArea") && !item->property("enabled").toBool();
+}
+
 /* What `Solium.input` says of an item: -1 unset, else its claim. A Qt Quick
  * Controls `Popup` is not an item, and Qt draws it with an item of its own,
  * the popup's child, so what a scene writes on the `Popup` is read there.
@@ -543,10 +556,12 @@ bool on_a_link(QQuickItem *item, const QPointF &local)
  * an item with any pointer handler every mouse button, to hand presses on to
  * the handlers, so an item with only a HoverHandler accepts every button and
  * still takes no press itself, and neither does one whose handlers are all
- * disabled, since Qt hands a disabled handler nothing. A Text takes a press
- * only on a link it handles.
+ * disabled, since Qt hands a disabled handler nothing. A MouseArea switched
+ * off takes nothing itself either, though Qt still hands its handlers what
+ * they ask for. A Text takes a press only on a link it handles.
  * `qml::hosted::tests::the_item_tree_decides_what_a_point_claims`,
  * `qml::hosted::tests::a_disabled_handler_claims_nothing`,
+ * `qml::hosted::tests::a_disabled_mouse_area_claims_nothing_of_its_own`,
  * `qml::hosted::tests::a_text_takes_a_press_only_on_a_link`. */
 int own_claim(QQuickItem *item, const QPointF &local)
 {
@@ -554,6 +569,7 @@ int own_claim(QQuickItem *item, const QPointF &local)
     if (declared >= 0) {
         return declared;
     }
+    const bool switched_off = switched_off_mouse_area(item);
     bool handlers = false;
     bool hover_handler = false;
     for (QObject *child : item->children()) {
@@ -571,10 +587,13 @@ int own_claim(QQuickItem *item, const QPointF &local)
         }
     }
     if (handlers) {
-        if (takes_presses_itself(item) || on_a_link(item, local)) {
+        if ((!switched_off && takes_presses_itself(item)) || on_a_link(item, local)) {
             return 2;
         }
         return hover_handler ? 1 : 0;
+    }
+    if (switched_off) {
+        return 0;
     }
     if (on_a_link(item, local)
         || (!item->inherits("QQuickText") && item->acceptedMouseButtons() != Qt::NoButton)) {
