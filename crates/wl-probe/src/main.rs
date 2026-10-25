@@ -21,6 +21,8 @@
 use std::os::unix::io::{AsFd as _, AsRawFd as _};
 use std::time::Duration;
 
+mod crop;
+
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
     wl_compositor::WlCompositor,
@@ -322,6 +324,15 @@ fn main() {
         }
     }
 
+    // Pixel-for-pixel region checks against a static hosted-scene fixture.
+    if std::env::var_os("WL_PROBE_CROP").is_some() {
+        if let Err(reason) = crop::check(&connection, &mut queue, &mut probe) {
+            eprintln!("wl-probe: {reason}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Connect, learn what is there, and leave -- with no surface of any kind.
     //
     // This exists to be a client lifecycle with no window in it. `super+return`
@@ -433,9 +444,11 @@ fn main() {
     // A screenshot, which is the one check that looks at what the compositor
     // actually drew rather than at what it said.
     if probe.has("zwlr_screencopy_manager_v1") {
-        // The whole monitor, then a region of it — the two entry points the
-        // protocol has, and `grim` uses both.
-        for region in [None, Some((200, 300, 400, 250))] {
+        // The whole monitor, then a region straddling our own bar's bottom.
+        // Its majority is the known nonzero bar, and its last rows are the
+        // desktop: ignoring the offset leaves one flat bar colour. An arbitrary
+        // interior crop can legitimately be mostly black wallpaper.
+        for region in [None, Some((200, BAR - 8, 400, 15))] {
             match take_a_shot(&connection, &mut queue, &mut probe, region) {
                 Ok(()) => {}
                 Err(reason) => failures.push(reason),
@@ -677,57 +690,17 @@ fn take_a_shot(
     probe: &mut Probe,
     region: Option<(i32, i32, i32, i32)>,
 ) -> Result<(), String> {
-    let handle = queue.handle();
-    let (Some(shm), Some(screencopy)) = (probe.shm.clone(), probe.screencopy.clone()) else {
-        return Err("zwlr_screencopy_manager_v1 is advertised and would not bind".to_owned());
-    };
-    let Some(screen) = probe.outputs.first() else {
-        return Err("no outputs to capture".to_owned());
-    };
-    let (output, name) = (screen.output.clone(), screen.name.clone());
-
-    println!();
-    probe.shot = Some(Shot::default());
-    // No cursor: a screenshot with somebody's mouse in it is the thing
-    // `overlay_cursor` exists to let you avoid, and asking for it here would
-    // make the pixel check depend on where the pointer happens to be.
-    let frame = match region {
-        None => screencopy.capture_output(0, &output, &handle, ()),
-        Some((x, y, w, h)) => screencopy.capture_output_region(0, &output, x, y, w, h, &handle, ()),
-    };
-
-    for turn in 0..50 {
-        if turn == 10 {
-            eprintln!("wl-probe: still waiting to be told what buffer to allocate…");
-        }
-        settle(connection, queue, probe)?;
-        if probe.shot.as_ref().is_some_and(|shot| shot.described) {
-            break;
-        }
-    }
-
-    let (format, width, height, stride) = {
-        let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
-        if !shot.described {
-            return Err("the compositor never said what buffer a capture needs".to_owned());
-        }
-        (
-            shot.format.ok_or("a capture with no format")?,
-            shot.width,
-            shot.height,
-            shot.stride,
-        )
-    };
-    println!("capture of {name}: {width}x{height}, stride {stride}, format {format}");
-
-    if width == 0 || height == 0 {
-        return Err("a capture of nothing".to_owned());
-    }
-    if stride < width * 4 {
-        return Err(format!(
-            "a stride of {stride} cannot hold {width} pixels of four bytes"
-        ));
-    }
+    let Captured {
+        width,
+        height,
+        stride,
+        pixels,
+        ..
+    } = capture_output(connection, queue, probe, 0, region)?;
+    let name = probe
+        .outputs
+        .first()
+        .map_or("unknown", |screen| screen.name.as_str());
     // What the buffer *should* be: the whole monitor in device pixels, or the
     // region asked for scaled the same way. A wrong size here is a capture of
     // something other than what was asked for, and every check below would
@@ -745,58 +718,6 @@ fn take_a_shot(
             "a capture of {name} is {width} wide, expected {expected} device pixels"
         ));
     }
-
-    // A pool the size the compositor asked for, and a buffer over it.
-    let length = (stride * height) as usize;
-    let file = tempfile_rs();
-    file.set_len(length as u64)
-        .unwrap_or_else(|err| panic!("wl-probe: could not size the capture pool: {err}"));
-    let pool = shm.create_pool(file.as_fd(), length as i32, &handle, ());
-    let buffer = pool.create_buffer(
-        0,
-        width as i32,
-        height as i32,
-        stride as i32,
-        wl_shm::Format::try_from(format).unwrap_or(wl_shm::Format::Xrgb8888),
-        &handle,
-        (),
-    );
-
-    frame.copy(&buffer);
-    for turn in 0..100 {
-        if turn == 20 {
-            eprintln!("wl-probe: still waiting for the capture to be filled…");
-        }
-        settle(connection, queue, probe)?;
-        let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
-        if shot.ready || shot.failed {
-            break;
-        }
-    }
-
-    let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
-    if shot.failed {
-        return Err(format!("the compositor refused to capture {name}"));
-    }
-    if !shot.ready {
-        return Err(format!(
-            "asked for a capture of {name} and was never told it was done"
-        ));
-    }
-    println!("  ok      filled, flags {:#04b}", shot.flags);
-
-    // And now the part no event can tell us: is there a desktop in it?
-    let pixels = std::fs::read(
-        std::path::Path::new("/proc/self/fd").join(file.as_fd().as_raw_fd().to_string()),
-    )
-    .unwrap_or_default();
-    let pixels = if pixels.len() >= length {
-        pixels
-    } else {
-        // Reading back through /proc is a convenience, not a guarantee. Map
-        // the pool instead if it did not work.
-        return Err("could not read the capture back to look at it".to_owned());
-    };
 
     if let Ok(path) = std::env::var("WL_PROBE_SHOT") {
         write_ppm(&path, width, height, stride, &pixels);
@@ -890,6 +811,139 @@ fn take_a_shot(
     }
 }
 
+/// A real client's screencopy buffer, including its row orientation.
+struct Captured {
+    width: u32,
+    height: u32,
+    stride: u32,
+    flags: u32,
+    pixels: Vec<u8>,
+}
+
+/// Shared transport for the default probe and the pixel comparison check.
+fn capture_output(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    output_index: usize,
+    region: Option<(i32, i32, i32, i32)>,
+) -> Result<Captured, String> {
+    let handle = queue.handle();
+    let (Some(shm), Some(screencopy)) = (probe.shm.clone(), probe.screencopy.clone()) else {
+        return Err("zwlr_screencopy_manager_v1 is advertised and would not bind".to_owned());
+    };
+    let Some(screen) = probe.outputs.get(output_index) else {
+        return Err("no outputs to capture".to_owned());
+    };
+    let (output, name) = (screen.output.clone(), screen.name.clone());
+
+    println!();
+    probe.shot = Some(Shot::default());
+    // No cursor: a screenshot with somebody's mouse in it is the thing
+    // `overlay_cursor` exists to let you avoid, and asking for it here would
+    // make the pixel check depend on where the pointer happens to be.
+    let frame = match region {
+        None => screencopy.capture_output(0, &output, &handle, ()),
+        Some((x, y, w, h)) => screencopy.capture_output_region(0, &output, x, y, w, h, &handle, ()),
+    };
+
+    for turn in 0..50 {
+        if turn == 10 {
+            eprintln!("wl-probe: still waiting to be told what buffer to allocate…");
+        }
+        settle(connection, queue, probe)?;
+        if probe.shot.as_ref().is_some_and(|shot| shot.described) {
+            break;
+        }
+    }
+
+    let (format, width, height, stride) = {
+        let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
+        if !shot.described {
+            return Err("the compositor never said what buffer a capture needs".to_owned());
+        }
+        (
+            shot.format.ok_or("a capture with no format")?,
+            shot.width,
+            shot.height,
+            shot.stride,
+        )
+    };
+    println!("capture of {name}: {width}x{height}, stride {stride}, format {format}");
+
+    if width == 0 || height == 0 {
+        return Err("a capture of nothing".to_owned());
+    }
+    if stride < width * 4 {
+        return Err(format!(
+            "a stride of {stride} cannot hold {width} pixels of four bytes"
+        ));
+    }
+    // A pool the size the compositor asked for, and a buffer over it.
+    let length = (stride * height) as usize;
+    let file = tempfile_rs();
+    file.set_len(length as u64)
+        .unwrap_or_else(|err| panic!("wl-probe: could not size the capture pool: {err}"));
+    let pool = shm.create_pool(file.as_fd(), length as i32, &handle, ());
+    let buffer = pool.create_buffer(
+        0,
+        width as i32,
+        height as i32,
+        stride as i32,
+        wl_shm::Format::try_from(format).unwrap_or(wl_shm::Format::Xrgb8888),
+        &handle,
+        (),
+    );
+
+    frame.copy(&buffer);
+    for turn in 0..100 {
+        if turn == 20 {
+            eprintln!("wl-probe: still waiting for the capture to be filled…");
+        }
+        settle(connection, queue, probe)?;
+        let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
+        if shot.ready || shot.failed {
+            break;
+        }
+    }
+
+    let shot = probe.shot.as_ref().ok_or("the capture vanished")?;
+    if shot.failed {
+        return Err(format!("the compositor refused to capture {name}"));
+    }
+    if !shot.ready {
+        return Err(format!(
+            "asked for a capture of {name} and was never told it was done"
+        ));
+    }
+    println!("  ok      filled, flags {:#04b}", shot.flags);
+
+    // And now the part no event can tell us: is there a desktop in it?
+    let pixels = std::fs::read(
+        std::path::Path::new("/proc/self/fd").join(file.as_fd().as_raw_fd().to_string()),
+    )
+    .unwrap_or_default();
+    let pixels = if pixels.len() >= length {
+        pixels
+    } else {
+        // Reading back through /proc is a convenience, not a guarantee. Map
+        // the pool instead if it did not work.
+        return Err("could not read the capture back to look at it".to_owned());
+    };
+
+    let flags = shot.flags;
+    buffer.destroy();
+    pool.destroy();
+    frame.destroy();
+    Ok(Captured {
+        width,
+        height,
+        stride,
+        flags,
+        pixels,
+    })
+}
+
 /// The first output's width in device pixels.
 fn screen_pixels(probe: &Probe) -> i32 {
     probe.outputs.first().map_or(0, |screen| screen.width)
@@ -956,11 +1010,15 @@ fn anchor_a_bar(
         .iter()
         .filter(|screen| only.as_deref().is_none_or(|only| only == screen.name))
         .map(|screen| {
-            (
-                screen.output.clone(),
-                screen.name.clone(),
-                screen.logical().0,
-            )
+            let width = std::env::var("WL_PROBE_CROP_SCALE")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .map_or_else(
+                    || screen.logical().0,
+                    |scale| (f64::from(screen.width) / scale).ceil() as i32,
+                );
+            (screen.output.clone(), screen.name.clone(), width)
         })
         .collect();
     if screens.is_empty() {
