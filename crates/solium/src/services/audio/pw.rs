@@ -399,6 +399,27 @@ fn bind_device(
     let props = global.props;
     let listener = proxy
         .add_listener_local()
+        // The device's own properties (`device.bus`, `device.form-factor`)
+        // come with its info, not with its registry entry.
+        .info({
+            let state = Rc::downgrade(state);
+            move |info| {
+                let Some(state) = state.upgrade() else { return };
+                let Some(props) = info.props() else { return };
+                let mut borrowed = state.borrow_mut();
+                let Some(device) = borrowed.devices.get_mut(&id) else {
+                    return;
+                };
+                if let Some(bus) = props.get("device.bus") {
+                    bus.clone_into(&mut device.bus);
+                }
+                if let Some(form_factor) = props.get("device.form-factor") {
+                    form_factor.clone_into(&mut device.form_factor);
+                }
+                drop(borrowed);
+                state.borrow().tell_device(id);
+            }
+        })
         .param({
             let state = Rc::downgrade(state);
             move |_seq, which, index, _next, param| {
