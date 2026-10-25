@@ -2783,6 +2783,26 @@ impl Scripts {
         })
     }
 
+    /// `sol.notify`'s notifications that closed without an action: their
+    /// functions are let go, so a shell that posts many does not keep them
+    /// all. `tests::sol_notify_queues_one_of_the_shells_own_with_its_actions`.
+    pub(crate) fn notify_forget(&mut self, tokens: &[u64]) {
+        let forgotten = self
+            .lua
+            .globals()
+            .get::<Table>("sol")
+            .and_then(|sol| sol.get::<Table>("_notify_actions"))
+            .and_then(|kept| {
+                for token in tokens {
+                    kept.set(*token, Value::Nil)?;
+                }
+                Ok(())
+            });
+        if let Err(err) = forgotten {
+            tracing::debug!(%err, "sol.notify's functions were not let go");
+        }
+    }
+
     /// An action of one of `sol.notify`'s own notifications was invoked: its
     /// function runs, and the notification's functions are let go.
     /// `tests::sol_notify_queues_one_of_the_shells_own_with_its_actions`.

@@ -325,8 +325,22 @@ fn percent_decode(text: &str) -> String {
 }
 
 fn read_png(path: &Path) -> Result<Image, Refused> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|_| Refused::Unreadable)?;
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    // Asked of the path first, and opened without blocking: a FIFO or a
+    // device named here would otherwise hang the worker, and every
+    // notification after it, for good.
+    // `an_image_path_that_is_a_fifo_is_refused_without_waiting`.
+    if !std::fs::metadata(path)
+        .map_err(|_| Refused::Unreadable)?
+        .is_file()
+    {
+        return Err(Refused::Unreadable);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| Refused::Unreadable)?;
     let metadata = file.metadata().map_err(|_| Refused::Unreadable)?;
     if !metadata.is_file() {
         return Err(Refused::Unreadable);
@@ -352,8 +366,8 @@ fn decode_png(bytes: &[u8]) -> Result<Image, Refused> {
     let mut reader = decoder.read_info().map_err(|_| Refused::Unreadable)?;
     let info = reader.info();
     let (width, height) = (info.width, info.height);
-    // 8192 x 8192 at most: past that, scaling down is not worth the memory.
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 8192 * 8192 {
+    // 4096 x 4096 at most: past that, scaling down is not worth the memory.
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 4096 * 4096 {
         return Err(Refused::Shape);
     }
     let mut buffer = vec![0; reader.output_buffer_size().ok_or(Refused::Shape)?];
@@ -617,6 +631,22 @@ mod tests {
         std::fs::write(&junk, b"not a png").expect("written");
         assert_eq!(
             image_path(&junk.display().to_string()),
+            Some(Err(Refused::Unreadable))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_image_path_that_is_a_fifo_is_refused_without_waiting() {
+        let dir = scratch("fifo");
+        let fifo = dir.join("pipe.png");
+        let path = std::ffi::CString::new(fifo.display().to_string()).expect("a path");
+        // SAFETY: a valid NUL-terminated path.
+        #[allow(unsafe_code)]
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "a fifo");
+        assert_eq!(
+            image_path(&fifo.display().to_string()),
             Some(Err(Refused::Unreadable))
         );
         let _ = std::fs::remove_dir_all(dir);

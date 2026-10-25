@@ -1549,7 +1549,7 @@ Column {
             Image { x: 14; y: 14; width: 44; height: 44; source: model.image || model.icon }
             Column {
                 x: 70; y: 14; width: parent.width - 84
-                Text { text: model.summary; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                Text { text: model.summary; textFormat: Text.PlainText; font.bold: true; elide: Text.ElideRight; width: parent.width }
                 Text { text: model.bodyRich; textFormat: Text.StyledText; elide: Text.ElideRight; width: parent.width }
             }
         }
@@ -1562,7 +1562,9 @@ The calls on a notification (`n.hold()`, `n.release()`, `n.dismiss()`,
 straight to the server. A banner's time stops while it is held, while the
 session is locked and while the screens are off. `bodyRich` is markup safe
 for `Text.StyledText`: bold, italic, underline and links only, never an
-image. `image` is the sender's picture, decoded and capped by Solium, and
+image. Every other field is the sender's own text: show it with
+`textFormat: Text.PlainText`, or a `<img>` in a summary is a picture fetched
+from wherever it points. `image` is the sender's picture, decoded and capped by Solium, and
 `icon` the app's theme icon.
 
 Lua decides what happens to each one, and hears what happened:

@@ -184,6 +184,12 @@ impl Item {
     }
 }
 
+/// The most banners on screen at once. Past it the oldest banner ends early,
+/// as if its time were up: critical ones, ones that never expire and ones
+/// that arrive while locked would otherwise pile up without end.
+/// `banners_past_the_cap_end_oldest_first`.
+pub(crate) const MAX_BANNERS: usize = 8;
+
 /// What the protocol, and Lua, must be told.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
@@ -318,7 +324,34 @@ impl Notifications {
                 keep,
             });
         }
-        self.trim_history()
+        let mut effects = self.cap_banners();
+        effects.extend(self.trim_history());
+        effects
+    }
+
+    /// The oldest banners past [`MAX_BANNERS`] end: kept ones go to the
+    /// history, the rest close as expired.
+    fn cap_banners(&mut self) -> Vec<Effect> {
+        let banners: Vec<u32> = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.shown, Shown::Banner { .. }))
+            .map(|item| item.incoming.id)
+            .collect();
+        let over = banners.len().saturating_sub(MAX_BANNERS);
+        let mut effects = Vec::new();
+        for id in &banners[..over] {
+            let Some(item) = self.items.iter_mut().find(|item| item.incoming.id == *id) else {
+                continue;
+            };
+            if item.keep {
+                item.shown = Shown::Stored;
+                item.held = false;
+            } else {
+                effects.extend(self.remove(*id, Reason::Expired));
+            }
+        }
+        effects
     }
 
     /// When the next banner ends, if one will.
@@ -768,6 +801,31 @@ mod tests {
         assert!(model.invoke(1, "reply").is_empty());
         assert!(model.get(1).is_some());
         assert!(!model.get(1).expect("there").has_default());
+    }
+
+    #[test]
+    fn banners_past_the_cap_end_oldest_first() {
+        let mut model = Notifications::default();
+        for id in 1..=(MAX_BANNERS as u32 + 2) {
+            let mut critical = incoming(id);
+            critical.urgency = Urgency::Critical;
+            model.arrive(critical, SHOW, ms(0));
+        }
+        assert_eq!(banner_ids(&model).len(), MAX_BANNERS);
+        assert_eq!(
+            history_ids(&model),
+            [2, 1],
+            "the oldest two went to the history"
+        );
+        let mut transient = incoming(100);
+        transient.transient = true;
+        transient.urgency = Urgency::Critical;
+        let effects = model.arrive(transient, SHOW, ms(0));
+        assert_eq!(
+            effects,
+            [],
+            "the oldest banner (kept) moved to the history; the new transient one shows"
+        );
     }
 
     #[test]

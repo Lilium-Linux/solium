@@ -57,13 +57,22 @@ fn settle_notifications(state: &mut Solium) {
             notifications::server::Fact::Down => state.services.notifications.down(),
         }
     }
+    let pending: Vec<notifications::Own> = {
+        let pending = &mut state.services.notifications.pending_own;
+        let take = pending.len().min(OWN_PER_SETTLE);
+        pending.drain(..take).collect()
+    };
+    for own in pending {
+        let id = state.services.notifications.allocate_own();
+        if own.token != 0 {
+            state.services.notifications.own.insert(id, own.token);
+        }
+        arrive(state, own.incoming(id), Origin::Script);
+    }
     let paused = state.lock.is_some() || state.idle.blanked();
     state.services.notifications.tick(now, paused);
     state.services.notifications.refresh_view();
     let events = std::mem::take(&mut state.services.notifications.events);
-    if events.is_empty() {
-        return;
-    }
     let view = state.services.notifications.view();
     for event in events {
         let json = event.to_json(&view);
@@ -72,28 +81,25 @@ fn settle_notifications(state: &mut Solium) {
             break;
         };
         let outcome = scripts.notifications_event(&json, snapshot);
-        // An own notification's action runs the function `sol.notify` gave it.
-        let own = (event.what == "invoked")
-            .then(|| state.services.notifications.own.get(&event.id).copied())
-            .flatten();
-        let outcome = match own {
-            Some(token) => {
-                let first = outcome;
-                let snapshot = state.snapshot();
-                let second = scripts.notify_action(token, &event.detail, snapshot);
-                state.scripts = Some(scripts);
-                state.apply(first);
-                second
-            }
-            None => {
-                state.scripts = Some(scripts);
-                outcome
-            }
-        };
-        if state.scripts.is_none() {
-            break;
-        }
+        state.scripts = Some(scripts);
         state.apply(outcome);
+    }
+    // `sol.notify`'s functions: an invoked one runs; a closed one's are let go.
+    let run = std::mem::take(&mut state.services.notifications.run_own);
+    let forget = std::mem::take(&mut state.services.notifications.forget_own);
+    for (token, key) in run {
+        let snapshot = state.snapshot();
+        let Some(mut scripts) = state.scripts.take() else {
+            break;
+        };
+        let outcome = scripts.notify_action(token, &key, snapshot);
+        state.scripts = Some(scripts);
+        state.apply(outcome);
+    }
+    if !forget.is_empty()
+        && let Some(scripts) = state.scripts.as_mut()
+    {
+        scripts.notify_forget(&forget);
     }
 }
 
@@ -225,6 +231,7 @@ pub(crate) fn act(
             }
             let window = service.joined(id).map_or(0, |joined| joined.window);
             let app_id = item.incoming.desktop_entry.clone();
+            let sender = item.incoming.sender.clone();
             let effects = service.model.invoke(id, &key);
             // A token the application can raise its window with, named for
             // its desktop entry, so a window it opens for the action may take
@@ -237,10 +244,14 @@ pub(crate) fn act(
                 let (token, _) = state.activation_state.create_external_token(data);
                 token.as_str().to_owned()
             };
-            state
-                .services
-                .notifications
-                .apply_effects(effects, origin, Some(token));
+            state.services.notifications.apply_effects(
+                effects,
+                origin,
+                Some(notifications::Answer {
+                    token: Some(token),
+                    to: sender,
+                }),
+            );
             // The window that sent it is brought forward at once; an
             // application that opens another uses the token.
             if window != 0 && key == "default" {
@@ -259,12 +270,13 @@ pub(crate) fn act(
     }
 }
 
-/// `sol.notify{ ... }`: one of the shell's own, through the same decision as
-/// any other.
+/// `sol.notify{ ... }`: one of the shell's own, queued, to arrive at the
+/// next settle through the same decision as any other. Never from here: a
+/// `notification` hook that posts one would otherwise recurse until the stack
+/// ran out.
 pub(crate) fn notify_own(state: &mut Solium, own: &notifications::Own) {
-    let id = state.services.notifications.allocate_own();
-    if own.token != 0 {
-        state.services.notifications.own.insert(id, own.token);
-    }
-    arrive(state, own.incoming(id), Origin::Script);
+    state.services.notifications.pending_own.push(own.clone());
 }
+
+/// How many of the shell's own notifications arrive in one settle.
+const OWN_PER_SETTLE: usize = 16;

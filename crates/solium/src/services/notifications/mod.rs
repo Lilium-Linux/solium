@@ -163,8 +163,9 @@ pub(crate) struct Service {
     serving: bool,
     owner: Option<Owner>,
     joined: BTreeMap<u32, Joined>,
-    /// Images handed to Qt, by id, with the revision they belong to.
-    images: BTreeMap<u32, u32>,
+    /// Images handed to Qt, by id: the revision they belong to and their
+    /// size in bytes, held to [`IMAGE_BUDGET`] all together.
+    images: BTreeMap<u32, (u32, usize)>,
     view: Rc<View>,
     dirty: bool,
     /// For `sol.on("notifications")`, in order, drained each settle.
@@ -172,6 +173,58 @@ pub(crate) struct Service {
     /// Lua functions behind the actions of `sol.notify`'s own notifications,
     /// by id: the Lua-side token their table is kept under.
     pub(crate) own: BTreeMap<u32, u64>,
+    /// Own actions invoked, `(token, key)`, for `sol.notify`'s functions to
+    /// run; and the tokens of own notifications closed without one, for Lua
+    /// to let go of. Both drained each settle.
+    pub(crate) run_own: Vec<(u64, String)>,
+    pub(crate) forget_own: Vec<u64>,
+    /// `sol.notify` calls waiting to arrive: taken each settle, never from
+    /// inside a hook, so a hook that posts one cannot recurse.
+    pub(crate) pending_own: Vec<Own>,
+}
+
+/// The most facts taken from the server in one settle: a flood waits for the
+/// next loops rather than freezing this one.
+const FACTS_PER_SETTLE: usize = 64;
+
+/// How many images Qt holds at once, in bytes: the oldest notifications lose
+/// their picture first, keeping their icon.
+/// `the_image_budget_drops_the_oldest_pictures_first`.
+const IMAGE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// The pictures to drop, oldest (lowest id) first, until the rest fit
+/// `budget` bytes.
+/// `the_image_budget_drops_the_oldest_pictures_first`.
+fn over_budget(images: &BTreeMap<u32, (u32, usize)>, budget: usize) -> Vec<u32> {
+    let mut total: usize = images.values().map(|(_, bytes)| bytes).sum();
+    let mut dropped = Vec::new();
+    for (&id, (_, bytes)) in images {
+        if total <= budget {
+            break;
+        }
+        total -= bytes;
+        dropped.push(id);
+    }
+    dropped
+}
+
+/// A theme icon name, as a client sent it, or nothing: only the characters
+/// icon names use, so nothing can be added to the icon URL.
+/// `an_icon_name_with_url_characters_is_dropped`.
+fn icon_name(name: &str) -> &str {
+    let safe = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'));
+    if safe { name } else { "" }
+}
+
+/// Who an invoke is answered to: the activation token and the sender.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Answer {
+    pub(crate) token: Option<String>,
+    pub(crate) to: String,
 }
 
 impl Default for Service {
@@ -197,6 +250,9 @@ impl Service {
             dirty: true,
             events: Vec::new(),
             own: BTreeMap::new(),
+            run_own: Vec::new(),
+            forget_own: Vec::new(),
+            pending_own: Vec::new(),
         }
     }
 
@@ -271,7 +327,7 @@ impl Service {
     pub(crate) fn take_facts(&mut self) -> Vec<server::Fact> {
         self.server
             .as_ref()
-            .map(|server| server.facts.try_iter().collect())
+            .map(|server| server.facts.try_iter().take(FACTS_PER_SETTLE).collect())
             .unwrap_or_default()
     }
 
@@ -320,14 +376,18 @@ impl Service {
         let id = incoming.id;
         let replaced = self.model.get(id).is_some();
         self.joined.insert(id, joined);
-        let image = incoming.image.clone();
+        let mut incoming = incoming;
+        // Qt keeps the picture; Rust need not keep a second copy.
+        let image = incoming.image.take();
         let effects = self.model.arrive(incoming, decision, now);
         if let Some(item) = self.model.get(id) {
             let revision = item.revision;
             match image {
                 Some(image) => {
+                    let bytes = image.rgba.len();
                     if crate::qml::hosted::set_notification_image(id, revision, &image) {
-                        self.images.insert(id, revision);
+                        self.images.insert(id, (revision, bytes));
+                        self.hold_to_budget();
                     }
                 }
                 None => {
@@ -370,21 +430,32 @@ impl Service {
         self.dirty = true;
     }
 
+    /// The oldest pictures dropped until all of them fit [`IMAGE_BUDGET`].
+    fn hold_to_budget(&mut self) {
+        for oldest in over_budget(&self.images, IMAGE_BUDGET) {
+            self.images.remove(&oldest);
+            crate::qml::hosted::drop_notification_image(oldest);
+            self.dirty = true;
+        }
+    }
+
     /// Apply what the model said must be told: signals to the server, the
-    /// registry freed, images dropped, events for Lua. `token` is the
-    /// activation token for an invoke.
+    /// registry freed, images dropped, events for Lua. `answer` says who an
+    /// invoke is answered to, with its activation token.
     pub(crate) fn apply_effects(
         &mut self,
         effects: Vec<Effect>,
         origin: Origin,
-        token: Option<String>,
+        answer: Option<Answer>,
     ) {
         for effect in effects {
             match effect {
                 Effect::Closed { id, reason } => {
                     server::lock(&self.registry).forget(id);
                     self.joined.remove(&id);
-                    self.own.remove(&id);
+                    if let Some(token) = self.own.remove(&id) {
+                        self.forget_own.push(token);
+                    }
                     if self.images.remove(&id).is_some() {
                         crate::qml::hosted::drop_notification_image(id);
                     }
@@ -403,11 +474,18 @@ impl Service {
                     self.dirty = true;
                 }
                 Effect::Invoked { id, key } => {
+                    // One of the shell's own: its function runs, and its
+                    // token is not forgotten when it closes after this.
+                    if let Some(token) = self.own.remove(&id) {
+                        self.run_own.push((token, key.clone()));
+                    }
+                    let answer = answer.clone().unwrap_or_default();
                     if let Some(server) = &self.server {
                         server.say(Signal::Invoked {
                             id,
                             key: key.clone(),
-                            token: token.clone(),
+                            token: answer.token,
+                            to: answer.to,
                         });
                     }
                     self.events.push(Event {
@@ -470,11 +548,12 @@ impl Service {
         } else {
             joined.app_name.clone()
         };
-        let icon_name = if n.app_icon.is_empty() {
-            joined.app_icon.clone()
+        let icon_name = icon_name(if n.app_icon.is_empty() {
+            &joined.app_icon
         } else {
-            n.app_icon.clone()
-        };
+            &n.app_icon
+        })
+        .to_owned();
         let icon = if icon_name.is_empty() {
             String::new()
         } else {
@@ -483,7 +562,7 @@ impl Service {
         let image = self
             .images
             .get(&n.id)
-            .map(|revision| format!("image://solium/notification/{}/{revision}", n.id))
+            .map(|(revision, _)| format!("image://solium/notification/{}/{revision}", n.id))
             .unwrap_or_default();
         let actions = n
             .actions
@@ -621,6 +700,53 @@ impl Own {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_image_budget_drops_the_oldest_pictures_first() {
+        let images = BTreeMap::from([(3, (1, 40)), (5, (1, 40)), (9, (2, 40))]);
+        assert_eq!(over_budget(&images, 100), [3]);
+        assert_eq!(over_budget(&images, 120), Vec::<u32>::new());
+        assert_eq!(over_budget(&images, 30), [3, 5, 9]);
+    }
+
+    #[test]
+    fn an_icon_name_with_url_characters_is_dropped() {
+        assert_eq!(icon_name("mail-unread"), "mail-unread");
+        assert_eq!(icon_name("org.gnome.Fractal"), "org.gnome.Fractal");
+        assert_eq!(icon_name("x?size=20000&scale=2"), "");
+        assert_eq!(icon_name("../../etc"), "");
+        assert_eq!(icon_name(""), "");
+    }
+
+    #[test]
+    fn an_own_notification_s_action_runs_even_though_invoking_closes_it() {
+        let mut service = Service::new(None);
+        let id = service.allocate_own();
+        let own = Own {
+            summary: "Update".to_owned(),
+            body: String::new(),
+            icon: String::new(),
+            urgency: Urgency::Normal,
+            actions: vec![("default".to_owned(), String::new())],
+            token: 9,
+            expire_timeout: -1,
+        };
+        service.own.insert(id, 9);
+        service.arrive(
+            own.incoming(id),
+            Decision {
+                banner: true,
+                keep: true,
+            },
+            Joined::default(),
+            Origin::Script,
+            Duration::ZERO,
+        );
+        let effects = service.model.invoke(id, "default");
+        service.apply_effects(effects, Origin::Scene, None);
+        assert_eq!(service.run_own, [(9, "default".to_owned())]);
+        assert!(service.forget_own.is_empty(), "invoked, not forgotten");
+    }
 
     #[test]
     fn a_hook_that_returns_banner_false_keeps_it_out_of_the_banners() {
