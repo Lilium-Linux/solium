@@ -2794,7 +2794,9 @@ impl Scripts {
     /// `tests::audio_events_reach_their_listeners_with_their_origin`.
     pub(crate) fn audio_event(&mut self, event: &crate::json::Json, snapshot: Snapshot) -> Outcome {
         let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
-        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "audio", data.clone()))
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "audio", data.clone())
+        })
     }
 
     /// An action of one of `sol.notify`'s own notifications was invoked: its
@@ -4635,20 +4637,29 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 table.set("ready", view.ready)?;
                 for (key, row) in [("output", &view.output), ("input", &view.input)] {
                     if let Some(row) = row {
-                        table.set(key, crate::services::notifications::object(row).to_lua(lua)?)?;
+                        table.set(
+                            key,
+                            crate::services::notifications::object(row).to_lua(lua)?,
+                        )?;
                     }
                 }
                 for (key, rows) in [("outputs", &view.outputs), ("inputs", &view.inputs)] {
                     let list = lua.create_table()?;
                     for (index, row) in rows.iter().enumerate() {
-                        list.set(index + 1, crate::services::notifications::object(row).to_lua(lua)?)?;
+                        list.set(
+                            index + 1,
+                            crate::services::notifications::object(row).to_lua(lua)?,
+                        )?;
                     }
                     table.set(key, list)?;
                 }
                 return Ok(Value::Table(table));
             };
             let mut settings = crate::services::audio::model::Settings::default();
-            for (key, slot, top) in [("max", &mut settings.max, 1.5), ("step", &mut settings.step, 0.5)] {
+            for (key, slot, top) in [
+                ("max", &mut settings.max, 1.5),
+                ("step", &mut settings.step, 0.5),
+            ] {
                 match options.get::<Value>(key) {
                     Ok(Value::Nil) | Err(_) => {}
                     Ok(value) => match number(&value).filter(|n| *n > 0.0 && *n <= top) {
@@ -4661,7 +4672,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     },
                 }
             }
-            with_pending(lua, |pending| pending.commands.push(Command::Audio(Some(settings))))?;
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Audio(Some(settings)))
+            })?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -13133,7 +13146,10 @@ mod tests {
             bus: crate::services::audio::model::Kind::Bluetooth,
         });
         let outcome = scripts.audio_event(&event, one_screen(&[]));
-        assert_eq!(outcome.status.as_deref(), Some("mute external bluetooth true"));
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("mute external bluetooth true")
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

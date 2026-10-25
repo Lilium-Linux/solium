@@ -16,8 +16,8 @@ use pw::{
         self,
         param::ParamType,
         pod::{
-            Object, Pod, Property, PropertyFlags, Value, ValueArray,
-            deserialize::PodDeserializer, serialize::PodSerializer,
+            Object, Pod, Property, PropertyFlags, Value, ValueArray, deserialize::PodDeserializer,
+            serialize::PodSerializer,
         },
     },
     types::ObjectType,
@@ -43,6 +43,11 @@ impl std::fmt::Debug for Thread {
 impl Thread {
     /// Start it. `None` when no thread could be made.
     pub(crate) fn start() -> Option<Self> {
+        // A test never reaches the developer's own PipeWire, as none reaches
+        // their session bus (`session::connect`).
+        if cfg!(test) {
+            return None;
+        }
         let (facts_out, facts) = mpsc::channel();
         let (commands, commands_in) = pw::channel::channel();
         let spawned = std::thread::Builder::new()
@@ -138,7 +143,10 @@ impl State {
             label: node.label.clone(),
             direction: node.direction,
             kind: Kind::from_props(form_factor, bus, port_type, node.is_virtual),
-            channels: route.map_or_else(|| node.volumes.clone(), |(_, route, _)| route.volumes.clone()),
+            channels: route.map_or_else(
+                || node.volumes.clone(),
+                |(_, route, _)| route.volumes.clone(),
+            ),
             muted: route.map_or(node.mute, |(_, route, _)| route.mute),
             step: None,
             route: route.map(|(device, route, _)| (device, route.index)),
@@ -165,12 +173,15 @@ impl State {
     }
 }
 
-fn run(facts: &mpsc::Sender<Fact>, commands: pw::channel::Receiver<Command>) -> Result<(), pw::Error> {
+fn run(
+    facts: &mpsc::Sender<Fact>,
+    commands: pw::channel::Receiver<Command>,
+) -> Result<(), pw::Error> {
     pw::init();
-    let main_loop = pw::main_loop::MainLoop::new(None)?;
-    let context = pw::context::Context::new(&main_loop)?;
-    let core = context.connect(None)?;
-    let registry = Rc::new(core.get_registry()?);
+    let main_loop = pw::main_loop::MainLoopRc::new(None)?;
+    let context = pw::context::ContextRc::new(&main_loop, None)?;
+    let core = context.connect_rc(None)?;
+    let registry = core.get_registry_rc()?;
     let state = Rc::new(RefCell::new(State {
         nodes: HashMap::new(),
         devices: HashMap::new(),
@@ -218,7 +229,7 @@ fn run(facts: &mpsc::Sender<Fact>, commands: pw::channel::Receiver<Command>) -> 
     let _registry_listener = registry
         .add_listener_local()
         .global({
-            let registry = Rc::downgrade(&registry);
+            let registry = registry.downgrade();
             let state = state.clone();
             move |global| {
                 let Some(registry) = registry.upgrade() else {
@@ -236,15 +247,11 @@ fn run(facts: &mpsc::Sender<Fact>, commands: pw::channel::Receiver<Command>) -> 
                         };
                         bind_node(&registry, global, direction, &state);
                     }
-                    ObjectType::Device => {
-                        if props.get("media.class") == Some("Audio/Device") {
-                            bind_device(&registry, global, &state);
-                        }
+                    ObjectType::Device if props.get("media.class") == Some("Audio/Device") => {
+                        bind_device(&registry, global, &state);
                     }
-                    ObjectType::Metadata => {
-                        if props.get("metadata.name") == Some("default") {
-                            bind_metadata(&registry, global, &state);
-                        }
+                    ObjectType::Metadata if props.get("metadata.name") == Some("default") => {
+                        bind_metadata(&registry, global, &state);
                     }
                     _ => {}
                 }
@@ -306,11 +313,18 @@ fn bind_node(
                     node.device = props
                         .get("device.id")
                         .and_then(|device| device.parse().ok())
-                        .zip(props.get("card.profile.device").and_then(|d| d.parse().ok()));
+                        .zip(
+                            props
+                                .get("card.profile.device")
+                                .and_then(|d| d.parse().ok()),
+                        );
                     node.is_virtual = props.get("node.virtual") == Some("true")
                         || props.get("device.id").is_none();
                     node.bus = props.get("device.bus").unwrap_or_default().to_owned();
-                    node.form_factor = props.get("device.form-factor").unwrap_or_default().to_owned();
+                    node.form_factor = props
+                        .get("device.form-factor")
+                        .unwrap_or_default()
+                        .to_owned();
                 }
                 node.state = match info.state() {
                     pw::node::NodeState::Running => "running",
@@ -355,7 +369,11 @@ fn bind_node(
         NodeEntry {
             proxy,
             _listener: listener,
-            name: global.props.and_then(|p| p.get("node.name")).unwrap_or_default().to_owned(),
+            name: global
+                .props
+                .and_then(|p| p.get("node.name"))
+                .unwrap_or_default()
+                .to_owned(),
             label: String::new(),
             direction,
             device: None,
@@ -400,7 +418,9 @@ fn bind_device(
                 if index == 0 {
                     device.routes.clear();
                 }
-                device.routes.retain(|each| !(each.device == route.device && each.output == route.output));
+                device
+                    .routes
+                    .retain(|each| !(each.device == route.device && each.output == route.output));
                 device.routes.push(route);
                 drop(borrowed);
                 state.borrow().tell_device(id);
@@ -414,8 +434,14 @@ fn bind_device(
             proxy,
             _listener: listener,
             routes: Vec::new(),
-            bus: props.and_then(|p| p.get("device.bus")).unwrap_or_default().to_owned(),
-            form_factor: props.and_then(|p| p.get("device.form-factor")).unwrap_or_default().to_owned(),
+            bus: props
+                .and_then(|p| p.get("device.bus"))
+                .unwrap_or_default()
+                .to_owned(),
+            form_factor: props
+                .and_then(|p| p.get("device.form-factor"))
+                .unwrap_or_default()
+                .to_owned(),
         },
     );
 }
@@ -433,7 +459,9 @@ fn bind_metadata(
         .property({
             let state = Rc::downgrade(state);
             move |_subject, key, _type, value| {
-                let Some(state) = state.upgrade() else { return 0 };
+                let Some(state) = state.upgrade() else {
+                    return 0;
+                };
                 let mut borrowed = state.borrow_mut();
                 let name = value.and_then(json_name);
                 let changed = match key {
@@ -471,7 +499,8 @@ fn json_name(value: &str) -> Option<String> {
 
 /// A `Props` param's channel volumes and mute, each when it carries one.
 fn props_of(pod: &Pod) -> Option<(Option<Vec<f32>>, Option<bool>)> {
-    let (_, Value::Object(object)) = PodDeserializer::deserialize_any_from(pod.as_bytes()).ok()? else {
+    let (_, Value::Object(object)) = PodDeserializer::deserialize_any_from(pod.as_bytes()).ok()?
+    else {
         return None;
     };
     Some(props_values(&object))
@@ -495,7 +524,8 @@ fn props_values(object: &Object) -> (Option<Vec<f32>>, Option<bool>) {
 /// A `Route` param: its index, profile device, direction, volumes, mute,
 /// description and port type.
 fn route_of(pod: &Pod) -> Option<Route> {
-    let (_, Value::Object(object)) = PodDeserializer::deserialize_any_from(pod.as_bytes()).ok()? else {
+    let (_, Value::Object(object)) = PodDeserializer::deserialize_any_from(pod.as_bytes()).ok()?
+    else {
         return None;
     };
     let mut route = Route::default();
@@ -523,9 +553,9 @@ fn route_of(pod: &Pod) -> Option<Route> {
                         _ => None,
                     })
                     .collect();
-                for pair in strings.chunks_exact(2) {
-                    if pair[0] == "port.type" {
-                        route.port_type = pair[1].to_owned();
+                for [key, value] in strings.as_chunks::<2>().0 {
+                    if *key == "port.type" {
+                        (*value).clone_into(&mut route.port_type);
                     }
                 }
             }
@@ -568,8 +598,16 @@ fn props_object(id: u32, volumes: Option<&[f32]>, mute: Option<bool>) -> Object 
 /// WirePlumber remembers it) or the node's `Props`, or a new default.
 fn perform(state: &State, command: Command) {
     let (name, target, volumes, mute) = match &command {
-        Command::Volume { name, target, channels } => (name, *target, Some(channels.as_slice()), None),
-        Command::Mute { name, target, muted } => (name, *target, None, Some(*muted)),
+        Command::Volume {
+            name,
+            target,
+            channels,
+        } => (name, *target, Some(channels.as_slice()), None),
+        Command::Mute {
+            name,
+            target,
+            muted,
+        } => (name, *target, None, Some(*muted)),
         Command::Default { direction, name } => {
             let key = match direction {
                 Direction::Output => "default.configured.audio.sink",
@@ -615,7 +653,11 @@ fn perform(state: &State, command: Command) {
                     Property {
                         key: spa::sys::SPA_PARAM_ROUTE_props,
                         flags: PropertyFlags::empty(),
-                        value: Value::Object(props_object(spa::sys::SPA_PARAM_Route, volumes, mute)),
+                        value: Value::Object(props_object(
+                            spa::sys::SPA_PARAM_Route,
+                            volumes,
+                            mute,
+                        )),
                     },
                     Property {
                         key: spa::sys::SPA_PARAM_ROUTE_save,

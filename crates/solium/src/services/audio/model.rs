@@ -310,7 +310,12 @@ impl Audio {
                         if (was_volume - observed).abs() > 1e-4 {
                             let (origin, next) = endpoint.writer.observed(observed, now);
                             if let Some(write) = next {
-                                commands.push(volume_command(&name, target, write, &endpoint.seen.channels));
+                                commands.push(volume_command(
+                                    &name,
+                                    target,
+                                    write,
+                                    &endpoint.seen.channels,
+                                ));
                             }
                             events.push(Event {
                                 what: "volume",
@@ -362,7 +367,9 @@ impl Audio {
                 }
             }
             Fact::Defaults { output, input } => {
-                for (direction, now_default) in [(Direction::Output, output), (Direction::Input, input)] {
+                for (direction, now_default) in
+                    [(Direction::Output, output), (Direction::Input, input)]
+                {
                     let slot = match direction {
                         Direction::Output => &mut self.output,
                         Direction::Input => &mut self.input,
@@ -371,7 +378,9 @@ impl Audio {
                     // last one rather than flash "no device".
                     if now_default.is_some() && *slot != now_default {
                         *slot = now_default;
-                        if let Some(endpoint) = slot.as_ref().and_then(|name| self.endpoints.get(name)) {
+                        if let Some(endpoint) =
+                            slot.as_ref().and_then(|name| self.endpoints.get(name))
+                        {
                             events.push(Event {
                                 what: "default",
                                 id: endpoint.id,
@@ -448,7 +457,11 @@ impl Audio {
         let muted = muted.unwrap_or(!endpoint.seen.muted);
         let target = volume::target(endpoint.seen.route);
         self.mutes.insert(name.clone(), (muted, origin, now));
-        Ok(Command::Mute { name, target, muted })
+        Ok(Command::Mute {
+            name,
+            target,
+            muted,
+        })
     }
 
     /// A new default asked for.
@@ -522,11 +535,23 @@ mod tests {
 
     #[test]
     fn the_kind_comes_from_the_port_then_the_bus_then_the_form_factor() {
-        assert_eq!(Kind::from_props("internal", "pci", "headphones", false), Kind::Headphones);
-        assert_eq!(Kind::from_props("internal", "pci", "speaker", false), Kind::Speakers);
-        assert_eq!(Kind::from_props("headset", "bluetooth", "", false), Kind::Bluetooth);
+        assert_eq!(
+            Kind::from_props("internal", "pci", "headphones", false),
+            Kind::Headphones
+        );
+        assert_eq!(
+            Kind::from_props("internal", "pci", "speaker", false),
+            Kind::Speakers
+        );
+        assert_eq!(
+            Kind::from_props("headset", "bluetooth", "", false),
+            Kind::Bluetooth
+        );
         assert_eq!(Kind::from_props("", "usb", "", false), Kind::Usb);
-        assert_eq!(Kind::from_props("headphone", "", "", false), Kind::Headphones);
+        assert_eq!(
+            Kind::from_props("headphone", "", "", false),
+            Kind::Headphones
+        );
         assert_eq!(Kind::from_props("", "", "", true), Kind::Virtual);
         assert_eq!(Kind::from_props("", "", "", false), Kind::Other);
     }
@@ -537,11 +562,24 @@ mod tests {
         let first = audio
             .request_volume(&Which::Output, Some(1.3), None, Origin::Scene, ms(0))
             .expect("asked");
-        let Some(Command::Volume { target, channels, .. }) = first else {
+        let Some(Command::Volume {
+            target, channels, ..
+        }) = first
+        else {
             panic!("a write: {first:?}");
         };
-        assert_eq!(target, Target::Route { device: 40, index: 2 });
-        assert_eq!(channels, vec![1.0, 1.0], "clamped to max 1.0, both channels");
+        assert_eq!(
+            target,
+            Target::Route {
+                device: 40,
+                index: 2
+            }
+        );
+        assert_eq!(
+            channels,
+            vec![1.0, 1.0],
+            "clamped to max 1.0, both channels"
+        );
         assert_eq!(
             audio.request_volume(&Which::Output, Some(0.8), None, Origin::Scene, ms(5)),
             Ok(None),
@@ -606,7 +644,13 @@ mod tests {
     #[test]
     fn a_default_that_is_briefly_none_keeps_the_last_one() {
         let mut audio = ready_with_speakers(0.5);
-        audio.apply(Fact::Defaults { output: None, input: None }, ms(10));
+        audio.apply(
+            Fact::Defaults {
+                output: None,
+                input: None,
+            },
+            ms(10),
+        );
         assert!(audio.default_of(Direction::Output).is_some());
     }
 

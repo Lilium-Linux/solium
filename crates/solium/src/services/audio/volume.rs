@@ -107,7 +107,7 @@ pub(crate) fn clamp(volume: f64, max: f64, step: Option<f64>) -> f64 {
 
 /// One endpoint's writes: what is in flight, what waits behind it, and what
 /// was asked recently, for telling an echo from an outside change.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Writer {
     /// Sent, waiting for its echo, and when it was sent.
     in_flight: Option<(Write, Duration)>,
@@ -136,7 +136,8 @@ impl Writer {
     /// now.
     /// `a_dragged_slider_sends_one_write_at_a_time_and_the_newest_last`.
     pub(crate) fn request(&mut self, write: Write, now: Duration) -> Option<Write> {
-        self.remembered.retain(|(_, at)| now.saturating_sub(*at) < REMEMBERED_FOR);
+        self.remembered
+            .retain(|(_, at)| now.saturating_sub(*at) < REMEMBERED_FOR);
         self.remembered.push((write, now));
         if self.in_flight.is_some() {
             self.queued = Some(write);
@@ -162,10 +163,9 @@ impl Writer {
         // The write in flight is answered by this change, its own echo or not:
         // PipeWire has moved since it was sent, so the next may go.
         let next = if self.in_flight.take().is_some() {
-            self.queued.take().map(|write| {
-                self.in_flight = Some((write, now));
-                write
-            })
+            self.queued
+                .take()
+                .inspect(|write| self.in_flight = Some((*write, now)))
         } else {
             None
         };
@@ -181,10 +181,9 @@ impl Writer {
             return None;
         }
         self.in_flight = None;
-        self.queued.take().map(|write| {
-            self.in_flight = Some((write, now));
-            write
-        })
+        self.queued
+            .take()
+            .inspect(|write| self.in_flight = Some((*write, now)))
     }
 }
 
@@ -228,7 +227,13 @@ mod tests {
 
     #[test]
     fn a_card_with_a_route_is_written_through_the_route_and_pro_audio_on_the_node() {
-        assert_eq!(target(Some((42, 3))), Target::Route { device: 42, index: 3 });
+        assert_eq!(
+            target(Some((42, 3))),
+            Target::Route {
+                device: 42,
+                index: 3
+            }
+        );
         assert_eq!(target(None), Target::Node);
     }
 

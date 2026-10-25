@@ -108,7 +108,7 @@ inotify = { version = "0.11", default-features = false }
 # limits, so Qt's image plugins never see a file a client named.
 png = "0.18"
 # Audio (#347): PipeWire's native protocol, on a thread of its own.
-pipewire = "0.8"
+pipewire = "0.10"
 
 [build-dependencies]
 # Qt Quick is hosted in-process, so a small C++ shim is compiled in. See

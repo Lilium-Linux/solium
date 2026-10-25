@@ -17,6 +17,7 @@ const MOC_HEADERS: &[&str] = &[
     "attached.h",
     "rows.h",
     "notifications.h",
+    "audio.h",
     "keyboard.h",
     "pointer.h",
     "lock.h",
@@ -58,6 +59,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         qml.join("notifications.h").display()
     );
+    println!("cargo:rerun-if-changed={}", qml.join("audio.cpp").display());
+    println!("cargo:rerun-if-changed={}", qml.join("audio.h").display());
     println!(
         "cargo:rerun-if-changed={}",
         qml.join("keyboard.cpp").display()
@@ -101,6 +104,7 @@ fn main() {
         .file(qml.join("attached.cpp"))
         .file(qml.join("rows.cpp"))
         .file(qml.join("notifications.cpp"))
+        .file(qml.join("audio.cpp"))
         .file(qml.join("keyboard.cpp"))
         .file(qml.join("pointer.cpp"))
         .file(qml.join("icon.cpp"))

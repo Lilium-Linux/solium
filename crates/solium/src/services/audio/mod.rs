@@ -117,9 +117,13 @@ impl Service {
         };
         match action {
             "audio.volume" => {
-                let command =
-                    self.model
-                        .request_volume(&which, number("value"), number("by"), origin, now)?;
+                let command = self.model.request_volume(
+                    &which,
+                    number("value"),
+                    number("by"),
+                    origin,
+                    now,
+                )?;
                 self.send(command.into_iter().collect());
             }
             "audio.mute" => {
@@ -249,7 +253,10 @@ pub(crate) fn event_json(event: &Event) -> Json {
         ("output".to_owned(), Json::Bool(event.output)),
         ("value".to_owned(), Json::Number(event.value)),
         ("muted".to_owned(), Json::Bool(event.muted)),
-        ("origin".to_owned(), Json::Text(event.origin.name().to_owned())),
+        (
+            "origin".to_owned(),
+            Json::Text(event.origin.name().to_owned()),
+        ),
         ("bus".to_owned(), Json::Text(event.bus.name().to_owned())),
     ]))
 }
@@ -261,7 +268,10 @@ mod tests {
     #[test]
     fn an_audio_action_names_its_target_by_output_input_or_id() {
         assert_eq!(which(None), Ok(Which::Output));
-        assert_eq!(which(Some(&Json::Text("input".to_owned()))), Ok(Which::Input));
+        assert_eq!(
+            which(Some(&Json::Text("input".to_owned()))),
+            Ok(Which::Input)
+        );
         assert_eq!(which(Some(&Json::Number(4.0))), Ok(Which::Id(4)));
         assert_eq!(which(Some(&Json::Bool(true))), Err("bad-data"));
     }
