@@ -19,6 +19,9 @@ use crate::json::Json;
 use model::{Audio, Command, Direction, Endpoint, Event, Fact, Settings, Which};
 use volume::Origin;
 
+const MIN_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 /// What snapshots and scenes read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct View {
@@ -36,6 +39,10 @@ pub(crate) struct Service {
     /// Asked for by the configuration (`sol.audio`, an `audio.*` action).
     wanted: bool,
     thread: Option<pw::Thread>,
+    /// When to try PipeWire again after it went away, and how long the next
+    /// wait is: 1 s, doubling to 30 s, back to 1 s once it answers.
+    retry_at: Option<Duration>,
+    backoff: Duration,
     pub(crate) model: Audio,
     view: Rc<View>,
     dirty: bool,
@@ -64,16 +71,31 @@ impl Service {
         self.view.clone()
     }
 
-    /// What the thread saw since the last call, applied.
+    /// What the thread saw since the last call, applied; and PipeWire tried
+    /// again, after a wait, when it went away, so the volume keys come back
+    /// with it. `audio_comes_back_after_pipewire_restarts`.
     pub(crate) fn settle(&mut self, now: Duration) {
+        if self.wanted && self.thread.is_none() {
+            match self.retry_at {
+                None => self.retry_at = Some(now + self.backoff.max(MIN_BACKOFF)),
+                Some(at) if now >= at => {
+                    self.thread = pw::Thread::start();
+                    self.retry_at = None;
+                    self.backoff = (self.backoff.max(MIN_BACKOFF) * 2).min(MAX_BACKOFF);
+                }
+                Some(_) => {}
+            }
+        }
         let facts: Vec<Fact> = self
             .thread
             .as_ref()
             .map(|thread| thread.facts.try_iter().collect())
             .unwrap_or_default();
         for fact in facts {
-            if fact == Fact::Down {
-                self.thread = None;
+            match fact {
+                Fact::Down => self.thread = None,
+                Fact::Ready => self.backoff = MIN_BACKOFF,
+                _ => {}
             }
             let (events, commands) = self.model.apply(fact, now);
             if !events.is_empty() {
@@ -264,6 +286,25 @@ pub(crate) fn event_json(event: &Event) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_comes_back_after_pipewire_restarts() {
+        // In a test the thread never starts, so the retries can be watched.
+        let mut service = Service::default();
+        service.want();
+        assert!(service.thread.is_none());
+        service.settle(Duration::from_secs(10));
+        assert_eq!(service.retry_at, Some(Duration::from_secs(11)));
+        service.settle(Duration::from_secs(11));
+        assert_eq!(service.retry_at, None, "tried again");
+        assert_eq!(service.backoff, Duration::from_secs(2));
+        service.settle(Duration::from_secs(12));
+        assert_eq!(
+            service.retry_at,
+            Some(Duration::from_secs(14)),
+            "waits longer"
+        );
+    }
 
     #[test]
     fn an_audio_action_names_its_target_by_output_input_or_id() {

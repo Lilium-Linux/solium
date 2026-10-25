@@ -52,6 +52,29 @@ pub(crate) const CAPABILITIES: [&str; 6] = [
     "persistence",
 ];
 
+/// The largest `Notify` read at all: a 1024-pixel square image and its text,
+/// with room to spare. A larger one is refused before it is decoded, because
+/// decoding `image-data` costs tens of times its size.
+/// `a_notify_over_the_size_limit_is_refused_unread`.
+const MAX_CALL_BYTES: usize = 5 * 1024 * 1024;
+
+/// The most text a field keeps, in bytes: a summary or an app name, and a
+/// body. Longer text is cut at a character boundary.
+const MAX_TEXT: usize = 1024;
+const MAX_BODY: usize = 64 * 1024;
+
+/// The most actions kept, as `(key, label)` pairs.
+const MAX_ACTIONS: usize = 16;
+
+/// Calls the worker has not got to yet, and facts the event loop has not
+/// taken: past these, a `Notify` is answered and dropped at once (closed,
+/// reason 4), so a flooding client cannot grow memory or stall the session.
+const WORK_QUEUE: usize = 256;
+const FACT_QUEUE: usize = 512;
+
+/// How many senders' pids the worker remembers before it forgets them all.
+const PID_CACHE: usize = 256;
+
 /// How many ids are reserved on disk at a time: a run that ends without
 /// writing again still starts the next one past every id it gave out.
 const ID_BLOCK: u32 = 1024;
@@ -94,11 +117,13 @@ pub(crate) enum Signal {
         reason: u32,
     },
     /// `ActivationToken(id, token)` when there is a token, then
-    /// `ActionInvoked(id, key)`.
+    /// `ActionInvoked(id, key)`, both to `to` alone (the sender), so no other
+    /// process can take the token: an empty `to` sends nothing.
     Invoked {
         id: u32,
         key: String,
         token: Option<String>,
+        to: String,
     },
 }
 
@@ -204,8 +229,11 @@ impl Registry {
 
     /// An id for one of the shell's own notifications (`sol.notify`), from
     /// the same counter so it can never clash with a client's.
+    /// Its identity holds a NUL, which no D-Bus string can, so no client can
+    /// replace or close one of the shell's own.
+    /// `no_client_can_replace_one_of_the_shells_own`.
     pub(crate) fn allocate_own(&mut self) -> u32 {
-        self.allocate("solium", "", 0).0
+        self.allocate("\0solium", "", 0).0
     }
 }
 
@@ -238,7 +266,7 @@ impl Server {
     /// Connect to `address` (the session bus for `None`, never in a test) and
     /// ask for the name. `None` when no thread could be made.
     pub(crate) fn start(address: Option<String>, registry: Arc<Mutex<Registry>>) -> Option<Self> {
-        let (facts_out, facts) = mpsc::channel();
+        let (facts_out, facts) = mpsc::sync_channel(FACT_QUEUE);
         let (signals, signals_in) = mpsc::channel();
         let link = Arc::new(Mutex::new(Link::Connecting));
         let spawned = std::thread::Builder::new()
@@ -311,7 +339,7 @@ fn run(
     address: Option<&str>,
     registry: &Arc<Mutex<Registry>>,
     link: &Mutex<Link>,
-    facts: &mpsc::Sender<Fact>,
+    facts: &mpsc::SyncSender<Fact>,
     signals: mpsc::Receiver<Signal>,
 ) {
     let connection = match crate::session::connect(address) {
@@ -345,13 +373,13 @@ fn run(
 fn serve(
     connection: &zbus::blocking::Connection,
     registry: &Arc<Mutex<Registry>>,
-    facts: &mpsc::Sender<Fact>,
+    facts: &mpsc::SyncSender<Fact>,
     signals: mpsc::Receiver<Signal>,
 ) -> zbus::Result<()> {
     // Read from before the name is asked for, so no call and no
     // `NameAcquired` is missed.
     let messages = zbus::blocking::MessageIterator::from(connection);
-    let (work_out, work) = mpsc::channel();
+    let (work_out, work) = mpsc::sync_channel(WORK_QUEUE);
     spawn_worker(connection.clone(), work, facts.clone())?;
     spawn_emitter(connection.clone(), signals)?;
     // Who owns the name, as it changes, from the bus alone.
@@ -378,7 +406,7 @@ fn serve(
         Ok(_) | Err(zbus::Error::NameTaken) => {
             tracing::info!("{NAME} is owned by another program: waiting for it, in the queue");
             let _ = facts.send(Fact::Serving(false));
-            let _ = work_out.send(Work::Owner);
+            let _ = work_out.try_send(Work::Owner);
         }
         Err(err) => return Err(err),
     }
@@ -400,7 +428,12 @@ fn serve(
 }
 
 /// A signal from the bus: the name won, lost, or moved between others.
-fn heard(message: &Message, unique: &str, facts: &mpsc::Sender<Fact>, work: &mpsc::Sender<Work>) {
+fn heard(
+    message: &Message,
+    unique: &str,
+    facts: &mpsc::SyncSender<Fact>,
+    work: &mpsc::SyncSender<Work>,
+) {
     let header = message.header();
     if header.sender().map(|s| s.as_str()) != Some(DBUS) {
         return;
@@ -409,15 +442,15 @@ fn heard(message: &Message, unique: &str, facts: &mpsc::Sender<Fact>, work: &mps
         Some("NameAcquired") => {
             if message.body().deserialize::<String>().ok().as_deref() == Some(NAME) {
                 tracing::info!("{NAME} acquired: Solium is the notification server now");
-                let _ = facts.send(Fact::Serving(true));
-                let _ = facts.send(Fact::Owner(None));
+                let _ = facts.try_send(Fact::Serving(true));
+                let _ = facts.try_send(Fact::Owner(None));
             }
         }
         Some("NameLost") => {
             if message.body().deserialize::<String>().ok().as_deref() == Some(NAME) {
                 tracing::info!("{NAME} lost to another program");
-                let _ = facts.send(Fact::Serving(false));
-                let _ = work.send(Work::Owner);
+                let _ = facts.try_send(Fact::Serving(false));
+                let _ = work.try_send(Work::Owner);
             }
         }
         Some("NameOwnerChanged") => {
@@ -425,7 +458,7 @@ fn heard(message: &Message, unique: &str, facts: &mpsc::Sender<Fact>, work: &mps
                 && name == NAME
                 && owner != unique
             {
-                let _ = work.send(Work::Owner);
+                let _ = work.try_send(Work::Owner);
             }
         }
         _ => {}
@@ -437,7 +470,7 @@ fn answer(
     connection: &zbus::blocking::Connection,
     message: &Message,
     registry: &Arc<Mutex<Registry>>,
-    work: &mpsc::Sender<Work>,
+    work: &mpsc::SyncSender<Work>,
 ) {
     let header = message.header();
     let interface = header.interface().map(|i| i.as_str().to_owned());
@@ -529,9 +562,18 @@ fn notify(
     message: &Message,
     sender: &str,
     registry: &Arc<Mutex<Registry>>,
-    work: &mpsc::Sender<Work>,
+    work: &mpsc::SyncSender<Work>,
 ) -> zbus::Result<()> {
-    let (app_name, replaces, app_icon, summary, body, actions, hints, expire_timeout) =
+    if message.data().len() > MAX_CALL_BYTES {
+        return connection
+            .reply_error(
+                &message.header(),
+                "org.freedesktop.DBus.Error.LimitsExceeded",
+                &"a notification larger than Solium reads",
+            )
+            .map(drop);
+    }
+    let (app_name, replaces, app_icon, summary, body, mut actions, hints, expire_timeout) =
         match message.body().deserialize::<NotifyArgs>() {
             Ok(args) => args,
             Err(err) => return invalid_args(connection, message, &err.to_string()),
@@ -539,12 +581,18 @@ fn notify(
     if actions.len() % 2 != 0 {
         return invalid_args(connection, message, "the actions list has an odd length");
     }
+    actions.truncate(MAX_ACTIONS * 2);
+    let app_name = cut(app_name, MAX_TEXT);
+    let app_icon = cut(app_icon, MAX_TEXT);
+    let summary = cut(summary, MAX_TEXT);
+    let body = cut(body, MAX_BODY);
     let identity = hint_string(&hints, "desktop-entry")
         .filter(|entry| !entry.is_empty())
         .unwrap_or_else(|| app_name.clone());
+    let identity = cut(identity, MAX_TEXT);
     let (id, _) = lock(registry).allocate(&identity, sender, replaces);
     connection.reply(&message.header(), &id)?;
-    let _ = work.send(Work::Notify {
+    let queued = work.try_send(Work::Notify {
         id,
         sender: sender.to_owned(),
         call: NotifyCall {
@@ -557,7 +605,31 @@ fn notify(
             expire_timeout,
         },
     });
+    if queued.is_err() {
+        // The worker is this far behind: a flood. Answered, and dropped at
+        // once, after its reply, so the sender is not left waiting.
+        lock(registry).forget(id);
+        let _ = connection.emit_signal(None::<&str>, PATH, NAME, "NotificationClosed", &(id, 4u32));
+        tracing::debug!(
+            id,
+            sender,
+            "notifications are arriving faster than they are shown; one dropped"
+        );
+    }
     Ok(())
+}
+
+/// `text`, at most `max` bytes, cut at a character boundary.
+/// `long_text_is_cut_at_a_character_boundary`.
+fn cut(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut at = max;
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        text.truncate(at);
+    }
+    text
 }
 
 fn invalid_args(
@@ -674,7 +746,7 @@ fn hint_image_data(hints: &HashMap<String, OwnedValue>) -> Option<content::Image
 fn spawn_worker(
     connection: zbus::blocking::Connection,
     work: mpsc::Receiver<Work>,
-    facts: mpsc::Sender<Fact>,
+    facts: mpsc::SyncSender<Fact>,
 ) -> zbus::Result<()> {
     std::thread::Builder::new()
         .name("solium-notifications-work".to_owned())
@@ -684,6 +756,9 @@ fn spawn_worker(
             for each in work {
                 let fact = match each {
                     Work::Notify { id, sender, call } => {
+                        if pids.len() >= PID_CACHE {
+                            pids.clear();
+                        }
                         let pid = *pids.entry(sender.clone()).or_insert_with(|| {
                             proxy.as_ref().and_then(|proxy| pid_of(proxy, &sender))
                         });
@@ -802,10 +877,16 @@ fn spawn_emitter(
                         "NotificationClosed",
                         &(id, reason),
                     ),
-                    Signal::Invoked { id, key, token } => {
+                    // To the sender alone: a token broadcast is a token any
+                    // process on the bus could spend first.
+                    // `an_invoke_says_its_token_before_its_action`.
+                    Signal::Invoked { id, key, token, to } => {
+                        if to.is_empty() {
+                            continue;
+                        }
                         let token_sent = match token {
                             Some(token) => connection.emit_signal(
-                                None::<&str>,
+                                Some(to.as_str()),
                                 PATH,
                                 NAME,
                                 "ActivationToken",
@@ -815,7 +896,7 @@ fn spawn_emitter(
                         };
                         token_sent.and_then(|()| {
                             connection.emit_signal(
-                                None::<&str>,
+                                Some(to.as_str()),
                                 PATH,
                                 NAME,
                                 "ActionInvoked",
@@ -1133,6 +1214,31 @@ mod tests {
         }
 
         #[test]
+        fn a_notify_over_the_size_limit_is_refused_unread() {
+            let mut bus = StandIn::new("huge", false);
+            let _server = started(&bus);
+            let body = "x".repeat(MAX_CALL_BYTES + 1);
+            let hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+            let answer = bus.call(
+                ":1.7",
+                "Notify",
+                &(
+                    "Mail",
+                    0u32,
+                    "",
+                    "Big",
+                    body.as_str(),
+                    Vec::<&str>::new(),
+                    hints,
+                    -1i32,
+                ),
+            );
+            assert!(answer.is_err(), "refused");
+            // And the server is still answering.
+            assert!(bus.notify(":1.7", "Mail", 0, &[]).is_ok());
+        }
+
+        #[test]
         fn an_odd_action_list_is_refused() {
             let mut bus = StandIn::new("odd", false);
             let _server = started(&bus);
@@ -1202,6 +1308,7 @@ mod tests {
                 id,
                 key: "default".to_owned(),
                 token: Some("token-1".to_owned()),
+                to: ":1.7".to_owned(),
             });
             server.say(Signal::Closed { id, reason: 2 });
             let mut signals = Vec::new();
@@ -1286,6 +1393,24 @@ mod tests {
         );
         assert_eq!(n.app_icon, "battery-caution");
         assert!(n.image.is_none());
+    }
+
+    #[test]
+    fn long_text_is_cut_at_a_character_boundary() {
+        assert_eq!(cut("abc".to_owned(), 10), "abc");
+        assert_eq!(cut("abcdef".to_owned(), 3), "abc");
+        // "é" is two bytes: a cut in its middle steps back before it.
+        assert_eq!(cut("aé".to_owned(), 2), "a");
+    }
+
+    #[test]
+    fn no_client_can_replace_one_of_the_shells_own() {
+        let mut registry = Registry::new(None);
+        let own = registry.allocate_own();
+        let (id, replaced) = registry.allocate("solium", ":1.9", own);
+        assert!(!replaced);
+        assert_ne!(id, own);
+        assert!(!registry.may_close(own, ":1.9"));
     }
 
     #[test]

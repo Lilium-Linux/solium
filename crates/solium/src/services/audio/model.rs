@@ -454,7 +454,14 @@ impl Audio {
     ) -> Result<Command, &'static str> {
         let endpoint = self.resolve(which).ok_or("unknown-endpoint")?;
         let name = endpoint.seen.name.clone();
-        let muted = muted.unwrap_or(!endpoint.seen.muted);
+        // A toggle toggles what was last asked, while that is still on its
+        // way: two quick presses mute and unmute, not mute twice.
+        // `two_quick_mute_toggles_mute_and_unmute`.
+        let current = match self.mutes.get(&name) {
+            Some((asked, _, at)) if now.saturating_sub(*at) < Duration::from_secs(2) => *asked,
+            _ => endpoint.seen.muted,
+        };
+        let muted = muted.unwrap_or(!current);
         let target = volume::target(endpoint.seen.route);
         self.mutes.insert(name.clone(), (muted, origin, now));
         Ok(Command::Mute {
@@ -629,6 +636,15 @@ mod tests {
         // The headset's own button unmutes it.
         let (events, _) = audio.apply(Fact::Seen(speakers(0.5)), ms(500));
         assert_eq!(events[0].origin, Origin::External);
+    }
+
+    #[test]
+    fn two_quick_mute_toggles_mute_and_unmute() {
+        let mut audio = ready_with_speakers(0.5);
+        let first = audio.request_mute(&Which::Output, None, Origin::Binding, ms(0));
+        let second = audio.request_mute(&Which::Output, None, Origin::Binding, ms(50));
+        assert!(matches!(first, Ok(Command::Mute { muted: true, .. })));
+        assert!(matches!(second, Ok(Command::Mute { muted: false, .. })));
     }
 
     #[test]

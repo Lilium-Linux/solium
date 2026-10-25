@@ -88,9 +88,12 @@ struct Route {
     port_type: String,
 }
 
+// Each entry's listener is declared before its proxy, so it is dropped
+// first: a listener removed after its proxy was freed would write into
+// freed memory.
 struct NodeEntry {
-    proxy: pw::node::Node,
     _listener: pw::node::NodeListener,
+    proxy: pw::node::Node,
     name: String,
     label: String,
     direction: Direction,
@@ -105,8 +108,8 @@ struct NodeEntry {
 }
 
 struct DeviceEntry {
-    proxy: pw::device::Device,
     _listener: pw::device::DeviceListener,
+    proxy: pw::device::Device,
     routes: Vec<Route>,
     bus: String,
     form_factor: String,
@@ -115,7 +118,7 @@ struct DeviceEntry {
 struct State {
     nodes: HashMap<u32, NodeEntry>,
     devices: HashMap<u32, DeviceEntry>,
-    metadata: Option<(pw::metadata::Metadata, pw::metadata::MetadataListener)>,
+    metadata: Option<(pw::metadata::MetadataListener, pw::metadata::Metadata)>,
     defaults: (Option<String>, Option<String>),
     facts: mpsc::Sender<Fact>,
 }
@@ -506,7 +509,7 @@ fn bind_metadata(
             }
         })
         .register();
-    state.borrow_mut().metadata = Some((proxy, listener));
+    state.borrow_mut().metadata = Some((listener, proxy));
 }
 
 /// `{"name":"alsa_output…"}`, the value the default metadata keeps.
@@ -639,7 +642,7 @@ fn perform(state: &State, command: Command) {
                 crate::json::Json::Text(name.clone()),
             )]))
             .render();
-            if let Some((metadata, _)) = &state.metadata {
+            if let Some((_, metadata)) = &state.metadata {
                 metadata.set_property(0, key, Some("Spa:String:JSON"), Some(&value));
             }
             return;
