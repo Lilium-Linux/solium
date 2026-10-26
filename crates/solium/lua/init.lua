@@ -44,6 +44,9 @@ sol.idle(config.idle)
 -- long banners last. A shell draws them from `Notifications`. See
 -- `config.lua`.
 sol.notifications(config.notifications)
+-- Audio: the volume keys below, and `Audio` for a shell's slider. See
+-- `config.lua`.
+sol.audio(config.audio or {})
 -- libinput device settings: tap-to-click, scrolling, acceleration and the
 -- rest, by device type and by device, applied now and again on every
 -- reload. See `config.lua`.
@@ -203,8 +206,9 @@ end)
 -- The laptop keys (#151): plain bindings to the usual programs, the way any
 -- compositor's default configuration has them. A key whose program is not
 -- installed does nothing but log; `config.bindings` takes any of them over,
--- and `false` there unbinds one. Volume through `wpctl` (PipeWire), capped at
--- 100%, with shift for a 1% step; brightness through `brightnessctl`; media
+-- and `false` there unbinds one. Volume through Solium's own audio (#347),
+-- capped at `audio.max`, with shift for a 1% step, so a key's change reaches
+-- `sol.on("audio")` as the key's; brightness through `brightnessctl`; media
 -- through `playerctl`; Print through `grim`, shift+Print a region with
 -- `slurp`, into ~/Pictures/Screenshots and onto the clipboard when `wl-copy`
 -- is there.
@@ -224,13 +228,19 @@ local function run(...)
 end
 local HELD = { note = "laptop keys", repeating = true, locked = true }
 local AT_THE_LOCK = { note = "laptop keys", locked = true }
-local SINK, SOURCE = "@DEFAULT_AUDIO_SINK@", "@DEFAULT_AUDIO_SOURCE@"
-sol.bind("XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "5%+"), HELD)
-sol.bind("XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "5%-"), HELD)
-sol.bind("shift+XF86AudioRaiseVolume", run("wpctl", "set-volume", "-l", "1.0", SINK, "1%+"), HELD)
-sol.bind("shift+XF86AudioLowerVolume", run("wpctl", "set-volume", SINK, "1%-"), HELD)
-sol.bind("XF86AudioMute", run("wpctl", "set-mute", SINK, "toggle"), AT_THE_LOCK)
-sol.bind("XF86AudioMicMute", run("wpctl", "set-mute", SOURCE, "toggle"), AT_THE_LOCK)
+local function volume(by)
+    return function() sol.act("audio.volume", { target = "output", by = by }) end
+end
+local function mute(target)
+    return function() sol.act("audio.mute", { target = target, value = "toggle" }) end
+end
+local step = (config.audio or {}).step or 0.05
+sol.bind("XF86AudioRaiseVolume", volume(step), HELD)
+sol.bind("XF86AudioLowerVolume", volume(-step), HELD)
+sol.bind("shift+XF86AudioRaiseVolume", volume(0.01), HELD)
+sol.bind("shift+XF86AudioLowerVolume", volume(-0.01), HELD)
+sol.bind("XF86AudioMute", mute("output"), AT_THE_LOCK)
+sol.bind("XF86AudioMicMute", mute("input"), AT_THE_LOCK)
 sol.bind("XF86MonBrightnessUp", run("brightnessctl", "set", "5%+"), HELD)
 sol.bind("XF86MonBrightnessDown", run("brightnessctl", "set", "5%-"), HELD)
 sol.bind("XF86AudioPlay", run("playerctl", "play-pause"), AT_THE_LOCK)

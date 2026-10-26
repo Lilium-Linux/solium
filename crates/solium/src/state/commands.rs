@@ -590,6 +590,25 @@ impl Solium {
                         reason: done.err(),
                     });
                 }
+                // An audio action is the service's (#347).
+                Command::Act {
+                    attempt,
+                    action,
+                    data,
+                    source,
+                } if action.starts_with("audio.") => {
+                    let done = crate::services::act_audio(
+                        self,
+                        &action,
+                        &data,
+                        crate::services::audio_origin(source),
+                    );
+                    self.settled_attempts.push(crate::script::Settled {
+                        attempt,
+                        ok: done.is_ok(),
+                        reason: done.err(),
+                    });
+                }
                 Command::Act {
                     attempt,
                     action,
@@ -657,6 +676,8 @@ impl Solium {
                 Command::Input(config) => self.input.configure(config),
                 Command::Notifications(config) => self.services.notifications.configure(config),
                 Command::Notify(own) => crate::services::notify_own(self, &own),
+                Command::Audio(Some(settings)) => self.services.audio.configure(settings),
+                Command::Audio(None) => self.services.audio.want(),
                 Command::Lock(settings) => {
                     self.logind.configure(settings, self.lock.is_some());
                 }

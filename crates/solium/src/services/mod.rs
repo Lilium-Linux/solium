@@ -8,6 +8,7 @@
 //! loops wake at least every 16 ms, and what a thread heard waits no longer
 //! than that.
 
+pub(crate) mod audio;
 pub(crate) mod notifications;
 
 use crate::{json::Json, state::Solium};
@@ -18,12 +19,14 @@ use notifications::{Joined, Origin, model::Decision};
 #[derive(Debug, Default)]
 pub(crate) struct Services {
     pub(crate) notifications: notifications::Service,
+    pub(crate) audio: audio::Service,
 }
 
 impl Services {
     pub(crate) fn new() -> Self {
         Self {
             notifications: notifications::Service::new(notifications::Service::state_file()),
+            audio: audio::Service::default(),
         }
     }
 }
@@ -32,6 +35,44 @@ impl Services {
 /// for Lua.
 pub(crate) fn settle(state: &mut Solium) {
     settle_notifications(state);
+    settle_audio(state);
+}
+
+fn settle_audio(state: &mut Solium) {
+    let now = state.clock.now();
+    state.services.audio.settle(now);
+    state.services.audio.refresh_view();
+    let events = std::mem::take(&mut state.services.audio.events);
+    for event in events {
+        let json = audio::event_json(&event);
+        let snapshot = state.snapshot();
+        let Some(mut scripts) = state.scripts.take() else {
+            break;
+        };
+        let outcome = scripts.audio_event(&json, snapshot);
+        state.scripts = Some(scripts);
+        state.apply(outcome);
+    }
+}
+
+/// Who asked, for audio's origin: a binding's handler, a scene, or a script.
+pub(crate) fn audio_origin(source: crate::script::FocusSource) -> audio::volume::Origin {
+    match source {
+        crate::script::FocusSource::Binding => audio::volume::Origin::Binding,
+        crate::script::FocusSource::Surface => audio::volume::Origin::Scene,
+        _ => audio::volume::Origin::Script,
+    }
+}
+
+/// An `audio.*` action, from Lua or a scene.
+pub(crate) fn act_audio(
+    state: &mut Solium,
+    action: &str,
+    data: &Json,
+    origin: audio::volume::Origin,
+) -> Result<(), &'static str> {
+    let now = state.clock.now();
+    state.services.audio.act(action, data, origin, now)
 }
 
 fn settle_notifications(state: &mut Solium) {

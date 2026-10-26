@@ -21,8 +21,13 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         libdrm-devel \
         qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
         pam \
+        pipewire-devel clang-devel \
         foot \
     && dnf clean all
+
+# `pipewire-devel` and `clang-devel`: Audio (#347) speaks PipeWire's native
+# protocol through pipewire-rs, whose bindings bindgen generates from
+# libpipewire's headers at build time, with libclang.
 
 # `pam`, not pam-devel: solium-auth (#281) declares the few PAM functions it
 # calls itself and links libpam.so.0 by name, so the runtime library is all a

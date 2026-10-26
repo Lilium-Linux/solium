@@ -111,6 +111,7 @@ mod ffi {
             data_json: *mut *const c_char,
         ) -> c_int;
         pub(super) fn solium_qml_set_notifications_state(json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_audio_state(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_notification_image(
             id: u32,
             revision: u32,
@@ -140,6 +141,10 @@ pub(crate) enum Model {
     NotificationBanners = 5,
     /// `Notifications.history` (#346).
     NotificationHistory = 6,
+    /// `Audio.outputs` (#347).
+    AudioOutputs = 7,
+    /// `Audio.inputs` (#347).
+    AudioInputs = 8,
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
@@ -182,6 +187,18 @@ pub(crate) fn set_notifications_state(json: &str) -> bool {
     };
     // SAFETY: `json` outlives the call; the host copies what it keeps.
     unsafe { ffi::solium_qml_set_notifications_state(json.as_ptr()) != 0 }
+}
+
+/// `Audio`'s own values (#347): `available`, `ready`, and the `output` and
+/// `input` facades' rows, as one JSON object. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_audio_state(json: &str) -> bool {
+    touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_set_audio_state(json.as_ptr()) != 0 }
 }
 
 /// A notification's image, for `image://solium/notification/<id>/<revision>`

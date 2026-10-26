@@ -55,6 +55,8 @@ BuildRequires:  libdrm-devel
 BuildRequires:  qt6-qtbase-devel
 BuildRequires:  qt6-qtbase-private-devel
 BuildRequires:  qt6-qtdeclarative-devel
+BuildRequires:  pipewire-devel
+BuildRequires:  clang-devel
 %endif
 
 # rpm finds the libraries the binary links. These it cannot see, and

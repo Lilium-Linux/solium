@@ -1589,6 +1589,47 @@ sol.notify{ summary = "Battery low", urgency = "critical",
 and off, where only critical notifications get a banner and the rest go
 straight to the history.
 
+### Volume
+
+Solium reads PipeWire itself, so a slider in your shell is live and every
+change says who made it. Every scene, the lock's too, can read `Audio`:
+`Audio.output` and `Audio.input` follow the default device, so a binding to
+`Audio.output.volume` survives a switch to headphones, and `Audio.outputs`
+and `Audio.inputs` list every sink and source.
+
+```qml
+Slider {
+    from: 0; to: Audio.output.max
+    value: Audio.output.volume
+    // Solium sends one write at a time, the newest, so this may write on
+    // every move without flooding PipeWire.
+    onMoved: Audio.output.setVolume(value)
+}
+```
+
+An endpoint has `id`, `name`, `label`, `kind` (`speakers`, `headphones`,
+`headset`, `hdmi`, `bluetooth`, `usb`, `virtual` or `other`), `icon`,
+`volume` (as `wpctl` shows it), `muted`, `pending`, `max`, `step`,
+`isDefault`, `portLabel`, `portKind` and `state`, and the calls
+`setVolume(v)`, `adjust(by)`, `setMuted(on)`, `toggleMuted()` and
+`makeDefault()`. A card's volume is written through its route, as
+WirePlumber does, so the hardware mixer moves and the level is remembered.
+
+The volume keys in the shipped configuration go through the same service,
+capped at `config.lua`'s `audio.max`. Lua hears every change, and who made
+it, which is what an on-screen display needs:
+
+```lua
+sol.on("audio", function(e)
+    -- A key or a headset's own button, not a slider already on screen.
+    if e.what == "volume" and e.output and e.origin ~= "scene" then
+        sol.log(string.format("volume %d%% (%s)", math.floor(e.value * 100 + 0.5), e.origin))
+    end
+end)
+
+sol.bind("super+m", function() sol.act("audio.mute", { target = "input", value = "toggle" }) end)
+```
+
 ### Bars, docks and wallpapers
 
 A shell — bar, dock and launcher together — can be hosted inside the

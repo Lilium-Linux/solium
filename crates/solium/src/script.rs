@@ -381,6 +381,8 @@ pub(crate) struct Snapshot {
     /// Notifications as the service holds them, for `sol.notifications()`
     /// (#346). Shared, not copied, from one snapshot to the next.
     pub(crate) notifications: std::rc::Rc<crate::services::notifications::View>,
+    /// Audio as the service holds it, for `sol.audio()` (#347).
+    pub(crate) audio: std::rc::Rc<crate::services::audio::View>,
 }
 
 /// One problem, as `sol.problems()` hands it over: an effect, a rule or the
@@ -825,6 +827,9 @@ pub(crate) enum Command {
     Notifications(crate::services::notifications::Config),
     /// `sol.notify{ ... }`: one of the shell's own notifications (#346).
     Notify(crate::services::notifications::Own),
+    /// `sol.audio{ ... }`, or `sol.audio()` with nothing to set (`None`):
+    /// either way, audio is wanted, and starts (#347).
+    Audio(Option<crate::services::audio::model::Settings>),
     /// How Solium's own lock checks a password: `sol.lock`'s `lockout`,
     /// `secret_layout`, `helper_timeout_ms`, `retry` and `keypad` (#281). See
     /// `crate::lock_auth::Settings`.
@@ -964,6 +969,7 @@ impl Command {
             | Self::LockScene(_)
             | Self::Notifications(_)
             | Self::Notify(_)
+            | Self::Audio(_)
             | Self::X11(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
@@ -2780,6 +2786,16 @@ impl Scripts {
         let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
         self.dispatch(snapshot, move |lua, _| {
             call_listeners(lua, "notifications", data.clone())
+        })
+    }
+
+    /// Something changed in audio (#347): `volume`, `mute`, `default`,
+    /// `added` or `removed`, with who did it, for `sol.on("audio")`.
+    /// `tests::audio_events_reach_their_listeners_with_their_origin`.
+    pub(crate) fn audio_event(&mut self, event: &crate::json::Json, snapshot: Snapshot) -> Outcome {
+        let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "audio", data.clone())
         })
     }
 
@@ -4618,6 +4634,66 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Notifications(config));
+            })?;
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    // Audio (03 §3.2.5, #347). `sol.audio{ max = 1.0, step = 0.05 }` sets its
+    // limits; `sol.audio()` answers what it is: `available`, `ready`,
+    // `output`, `input`, `outputs` and `inputs`. Either starts it. Volume and
+    // mute go through `sol.act`: `audio.volume { target, value | by }`,
+    // `audio.mute { target, value }`, `audio.default { endpoint }`.
+    // `tests::sol_audio_sets_its_limits_and_answers_its_endpoints`.
+    sol.set(
+        "audio",
+        lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
+            let Some(options) = options else {
+                with_pending(lua, |pending| pending.commands.push(Command::Audio(None)))?;
+                let snapshot = snapshot(lua)?;
+                let view = &snapshot.audio;
+                let table = lua.create_table()?;
+                table.set("available", view.available)?;
+                table.set("ready", view.ready)?;
+                for (key, row) in [("output", &view.output), ("input", &view.input)] {
+                    if let Some(row) = row {
+                        table.set(
+                            key,
+                            crate::services::notifications::object(row).to_lua(lua)?,
+                        )?;
+                    }
+                }
+                for (key, rows) in [("outputs", &view.outputs), ("inputs", &view.inputs)] {
+                    let list = lua.create_table()?;
+                    for (index, row) in rows.iter().enumerate() {
+                        list.set(
+                            index + 1,
+                            crate::services::notifications::object(row).to_lua(lua)?,
+                        )?;
+                    }
+                    table.set(key, list)?;
+                }
+                return Ok(Value::Table(table));
+            };
+            let mut settings = crate::services::audio::model::Settings::default();
+            for (key, slot, top) in [
+                ("max", &mut settings.max, 1.5),
+                ("step", &mut settings.step, 0.5),
+            ] {
+                match options.get::<Value>(key) {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value).filter(|n| *n > 0.0 && *n <= top) {
+                        Some(n) => *slot = n,
+                        None => tracing::warn!(
+                            key,
+                            value = describe(&value),
+                            "audio: a number above 0 and at most {top}; keeping the default"
+                        ),
+                    },
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Audio(Some(settings)))
             })?;
             Ok(Value::Nil)
         })?,
@@ -8069,6 +8145,7 @@ mod tests {
         let snapshot = Snapshot {
             locked: false,
             notifications: Default::default(),
+            audio: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
                 id: 7,
@@ -11257,6 +11334,7 @@ mod tests {
         Snapshot {
             locked: false,
             notifications: Default::default(),
+            audio: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: Vec::new(),
             monitors: Vec::new(),
@@ -11743,6 +11821,7 @@ mod tests {
         Snapshot {
             locked: false,
             notifications: Default::default(),
+            audio: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: windows
                 .iter()
@@ -13023,6 +13102,74 @@ mod tests {
         ]));
         let outcome = scripts.notifications_event(&event, one_screen(&[]));
         assert_eq!(outcome.status.as_deref(), Some("closed scene 7 dismissed"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn sol_audio_sets_its_limits_and_answers_its_endpoints() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-audio",
+            r#"sol.audio{ max = 1.2, step = 0.02 }"#,
+        );
+        let settings: Vec<Option<crate::services::audio::model::Settings>> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Audio(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            settings,
+            [Some(crate::services::audio::model::Settings {
+                max: 1.2,
+                step: 0.02
+            })]
+        );
+        let mut snapshot = one_screen(&[]);
+        snapshot.audio = std::rc::Rc::new(crate::services::audio::View {
+            available: true,
+            ready: true,
+            output: Some(std::collections::BTreeMap::from([
+                ("label", crate::json::Json::Text("Speakers".to_owned())),
+                ("volume", crate::json::Json::Number(0.5)),
+            ])),
+            input: None,
+            outputs: Vec::new(),
+            inputs: Vec::new(),
+        });
+        assert_eq!(
+            scripts.evaluate_in(
+                snapshot,
+                "local a = sol.audio(); return a.output.label .. ' ' .. a.output.volume .. ' ' .. tostring(a.input) .. ' ' .. #a.outputs"
+            ),
+            "Speakers 0.5 nil 0"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn audio_events_reach_their_listeners_with_their_origin() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-audio-events",
+            r#"sol.on("audio", function(e) sol.status(e.what .. " " .. e.origin .. " " .. e.bus .. " " .. tostring(e.output)) end)"#,
+        );
+        let event = crate::services::audio::event_json(&crate::services::audio::model::Event {
+            what: "mute",
+            id: 3,
+            direction: crate::services::audio::model::Direction::Output,
+            output: true,
+            value: 0.4,
+            muted: true,
+            origin: crate::services::audio::volume::Origin::External,
+            bus: crate::services::audio::model::Kind::Bluetooth,
+        });
+        let outcome = scripts.audio_event(&event, one_screen(&[]));
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("mute external bluetooth true")
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

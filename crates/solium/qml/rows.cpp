@@ -1,5 +1,6 @@
 #include "rows.h"
 #include "notifications.h"
+#include "audio.h"
 
 #include "host.h"
 
@@ -555,6 +556,8 @@ SoliumRows *solium_rows(int model)
     static SoliumRows *folder = nullptr;
     static SoliumRows *banners = nullptr;
     static SoliumRows *history = nullptr;
+    static SoliumRows *outputs = nullptr;
+    static SoliumRows *inputs = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -595,6 +598,16 @@ SoliumRows *solium_rows(int model)
             history = new SoliumNotificationRows();
         }
         return history;
+    case SOLIUM_QML_ROWS_AUDIO_OUTPUTS:
+        if (outputs == nullptr) {
+            outputs = new SoliumAudioRows();
+        }
+        return outputs;
+    case SOLIUM_QML_ROWS_AUDIO_INPUTS:
+        if (inputs == nullptr) {
+            inputs = new SoliumAudioRows();
+        }
+        return inputs;
     default:
         return nullptr;
     }

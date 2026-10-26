@@ -55,9 +55,10 @@ multi-GPU output, compositor touch/gestures and end-to-end portal validation.
 
 Solium needs **Rust 1.88 or newer** (edition 2024), a C++17 compiler, **Qt 6.5
 or newer** (Qt Quick and Qml), the development files for Wayland,
-libinput, libudev, libseat, xkbcommon, GBM, EGL and libdrm, and PAM's runtime
-library, `libpam.so.0`, which every distribution installs by default: the lock
-screen's password helper, `solium-auth`, declares the few PAM calls it makes
+libinput, libudev, libseat, xkbcommon, GBM, EGL, libdrm and PipeWire, libclang
+(the PipeWire bindings are generated from its headers while building), and
+PAM's runtime library, `libpam.so.0`, which every distribution installs by
+default: the lock screen's password helper, `solium-auth`, declares the few PAM calls it makes
 itself, so no PAM development package is needed.
 Lua is compiled in and needs nothing installed. The build also runs Qt's `moc`
 on the headers of Solium's own QML types; `QT_MOC` names it when the build
@@ -77,14 +78,14 @@ works too if it is new enough. The system packages:
 sudo dnf install gcc gcc-c++ pkgconf-pkg-config wayland-devel libinput-devel \
     systemd-devel libseat-devel libxkbcommon-devel mesa-libgbm-devel \
     mesa-libEGL-devel libdrm-devel qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
-    pam
+    pipewire-devel clang-devel pam
 ```
 
 **Arch Linux**
 
 ```sh
 sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
-    libxkbcommon mesa libdrm qt6-base qt6-declarative pam
+    libxkbcommon mesa libdrm qt6-base qt6-declarative pipewire clang pam
 ```
 
 **Debian 13 and Ubuntu 24.10 or newer** (older releases ship a Qt older than
@@ -93,7 +94,8 @@ sudo pacman -S --needed base-devel wayland libinput systemd-libs seatd \
 ```sh
 sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
     libudev-dev libseat-dev libxkbcommon-dev libgbm-dev libegl-dev libdrm-dev \
-    qt6-base-dev qt6-base-private-dev qt6-declarative-dev libpam0g
+    qt6-base-dev qt6-base-private-dev qt6-declarative-dev libpipewire-0.3-dev \
+    libclang-dev libpam0g
 ```
 
 **openSUSE Tumbleweed**
@@ -102,7 +104,7 @@ sudo apt install build-essential pkg-config libwayland-dev libinput-dev \
 sudo zypper install gcc-c++ pkgconf qt6-base-devel qt6-base-private-devel qt6-declarative-devel \
     'pkgconfig(wayland-server)' 'pkgconfig(libinput)' 'pkgconfig(libudev)' \
     'pkgconfig(libseat)' 'pkgconfig(xkbcommon)' 'pkgconfig(gbm)' 'pkgconfig(egl)' \
-    'pkgconfig(libdrm)' pam
+    'pkgconfig(libdrm)' 'pkgconfig(libpipewire-0.3)' clang-devel pam
 ```
 
 Then, from the checkout:

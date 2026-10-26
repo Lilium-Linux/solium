@@ -52,7 +52,8 @@ jobs:
             wayland-devel libinput-devel systemd-devel libseat-devel \
             libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
             libdrm-devel \
-            qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel
+            qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
+            pipewire-devel clang-devel
 
       - uses: actions/checkout@v5
 

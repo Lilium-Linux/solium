@@ -41,6 +41,7 @@ jobs:
             libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
             libdrm-devel \
             qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
+            pipewire-devel clang-devel \
             pam
 
       - uses: actions/checkout@v5
@@ -95,6 +96,7 @@ jobs:
             libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel \
             libdrm-devel \
             qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
+            pipewire-devel clang-devel \
             pam python3
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
