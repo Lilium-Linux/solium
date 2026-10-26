@@ -660,7 +660,7 @@ impl Solium {
         // Behind the lock the keyboard is the lock screen's: what a scene
         // says of it is read once the lock is gone, as its grabs are.
         // `state::tests::real_client::lock_focus::no_scene_holds_the_keyboard_while_the_session_is_locked`.
-        if self.lock.is_some() {
+        if self.lock.is_some() || self.exclusive_keyboard_layer().is_some() {
             return;
         }
         let (outputs, primary) = (self.monitor_rects(), self.primary_output());
