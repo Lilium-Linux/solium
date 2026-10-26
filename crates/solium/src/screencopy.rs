@@ -338,9 +338,9 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
 /// Fill every buffer a client has handed over, and answer for it.
 ///
 /// Called from the backend's render loop, which is the only place a renderer
-/// exists. One capture is one extra render pass over one monitor's region, so a
-/// recorder asking every frame costs about one extra frame — which is what
-/// recording is.
+/// exists. One capture is one extra render pass over one whole monitor, a region
+/// included (only the region is read back), so a recorder asking every frame
+/// costs about one extra frame — which is what recording is.
 pub(crate) fn settle(
     state: &mut Solium,
     renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
