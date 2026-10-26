@@ -4,7 +4,7 @@
 The planned v0.1.0 is a public preview, with readiness determined by testing
 and the remaining daily-use issues rather than a release date.
 
-This documentation snapshot was checked against `stage` on 2026-10-20.
+This documentation snapshot was checked against `stage` on 2026-10-30.
 Use the [project board](https://github.com/orgs/Lilium-Linux/projects/2) for
 work in progress and the
 [`daily-drive` queue](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20is%3Aopen%20label%3Adaily-drive)
@@ -21,14 +21,19 @@ for current daily-use priorities.
 - Multiple outputs, hotplug, scaling and screen power; keyboard layouts,
   per-device libinput settings and cursor themes; keyboard-shortcuts-inhibit,
   so a VM or remote desktop can have `super`.
-- Session-lock with external lockers, idle inhibition, logind lock/sleep
-  handling and installed-session integration with systemd and XDG autostart.
+- Solium's own lock screen, with an optional PIN, and session-lock with
+  external lockers; idle inhibition, logind lock/sleep handling and
+  installed-session integration with systemd and XDG autostart.
+- Touch on windows and on compositor UI (frames and hosted scenes), with a
+  touchscreen bound to its monitor by `input.touchscreen.output`.
+- A notification server and PipeWire audio, with every application's stream
+  matched to its window, published to QML scenes and Lua.
 - Checkout installation and a Fedora 44 RPM build script.
 
 Implemented features can still have correctness and compatibility issues.
 [Known limitations](gaps.md) names affected workflows, including IMEs,
-clipboard privacy, compositor touch, explicit-sync hardware validation,
-multi-GPU and portals.
+clipboard privacy, gestures, explicit-sync hardware validation, multi-GPU and
+portals.
 
 ## Validation and remaining risk
 

@@ -1,7 +1,7 @@
 # Known limitations
 
 Solium is alpha. This page describes compatibility gaps and known risks in the
-current implementation, checked against `stage` and the tracker on 2026-10-20.
+current implementation, checked against `stage` and the tracker on 2026-10-30.
 It is a guide to affected workflows, not an exhaustive protocol inventory or a
 promise about priority.
 
@@ -18,10 +18,10 @@ for daily-use priorities. [Status](status.md) describes what is implemented;
 | Gestures | Client pinch/swipe protocols and configurable compositor gestures remain incomplete. | [#70](https://github.com/Lilium-Linux/solium/issues/70), [#252](https://github.com/Lilium-Linux/solium/issues/252), [#7](https://github.com/Lilium-Linux/solium/issues/7) |
 | Tablet tools | No tablet-v2 support for pen pressure and stylus tools. | [#62](https://github.com/Lilium-Linux/solium/issues/62) |
 | Shortcut inhibition | VMs, remote desktops and nested compositors can take the compositor's shortcuts through keyboard-shortcuts-inhibit, and `super+Escape` takes them back. Any client may ask, with no per-application policy, no indicator, and no XWayland keyboard grab for X11 games. | [#245](https://github.com/Lilium-Linux/solium/issues/245) |
-| Absolute-device mapping | Touchscreens and other absolute devices need configurable output mapping. | [#42](https://github.com/Lilium-Linux/solium/issues/42) |
 
-Keyboard layouts, repeat, tap-to-click and per-device libinput settings are
-implemented; they are not missing features. See
+Keyboard layouts, repeat, tap-to-click, per-device libinput settings and
+binding a touchscreen to its monitor are implemented; they are not missing
+features. See
 [input configuration](ricing.md) for defaults and overrides.
 
 ## External shells and desktop tools
@@ -37,9 +37,9 @@ several are missing:
 | Clipboard managers | Data-control (wlr and ext) works, but every client is offered it, so any client can read every copy without focus. Limiting it to trusted clients needs security-context. | [#68](https://github.com/Lilium-Linux/solium/issues/68) |
 | Client-supplied window icons | Application icons resolve through desktop files; per-toplevel icons through xdg-toplevel-icon are unavailable. | [#73](https://github.com/Lilium-Linux/solium/issues/73) |
 | External background effects | Compositor effects exist, but clients cannot request blur through ext-background-effect. | [#78](https://github.com/Lilium-Linux/solium/issues/78) |
-| Portals | Screencopy and session portal configuration exist, and screen sharing through xdg-desktop-portal-wlr streams in a nested session (`dev/screencast-check.sh`); the wider portal flow still needs end-to-end validation. | [#83](https://github.com/Lilium-Linux/solium/issues/83) |
-| Preview desktop services | The preview has a bar, dock, search and desktop icons. Solium is the notification server, and reads audio from PipeWire, for scenes and Lua (#346, #347); media, power, network, Bluetooth and the tray are not services yet, audio has no per-application streams, levels or ports, and notifications have no inline reply, grouping, history on disk or focus modes. | [#169](https://github.com/Lilium-Linux/solium/issues/169) |
-| Native lock screen | Solium's own lock is the session's by default, taken by logind's `Lock`, sleep, `idle.lock_after`, `sol.lock_now` and `super+ctrl+l`, but it has not yet been run on hardware from a text console. A PIN (`solium pin set`) unlocks it in place of the password, with the password needed after a restart, after `lock.pin.attempts` wrong PINs and every `lock.pin.password_after_hours`; it waits for a security review and a run on hardware. What is drawn over it, the lock's scenes and the pointer's, sees no windows, workspaces or apps at all, only notifications (#346): what a lock may show of the rest (redaction in place), media on the lock, hiding notifications there, fingerprint, and glass behind the passcode are later work. | [#281](https://github.com/Lilium-Linux/solium/issues/281) |
+| Portals | Screencopy and session portal configuration exist. Region screenshots keep hosted scenes and layers, recording clients get DMA-BUF feedback and upright buffers, and layer-shell choosers such as slurp get the keyboard; screen sharing through xdg-desktop-portal-wlr streams in a nested session (`dev/screencast-check.sh`) and through a browser. A run on hardware remains, a browser sharing a rotated output receives its frames upside down, one window cannot be shared or captured on its own yet ([#47](https://github.com/Lilium-Linux/solium/issues/47)), and file-chooser grants and parenting are untested. | [#83](https://github.com/Lilium-Linux/solium/issues/83) |
+| Preview desktop services | The preview has a bar, dock, search and desktop icons. Solium is the notification server, and reads audio from PipeWire, for scenes and Lua (#346, #347); media, power, network, Bluetooth and the tray are not services yet, every application's playback stream is listed and matched to its window (#416) but audio has no levels or ports, and notifications have no inline reply, grouping, history on disk or focus modes. | [#169](https://github.com/Lilium-Linux/solium/issues/169) |
+| Native lock screen | Solium's own lock is the session's by default, taken by logind's `Lock`, sleep, `idle.lock_after`, `sol.lock_now` and `super+ctrl+l`, and it has run on hardware on a Surface Pro 7. A PIN (`solium pin set`) unlocks it in place of the password, with the password needed after a restart, after `lock.pin.attempts` wrong PINs and every `lock.pin.password_after_hours`; it has run on the same Surface and waits for a security review. What is drawn over it, the lock's scenes and the pointer's, sees no windows, workspaces or apps at all, only notifications (#346): what a lock may show of the rest (redaction in place), media on the lock, hiding notifications there, fingerprint, and glass behind the passcode are later work. | [#281](https://github.com/Lilium-Linux/solium/issues/281) |
 
 ## Displays, rendering and gaming
 
@@ -63,7 +63,6 @@ several are missing:
 | Window rules | There is no general declarative rule system for placing or sizing applications by identity. | [#56](https://github.com/Lilium-Linux/solium/issues/56) |
 | Close confirmation | An application asking for confirmation can disappear during close grace and return afterward. | [#231](https://github.com/Lilium-Linux/solium/issues/231) |
 | Focus policy | Focus-stealing prevention and related correctness follow-ups remain open. | [#136](https://github.com/Lilium-Linux/solium/issues/136), [#258](https://github.com/Lilium-Linux/solium/issues/258) |
-| Tiled client state | Some clients still need correct tiled-state reporting. | [#228](https://github.com/Lilium-Linux/solium/issues/228) |
 | Frame styles | Per-window style selection, style-switch stalls and individual frame input problems remain tracked. | [#234](https://github.com/Lilium-Linux/solium/issues/234), [#226](https://github.com/Lilium-Linux/solium/issues/226), [#158](https://github.com/Lilium-Linux/solium/issues/158) |
 | User QML overrides | The shipped Solium module can win over user QML; do not assume a user Theme.qml will override it. | [#88](https://github.com/Lilium-Linux/solium/issues/88) |
 | Live effect tuning | Effect files and shipped effects exist; schema-driven live tuning and presets remain planned. | [#259](https://github.com/Lilium-Linux/solium/issues/259) |
@@ -80,7 +79,7 @@ several are missing:
 | XWayland selections | The selection-flush workaround still needs upstream follow-up. | [#40](https://github.com/Lilium-Linux/solium/issues/40) |
 | Crash recovery | A compositor crash ends the graphical session; applications are not recovered into a replacement compositor. | [#82](https://github.com/Lilium-Linux/solium/issues/82) |
 | Distribution packages | Checkout installation and Fedora RPM builds exist; a published package repository and Arch packaging remain open. | [#66](https://github.com/Lilium-Linux/solium/issues/66) |
-| Test reliability | Parallel test crashes and timing-sensitive scenarios can undermine gate confidence and need investigation. | [#237](https://github.com/Lilium-Linux/solium/issues/237), [#241](https://github.com/Lilium-Linux/solium/issues/241), [#256](https://github.com/Lilium-Linux/solium/issues/256) |
+| Test reliability | Parallel test crashes and timing-sensitive scenarios can undermine gate confidence and need investigation. | [#241](https://github.com/Lilium-Linux/solium/issues/241), [#256](https://github.com/Lilium-Linux/solium/issues/256) |
 
 Logind lock/sleep handling is implemented, as is the input-startup fix. logind's
 `Lock` and sleep take Solium's own lock screen (#281), or run `lock.command`
