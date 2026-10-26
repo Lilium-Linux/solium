@@ -1059,7 +1059,9 @@ function sol.warp(target, warp) end
 ---
 ---`{ key = combo }` is a key, spelled as `sol.bind` spells it: `"Escape"`,
 ---`"alt+Left"`, `"ctrl+shift+t"`, its key any xkb keysym name in any case,
----found in the live keymap whichever layout is active. A key to a window is
+---found in the active layout first and then in the others, so `.` with
+---Russian active is Russian's `.` and the `t` of a shortcut is English's,
+---as a person would press them. A key to a window is
 ---the window being typed into, so a window without the keyboard is focused
 ---first, as `sol.focus` would, and keeps it.
 ---

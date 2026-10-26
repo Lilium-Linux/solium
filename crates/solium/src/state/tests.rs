@@ -43184,6 +43184,55 @@ sol.bind("super+y", function() sol.unminimize(last) end)
                 );
             }
 
+            /// **A key is found in the active layout first**: with Russian
+            /// active, `period` is the key Russian puts `.` on (evdev's
+            /// slash), not English's (evdev's dot, `ю` on Russian), and the
+            /// `t` of `ctrl+shift+t`, which Russian has nowhere, is the key
+            /// English has it on, as a person presses the shortcut.
+            #[test]
+            fn a_key_is_found_in_the_active_layout_first() {
+                /// The left Control and Shift, `t` and `/`, as evdev names them.
+                const CTRL: u32 = 29;
+                const SHIFT: u32 = 42;
+                const T: u32 = 20;
+                const SLASH: u32 = 53;
+                let mut desk = Desk::new(1);
+                let (_first, second, _pointer) = two_windows(&mut desk);
+                desk.client.key_events.clear();
+                let id = desk.id(&second);
+                let period = run(
+                    &mut desk,
+                    &format!("sol.press({id}, {{ key = \"period\" }})"),
+                );
+                let shortcut = run(
+                    &mut desk,
+                    &format!("sol.press({id}, {{ key = \"ctrl+shift+t\" }})"),
+                );
+                desk.pump();
+                assert_eq!(
+                    (
+                        period.as_str(),
+                        shortcut.as_str(),
+                        desk.client.key_events.clone()
+                    ),
+                    (
+                        "ok",
+                        "ok",
+                        vec![
+                            (SLASH, true),
+                            (SLASH, false),
+                            (CTRL, true),
+                            (SHIFT, true),
+                            (T, true),
+                            (T, false),
+                            (SHIFT, false),
+                            (CTRL, false),
+                        ],
+                    ),
+                    "(said for period, for ctrl+shift+t, the keys the client heard)"
+                );
+            }
+
             /// **A minimized window is pressed nowhere**: asked from Lua it
             /// is an error, and a press already asked for when it was
             /// minimized reaches it neither as a button nor as a key, nor
