@@ -54,19 +54,43 @@ const FORMAT: wl_shm::Format = wl_shm::Format::Xrgb8888;
 /// Bytes per pixel in [`FORMAT`].
 const BYTES: i32 = 4;
 
-/// An output-local logical rectangle in the capture framebuffer's pixels.
-/// Round edges together: independently rounded position and size can run one
-/// pixel beyond the output at a fractional scale.
+/// The logical request expressed in the output's buffer orientation.
+/// Fractional edges are rounded together and clipped to the actual mode.
 #[expect(clippy::cast_possible_truncation, reason = "a region of one monitor")]
-fn physical_rect(
+fn capture_rect(
     region: Rectangle<i32, smithay::utils::Logical>,
     scale: f64,
+    mode: smithay::utils::Size<i32, smithay::utils::Physical>,
+    transform: smithay::utils::Transform,
 ) -> Rectangle<i32, BufferCoords> {
+    let area = transform.transform_size(mode);
+    let area = (area.w, area.h).into();
     let left = (f64::from(region.loc.x) * scale).round() as i32;
     let top = (f64::from(region.loc.y) * scale).round() as i32;
     let right = (f64::from(region.loc.x + region.size.w) * scale).round() as i32;
     let bottom = (f64::from(region.loc.y + region.size.h) * scale).round() as i32;
-    Rectangle::new((left, top).into(), (right - left, bottom - top).into())
+    let upright = Rectangle::new((left, top).into(), (right - left, bottom - top).into())
+        .intersection(Rectangle::from_size(area))
+        .unwrap_or_default();
+    transform.invert().transform_rect_in(upright, &area)
+}
+
+/// Output state at announcement: a later change must not fill a stale buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OutputState {
+    mode: smithay::utils::Size<i32, smithay::utils::Physical>,
+    scale: f64,
+    transform: smithay::utils::Transform,
+}
+
+impl OutputState {
+    fn of(output: &Output) -> Option<Self> {
+        Some(Self {
+            mode: output.current_mode()?.size,
+            scale: output.current_scale().fractional_scale(),
+            transform: output.current_transform(),
+        })
+    }
 }
 
 /// The global, held for the session.
@@ -101,6 +125,7 @@ pub(crate) struct Capture {
     pub(crate) region: Rectangle<i32, smithay::utils::Logical>,
     /// The size of the buffer the client was told to allocate, in pixels.
     pub(crate) size: smithay::utils::Size<i32, BufferCoords>,
+    output_state: OutputState,
     /// Whether the pointer should be in the picture.
     pub(crate) cursor: bool,
     /// The buffer, once the client has handed one over.
@@ -121,6 +146,7 @@ struct Pending {
     output: Output,
     region: Rectangle<i32, smithay::utils::Logical>,
     size: smithay::utils::Size<i32, BufferCoords>,
+    output_state: OutputState,
     cursor: bool,
     /// Set once `copy` has been called, so a second one is an error rather
     /// than a second capture.
@@ -218,9 +244,17 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Solium {
 
         // The buffer is in *device* pixels: a capture of a 2x monitor is worth
         // having at the resolution it actually has.
-        let scale = output.current_scale().fractional_scale();
-        let size = physical_rect(region, scale).size;
-        // A subpixel region can round to no framebuffer pixels.
+        let Some(output_state) = OutputState::of(&output) else {
+            frame.failed();
+            return;
+        };
+        let size = capture_rect(
+            region,
+            output_state.scale,
+            output_state.mode,
+            output_state.transform,
+        )
+        .size;
         if size.w <= 0 || size.h <= 0 {
             frame.failed();
             return;
@@ -233,6 +267,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Solium {
                 output,
                 region,
                 size,
+                output_state,
                 cursor: overlay_cursor != 0,
                 used: false,
             });
@@ -316,6 +351,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
             output: pending.output,
             region: pending.region,
             size: pending.size,
+            output_state: pending.output_state,
             cursor: pending.cursor,
             buffer: Some(buffer),
             damage,
@@ -363,11 +399,8 @@ pub(crate) fn settle(
     for capture in captures {
         match fill(state, renderer, prepared, &capture) {
             Ok(()) => {
-                // The buffer is top-down and in the format the client was
-                // told, so no flags. `Y_INVERT` exists for compositors that
-                // hand back a GL framebuffer as it comes; this one flips it,
-                // because a client that ignores the flag then writes an
-                // upside-down screenshot and blames its own code.
+                // Row storage is top-down in the output's buffer orientation.
+                // Clients apply wl_output.transform separately from Y_INVERT.
                 capture
                     .frame
                     .flags(zwlr_screencopy_frame_v1::Flags::empty());
@@ -420,29 +453,33 @@ fn fill(
         renderer::element::{Element as _, RenderElement},
         renderer::{Bind, Color32F, ExportMem, Frame as _, Offscreen, Renderer},
     };
-    use smithay::utils::{Physical, Scale, Size, Transform};
+    use smithay::utils::{Physical, Scale, Size};
 
+    anyhow::ensure!(
+        OutputState::of(&capture.output) == Some(capture.output_state),
+        "the output changed after the capture buffer was announced"
+    );
     let buffer = capture
         .buffer
         .as_ref()
         .context("a capture with no buffer")?;
 
-    // The draw walk resolves hosted scenes, layers and effect results through
-    // the complete output geometry. A crop is a readback viewport, never a
-    // different output: passing it to `elements` would lose those contents.
+    // Resolve the complete output's content first; the requested region is
+    // a viewport into that frame, expressed in its buffer orientation.
     let screen = state
         .space
         .output_geometry(&capture.output)
         .context("the output is no longer mapped")?;
-    let scale = capture.output.current_scale().fractional_scale();
-    let buffer_size = physical_rect(Rectangle::from_size(screen.size), scale).size;
-    let readback = physical_rect(capture.region, scale);
+    let scale = capture.output_state.scale;
+    let transform = capture.output_state.transform;
+    let size: Size<i32, Physical> = capture.output_state.mode;
+    let buffer_size: Size<i32, BufferCoords> = (size.w, size.h).into();
+    let upright = transform.transform_size(size);
+    let readback = capture_rect(capture.region, scale, size, transform);
     anyhow::ensure!(
         readback.size == capture.size && Rectangle::from_size(buffer_size).contains_rect(readback),
         "the output changed after the capture buffer was announced"
     );
-
-    let size: Size<i32, Physical> = (buffer_size.w, buffer_size.h).into();
     let elements = crate::render::elements(
         state,
         renderer,
@@ -469,15 +506,15 @@ fn fill(
         {
             let _frame = crate::qml::frame_in_flight();
             let mut frame = renderer
-                .render(&mut framebuffer, size, Transform::Normal)
+                .render(&mut framebuffer, size, transform.invert())
                 .context("rendering the capture")?;
             frame
                 .clear(
                     Color32F::new(0.05, 0.05, 0.06, 1.0),
-                    &[smithay::utils::Rectangle::from_size(size)],
+                    &[smithay::utils::Rectangle::from_size(upright)],
                 )
                 .context("clearing the capture")?;
-            let whole = [smithay::utils::Rectangle::from_size(size)];
+            let whole = [smithay::utils::Rectangle::from_size(upright)];
             // Reversed: the list is topmost-first, and drawing it in that order
             // onto a cleared buffer paints the top of the stack first.
             for element in elements.iter().rev() {
@@ -513,32 +550,26 @@ fn fill(
     );
 
     smithay::wayland::shm::with_buffer_contents_mut(buffer, |target, len, data| {
-        let wanted = stride * rows;
+        let client_stride = usize::try_from(data.stride).context("negative capture stride")?;
+        let offset = usize::try_from(data.offset).context("negative capture offset")?;
+        let wanted = client_stride
+            .checked_mul(rows.saturating_sub(1))
+            .and_then(|last_row| last_row.checked_add(stride))
+            .and_then(|end| end.checked_add(offset))
+            .context("capture buffer size overflow")?;
         anyhow::ensure!(
-            len >= wanted && data.stride as usize >= stride,
-            "the client's buffer is {len} bytes with stride {}, needs {wanted} and {stride}",
-            data.stride
+            data.format == FORMAT
+                && data.width == capture.size.w
+                && data.height == capture.size.h
+                && client_stride >= stride
+                && len >= wanted,
+            "the client's buffer does not match the announced capture"
         );
-        // Row for row, *not* reversed.
-        //
-        // `capture.rs` reverses, and copying that was the first thing tried
-        // here: the result was a desktop upside down, with a bar anchored to
-        // the top of the screen sitting along the bottom of the image. The two
-        // are not the same read. `capture.rs` reads the winit backend's own
-        // framebuffer, which was rendered through the output's
-        // `Flipped180` transform and is therefore stored flipped; reversing
-        // undoes that. This reads an offscreen texture rendered with
-        // `Transform::Normal`, which is already top-down, so reversing adds a
-        // flip rather than removing one.
-        //
-        // A rotated monitor is captured un-rotated for the same reason: the
-        // transform belongs to the display pipeline, not to this pass. That is
-        // arguably what a screenshot should be — the picture, not the picture
-        // as the panel happens to be mounted — and it is why the buffer is
-        // sized from the logical geometry.
+        // The offscreen pass applies the inverse output transform. Copy its
+        // rows unchanged; the client normalises wl_output.transform once.
         for row in 0..rows {
             let from = row * stride;
-            let into = row * usize::try_from(data.stride).unwrap_or_default();
+            let into = offset + row * client_stride;
             let Some(source) = pixels.get(from..from + stride) else {
                 anyhow::bail!("the capture was short a row");
             };
@@ -561,8 +592,88 @@ fn fill(
 }
 
 #[cfg(test)]
-mod tests {
+mod orientation_tests {
     use super::*;
+    use smithay::utils::Transform;
+
+    #[test]
+    fn a_capture_rectangle_uses_the_outputs_buffer_orientation() {
+        // The same upright region within a 100x80 canvas, hand-computed.
+        for (transform, mode, expected) in [
+            (Transform::Normal, (100, 80), (2, 3, 7, 11)),
+            (Transform::_90, (80, 100), (3, 91, 11, 7)),
+            (Transform::_180, (100, 80), (91, 66, 7, 11)),
+            (Transform::_270, (80, 100), (66, 2, 11, 7)),
+            (Transform::Flipped, (100, 80), (91, 3, 7, 11)),
+            (Transform::Flipped90, (80, 100), (3, 2, 11, 7)),
+            (Transform::Flipped180, (100, 80), (2, 66, 7, 11)),
+            (Transform::Flipped270, (80, 100), (66, 91, 11, 7)),
+        ] {
+            let region = Rectangle::new((2, 3).into(), (7, 11).into());
+            let (x, y, w, h) = expected;
+            assert_eq!(
+                capture_rect(region, 1.0, mode.into(), transform),
+                Rectangle::new((x, y).into(), (w, h).into()),
+                "{transform:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_subpixel_region_does_not_invent_a_framebuffer_pixel() {
+        assert_eq!(
+            capture_rect(
+                Rectangle::new((1, 1).into(), (1, 1).into()),
+                0.5,
+                (10, 10).into(),
+                Transform::Normal
+            )
+            .size,
+            (0, 0).into()
+        );
+    }
+
+    #[test]
+    fn a_fractional_full_capture_does_not_grow_past_the_mode() {
+        assert_eq!(
+            capture_rect(
+                Rectangle::from_size((1067, 600).into()),
+                1.5,
+                (1600, 900).into(),
+                Transform::Normal
+            ),
+            Rectangle::from_size((1600, 900).into())
+        );
+    }
+
+    #[test]
+    fn fractional_crop_edges_round_together_before_orientation() {
+        assert_eq!(
+            capture_rect(
+                Rectangle::new((1, 1).into(), (9, 9).into()),
+                1.5,
+                (15, 15).into(),
+                Transform::Flipped180
+            ),
+            Rectangle::new((2, 0).into(), (13, 13).into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+    fn physical_rect(
+        region: Rectangle<i32, smithay::utils::Logical>,
+        scale: f64,
+    ) -> Rectangle<i32, BufferCoords> {
+        capture_rect(
+            region,
+            scale,
+            (2000, 2000).into(),
+            smithay::utils::Transform::Normal,
+        )
+    }
 
     #[test]
     fn a_double_scale_crop_keeps_its_output_local_offset() {

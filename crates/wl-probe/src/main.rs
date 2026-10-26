@@ -23,6 +23,7 @@ use std::time::Duration;
 
 mod crop;
 mod dmabuf;
+mod pixels;
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
@@ -174,7 +175,12 @@ impl Screen {
     /// that positions anything speaks in.
     fn logical(&self) -> (i32, i32) {
         let scale = self.scale.max(1);
-        (self.width / scale, self.height / scale)
+        let (w, h) = if self.transform % 2 == 1 {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        };
+        (w / scale, h / scale)
     }
 }
 
@@ -864,7 +870,7 @@ fn capture_output(
     let Some(screen) = probe.outputs.get(output_index) else {
         return Err("no outputs to capture".to_owned());
     };
-    let (output, name) = (screen.output.clone(), screen.name.clone());
+    let (output, name, transform) = (screen.output.clone(), screen.name.clone(), screen.transform);
 
     println!();
     probe.shot = Some(Shot::default());
@@ -908,17 +914,27 @@ fn capture_output(
             "a stride of {stride} cannot hold {width} pixels of four bytes"
         ));
     }
-    // A pool the size the compositor asked for, and a buffer over it.
-    let length = (stride * height) as usize;
+    // Optional guarded suballocation: offset, row padding and a second pool
+    // region must survive a capture into this buffer unchanged.
+    let guarded = std::env::var_os("WL_PROBE_SHM_LAYOUT").is_some();
+    let offset = if guarded { 64 } else { 0 };
+    let client_stride = stride + if guarded { 16 } else { 0 };
+    let suffix = if guarded { 32 } else { 0 };
+    let length = offset + (client_stride * height) as usize + suffix;
     let file = tempfile_rs();
     file.set_len(length as u64)
         .unwrap_or_else(|err| panic!("wl-probe: could not size the capture pool: {err}"));
+    if guarded {
+        use std::os::unix::fs::FileExt as _;
+        file.write_all_at(&vec![0xa7; length], 0)
+            .map_err(|e| e.to_string())?;
+    }
     let pool = shm.create_pool(file.as_fd(), length as i32, &handle, ());
     let buffer = pool.create_buffer(
-        0,
+        offset as i32,
         width as i32,
         height as i32,
-        stride as i32,
+        client_stride as i32,
         wl_shm::Format::try_from(format).unwrap_or(wl_shm::Format::Xrgb8888),
         &handle,
         (),
@@ -960,7 +976,31 @@ fn capture_output(
         return Err("could not read the capture back to look at it".to_owned());
     };
 
-    let flags = shot.flags;
+    if guarded {
+        if pixels[..offset].iter().any(|v| *v != 0xa7)
+            || pixels[length - suffix..].iter().any(|v| *v != 0xa7)
+        {
+            return Err("capture overwrote another region of the SHM pool".to_owned());
+        }
+        for row in 0..height as usize {
+            let start = offset + row * client_stride as usize + width as usize * 4;
+            let end = offset + (row + 1) * client_stride as usize;
+            if pixels[start..end].iter().any(|v| *v != 0xa7) {
+                return Err("capture overwrote row padding".to_owned());
+            }
+        }
+        println!("  ok      nonzero SHM offset and row padding preserved");
+    }
+    let (width, height, stride, pixels) = pixels::normalise(
+        &pixels[offset..],
+        width,
+        height,
+        client_stride,
+        shot.flags,
+        transform,
+    )?;
+
+    let flags = 0;
     buffer.destroy();
     pool.destroy();
     frame.destroy();
@@ -981,7 +1021,13 @@ fn fixture_logical_width(width: i32, height: i32, transform: u32, scale: f64) ->
 
 /// The first output's width in device pixels.
 fn screen_pixels(probe: &Probe) -> i32 {
-    probe.outputs.first().map_or(0, |screen| screen.width)
+    probe.outputs.first().map_or(0, |screen| {
+        if screen.transform % 2 == 1 {
+            screen.height
+        } else {
+            screen.width
+        }
+    })
 }
 
 /// Write a captured buffer out as a binary PPM, so a person can look at it.

@@ -718,8 +718,24 @@ and never sent an initial configure, and a client may not attach a buffer until
 it has been configured once. Every bar and every dock was invisible, for as
 long as `layer.rs` has claimed that any existing panel works.
 
-`WL_PROBE_SHOT=/tmp/shot.ppm` writes the capture it took out as a binary PPM,
-because "some pixels were not zero" and "that is my desktop" are different
+`WL_PROBE_SHOT=/tmp/shot.ppm` writes the capture as a binary PPM
+after normalising the output transform and `Y_INVERT` row-storage flag. The
+protocol buffer itself uses the output's buffer orientation; screenshots and
+recording clients apply that transform once (#353).
+
+`WL_PROBE_SHM_LAYOUT=1` allocates the capture at a nonzero offset in a
+shared-memory pool, with padded rows and sentinel bytes around the buffer.
+The probe checks that the compositor fills only the announced pixels. The
+same allocation check can run without building a client:
+
+```sh
+WAYLAND_DISPLAY=<nested-socket> python3 dev/screencopy-shm-check.py
+```
+
+Use the socket printed by the nested compositor. Both checks reject writes
+into the pool prefix, row padding or suffix.
+
+"Some pixels were not zero" and "that is my desktop" are different
 claims and only one of them can be checked by a program. It checks what it can:
 that the buffer is the size that was asked for, that it holds more than one
 colour, and — the one thing no event can tell a client — that it is the right
