@@ -1,4 +1,5 @@
 #include "attached.h"
+#include "notifications.h"
 
 #include "host.h"
 #include "keyboard.h"
@@ -746,6 +747,9 @@ void solium_qml_register_types()
      * shell's own `Folder.qml`, if it ever wrote one, would still be its
      * own (04-ui.md §4.9). */
     qmlRegisterAnonymousType<SoliumFolderEntry>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumNotification>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumNotificationRows>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumNotifications>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumFolderRows>(SOLIUM_NATIVE_URI, 1);
 }
 
@@ -760,6 +764,9 @@ void solium_qml_name_scope(QQmlContext *context, bool redacted)
     context->setContextProperty(QStringLiteral("Workspaces"), rows(SOLIUM_QML_ROWS_WORKSPACES));
     context->setContextProperty(QStringLiteral("Apps"), rows(SOLIUM_QML_ROWS_APPS));
     context->setContextProperty(QStringLiteral("Folder"), rows(SOLIUM_QML_ROWS_FOLDER));
+    // Notifications show on the lock as anywhere (Illia, 2026-10-01): the
+    // lock's scenes read the same one (#346).
+    context->setContextProperty(QStringLiteral("Notifications"), solium_notifications());
 }
 
 /* What `Solium.status` reads: the text `sol.status` set.

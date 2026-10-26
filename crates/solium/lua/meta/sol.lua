@@ -496,6 +496,8 @@
 ---| "minimize" # A window was minimized, by `sol.minimize` or its application: `(id)`. Told once, before anything else reacts, with the window already `minimized`: a present started here plays out before the window is put away, and a layout takes the window out. The keyboard leaves it afterwards, as it leaves a window whose close landed (`focus.after_close`).
 ---| "unminimize" # A minimized window is shown again, by `sol.unminimize`, its application, or a focus -- `sol.focus`, a click in the overview, an application asking to be brought forward, but never behind the lock: `(id)`. Told before the `focus` that showed it, with the window no longer `minimized`; a configuration presents it back from wherever it put it, and a layout takes it back.
 ---| "close" # The window is gone: `(id)`.
+---| "notification" # A notification arrived or was replaced, over the bus or from `sol.notify`: `(n)`, a `sol.Arrival`. A decision hook: the first listener that returns a table decides, `{ banner = boolean, keep = boolean }`, each left out taking the shipped rule (a banner unless do-not-disturb is on, where only a critical one gets one; kept unless the sender said it is transient). With none answering, the shipped rule decides.
+---| "notifications" # Something happened to a notification: `(event)`, a `sol.NotificationEvent`.
 ---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
@@ -732,6 +734,102 @@ function sol.workspaces(declared) end
 ---@param mode "on"|"off"
 ---@return nil
 function sol.monitor_power(which, mode) end
+
+---@class sol.NotificationTimeouts
+---@field low? number How long a low-urgency banner lasts when its sender leaves it to the server, in milliseconds; 0 for never. 5000 by default.
+---@field normal? number The same for a normal one. 7000 by default.
+---@field critical? number The same for a critical one. 0, never, by default: a critical banner waits to be dealt with.
+
+---@class sol.NotificationsOptions
+---@field serve? boolean Own `org.freedesktop.Notifications` on the session bus, so applications' notifications come to Solium. False by default. A nested run owns it only on the bus `SOLIUM_SESSION_BUS` names. Another program that has the name keeps it: Solium waits its turn, and `owner` names who has it.
+---@field timeouts? sol.NotificationTimeouts
+---@field history? { max?: integer } How many notifications are kept once their banner ends, oldest dropped first; 0 keeps none, and a banner that ends then closes the notification. 200 by default.
+
+---@class sol.Notification
+---@field id integer The id the sender was given.
+---@field revision integer 1, and one more each time the sender replaced it.
+---@field appName string The application, by its desktop entry's name when the sender named one, else as the sender named itself.
+---@field appIcon string A theme icon name, or empty.
+---@field desktopId string The sender's `desktop-entry` hint, or empty.
+---@field window integer The window of the sender's process, or of its parent up to four generations, or 0.
+---@field monitor string The monitor that window is on, or empty.
+---@field summary string
+---@field body string The body as plain text.
+---@field bodyRich string The body as markup safe for a `Text.StyledText`: bold, italic, underline and `http`, `https` and `mailto` links only.
+---@field image string `image://solium/notification/<id>/<revision>`, or empty.
+---@field icon string `image://solium/icon/<name>`, or empty.
+---@field urgency "low"|"normal"|"critical"
+---@field category string
+---@field actions { key: string, label: string }[] The sender's buttons, `default` left out (it is a click on the body).
+---@field hasDefault boolean Whether a click on the body does anything.
+---@field resident boolean It stays after an action is invoked.
+---@field transient boolean It is never kept once its banner ends.
+---@field received number When it came, in milliseconds since the epoch.
+---@field held boolean A pointer or a finger is on its banner, and its time is stopped.
+---@field state "banner"|"stored"
+
+---@class sol.Arrival
+---@field id integer
+---@field appName string
+---@field desktopId string
+---@field summary string
+---@field body string
+---@field urgency "low"|"normal"|"critical"
+---@field category string
+---@field actions { key: string, label: string }[] Every action, `default` included.
+---@field transient boolean
+---@field resident boolean
+---@field window integer
+---@field monitor string
+---@field dnd boolean Whether do-not-disturb is on.
+
+---@class sol.NotificationEvent
+---@field what "added"|"replaced"|"closed"|"invoked"|"dnd"|"owner"
+---@field origin "external"|"scene"|"script"|"service" Who did it: the sender over the bus, a scene's own call, Lua, or the service itself (a timeout, a full history).
+---@field id? integer The notification, when there is one.
+---@field reason? "expired"|"dismissed"|"closed"|"undefined" For `closed`.
+---@field key? string For `invoked`: the action, `default` for a click on the body.
+---@field value? boolean For `dnd`: whether it is on now.
+---@field serving? boolean For `owner`: whether Solium has the name now.
+---@field notification? sol.Notification The notification as it is now, for `added`, `replaced` and `invoked`.
+
+---@class sol.NotificationsState
+---@field available boolean Whether the server is running at all.
+---@field serving boolean Whether Solium has the name.
+---@field dnd boolean
+---@field owner? { name: string, pid?: integer, program: string } Who has the name, when Solium does not.
+---@field banners sol.Notification[] On screen now, newest first.
+---@field history sol.Notification[] Kept, newest first.
+
+---Notifications (#346): with a table, whether Solium serves them and how long
+---banners last and how much is kept; with none, what they are now. Their
+---actions go through `sol.act`: `notifications.invoke { id, key }`,
+---`notifications.dismiss { id }` or `{ all = true }`, `notifications.dnd {
+---value = true|false|"toggle" }`, `notifications.hold { id }` and
+---`notifications.release { id }`.
+---@overload fun(): sol.NotificationsState
+---@param options sol.NotificationsOptions
+---@return nil
+function sol.notifications(options) end
+
+---@class sol.NotifyAction
+---@field key string `default` for a click on the body.
+---@field label string
+---@field fn? fun() Run when the action is invoked.
+
+---@class sol.NotifyOptions
+---@field summary string
+---@field body? string Markup as a sender's would be: bold, italic, underline and links.
+---@field icon? string A theme icon name.
+---@field urgency? "low"|"normal"|"critical"
+---@field timeout? number Milliseconds, 0 for never; the timeouts' default for its urgency when left out.
+---@field actions? sol.NotifyAction[]
+
+---One of the shell's own notifications, with no bus behind it: decided by the
+---`notification` hooks and shown like any other.
+---@param options sol.NotifyOptions
+---@return nil
+function sol.notify(options) end
 
 ---Set the idle blank: `config.idle`, which the shipped `init.lua` hands over.
 ---@param options? sol.IdleOptions
@@ -1354,6 +1452,8 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "layout"|"monitors"|"restore"|"problems", handler: fun())
 ---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))
 ---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
+---@overload fun(event: "notification", handler: fun(n: sol.Arrival): { banner?: boolean, keep?: boolean }|nil)
+---@overload fun(event: "notifications", handler: fun(event: sol.NotificationEvent))
 ---@param event sol.Event
 ---@param handler function
 ---@return nil
@@ -1389,6 +1489,12 @@ sol._keeps = {}
 ---@private
 ---@type table<function, integer>
 sol._strikes = {}
+
+---Internal: the action functions of `sol.notify`'s own notifications, by the
+---token their command carries, until one runs (#346).
+---@type table<integer, table<string, function>>
+---@private
+sol._notify_actions = {}
 
 ---Internal: the notes `sol.bind` and `sol.unbind` were given, by combination.
 ---@private

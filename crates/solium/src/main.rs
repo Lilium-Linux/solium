@@ -63,6 +63,7 @@ mod screencopy;
 mod screensaver;
 mod script;
 mod scripted;
+mod services;
 mod session;
 mod shortcuts_inhibit;
 mod signals;

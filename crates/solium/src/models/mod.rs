@@ -26,6 +26,11 @@ pub(crate) struct Published {
     apps: Vec<diff::Row>,
     /// `Folder`'s rows (`models::folder::rows`, 04-ui.md §4.9).
     folder: Vec<diff::Row>,
+    /// `Notifications.banners` and `.history`, and its own values, as last
+    /// taken (#346).
+    notification_banners: Vec<diff::Row>,
+    notification_history: Vec<diff::Row>,
+    notifications_state: Option<String>,
     /// What `Solium.status`, `Workspaces.arrangement` and `Solium.dirs.desktop`
     /// last took.
     /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
@@ -85,6 +90,41 @@ impl crate::state::Solium {
             apps,
             crate::qml::hosted::apply_rows,
         );
+        // Notifications (#346): the service's rows and its own values, read
+        // by session scenes and by the lock's alike (notifications show on
+        // the lock: Illia's 2026-10-01 answer).
+        // `models::tests::publish_models_carries_notifications_to_their_rows`.
+        let view = self.services.notifications.view();
+        let rows = |rows: &[std::collections::BTreeMap<&'static str, crate::json::Json>]| {
+            rows.iter()
+                .map(|values| diff::Row {
+                    key: values
+                        .get("id")
+                        .and_then(crate::json::Json::as_u64)
+                        .unwrap_or_default()
+                        .to_string(),
+                    values: values.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        publish(
+            Model::NotificationBanners,
+            &mut self.published.notification_banners,
+            rows(&view.banners),
+            crate::qml::hosted::apply_rows,
+        );
+        publish(
+            Model::NotificationHistory,
+            &mut self.published.notification_history,
+            rows(&view.history),
+            crate::qml::hosted::apply_rows,
+        );
+        let state = notifications_state(&view);
+        if self.published.notifications_state.as_deref() != Some(state.as_str())
+            && crate::qml::hosted::set_notifications_state(&state)
+        {
+            self.published.notifications_state = Some(state);
+        }
         // `Folder`: the desktop directory, resolved once (again on a
         // reload) and rescanned wholesale whenever `folder_scan_pending`
         // asks for one or the inotify watch says something changed.
@@ -210,6 +250,30 @@ impl crate::state::Solium {
 /// before it has started, leaves `last` as it was, so the next frame sends the
 /// difference from what Qt really has:
 /// `tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+/// `Notifications`' own values, as the JSON object the host reads.
+fn notifications_state(view: &crate::services::notifications::View) -> String {
+    use crate::json::Json;
+    let owner = view.owner.as_ref().map_or(Json::Null, |owner| {
+        Json::Object(std::collections::BTreeMap::from([
+            ("name".to_owned(), Json::Text(owner.name.clone())),
+            (
+                "pid".to_owned(),
+                owner
+                    .pid
+                    .map_or(Json::Null, |pid| Json::Number(f64::from(pid))),
+            ),
+            ("program".to_owned(), Json::Text(owner.program.clone())),
+        ]))
+    });
+    Json::Object(std::collections::BTreeMap::from([
+        ("available".to_owned(), Json::Bool(view.available)),
+        ("serving".to_owned(), Json::Bool(view.serving)),
+        ("dnd".to_owned(), Json::Bool(view.dnd)),
+        ("owner".to_owned(), owner),
+    ]))
+    .render()
+}
+
 fn publish(
     model: Model,
     last: &mut Vec<diff::Row>,

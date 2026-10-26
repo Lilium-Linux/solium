@@ -110,6 +110,20 @@ mod ffi {
             action: *mut *const c_char,
             data_json: *mut *const c_char,
         ) -> c_int;
+        pub(super) fn solium_qml_set_notifications_state(json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_notification_image(
+            id: u32,
+            revision: u32,
+            width: c_int,
+            height: c_int,
+            rgba: *const u8,
+            len: usize,
+        ) -> c_int;
+        pub(super) fn solium_qml_drop_notification_image(id: u32);
+        pub(super) fn solium_qml_take_service_call(
+            action: *mut *const c_char,
+            data_json: *mut *const c_char,
+        ) -> c_int;
     }
 }
 
@@ -122,6 +136,10 @@ pub(crate) enum Model {
     Workspaces = 2,
     Apps = 3,
     Folder = 4,
+    /// `Notifications.banners` (#346).
+    NotificationBanners = 5,
+    /// `Notifications.history` (#346).
+    NotificationHistory = 6,
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
@@ -152,6 +170,81 @@ pub(crate) fn set_status(text: &str) -> bool {
     };
     // SAFETY: `text` outlives the call; the host copies it.
     unsafe { ffi::solium_qml_set_status(text.as_ptr()) != 0 }
+}
+
+/// `Notifications`' own values (#346): `available`, `serving`, `dnd` and
+/// `owner`, as one JSON object. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_notifications_state(json: &str) -> bool {
+    touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_set_notifications_state(json.as_ptr()) != 0 }
+}
+
+/// A notification's image, for `image://solium/notification/<id>/<revision>`
+/// (#346): straight RGBA, already made safe and capped by
+/// `services::notifications::content`. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_notification_image(
+    id: u32,
+    revision: u32,
+    image: &crate::services::notifications::content::Image,
+) -> bool {
+    let (Ok(width), Ok(height)) = (c_int::try_from(image.width), c_int::try_from(image.height))
+    else {
+        return false;
+    };
+    if image.rgba.len() != image.width as usize * image.height as usize * 4 {
+        return false;
+    }
+    touched();
+    // SAFETY: the bytes outlive the call, and the host copies them.
+    unsafe {
+        ffi::solium_qml_set_notification_image(
+            id,
+            revision,
+            width,
+            height,
+            image.rgba.as_ptr(),
+            image.rgba.len(),
+        ) != 0
+    }
+}
+
+/// A notification's image let go.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn drop_notification_image(id: u32) {
+    // SAFETY: no pointer, nothing to outlive.
+    unsafe { ffi::solium_qml_drop_notification_image(id) }
+}
+
+/// One call a scene made on a service's object (`n.dismiss()`,
+/// `Notifications.setDnd(true)`), oldest first: its action and data (#346).
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn take_service_call() -> Option<(String, Json)> {
+    let mut action: *const c_char = std::ptr::null();
+    let mut data: *const c_char = std::ptr::null();
+    // SAFETY: the host sets both only when it returns 1.
+    let taken = unsafe { ffi::solium_qml_take_service_call(&raw mut action, &raw mut data) };
+    if taken == 0 || action.is_null() || data.is_null() {
+        return None;
+    }
+    // SAFETY: NUL-terminated strings the host keeps valid until its next
+    // call, copied here before any.
+    let (action, data) = unsafe {
+        (
+            std::ffi::CStr::from_ptr(action)
+                .to_string_lossy()
+                .into_owned(),
+            std::ffi::CStr::from_ptr(data)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    Some((action, Json::parse(&data).unwrap_or(Json::Null)))
 }
 
 /// `Apps.ready`: false until the first scan (`models::mod`'s

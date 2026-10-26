@@ -18,6 +18,7 @@ mod commit;
 const MOC_HEADERS: &[&str] = &[
     "qml/attached.h",
     "qml/rows.h",
+    "qml/notifications.h",
     "qml/keyboard.h",
     "qml/pointer.h",
     "qml/lock.h",
@@ -37,6 +38,8 @@ fn main() {
     println!("cargo:rerun-if-changed=qml/attached.h");
     println!("cargo:rerun-if-changed=qml/rows.cpp");
     println!("cargo:rerun-if-changed=qml/rows.h");
+    println!("cargo:rerun-if-changed=qml/notifications.cpp");
+    println!("cargo:rerun-if-changed=qml/notifications.h");
     println!("cargo:rerun-if-changed=qml/keyboard.cpp");
     println!("cargo:rerun-if-changed=qml/keyboard.h");
     println!("cargo:rerun-if-changed=qml/pointer.cpp");
@@ -75,6 +78,7 @@ fn main() {
         .file("qml/host.cpp")
         .file("qml/attached.cpp")
         .file("qml/rows.cpp")
+        .file("qml/notifications.cpp")
         .file("qml/keyboard.cpp")
         .file("qml/pointer.cpp")
         .file("qml/icon.cpp")

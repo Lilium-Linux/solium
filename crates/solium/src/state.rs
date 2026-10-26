@@ -258,6 +258,8 @@ pub(crate) struct Solium {
     /// Who is waiting to be told nobody is here, and who is stopping us
     /// deciding that.
     pub(crate) idle: crate::idle::Idle,
+    /// The services hub: notifications today (03 §3.1).
+    pub(crate) services: crate::services::Services,
     /// Registers `zwlr_output_power_manager_v1`. See `power.rs`.
     #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
     pub(crate) power_state: crate::power::PowerState,
@@ -1384,6 +1386,7 @@ impl Solium {
             idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
             idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
             idle: crate::idle::Idle::default(),
+            services: crate::services::Services::new(),
             power_state: crate::power::PowerState::new::<Self>(&display_handle),
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),

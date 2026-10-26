@@ -486,6 +486,7 @@ impl Solium {
             monitors,
             apps,
             locked: self.lock.is_some(),
+            notifications: self.services.notifications.view(),
             keyboard: self.keyboard.clone(),
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),

@@ -272,6 +272,101 @@ Item {
                 }
             }
 
+            // What arrived while away (#346): the newest notifications, under
+            // the clock and lifted away with it. Read only: nothing behind
+            // the lock is opened from here. Banners first (what arrived while
+            // locked stays a banner, its time stopped), then the history,
+            // three at most. Plain text only: a client's markup is never
+            // read here.
+            Column {
+                id: arrived
+                readonly property int shown: 3
+                readonly property int bannerCount: Math.min(Notifications.banners.count, shown)
+                readonly property int total: Notifications.banners.count + Notifications.history.count
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: clock.y + clock.height + 28
+                width: Math.min(420, root.width - 48)
+                spacing: 8
+                opacity: 1 - root.lift
+                visible: opacity > 0.01
+
+                component Card: Rectangle {
+                    id: card
+                    required property var model
+                    width: arrived.width
+                    height: visible ? 64 : 0
+                    radius: 16
+                    color: Theme.surface
+                    opacity: 0.92
+
+                    Image {
+                        id: picture
+                        x: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 36
+                        height: 36
+                        source: card.model.image || card.model.icon
+                        sourceSize.width: 72
+                        sourceSize.height: 72
+                        fillMode: Image.PreserveAspectFit
+                    }
+
+                    Column {
+                        anchors.left: picture.right
+                        anchors.leftMargin: 12
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 2
+
+                        Text {
+                            width: parent.width
+                            text: card.model.appName + "  ·  " + card.model.summary
+                            textFormat: Text.PlainText
+                            color: Theme.text
+                            font.pixelSize: 14
+                            font.weight: Font.DemiBold
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            width: parent.width
+                            text: card.model.body
+                            textFormat: Text.PlainText
+                            color: Theme.text
+                            opacity: 0.75
+                            font.pixelSize: 13
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
+                        }
+                    }
+                }
+
+                Repeater {
+                    model: Notifications.banners
+                    delegate: Card {
+                        required property int index
+                        visible: index < arrived.shown
+                    }
+                }
+                Repeater {
+                    model: Notifications.history
+                    delegate: Card {
+                        required property int index
+                        visible: index < arrived.shown - arrived.bannerCount
+                    }
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    visible: arrived.total > arrived.shown
+                    text: "+" + (arrived.total - arrived.shown)
+                    textFormat: Text.PlainText
+                    color: Theme.text
+                    opacity: 0.7
+                    font.pixelSize: 13
+                }
+            }
+
             // The user and the password, on the prompt's monitor only.
             Column {
                 id: who

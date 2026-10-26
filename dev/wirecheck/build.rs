@@ -13,7 +13,14 @@ use std::path::{Path, PathBuf};
 
 /// The headers moc runs on, in crates/solium/qml: the same list as
 /// `MOC_HEADERS` in crates/solium/build.rs.
-const MOC_HEADERS: &[&str] = &["attached.h", "rows.h", "keyboard.h", "pointer.h", "lock.h"];
+const MOC_HEADERS: &[&str] = &[
+    "attached.h",
+    "rows.h",
+    "notifications.h",
+    "keyboard.h",
+    "pointer.h",
+    "lock.h",
+];
 
 /// The repository this harness belongs to: two levels up from `dev/wirecheck`.
 ///
@@ -43,6 +50,14 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", qml.join("rows.cpp").display());
     println!("cargo:rerun-if-changed={}", qml.join("rows.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        qml.join("notifications.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        qml.join("notifications.h").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         qml.join("keyboard.cpp").display()
@@ -85,6 +100,7 @@ fn main() {
         // output below: the gate's wirecheck step links only with all of them.
         .file(qml.join("attached.cpp"))
         .file(qml.join("rows.cpp"))
+        .file(qml.join("notifications.cpp"))
         .file(qml.join("keyboard.cpp"))
         .file(qml.join("pointer.cpp"))
         .file(qml.join("icon.cpp"))

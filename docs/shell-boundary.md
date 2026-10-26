@@ -643,6 +643,22 @@ the same key read from `user-dirs.dirs`, empty when neither names one or it
 names `$HOME` itself -- a user whose whole home is "the desktop" gets no
 icons drawn over every file in it (`crate::folder::desktop_dir`).
 
+**Notifications, live** (#346). `Notifications` is what Solium's
+notification server holds: `banners` and `history`, two row models newest
+first, and `dnd`, `serving`, `available` and `owner`. A row has `id`,
+`revision`, `appName`, `appIcon`, `desktopId`, `window` and `monitor` (the
+sender's window, joined by its process), `summary`, `body`, `bodyRich`
+(markup safe for `Text.StyledText`), `image`
+(`image://solium/notification/<id>/<revision>`, decoded and capped by Solium,
+never by Qt), `icon` (`image://solium/icon/<name>`), `urgency`, `category`,
+`actions`, `hasDefault`, `resident`, `transient`, `received`, `held` and
+`state`. Its calls (`n.hold()`, `n.release()`, `n.dismiss()`,
+`n.invoke(key)`, and `Notifications.dismissAll()` and `setDnd(on)`) go
+straight to the server, never through a `surface` listener, and Lua hears each
+as a `notifications` event with `origin = "scene"`. Unlike the other models,
+the lock's scenes and the pointer's read it in full: notifications show on the
+lock. [ricing.md](ricing.md#notifications) has a banner, and the Lua side.
+
 A scene asks the compositor to do something about one entry the same way it
 asks anything else, `Solium.send(action, data)`, answered by `lua/actions.lua`
 forwarding to `sol.act` (the `folder` service alongside `windows`,

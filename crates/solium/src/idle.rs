@@ -235,6 +235,12 @@ impl Idle {
             .permit(place, bus, self.settings.dbus_inhibit);
     }
 
+    /// Whether the idle blank has the screens off now: nobody is there to
+    /// read a banner, so notifications' banners stop counting down.
+    pub(crate) fn blanked(&self) -> bool {
+        self.blanked
+    }
+
     /// Whether a client holds the screens on over the session bus.
     pub(crate) fn dbus_inhibiting(&self) -> bool {
         self.screensaver.holding()

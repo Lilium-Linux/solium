@@ -40,6 +40,10 @@ sol.monitors(config.monitors)
 -- When the screens go dark on their own. An absent table keeps the default,
 -- for the reason `sol.resize` gives.
 sol.idle(config.idle)
+-- Applications' notifications: Solium as the notification server, and how
+-- long banners last. A shell draws them from `Notifications`. See
+-- `config.lua`.
+sol.notifications(config.notifications)
 -- libinput device settings: tap-to-click, scrolling, acceleration and the
 -- rest, by device type and by device, applied now and again on every
 -- reload. See `config.lua`.

@@ -104,6 +104,9 @@ libc = "0.2"
 # on the compositor's own clock, the same shape as every other descriptor
 # `qml::wake` already polls.
 inotify = { version = "0.11", default-features = false }
+# Notification images from an `image-path` (#346): decoded in Rust, with
+# limits, so Qt's image plugins never see a file a client named.
+png = "0.18"
 
 [build-dependencies]
 # Qt Quick is hosted in-process, so a small C++ shim is compiled in. See
