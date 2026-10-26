@@ -162,6 +162,7 @@ struct Screen {
     name: String,
     width: i32,
     height: i32,
+    transform: u32,
     /// From `wl_output.scale`. Device pixels per logical one, as an integer —
     /// the protocol has no fractional form, and a compositor rounds up.
     scale: i32,
@@ -194,6 +195,26 @@ impl Probe {
 #[cfg(test)]
 mod tests {
     use super::layouts_in_keymap_text;
+
+    #[test]
+    fn fractional_fixture_bar_uses_upright_output_width() {
+        for (transform, expected) in [
+            (0, 1067),
+            (1, 600),
+            (2, 1067),
+            (3, 600),
+            (4, 1067),
+            (5, 600),
+            (6, 1067),
+            (7, 600),
+        ] {
+            assert_eq!(
+                super::fixture_logical_width(1600, 900, transform, 1.5),
+                expected,
+                "transform {transform}"
+            );
+        }
+    }
 
     const TWO: &str = "\
 xkb_keymap {
@@ -944,6 +965,12 @@ fn capture_output(
     })
 }
 
+/// Upright logical width of a bar fixture at a fractional output scale.
+fn fixture_logical_width(width: i32, height: i32, transform: u32, scale: f64) -> i32 {
+    let upright_width = if transform % 2 == 1 { height } else { width };
+    (f64::from(upright_width) / scale).ceil() as i32
+}
+
 /// The first output's width in device pixels.
 fn screen_pixels(probe: &Probe) -> i32 {
     probe.outputs.first().map_or(0, |screen| screen.width)
@@ -1016,7 +1043,9 @@ fn anchor_a_bar(
                 .filter(|scale| scale.is_finite() && *scale > 0.0)
                 .map_or_else(
                     || screen.logical().0,
-                    |scale| (f64::from(screen.width) / scale).ceil() as i32,
+                    |scale| {
+                        fixture_logical_width(screen.width, screen.height, screen.transform, scale)
+                    },
                 );
             (screen.output.clone(), screen.name.clone(), width)
         })
@@ -1814,6 +1843,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                     name: String::new(),
                     width: 0,
                     height: 0,
+                    transform: 0,
                     scale: 1,
                 });
             }
@@ -2183,6 +2213,7 @@ impl Dispatch<WlOutput, ()> for Probe {
         };
         match event {
             wl_output::Event::Name { name } => screen.name = name,
+            wl_output::Event::Geometry { transform, .. } => screen.transform = transform.into(),
             // The *current* mode, not every mode the monitor offers -- an
             // output sends one of these per mode it supports.
             wl_output::Event::Mode {

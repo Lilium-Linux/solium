@@ -665,7 +665,9 @@ directory. `SOLIUM_COPY_CASES="single-1x mixed"` selects cases;
 `SOLIUM_COPY_HOLD=61` keeps each compositor alive for the survival check.
 The standalone crop client takes `WL_PROBE_CROP_DIR` for its image directory
 and `WL_PROBE_CROP_SCALE` for a fractional fixture scale (`wl_output.scale`
-only reports integers). Run the multiprocess check more than once and inspect
+only reports integers). Fractional bar fixtures use the transformed output
+width. Expected far-edge crops stop at the full capture's pixel bounds;
+physical-mode clipping and recording orientation are covered by #353. Run the multiprocess check more than once and inspect
 the saved images.
 
 `wl-probe` is a Wayland client, and exists because a compositor cannot test its

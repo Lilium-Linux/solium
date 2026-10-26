@@ -90,8 +90,8 @@ pub(super) fn check(
             let (x, y, w, h) = region;
             let left = (f64::from(x) * scale).round() as u32;
             let top = (f64::from(y) * scale).round() as u32;
-            let right = (f64::from(x + w) * scale).round() as u32;
-            let bottom = (f64::from(y + h) * scale).round() as u32;
+            let right = ((f64::from(x + w) * scale).round() as u32).min(full.width);
+            let bottom = ((f64::from(y + h) * scale).round() as u32).min(full.height);
             if (crop.width, crop.height) != (right - left, bottom - top) {
                 return Err(format!(
                     "{name}/{label}: {}x{}, expected {}x{}",
