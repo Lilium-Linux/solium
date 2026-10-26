@@ -441,6 +441,7 @@ that should not be.
 | `dev/app-check.sh <program>` | a client runs, draws, and provokes no protocol error |
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
+| `dev/screencopy-check.sh` | cropped screenshots match full-output pixels, with hosted QML and layer-shell content at 1x, 2x, fractional scale and on a second monitor |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, clicks follow the rect a window is drawn at without following the `z` it is drawn above, a genie on a second monitor lands on its target, and a tilted window's menu is drawn whole and in front of it |
 | `dev/fence-check.sh` | skipping a capture's CPU fence wait (`SOLIUM_FENCE_WAIT=off`) changes no pixel |
@@ -647,6 +648,27 @@ written for failed about one time in three, so a single green run proves
 nothing — which is exactly how it nearly shipped.
 
 ### wl-probe
+
+`dev/screencopy-check.sh` runs a static hosted QML scene and a layer-shell bar
+in disposable nested sessions. Its `WL_PROBE_CROP=1` client captures the full
+output, then nonzero regions containing the bar, QML and the far output edge,
+and compares every RGB pixel. Literal scene colours also have to match, so two
+blank captures cannot pass. It checks 1x, 2x, mixed-scale monitors and 1.5x;
+the second monitor has different content and a nonzero global origin. This
+regresses a region capture losing its output identity and omitting both hosted
+scenes and layer-shell content (#350).
+
+Build `solium` and `wl-probe` first. Run with an explicit host
+`WAYLAND_DISPLAY`; clients use only the child socket reported by that run.
+`SOLIUM_CHECK_DIR` retains the logs and full/cropped PPM images in a chosen
+directory. `SOLIUM_COPY_CASES="single-1x mixed"` selects cases;
+`SOLIUM_COPY_HOLD=61` keeps each compositor alive for the survival check.
+The standalone crop client takes `WL_PROBE_CROP_DIR` for its image directory
+and `WL_PROBE_CROP_SCALE` for a fractional fixture scale (`wl_output.scale`
+only reports integers). Fractional bar fixtures use the transformed output
+width. Expected far-edge crops stop at the full capture's pixel bounds;
+physical-mode clipping and recording orientation are covered by #353. Run the multiprocess check more than once and inspect
+the saved images.
 
 `wl-probe` is a Wayland client, and exists because a compositor cannot test its
 own protocol support from the inside. "The global is advertised" is a different

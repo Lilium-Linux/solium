@@ -54,6 +54,21 @@ const FORMAT: wl_shm::Format = wl_shm::Format::Xrgb8888;
 /// Bytes per pixel in [`FORMAT`].
 const BYTES: i32 = 4;
 
+/// An output-local logical rectangle in the capture framebuffer's pixels.
+/// Round edges together: independently rounded position and size can run one
+/// pixel beyond the output at a fractional scale.
+#[expect(clippy::cast_possible_truncation, reason = "a region of one monitor")]
+fn physical_rect(
+    region: Rectangle<i32, smithay::utils::Logical>,
+    scale: f64,
+) -> Rectangle<i32, BufferCoords> {
+    let left = (f64::from(region.loc.x) * scale).round() as i32;
+    let top = (f64::from(region.loc.y) * scale).round() as i32;
+    let right = (f64::from(region.loc.x + region.size.w) * scale).round() as i32;
+    let bottom = (f64::from(region.loc.y + region.size.h) * scale).round() as i32;
+    Rectangle::new((left, top).into(), (right - left, bottom - top).into())
+}
+
 /// The global, held for the session.
 #[derive(Debug)]
 pub(crate) struct ScreencopyState {
@@ -204,12 +219,12 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Solium {
         // The buffer is in *device* pixels: a capture of a 2x monitor is worth
         // having at the resolution it actually has.
         let scale = output.current_scale().fractional_scale();
-        #[expect(clippy::cast_possible_truncation, reason = "a region of one monitor")]
-        let size: smithay::utils::Size<i32, BufferCoords> = (
-            ((f64::from(region.size.w) * scale).round() as i32).max(1),
-            ((f64::from(region.size.h) * scale).round() as i32).max(1),
-        )
-            .into();
+        let size = physical_rect(region, scale).size;
+        // A subpixel region can round to no framebuffer pixels.
+        if size.w <= 0 || size.h <= 0 {
+            frame.failed();
+            return;
+        }
 
         if let Some(data) = frame.data::<FrameData>()
             && let Ok(mut held) = data.inner.lock()
@@ -323,9 +338,9 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
 /// Fill every buffer a client has handed over, and answer for it.
 ///
 /// Called from the backend's render loop, which is the only place a renderer
-/// exists. One capture is one extra render pass over one monitor's region, so a
-/// recorder asking every frame costs about one extra frame — which is what
-/// recording is.
+/// exists. One capture is one extra render pass over one whole monitor, a region
+/// included (only the region is read back), so a recorder asking every frame
+/// costs about one extra frame — which is what recording is.
 pub(crate) fn settle(
     state: &mut Solium,
     renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
@@ -412,17 +427,22 @@ fn fill(
         .as_ref()
         .context("a capture with no buffer")?;
 
-    // Where the region is in the global space, which is what `elements` draws
-    // against. The protocol's coordinates are relative to the output.
-    let origin = state
+    // The draw walk resolves hosted scenes, layers and effect results through
+    // the complete output geometry. A crop is a readback viewport, never a
+    // different output: passing it to `elements` would lose those contents.
+    let screen = state
         .space
         .output_geometry(&capture.output)
-        .context("the output is no longer mapped")?
-        .loc;
-    let screen = smithay::utils::Rectangle::new(origin + capture.region.loc, capture.region.size);
+        .context("the output is no longer mapped")?;
     let scale = capture.output.current_scale().fractional_scale();
+    let buffer_size = physical_rect(Rectangle::from_size(screen.size), scale).size;
+    let readback = physical_rect(capture.region, scale);
+    anyhow::ensure!(
+        readback.size == capture.size && Rectangle::from_size(buffer_size).contains_rect(readback),
+        "the output changed after the capture buffer was announced"
+    );
 
-    let size: Size<i32, Physical> = (capture.size.w, capture.size.h).into();
+    let size: Size<i32, Physical> = (buffer_size.w, buffer_size.h).into();
     let elements = crate::render::elements(
         state,
         renderer,
@@ -438,7 +458,6 @@ fn fill(
     // Its own texture, for the same reason the deform path uses one: this
     // binds a framebuffer, and doing that underneath the output's own bind
     // sends the whole frame into the texture instead of onto the screen.
-    let buffer_size: smithay::utils::Size<i32, BufferCoords> = (size.w, size.h).into();
     let mut texture: smithay::backend::renderer::gles::GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, buffer_size)
         .context("no buffer to capture into")?;
@@ -475,11 +494,7 @@ fn fill(
                 .map_err(|_| anyhow::anyhow!("waiting for the capture failed"))?;
         }
         let mapping = renderer
-            .copy_framebuffer(
-                &framebuffer,
-                smithay::utils::Rectangle::from_size(buffer_size),
-                Fourcc::Xrgb8888,
-            )
+            .copy_framebuffer(&framebuffer, readback, Fourcc::Xrgb8888)
             .map_err(|err| anyhow::anyhow!("copying the capture back: {err}"))?;
         renderer
             .map_texture(&mapping)
@@ -488,8 +503,8 @@ fn fill(
     };
     crate::warp::release_framebuffer(renderer);
 
-    let stride = usize::try_from(size.w * BYTES).unwrap_or_default();
-    let rows = usize::try_from(size.h).unwrap_or_default();
+    let stride = usize::try_from(capture.size.w * BYTES).unwrap_or_default();
+    let rows = usize::try_from(capture.size.h).unwrap_or_default();
     anyhow::ensure!(
         pixels.len() >= stride * rows,
         "the capture is {} bytes, expected {}",
@@ -543,4 +558,42 @@ fn fill(
     .context("filling the client's buffer")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_double_scale_crop_keeps_its_output_local_offset() {
+        let region = Rectangle::new((20, 30).into(), (100, 60).into());
+        assert_eq!(
+            physical_rect(region, 2.0),
+            Rectangle::new((40, 60).into(), (200, 120).into())
+        );
+    }
+
+    #[test]
+    fn a_fractional_crop_reaching_the_far_edges_stays_inside_the_output() {
+        let region = Rectangle::new((1, 1).into(), (9, 9).into());
+        assert_eq!(
+            physical_rect(region, 1.5),
+            Rectangle::new((2, 2).into(), (13, 13).into())
+        );
+    }
+
+    #[test]
+    fn a_one_pixel_crop_at_a_fractional_edge_does_not_grow_past_it() {
+        let region = Rectangle::new((1, 1).into(), (1, 1).into());
+        assert_eq!(
+            physical_rect(region, 1.5),
+            Rectangle::new((2, 2).into(), (1, 1).into())
+        );
+    }
+
+    #[test]
+    fn a_subpixel_crop_can_cover_no_framebuffer_pixels() {
+        let region = Rectangle::new((1, 1).into(), (1, 1).into());
+        assert_eq!(physical_rect(region, 0.5).size, (0, 0).into());
+    }
 }
