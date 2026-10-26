@@ -375,21 +375,28 @@ fn set_lock(state: &mut Solium, lock: Lock, on: bool) -> bool {
     locked(state) == on
 }
 
-/// The first key that types `keysym` with no modifier, in any layout of the
-/// live keymap. For a lock, and for `SOLIUM_KEY_AT`, which presses keys by
-/// name. `tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`.
+/// The first key that types `keysym` with no modifier: in the active layout
+/// when it has one, else in any layout of the live keymap. A `.` with Russian
+/// active is the key Russian puts it on, not English's, which types `ю` there;
+/// a shortcut's `t` is the key that has it on English, as a person presses it.
+/// For a lock, for `SOLIUM_KEY_AT`, which presses keys by name, and for
+/// `sol.press`. `tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`,
+/// `press::a_key_is_found_in_the_active_layout_first`.
 pub(crate) fn keycode_of(state: &mut Solium, keysym: Keysym) -> Option<Keycode> {
     let keyboard = state.seat.get_keyboard()?;
     keyboard.with_xkb_state(state, |context| {
         let xkb = context.xkb().lock().ok()?;
-        let layouts: Vec<Layout> = xkb.layouts().collect();
+        let types = |code: Keycode, layout: Layout| {
+            xkb.raw_syms_for_key_in_layout(code, layout)
+                .contains(&keysym)
+        };
         // xkb keycodes are evdev's plus eight, and evdev's stop at KEY_MAX,
         // 0x2ff.
-        (8..=0x2ff + 8).map(Keycode::new).find(|&code| {
-            layouts.iter().any(|&layout| {
-                xkb.raw_syms_for_key_in_layout(code, layout)
-                    .contains(&keysym)
-            })
+        let codes = || (8..=0x2ff + 8).map(Keycode::new);
+        let active = xkb.active_layout();
+        codes().find(|&code| types(code, active)).or_else(|| {
+            let layouts: Vec<Layout> = xkb.layouts().collect();
+            codes().find(|&code| layouts.iter().any(|&layout| types(code, layout)))
         })
     })
 }

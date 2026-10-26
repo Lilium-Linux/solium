@@ -66,13 +66,7 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
                     ("appId", Json::Text(info.app_id.clone())),
                     (
                         "pid",
-                        client
-                            .and_then(|window| {
-                                pid_of(
-                                    window.x11_surface().map(crate::xwayland::client_pid),
-                                    || state.client_pid(window),
-                                )
-                            })
+                        info.pid
                             .map_or(Json::Number(-1.0), |pid| Json::Number(f64::from(pid))),
                     ),
                     (
@@ -132,12 +126,16 @@ fn window_states(window: &Window) -> (bool, bool) {
     })
 }
 
-/// Which process a window belongs to. An X11 window's is the one Xwayland
-/// named for its own X connection (`crate::xwayland::client_pid`), and never
-/// its Wayland connection's, which is Xwayland itself for every X11 window;
-/// any other window's is its connection's.
+/// Which process a window belongs to, from what each side can tell. An X11
+/// window's is `x11`, what its own X connection and its `_NET_WM_PID` say
+/// (`Solium::window_pid`), and never its Wayland connection's, which is
+/// Xwayland itself for every X11 window; any other window's is its
+/// connection's.
 /// `tests::an_x11_window_is_never_given_the_pid_of_its_connection`.
-fn pid_of(x11: Option<Option<u32>>, connection: impl FnOnce() -> Option<u32>) -> Option<u32> {
+pub(crate) fn pid_of(
+    x11: Option<Option<u32>>,
+    connection: impl FnOnce() -> Option<u32>,
+) -> Option<u32> {
     match x11 {
         Some(named) => named,
         None => connection(),

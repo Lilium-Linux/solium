@@ -443,6 +443,7 @@ impl Solium {
                         // with a commit, and the next snapshot has it. A
                         // reserved slot has no client to have said anything.
                         content_type: pane.client().map_or("none", content_type_of),
+                        pid: pane.client().and_then(|window| self.window_pid(window)),
                     })
                 })
                 .collect();

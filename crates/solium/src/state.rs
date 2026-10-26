@@ -109,6 +109,7 @@ mod minimize;
 mod monitors;
 mod open;
 mod placement;
+mod press;
 mod resize_bridge;
 mod snapshot;
 mod workspaces;

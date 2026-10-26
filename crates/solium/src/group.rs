@@ -1110,6 +1110,7 @@ mod desk {
             class: None,
             instance: None,
             content_type: "none",
+            pid: None,
         }
     }
 

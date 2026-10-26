@@ -3145,6 +3145,12 @@ mod real_client {
         /// [`Self::seat_pointer`]: a button a window was never told went
         /// down must not be told it came up either.
         buttons: Vec<(u32, bool)>,
+        /// The surface the pointer is on, as this client's own `enter` and
+        /// `leave` say, and the one each of [`Self::buttons`] arrived on:
+        /// `wl_pointer.button` names no surface, so which window was
+        /// clicked is only this end's to say.
+        pointer_on: Option<u32>,
+        clicked_on: Vec<Option<u32>>,
         /// Raw wl_touch events, preserving slot ids, coordinates and frames.
         touches: Vec<wl_touch::Event>,
     }
@@ -3187,16 +3193,24 @@ mod real_client {
             _conn: &Connection,
             _qh: &QueueHandle<Self>,
         ) {
-            if let wl_pointer::Event::Button {
-                button,
-                state: button_state,
-                ..
-            } = event
-            {
-                state.buttons.push((
+            match event {
+                wl_pointer::Event::Enter { surface, .. } => {
+                    state.pointer_on = Some(wayland_client::Proxy::id(&surface).protocol_id());
+                }
+                wl_pointer::Event::Leave { .. } => state.pointer_on = None,
+                wl_pointer::Event::Button {
                     button,
-                    button_state == wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed),
-                ));
+                    state: button_state,
+                    ..
+                } => {
+                    state.buttons.push((
+                        button,
+                        button_state
+                            == wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed),
+                    ));
+                    state.clicked_on.push(state.pointer_on);
+                }
+                _ => {}
             }
         }
     }
@@ -22601,6 +22615,52 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 (before, before, true),
                 "(after `sol.warp`, after `sol.focus` with a warp, nothing flying): the pointer \
                  moved behind the lock"
+            );
+        }
+
+        /// **Nothing `sol.press` asks reaches a window behind the lock**: a
+        /// button and a key for the application's window, asked while the
+        /// session is locked, reach its client as neither, and the keyboard
+        /// stays on the lock surface.
+        #[test]
+        fn nothing_sol_press_asks_reaches_a_window_behind_the_lock() {
+            let mut session = Session::new();
+            let (window, _toplevel, _surface, _xdg) =
+                session.app.open(&mut session.display, &mut session.state);
+            let id = session
+                .state
+                .panes
+                .id_of(&window)
+                .expect("a client in the space has a pane")
+                .get();
+            let _pointer = session.app.client.seat_pointer(&session.app.qh);
+            session.app.pump(&mut session.display, &mut session.state);
+            session.lock();
+            session.app.client.buttons.clear();
+            session.app.client.keys.clear();
+            let press = |press| Command::Press {
+                id,
+                press,
+                source: crate::script::FocusSource::Script,
+            };
+            session.state.apply(Outcome {
+                commands: vec![
+                    press(crate::script::Press::Button(0x113)),
+                    press(crate::script::Press::Keys(vec![
+                        smithay::input::keyboard::Keysym::Escape,
+                    ])),
+                ],
+                ..Outcome::default()
+            });
+            session.app.pump(&mut session.display, &mut session.state);
+            assert_eq!(
+                (
+                    session.app.client.buttons.clone(),
+                    session.app.client.keys.clone(),
+                    session.keyboard_on_lock(),
+                ),
+                (Vec::new(), Vec::new(), true),
+                "(the buttons the application heard, its keys, the keyboard on the lock)"
             );
         }
 
@@ -43145,6 +43205,289 @@ sol.bind("super+y", function() sol.unminimize(last) end)
                 "true,false,true",
                 "(the first from the second, the first again, the second from the first)"
             );
+        }
+
+        /// `sol.press`: a button or a key delivered to a window by a script,
+        /// as a device would deliver it. See `state/press.rs`.
+        mod press {
+            use super::*;
+
+            /// `BTN_SIDE`, a mouse's back button, as evdev names it.
+            const SIDE: u32 = 0x113;
+            /// Escape, the left Alt and the left arrow, as evdev names them.
+            const ESCAPE: u32 = 1;
+            const ALT: u32 = 56;
+            const ARROW: u32 = 105;
+
+            /// A surface action runs its name as Lua, inside a dispatch as
+            /// a scene's action is, and says how it went in `said`.
+            const RUNS: &str = "said = \"\"\n\
+                 sol.on(\"surface\", function(_, action)\n\
+                     local ok, err = pcall(load(action))\n\
+                     said = ok and \"ok\" or tostring(err)\n\
+                 end)\n";
+
+            /// Two floating windows of the one client, `first` at 100,100
+            /// and `second` at 1000,100, with the client holding a pointer,
+            /// and `first` focused by a click on it.
+            fn two_windows(desk: &mut Desk) -> (Opened, Opened, wl_pointer::WlPointer) {
+                desk.install(RUNS);
+                let first = desk.open();
+                let second = desk.open();
+                desk.apply(vec![
+                    floated(desk.id(&first), 100.0, 100.0, 0),
+                    floated(desk.id(&second), 1000.0, 100.0, 0),
+                ]);
+                desk.rest();
+                let pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                desk.mouse_to((132.0, 132.0).into());
+                desk.button(true);
+                desk.button(false);
+                assert!(
+                    desk.focused().as_ref() == Some(&first.window),
+                    "the premise: a click focused the first window"
+                );
+                desk.client.buttons.clear();
+                desk.client.clicked_on.clear();
+                (first, second, pointer)
+            }
+
+            /// Run `code` as a scene's action would, and say how it went.
+            fn run(desk: &mut Desk, code: &str) -> String {
+                desk.action(code, &crate::json::Json::Null);
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return said"))
+                    .unwrap_or_default()
+            }
+
+            fn surface_id(opened: &Opened) -> u32 {
+                wayland_client::Proxy::id(&opened.surface).protocol_id()
+            }
+
+            /// **A window hears the side button with the pointer elsewhere,
+            /// and nothing else moves**: `sol.press(id, { button = "side" })`
+            /// on the second window, with the pointer over nothing and then
+            /// over the first, reaches the second as a press and a release,
+            /// on its own surface; the pointer does not move, its picture
+            /// neither moves nor changes, the keyboard stays on the first,
+            /// and the pointer is back on what is under it.
+            #[test]
+            fn a_window_hears_the_side_button_with_the_pointer_elsewhere_and_nothing_else_moves() {
+                let mut desk = Desk::new(1);
+                let (first, second, _pointer) = two_windows(&mut desk);
+                let press = format!("sol.press({}, {{ button = \"side\" }})", desk.id(&second));
+                for over in [(600.0, 700.0), (132.0, 132.0)] {
+                    desk.mouse_to(over.into());
+                    desk.rest();
+                    desk.client.buttons.clear();
+                    desk.client.clicked_on.clear();
+                    let (at, drawn, showing) = (desk.at(), desk.drawn(), desk.state.pointer.said());
+                    let under = desk.under();
+                    let said = run(&mut desk, &press);
+                    assert_eq!(
+                        (
+                            said.as_str(),
+                            desk.client.buttons.clone(),
+                            desk.client.clicked_on.clone(),
+                            desk.at(),
+                            desk.drawn(),
+                            desk.state.pointer.said() == showing,
+                            desk.under() == under,
+                            desk.focused().as_ref() == Some(&first.window),
+                            desk.state.flight.is_none(),
+                        ),
+                        (
+                            "ok",
+                            vec![(SIDE, true), (SIDE, false)],
+                            vec![Some(surface_id(&second)); 2],
+                            at,
+                            drawn,
+                            true,
+                            true,
+                            true,
+                            true,
+                        ),
+                        "over {over:?}: (said, the buttons, on which surface, the pointer, its \
+                         picture, its shape kept, what it is on kept, the keyboard on the first, \
+                         nothing flying)"
+                    );
+                }
+                assert_eq!(
+                    desk.client.pointer_on,
+                    Some(surface_id(&first)),
+                    "and the client was told the pointer is back on the first window"
+                );
+            }
+
+            /// **A key reaches the window, and gives it the keyboard**:
+            /// `Escape` and then `alt+Left` on the second window, with the
+            /// first focused and Russian active, reach the second as presses
+            /// and releases in order, on its own surface; the second has the
+            /// keyboard, and the pointer has not moved.
+            #[test]
+            fn a_key_reaches_the_window_and_gives_it_the_keyboard() {
+                let mut desk = Desk::new(1);
+                let (_first, second, _pointer) = two_windows(&mut desk);
+                desk.mouse_to((600.0, 700.0).into());
+                let at = desk.at();
+                desk.client.key_events.clear();
+                desk.client.typed.clear();
+                let id = desk.id(&second);
+                let escape = run(
+                    &mut desk,
+                    &format!("sol.press({id}, {{ key = \"Escape\" }})"),
+                );
+                let back = run(
+                    &mut desk,
+                    &format!("sol.press({id}, {{ key = \"alt+Left\" }})"),
+                );
+                desk.pump();
+                assert_eq!(
+                    (
+                        escape.as_str(),
+                        back.as_str(),
+                        desk.client.key_events.clone(),
+                        desk.client
+                            .typed
+                            .iter()
+                            .all(|(on, _)| *on == Some(surface_id(&second))),
+                        desk.focused().as_ref() == Some(&second.window),
+                        desk.at(),
+                    ),
+                    (
+                        "ok",
+                        "ok",
+                        vec![
+                            (ESCAPE, true),
+                            (ESCAPE, false),
+                            (ALT, true),
+                            (ARROW, true),
+                            (ARROW, false),
+                            (ALT, false),
+                        ],
+                        true,
+                        true,
+                        at,
+                    ),
+                    "(said for Escape, for alt+Left, the keys the client heard, all on the \
+                     second window, the second focused, the pointer)"
+                );
+            }
+
+            /// **A key is found in the active layout first**: with Russian
+            /// active, `period` is the key Russian puts `.` on (evdev's
+            /// slash), not English's (evdev's dot, `ю` on Russian), and the
+            /// `t` of `ctrl+shift+t`, which Russian has nowhere, is the key
+            /// English has it on, as a person presses the shortcut.
+            #[test]
+            fn a_key_is_found_in_the_active_layout_first() {
+                /// The left Control and Shift, `t` and `/`, as evdev names them.
+                const CTRL: u32 = 29;
+                const SHIFT: u32 = 42;
+                const T: u32 = 20;
+                const SLASH: u32 = 53;
+                let mut desk = Desk::new(1);
+                let (_first, second, _pointer) = two_windows(&mut desk);
+                desk.client.key_events.clear();
+                let id = desk.id(&second);
+                let period = run(
+                    &mut desk,
+                    &format!("sol.press({id}, {{ key = \"period\" }})"),
+                );
+                let shortcut = run(
+                    &mut desk,
+                    &format!("sol.press({id}, {{ key = \"ctrl+shift+t\" }})"),
+                );
+                desk.pump();
+                assert_eq!(
+                    (
+                        period.as_str(),
+                        shortcut.as_str(),
+                        desk.client.key_events.clone()
+                    ),
+                    (
+                        "ok",
+                        "ok",
+                        vec![
+                            (SLASH, true),
+                            (SLASH, false),
+                            (CTRL, true),
+                            (SHIFT, true),
+                            (T, true),
+                            (T, false),
+                            (SHIFT, false),
+                            (CTRL, false),
+                        ],
+                    ),
+                    "(said for period, for ctrl+shift+t, the keys the client heard)"
+                );
+            }
+
+            /// **A minimized window is pressed nowhere**: asked from Lua it
+            /// is an error, and a press already asked for when it was
+            /// minimized reaches it neither as a button nor as a key, nor
+            /// gives it the keyboard.
+            #[test]
+            fn a_minimized_window_is_pressed_nowhere() {
+                let mut desk = Desk::new(1);
+                let (first, second, _pointer) = two_windows(&mut desk);
+                let id = desk.id(&second);
+                desk.apply(vec![Command::Minimize { id }]);
+                desk.client.key_events.clear();
+                let said = run(
+                    &mut desk,
+                    &format!("sol.press({id}, {{ button = \"side\" }})"),
+                );
+                desk.apply(vec![
+                    Command::Press {
+                        id,
+                        press: crate::script::Press::Button(SIDE),
+                        source: FocusSource::Script,
+                    },
+                    Command::Press {
+                        id,
+                        press: crate::script::Press::Keys(vec![
+                            smithay::input::keyboard::Keysym::Escape,
+                        ]),
+                        source: FocusSource::Script,
+                    },
+                ]);
+                assert_eq!(
+                    (
+                        said.contains("is minimized"),
+                        desk.client.buttons.clone(),
+                        desk.client.key_events.clone(),
+                        desk.focused().as_ref() == Some(&first.window),
+                    ),
+                    (true, Vec::new(), Vec::new(), true),
+                    "(an error from Lua, the buttons, the keys, the keyboard still on the first): {said}"
+                );
+            }
+
+            /// **`sol.windows()` rows carry the client's pid**: the client
+            /// here is this process, on the other end of a socketpair, so
+            /// the kernel says its pid is ours.
+            #[test]
+            fn sol_windows_rows_carry_the_clients_pid() {
+                let mut desk = Desk::new(1);
+                desk.install(RUNS);
+                let _opened = desk.open();
+                let said = run(&mut desk, "seen = tostring(sol.windows()[1].pid)");
+                let seen = desk
+                    .state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return seen"))
+                    .unwrap_or_default();
+                assert_eq!(
+                    (said.as_str(), seen),
+                    ("ok", std::process::id().to_string()),
+                    "(said, the pid the row carries)"
+                );
+            }
         }
     }
 }

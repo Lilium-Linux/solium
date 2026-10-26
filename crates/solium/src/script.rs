@@ -268,6 +268,11 @@ pub(crate) struct WindowInfo {
     /// variable refresh rate, keeping the screen awake -- can be made by a
     /// script for the window that is actually a game or a film.
     pub(crate) content_type: &'static str,
+    /// The process the window belongs to, or `None` when it cannot be
+    /// told: see `Solium::window_pid`. For a configuration that matches a
+    /// window to a process it knows, such as one it launched.
+    /// `real_client::follow::press::sol_windows_rows_carry_the_clients_pid`.
+    pub(crate) pid: Option<u32>,
 }
 
 /// How a window is drawn this instant, as `Solium::window_under` reads it:
@@ -456,6 +461,109 @@ pub(crate) struct Selection {
     pub(crate) on: Option<String>,
 }
 
+/// What `sol.press` delivers to a window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Press {
+    /// A pointer button, by its evdev code: `BTN_LEFT` and the four after it.
+    Button(u32),
+    /// A key combination, as the keysyms pressed in order: the modifiers
+    /// first, the key last. Let go of in reverse.
+    Keys(Vec<smithay::input::keyboard::Keysym>),
+}
+
+/// The buttons `sol.press` names, with their evdev codes: `side` is
+/// `BTN_SIDE`, a mouse's "back", and `extra` is `BTN_EXTRA`, its "forward".
+const PRESS_BUTTONS: [(&str, u32); 5] = [
+    ("left", 0x110),
+    ("right", 0x111),
+    ("middle", 0x112),
+    ("side", 0x113),
+    ("extra", 0x114),
+];
+
+/// `sol.press`'s spec: `{ button = name }` or `{ key = combo }`, one of the
+/// two and nothing else. A combination is spelled as `sol.bind` spells it,
+/// and normalised by the same [`normalise_combo`]; its key is an xkb keysym
+/// name, in any case. Anything else is an error, so a spec that would press
+/// nothing never looks like one that pressed something.
+/// `directions::sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach`.
+fn press_from(spec: &Table) -> mlua::Result<Press> {
+    let refused = |why: String| {
+        mlua::Error::runtime(format!(
+            "sol.press: {why}; the spec is {{ button = \"left\"|\"right\"|\"middle\"|\"side\"|\"extra\" }} \
+             or {{ key = \"Escape\" }}"
+        ))
+    };
+    let mut button = None;
+    let mut key = None;
+    for pair in spec.pairs::<Value, Value>() {
+        let (name, value) = pair?;
+        let name = match &name {
+            Value::String(name) => name.to_string_lossy(),
+            other => {
+                return Err(refused(format!(
+                    "a key of {} is not a name",
+                    other.type_name()
+                )));
+            }
+        };
+        match name.as_str() {
+            "button" => button = Some(value),
+            "key" => key = Some(value),
+            other => return Err(refused(format!("`{other}` is not in it"))),
+        }
+    }
+    match (button, key) {
+        (Some(Value::String(name)), None) => {
+            let name = name.to_string_lossy();
+            PRESS_BUTTONS
+                .iter()
+                .find(|(each, _)| *each == name)
+                .map(|(_, code)| Press::Button(*code))
+                .ok_or_else(|| refused(format!("no button is called `{name}`")))
+        }
+        (None, Some(Value::String(combo))) => {
+            let combo = combo.to_string_lossy();
+            press_keysyms(&combo)
+                .map(Press::Keys)
+                .ok_or_else(|| refused(format!("`{combo}` names no key")))
+        }
+        (Some(_), Some(_)) => Err(refused("a button and a key at once".to_owned())),
+        (None, None) => Err(refused("it names nothing".to_owned())),
+        _ => Err(refused("a button or a key is a string".to_owned())),
+    }
+}
+
+/// A combination's keysyms, in the order they go down: its modifiers, as
+/// [`normalise_combo`] orders them and as the left-hand keys, then its key.
+/// `None` for a combination with no key, or a key no keysym is called.
+fn press_keysyms(combo: &str) -> Option<Vec<smithay::input::keyboard::Keysym>> {
+    use smithay::input::keyboard::{Keysym, xkb};
+    let canonical = normalise_combo(combo);
+    let (modifiers, key) = canonical
+        .rsplit_once('+')
+        .unwrap_or(("", canonical.as_str()));
+    if key.is_empty() {
+        return None;
+    }
+    let mut keysyms: Vec<Keysym> = modifiers
+        .split('+')
+        .filter_map(|modifier| match modifier {
+            "ctrl" => Some(Keysym::Control_L),
+            "alt" => Some(Keysym::Alt_L),
+            "shift" => Some(Keysym::Shift_L),
+            "super" => Some(Keysym::Super_L),
+            _ => None,
+        })
+        .collect();
+    let keysym = xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE);
+    if keysym == Keysym::NoSymbol {
+        return None;
+    }
+    keysyms.push(keysym);
+    Some(keysyms)
+}
+
 /// Something a script asked the compositor to do.
 #[derive(Clone, Debug)]
 pub(crate) enum Command {
@@ -574,6 +682,15 @@ pub(crate) enum Command {
     ShowMinimized {
         id: u64,
         shown: bool,
+    },
+    /// One press and release delivered to a window, as a device would
+    /// deliver it: `sol.press`. A key gives the window the keyboard first,
+    /// and the focus is told with `source`, what the handler that asked was
+    /// answering. See `Solium::press`.
+    Press {
+        id: u64,
+        press: Press,
+        source: FocusSource,
     },
     /// Frame every window with a named decoration.
     Decoration {
@@ -795,6 +912,7 @@ impl Command {
             | Self::Minimize { .. }
             | Self::Unminimize { .. }
             | Self::ShowMinimized { .. }
+            | Self::Press { .. }
             | Self::Place { .. }
             | Self::Unplace { .. }
             | Self::Close { .. }
@@ -3601,7 +3719,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // act on a case the compositor's own default (hiding a window whose
     // `class` or `instance` is in `config.x11.hidden`) does not already decide
     // for it. `content_type` is what the window says it is showing (#71),
-    // `"none"` when it said nothing; see `WindowInfo::content_type`.
+    // `"none"` when it said nothing; see `WindowInfo::content_type`. `pid` is
+    // the process the window belongs to, absent when it cannot be told; see
+    // `WindowInfo::pid`.
     sol.set(
         "windows",
         lua.create_function(|lua, ()| {
@@ -3633,6 +3753,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("class", window.class.clone())?;
                 entry.set("instance", window.instance.clone())?;
                 entry.set("content_type", window.content_type)?;
+                entry.set("pid", window.pid)?;
                 windows.set(index + 1, entry)?;
             }
             Ok(windows)
@@ -5378,6 +5499,44 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Click { x, y })
+            })
+        })?,
+    )?;
+
+    // `sol.press(id, spec)`: one button or key, pressed and let go on a
+    // window, as a device would. The window named, or the focused one when
+    // none is, and nothing when there is neither, as the toggles below. A
+    // window that is not in `sol.windows()` -- gone, or a menu or tooltip
+    // that is not a window -- or one leaving or minimized is an error: no
+    // device could reach it. What the press does once it is carried out is
+    // `Solium::press`'s.
+    // `directions::sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach`.
+    sol.set(
+        "press",
+        lua.create_function(|lua, (id, spec): (Option<u64>, Table)| {
+            let press = press_from(&spec)?;
+            let Some(id) = id.or_else(|| focused_id(lua)) else {
+                return Ok(());
+            };
+            let refusal =
+                lua.app_data_ref::<Snapshot>()
+                    .map_or(Some("is not a window"), |snapshot| {
+                        match snapshot.windows.iter().find(|window| window.id == id) {
+                            None => Some("is not a window"),
+                            Some(window) if window.leaving => Some("is leaving"),
+                            Some(window) if window.minimized => Some("is minimized"),
+                            Some(_) => None,
+                        }
+                    });
+            if let Some(why) = refusal {
+                return Err(mlua::Error::runtime(format!("sol.press: {id} {why}")));
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Press {
+                    id,
+                    press,
+                    source: pending.source,
+                });
             })
         })?,
     )?;
@@ -7649,6 +7808,7 @@ mod tests {
                 class: None,
                 instance: None,
                 content_type: "none",
+                pid: None,
             }],
             monitors: vec![MonitorInfo {
                 name: "test-1".to_owned(),
@@ -10616,6 +10776,7 @@ mod tests {
             class: None,
             instance: None,
             content_type: "none",
+            pid: None,
         };
         snapshot.windows = vec![
             window(1, false, Parentage::None),
@@ -11326,6 +11487,7 @@ mod tests {
                     class: None,
                     instance: None,
                     content_type: "none",
+                    pid: None,
                 })
                 .collect(),
             monitors: vec![MonitorInfo {
@@ -15048,6 +15210,7 @@ mod dialogs {
             class: None,
             instance: None,
             content_type: "none",
+            pid: None,
         }
     }
 
@@ -18618,6 +18781,7 @@ mod directions {
             class: None,
             instance: None,
             content_type: "none",
+            pid: None,
         }
     }
 
@@ -20141,6 +20305,110 @@ mod directions {
         );
         assert!(scripts.key("super+a", desk(false)).commands.is_empty());
         assert!(scripts.key("super+b", desk(false)).commands.is_empty());
+    }
+
+    /// **`sol.press` names a button or a key, and refuses what it cannot
+    /// reach**: a button by its name and a key as `sol.bind` spells it, on
+    /// the window named or the focused one, are pressed; a minimized, leaving
+    /// or unknown window, and a spec that names no button or key, or both,
+    /// or something else, are errors and ask nothing. With nothing focused
+    /// and no id, nothing. And it reaches past the lock, so a binding allowed
+    /// there cannot ask for it.
+    #[test]
+    fn sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach() {
+        use smithay::input::keyboard::Keysym;
+        let mut scripts = plain(
+            "press",
+            r#"
+            said = {}
+            local function try(...)
+                local ok, err = pcall(sol.press, ...)
+                said[#said + 1] = ok and "ok" or tostring(err):match("[^\n]*")
+            end
+            sol.bind("super+a", function()
+                try(1, { button = "side" })
+                try(nil, { key = "alt+Left" })
+                try(1, { key = "Escape" })
+                try(2, { button = "left" })
+                try(3, { key = "Escape" })
+                try(9, { button = "left" })
+                try(1, { button = "back" })
+                try(1, { key = "no_such_key" })
+                try(1, { key = "alt+" })
+                try(1, { button = "left", key = "Escape" })
+                try(1, {})
+                try(1, { button = "left", at = 3 })
+                try(1, { button = 4 })
+            end)
+            sol.bind("super+b", function() try(nil, { button = "left" }) end)
+            "#,
+        );
+        let desk = |focused: bool| Snapshot {
+            windows: vec![
+                WindowInfo {
+                    focused,
+                    ..window(1, "DP-1", WIDE)
+                },
+                WindowInfo {
+                    minimized: true,
+                    ..window(2, "DP-1", WIDE)
+                },
+                WindowInfo {
+                    leaving: true,
+                    ..window(3, "DP-1", WIDE)
+                },
+            ],
+            ..Snapshot::default()
+        };
+        let press = |press: super::Press| Command::Press {
+            id: 1,
+            press,
+            source: FocusSource::Binding,
+        };
+        let asked = |commands: Vec<Command>| -> Vec<String> {
+            commands
+                .iter()
+                .map(|command| format!("{command:?}"))
+                .collect()
+        };
+        assert_eq!(
+            asked(scripts.key("super+a", desk(true)).commands),
+            [
+                press(super::Press::Button(0x113)),
+                press(super::Press::Keys(vec![Keysym::Alt_L, Keysym::Left])),
+                press(super::Press::Keys(vec![Keysym::Escape])),
+            ]
+            .map(|command| format!("{command:?}"))
+        );
+        let said = scripts.evaluate("return table.concat(said, \"\\n\")");
+        let said: Vec<&str> = said.lines().collect();
+        let wanted = [
+            "ok",
+            "ok",
+            "ok",
+            "2 is minimized",
+            "3 is leaving",
+            "9 is not a window",
+            "no button is called `back`",
+            "`no_such_key` names no key",
+            "`alt+` names no key",
+            "a button and a key at once",
+            "it names nothing",
+            "`at` is not in it",
+            "a button or a key is a string",
+        ];
+        assert_eq!(said.len(), wanted.len(), "every call answered: {said:?}");
+        for (said, wanted) in said.iter().zip(wanted) {
+            assert!(said.contains(wanted), "{said:?} is not {wanted:?}");
+        }
+        assert!(
+            scripts.key("super+b", desk(false)).commands.is_empty(),
+            "no id and nothing focused presses nothing"
+        );
+        assert!(
+            press(super::Press::Button(0x110)).reaches_past_the_lock(),
+            "a press is allowed to a binding at the lock"
+        );
     }
 
     /// **`sol.minimize` names the focused window when given none**, the

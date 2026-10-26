@@ -642,7 +642,7 @@ issue #116, and both halves above are what it cost.
 sol.windows()          -- every window: id, x, y, w, h, title, focused, monitor,
                        --                modal, parent, leaving, app_id, min, max,
                        --                cramped, shown, fullscreen, style,
-                       --                content_type
+                       --                content_type, pid
 sol.monitors()         -- every monitor: name, x, y, w, h, whole, scale,
                        --                 transform, focused, primary, power
                        --   (x, y, w, h: the work area, less layer-shell
@@ -717,6 +717,14 @@ switch for every window -- tearing, a variable refresh rate, keeping the screen
 awake -- can be made for the window that is actually a game or a film. A change
 to it does not re-run `layout`: no layout arranges by it.
 
+`pid` is the process the window belongs to: a Wayland window's connection, as
+the kernel reports it, and an X11 window's own X connection, as Xwayland
+reports it, or the `_NET_WM_PID` the window set when Xwayland cannot say --
+never Xwayland's own, which every X11 window's connection is. It is absent
+when it cannot be told, and while a window's application has not arrived. It
+is how a configuration matches a window to a process it knows, such as one it
+launched (`state::tests::real_client::follow::press::sol_windows_rows_carry_the_clients_pid`).
+
 `skip` on `window_at` exists because of one specific bug: a new window is
 already mapped and under the pointer, so asking "what am I pointing at" without
 skipping it names the window as its own split target.
@@ -774,6 +782,43 @@ that slid in under it since has it and says its cursor (#229)
 `state::tests::real_client::follow::a_held_pointer_is_not_warped`,
 `state::tests::real_client::lock_focus::no_warp_moves_the_pointer_behind_the_lock`,
 `state::tests::real_client::follow::where_the_picture_lands_the_pointer_is_given_to_what_is_there`).
+
+## Pressing a button or a key on a window
+
+```lua
+sol.press(id, { button = "side" })   -- a mouse's back button: left, right, middle, side, extra
+sol.press(id, { key = "alt+Left" })  -- a key, spelled as sol.bind spells it
+sol.press(nil, { key = "Escape" })   -- the focused window
+```
+
+One press and its release, delivered to the window as a device would deliver
+them: its application hears them, and nothing of the compositor's does. No
+binding fires, no click focuses or raises a window, and no scene hears it. It
+is the primitive a "back" gesture is built from -- a tablet shell's edge swipe
+sends `side`, or `alt+Left`, or `Escape`, as the shell decides what back means
+for the window in front.
+
+A button needs the pointer, and borrows it: the window is given the pointer at
+its centre for the click, without the pointer moving or its picture changing,
+and the pointer goes straight back to whatever is under it. The keyboard stays
+where it was. Nothing is clicked while a button, a drag, a menu or a scene
+holds the pointer, or while a client holds it (a game's locked pointer) unless
+the click is for that client's window. An X11 window is clicked the same way,
+through Xwayland
+(`state::tests::real_client::follow::press::a_window_hears_the_side_button_with_the_pointer_elsewhere_and_nothing_else_moves`).
+
+A key is the window being typed into, so a window without the keyboard is
+focused first, as `sol.focus` would focus it, and keeps it. The key is found
+in the live keymap whichever layout is active, so `Escape` is `Escape` with
+Russian on
+(`state::tests::real_client::follow::press::a_key_reaches_the_window_and_gives_it_the_keyboard`).
+
+A window that is not in `sol.windows()` -- closed, or a menu or tooltip -- or
+one that is leaving or minimized is an error, as is a spec that names neither
+a button nor a key, or both, or a key no keysym is called. Nothing is pressed
+behind the lock, and a binding allowed at the lock cannot ask for it
+(`script::directions::sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach`,
+`state::tests::real_client::lock_focus::nothing_sol_press_asks_reaches_a_window_behind_the_lock`).
 
 ## A layout runs per monitor
 
