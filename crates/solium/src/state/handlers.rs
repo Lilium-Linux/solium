@@ -201,6 +201,7 @@ impl Solium {
                 layer.layer_surface().send_configure();
                 self.relayout_for_layers();
             }
+            self.settle_focus();
             return;
         }
     }
@@ -1015,6 +1016,7 @@ impl WlrLayerShellHandler for Solium {
             }
         }
         tracing::info!("layer surface gone");
+        self.settle_focus();
     }
 }
 
@@ -1349,6 +1351,7 @@ impl SeatHandler for Solium {
     /// `text_input::tests::a_field_whose_window_loses_the_keyboard_is_gone`.
     /// So do the shortcuts a window asked for (#58): see `shortcuts_inhibit`.
     fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        self.remember_layer_focus(focused);
         self.text_input_focus(focused);
         self.settle_inhibitors(focused);
     }

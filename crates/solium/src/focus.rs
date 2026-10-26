@@ -45,23 +45,298 @@
 //! The last of those still holds if everything above it is someday wrong.
 
 use smithay::{
-    desktop::{PopupUngrabStrategy, Window, find_popup_root_surface},
+    desktop::{
+        LayerSurface, PopupUngrabStrategy, Window, WindowSurfaceType, find_popup_root_surface,
+        layer_map_for_output,
+    },
     input::keyboard::KeyboardGrab,
     reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
     utils::{SERIAL_COUNTER, Serial},
     wayland::{
         seat::WaylandFocus,
         selection::{data_device::set_data_device_focus, primary_selection::set_primary_focus},
+        shell::wlr_layer::KeyboardInteractivity,
     },
 };
 
 use crate::state::Solium;
 
+/// An exclusive layer's temporary ownership, across replacements by other layers.
+#[derive(Debug)]
+pub(crate) struct LayerKeyboard {
+    surface: WlSurface,
+    returns_to: Option<WlSurface>,
+}
+
+/// Actual keyboard focus and its owning layer, even after a popup disappears.
+#[derive(Debug)]
+pub(crate) struct LayerKeyboardFocus {
+    focused: WlSurface,
+    root: WlSurface,
+}
+
 impl Solium {
+    fn keyboard_layer(&self, surface: &WlSurface) -> Option<LayerSurface> {
+        self.space.outputs().find_map(|output| {
+            layer_map_for_output(output)
+                .layer_for_surface(surface, WindowSurfaceType::ALL)
+                .cloned()
+        })
+    }
+
+    fn mapped_keyboard_layer(layer: &LayerSurface) -> bool {
+        let surface = layer.layer_surface().wl_surface();
+        surface.is_alive()
+            && smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+                state.buffer().is_some()
+            })
+            .unwrap_or(false)
+    }
+
+    /// Only committed, buffered Top/Overlay layers claim the seat automatically.
+    pub(crate) fn exclusive_keyboard_layer(&self) -> Option<WlSurface> {
+        if self.lock.is_some() || self.refocus_on_release {
+            return None;
+        }
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        let owning_output = focused.as_ref().and_then(|surface| {
+            self.space
+                .outputs()
+                .find(|output| {
+                    layer_map_for_output(output)
+                        .layer_for_surface(surface, WindowSurfaceType::ALL)
+                        .is_some()
+                })
+                .cloned()
+        });
+        let active = self.active_output();
+        for band in [crate::scripted::Layer::Overlay, crate::scripted::Layer::Top] {
+            let candidates: Vec<_> = self
+                .space
+                .outputs()
+                .filter_map(|output| {
+                    let map = layer_map_for_output(output);
+                    crate::layer::on(&map, band)
+                        .find(|layer| {
+                            Self::mapped_keyboard_layer(layer)
+                                && layer.cached_state().keyboard_interactivity
+                                    == KeyboardInteractivity::Exclusive
+                        })
+                        .map(|layer| (output.clone(), layer.layer_surface().wl_surface().clone()))
+                })
+                .collect();
+            // A monitor tie keeps the current winner; a newly mapped surface
+            // above it on that monitor still wins the same ordering as drawing.
+            if let Some((_, surface)) = candidates
+                .iter()
+                .find(|(output, _)| Some(output) == owning_output.as_ref())
+            {
+                return Some(surface.clone());
+            }
+            if let Some((_, surface)) = candidates
+                .iter()
+                .find(|(output, _)| Some(output) == active.as_ref())
+                .or_else(|| candidates.first())
+            {
+                return Some(surface.clone());
+            }
+        }
+        None
+    }
+
+    pub(crate) fn exclusive_layer_has_keyboard(&self) -> bool {
+        let Some(winner) = self.exclusive_keyboard_layer() else {
+            return false;
+        };
+        self.seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|surface| self.keyboard_layer(&surface))
+            .is_some_and(|layer| layer.layer_surface().wl_surface() == &winner)
+    }
+
+    /// Remember actual layer focus while its role and output still exist.
+    /// Smithay also changes focus through popup grabs, so observe seat callbacks.
+    pub(crate) fn remember_layer_focus(&mut self, focused: Option<&WlSurface>) {
+        let Some(focused) = focused else {
+            self.layer_keyboard_focus = None;
+            return;
+        };
+        let layer = self.keyboard_layer(focused).or_else(|| {
+            // A grab can focus a popup before its first commit puts it in
+            // the mapped tree. Resolve its protocol parent in that interval.
+            let popup = self.popups.find_popup(focused)?;
+            let root = find_popup_root_surface(&popup).ok()?;
+            self.keyboard_layer(&root)
+        });
+        if let Some(layer) = layer {
+            self.layer_keyboard_focus = Some(LayerKeyboardFocus {
+                focused: focused.clone(),
+                root: layer.layer_surface().wl_surface().clone(),
+            });
+        } else if self
+            .layer_keyboard_focus
+            .as_ref()
+            .is_none_or(|held| &held.focused != focused)
+        {
+            self.layer_keyboard_focus = None;
+        }
+        // The same focus with a missing role/tree keeps its root until
+        // settlement can dismiss that owner's grab and send keyboard leave.
+    }
+
+    /// Reconcile layer ownership before settling ordinary window focus.
+    pub(crate) fn settle_layer_keyboard(&mut self) -> bool {
+        if self.lock.is_some() || self.refocus_on_release {
+            return false;
+        }
+        if let Some(surface) = self.exclusive_keyboard_layer() {
+            if self
+                .layer_keyboard
+                .as_ref()
+                .is_none_or(|held| held.surface != surface)
+            {
+                let returns_to = self
+                    .layer_keyboard
+                    .take()
+                    .map(|held| held.returns_to)
+                    .unwrap_or_else(|| {
+                        self.focused_window()
+                            .and_then(|window| window.wl_surface().map(|root| root.into_owned()))
+                            .or_else(|| {
+                                self.hosted_keyboard
+                                    .as_ref()
+                                    .and_then(|held| held.returns_to.clone())
+                            })
+                            .or_else(|| {
+                                self.seat
+                                    .get_keyboard()
+                                    .and_then(|keyboard| keyboard.current_focus())
+                            })
+                    });
+                // A dismissed popup cannot be a restoration target. Preserve
+                // the layer root while it is still in its output's tree.
+                let returns_to = returns_to.map(|surface| {
+                    self.keyboard_layer(&surface)
+                        .map(|layer| layer.layer_surface().wl_surface().clone())
+                        .unwrap_or(surface)
+                });
+                self.end_keyboard_hold(false);
+                self.dismiss_keyboard_popups(None);
+                self.layer_keyboard = Some(LayerKeyboard {
+                    surface: surface.clone(),
+                    returns_to,
+                });
+            }
+            if !self.exclusive_layer_has_keyboard() {
+                self.give_keyboard(Some(surface), SERIAL_COUNTER.next_serial());
+            }
+            return true;
+        }
+        if let Some(held) = self.layer_keyboard.take() {
+            self.dismiss_keyboard_popups(Some(&held.surface));
+            self.give_keyboard(None, SERIAL_COUNTER.next_serial());
+            if let Some(surface) = held
+                .returns_to
+                .filter(|surface| surface.is_alive() && self.may_hold_keyboard(surface))
+            {
+                if let Some(window) = self.restorable_keyboard_window(&surface) {
+                    self.focus_window(
+                        &window,
+                        SERIAL_COUNTER.next_serial(),
+                        crate::script::FocusSource::Settle,
+                    );
+                    return true;
+                } else if self.keyboard_layer(&surface).is_some() {
+                    self.give_keyboard(Some(surface), SERIAL_COUNTER.next_serial());
+                    return true;
+                }
+            }
+        }
+        if let Some(surface) = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+        {
+            let root = self
+                .keyboard_layer(&surface)
+                .map(|layer| layer.layer_surface().wl_surface().clone())
+                .or_else(|| {
+                    self.layer_keyboard_focus
+                        .as_ref()
+                        .filter(|held| held.focused == surface)
+                        .map(|held| held.root.clone())
+                });
+            if let Some(root) = root {
+                if self.keyboard_layer(&root).is_some() && self.may_hold_keyboard(&root) {
+                    return true;
+                }
+                self.dismiss_keyboard_popups(Some(&root));
+                self.give_keyboard(None, SERIAL_COUNTER.next_serial());
+            }
+        }
+        false
+    }
+
+    /// Dismiss a keyboard popup chain before changing focus. `owner` limits
+    /// withdrawal cleanup to that chain's owning layer root; exclusive
+    /// preemption passes None because it must release any keyboard grab.
+    fn dismiss_keyboard_popups(&mut self, owner: Option<&WlSurface>) {
+        if owner.is_some_and(|owner| {
+            self.popup_grab
+                .as_ref()
+                .is_none_or(|grab| grab.keyboard_grab_start_data().focus.as_ref() != Some(owner))
+        }) {
+            return;
+        }
+        let serials = self.popup_grab.as_ref().map(|grab| {
+            (
+                grab.serial(),
+                grab.previous_serial().unwrap_or_else(|| grab.serial()),
+            )
+        });
+        if let Some(mut grab) = self.popup_grab.take() {
+            grab.ungrab(PopupUngrabStrategy::All);
+        }
+        // Keyboard first: unsetting a matching popup pointer grab can
+        // otherwise give the keyboard back to the withdrawn root.
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.unset_grab(self);
+        }
+        if let Some(pointer) = self.seat.get_pointer()
+            && serials.is_some_and(|(serial, previous)| {
+                pointer.has_grab(serial) || pointer.has_grab(previous)
+            })
+        {
+            let time = u32::try_from(self.clock.now().as_millis()).unwrap_or(u32::MAX);
+            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+        }
+    }
+
+    /// The actual hit surface determines whether a click can focus a layer.
+    pub(crate) fn focus_layer_on_click(&mut self, surface: &WlSurface, serial: Serial) -> bool {
+        let Some(layer) = self.keyboard_layer(surface) else {
+            return false;
+        };
+        if layer.cached_state().keyboard_interactivity == KeyboardInteractivity::None {
+            return false;
+        }
+        let root = layer.layer_surface().wl_surface();
+        if Self::mapped_keyboard_layer(&layer) && self.may_hold_keyboard(root) {
+            self.end_keyboard_hold(false);
+            self.give_keyboard(Some(root.clone()), serial);
+        }
+        true
+    }
+
     /// The rule. Everything else in this file is a way of asking it.
     ///
-    /// Unlocked, any surface may hold the keyboard. Locked, only a surface of
-    /// the lock client's own may. A window, a popup, a layer surface or an X11
+    /// Unlocked, layer interactivity and exclusive ownership decide who may
+    /// hold the keyboard. Locked, only a surface of the lock client's own may.
+    /// A window, a popup, a layer surface or an X11
     /// window never qualifies, because each of them belongs to the session the
     /// lock is there to seal.
     ///
@@ -73,7 +348,20 @@ impl Solium {
     /// the holder's surfaces are ever added.
     pub(crate) fn may_hold_keyboard(&self, surface: &WlSurface) -> bool {
         match self.lock.as_ref() {
-            None => true,
+            None => {
+                let layer = self.keyboard_layer(surface);
+                if let Some(layer) = layer.as_ref()
+                    && (self.refocus_on_release
+                        || !Self::mapped_keyboard_layer(layer)
+                        || layer.cached_state().keyboard_interactivity
+                            == KeyboardInteractivity::None)
+                {
+                    return false;
+                }
+                self.exclusive_keyboard_layer().is_none_or(|winner| {
+                    layer.is_some_and(|layer| layer.layer_surface().wl_surface() == &winner)
+                })
+            }
             Some(lock) => lock.surfaces().any(|each| each.wl_surface() == surface),
         }
     }
@@ -88,7 +376,7 @@ impl Solium {
     pub(crate) fn may_focus(&self, window: &Window) -> bool {
         match window.wl_surface() {
             Some(surface) => self.may_hold_keyboard(&surface),
-            None => self.lock.is_none(),
+            None => self.lock.is_none() && self.exclusive_keyboard_layer().is_none(),
         }
     }
 
@@ -96,8 +384,9 @@ impl Solium {
     /// place in Solium that moves keyboard focus.**
     ///
     /// Refused, with nothing changed, for a surface the rule does not allow.
-    /// `None` is always allowed: taking the keyboard away from everything
-    /// cannot deliver a key to anyone. Returns whether the focus was set.
+    /// Clearing focus is allowed unless an exclusive layer owns the seat.
+    /// The lock and post-unlock held-key barrier outrank that ownership.
+    /// Returns whether the focus was set.
     ///
     /// The selection moves with the keyboard, because the two are halves of
     /// one thing. A client can read the clipboard only while it holds the data
@@ -112,10 +401,13 @@ impl Solium {
         reason = "the gate itself: `clippy.toml` sends every other caller here"
     )]
     pub(crate) fn give_keyboard(&mut self, surface: Option<WlSurface>, serial: Serial) -> bool {
+        if surface.is_none() && self.exclusive_keyboard_layer().is_some() {
+            return false;
+        }
         if let Some(surface) = surface.as_ref()
             && !self.may_hold_keyboard(surface)
         {
-            tracing::debug!("refused the keyboard to a surface behind the lock");
+            tracing::debug!("refused keyboard focus by the seat policy");
             return false;
         }
         if let Some(keyboard) = self.seat.get_keyboard() {
@@ -127,7 +419,9 @@ impl Solium {
             // text field gets its `leave`. A grab that ignored the
             // `set_focus` leaves the keyboard where it was, and this nothing.
             // `text_input::tests::a_field_whose_window_leaves_the_keyboard_on_nothing_is_gone`.
-            self.text_input_focus(keyboard.current_focus().as_ref());
+            let focused = keyboard.current_focus();
+            self.remember_layer_focus(focused.as_ref());
+            self.text_input_focus(focused.as_ref());
         }
         let client = surface.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, &self.seat, client.clone());
@@ -182,6 +476,7 @@ impl Solium {
     /// matching serial and gives the keyboard to the menu's window. Once the
     /// keyboard grab is gone there is nothing left for it to match.
     pub(crate) fn release_grabs(&mut self) {
+        self.layer_keyboard = None;
         // A hosted scene's grab goes first, as the menus do, and the presses
         // swallowed before the lock are forgotten: their releases are the
         // lock screen's.

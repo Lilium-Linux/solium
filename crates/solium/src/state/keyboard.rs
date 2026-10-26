@@ -56,6 +56,16 @@ impl Solium {
         self.focused_window().as_ref() == Some(window)
     }
 
+    /// A temporary keyboard owner may return to a window still settling on screen.
+    pub(crate) fn restorable_keyboard_window(&self, surface: &WlSurface) -> Option<Window> {
+        let window = self.window_for(surface)?;
+        let pane = self.panes.get(self.panes.id_of(&window)?)?;
+        (!pane.leaving()
+            && !pane.minimized()
+            && self.on_stage(pane, &self.screens(), self.settling()))
+        .then_some(window)
+    }
+
     /// Give the keyboard to something, if a window went and left it nowhere.
     ///
     /// Focus is a Wayland concept and belongs to a surface, so when the focused
@@ -149,6 +159,9 @@ impl Solium {
             return;
         }
         if self.refocus_on_release {
+            return;
+        }
+        if self.settle_layer_keyboard() {
             return;
         }
         // A scene holding the keyboard has it until it lets go.
@@ -389,7 +402,7 @@ impl Solium {
         // Scripts (`sol.focus`), layouts' event handlers, xdg-activation and
         // `settle_focus` all arrive here, and all of them can while locked.
         if !self.may_focus(window) {
-            tracing::debug!("refused to focus a window: the session is locked");
+            tracing::debug!("refused window focus by the seat policy");
             return;
         }
         // **A minimized window is shown again before it is focused** (#30):

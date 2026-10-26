@@ -460,7 +460,7 @@ fn press(
             combo,
             repeats: key_repeats(&handle),
         }))
-    } else if state.script_grab {
+    } else if state.script_grab && !state.exclusive_layer_has_keyboard() {
         // A mode owns input: keys it did not bind are swallowed rather
         // than leaking to whatever is underneath it.
         FilterResult::Intercept(None)
@@ -1283,6 +1283,14 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // compositor's interpretations below, only the forward at the end. What
     // `Solium::claim_under` tells the pointer, from the same answer.
     let on_a_client = !pointer.is_grabbed() && state.client_above(location);
+    if pressed
+        && !pointer.is_grabbed()
+        && let Some((surface, _)) = state.surface_under(location)
+        && state.focus_layer_on_click(&surface, serial)
+    {
+        forward_button(state, &pointer, &forward);
+        return;
+    }
 
     // A press on the compositor's own chrome is the compositor's: a frame's
     // button, a move drag, or a resize from an edge. None of it reaches a

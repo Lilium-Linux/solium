@@ -575,6 +575,9 @@ pub(crate) struct Solium {
     /// from (Ruling 14).
     /// `tests::real_client::reflow_on_close::hosted::the_window_gets_the_keyboard_back_when_the_shell_lets_go`.
     pub(crate) hosted_keyboard: Option<HostedKeyboard>,
+    pub(crate) layer_keyboard: Option<crate::focus::LayerKeyboard>,
+    /// Actual layer focus, retained until withdrawal even if its role has gone.
+    pub(crate) layer_keyboard_focus: Option<crate::focus::LayerKeyboardFocus>,
     /// The keys whose press went to a scene, by xkb keycode, so their
     /// release does too and never reaches a window.
     /// `crate::input::tests::a_release_whose_press_went_to_a_scene_reaches_no_window`.
@@ -1334,6 +1337,8 @@ impl Solium {
             hosted_grab: None,
             swallowed: std::collections::HashSet::new(),
             hosted_keyboard: None,
+            layer_keyboard: None,
+            layer_keyboard_focus: None,
             keys_to_scene: std::collections::HashSet::new(),
             scene_repeat: None,
             held_binding: None,

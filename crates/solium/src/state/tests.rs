@@ -2992,6 +2992,7 @@ mod real_client {
         /// than the monitor, which is what tells a maximised window from a
         /// fullscreen one.
         layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+        layer_configures: Vec<(wayland_client::backend::ObjectId, u32)>,
         /// Every `xdg_toplevel.configure` this client has been sent, with
         /// the toplevel it was sent to.
         ///
@@ -3045,6 +3046,7 @@ mod real_client {
         /// `enter`/`leave` events say -- the client's view, which is the
         /// one that matters, and not the server's.
         keyboard_on: Option<wayland_client::backend::ObjectId>,
+        key_serial: Option<u32>,
         /// The serial of the last `wl_keyboard.enter`, for a menu to grab
         /// with the way a real one does.
         serial: u32,
@@ -3311,10 +3313,12 @@ mod real_client {
             _conn: &Connection,
             qh: &QueueHandle<Self>,
         ) {
-            let (name, interface) = match event {
+            let (name, interface, version) = match event {
                 wl_registry::Event::Global {
-                    name, interface, ..
-                } => (name, interface),
+                    name,
+                    interface,
+                    version,
+                } => (name, interface, version),
                 wl_registry::Event::GlobalRemove { name } => {
                     state.globals_removed.push(name);
                     return;
@@ -3372,7 +3376,7 @@ mod real_client {
                     state.data_devices = Some(registry.bind(name, 1, qh, ()));
                 }
                 "zwlr_layer_shell_v1" => {
-                    state.layer_shell = Some(registry.bind(name, 1, qh, ()));
+                    state.layer_shell = Some(registry.bind(name, version.min(4), qh, ()));
                 }
                 "zwp_pointer_constraints_v1" => {
                     state.pointer_constraints = Some(registry.bind(name, 1, qh, ()));
@@ -3454,10 +3458,12 @@ mod real_client {
                     state.keyboard_on = None;
                 }
                 wl_keyboard::Event::Key {
+                    serial,
                     key,
                     state: key_state,
                     ..
                 } => {
+                    state.key_serial = Some(serial);
                     state.keys.push(key);
                     state.key_events.push((
                         key,
@@ -3666,7 +3672,23 @@ mod real_client {
         }
     }
     wayland_client::delegate_noop!(Client: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
-    wayland_client::delegate_noop!(Client: ignore zwlr_layer_surface_v1::ZwlrLayerSurfaceV1);
+    impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+            event: zwlr_layer_surface_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let zwlr_layer_surface_v1::Event::Configure { serial, .. } = event {
+                state
+                    .layer_configures
+                    .push((wayland_client::Proxy::id(layer), serial));
+                layer.ack_configure(serial);
+            }
+        }
+    }
     wayland_client::delegate_noop!(Client: ignore zwp_pointer_constraints_v1::ZwpPointerConstraintsV1);
     wayland_client::delegate_noop!(Client: ignore zwp_locked_pointer_v1::ZwpLockedPointerV1);
     // For a pointer confined to a region of a window: #220's
@@ -16701,6 +16723,9 @@ end)"#,
     /// in this module now also has its frames shown (`Session::show`),
     /// because without them `locked` does not come.
     mod lock_focus {
+        mod layer_keyboard {
+            include!("layer_keyboard_tests.rs");
+        }
         use super::*;
         use smithay::backend::input::KeyState;
         use smithay::input::keyboard::Keycode;

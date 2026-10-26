@@ -718,6 +718,17 @@ and never sent an initial configure, and a client may not attach a buffer until
 it has been configured once. Every bar and every dock was invisible, for as
 long as `layer.rs` has claimed that any existing panel works.
 
+Layer-shell keyboard focus follows committed state. A buffered exclusive
+Overlay layer takes the keyboard before a Top layer; within either band the
+last mapped layer wins on its monitor. A tie between monitors keeps the
+current owning monitor, then falls back to the pointer's monitor. Exclusive
+Background and Bottom layers use click focus, as do OnDemand layers. None
+never takes keyboard focus. Removing the owner restores its previous visible
+window when possible. Session locking and the held-key barrier after unlock
+always take precedence. Ordinary global bindings still work, and unbound keys
+reach the exclusive client even while a layout mode holds input. The real
+Wayland-client tests are `cargo test -p solium layer_keyboard`.
+
 `WL_PROBE_SHOT=/tmp/shot.ppm` writes the capture as a binary PPM
 after normalising the output transform and `Y_INVERT` row-storage flag. The
 protocol buffer itself uses the output's buffer orientation; screenshots and
