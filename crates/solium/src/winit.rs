@@ -31,6 +31,7 @@ use smithay::{
         },
     },
     utils::{Rectangle, Transform},
+    wayland::dmabuf::DmabufFeedbackBuilder,
 };
 
 use crate::{
@@ -309,12 +310,39 @@ pub(crate) fn run() -> Result<()> {
             .iter()
             .copied()
             .collect();
-        tracing::info!(count = formats.len(), "advertising dmabuf formats");
-        state.dmabuf_global = Some(
-            state
-                .dmabuf_state
-                .create_global::<Solium>(&display_handle, formats),
-        );
+        let feedback = (|| -> Result<_> {
+            anyhow::ensure!(!formats.is_empty(), "the renderer has no DMA-BUF formats");
+            let device = smithay::backend::egl::EGLDevice::device_for_display(
+                backend.renderer().egl_context().display(),
+            )?;
+            let node = device
+                .try_get_render_node()?
+                .context("the EGL device has no accessible DRM node")?;
+            let node = node
+                .node_with_type(smithay::backend::drm::NodeType::Render)
+                .context("the EGL device has no render node")??;
+            DmabufFeedbackBuilder::new(node.dev_id(), formats)
+                .build()
+                .context("building nested DMA-BUF feedback")
+        })();
+        match feedback {
+            Ok(feedback) => {
+                // Recording and portal clients need the actual allocation
+                // device, not a version-3 format list with no device feedback.
+                state.dmabuf_global = Some(
+                    state
+                        .dmabuf_state
+                        .create_global_with_default_feedback::<Solium>(&display_handle, &feedback),
+                );
+                tracing::info!("advertising nested dmabuf with device feedback");
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "no nested dmabuf feedback: clients will use shared memory"
+                );
+            }
+        }
     }
 
     let size = backend.window_size();

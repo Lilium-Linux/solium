@@ -22,6 +22,7 @@ use std::os::unix::io::{AsFd as _, AsRawFd as _};
 use std::time::Duration;
 
 mod crop;
+mod dmabuf;
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
@@ -257,6 +258,13 @@ xkb_symbols \"pc_ua_us_2_inet(evdev)\" {
 }
 
 fn main() {
+    if std::env::var_os("WL_PROBE_DMABUF").is_some() {
+        if let Err(err) = dmabuf::check() {
+            eprintln!("wl-probe: DMA-BUF feedback: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let connection = match Connection::connect_to_env() {
         Ok(connection) => connection,
         Err(err) => {

@@ -687,6 +687,19 @@ answer: the log line with `socket=` says which, and `dev/run-nested.sh` prints
 it. `wl-probe` exits non-zero if anything it asked for went unanswered, so it
 can be a gate.
 
+`WL_PROBE_DMABUF=1` binds version 4 of the DMA-BUF global and asks for both
+default and surface feedback. It checks the format table, tranche indices
+and main DRM device, so a format-only global cannot pass as usable feedback
+(#352). Run it against the nested socket after building `wl-probe`:
+
+    WL_PROBE_DMABUF=1 WAYLAND_DISPLAY=wayland-1 ./target/debug/wl-probe
+
+With Solium started using `SOLIUM_NO_DMABUF=1`, use
+`WL_PROBE_DMABUF=absent` instead to check the shared-memory fallback. A
+renderer without a discoverable render node also uses that fallback. These
+checks establish feedback availability; recording and portal streaming still
+need actual capture clients.
+
 It also anchors a bar to the top of every monitor with an exclusive zone and
 checks that each was configured to *that* monitor's width — a layer surface
 that landed on the wrong screen comes back with the wrong number, and there is
