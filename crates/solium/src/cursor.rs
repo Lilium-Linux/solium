@@ -9,7 +9,13 @@
 //! 1. **A client hands over pixels.** `wl_pointer.set_cursor` with a surface:
 //!    the client rasterised a cursor itself and we draw its buffer, hotspot
 //!    and all. `CursorImageStatus::Surface`, and `render.rs` draws it as a
-//!    surface tree rather than through this module.
+//!    surface tree rather than through this module. **Except XWayland's**
+//!    (#364): XWayland can only hand an X11 window's cursor over as pixels,
+//!    so while the X server says that cursor has a standard name — `left_ptr`,
+//!    `xterm`, `hand2` — [`Pointer::showing`] draws the surface as the shape
+//!    the name stands for, which makes it source two in all but the wire; see
+//!    [`x11`]. An X cursor with no name, or one we do not know, as a game's
+//!    own picture is, stays its pixels.
 //! 2. **A client names a shape.** `wp_cursor_shape_device_v1.set_shape`: the
 //!    client says "this is a text field" and leaves the picture to us. smithay
 //!    hands it over as `CursorImageStatus::Named`, and what becomes of that
@@ -90,6 +96,7 @@ pub(crate) mod flight;
 pub(crate) mod scene;
 pub(crate) mod shape;
 pub(crate) mod theme;
+pub(crate) mod x11;
 
 use std::{
     path::{Path, PathBuf},
@@ -110,6 +117,7 @@ use smithay::{
         },
     },
     input::pointer::{CursorIcon, CursorImageStatus},
+    reexports::wayland_server::backend::ClientId,
     utils::{IsAlive as _, Logical, Point, Rectangle, Size, Transform},
 };
 
@@ -697,6 +705,15 @@ pub(crate) struct Pointer {
     /// compositor can simply stop making: `assert(None)` and the client's own
     /// cursor is back, untouched and exact.
     chrome: Option<CursorIcon>,
+    /// What the X server says XWayland's cursor surface stands for, which
+    /// [`Pointer::showing`] draws in its place (#364).
+    ///
+    /// Beside `status` rather than written into it, for the reason `chrome`
+    /// is: the two arrive on different connections in either order, the
+    /// surface through `wl_pointer` and the name through XFixes, and whichever
+    /// comes second has to change the picture without the first being sent
+    /// again. Read at drawing time, the two always agree by the next frame.
+    x11: x11::Named,
     /// The theme and size, after `config.lua`, the environment and the
     /// built-in default have been consulted in that order. See
     /// [`theme::Settings::resolve`], which is where that order is argued.
@@ -727,6 +744,7 @@ impl Default for Pointer {
         Self {
             status: CursorImageStatus::default_named(),
             chrome: None,
+            x11: x11::Named::default(),
             // Resolved from the environment straight away, rather than waiting
             // for `sol.cursor`. `lua/init.lua` does call it, but a user who
             // copied `init.lua` into ~/.config/solium before this setting
@@ -795,6 +813,23 @@ impl Pointer {
         true
     }
 
+    /// XWayland is up, as `client`: its cursor surfaces are the ones the X
+    /// cursor's name may stand for. See [`x11`].
+    pub(crate) fn xwayland(&mut self, client: ClientId) {
+        self.x11.xwayland(client);
+    }
+
+    /// The X cursor now stands for `icon`, or for no shape we know.
+    ///
+    /// **Returns whether the picture may now be different**, which the caller
+    /// turns into damage, as [`Pointer::assert`] does: the name arrives on a
+    /// connection of its own, after or before the surface it describes, and a
+    /// stationary pointer produces no frame to show it in. `false` when the
+    /// name stands for the same shape it did.
+    pub(crate) fn x11(&mut self, icon: Option<CursorIcon>) -> bool {
+        self.x11.name(icon)
+    }
+
     /// What to draw this frame.
     ///
     /// **The only reader, because it is not a pure getter**: a client's cursor
@@ -837,6 +872,14 @@ impl Pointer {
         {
             self.status = CursorImageStatus::default_named();
         }
+        // XWayland's cursor surface, while the X cursor has a name we know, is
+        // drawn as the shape the name stands for; `status` keeps the surface,
+        // for the moment the name goes. See [`x11`].
+        if let CursorImageStatus::Surface(surface) = &self.status
+            && let Some(icon) = self.x11.of(surface)
+        {
+            return CursorImageStatus::Named(icon);
+        }
         self.status.clone()
     }
 
@@ -849,9 +892,10 @@ impl Pointer {
     }
 
     /// The named shape [`Pointer::showing`] would draw now, without its write:
-    /// the compositor's over its chrome, a client's named one, and the arrow
-    /// for a cursor surface that has died. `None` while a client's own cursor
-    /// surface is shown, or nothing is, because then no named shape is drawn.
+    /// the compositor's over its chrome, a client's named one, the one an X11
+    /// cursor's name stands for, and the arrow for a cursor surface that has
+    /// died. `None` while a client's own cursor surface is shown, or nothing
+    /// is, because then no named shape is drawn.
     /// `crate::models::pointer::tests::a_named_shape_reaches_solium_cursor_shape`.
     pub(crate) fn shape(&self) -> Option<CursorIcon> {
         if let Some(icon) = self.chrome {
@@ -860,7 +904,8 @@ impl Pointer {
         match &self.status {
             CursorImageStatus::Named(icon) => Some(*icon),
             CursorImageStatus::Surface(surface) if !surface.alive() => Some(CursorIcon::Default),
-            CursorImageStatus::Surface(_) | CursorImageStatus::Hidden => None,
+            CursorImageStatus::Surface(surface) => self.x11.of(surface),
+            CursorImageStatus::Hidden => None,
         }
     }
 

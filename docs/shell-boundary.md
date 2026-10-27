@@ -845,8 +845,11 @@ engine as every other scene and is given this
   surface, through `cursor-shape`, and for every one the compositor asserts
   over its own chrome: the arrow over a titlebar, the resize arrows on the
   edges. No theme is asked
-  (`models::pointer::tests::a_configured_scene_hears_every_named_shape`). A
-  window that attaches a cursor surface of its own, or hides the pointer, is
+  (`models::pointer::tests::a_configured_scene_hears_every_named_shape`).
+  An X11 window's cursor counts as named when the X server knows it by a
+  standard name, `left_ptr` or `xterm` or `hand2`
+  (`state::tests::real_client::x11_cursor::xwaylands_cursor_surface_is_drawn_as_the_shape_its_x_name_stands_for`).
+  A window that attaches a cursor surface of its own, or hides the pointer, is
   still drawn as it asked, over its own surface
   (`cursor::tests::a_pointer_a_client_hides_stays_hidden_with_a_scene_configured`).
 - **`Solium.cursor`**, published once a frame for as long as a pointer scene
