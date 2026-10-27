@@ -1025,8 +1025,11 @@ size it had, until the key puts it back. It stays floated through a reload.
 
 `super+shift+m` on a fullscreen window leaves fullscreen for maximised, or,
 for one that was maximised before it went fullscreen, for where it was before
-either. `super+f` and `super+shift+m` act on Wayland windows only for now: an
-X11 window under XWayland does not go fullscreen or maximised by key.
+either. Both keys act on an X11 window under XWayland as on a Wayland one,
+and so does the X11 window's own request: a game asking for
+`_NET_WM_STATE_FULLSCREEN` covers its monitor, and one that opens with no
+frame at exactly its monitor's size and position, as Wine and Proton games
+do, opens fullscreen.
 
 A fullscreen or maximised window stays so when it is moved. On its own monitor
 the move happens behind it: in tiling it trades tiles with the one that way,

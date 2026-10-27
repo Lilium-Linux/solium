@@ -154,6 +154,48 @@ pub(crate) const fn floats_over_its_parent(kind: Option<WmWindowType>) -> bool {
     matches!(kind, Some(WmWindowType::Dialog))
 }
 
+/// The monitor an X11 window asks to cover by the way it maps, if it does:
+/// with no frame, at exactly that monitor's rectangle.
+///
+/// **The request a fullscreen game makes before it maps cannot reach us
+/// otherwise.** EWMH has a client that is not mapped yet write
+/// `_NET_WM_STATE_FULLSCREEN` into its own property rather than send the
+/// message, and Wine and Proton do exactly that for a game started
+/// fullscreen; smithay never reads a client's own `_NET_WM_STATE` (the note on
+/// [`floats_over_its_parent`] says why), so the request is lost and the game
+/// was tiled under the bar, drawing at its monitor's size inside its tile
+/// (#361). What smithay does read is the rest of what such a window looks
+/// like: the Motif hints asking for no decorations, which Wine sets on every
+/// borderless window, and the rectangle the client placed it at.
+///
+/// **Both halves, exactly.** A window asking for no frame is not asking for
+/// fullscreen -- a launcher, a splash, a borderless tool window are all that
+/// and smaller. One with a frame at the monitor's size is a window that
+/// remembered being large, which `show_if_new` fits into the work area. And
+/// the position as well as the size: Wine places a fullscreen window at its
+/// monitor's origin in X's root coordinates, which XWayland lays out as the
+/// compositor lays out its monitors, so the rectangle names the monitor with
+/// no guessing between two of the same size, and an undecorated window the
+/// size of a monitor somewhere else -- half on one screen and half on another
+/// -- is not read as asking for either.
+///
+/// `asks_for_no_frame` is smithay's `X11Surface::is_decorated`, which, despite
+/// the name, answers whether the client is *client-side* decorated: whether
+/// its Motif hints set the decorations flag to none. Override-redirect needs
+/// no argument here: such a window never reaches `map_window_request`, where
+/// this is asked.
+/// `tests::an_undecorated_window_mapped_exactly_over_a_monitor_asks_for_fullscreen_on_it`.
+pub(crate) fn maps_fullscreen(
+    asks_for_no_frame: bool,
+    at: Rectangle<i32, Logical>,
+    monitors: impl IntoIterator<Item = Rectangle<i32, Logical>>,
+) -> Option<Rectangle<i32, Logical>> {
+    if !asks_for_no_frame {
+        return None;
+    }
+    monitors.into_iter().find(|monitor| *monitor == at)
+}
+
 /// `config.x11.hidden`, handed over by the shipped `init.lua`'s
 /// `sol.x11(config.x11)`: the `WM_CLASS` names [`asks_not_to_be_shown`] hides
 /// outright, the same way a menu or a `Dialog` is handled generically.
@@ -407,10 +449,16 @@ impl XWaylandShellHandler for Solium {
 impl Solium {
     /// The pane an X11 window is in, if it is in the space.
     fn x11_pane(&self, window: &X11Surface) -> Option<crate::pane::PaneId> {
+        self.x11_window(window)
+            .and_then(|element| self.panes.id_of(&element))
+    }
+
+    /// The `Window` an X11 window is, if it is in the space.
+    fn x11_window(&self, window: &X11Surface) -> Option<Window> {
         self.space
             .elements()
             .find(|element| element.x11_surface() == Some(window))
-            .and_then(|element| self.panes.id_of(element))
+            .cloned()
     }
 }
 
@@ -470,6 +518,15 @@ impl XwmHandler for Solium {
         // so this is the spot the client computed next to its button, not the
         // (0, 0) a window starts life at.
         let asked_for = window.geometry().loc;
+        // And whether it is asking, by how it maps, to cover a monitor: read
+        // here for the same reason, and acted on below, once it has a pane.
+        let covers = maps_fullscreen(
+            window.is_decorated(),
+            window.geometry(),
+            self.space
+                .outputs()
+                .filter_map(|output| self.space.output_geometry(output)),
+        );
         // Which process it is, read before the surface is moved into the
         // element, for `Windows`' `pid` and so a hidden window's close can
         // reach it too (#221's `close.rs`): `remember_client_pid` only ever
@@ -505,6 +562,11 @@ impl XwmHandler for Solium {
         }
         self.map_stacked(element.clone(), (0, 0), true);
         self.take_pane(element.clone());
+        // Fullscreen from the start, before anything has placed or framed it,
+        // so the game is never told a tile's size on its way to the monitor.
+        if let Some(screen) = covers {
+            self.fullscreen_from_the_start(&element, screen);
+        }
         // **X11's half of `refused_with_a_dialog`, and the place nearly every
         // one of them arrives.** An application answering `WM_DELETE_WINDOW`
         // with "save your changes?" creates the dialog with `WM_TRANSIENT_FOR`
@@ -810,6 +872,40 @@ impl XwmHandler for Solium {
         }
     }
 
+    /// An X11 client asking for fullscreen (`_NET_WM_STATE_FULLSCREEN`), and
+    /// to leave it: made as an xdg window's request is, through
+    /// `Solium::fullscreen` and `Solium::unfullscreen` (#361), on the monitor
+    /// the window is on. smithay's defaults dropped both, so a game asking
+    /// stayed in its tile under the bar. No test can make an X11 window, so the
+    /// shared path is tested through xdg windows, and this is checked by
+    /// reading it and nested with `x11-probe`.
+    fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(window) = self.x11_window(&window) {
+            self.fullscreen(&window, None);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(window) = self.x11_window(&window) {
+            self.unfullscreen(&window);
+        }
+    }
+
+    /// And to be maximised, or not (`_NET_WM_STATE_MAXIMIZED_HORZ` and
+    /// `_VERT`): `Solium::client_maximize`, which says what that does to a
+    /// window that is fullscreen.
+    fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(window) = self.x11_window(&window) {
+            self.client_maximize(&window, true);
+        }
+    }
+
+    fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(window) = self.x11_window(&window) {
+            self.client_maximize(&window, false);
+        }
+    }
+
     /// Whether an X11 client may read a selection a Wayland client owns.
     ///
     /// Yes, unless the session is locked. The default is `false`, which is the
@@ -1071,6 +1167,22 @@ impl XwmHandler for crate::tty::State {
         self.solium.unminimize_request(xwm, window);
     }
 
+    fn fullscreen_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.solium.fullscreen_request(xwm, window);
+    }
+
+    fn unfullscreen_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.solium.unfullscreen_request(xwm, window);
+    }
+
+    fn maximize_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.solium.maximize_request(xwm, window);
+    }
+
+    fn unmaximize_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.solium.unmaximize_request(xwm, window);
+    }
+
     fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
         self.solium.allow_selection_access(xwm, selection)
     }
@@ -1098,9 +1210,57 @@ impl XwmHandler for crate::tty::State {
 mod tests {
     use super::{
         Settings, asks_not_to_be_shown, floats_over_its_parent, is_hidden, kill_client,
-        places_itself, window_type_name,
+        maps_fullscreen, places_itself, window_type_name,
     };
-    use smithay::xwayland::xwm::WmWindowType;
+    use smithay::{
+        utils::{Logical, Rectangle},
+        xwayland::xwm::WmWindowType,
+    };
+
+    /// **#361: an undecorated window mapped exactly over a monitor asks for
+    /// fullscreen on it**, as a Wine or Proton game started fullscreen maps.
+    /// Two monitors of one size side by side, so the position is what picks
+    /// the monitor; and each half of the rule alone is not enough.
+    #[test]
+    fn an_undecorated_window_mapped_exactly_over_a_monitor_asks_for_fullscreen_on_it() {
+        let rect = |x, y, w, h| Rectangle::<i32, Logical>::new((x, y).into(), (w, h).into());
+        let left = rect(0, 0, 1920, 1080);
+        let right = rect(1920, 0, 1920, 1080);
+        let monitors = [left, right];
+        assert_eq!(
+            maps_fullscreen(true, left, monitors),
+            Some(left),
+            "a game covering the first monitor asks for it"
+        );
+        assert_eq!(
+            maps_fullscreen(true, right, monitors),
+            Some(right),
+            "and one covering the second asks for that one, not the first of \
+             the same size"
+        );
+        assert_eq!(
+            maps_fullscreen(false, left, monitors),
+            None,
+            "a window with a frame at the monitor's size remembered being \
+             large; it did not ask for fullscreen"
+        );
+        assert_eq!(
+            maps_fullscreen(true, rect(960, 0, 1920, 1080), monitors),
+            None,
+            "the size of a monitor, over two of them, is neither"
+        );
+        assert_eq!(
+            maps_fullscreen(true, rect(0, 0, 1280, 720), monitors),
+            None,
+            "a borderless window smaller than its monitor is a launcher or a \
+             splash"
+        );
+        assert_eq!(
+            maps_fullscreen(true, left, []),
+            None,
+            "with no monitor there is nothing to cover"
+        );
+    }
 
     /// **#221: a window named in `hidden` is hidden**, by either `WM_CLASS`
     /// field — class or instance, either one, is enough.

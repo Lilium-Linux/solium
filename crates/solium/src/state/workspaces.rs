@@ -113,16 +113,15 @@ pub(super) fn put_away(bound: crate::group::Shift) -> bool {
     dx != 0.0 || dy != 0.0 || !bound.apply(Frame::real(Rectangle::default())).shows()
 }
 
-/// Whether a window is fullscreen, as the compositor last told it: the
-/// state its next configure carries, which is set and unset in
-/// `fullscreen_request` and `unfullscreen_request`.
+/// Whether a window is fullscreen, as the compositor last told it, whichever
+/// kind it is: `window_states`, which `Solium::fullscreen` and
+/// `Solium::unfullscreen` set and unset. So an X11 window covers the bars as
+/// an xdg one does (#361).
 /// `leaving_fullscreen_puts_the_bar_back_on_top`, and what a rule's
 /// `fullscreen` match reads
 /// (`real_client::a_rule_on_fullscreen_applies_from_the_configure_that_sets_it`).
 pub(crate) fn fullscreen(window: &Window) -> bool {
-    window.toplevel().is_some_and(|toplevel| {
-        toplevel.with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))
-    })
+    window_states(window).fullscreen
 }
 
 impl Solium {

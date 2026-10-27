@@ -1336,9 +1336,7 @@ function sol.show_minimized(id, shown) end
 ---the compositor has acted, in a handler of its own; `reason` is
 ---`"unknown-action"`, `"unknown-window"`, `"bad-data"`, for a
 ---`windows.focus`, `windows.minimize` or `windows.unminimize` behind the lock
----`"locked"`, or, for a `windows.fullscreen`
----or `windows.maximize` of an X11 window, which the compositor cannot send
----there, `"unsupported"`. A window still
+---`"locked"`. A window still
 ---loading is `"unknown-window"` to all but `windows.close`. A `done` that
 ---calls `sol.act` again is told again in the same dispatch, 16 rounds at
 ---most, and the rest at the next one. Answers the attempt's id, one no
