@@ -44634,3 +44634,280 @@ fn both_loops_serve_what_wayland_clients_paste_from_x11() {
         );
     }
 }
+
+/// Where a monitor tells its clients it is.
+///
+/// A screenshot tool, a recorder and the screen-sharing portal lay the
+/// monitors out from `wl_output.geometry` and `zxdg_output_v1`'s
+/// `logical_position`, and `grim` takes even one named monitor by capturing
+/// every monitor that box overlaps and composing them where they say they
+/// are. So a monitor that says it is somewhere it is not is a screenshot of
+/// the wrong monitor. These tests read what a real client is sent.
+mod outputs {
+    use super::*;
+    use smithay::output::{Mode, PhysicalProperties, Subpixel};
+    use smithay::reexports::wayland_server::Display;
+    use std::collections::HashMap;
+    use std::os::unix::net::UnixStream;
+    use wayland_client::protocol::{wl_output, wl_registry};
+    use wayland_client::{Connection, Dispatch, EventQueue, Proxy as _, QueueHandle};
+    use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
+
+    /// A client that binds every monitor and asks where each one is, the
+    /// way grim does.
+    #[derive(Debug, Default)]
+    struct Client {
+        manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
+        outputs: Vec<wl_output::WlOutput>,
+        /// Each `wl_output`'s name, by its protocol id.
+        names: HashMap<u32, String>,
+        /// The last `wl_output.geometry` position, by the output's id.
+        geometry: HashMap<u32, (i32, i32)>,
+        /// The last `zxdg_output_v1.logical_position`, by the id of the
+        /// `wl_output` it was asked for.
+        logical: HashMap<u32, (i32, i32)>,
+    }
+
+    /// Where one monitor said it is: over `wl_output`, then over
+    /// `xdg_output`, each `None` until it has said.
+    type Told = (Option<(i32, i32)>, Option<(i32, i32)>);
+
+    impl Client {
+        /// What one monitor said, by name.
+        fn told(&self, name: &str) -> Told {
+            let id = self
+                .names
+                .iter()
+                .find(|(_, each)| each.as_str() == name)
+                .map(|(id, _)| *id);
+            id.map_or((None, None), |id| {
+                (
+                    self.geometry.get(&id).copied(),
+                    self.logical.get(&id).copied(),
+                )
+            })
+        }
+    }
+
+    impl Dispatch<wl_registry::WlRegistry, ()> for Client {
+        fn event(
+            state: &mut Self,
+            registry: &wl_registry::WlRegistry,
+            event: wl_registry::Event,
+            (): &(),
+            _conn: &Connection,
+            qh: &QueueHandle<Self>,
+        ) {
+            let wl_registry::Event::Global {
+                name, interface, ..
+            } = event
+            else {
+                return;
+            };
+            match interface.as_str() {
+                // Version 4, for `name`, which is how grim's `-o` finds one.
+                "wl_output" => state.outputs.push(registry.bind(name, 4, qh, ())),
+                "zxdg_output_manager_v1" => state.manager = Some(registry.bind(name, 3, qh, ())),
+                _ => {}
+            }
+        }
+    }
+
+    wayland_client::delegate_noop!(Client: ignore zxdg_output_manager_v1::ZxdgOutputManagerV1);
+
+    impl Dispatch<wl_output::WlOutput, ()> for Client {
+        fn event(
+            state: &mut Self,
+            output: &wl_output::WlOutput,
+            event: wl_output::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            let id = output.id().protocol_id();
+            match event {
+                wl_output::Event::Geometry { x, y, .. } => {
+                    state.geometry.insert(id, (x, y));
+                }
+                wl_output::Event::Name { name } => {
+                    state.names.insert(id, name);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The data is the id of the `wl_output` it describes.
+    impl Dispatch<zxdg_output_v1::ZxdgOutputV1, u32> for Client {
+        fn event(
+            state: &mut Self,
+            _xdg: &zxdg_output_v1::ZxdgOutputV1,
+            event: zxdg_output_v1::Event,
+            output: &u32,
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
+                state.logical.insert(*output, (x, y));
+            }
+        }
+    }
+
+    /// A client connected and done with its first round trips: it has
+    /// every monitor, and an `xdg_output` for each.
+    struct Connected {
+        conn: Connection,
+        queue: EventQueue<Client>,
+        client: Client,
+    }
+
+    impl Connected {
+        fn new(display: &mut Display<Solium>, state: &mut Solium) -> Self {
+            let (server_side, client_side) =
+                UnixStream::pair().expect("a socket pair for the test client");
+            display
+                .handle()
+                .insert_client(server_side, std::sync::Arc::new(ClientState::default()))
+                .expect("inserting the test client");
+            let conn = Connection::from_socket(client_side).expect("wrapping the client socket");
+            let queue = conn.new_event_queue::<Client>();
+            conn.display().get_registry(&queue.handle(), ());
+            let mut connected = Self {
+                conn,
+                queue,
+                client: Client::default(),
+            };
+            connected.round_trip(display, state);
+            let qh = connected.queue.handle();
+            let manager = connected
+                .client
+                .manager
+                .clone()
+                .expect("zxdg_output_manager_v1 bound");
+            for output in connected.client.outputs.clone() {
+                let id = output.id().protocol_id();
+                let _ = manager.get_xdg_output(&output, &qh, id);
+            }
+            connected.round_trip(display, state);
+            connected
+        }
+
+        /// Send what this client asked, let the server answer, read the
+        /// answer. Blocking is safe for the reason `data_control` gives: the
+        /// `sync` is answered by the server before the read, and nothing but
+        /// this thread drives it.
+        fn round_trip(&mut self, display: &mut Display<Solium>, state: &mut Solium) {
+            self.conn.display().sync(&self.queue.handle(), ());
+            self.conn.flush().expect("flushing the client's requests");
+            display
+                .dispatch_clients(state)
+                .expect("dispatching the client's requests");
+            display.flush_clients().expect("flushing to the clients");
+            self.queue
+                .blocking_dispatch(&mut self.client)
+                .expect("reading the server's answer");
+        }
+    }
+
+    wayland_client::delegate_noop!(Client: ignore wayland_client::protocol::wl_callback::WlCallback);
+
+    /// A 1920x1080 monitor made the way both backends make one: a global,
+    /// its location left at the origin, and mapped there for
+    /// `place_outputs` to move.
+    fn plugged(display: &Display<Solium>, state: &mut Solium, name: &str) -> Output {
+        let output = Output::new(
+            name.to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "solium".to_string(),
+                model: name.to_string(),
+            },
+        );
+        let _global = output.create_global::<Solium>(&display.handle());
+        output.change_current_state(
+            Some(Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(Scale::Fractional(1.0)),
+            Some((0, 0).into()),
+        );
+        state.space.map_output(&output, (0, 0));
+        output
+    }
+
+    /// `name` placed on `side` of `of`, the top or left edges lined up.
+    fn beside(name: &str, side: crate::monitor::Side, of: &str) -> crate::monitor::Placement {
+        crate::monitor::Placement {
+            name: name.to_string(),
+            at: None,
+            beside: Some((side, of.to_string(), crate::monitor::Align::Start)),
+            mode: crate::monitor::Wanted::default(),
+            vrr: None,
+            transform: None,
+            enabled: true,
+            primary: false,
+            scale: crate::monitor::Scaling::Fixed(1.0),
+        }
+    }
+
+    /// **The second monitor said it was at 0,0, wherever it was placed.**
+    ///
+    /// Seen on two 2560x1440 monitors side by side: the log said
+    /// `placed monitor="DP-2" x=2560 y=0`, and `wayland-info` said both
+    /// were at 0,0. `place_outputs` moved the monitor in the space and
+    /// never told the `Output`, whose location is what both protocols send.
+    /// So `grim -o DP-1` captured both monitors, composed them over each
+    /// other, and handed back the second one's picture: the wallpaper and
+    /// the bar, without the windows on the first. Without the change in
+    /// `place_outputs`, fails at "a client is told".
+    #[test]
+    fn a_placed_output_tells_its_clients_where_it_is() {
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        let left = plugged(&display, &mut state, "left");
+        let right = plugged(&display, &mut state, "right");
+        // Nothing configured: the second goes to the right of the first,
+        // which is what the hardware did.
+        state.place_outputs();
+        assert_eq!(
+            state.space.output_geometry(&right).map(|at| at.loc),
+            Some((1920, 0).into()),
+            "the premise: the second monitor is placed to the right"
+        );
+
+        let mut client = Connected::new(&mut display, &mut state);
+        assert_eq!(
+            client.client.told("right"),
+            (Some((1920, 0)), Some((1920, 0))),
+            "a client is told the second monitor is where it was placed, \
+             over wl_output and over xdg_output"
+        );
+        assert_eq!(client.client.told("left"), (Some((0, 0)), Some((0, 0))));
+
+        // Placed again, as a configuration read again places it, with the
+        // client already bound: it is told the new place, as the first is
+        // when it moves.
+        state.arrangement = crate::monitor::Arrangement::new(vec![beside(
+            "right",
+            crate::monitor::Side::Above,
+            "left",
+        )]);
+        state.place_outputs();
+        client.round_trip(&mut display, &mut state);
+        let (above, below) = (
+            state.space.output_geometry(&right).map(|at| at.loc),
+            state.space.output_geometry(&left).map(|at| at.loc),
+        );
+        let point = |at: Option<Point<i32, Logical>>| at.map(|at| (at.x, at.y));
+        assert_eq!(
+            client.client.told("right"),
+            (point(above), point(above)),
+            "a monitor moved while a client is bound tells it where it went"
+        );
+        assert_eq!(client.client.told("left"), (point(below), point(below)));
+        assert_ne!(above, below, "the premise: the two are not in one place");
+    }
+}

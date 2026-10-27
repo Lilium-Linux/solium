@@ -312,6 +312,20 @@ impl Solium {
         }
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         for (output, at) in outputs.iter().zip(layout.at) {
+            // Clients are told where it is, as well as the space. Mapping an
+            // output into the space moves it there and nowhere else:
+            // `wl_output.geometry` and `zxdg_output_v1.logical_position`
+            // send the `Output`'s own location, which only
+            // `change_current_state` sets. A tool that lays the monitors out
+            // from what they say (grim, the screen-sharing portal) composes
+            // its picture from those places, so a monitor that says the
+            // wrong one is a picture of the wrong monitor. Asked apart from
+            // the move below, so an output already in its place in the space
+            // is still told about it.
+            // `tests::outputs::a_placed_output_tells_its_clients_where_it_is`.
+            if output.current_location() != at {
+                output.change_current_state(None, None, None, Some(at));
+            }
             // Only when it actually moved. Remapping an output resets its
             // damage memory, so re-placing everything on every reload would
             // throw away damage tracking to achieve nothing -- and would log a
