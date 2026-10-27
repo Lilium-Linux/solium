@@ -901,6 +901,35 @@ draws, for `dev/present-check.sh`'s `menu` case. `WL_PROBE_CONNECT_ONLY=1`
 connects, counts the globals and leaves, for hunting what a client that never
 draws costs.
 
+### x11-probe
+
+`x11-probe` is `wl-probe`'s X11 twin, for the window-manager half no test can
+reach: the test binary cannot start XWayland, so an X11 window exists only in a
+real run, and nothing installed asks a window manager for fullscreen the way a
+game does (#361). Its window is one flat blue, so a capture shows where it is.
+
+    DISPLAY=:1 ./target/debug/x11-probe request
+    DISPLAY=:1 ./target/debug/x11-probe mapped
+
+`request` maps a 640x480 window and asks, through the `_NET_WM_STATE` client
+message, for fullscreen, to leave it, to be maximised and to be restored.
+`mapped` maps a window as a Wine or Proton game started fullscreen does: no
+frame (Motif hints), at exactly the first monitor's rectangle, with
+`_NET_WM_STATE_FULLSCREEN` in its own property; then it asks to leave, to be
+maximised and to be restored. Each step waits `X11_PROBE_HOLD` milliseconds,
+1500 by default, and prints the window's rectangle and state; the exit status
+is non-zero if any answer was not the one asked for. The display number is in
+Solium's log, on the line `XWayland is up`. A burst of captures beside it shows
+each step:
+
+    SOLIUM_CAPTURE=/tmp/x11.ppm SOLIUM_CAPTURE_FRAMES=18 SOLIUM_CAPTURE_INTERVAL=500 \
+        SOLIUM_CAPTURE_AT=1500 timeout -s TERM 13 ./target/debug/solium &
+    sleep 1; DISPLAY=:1 ./target/debug/x11-probe mapped
+
+The keys need no probe: `glxgears` is an ordinary X11 window, and
+`SOLIUM_TRIGGER_AT="3000:super+f,5000:super+f"` sends it fullscreen and back,
+which `xprop -name glxgears _NET_WM_STATE` reads from the X11 side.
+
 ## Hotplug, and how to test it without a cable
 
 Monitors arriving and leaving

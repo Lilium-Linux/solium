@@ -540,17 +540,6 @@ impl Solium {
             ("windows.minimize" | "windows.unminimize", Some(_)) if self.lock.is_some() => {
                 Err("locked")
             }
-            // An X11 window has no xdg toplevel, and `ToggleFullscreen` and
-            // `toggle_maximize` leave a window without one as it is, so
-            // `done` hears `unsupported` and not that it was done. No test
-            // can make an X11 window (an `X11Surface` needs a live XWayland,
-            // as the comment on `first_focus` in `state/open.rs` says), so
-            // this is checked by reading those two.
-            ("windows.fullscreen" | "windows.maximize", Some(window))
-                if window.toplevel().is_none() =>
-            {
-                Err("unsupported")
-            }
             _ => Ok(make(id)),
         }
     }

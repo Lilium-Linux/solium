@@ -31,6 +31,7 @@ file is out of date.
 | `crates/animation/`, `crates/layout/`, `crates/effects/` | Crates with no compositor in them: curves and springs, the window arrangements, and the effect format |
 | `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
+| `crates/x11-probe/` | An X11 client that asks the window manager for fullscreen and maximised, from outside |
 | `dev/` | Setup, the gate, the build image, and the nested and TTY harnesses |
 | `docs/` | The documentation site |
 

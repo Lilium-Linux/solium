@@ -802,12 +802,24 @@ impl Solium {
 
         // Sized to fit before it is placed, because where a window goes
         // depends on how big it is.
-        let size = self.fitted_size(window);
-        let location = self.initial_placement(window, size);
-        if size != window.geometry().size {
-            size_window(window, Rectangle::new(location, size));
+        //
+        // **Not a window that is fullscreen or maximised by now**: a player
+        // started with `--fs`, which asks before its first commit, or an X11
+        // game that mapped covering its monitor (#361). It has been told the
+        // monitor and put there, and fitting it into the work area told it the
+        // work area instead, still marked fullscreen, under the bar -- and an
+        // X11 window was moved off its monitor's corner by the cascade too.
+        // The layout hears it opened below, and leaves it where it is as it
+        // leaves every such window (`pane_laid_out`).
+        // `a_window_fullscreen_before_it_has_drawn_opens_over_the_bar_at_the_monitors_size`.
+        if !placement::over_the_arrangement(window) {
+            let size = self.fitted_size(window);
+            let location = self.initial_placement(window, size);
+            if size != window.geometry().size {
+                size_window(window, Rectangle::new(location, size));
+            }
+            self.map_stacked(window.clone(), location, true);
         }
-        self.map_stacked(window.clone(), location, true);
 
         // How a window appears is a script's decision — that is what makes the
         // dock-icon genie a script rather than a feature. The built-in is only

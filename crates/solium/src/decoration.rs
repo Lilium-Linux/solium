@@ -5243,8 +5243,8 @@ mod tests {
 
     /// **Issue #92, on a pane that really is framed.**
     ///
-    /// The calls below are `Solium::fullscreen_request`'s and then
-    /// `Solium::unfullscreen_request`'s, in their order: the frame is dropped,
+    /// The calls below are `Solium::fullscreen`'s and then
+    /// `Solium::unfullscreen`'s, in their order: the frame is dropped,
     /// the pane marked bare, the ban lifted and a new frame built. The rect a
     /// window goes back to lived on the `Decoration` until this issue, so the
     /// `remove` dropped it and the new frame came up without it.
@@ -5257,7 +5257,7 @@ mod tests {
     /// **A fullscreen window is drawn square**, so it keeps direct scanout,
     /// and a framed one, maximised included, keeps its corners: what
     /// `render::rounding` is asked of is the pane's frame's effects, and going
-    /// fullscreen drops the frame. The calls are `Solium::fullscreen_request`'s,
+    /// fullscreen drops the frame. The calls are `Solium::fullscreen`'s,
     /// in its order, on a pane really framed in the shipped `rounded` style,
     /// for the reason `a_rebuilt_frame_does_not_take_the_way_back_with_it`
     /// gives.

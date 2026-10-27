@@ -5,7 +5,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use smithay::desktop::Window;
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 
 use super::diff::Row;
 use crate::json::Json;
@@ -108,22 +107,12 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
 }
 
 /// Whether a window is fullscreen and maximised, as the compositor last set
-/// it: the state its next configure carries, which is how the compositor
-/// itself asks (`state::workspaces`' `fullscreen`), so nothing waits for the
-/// client (Section 2, rule 3).
+/// it: `state::window_states`, which is how the compositor itself asks, so
+/// nothing waits for the client (Section 2, rule 3).
 /// `state::tests::real_client::reflow_on_close::hosted::a_maximised_window_reads_maximized_at_once`.
 fn window_states(window: &Window) -> (bool, bool) {
-    if let Some(toplevel) = window.toplevel() {
-        return toplevel.with_pending_state(|state| {
-            (
-                state.states.contains(xdg_toplevel::State::Fullscreen),
-                state.states.contains(xdg_toplevel::State::Maximized),
-            )
-        });
-    }
-    window.x11_surface().map_or((false, false), |x11| {
-        (x11.is_fullscreen(), x11.is_maximized())
-    })
+    let states = crate::state::window_states(window);
+    (states.fullscreen, states.maximized)
 }
 
 /// Which process a window belongs to, from what each side can tell. An X11

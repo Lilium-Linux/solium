@@ -486,19 +486,10 @@ impl Solium {
                 // The client's own requests, made for it, so a key sends a
                 // window fullscreen exactly as the window asking would. See
                 // `a_script_toggles_fullscreen_and_maximised_as_the_client_would`.
+                // An X11 window's too, through the same path (#361).
                 Command::ToggleFullscreen { id } => {
-                    if let Some(toplevel) = self
-                        .window_by_id(id)
-                        .and_then(|window| window.toplevel().cloned())
-                    {
-                        let fullscreen = toplevel.with_pending_state(|state| {
-                            state.states.contains(xdg_toplevel::State::Fullscreen)
-                        });
-                        if fullscreen {
-                            XdgShellHandler::unfullscreen_request(self, toplevel);
-                        } else {
-                            XdgShellHandler::fullscreen_request(self, toplevel, None);
-                        }
+                    if let Some(window) = self.window_by_id(id) {
+                        self.toggle_fullscreen(&window);
                     }
                 }
                 Command::ToggleMaximize { id } => {

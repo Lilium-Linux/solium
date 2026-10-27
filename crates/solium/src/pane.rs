@@ -372,7 +372,7 @@ pub(crate) struct Pane {
     /// until the next sweep:** `tiling.apply` places every leaf of its trees,
     /// a script cannot see that a window is maximised, and a maximise takes no
     /// window out of its tree -- so a relayout while one is maximised, which
-    /// `unfullscreen_request` and a layer surface arriving each cause, puts it
+    /// `Solium::unfullscreen` and a layer surface arriving each cause, puts it
     /// back here and `move_pane` configures it into the tile. That configure
     /// is what stage did as well; it is read from `tiling.lua` and `move_pane`,
     /// and no test pins it.
@@ -404,9 +404,9 @@ pub(crate) struct Pane {
     /// for the way back to put it in again.
     ///
     /// Beside [`Self::restore`] and spent with it: written when
-    /// `Solium::toggle_maximize` or `Solium::fullscreen_request` takes the
+    /// `Solium::toggle_maximize` or `Solium::fullscreen` takes the
     /// pane out of [`Self::placed`], and taken by whichever of
-    /// `toggle_maximize` and `Solium::unfullscreen_request` puts the window
+    /// `toggle_maximize` and `Solium::unfullscreen` puts the window
     /// back at its restore rectangle. Without it a window restored into its
     /// tile would be a floating window inside a tiled layout until the next
     /// sweep, and an edge drag begun in between would start from the client's
@@ -415,9 +415,9 @@ pub(crate) struct Pane {
     left_tile: Option<Rectangle<i32, Logical>>,
     /// Where this window goes back to when it leaves maximised or fullscreen.
     ///
-    /// Written by `Solium::toggle_maximize` and `Solium::fullscreen_request`
+    /// Written by `Solium::toggle_maximize` and `Solium::fullscreen`
     /// before they move the window, and taken -- used once -- by whichever of
-    /// `toggle_maximize` and `Solium::unfullscreen_request` puts it back.
+    /// `toggle_maximize` and `Solium::unfullscreen` puts it back.
     ///
     /// **One slot for both**, so a window maximised and then sent fullscreen
     /// has the rect from before the maximise here. Leaving fullscreen leaves it
@@ -426,7 +426,7 @@ pub(crate) struct Pane {
     /// rect would be spent on a window that is still maximised.
     ///
     /// **A property of the window, not of its frame**, and it lived on the
-    /// frame until #92. `Solium::fullscreen_request` wrote it into the pane's
+    /// frame until #92. `Solium::fullscreen` wrote it into the pane's
     /// `Decoration` and then, two lines later, dropped that decoration so a
     /// fullscreen window has no titlebar; leaving fullscreen built a new one
     /// with this empty, so there was never a rect to put the window back at.

@@ -112,6 +112,7 @@ mod placement;
 mod press;
 mod resize_bridge;
 mod snapshot;
+mod window_state;
 mod workspaces;
 mod x11;
 
@@ -134,6 +135,7 @@ use placement::{Change, outer_of};
 #[cfg(test)]
 use snapshot::to_rect;
 pub(crate) use snapshot::{Limits, limits_of};
+pub(crate) use window_state::{States, states as window_states};
 use workspaces::nothing_on_stage;
 #[cfg(test)]
 use workspaces::{SETTLED, put_away, staged};

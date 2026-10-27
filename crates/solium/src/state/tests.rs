@@ -6402,6 +6402,85 @@ end)"#,
         );
     }
 
+    /// **#361: a window fullscreen before it has drawn opens over the bar,
+    /// at the monitor's size.**
+    ///
+    /// `show_if_new` fitted every window into the work area at its first
+    /// frame, fullscreen or not, so a player started with `--fs` under a bar
+    /// was told the work area's size while still marked fullscreen, and was
+    /// put below the bar. The X11 game that maps covering its monitor goes
+    /// fullscreen at the same moment, before it has drawn, and takes the same
+    /// path; no test can make an X11 window, so this one stands for both.
+    #[test]
+    fn a_window_fullscreen_before_it_has_drawn_opens_over_the_bar_at_the_monitors_size() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+
+        let (conn, mut event_queue, mut client) = connect(&mut display, &mut state);
+        let qh = event_queue.handle();
+        let _bar = bar(&mut display, &mut state, &conn, &client, &qh, 30);
+        let work = state.work_area_on(&output).expect("the monitor is mapped");
+        assert_ne!(
+            work, screen,
+            "the bar holds the top of the screen, or the work area is the \
+             monitor and nothing below can tell the two apart"
+        );
+
+        let compositor = client.compositor.clone().expect("wl_compositor bound");
+        let wm_base = client.wm_base.clone().expect("xdg_wm_base bound");
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        toplevel.set_fullscreen(None);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut event_queue,
+            &mut client,
+        );
+        let window = state
+            .space
+            .elements()
+            .next()
+            .cloned()
+            .expect("new_toplevel maps a window before it has drawn anything");
+
+        commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut event_queue,
+            &mut client,
+        );
+
+        assert!(in_state(&window, State::Fullscreen));
+        assert_eq!(
+            last_configured(&client, &toplevel),
+            Some((screen.size.w, screen.size.h)),
+            "its first frame did not fit it into the work area: it is told \
+             the monitor's size, which is what fullscreen told it"
+        );
+        assert_eq!(
+            state.real_geometry(&window),
+            Some(screen),
+            "and it covers the monitor, bar and all"
+        );
+    }
+
     /// **#49: going fullscreen or maximised, and coming back, is drawn
     /// moving**, through the placement path and the transform a layout's
     /// glide uses, on the one clock.

@@ -783,9 +783,7 @@ hears once whether it was done, after it was; `reason` is `"unknown-action"`,
 `"unknown-window"`, `"bad-data"`, for a `windows.focus`, `windows.minimize` or
 `windows.unminimize` behind the lock `"locked"`
 (`state::tests::real_client::lock_focus::sol_act_minimize_behind_the_lock_is_answered_locked`),
-or, for a `windows.fullscreen` or `windows.maximize` of an X11
-window, which the compositor cannot send there, `"unsupported"` (no test can
-make an X11 window, so that one is read in `Solium::act`), and a window still
+and a window still
 loading, one `sol.windows()` lists before its application has arrived, is
 `"unknown-window"` to all but `windows.close`
 (`script::tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,

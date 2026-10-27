@@ -52,15 +52,11 @@ pub(crate) enum Change {
 }
 
 /// Whether this window is fullscreen or maximised, as the compositor last
-/// decided it: in the pending state, which is what `Solium::toggle_maximize`
-/// and the fullscreen requests write.
-fn over_the_arrangement(window: &Window) -> bool {
-    window.toplevel().is_some_and(|toplevel| {
-        toplevel.with_pending_state(|state| {
-            state.states.contains(xdg_toplevel::State::Fullscreen)
-                || state.states.contains(xdg_toplevel::State::Maximized)
-        })
-    })
+/// decided it, whichever kind it is: `window_states`, which is what
+/// `Solium::toggle_maximize` and `Solium::fullscreen` write.
+pub(super) fn over_the_arrangement(window: &Window) -> bool {
+    let states = window_states(window);
+    states.fullscreen || states.maximized
 }
 
 /// Tell the client whether it is tiled: all four `tiled_*` states, or none
@@ -688,9 +684,6 @@ impl Solium {
         else {
             return;
         };
-        let Some(toplevel) = window.toplevel().cloned() else {
-            return;
-        };
         let Some(here) = self
             .pane_outer_of(pane)
             .and_then(|outer| self.output_of(outer))
@@ -706,8 +699,7 @@ impl Solium {
         ) else {
             return;
         };
-        let fullscreen = toplevel
-            .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen));
+        let fullscreen = window_states(&window).fullscreen;
         let rect = if fullscreen {
             Some(screen)
         } else {
@@ -722,10 +714,14 @@ impl Solium {
             held.set_restore(back);
             held.set_slot(rect);
         }
-        toplevel.with_pending_state(|state| state.size = Some(rect.size));
-        if toplevel.is_initial_configure_sent() {
-            toplevel.send_pending_configure();
-        }
+        // The whole rectangle, which an X11 window needs: `map_stacked` moves
+        // it in the space and tells its client nothing.
+        window_state::tell(
+            &window,
+            Some(rect),
+            None,
+            window_state::Sending::OnceConfigured,
+        );
         self.map_stacked(window, rect.loc, false);
         self.redraw = true;
         tracing::debug!(
@@ -1162,39 +1158,34 @@ impl Solium {
         let Some(id) = self.panes.id_of(window) else {
             return;
         };
-        let Some(toplevel) = window.toplevel().cloned() else {
+        // Either kind (#361), but never a window that places itself: an X11
+        // menu, tooltip or override-redirect window is not the compositor's
+        // to size, as `Solium::fullscreen` says too.
+        if !self.panes.get(id).is_some_and(Pane::managed) {
             return;
-        };
+        }
 
         // **A fullscreen window leaves fullscreen for it.** Its way back is the
-        // one slot on the pane, kept for `unfullscreen_request`, and toggled
+        // one slot on the pane, kept for `unfullscreen`, and toggled
         // from here it was spent: the window stayed fullscreen with nothing
         // kept, and leaving fullscreen then had nowhere to go. So the
         // maximised state under the fullscreen one is flipped, and the window
-        // leaves fullscreen into it -- which is what `unfullscreen_request`
+        // leaves fullscreen into it -- which is what `unfullscreen`
         // does already for a window that was maximised when it went
         // fullscreen, the kept rect and the tile included.
         // `maximising_a_fullscreen_window_leaves_fullscreen_for_it`.
-        let (fullscreen, was_maximized) = toplevel.with_pending_state(|state| {
-            (
-                state.states.contains(xdg_toplevel::State::Fullscreen),
-                state.states.contains(xdg_toplevel::State::Maximized),
-            )
-        });
+        let States {
+            fullscreen,
+            maximized: was_maximized,
+        } = window_states(window);
         if fullscreen {
-            toplevel.with_pending_state(|state| {
-                if was_maximized {
-                    state.states.unset(xdg_toplevel::State::Maximized);
-                } else {
-                    state.states.set(xdg_toplevel::State::Maximized);
-                }
-            });
-            XdgShellHandler::unfullscreen_request(self, toplevel);
+            window_state::write_maximized(window, !was_maximized);
+            self.unfullscreen(window);
             return;
         }
 
         // Where it stands, which is the way back it keeps below, as
-        // `fullscreen_request` keeps one.
+        // `fullscreen` keeps one.
         // `turning_round_part_of_the_way_out_keeps_the_way_back`.
         let Some(current) = self.standing(window) else {
             return;
@@ -1219,7 +1210,7 @@ impl Solium {
             // has gone since, see `back_on_a_screen`.
             Some(previous) => (Some(self.back_on_a_screen(window, previous)), false),
             // Maximised with no way back kept: a window that went fullscreen
-            // before it had drawn, so `fullscreen_request` kept no rect, and
+            // before it had drawn, so `fullscreen` kept no rect, and
             // was maximised from there. Restored as leaving fullscreen restores
             // it, with no rect and so no size, and the client picks its own;
             // maximising it again left the key dead for a press.
@@ -1246,18 +1237,10 @@ impl Solium {
             }
         });
 
-        toplevel.with_pending_state(|state| {
-            state.size = back.map(|back| back.size);
-            set_tiled(state, tiled);
-            if maximized {
-                state.states.set(xdg_toplevel::State::Maximized);
-            } else {
-                state.states.unset(xdg_toplevel::State::Maximized);
-            }
-        });
-        toplevel.send_pending_configure();
+        window_state::write_maximized(window, maximized);
+        window_state::tell(window, back, Some(tiled), window_state::Sending::Now);
         if let Some(back) = back {
-            // The slot as well as the space, as `unfullscreen_request` writes
+            // The slot as well as the space, as `unfullscreen` writes
             // both: it is what `transition` moves the picture to.
             if let Some(pane) = self.panes.get_mut(id) {
                 pane.set_slot(back);
@@ -1267,7 +1250,7 @@ impl Solium {
         // Back in a tile, and the layout says where that is now: a sweep while
         // the window was maximised kept the tile it gave, which need not be the
         // one the window left -- a move by key traded it for its neighbour's --
-        // so it is asked, as `unfullscreen_request` asks.
+        // so it is asked, as `unfullscreen` asks.
         // `a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is`.
         if tiled {
             self.trigger_relayout();
@@ -1295,7 +1278,7 @@ impl Solium {
     /// The frame's height comes out of the client's share, which is the same
     /// arithmetic as placement: a maximised window and its frame together fill
     /// the work area exactly. Asked by [`Self::toggle_maximize`], and by
-    /// `unfullscreen_request` for a window that was maximised when it went
+    /// `unfullscreen` for a window that was maximised when it went
     /// fullscreen and so goes back to being maximised.
     pub(super) fn maximised(
         &self,
