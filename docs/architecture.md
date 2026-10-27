@@ -28,7 +28,7 @@ modules; their geometry calculations use the layout crate.
 | Effect definitions | Geometry and fragment effects | `crates/solium/effects/` |
 | Compositor | Protocols, state, input, script API, scene hosting, frame scheduling | `crates/solium/src/` |
 | Reusable calculations | Animation, layout, deformation and effect formats | `crates/animation/`, `crates/layout/`, `crates/effects/` |
-| External probes | Protocol checks from a separate Wayland client | `crates/wl-probe/`, `dev/` |
+| External probes | Protocol checks from a separate Wayland client, and window-manager checks from a separate X11 one | `crates/wl-probe/`, `crates/x11-probe/`, `dev/` |
 
 The animation, layout and effects crates keep calculations independent of the
 compositor. They do not choose desktop policy.

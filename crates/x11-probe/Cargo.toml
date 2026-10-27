@@ -1,0 +1,22 @@
+[package]
+name    = "x11-probe"
+version.workspace    = true
+edition.workspace    = true
+rust-version.workspace = true
+license.workspace    = true
+repository.workspace = true
+publish = false
+
+# An X11 client, for the window-manager half of Solium that no test can reach:
+# the test binary cannot start XWayland, so an `X11Surface` exists only with a
+# real one, and no X11 tool on a developer's machine asks for fullscreen or
+# maps a window the way a Wine game does (#361). wl-probe is the Wayland twin.
+[dependencies]
+# Already in the dependency graph through smithay, at this version: the pure
+# Rust connection, and RandR to find a monitor's rectangle.
+x11rb = { version = "0.13", features = ["randr"] }
+
+# Not the workspace lints, for wl-probe's reason: a probe run by hand may panic,
+# and a backtrace is what it should give when the answer is absurd.
+[lints.rust]
+unsafe_code = "warn"

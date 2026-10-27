@@ -3123,6 +3123,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "x11-probe"
+version = "0.0.0"
+dependencies = [
+ "x11rb",
+]
+
+[[package]]
 name = "x11rb"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
