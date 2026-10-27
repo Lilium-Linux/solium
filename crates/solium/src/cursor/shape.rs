@@ -174,7 +174,7 @@ pub(crate) fn resolve(icon: CursorIcon, mut has: impl FnMut(&str) -> bool) -> Op
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use smithay::input::pointer::CursorIcon;
 
     use super::{names, resolve};
@@ -185,7 +185,7 @@ mod tests {
     /// `#[non_exhaustive]` and has no iterator: there is no way to ask the
     /// crate for its variants, so the list is maintained here and the count
     /// below is what catches it drifting.
-    const EVERY: [CursorIcon; 36] = [
+    pub(crate) const EVERY: [CursorIcon; 36] = [
         CursorIcon::Default,
         CursorIcon::ContextMenu,
         CursorIcon::Help,

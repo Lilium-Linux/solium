@@ -408,8 +408,10 @@ local defaults = {
     --           `pointer`, `ew-resize`...), `pressed`, `velocity`, `scale`
     --           and `size`. It sets `Solium.cursor.hotspot` on its root, and
     --           is as big as its root says, so a glow can reach past `size`.
-    --           It may animate. A window that draws its own cursor, or hides
-    --           it as a game does, still does over its own surface.
+    --           It may animate. An X11 window's standard cursors (`left_ptr`,
+    --           `xterm`, `hand2`...) are drawn by it too. A window that draws
+    --           its own cursor, or hides it as a game does, still does over
+    --           its own surface.
     --           `SOLIUM_QML_CURSOR=<file>` is the scene for one run, over this.
     --           docs/ricing.md has an example.
     --   theme   the name of an XCursor theme -- a directory under ~/.icons,

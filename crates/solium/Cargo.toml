@@ -109,6 +109,11 @@ inotify = { version = "0.11", default-features = false }
 png = "0.18"
 # Audio (#347): PipeWire's native protocol, on a thread of its own.
 pipewire = "0.10"
+# The names of the cursors X11 windows show (#364), heard through XFixes on a
+# connection to XWayland of our own: `src/cursor/x11.rs`. Already in the
+# lockfile with this feature through smithay's `xwayland`, which keeps its own
+# connection private, so this only adds an edge to the graph.
+x11rb = { version = "0.13", default-features = false, features = ["xfixes"] }
 
 [build-dependencies]
 # Qt Quick is hosted in-process, so a small C++ shim is compiled in. See

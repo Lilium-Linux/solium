@@ -394,6 +394,10 @@ where
                 solium.x11_display = Some(display_number);
                 tracing::info!(display = display_number, "XWayland is up");
                 solium.session.x11(Some(display_number));
+                // Its cursor surfaces are drawn as the shapes their X names
+                // stand for, which a connection of our own hears (#364).
+                solium.pointer.xwayland(client.id());
+                crate::cursor::x11::watch(&loop_handle, display_number);
             }
             Err(err) => {
                 tracing::warn!(?err, "could not manage XWayland's windows");

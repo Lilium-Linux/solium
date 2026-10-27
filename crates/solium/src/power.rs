@@ -89,8 +89,9 @@
 //! sway's behaviour, for anyone who wants it.
 //! `a_window_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`.
 //!
-//! The layer and lock surfaces on a dark monitor are told exactly as a window
-//! shown only there is, by the same code (#149,
+//! The layer and lock surfaces on a dark monitor, and a cursor surface while
+//! the pointer is on one, are told exactly as a window shown only there is,
+//! by the same code (#149,
 //! `a_layer_surface_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`,
 //! `a_lock_surface_is_told_to_draw_while_locked`).
 //!
@@ -103,6 +104,7 @@ use std::time::Duration;
 
 use smithay::{
     desktop::{LayerSurface, Window, layer_map_for_output, utils::send_frames_surface_tree},
+    input::pointer::CursorImageStatus,
     output::Output,
     reexports::{
         wayland_protocols_wlr::output_power_management::v1::server::{
@@ -420,14 +422,34 @@ impl Solium {
         )
     }
 
-    /// What only `output` draws: every layer surface in its layer map, and
-    /// the lock surface for it while the session is locked.
+    /// What only `output` draws: every layer surface in its layer map, the
+    /// lock surface for it while the session is locked, and a client's cursor
+    /// surface while the pointer is on it.
+    ///
+    /// **The cursor surface is told even while a named shape is drawn in its
+    /// place** (#364). XWayland attaches an X11 window's next cursor image
+    /// only once the last one's frame callback is done, so a cursor surface
+    /// never told stays at the first picture it was given: an X cursor that
+    /// loses its name, a game's own, would come back as whatever XWayland drew
+    /// first, and an animated one would never move. Told on every refresh of
+    /// the pointer's monitor, it is always the client's latest picture
+    /// (`state::tests::real_client::x11_cursor::a_cursor_surface_is_told_to_draw_on_the_pointers_monitor`).
     fn drawn_only_on(&self, output: &Output, mut each: impl FnMut(Paced<'_>)) {
         for layer in layer_map_for_output(output).layers() {
             each(Paced::Layer(layer));
         }
         if let Some(surface) = self.lock.as_ref().and_then(|lock| lock.surface_for(output)) {
             each(Paced::Lock(surface.wl_surface()));
+        }
+        if let CursorImageStatus::Surface(surface) = self.pointer.said() {
+            let at = self
+                .seat
+                .get_pointer()
+                .map(|pointer| pointer.current_location())
+                .unwrap_or_default();
+            if self.output_at(at.to_i32_round()).as_ref() == Some(output) {
+                each(Paced::Cursor(&surface));
+            }
         }
     }
 
@@ -511,6 +533,9 @@ enum Paced<'a> {
     Window(&'a Window),
     Layer(&'a LayerSurface),
     Lock(&'a WlSurface),
+    /// A client's cursor surface, and any subsurfaces it has, told as a lock
+    /// surface is. See `Solium::drawn_only_on`.
+    Cursor(&'a WlSurface),
 }
 
 impl Paced<'_> {
@@ -524,7 +549,7 @@ impl Paced<'_> {
         match self {
             Self::Window(window) => window.send_frame(output, time, Some(throttle), primary),
             Self::Layer(layer) => layer.send_frame(output, time, Some(throttle), primary),
-            Self::Lock(surface) => {
+            Self::Lock(surface) | Self::Cursor(surface) => {
                 send_frames_surface_tree(surface, output, time, Some(throttle), primary);
             }
         }

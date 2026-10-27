@@ -1795,7 +1795,13 @@ and then in the shipped QML
 (`cursor::theme::tests::the_environment_overrides_the_configured_scene`).
 It draws every shape a window or the compositor asks for, ahead of any
 XCursor theme, and is told which one
-(`models::pointer::tests::a_configured_scene_hears_every_named_shape`). A
+(`models::pointer::tests::a_configured_scene_hears_every_named_shape`).
+That includes X11 windows, such as Steam: their arrow, I-beam and hand are
+handed over as pictures, but the X server knows them by name (`left_ptr`,
+`xterm`, `hand2`, and so on), and a cursor with a name it knows is drawn as
+that shape
+(`state::tests::real_client::x11_cursor::xwaylands_cursor_surface_is_drawn_as_the_shape_its_x_name_stands_for`,
+`cursor::x11::tests::the_x11_names_are_the_shapes_they_mean`). A
 window that sets a cursor of its own, or hides the pointer as a game does,
 still does over its own surface
 (`cursor::tests::a_pointer_a_client_hides_stays_hidden_with_a_scene_configured`).

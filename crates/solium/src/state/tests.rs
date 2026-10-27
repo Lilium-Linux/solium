@@ -3155,6 +3155,9 @@ mod real_client {
         /// `wl_pointer.button` names no surface, so which window was
         /// clicked is only this end's to say.
         pointer_on: Option<u32>,
+        /// The serial of the last `wl_pointer.enter`, which a cursor surface
+        /// is set with.
+        pointer_entered: Option<u32>,
         clicked_on: Vec<Option<u32>>,
         /// Raw wl_touch events, preserving slot ids, coordinates and frames.
         touches: Vec<wl_touch::Event>,
@@ -3199,8 +3202,11 @@ mod real_client {
             _qh: &QueueHandle<Self>,
         ) {
             match event {
-                wl_pointer::Event::Enter { surface, .. } => {
+                wl_pointer::Event::Enter {
+                    serial, surface, ..
+                } => {
                     state.pointer_on = Some(wayland_client::Proxy::id(&surface).protocol_id());
+                    state.pointer_entered = Some(serial);
                 }
                 wl_pointer::Event::Leave { .. } => state.pointer_on = None,
                 wl_pointer::Event::Button {
@@ -43599,6 +43605,255 @@ sol.bind("super+y", function() sol.unminimize(last) end)
                     "(said, the pid the row carries)"
                 );
             }
+        }
+    }
+
+    /// **#364: an X11 window's pointer**, against a real client and a real
+    /// cursor surface.
+    ///
+    /// The test client stands in for XWayland: which client XWayland is, is
+    /// all `Pointer` is told of it, and this binary cannot start XWayland
+    /// (see `a_managed_x11_window_is_offered_the_keyboard_as_an_xdg_one_is`).
+    /// What the X server says the cursor is called arrives through
+    /// `Pointer::x11`, which is all the connection in `cursor::x11` does with
+    /// a name once it has one.
+    mod x11_cursor {
+        use super::*;
+
+        /// Two monitors side by side, one client's window on the left-hand
+        /// one with the pointer over it, and the client's cursor surface set.
+        struct Desk {
+            display: Display<Solium>,
+            state: Solium,
+            conn: Connection,
+            queue: wayland_client::EventQueue<Client>,
+            qh: QueueHandle<Client>,
+            client: Client,
+            window: Window,
+            pointer: wl_pointer::WlPointer,
+            cursor: wl_surface::WlSurface,
+            /// The serial of the pointer's `enter`, which sets a cursor.
+            serial: u32,
+            /// The monitor the pointer is on, and the other.
+            left: Output,
+            right: Output,
+        }
+
+        impl Desk {
+            fn new() -> Self {
+                let mut display =
+                    Display::<Solium>::new().expect("creating a test wayland display");
+                let mut state = Solium::new(display.handle());
+                // See the #99 test: a Qt scene in a process holding a
+                // libwayland connection of its own aborts the test binary.
+                state
+                    .decorations
+                    .set_style(&mut state.panes, Some("none".to_string()));
+                let (left, right) = side_by_side(&mut state, "x11-cursor-test");
+                let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+                let qh = queue.handle();
+                let (window, _toplevel, _surface) =
+                    open_surface(&mut display, &mut state, &conn, &client, &qh);
+                state.sync_panes();
+                state.space.map_element(window.clone(), (600, 500), false);
+                state.space.refresh();
+                state.clock.advance(Duration::from_secs(1));
+                let now = state.clock.now();
+                state.settle(now);
+                let pointer = client.seat_pointer(&qh);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                let over = state
+                    .space
+                    .element_geometry(&window)
+                    .expect("the window is in the space")
+                    .to_f64();
+                move_pointer(
+                    &mut state,
+                    (
+                        over.loc.x + over.size.w / 2.0,
+                        over.loc.y + over.size.h / 2.0,
+                    ),
+                    1_000,
+                );
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                let serial = client
+                    .pointer_entered
+                    .expect("the premise: the window was told the pointer entered");
+                let compositor = client.compositor.clone().expect("wl_compositor bound");
+                let cursor = compositor.create_surface(&qh, ());
+                pointer.set_cursor(serial, Some(&cursor), 0, 0);
+                let mut desk = Self {
+                    display,
+                    state,
+                    conn,
+                    queue,
+                    qh,
+                    client,
+                    window,
+                    pointer,
+                    cursor,
+                    serial,
+                    left,
+                    right,
+                };
+                desk.pump();
+                assert!(
+                    matches!(desk.state.pointer.showing(), CursorImageStatus::Surface(_)),
+                    "the premise: the client's cursor surface is shown"
+                );
+                desk
+            }
+
+            fn pump(&mut self) {
+                pump(
+                    &mut self.display,
+                    &mut self.state,
+                    &self.conn,
+                    &self.qh,
+                    &mut self.queue,
+                    &mut self.client,
+                );
+            }
+
+            /// This client is XWayland.
+            fn be_xwayland(&mut self) {
+                let owner = self
+                    .window
+                    .wl_surface()
+                    .and_then(|surface| surface.client())
+                    .expect("the window has a client")
+                    .id();
+                self.state.pointer.xwayland(owner);
+            }
+
+            /// What is drawn, as a shape or as the client's own pixels.
+            fn drawn(&mut self) -> (Option<CursorIcon>, bool) {
+                let shown = match self.state.pointer.showing() {
+                    CursorImageStatus::Named(icon) => Some(icon),
+                    _ => None,
+                };
+                let pixels = matches!(self.state.pointer.showing(), CursorImageStatus::Surface(_));
+                assert_eq!(
+                    self.state.pointer.shape(),
+                    shown,
+                    "the pointer scene was told something other than what is drawn"
+                );
+                (shown, pixels)
+            }
+        }
+
+        /// **XWayland's cursor surface is drawn as the shape its X name stands
+        /// for**: a name known while the surface is another client's changes
+        /// nothing; once the client is XWayland, the surface is drawn as the
+        /// shape and the pointer scene is told it; with no name known it is
+        /// the client's own pixels again; and a pointer the client hides
+        /// stays hidden whatever the X cursor is called.
+        #[test]
+        fn xwaylands_cursor_surface_is_drawn_as_the_shape_its_x_name_stands_for() {
+            let mut desk = Desk::new();
+            let text = Some(CursorIcon::Text);
+            assert!(
+                desk.state.pointer.x11(text),
+                "a new name did not ask for a frame"
+            );
+            assert!(
+                !desk.state.pointer.x11(text),
+                "the same name asked for a frame"
+            );
+            assert_eq!(
+                desk.drawn(),
+                (None, true),
+                "a surface not XWayland's was drawn as the X cursor's shape"
+            );
+
+            desk.be_xwayland();
+            assert_eq!(
+                desk.drawn(),
+                (text, false),
+                "XWayland's surface was not drawn as the X cursor's shape"
+            );
+            assert!(
+                matches!(desk.state.pointer.said(), CursorImageStatus::Surface(_)),
+                "the surface was thrown away for the shape"
+            );
+
+            assert!(desk.state.pointer.x11(None));
+            assert_eq!(
+                desk.drawn(),
+                (None, true),
+                "a cursor with no name known was not the client's own pixels"
+            );
+
+            desk.state.pointer.x11(text);
+            let serial = desk.serial;
+            desk.pointer.set_cursor(serial, None, 0, 0);
+            desk.pump();
+            assert!(
+                matches!(desk.state.pointer.showing(), CursorImageStatus::Hidden)
+                    && desk.state.pointer.shape().is_none(),
+                "a pointer XWayland hid was drawn"
+            );
+        }
+
+        /// **A cursor surface is told to draw on the pointer's monitor**, and
+        /// only there, including while a named shape is drawn in its place:
+        /// XWayland attaches the next picture only once the last one's frame
+        /// is done, so a surface never told would be stale the moment its X
+        /// cursor lost its name.
+        ///
+        /// With cursor surfaces left out of `Solium::drawn_only_on`, fails at
+        /// "the pointer's monitor did not tell the cursor surface".
+        #[test]
+        fn a_cursor_surface_is_told_to_draw_on_the_pointers_monitor() {
+            let mut desk = Desk::new();
+            desk.be_xwayland();
+            desk.state.pointer.x11(Some(CursorIcon::Text));
+            assert_eq!(desk.drawn(), (Some(CursorIcon::Text), false));
+            let (left, right) = (desk.left.clone(), desk.right.clone());
+            let at = desk
+                .state
+                .seat
+                .get_pointer()
+                .map(|pointer| pointer.current_location())
+                .unwrap_or_default();
+            assert_eq!(
+                desk.state.output_at(at.to_i32_round()).as_ref(),
+                Some(&left),
+                "the premise: the pointer is on the left-hand monitor"
+            );
+            desk.cursor.frame(&desk.qh, FrameDone);
+            desk.cursor.commit();
+            desk.pump();
+            let refresh = Duration::from_millis(16);
+
+            desk.state
+                .send_frames_on(&right, Duration::from_millis(16), refresh);
+            desk.pump();
+            assert_eq!(
+                desk.client.frames_done, 0,
+                "a monitor the pointer is not on told the cursor surface to draw"
+            );
+            desk.state
+                .send_frames_on(&left, Duration::from_millis(32), refresh);
+            desk.pump();
+            assert_eq!(
+                desk.client.frames_done, 1,
+                "the pointer's monitor did not tell the cursor surface to draw"
+            );
         }
     }
 }
