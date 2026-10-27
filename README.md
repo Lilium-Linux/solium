@@ -46,8 +46,10 @@ window-frame rendering, rather than the current desktop appearance.
 | Session integration | External lockers through session-lock, idle inhibition, logind lock/sleep integration, systemd and XDG autostart |
 
 Implementation is not a guarantee that every application or device works.
-Important gaps include input methods, clipboard managers, explicit sync,
-multi-GPU output, compositor touch/gestures and end-to-end portal validation.
+Important gaps include input methods, clipboard managers, multi-GPU output,
+compositor touch/gestures and end-to-end portal validation. Explicit DRM sync
+is available on capable devices; Vulkan/NVIDIA hardware validation remains
+tracked in [#59](https://github.com/Lilium-Linux/solium/issues/59).
 [Known limitations](docs/gaps.md) explains these and links to their issues.
 
 ## Building

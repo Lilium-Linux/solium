@@ -7,11 +7,18 @@
 use super::*;
 
 impl CompositorHandler for Solium {
+    fn new_surface(&mut self, surface: &WlSurface) {
+        self.explicit_sync.surface(surface);
+    }
+
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        if let Some(state) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &state.compositor_state;
+        }
         match client.get_data::<ClientState>() {
             Some(state) => &state.compositor_state,
             // Smithay only calls this for clients we created with ClientState,
@@ -28,6 +35,7 @@ impl CompositorHandler for Solium {
         // Imports the client's attached buffer into renderer-visible state.
         // Without it every surface is silently empty: the window maps, the
         // client draws, and the compositor renders nothing.
+        crate::explicit_sync::before_import(self, surface);
         on_commit_buffer_handler::<Self>(surface);
 
         // A client committing is the screen changing. Nothing else says so --
@@ -1741,3 +1749,9 @@ smithay::delegate_primary_selection!(Solium);
 smithay::delegate_data_control!(Solium);
 smithay::delegate_ext_data_control!(Solium);
 smithay::delegate_xwayland_shell!(Solium);
+
+impl smithay::wayland::drm_syncobj::DrmSyncobjHandler for Solium {
+    fn drm_syncobj_state(&mut self) -> Option<&mut smithay::wayland::drm_syncobj::DrmSyncobjState> {
+        self.explicit_sync.protocol.as_mut()
+    }
+}

@@ -647,6 +647,41 @@ first frame under the control is drawn at once.
 written for failed about one time in three, so a single green run proves
 nothing — which is exactly how it nearly shipped.
 
+### Explicit DRM synchronization
+
+`dev/explicit-sync-check.sh` runs opt-in real-client tests using a DRM render
+node. It imports real timelines and GBM dmabufs, delays acquire readiness,
+checks synchronized children and same-buffer reattachment, and checks protocol
+errors. It never acquires DRM master or switches a VT. Set
+`SOLIUM_TEST_RENDER_NODE=/dev/dri/renderD128` to select a node; missing hardware
+or syncobj-eventfd support fails this opt-in check rather than silently passing.
+Build the test executable first with `cargo test -p solium --no-run`, using
+the normal build environment and resource limits. Pass its executable path as
+`SOLIUM_TEST_BINARY=/absolute/path/to/target/debug/deps/solium-<hash>`; the
+helper only runs that executable and never starts a build. The ordinary
+suite also checks release ownership with a controlled completion fence and
+checks the unsupported-backend path without needing a GPU.
+
+Both backends advertise `wp_linux_drm_syncobj_manager_v1` only with dmabuf and
+syncobj-eventfd support. `SOLIUM_NO_DMABUF` suppresses both globals. A nested
+renderer whose render node cannot be opened continues with implicit sync.
+
+Real Vulkan/NVIDIA presentation is checked by a person on a free VT:
+
+```sh
+dev/explicit-sync-tty.sh vkcube --wsi wayland
+```
+
+Replace the command with an installed native Wayland Vulkan application. The
+script refuses an existing Wayland session and non-VT terminal, starts a
+separate Solium configuration, and records driver information, compositor logs
+and the client's Wayland trace under a printed `/tmp/solium-explicit-sync-*`
+directory. It fails if the client does not actually send acquire/release points.
+`SYNC_CHECK_SECONDS=120` is the default run cap. Exercise redraw, fullscreen and
+VT switching; run suspend/resume separately when ready. Send the evidence
+folder and observations for analysis. Passing protocol checks does not establish
+scanout, NVIDIA frame pacing or suspend/resume correctness.
+
 ### wl-probe
 
 `dev/screencopy-check.sh` runs a static hosted QML scene and a layer-shell bar

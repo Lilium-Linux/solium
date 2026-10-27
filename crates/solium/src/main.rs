@@ -24,6 +24,7 @@ mod cursor;
 mod decoration;
 mod dev;
 mod effect;
+mod explicit_sync;
 mod focus;
 mod folder;
 mod gputime;
