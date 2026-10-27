@@ -393,6 +393,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         .services
         .notifications
         .permit(place, crate::dev::session_bus());
+    solium
+        .services
+        .tray
+        .permit(place, crate::dev::session_bus());
 
     let qt = crate::qml::wake::Wake::insert(
         &event_loop.handle(),

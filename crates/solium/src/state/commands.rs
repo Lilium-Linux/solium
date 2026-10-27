@@ -590,6 +590,25 @@ impl Solium {
                         reason: done.err(),
                     });
                 }
+                // A tray action is the service's (#363).
+                Command::Act {
+                    attempt,
+                    action,
+                    data,
+                    ..
+                } if action.starts_with("tray.") => {
+                    let done = crate::services::act_tray(
+                        self,
+                        &action,
+                        &data,
+                        crate::services::notifications::Origin::Script,
+                    );
+                    self.settled_attempts.push(crate::script::Settled {
+                        attempt,
+                        ok: done.is_ok(),
+                        reason: done.err(),
+                    });
+                }
                 // An audio action is the service's (#347).
                 Command::Act {
                     attempt,
@@ -678,6 +697,7 @@ impl Solium {
                 Command::Notify(own) => crate::services::notify_own(self, &own),
                 Command::Audio(Some(settings)) => self.services.audio.configure(settings),
                 Command::Audio(None) => self.services.audio.want(),
+                Command::Tray(config) => self.services.tray.configure(config),
                 Command::Lock(settings) => {
                     self.logind.configure(settings, self.lock.is_some());
                 }

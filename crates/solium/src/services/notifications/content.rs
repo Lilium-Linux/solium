@@ -405,7 +405,7 @@ fn decode_png(bytes: &[u8]) -> Result<Image, Refused> {
 /// Scaled down, keeping its shape, so neither side is over `max`; averaged
 /// over each target pixel's box, so a photo does not alias. Already small
 /// enough: returned as it is.
-fn fit(image: Image, max: u32) -> Image {
+pub(crate) fn fit(image: Image, max: u32) -> Image {
     if image.width <= max && image.height <= max {
         return image;
     }

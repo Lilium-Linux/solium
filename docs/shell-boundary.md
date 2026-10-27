@@ -406,7 +406,7 @@ the models `Windows` ("Windows, live", below), `Workspaces` ("Workspaces, as
 the configuration has them", below), `Apps` and `Folder`, which every scene
 reads by name, but which are no singletons: Solium's own lock scenes and
 the pointer's scene, the scenes drawn over the lock, read empty ones under
-the same names
+the same names, and a `Tray` with no items
 (`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`,
 `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`); the types `Grab` ("Popups that hold the
 pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
@@ -670,6 +670,22 @@ device, `outputs` and `inputs`, row models of every sink and source, and
 to the service, which writes one change at a time per device, the newest, and
 tells Lua with `origin = "scene"`. [ricing.md](ricing.md#volume) has a slider
 and the Lua side.
+
+**The tray, live** (#363). `Tray` is what Solium, as the session's
+`org.kde.StatusNotifierWatcher` and its host, holds of the items applications
+register: `items`, a row model in the order they arrived, and `available`,
+`serving` and `owner`. An item has `id`, `service`, `itemId`, `category`,
+`title`, `status`, `icon` (attention-aware), `iconName`, `attentionIcon`,
+`overlayIcon` (`image://solium/tray/<id>/<kind>/<revision>` for pixels the
+item sent or a PNG in its own `IconThemePath`, decoded and capped by Solium;
+`image://solium/icon/<name>` for a theme icon), `tooltipTitle`,
+`tooltipBody`, `itemIsMenu`, `hasMenu`, `menuOpen` and `menu`, its
+`com.canonical.dbusmenu` menu as a tree of entries while it is open. Its calls
+(`activate`, `secondaryActivate`, `scroll`, `contextMenu`, `openMenu`,
+`closeMenu`, `clickMenu`, `openSubmenu`, and `Tray.closeMenus()`) go straight
+to the service, which makes them on the bus and tells Lua as `tray` events
+with `origin = "scene"`. The lock's scenes read a `Tray` with no items.
+[ricing.md](ricing.md#tray) has a bar's tray with its menu, and the Lua side.
 
 A scene asks the compositor to do something about one entry the same way it
 asks anything else, `Solium.send(action, data)`, answered by `lua/actions.lua`

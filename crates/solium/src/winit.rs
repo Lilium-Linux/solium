@@ -468,6 +468,11 @@ pub(crate) fn run() -> Result<()> {
         .services
         .notifications
         .permit(crate::session::Place::Nested, dev::session_bus());
+    // And org.kde.StatusNotifierWatcher, the tray, by the same rule.
+    state
+        .services
+        .tray
+        .permit(crate::session::Place::Nested, dev::session_bus());
 
     // The screens exist and the scripts have loaded: whichever came second,
     // this is the first moment a script can be told where the monitors are.

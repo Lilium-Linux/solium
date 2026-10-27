@@ -351,6 +351,13 @@ impl Solium {
                     &data,
                     crate::services::audio::volume::Origin::Scene,
                 )
+            } else if action.starts_with("tray.") {
+                crate::services::act_tray(
+                    self,
+                    &action,
+                    &data,
+                    crate::services::notifications::Origin::Scene,
+                )
             } else if action.starts_with("notifications.") {
                 crate::services::act(
                     self,

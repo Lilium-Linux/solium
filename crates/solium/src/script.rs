@@ -383,6 +383,8 @@ pub(crate) struct Snapshot {
     pub(crate) notifications: std::rc::Rc<crate::services::notifications::View>,
     /// Audio as the service holds it, for `sol.audio()` (#347).
     pub(crate) audio: std::rc::Rc<crate::services::audio::View>,
+    /// The tray as the service holds it, for `sol.tray()` (#363).
+    pub(crate) tray: std::rc::Rc<crate::services::tray::View>,
 }
 
 /// One problem, as `sol.problems()` hands it over: an effect, a rule or the
@@ -830,6 +832,9 @@ pub(crate) enum Command {
     /// `sol.audio{ ... }`, or `sol.audio()` with nothing to set (`None`):
     /// either way, audio is wanted, and starts (#347).
     Audio(Option<crate::services::audio::model::Settings>),
+    /// `sol.tray{ ... }`: whether Solium is the tray (#363). See
+    /// `crate::services::tray::Config`.
+    Tray(crate::services::tray::Config),
     /// How Solium's own lock checks a password: `sol.lock`'s `lockout`,
     /// `secret_layout`, `helper_timeout_ms`, `retry` and `keypad` (#281). See
     /// `crate::lock_auth::Settings`.
@@ -934,10 +939,12 @@ impl Command {
             | Self::Quit => true,
             // `sol.act`'s verbs on windows and workspaces; `apps.launch` is a
             // spawn, and `folder` opens one.
-            // `notifications.invoke` brings the sender's window forward.
+            // `notifications.invoke` brings the sender's window forward, and
+            // a tray item's actions reach into its application.
             Self::Act { action, .. } => {
                 action.starts_with("windows.")
                     || action.starts_with("workspaces.")
+                    || action.starts_with("tray.")
                     || action == "notifications.invoke"
             }
             Self::Decoration { .. }
@@ -970,6 +977,7 @@ impl Command {
             | Self::Notifications(_)
             | Self::Notify(_)
             | Self::Audio(_)
+            | Self::Tray(_)
             | Self::X11(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
@@ -2796,6 +2804,17 @@ impl Scripts {
         let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
         self.dispatch(snapshot, move |lua, _| {
             call_listeners(lua, "audio", data.clone())
+        })
+    }
+
+    /// Something changed in the tray (#363): an item `added`, `changed` or
+    /// `removed`, its `menu` opened, read or closed, or the `owner` of the
+    /// watcher's name, for `sol.on("tray")`.
+    /// `tests::tray_events_reach_their_listeners_with_their_origin`.
+    pub(crate) fn tray_event(&mut self, event: &crate::json::Json, snapshot: Snapshot) -> Outcome {
+        let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "tray", data.clone())
         })
     }
 
@@ -4634,6 +4653,55 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Notifications(config));
+            })?;
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    // The tray (#363). `sol.tray{ serve = true }` makes Solium the session's
+    // `org.kde.StatusNotifierWatcher`, so applications' tray icons come to
+    // it; with no table, `sol.tray()` answers what it holds: `available`,
+    // `serving`, `owner` and `items`, in the order they first answered. Its
+    // actions go through `sol.act`: `tray.activate { id, x, y }` and the
+    // rest.
+    // `tests::sol_tray_sets_the_service_and_answers_its_items`.
+    sol.set(
+        "tray",
+        lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
+            let Some(options) = options else {
+                let snapshot = snapshot(lua)?;
+                let view = &snapshot.tray;
+                let table = lua.create_table()?;
+                table.set("available", view.available)?;
+                table.set("serving", view.serving)?;
+                let items = lua.create_table()?;
+                for (index, row) in view.items.iter().enumerate() {
+                    items.set(
+                        index + 1,
+                        crate::services::notifications::object(row).to_lua(lua)?,
+                    )?;
+                }
+                table.set("items", items)?;
+                if let Some(owner) = &view.owner {
+                    let row = lua.create_table()?;
+                    row.set("name", owner.name.clone())?;
+                    row.set("pid", owner.pid)?;
+                    row.set("program", owner.program.clone())?;
+                    table.set("owner", row)?;
+                }
+                return Ok(Value::Table(table));
+            };
+            let mut config = crate::services::tray::Config::default();
+            match options.get::<Value>("serve") {
+                Ok(Value::Boolean(on)) => config.serve = on,
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(other) => tracing::warn!(
+                    value = describe(&other),
+                    "tray.serve: true or false; keeping the default, false"
+                ),
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Tray(config));
             })?;
             Ok(Value::Nil)
         })?,
@@ -8146,6 +8214,7 @@ mod tests {
             locked: false,
             notifications: Default::default(),
             audio: Default::default(),
+            tray: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
                 id: 7,
@@ -11335,6 +11404,7 @@ mod tests {
             locked: false,
             notifications: Default::default(),
             audio: Default::default(),
+            tray: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: Vec::new(),
             monitors: Vec::new(),
@@ -11822,6 +11892,7 @@ mod tests {
             locked: false,
             notifications: Default::default(),
             audio: Default::default(),
+            tray: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: windows
                 .iter()
@@ -13171,6 +13242,78 @@ mod tests {
             Some("mute external bluetooth true")
         );
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn sol_tray_sets_the_service_and_answers_its_items() {
+        let (directory, mut scripts) =
+            loaded("solium-script-test-tray", r#"sol.tray{ serve = true }"#);
+        let configs: Vec<crate::services::tray::Config> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Tray(config) => Some(config),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(configs, [crate::services::tray::Config { serve: true }]);
+        let mut snapshot = one_screen(&[]);
+        snapshot.tray = std::rc::Rc::new(crate::services::tray::View {
+            available: true,
+            serving: true,
+            owner: None,
+            items: vec![std::collections::BTreeMap::from([
+                ("id", crate::json::Json::Number(4.0)),
+                ("title", crate::json::Json::Text("Steam".to_owned())),
+            ])],
+        });
+        assert_eq!(
+            scripts.evaluate_in(
+                snapshot,
+                "local t = sol.tray(); return t.items[1].title .. ' ' .. t.items[1].id .. ' ' .. tostring(t.serving) .. ' ' .. tostring(t.owner)"
+            ),
+            "Steam 4 true nil"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn tray_events_reach_their_listeners_with_their_origin() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-tray-events",
+            r#"sol.on("tray", function(e) sol.status(e.what .. " " .. e.origin .. " " .. e.id .. " " .. tostring(e.open) .. " " .. e.item.title) end)"#,
+        );
+        let view = crate::services::tray::View {
+            items: vec![std::collections::BTreeMap::from([
+                ("id", crate::json::Json::Number(4.0)),
+                ("title", crate::json::Json::Text("Steam".to_owned())),
+                ("menuOpen", crate::json::Json::Bool(true)),
+            ])],
+            ..crate::services::tray::View::default()
+        };
+        let event = crate::services::tray::Event {
+            what: "menu",
+            id: 4,
+            origin: crate::services::notifications::Origin::Scene,
+        }
+        .to_json(&view);
+        let outcome = scripts.tray_event(&event, one_screen(&[]));
+        assert_eq!(outcome.status.as_deref(), Some("menu scene 4 true Steam"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_tray_action_is_refused_from_a_binding_at_the_lock() {
+        let act = |action: &str| Command::Act {
+            attempt: 0,
+            action: action.to_owned(),
+            data: crate::json::Json::Null,
+            source: FocusSource::Binding,
+        };
+        assert!(act("tray.activate").reaches_past_the_lock());
+        assert!(act("tray.open_menu").reaches_past_the_lock());
+        assert!(!act("audio.mute").reaches_past_the_lock());
     }
 
     #[test]

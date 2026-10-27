@@ -1,6 +1,7 @@
 #include "rows.h"
 #include "notifications.h"
 #include "audio.h"
+#include "tray.h"
 
 #include "host.h"
 
@@ -518,6 +519,7 @@ SoliumRows *solium_rows_redacted(int model)
     static SoliumRows *workspaces = nullptr;
     static SoliumRows *apps = nullptr;
     static SoliumRows *folder = nullptr;
+    static SoliumRows *tray = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -542,6 +544,13 @@ SoliumRows *solium_rows_redacted(int model)
             folder = new SoliumFolderRows();
         }
         return folder;
+    // The lock's scenes read a tray with no items: nothing behind the lock
+    // is reached from it.
+    case SOLIUM_QML_ROWS_TRAY:
+        if (tray == nullptr) {
+            tray = new SoliumTrayRows();
+        }
+        return tray;
     default:
         return nullptr;
     }
@@ -558,6 +567,7 @@ SoliumRows *solium_rows(int model)
     static SoliumRows *history = nullptr;
     static SoliumRows *outputs = nullptr;
     static SoliumRows *inputs = nullptr;
+    static SoliumRows *tray = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -608,6 +618,11 @@ SoliumRows *solium_rows(int model)
             inputs = new SoliumAudioRows();
         }
         return inputs;
+    case SOLIUM_QML_ROWS_TRAY:
+        if (tray == nullptr) {
+            tray = new SoliumTrayRows();
+        }
+        return tray;
     default:
         return nullptr;
     }

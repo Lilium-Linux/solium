@@ -26,6 +26,7 @@
  */
 #include "icon.h"
 #include "notifications.h"
+#include "tray.h"
 
 #include <QtCore/QCache>
 #include <QtCore/QMutex>
@@ -62,9 +63,9 @@ SoliumIconProvider::SoliumIconProvider() : QQuickImageProvider(QQuickImageProvid
 QImage SoliumIconProvider::requestImage(const QString &id, QSize *size,
                                         const QSize &requestedSize)
 {
-    // `id` is everything after `image://solium/`: `icon/<name>?size=...`.
-    // Only the `icon/` route exists in this version (tray, notification,
-    // album art and avatar images are P1/P2, 03 §3.2.14's own table).
+    // `id` is everything after `image://solium/`: `icon/<name>?size=...`,
+    // and the pictures services hand over, below (album art and avatar
+    // images are P1/P2, 03 §3.2.14's own table).
     // `notification/<id>/<revision>` (#346): an image Rust decoded, with its
     // limits, and handed over; the revision only makes a replaced image a
     // new URL.
@@ -72,6 +73,22 @@ QImage SoliumIconProvider::requestImage(const QString &id, QSize *size,
     if (id.startsWith(notification)) {
         const quint32 which = id.mid(notification.size()).section(QLatin1Char('/'), 0, 0).toUInt();
         QImage image = solium_notification_image(which);
+        if (!image.isNull() && requestedSize.isValid()
+            && (image.width() > requestedSize.width() || image.height() > requestedSize.height())) {
+            image = image.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+        if (size != nullptr && !image.isNull()) {
+            *size = image.size();
+        }
+        return image;
+    }
+    // `tray/<id>/<kind>/<revision>` (#363): a tray item's picture, sent as
+    // pixels or read from its own icon directory by Rust, within its limits.
+    const QString tray = QStringLiteral("tray/");
+    if (id.startsWith(tray)) {
+        const QString rest = id.mid(tray.size());
+        QImage image = solium_tray_image(rest.section(QLatin1Char('/'), 0, 0).toUInt(),
+                                         rest.section(QLatin1Char('/'), 1, 1));
         if (!image.isNull() && requestedSize.isValid()
             && (image.width() > requestedSize.width() || image.height() > requestedSize.height())) {
             image = image.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);

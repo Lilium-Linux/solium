@@ -121,6 +121,16 @@ mod ffi {
             len: usize,
         ) -> c_int;
         pub(super) fn solium_qml_drop_notification_image(id: u32);
+        pub(super) fn solium_qml_set_tray_state(json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_tray_image(
+            id: u32,
+            kind: u32,
+            width: c_int,
+            height: c_int,
+            rgba: *const u8,
+            len: usize,
+        ) -> c_int;
+        pub(super) fn solium_qml_drop_tray_image(id: u32, kind: u32);
         pub(super) fn solium_qml_take_service_call(
             action: *mut *const c_char,
             data_json: *mut *const c_char,
@@ -145,6 +155,8 @@ pub(crate) enum Model {
     AudioOutputs = 7,
     /// `Audio.inputs` (#347).
     AudioInputs = 8,
+    /// `Tray.items` (#363).
+    Tray = 9,
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
@@ -236,6 +248,56 @@ pub(crate) fn set_notification_image(
 pub(crate) fn drop_notification_image(id: u32) {
     // SAFETY: no pointer, nothing to outlive.
     unsafe { ffi::solium_qml_drop_notification_image(id) }
+}
+
+/// `Tray`'s own values (#363): `available`, `serving` and `owner`, as one
+/// JSON object. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_tray_state(json: &str) -> bool {
+    touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_set_tray_state(json.as_ptr()) != 0 }
+}
+
+/// One of a tray item's pictures, for
+/// `image://solium/tray/<id>/<kind>/<revision>` (#363): straight RGBA, made
+/// safe and capped by `services::tray::content`; `kind` is
+/// `services::tray::model::Picture`'s number. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_tray_image(
+    id: u32,
+    kind: u32,
+    image: &crate::services::notifications::content::Image,
+) -> bool {
+    let (Ok(width), Ok(height)) = (c_int::try_from(image.width), c_int::try_from(image.height))
+    else {
+        return false;
+    };
+    if image.rgba.len() != image.width as usize * image.height as usize * 4 {
+        return false;
+    }
+    touched();
+    // SAFETY: the bytes outlive the call, and the host copies them.
+    unsafe {
+        ffi::solium_qml_set_tray_image(
+            id,
+            kind,
+            width,
+            height,
+            image.rgba.as_ptr(),
+            image.rgba.len(),
+        ) != 0
+    }
+}
+
+/// One of a tray item's pictures let go.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn drop_tray_image(id: u32, kind: u32) {
+    // SAFETY: no pointer, nothing to outlive.
+    unsafe { ffi::solium_qml_drop_tray_image(id, kind) }
 }
 
 /// One call a scene made on a service's object (`n.dismiss()`,
@@ -2601,6 +2663,85 @@ pub(crate) mod tests {
                 [2, 0, 2, 0],
                 "[MouseArea clicks, its double-clicks, TapHandler single taps, its double taps]"
             );
+        });
+    }
+
+    /// **A tray item reaches a scene, and its calls go to Rust** (#363):
+    /// `Tray.items` counts it, `Tray.get(id)` answers its values and its
+    /// menu, and `item.activate(x, y)` and `item.clickMenu(entry)` are queued
+    /// for `take_service_call`, in order, with their data.
+    #[test]
+    fn a_tray_item_reaches_a_scene_and_its_calls_are_queued_for_rust() {
+        use crate::{
+            json::Json,
+            models::diff::{Row, diff, render},
+        };
+        use std::collections::BTreeMap;
+
+        on_the_qt_thread(|| {
+            while super::take_service_call().is_some() {}
+            let (directory, mut scene) = hosted(
+                "solium-hosted-tray",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int count: Tray.items.count
+                    readonly property var item: count > 0 ? Tray.get(7) : null
+                    readonly property int titled: item && item.title === "Steam" ? 1 : 0
+                    readonly property int quit: item && item.menu.length === 1 && item.menu[0].label === "Quit" ? 1 : 0
+                    property int go: 0
+                    onGoChanged: {
+                        item.activate(3, 4)
+                        item.clickMenu(1)
+                    }
+                }
+                "#,
+                "tray-1",
+            );
+            let menu =
+                Json::parse(r#"[{"id":1,"label":"Quit","children":[]}]"#).unwrap_or(Json::Null);
+            let rows = vec![Row {
+                key: "7".to_owned(),
+                values: BTreeMap::from([
+                    ("id", Json::Number(7.0)),
+                    ("title", Json::Text("Steam".to_owned())),
+                    ("menu", menu),
+                ]),
+            }];
+            assert!(super::apply_rows(
+                super::Model::Tray,
+                &render(&diff(&[], &rows))
+            ));
+            assert_eq!(
+                (
+                    scene.get_int("count"),
+                    scene.get_int("titled"),
+                    scene.get_int("quit")
+                ),
+                (1, 1, 1)
+            );
+            scene.set_int("go", 1);
+            assert_eq!(
+                super::take_service_call(),
+                Some((
+                    "tray.activate".to_owned(),
+                    Json::parse(r#"{"id":7,"x":3,"y":4}"#).unwrap_or(Json::Null)
+                ))
+            );
+            assert_eq!(
+                super::take_service_call(),
+                Some((
+                    "tray.menu_click".to_owned(),
+                    Json::parse(r#"{"id":7,"entry":1}"#).unwrap_or(Json::Null)
+                ))
+            );
+            assert!(super::apply_rows(
+                super::Model::Tray,
+                &render(&diff(&rows, &[]))
+            ));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
         });
     }
 

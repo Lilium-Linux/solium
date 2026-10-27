@@ -488,6 +488,7 @@ impl Solium {
             locked: self.lock.is_some(),
             notifications: self.services.notifications.view(),
             audio: self.services.audio.view(),
+            tray: self.services.tray.view(),
             keyboard: self.keyboard.clone(),
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
