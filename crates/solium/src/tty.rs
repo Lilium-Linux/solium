@@ -850,6 +850,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // configuration once, so a pill it moves to the caret is in this
             // frame: `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
             state.solium.settle_text_input();
+            // And a Wayland client waiting on an X11 client's clipboard, as
+            // the nested loop serves it (#362); see `settle_selection`.
+            crate::xwayland::settle_selection(&mut state.solium, &state.handle);
             if state.solium.redraw || state.animating {
                 state.render();
             }

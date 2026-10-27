@@ -735,13 +735,20 @@ pub(crate) struct Solium {
     )]
     pub(crate) presentation_state: PresentationState,
 
-    /// A selection an X11 client owns that a Wayland client has asked to read.
+    /// Selections an X11 client owns that Wayland clients have asked to read,
+    /// oldest first.
     ///
     /// Recorded rather than served, for the same reason the resize and the drop
     /// are: pumping an X11 transfer needs the event loop, and only a backend
     /// has one — the two backends have loops over different state types, so
     /// there is no one handle this could hold. See `settle_selection`.
-    pub(crate) pending_selection: Option<(SelectionTarget, String, std::os::fd::OwnedFd)>,
+    ///
+    /// **A queue, not one slot** (#362). A client pasting may ask for more
+    /// than one type before the loop comes round, and a slot kept only the
+    /// last: every earlier request's descriptor was dropped, and that read
+    /// came back empty.
+    pub(crate) pending_selection:
+        std::collections::VecDeque<(SelectionTarget, String, std::os::fd::OwnedFd)>,
 
     /// The middle-click clipboard. A separate selection with its own protocol,
     /// and its absence is not subtle: a terminal that pastes on middle click
@@ -1374,7 +1381,7 @@ impl Solium {
             // bound at version 1 simply never sends them. `cursor::shape` maps
             // both, so there is nothing to gate.
             cursor_shape_state: CursorShapeManagerState::new::<Self>(&display_handle),
-            pending_selection: None,
+            pending_selection: std::collections::VecDeque::new(),
             activation_state: XdgActivationState::new::<Self>(&display_handle),
             viewporter_state: ViewporterState::new::<Self>(&display_handle),
             single_pixel_buffer_state: crate::single_pixel::state(&display_handle),
