@@ -211,7 +211,7 @@ fn over_budget(images: &BTreeMap<u32, (u32, usize)>, budget: usize) -> Vec<u32> 
 /// A theme icon name, as a client sent it, or nothing: only the characters
 /// icon names use, so nothing can be added to the icon URL.
 /// `an_icon_name_with_url_characters_is_dropped`.
-fn icon_name(name: &str) -> &str {
+pub(crate) fn icon_name(name: &str) -> &str {
     let safe = !name.is_empty()
         && name.len() <= 128
         && name

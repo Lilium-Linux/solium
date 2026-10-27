@@ -35,6 +35,9 @@ pub(crate) struct Published {
     audio_outputs: Vec<diff::Row>,
     audio_inputs: Vec<diff::Row>,
     audio_state: Option<String>,
+    /// `Tray.items`, and its own values, as last taken (#363).
+    tray: Vec<diff::Row>,
+    tray_state: Option<String>,
     /// What `Solium.status`, `Workspaces.arrangement` and `Solium.dirs.desktop`
     /// last took.
     /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
@@ -149,6 +152,20 @@ impl crate::state::Solium {
         {
             self.published.audio_state = Some(state);
         }
+        // The tray (#363): its items, and its own values.
+        let tray = self.services.tray.view();
+        publish(
+            Model::Tray,
+            &mut self.published.tray,
+            rows(&tray.items),
+            crate::qml::hosted::apply_rows,
+        );
+        let state = tray_state(&tray);
+        if self.published.tray_state.as_deref() != Some(state.as_str())
+            && crate::qml::hosted::set_tray_state(&state)
+        {
+            self.published.tray_state = Some(state);
+        }
         // `Folder`: the desktop directory, resolved once (again on a
         // reload) and rescanned wholesale whenever `folder_scan_pending`
         // asks for one or the inotify watch says something changed.
@@ -255,6 +272,7 @@ impl crate::state::Solium {
             (Model::Folder, &mut self.published.folder),
             (Model::Windows, &mut self.published.windows),
             (Model::Workspaces, &mut self.published.workspaces),
+            (Model::Tray, &mut self.published.tray),
         ] {
             publish(model, last, Vec::new(), crate::qml::hosted::apply_rows);
         }
@@ -290,10 +308,21 @@ fn audio_state(view: &crate::services::audio::View) -> String {
     .render()
 }
 
-/// `Notifications`' own values, as the JSON object the host reads.
-fn notifications_state(view: &crate::services::notifications::View) -> String {
+/// `Tray`'s own values, as the JSON object the host reads.
+fn tray_state(view: &crate::services::tray::View) -> String {
     use crate::json::Json;
-    let owner = view.owner.as_ref().map_or(Json::Null, |owner| {
+    Json::Object(std::collections::BTreeMap::from([
+        ("available".to_owned(), Json::Bool(view.available)),
+        ("serving".to_owned(), Json::Bool(view.serving)),
+        ("owner".to_owned(), owner_json(view.owner.as_ref())),
+    ]))
+    .render()
+}
+
+/// Who has a service's name when Solium does not, or `null`.
+fn owner_json(owner: Option<&crate::services::notifications::server::Owner>) -> crate::json::Json {
+    use crate::json::Json;
+    owner.map_or(Json::Null, |owner| {
         Json::Object(std::collections::BTreeMap::from([
             ("name".to_owned(), Json::Text(owner.name.clone())),
             (
@@ -304,12 +333,17 @@ fn notifications_state(view: &crate::services::notifications::View) -> String {
             ),
             ("program".to_owned(), Json::Text(owner.program.clone())),
         ]))
-    });
+    })
+}
+
+/// `Notifications`' own values, as the JSON object the host reads.
+fn notifications_state(view: &crate::services::notifications::View) -> String {
+    use crate::json::Json;
     Json::Object(std::collections::BTreeMap::from([
         ("available".to_owned(), Json::Bool(view.available)),
         ("serving".to_owned(), Json::Bool(view.serving)),
         ("dnd".to_owned(), Json::Bool(view.dnd)),
-        ("owner".to_owned(), owner),
+        ("owner".to_owned(), owner_json(view.owner.as_ref())),
     ]))
     .render()
 }

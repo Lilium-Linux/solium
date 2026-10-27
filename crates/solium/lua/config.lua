@@ -709,6 +709,19 @@ local defaults = {
         history = { max = 200 },
     },
 
+    -- The tray (#363).
+    --
+    -- Solium answers `org.kde.StatusNotifierWatcher` on the session bus, so
+    -- the icons Steam, Discord, Telegram and the rest put in a tray come to
+    -- it, and a shell draws them: a scene reads `Tray.items`, each with its
+    -- menu for the shell to draw, and Lua hears `sol.on("tray")`. A program
+    -- that already has the name (another desktop's panel) keeps it, and
+    -- Solium waits its turn. Nested, it is owned only on the bus
+    -- SOLIUM_SESSION_BUS names.
+    tray = {
+        serve = true,
+    },
+
     -- Audio (#347): Solium reads PipeWire itself, so a shell's slider is
     -- live and a volume key's change is known to be the key's.
     audio = {

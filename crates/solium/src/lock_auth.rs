@@ -3855,13 +3855,14 @@ mod tests {
                     readonly property int workspaces: Workspaces.count
                     readonly property int listed: list.count
                     readonly property int arranged: Object.keys(Workspaces.arrangement).length
+                    readonly property int tray: Tray.items.count
                     readonly property string monitor: Solium.monitor.name
                     readonly property int layouts: Keyboard.layouts.length
                     WorkspaceList { id: list }
                 }"#;
 
-    /// The session as `READS_THE_SESSION` reads it: a status, an app, and
-    /// two workspaces in an arrangement on `monitor`.
+    /// The session as `READS_THE_SESSION` reads it: a status, an app, two
+    /// workspaces in an arrangement on `monitor`, and a tray item.
     fn fill_the_session(state: &mut Solium, monitor: &str) {
         use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
         state.status = "a window's secret title".to_owned();
@@ -3901,41 +3902,58 @@ mod tests {
             }],
             windows: std::collections::BTreeMap::new(),
         });
+        state
+            .services
+            .tray
+            .apply(crate::services::tray::server::Fact::Read(Box::new(
+                crate::services::tray::server::ReadItem {
+                    key: ":1.7/StatusNotifierItem".to_owned(),
+                    props: crate::services::tray::model::Props {
+                        title: "a chat's secret title".to_owned(),
+                        ..crate::services::tray::model::Props::default()
+                    },
+                    pictures: [None, None, None],
+                },
+            )));
+        state.services.tray.refresh_view();
     }
 
     /// What a scene reading `READS_THE_SESSION` reads of the session: the
-    /// status, the apps, the workspaces, a `WorkspaceList` of them and the
-    /// arrangement.
-    fn session_read(scene: &mut crate::qml::Scene) -> (String, i32, i32, i32, i32) {
+    /// status, the apps, the workspaces, a `WorkspaceList` of them, the
+    /// arrangement and the tray's items.
+    fn session_read(scene: &mut crate::qml::Scene) -> (String, i32, i32, i32, i32, i32) {
         (
             scene.get_string_for_test("status"),
             scene.get_int("apps"),
             scene.get_int("workspaces"),
             scene.get_int("listed"),
             scene.get_int("arranged"),
+            scene.get_int("tray"),
         )
     }
 
     /// Whether `read` is the whole session `fill_the_session` made.
-    fn reads_it_all(read: &(String, i32, i32, i32, i32)) -> bool {
-        let (status, apps, workspaces, listed, arranged) = read;
+    fn reads_it_all(read: &(String, i32, i32, i32, i32, i32)) -> bool {
+        let (status, apps, workspaces, listed, arranged, tray) = read;
         status == "a window's secret title"
             && *apps >= 1
             && *workspaces >= 2
             && *listed >= 2
             && *arranged > 0
+            && *tray >= 1
     }
 
     /// What a scene that reads only what a lock may show reads of it.
-    fn read_empty() -> (String, i32, i32, i32, i32) {
-        (String::new(), 0, 0, 0, 0)
+    fn read_empty() -> (String, i32, i32, i32, i32, i32) {
+        (String::new(), 0, 0, 0, 0, 0)
     }
 
     /// **A lock scene reads only what a lock may show, at all times**:
-    /// `Solium.status`, `Apps`, `Workspaces`, a `WorkspaceList` and the
-    /// arrangement read empty in it while Solium holds the lock, through the
-    /// entry and after it, and still empty once it is unlocked and the scene
-    /// waits, quiet, for the next lock; the monitor and the keyboard read in
+    /// `Solium.status`, `Apps`, `Workspaces`, a `WorkspaceList`, the
+    /// arrangement and `Tray.items` read empty in it while Solium holds the
+    /// lock, through the entry and after it, and still empty once it is
+    /// unlocked and the scene waits, quiet, for the next lock; the monitor
+    /// and the keyboard read in
     /// it. A desktop scene beside it reads the session all along, locked or
     /// not: it is not drawn behind the lock, and what it reads is kept for
     /// the unlock (`state::tests::real_client::lock_focus::native::a_session_scene_keeps_its_rows_through_a_native_lock`).

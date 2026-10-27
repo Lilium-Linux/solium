@@ -55,6 +55,7 @@ Item {
         anchors { right: root.right; rightMargin: 6; bottom: root.bottom; bottomMargin: 6 }
         spacing: 12
 
+        TrayChip {}
         LayoutChip {}
         ClockPill {}
     }

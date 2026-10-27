@@ -1630,6 +1630,108 @@ end)
 sol.bind("super+m", function() sol.act("audio.mute", { target = "input", value = "toggle" }) end)
 ```
 
+### Tray
+
+Solium is the tray: the icons Steam, Discord, Telegram and the rest put there
+come to it (`org.kde.StatusNotifierWatcher`), and your scenes draw them, menus
+included. `config.lua`'s `tray` table turns it on, as it is in the shipped
+configuration:
+
+```lua
+return { tray = { serve = true } }
+```
+
+As with notifications, a program that already has the name (another
+desktop's panel) keeps it and Solium waits its turn, `Tray.serving` says
+which, and a nested run serves only on the bus `SOLIUM_SESSION_BUS` names.
+
+Every scene can read `Tray.items`, in the order the items arrived; a lock's
+scenes read none. A tray in a bar, with its menu, as a sketch:
+
+```qml
+Row {
+    spacing: 6
+    Repeater {
+        model: Tray.items
+        delegate: Item {
+            id: slot
+            required property var model
+            readonly property var item: Tray.get(model.id)
+            visible: model.status !== "passive"
+            width: 22; height: 22
+            Image { anchors.fill: parent; source: model.icon; sourceSize: Qt.size(44, 44) }
+            TapHandler {
+                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+                onTapped: (point, button) => {
+                    const at = slot.mapToGlobal(point.position.x, point.position.y)
+                    if (button === Qt.RightButton) slot.item.openMenu(at.x, at.y)
+                    else if (button === Qt.MiddleButton) slot.item.secondaryActivate(at.x, at.y)
+                    else slot.item.activate(at.x, at.y)
+                }
+            }
+            WheelHandler { onWheel: (wheel) => slot.item.scroll(wheel.angleDelta.y) }
+            // In the window's own content, not under the icon: drawn
+            // outside the icon's bounds, it would be seen and never pressed.
+            Column {
+                parent: slot.Window.contentItem
+                visible: model.menuOpen
+                readonly property point at: visible ? slot.mapToItem(parent, 0, 0) : Qt.point(0, 0)
+                x: at.x
+                y: at.y - height - 8
+                Repeater {
+                    model: slot.model.menu
+                    delegate: Text {
+                        required property var modelData
+                        visible: modelData.visible && modelData.type !== "separator"
+                        text: modelData.label
+                        textFormat: Text.PlainText
+                        color: modelData.enabled ? "white" : "gray"
+                        TapHandler { onTapped: slot.item.clickMenu(modelData.id) }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+An item has `id`, `itemId` (its own name for itself, `steam`), `title`,
+`status` (`passive` asks to be hidden, `attention` to be looked at), `icon`
+(what to draw now: its attention picture while it asks for attention),
+`attentionIcon`, `overlayIcon`, `tooltipTitle`, `tooltipBody`, `itemIsMenu`,
+`hasMenu`, `menuOpen` and `menu`. Its pictures are what the application
+sent, decoded and capped by Solium (`image://solium/tray/...`), or a theme
+icon (`image://solium/icon/...`).
+
+Its calls go straight to the application: `activate(x, y)` (a primary click,
+which opens the menu instead for an item that is only a menu),
+`secondaryActivate(x, y)` (a middle click), `scroll(delta, orientation)`,
+`contextMenu(x, y)` (the application draws its own menu), and the menu's:
+`openMenu(x, y)`, `closeMenu()`, `clickMenu(entry)` and `openSubmenu(entry)`,
+with `Tray.closeMenus()` for a click outside. `openMenu` turns `menuOpen` on
+at once and fills `menu` when the application answers; one menu is open at a
+time. An entry has `id`, `label`, `enabled`, `visible`, `type` (`standard`
+or `separator`), `toggleType` (`checkmark`, `radio` or empty), `toggleState`,
+`icon`, `submenu` and `children`. Labels and titles are the application's
+own text: show them with `textFormat: Text.PlainText`.
+
+Lua hears what changes, and acts the same way:
+
+```lua
+sol.on("tray", function(e)
+    if e.what == "changed" and e.item.status == "attention" then
+        sol.log(e.item.title .. " wants attention")
+    end
+end)
+
+-- Open Steam's menu from a key.
+sol.bind("super+shift+s", function()
+    for _, item in ipairs(sol.tray().items) do
+        if item.itemId == "steam" then sol.act("tray.open_menu", { id = item.id }) end
+    end
+end)
+```
+
 ### Bars, docks and wallpapers
 
 A shell — bar, dock and launcher together — can be hosted inside the
@@ -1688,6 +1790,9 @@ nothing else. It shows:
   pill, an occupied one filled -- and a click switches;
 - the running windows of this monitor's current workspace, as chips -- icon,
   title or app id, the focused one highlighted -- and a click focuses one;
+- the tray: applications' icons ([Tray](#tray)), a left click activating
+  one, a middle click its second action, the wheel scrolling it, and a right
+  click opening its menu above the bar, drawn in the bar's look;
 - the keyboard layout, once more than one is configured;
 - a clock;
 - a top dock: pinned apps, then a hairline, then running ones that are not
@@ -1763,7 +1868,7 @@ nothing else. It shows:
   the desktop the keyboard on demand, so claiming it unconditionally would
   only fight the dock and quick search for focus).
 
-Next pieces -- the island, quick settings, a tray, and previews -- need
+Next pieces -- the island, quick settings and previews -- need
 services this compositor does not have yet, and are not here. `lua/preview/`
 and `qml/preview/` are where all of it lives, so copying one file still
 changes one behaviour, exactly as **[Your own frame](#your-own-frame)** and

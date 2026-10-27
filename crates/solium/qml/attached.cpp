@@ -1,6 +1,7 @@
 #include "attached.h"
 #include "notifications.h"
 #include "audio.h"
+#include "tray.h"
 
 #include "host.h"
 #include "keyboard.h"
@@ -754,6 +755,9 @@ void solium_qml_register_types()
     qmlRegisterAnonymousType<SoliumAudioEndpoint>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumAudioRows>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumAudio>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumTrayItem>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumTrayRows>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumTray>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumFolderRows>(SOLIUM_NATIVE_URI, 1);
 }
 
@@ -773,6 +777,9 @@ void solium_qml_name_scope(QQmlContext *context, bool redacted)
     context->setContextProperty(QStringLiteral("Notifications"), solium_notifications());
     // Audio is no one's private matter: the lock's OSD may show the volume.
     context->setContextProperty(QStringLiteral("Audio"), solium_audio());
+    // The tray reaches into applications: the lock's scenes read one with no
+    // items (#363).
+    context->setContextProperty(QStringLiteral("Tray"), solium_tray(redacted));
 }
 
 /* What `Solium.status` reads: the text `sol.status` set.

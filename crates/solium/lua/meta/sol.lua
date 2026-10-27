@@ -499,6 +499,7 @@
 ---| "notification" # A notification arrived or was replaced, over the bus or from `sol.notify`: `(n)`, a `sol.Arrival`. A decision hook: the first listener that returns a table decides, `{ banner = boolean, keep = boolean }`, each left out taking the shipped rule (a banner unless do-not-disturb is on, where only a critical one gets one; kept unless the sender said it is transient). With none answering, the shipped rule decides.
 ---| "notifications" # Something happened to a notification: `(event)`, a `sol.NotificationEvent`.
 ---| "audio" # Something changed in audio: `(event)`, a `sol.AudioEvent`, with who changed it.
+---| "tray" # Something changed in the tray: `(event)`, a `sol.TrayEvent`.
 ---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
@@ -860,6 +861,69 @@ function sol.notifications(options) end
 ---@param options sol.AudioOptions
 ---@return nil
 function sol.audio(options) end
+
+---@class sol.TrayMenuEntry
+---@field id integer The entry's id, for `tray.menu_click` and `tray.submenu`.
+---@field label string Its label, the mnemonic marks (`_`) taken out. The application's own text: show it as plain text.
+---@field enabled boolean
+---@field visible boolean An entry the application hides; a menu leaves it out.
+---@field type "standard"|"separator"
+---@field toggleType ""|"checkmark"|"radio"
+---@field toggleState integer 1 on, 0 off, -1 neither.
+---@field iconName string A theme icon name, or empty.
+---@field icon string `image://solium/icon/<name>`, or empty.
+---@field submenu boolean It opens a submenu, `children`, rather than doing something itself.
+---@field children sol.TrayMenuEntry[]
+
+---@class sol.TrayItem
+---@field id integer Solium's id for it, never given out twice in a run.
+---@field service string The watcher's name for it: its bus name and its object path.
+---@field itemId string The item's own `Id`, often its application's name: `steam`, `discord`.
+---@field category string `ApplicationStatus`, `Communications`, `SystemServices` or `Hardware`.
+---@field title string Its `Title`, as the application names it.
+---@field status "passive"|"active"|"attention" `passive` asks to be hidden; `attention` asks to be looked at.
+---@field icon string The picture to draw now: `image://solium/tray/<id>/<kind>/<revision>` for pixels the item sent (or an icon file of its own), `image://solium/icon/<name>` for a theme icon, or empty. The attention picture while `status` is `attention`, when it has one.
+---@field iconName string Its theme icon name, or empty.
+---@field attentionIcon string The attention picture, or empty.
+---@field overlayIcon string A picture to draw over the icon's corner, or empty.
+---@field tooltipTitle string
+---@field tooltipBody string As plain text, markup taken out.
+---@field itemIsMenu boolean A primary click opens its menu: `tray.activate` does so itself.
+---@field hasMenu boolean It hands its menu over, for a shell to draw.
+---@field menuOpen boolean Its menu is open: a shell shows `menu`. One is open at a time.
+---@field menu sol.TrayMenuEntry[] Its menu's entries while it is open, once read; empty otherwise.
+
+---@class sol.TrayEvent
+---@field what "added"|"changed"|"removed"|"menu"|"owner"
+---@field origin "external"|"scene"|"script" Who did it: the application over the bus, a scene's own call, or Lua.
+---@field id? integer The item, when there is one.
+---@field item? sol.TrayItem The item as it is now, for all but `removed`.
+---@field open? boolean For `menu`: whether its menu is open now.
+---@field serving? boolean For `owner`: whether Solium has the name now.
+
+---@class sol.TrayState
+---@field available boolean Whether the watcher is running at all.
+---@field serving boolean Whether Solium has the name.
+---@field owner? { name: string, pid?: integer, program: string } Who has the name, when Solium does not.
+---@field items sol.TrayItem[] In the order they first answered.
+
+---@class sol.TrayOptions
+---@field serve? boolean Own `org.kde.StatusNotifierWatcher` on the session bus, so applications' tray icons (Steam, Discord, Telegram...) come to Solium. False by default. A nested run owns it only on the bus `SOLIUM_SESSION_BUS` names. Another program that has the name keeps it: Solium waits its turn, and `owner` names who has it.
+
+---The tray (#363): with a table, whether Solium is the tray; with none, what
+---it holds now. Its actions go through `sol.act`, each with the item's `id`:
+---`tray.activate { id, x, y }` (a primary click; an item that is a menu opens
+---its menu), `tray.secondary_activate { id, x, y }`, `tray.scroll { id,
+---delta, orientation = "vertical"|"horizontal" }`, `tray.context_menu { id,
+---x, y }` (the item draws its own menu), `tray.open_menu { id, x, y }` (its
+---menu, for a shell to draw), `tray.close_menu { id }` (or every menu, with
+---no `id`), `tray.menu_click { id, entry }` and `tray.submenu { id, entry }`.
+---`x` and `y` are where on the screen, for an item that places a window of
+---its own there. None is done behind the lock (`"locked"`).
+---@overload fun(): sol.TrayState
+---@param options sol.TrayOptions
+---@return nil
+function sol.tray(options) end
 
 ---@class sol.NotifyAction
 ---@field key string `default` for a click on the body.

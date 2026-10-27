@@ -10,6 +10,7 @@
 
 pub(crate) mod audio;
 pub(crate) mod notifications;
+pub(crate) mod tray;
 
 use crate::{json::Json, state::Solium};
 
@@ -20,6 +21,7 @@ use notifications::{Joined, Origin, model::Decision};
 pub(crate) struct Services {
     pub(crate) notifications: notifications::Service,
     pub(crate) audio: audio::Service,
+    pub(crate) tray: tray::Service,
 }
 
 impl Services {
@@ -27,6 +29,7 @@ impl Services {
         Self {
             notifications: notifications::Service::new(notifications::Service::state_file()),
             audio: audio::Service::default(),
+            tray: tray::Service::default(),
         }
     }
 }
@@ -36,6 +39,50 @@ impl Services {
 pub(crate) fn settle(state: &mut Solium) {
     settle_notifications(state);
     settle_audio(state);
+    settle_tray(state);
+}
+
+fn settle_tray(state: &mut Solium) {
+    state.services.tray.settle();
+    state.services.tray.refresh_view();
+    let events = std::mem::take(&mut state.services.tray.events);
+    let view = state.services.tray.view();
+    for event in events {
+        let json = event.to_json(&view);
+        let snapshot = state.snapshot();
+        let Some(mut scripts) = state.scripts.take() else {
+            break;
+        };
+        let outcome = scripts.tray_event(&json, snapshot);
+        state.scripts = Some(scripts);
+        state.apply(outcome);
+    }
+}
+
+/// A `tray.*` action, from Lua or a scene (#363). Nothing behind the lock is
+/// reached from it: an application's window or menu would open over it.
+pub(crate) fn act_tray(
+    state: &mut Solium,
+    action: &str,
+    data: &Json,
+    origin: Origin,
+) -> Result<(), &'static str> {
+    if state.lock.is_some() {
+        return Err("locked");
+    }
+    let activation = &mut state.activation_state;
+    state.services.tray.act(action, data, origin, |item| {
+        // A token the application can raise its window with, named for the
+        // item's own id, so the window an activation opens may take the
+        // keyboard, as a notification's action's may.
+        let app_id = item.props.item_id.clone();
+        let data = smithay::wayland::xdg_activation::XdgActivationTokenData {
+            app_id: (!app_id.is_empty()).then_some(app_id),
+            ..smithay::wayland::xdg_activation::XdgActivationTokenData::default()
+        };
+        let (token, _) = activation.create_external_token(data);
+        Some(token.as_str().to_owned())
+    })
 }
 
 fn settle_audio(state: &mut Solium) {

@@ -44,6 +44,9 @@ sol.idle(config.idle)
 -- long banners last. A shell draws them from `Notifications`. See
 -- `config.lua`.
 sol.notifications(config.notifications)
+-- The tray: Solium as the session's StatusNotifierWatcher, so applications'
+-- tray icons come to it. A shell draws them from `Tray`. See `config.lua`.
+sol.tray(config.tray or { serve = true })
 -- Audio: the volume keys below, and `Audio` for a shell's slider. See
 -- `config.lua`.
 sol.audio(config.audio or {})
