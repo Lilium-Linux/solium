@@ -945,7 +945,8 @@ impl XwmHandler for Solium {
     }
 }
 
-/// Serve a selection an X11 client owns to the Wayland client that asked.
+/// Serve the selections X11 clients own to the Wayland clients that asked,
+/// every one asked for since the last pass, in order.
 ///
 /// The last link, and it lives here rather than on `Solium` because
 /// `X11Wm::send_selection` needs the event loop to pump the transfer with, and
@@ -953,18 +954,26 @@ impl XwmHandler for Solium {
 /// recorded where it arrives and carried out where there is a loop — the same
 /// arrangement `pending_resize` and `pending_drop` already use, and for the
 /// same reason.
+///
+/// **Both loops call it, once a pass** (#362). Only the nested one did: on the
+/// hardware nothing ever served the request, so text copied in Steam pasted
+/// as nothing into Firefox, and the request's descriptor stayed open until the
+/// next one replaced it. With no XWayland the requests are dropped, which
+/// closes their descriptors: the reader sees an empty selection rather than
+/// waiting for one.
+/// `state::tests::every_paste_asked_for_before_a_pass_waits_for_it_in_order`,
+/// `state::tests::both_loops_serve_what_wayland_clients_paste_from_x11`.
 pub(crate) fn settle_selection<D>(solium: &mut Solium, handle: &LoopHandle<'static, D>)
 where
     D: XwmHandler + 'static,
 {
-    let Some((selection, mime_type, fd)) = solium.pending_selection.take() else {
-        return;
-    };
-    let Some(xwm) = solium.xwm.as_mut() else {
-        return;
-    };
-    if let Err(err) = xwm.send_selection(selection, mime_type, fd, handle.clone()) {
-        tracing::warn!(?err, ?selection, "an X11 selection could not be read");
+    while let Some((selection, mime_type, fd)) = solium.pending_selection.pop_front() {
+        let Some(xwm) = solium.xwm.as_mut() else {
+            continue;
+        };
+        if let Err(err) = xwm.send_selection(selection, mime_type, fd, handle.clone()) {
+            tracing::warn!(?err, ?selection, "an X11 selection could not be read");
+        }
     }
 }
 

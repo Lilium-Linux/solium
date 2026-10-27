@@ -1243,7 +1243,7 @@ impl SelectionHandler for Solium {
         _seat: Seat<Self>,
         (): &(),
     ) {
-        self.pending_selection = Some((ty, mime_type, fd));
+        self.pending_selection.push_back((ty, mime_type, fd));
     }
 }
 

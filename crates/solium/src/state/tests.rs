@@ -44304,3 +44304,78 @@ mod data_control {
         assert_eq!(read, "restored from history");
     }
 }
+
+/// **#362: every paste a Wayland client asks of an X11 one before a pass
+/// waits for it, in order.** Two requests between passes, as a client pasting
+/// asks for more than one type: one slot kept only the second, and the first
+/// read was dropped. And with no XWayland to answer, the pass lets both go,
+/// which closes their descriptors: the reader sees an empty selection at once
+/// rather than waiting for one.
+#[test]
+fn every_paste_asked_for_before_a_pass_waits_for_it_in_order() {
+    use smithay::wayland::selection::{SelectionHandler, SelectionTarget};
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    let event_loop =
+        smithay::reexports::calloop::EventLoop::<Solium>::try_new().expect("an event loop");
+
+    let mut readers = Vec::new();
+    for mime in ["text/plain;charset=utf-8", "text/plain"] {
+        let (ours, theirs) = UnixStream::pair().expect("a pipe for the transfer");
+        let seat = state.seat.clone();
+        SelectionHandler::send_selection(
+            &mut state,
+            SelectionTarget::Clipboard,
+            mime.to_owned(),
+            std::os::fd::OwnedFd::from(ours),
+            seat,
+            &(),
+        );
+        readers.push(theirs);
+    }
+    let asked: Vec<&str> = state
+        .pending_selection
+        .iter()
+        .map(|(_, mime, _)| mime.as_str())
+        .collect();
+    assert_eq!(
+        asked,
+        ["text/plain;charset=utf-8", "text/plain"],
+        "a request asked for before the pass was lost, or they are out of order"
+    );
+
+    crate::xwayland::settle_selection(&mut state, &event_loop.handle());
+    assert!(
+        state.pending_selection.is_empty(),
+        "the pass left a request waiting"
+    );
+    for mut reader in readers {
+        let mut read = Vec::new();
+        reader
+            .read_to_end(&mut read)
+            .expect("the transfer ends rather than hanging");
+        assert!(read.is_empty(), "nothing can have been written with no X11");
+    }
+}
+
+/// **#362: both loops serve what Wayland clients paste from X11.** The pass
+/// that serves it needs a loop handle, so each backend calls it from its own
+/// loop -- and only the nested one did, so on the hardware a paste from Steam
+/// into Firefox was never answered. Asked of the source text, for the reason
+/// `render.rs`'s drag-icon test gives: serving it needs a real XWayland.
+#[test]
+fn both_loops_serve_what_wayland_clients_paste_from_x11() {
+    for (backend, source) in [
+        ("tty.rs", include_str!("../tty.rs")),
+        ("winit.rs", include_str!("../winit.rs")),
+    ] {
+        assert!(
+            source.contains("crate::xwayland::settle_selection("),
+            "{backend}'s loop never serves a paste from an X11 client"
+        );
+    }
+}
