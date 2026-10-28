@@ -17,7 +17,7 @@
 
 use smithay::backend::renderer::gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram};
 use solium_effects::fragment::{
-    CLIPPED_SOLID, CLIPPED_SURFACE, Corners, Effect, Inputs, MASKED_TEXTURE,
+    CLIPPED_SOLID, CLIPPED_SURFACE, CROSSFADE_TEXTURE, Corners, Effect, Inputs, MASKED_TEXTURE,
 };
 
 mod uniforms;
@@ -167,6 +167,11 @@ pub(crate) struct Programs {
     masked: Option<GlesTexProgram>,
     /// As `warp_failed`, for the masked program.
     masked_failed: bool,
+    /// The program a slot crossfading between two rules' results is drawn
+    /// through (`effect::crossfade`), on the same terms as `warp`.
+    crossfade: Option<GlesTexProgram>,
+    /// As `warp_failed`, for the crossfade program.
+    crossfade_failed: bool,
     /// What a backdrop beneath a warped pane and its capture's hole are
     /// drawn with (`warp/gl.rs`, Ruling F37), on the same terms as `warp`.
     beneath: Option<crate::warp::BeneathProgram>,
@@ -264,6 +269,35 @@ impl Programs {
     /// `render::elements`, which must never compile (this module's doc).
     pub(crate) fn masked_compiled(&self) -> Option<&GlesTexProgram> {
         self.masked.as_ref()
+    }
+
+    /// The program a slot crossfading from one rule's result to another's
+    /// is drawn through, both mixed in one draw (`effect::crossfade`),
+    /// compiled on first use between frames and latched
+    /// (`tests::a_program_that_will_not_compile_is_tried_once`), with the
+    /// uniforms its source declares, its second sampler among them
+    /// (`tests::the_registered_uniforms_are_the_declared_ones_but_smithays`);
+    /// wirecheck's case 12k compiles the same through the same
+    /// [`registration`]. `None` hands a slot over at once, as before
+    /// crossfades.
+    pub(crate) fn crossfade(&mut self, renderer: &mut GlesRenderer) -> Option<&GlesTexProgram> {
+        once(&mut self.crossfade, &mut self.crossfade_failed, || {
+            renderer
+                .compile_custom_texture_shader(CROSSFADE_TEXTURE, &registration(CROSSFADE_TEXTURE))
+                .map_err(|err| {
+                    tracing::warn!(
+                        ?err,
+                        "the crossfade shader did not compile; a slot that changes rule will change at once"
+                    );
+                })
+                .ok()
+        })
+    }
+
+    /// The crossfade program if [`Programs::crossfade`] has compiled it, for
+    /// `render::elements`, which must never compile (this module's doc).
+    pub(crate) fn crossfade_compiled(&self) -> Option<&GlesTexProgram> {
+        self.crossfade.as_ref()
     }
 
     /// The beneath program (Ruling F37, amended 2026-10-14, live under
@@ -512,8 +546,9 @@ mod tests {
     /// **The registered uniforms are the declared ones but smithay's**, with
     /// the declared types: #94's defect (a `vec4` registered as `_1f`) cannot
     /// be written again, because nothing is written by hand. Every source
-    /// registered through [`registration`]: the clipped pair, and wirecheck's
-    /// case 11's `ROUNDED_CORNERS`.
+    /// registered through [`registration`]: the clipped pair, wirecheck's
+    /// case 11's `ROUNDED_CORNERS`, and the crossfade's, whose second sampler
+    /// is registered as the texture unit it reads.
     #[test]
     fn the_registered_uniforms_are_the_declared_ones_but_smithays() {
         use smithay::backend::renderer::gles::UniformType;
@@ -521,6 +556,7 @@ mod tests {
             solium_effects::fragment::CLIPPED_SURFACE,
             solium_effects::fragment::CLIPPED_SOLID,
             solium_effects::fragment::ROUNDED_CORNERS,
+            solium_effects::fragment::CROSSFADE_TEXTURE,
         ] {
             let registered = super::registration(source);
             let declared: Vec<_> = solium_effects::glsl::uniforms(source)
@@ -536,6 +572,7 @@ mod tests {
                     solium_effects::glsl::Glsl::Vec3 => UniformType::_3f,
                     solium_effects::glsl::Glsl::Vec4 => UniformType::_4f,
                     solium_effects::glsl::Glsl::Mat3 => UniformType::Matrix3x3,
+                    solium_effects::glsl::Glsl::Sampler2D => UniformType::_1i,
                     other => panic!("{other:?} is not registered"),
                 };
                 assert_eq!(name.type_, expected, "{}", uniform.name);

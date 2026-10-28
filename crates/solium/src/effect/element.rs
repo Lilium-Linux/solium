@@ -78,7 +78,7 @@ impl Placement {
 
 /// What of a `size` texture a placement draws: its crop, or the whole
 /// texture. `tests::a_cropped_placement_draws_only_its_crop`.
-fn src_of(placement: Placement, size: (i32, i32)) -> Rectangle<f64, Buffer> {
+pub(crate) fn src_of(placement: Placement, size: (i32, i32)) -> Rectangle<f64, Buffer> {
     placement
         .crop
         .unwrap_or_else(|| Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into()))
@@ -217,6 +217,16 @@ impl EffectElement {
             placement: self.placement.cropped(crop),
             ..self.clone()
         }
+    }
+
+    /// Its texture, which a crossfade reads it from (`effect::crossfade`).
+    pub(crate) fn texture(&self) -> &GlesTexture {
+        &self.texture
+    }
+
+    /// Where and how it is placed, which a crossfade places it by.
+    pub(crate) fn placement(&self) -> Placement {
+        self.placement
     }
 }
 

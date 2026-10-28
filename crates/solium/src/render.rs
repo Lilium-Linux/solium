@@ -104,6 +104,10 @@ render_elements! {
     /// An effect's result in its slot, cut by its part's mask. See
     /// `crate::effect::element`.
     Effect = crate::effect::element::EffectElement,
+    /// Two rules' results of one slot mixed in one draw as the slot
+    /// crossfades from one to the other (#389). See
+    /// `crate::effect::crossfade`.
+    Crossfade = crate::effect::crossfade::CrossfadeElement,
     /// A slot's backdrop drawn beneath a warped pane through its mesh, each
     /// fragment reading it where it is on the monitor (Ruling F37). See
     /// `crate::effect::beneath`.
@@ -1367,6 +1371,9 @@ impl Phases for Gpu<'_> {
         // nothing with none (spec §8.4,
         // `effect::host::tests::an_empty_host_touches_no_gl`).
         let _ = state.programs.masked(renderer);
+        // And what a slot crossfading between two rules is drawn through
+        // (`effect::crossfade`).
+        let _ = state.programs.crossfade(renderer);
         // And what a warped pane and a slot beneath its warp are drawn with,
         // so a slot is never placed beneath a warp that cannot be drawn
         // (`measured` reads their refusals; Ruling F37).
@@ -1386,6 +1393,12 @@ impl Phases for Gpu<'_> {
         // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
         // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
         let mut slots = build_slots(state);
+        // A slot crossfading between two rules keeps the result of the one it
+        // leaves, in its `Leaving` twin, rather than start that afresh
+        // (`effect::store::tests::a_crossfading_slot_keeps_both_rules_states`).
+        for (owner, slot, to, from) in slots.crossfades() {
+            state.store.arrange(owner, slot, to, from);
+        }
         // Every wanted slot's box, and its state in the store, kept while it is
         // wanted and given back by the sweep once it is not
         // (`effect::store::tests::a_slot_no_rule_wanted_this_pass_is_dropped`).
@@ -2036,47 +2049,87 @@ fn unders(
     warp: CommitCounter,
 ) -> Vec<crate::effect::beneath::Under> {
     let mut unders = Vec::new();
-    for (owner, slot) in holes {
-        let crate::effect::plan::Owner::Pane(pane, _) = owner else {
-            continue;
+    for (owner, hole) in holes {
+        // A slot crossfading between two rules has both its results beneath
+        // the warp, each at its share of the slot's opacity, laid one over
+        // the other there rather than mixed in one draw as the flat path
+        // mixes them (`effect::crossfade`): a dip half way through, for as
+        // long as a crossfade and a warp meet.
+        let whole = slots.opacity(owner, *hole);
+        let legs = match slots.mix(owner, *hole) {
+            Some(share) => [
+                Some((*hole, whole * share)),
+                Some((hole.leaving(), whole * (1.0 - share))),
+            ],
+            None => [Some((*hole, whole)), None],
         };
-        let (Some(outer), Some((found, _)), Some(key), Some(boxed)) = (
-            state.pane_outer_of(*pane),
-            part_of(state, owner),
-            slots.key(owner, *slot),
-            slots.boxed(owner, *slot),
-        ) else {
-            continue;
-        };
-        let Some(rest) = part_rect(state, &found) else {
-            continue;
-        };
-        // In the capture, which holds the pane's layers' bleed around it
-        // (#312): the part's place in the pane grown by it.
-        let captured = bled(outer, capture_bleed(state, *pane));
-        let mask = crate::effect::beneath::BeneathMask::Shape(
-            crate::effect::beneath::beneath_mask(rest, captured, boxed.radii, scale),
-        );
-        for place in slots.places(owner, *slot) {
-            let Some(screened) = slots.screened(owner, *slot, &place.monitor) else {
-                continue;
-            };
-            let t2 = state
-                .store
-                .slot_mut(owner, *slot, key)
-                .t2_mut(&place.monitor);
-            unders.push(crate::effect::beneath::Under {
-                monitor: place.monitor.clone(),
-                texture: screened.texture.clone(),
-                over: screened.over,
-                mask: mask.clone(),
-                id: t2.id.clone(),
-                commit: t2.under_commit(warp, screened.rerun),
-                opacity: slots.opacity(owner, *slot),
-            });
+        for (slot, opacity) in legs.into_iter().flatten() {
+            under(
+                state,
+                slots,
+                owner,
+                slot,
+                opacity,
+                (scale, warp),
+                &mut unders,
+            );
         }
     }
     unders
+}
+
+/// One result beneath a warped pane on every monitor it is placed on, at
+/// `opacity`, pushed onto `into`: [`unders`]' body, once per result.
+fn under(
+    state: &mut Solium,
+    slots: &Slots,
+    owner: &crate::effect::plan::Owner,
+    slot: Slot,
+    opacity: f32,
+    (scale, warp): (f64, CommitCounter),
+    into: &mut Vec<crate::effect::beneath::Under>,
+) {
+    let crate::effect::plan::Owner::Pane(pane, _) = owner else {
+        return;
+    };
+    let (Some(outer), Some((found, _)), Some(key), Some(boxed)) = (
+        state.pane_outer_of(*pane),
+        part_of(state, owner),
+        slots.key(owner, slot),
+        slots.boxed(owner, slot),
+    ) else {
+        return;
+    };
+    let Some(rest) = part_rect(state, &found) else {
+        return;
+    };
+    // In the capture, which holds the pane's layers' bleed around it
+    // (#312): the part's place in the pane grown by it.
+    let captured = bled(outer, capture_bleed(state, *pane));
+    let mask = crate::effect::beneath::BeneathMask::Shape(crate::effect::beneath::beneath_mask(
+        rest,
+        captured,
+        boxed.radii,
+        scale,
+    ));
+    for place in slots.places(owner, slot) {
+        let Some(screened) = slots.screened(owner, slot, &place.monitor) else {
+            continue;
+        };
+        let t2 = state
+            .store
+            .slot_mut(owner, slot, key)
+            .t2_mut(&place.monitor);
+        into.push(crate::effect::beneath::Under {
+            monitor: place.monitor.clone(),
+            texture: screened.texture.clone(),
+            over: screened.over,
+            mask: mask.clone(),
+            id: t2.id.clone(),
+            commit: t2.under_commit(warp, screened.rerun),
+            opacity,
+        });
+    }
 }
 
 /// The effects a pane's style declares, copied out so nothing borrows the
@@ -2277,9 +2330,12 @@ fn resolve_slots(
 /// `fades` at `now`: a rule with a `fade` is wanted at the opacity its fade
 /// has reached, and still wanted, fading out, once it stops matching, until
 /// it is gone (`effect::fade`); one without is wanted whole while it matches.
+/// A slot crossfading from another rule wants that rule in its `Leaving`
+/// twin too, with how far the crossfade has got.
 /// `style` is the pane's style's rules, which a key of the style's names.
 /// `state::tests::real_client::a_rule_whose_chain_is_not_bound_wants_no_slot`,
-/// `state::tests::real_client::a_rule_with_a_fade_eases_its_slot_in_and_out_with_the_focus`.
+/// `state::tests::real_client::a_rule_with_a_fade_eases_its_slot_in_and_out_with_the_focus`,
+/// `state::tests::real_client::two_replace_rules_on_focused_crossfade_as_the_keyboard_moves`.
 fn want_resolved(
     slots: &mut crate::effect::plan::Slots,
     state: &Solium,
@@ -2320,6 +2376,18 @@ fn want_resolved(
         slots.want(owner.clone(), slot, shown.key);
         if shown.opacity < 1.0 {
             slots.set_opacity(owner.clone(), slot, shown.opacity);
+        }
+        // Crossfading from another rule: that rule's result is wanted too, in
+        // the slot's `Leaving` twin, so it is kept and run beside this one's
+        // and drawn mixed with it (`effect::fade`). One that reads nothing
+        // here, as above, leaves this one's alone.
+        if let Some((from, share)) = shown.from
+            && let Some(leaving) = state.chains.get(from)
+            && (leaving.tier != crate::effect::rules::Tier::Xray
+                || t2_cut(state, owner, leaving).is_some())
+        {
+            slots.want(owner.clone(), slot.leaving(), from);
+            slots.set_mix(owner.clone(), slot, share);
         }
     }
 }
@@ -2943,7 +3011,7 @@ pub(crate) fn run_slots(
             // Ruling 6's edge rule: a self chain in `replace` reads the
             // part's own edge beyond it, in `behind` and `front` transparent
             // (`effect::run::tests::the_first_input_is_clamped_to_its_edge_texels`).
-            clamp_first: slot == Slot::Replace && chain.tier == Tier::Own,
+            clamp_first: slot.placed() == Slot::Replace && chain.tier == Tier::Own,
         };
         if !began {
             runner.begin();
@@ -3703,7 +3771,7 @@ pub(crate) fn measured(
     match state.presented.get(*pane) {
         Some(Planned::Warp { frame, grid, .. }) => {
             let beneath = state.effect_settings.xray.warped == crate::effect::xray::Warped::Drawn
-                && slot == Slot::Behind
+                && slot.placed() == Slot::Behind
                 && *part != PaneSlot::Popups
                 && !state.programs.warp_refused()
                 && !state.programs.beneath_refused();
@@ -4261,10 +4329,13 @@ pub(crate) fn drawn_alpha(frame: &present::Frame, piece: Piece) -> Option<f32> {
 
 /// A pane's pieces with its slots, topmost first (Ruling 15): the pane's
 /// `front`, then `PANE_ORDER` with the client's slots around the client, then
-/// the pane's `behind`; a pane `replace` is the whole of it; a client
-/// `replace` takes the client's place. Layer and titlebar slots are inside
-/// `Layers`, around their layer ([`around_layer`]), and the popups' around
-/// the popups, which go in ahead of the walk.
+/// the pane's `behind`; a pane `replace` takes the place of all of
+/// `PANE_ORDER`, and a client `replace` the client's, each [`bracket`]ed by
+/// its part's `front` and `behind` as every other part is (#389: a client's
+/// `front` over its `replace` was left out, so an outline over a window made
+/// see-through drew nothing). Layer and titlebar slots are inside `Layers`,
+/// around their layer ([`around_layer`]), and the popups' around the
+/// popups, which go in ahead of the walk.
 /// `tests::with_no_slots_the_pane_walk_is_pane_order`,
 /// `tests::client_slots_bracket_the_client_and_replace_takes_its_place`,
 /// `tests::pane_slots_are_around_the_sandwich_and_below_the_popups`.
@@ -4273,29 +4344,23 @@ pub(crate) fn pane_walk<T>(
     has: &dyn Fn(PaneSlot, Slot) -> bool,
     mut piece: impl FnMut(&mut Vec<T>, Piece),
 ) {
-    if has(PaneSlot::Pane, Slot::Replace) {
-        piece(into, Piece::Slot(PaneSlot::Pane, Slot::Replace));
-        return;
-    }
     if has(PaneSlot::Pane, Slot::Front) {
         piece(into, Piece::Slot(PaneSlot::Pane, Slot::Front));
     }
-    for each in PANE_ORDER {
-        match each {
-            Piece::Client => {
-                if has(PaneSlot::Client, Slot::Replace) {
-                    piece(into, Piece::Slot(PaneSlot::Client, Slot::Replace));
-                    continue;
-                }
-                if has(PaneSlot::Client, Slot::Front) {
-                    piece(into, Piece::Slot(PaneSlot::Client, Slot::Front));
-                }
-                piece(into, Piece::Client);
-                if has(PaneSlot::Client, Slot::Behind) {
-                    piece(into, Piece::Slot(PaneSlot::Client, Slot::Behind));
-                }
+    if has(PaneSlot::Pane, Slot::Replace) {
+        piece(into, Piece::Slot(PaneSlot::Pane, Slot::Replace));
+    } else {
+        for each in PANE_ORDER {
+            match each {
+                Piece::Client => bracket(
+                    |slot| has(PaneSlot::Client, slot),
+                    |slot| match slot {
+                        Some(slot) => piece(into, Piece::Slot(PaneSlot::Client, slot)),
+                        None => piece(into, Piece::Client),
+                    },
+                ),
+                other => piece(into, other),
             }
-            other => piece(into, other),
         }
     }
     if has(PaneSlot::Pane, Slot::Behind) {
@@ -4551,7 +4616,9 @@ pub(crate) fn slot_draw(within: Within, beneath: bool, screened: bool) -> SlotDr
 /// mask on this output in logical pixels (`effect::mask`), cut by it as
 /// [`cut_by_shape`] says, at `alpha`; nothing for a slot with no result on
 /// `monitor`, the output it is drawn on. In a capture, a slot drawn beneath
-/// its pane's warp is a hole, or nothing ([`slot_draw`]).
+/// its pane's warp is a hole, or nothing ([`slot_draw`]). A slot
+/// crossfading between two rules is both their results mixed in one draw
+/// (`effect::crossfade`, #389).
 #[expect(
     clippy::too_many_arguments,
     reason = "one slot placed: whose, which, over what, on which monitor and in which walk, at what scale and alpha"
@@ -4595,6 +4662,51 @@ fn slot_element(
             )));
         }
     }
+    // A slot fading in or out with its rule is drawn at its fade's opacity,
+    // its result as it is (`effect::fade`).
+    let alpha = alpha * slots.opacity(owner, slot);
+    let own = placed_result(state, slots, owner, slot, part, scale, alpha, monitor);
+    let Some(share) = slots.mix(owner, slot) else {
+        return own.map(Element::Effect);
+    };
+    // Crossfading from the rule in its `Leaving` twin: both results mixed in
+    // one draw (`effect::crossfade`), or the one there is while the other has
+    // nothing to draw, or with no program to mix them, its own at once.
+    let leaving = placed_result(
+        state,
+        slots,
+        owner,
+        slot.leaving(),
+        part,
+        scale,
+        alpha,
+        monitor,
+    );
+    match (leaving, own, state.programs.crossfade_compiled()) {
+        (Some(from), Some(to), Some(program)) => Some(Element::Crossfade(
+            crate::effect::crossfade::CrossfadeElement::new(from, to, share, program.clone()),
+        )),
+        (from, to, _) => to.or(from).map(Element::Effect),
+    }
+}
+
+/// One rule's result in a slot (a crossfading slot's `Leaving` twin's
+/// included), placed over its part as [`slot_element`] says, at `alpha`;
+/// nothing for a slot with no result on `monitor`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one result placed: whose, which, over what, at what scale and alpha, on which monitor"
+)]
+fn placed_result(
+    state: &Solium,
+    slots: &Slots,
+    owner: &crate::effect::plan::Owner,
+    slot: Slot,
+    part: Mask,
+    scale: f64,
+    alpha: f32,
+    monitor: Option<&str>,
+) -> Option<crate::effect::element::EffectElement> {
     // On `monitor`, its own result there (a T2 slot's) or the slot's one
     // (`effect::plan::tests::a_monitors_own_result_wins_over_the_slots_one`).
     let ready = match monitor {
@@ -4628,13 +4740,7 @@ fn slot_element(
         ready.reach,
         corners_times(radii, scale),
     );
-    // A slot fading in or out with its rule is drawn at its fade's opacity,
-    // its result as it is (`effect::fade`).
-    Some(Element::Effect(ready.element.at(
-        dst,
-        cut.then_some(mask),
-        alpha * slots.opacity(owner, slot),
-    )))
+    Some(ready.element.at(dst, cut.then_some(mask), alpha))
 }
 
 /// The ready slots around a pane's layers at `depth`, placed, each with its
@@ -10663,6 +10769,8 @@ pub(crate) mod tests {
         });
     }
 
+    /// **Client slots bracket the client, and a `replace` takes its
+    /// place**, its `front` and `behind` still around it (#389).
     #[test]
     fn client_slots_bracket_the_client_and_replace_takes_its_place() {
         use crate::effect::plan::PaneSlot;
@@ -10686,11 +10794,26 @@ pub(crate) mod tests {
                     && slot == Slot::Replace),
                 ["spikes", "bar", "<Client Replace>", "glow"]
             );
+            // And a replaced client is still bracketed by its other slots
+            // (#389), as every part is (`bracket`).
+            assert_eq!(
+                walked(&decoration, &|part, _| part == PaneSlot::Client),
+                [
+                    "spikes",
+                    "bar",
+                    "<Client Front>",
+                    "<Client Replace>",
+                    "<Client Behind>",
+                    "glow"
+                ]
+            );
         });
     }
 
     /// **Pane slots are around the sandwich**; the popups are not in the
     /// walk at all (they go in ahead of it), so a pane's `front` is below them.
+    /// A pane `replace` takes the sandwich's place, inside its `front` and
+    /// `behind`.
     #[test]
     fn pane_slots_are_around_the_sandwich_and_below_the_popups() {
         use crate::effect::plan::PaneSlot;
@@ -10713,6 +10836,10 @@ pub(crate) mod tests {
                 walked(&decoration, &|part, slot| part == PaneSlot::Pane
                     && slot == Slot::Replace),
                 ["<Pane Replace>"]
+            );
+            assert_eq!(
+                walked(&decoration, &|part, _| part == PaneSlot::Pane),
+                ["<Pane Front>", "<Pane Replace>", "<Pane Behind>"]
             );
         });
     }

@@ -35,6 +35,9 @@ pub(crate) fn registration(source: &str) -> Vec<UniformName<'static>> {
                 Glsl::Vec3 => UniformType::_3f,
                 Glsl::Vec4 => UniformType::_4f,
                 Glsl::Mat3 => UniformType::Matrix3x3,
+                // A sampler is the texture unit it reads, beside smithay's
+                // own `tex`: `fragment::CROSSFADE_TEXTURE`'s second result.
+                Glsl::Sampler2D => UniformType::_1i,
                 _ => return None,
             };
             Some(UniformName::new(uniform.name, kind))

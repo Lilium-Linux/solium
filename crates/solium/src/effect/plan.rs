@@ -527,6 +527,9 @@ pub(crate) struct Slots {
     /// A slot fading in or out with its rule, at the opacity its fade has
     /// reached this pass; every other slot is whole (`effect::fade`).
     opacity: HashMap<(Owner, Slot), f32>,
+    /// A slot crossfading from the rule in its `Leaving` twin to its own,
+    /// at how far the crossfade has got this pass, 0 to 1 (`effect::fade`).
+    mix: HashMap<(Owner, Slot), f32>,
 }
 
 impl Slots {
@@ -546,6 +549,39 @@ impl Slots {
     /// `state::tests::real_client::a_rule_with_a_fade_eases_its_slot_in_and_out_with_the_focus`.
     pub(crate) fn set_opacity(&mut self, owner: Owner, slot: Slot, opacity: f32) {
         self.opacity.insert((owner, slot), opacity);
+    }
+
+    /// A wanted slot crossfading to its rule from the one wanted in its
+    /// `Leaving` twin: how far it has got this pass, from 0, all that one's
+    /// result, to 1, all its own.
+    /// `state::tests::real_client::two_replace_rules_on_focused_crossfade_as_the_keyboard_moves`.
+    pub(crate) fn set_mix(&mut self, owner: Owner, slot: Slot, share: f32) {
+        self.mix.insert((owner, slot), share);
+    }
+
+    /// How far a slot's crossfade has got this pass, `None` for a slot not
+    /// crossfading (`effect::fade`).
+    /// `state::tests::real_client::two_replace_rules_on_focused_crossfade_as_the_keyboard_moves`.
+    pub(crate) fn mix(&self, owner: &Owner, slot: Slot) -> Option<f32> {
+        if self.mix.is_empty() {
+            return None;
+        }
+        self.mix.get(&(owner.clone(), slot)).copied()
+    }
+
+    /// Every slot crossfading this pass: its owner and slot, the rule it
+    /// crossfades to and the one it crossfades from, wanted in its `Leaving`
+    /// twin (`effect::store::Store::arrange`).
+    /// `state::tests::real_client::two_replace_rules_on_focused_crossfade_as_the_keyboard_moves`.
+    pub(crate) fn crossfades(&self) -> impl Iterator<Item = (&Owner, Slot, RuleKey, RuleKey)> {
+        self.mix.keys().filter_map(|(owner, slot)| {
+            Some((
+                owner,
+                *slot,
+                self.key(owner, *slot)?,
+                self.key(owner, slot.leaving())?,
+            ))
+        })
     }
 
     /// How opaque a slot's result is drawn this pass: 1 but while its rule's
@@ -620,16 +656,20 @@ impl Slots {
     }
 
     /// Whether the slot has a result to draw on any monitor: what a walk
-    /// with no monitor asks (a warped pane's capture).
+    /// with no monitor asks (a warped pane's capture). A crossfading slot
+    /// has one while either of its two rules has.
     /// `tests::a_slot_is_wanted_by_its_owner_and_slot_and_ready_apart`,
     /// `tests::a_monitors_own_result_wins_over_the_slots_one`,
     /// `render::tests::a_wanted_slot_with_nothing_ready_draws_what_no_slot_draws`.
     pub(crate) fn is_ready(&self, owner: &Owner, slot: Slot) -> bool {
-        self.ready.contains_key(&(owner.clone(), slot))
-            || self
-                .on
-                .keys()
-                .any(|(each, at, _)| each == owner && *at == slot)
+        let ready = |slot: Slot| {
+            self.ready.contains_key(&(owner.clone(), slot))
+                || self
+                    .on
+                    .keys()
+                    .any(|(each, at, _)| each == owner && *at == slot)
+        };
+        ready(slot) || (self.mix(owner, slot).is_some() && ready(slot.leaving()))
     }
 
     /// A T2 slot's places (`render::record_boxes`).
@@ -667,12 +707,16 @@ impl Slots {
 
     /// Whether the slot has a result to draw on `monitor`: its own there,
     /// else the slot's one result. What the walk on that monitor asks, so
-    /// a T2 slot ready on one monitor only brackets nothing on another.
+    /// a T2 slot ready on one monitor only brackets nothing on another. A
+    /// crossfading slot has one while either of its two rules has.
     /// `tests::a_monitors_own_result_wins_over_the_slots_one`.
     pub(crate) fn is_ready_on(&self, owner: &Owner, slot: Slot, monitor: &str) -> bool {
-        self.on
-            .contains_key(&(owner.clone(), slot, monitor.to_owned()))
-            || self.ready.contains_key(&(owner.clone(), slot))
+        let ready = |slot: Slot| {
+            self.on
+                .contains_key(&(owner.clone(), slot, monitor.to_owned()))
+                || self.ready.contains_key(&(owner.clone(), slot))
+        };
+        ready(slot) || (self.mix(owner, slot).is_some() && ready(slot.leaving()))
     }
 
     /// A T2 place whose memos were not held this pass: it runs its whole

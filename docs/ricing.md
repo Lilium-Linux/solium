@@ -328,7 +328,11 @@ outline ([its folder](../crates/solium/effects/shade/README.md)), which the
 ```
 
 the compositor blending the result it has at another opacity on each frame
-and running nothing for it.
+and running nothing for it. Two rules for one slot, one with the keyboard and
+one without, each with a `fade`, crossfade from one result to the other as
+the keyboard moves: a window's own pixels eased between two opacities, say,
+with a blur behind it that stays solid
+([crossfades](../crates/solium/effects/README.md#crossfades)).
 An effect that reads the part's own pixels (`self`, or `source = "self"`, as
 the rule above gives the blur) is drawn in its slot, and runs again only when
 the window draws something new, changes size, or the rule's params change:

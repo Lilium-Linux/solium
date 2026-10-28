@@ -54,6 +54,16 @@ pub(crate) mod run;
 )]
 pub(crate) mod element;
 
+/// The compositor's crossfade element (Smithay and `solium_effects` only,
+/// beside `element`): case 12k draws it.
+#[path = "../../../crates/solium/src/effect/crossfade.rs"]
+#[allow(
+    dead_code,
+    unfulfilled_lint_expectations,
+    reason = "the compositor's crossfade element, of which case 12k draws the element"
+)]
+pub(crate) mod crossfade;
+
 /// The compositor's pool, included once, by FX0's cases: case 12c probes
 /// its formats, and the executor draws into its targets.
 use crate::fx0::pool;
@@ -75,6 +85,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_chain_feeds_each_links_result_to_the_next(renderer)?;
     nothing_is_allocated_while_a_result_is_drawn(renderer)?;
     a_result_is_cut_by_its_mask(renderer)?;
+    a_crossfade_mixes_two_results_in_one_draw(renderer)?;
     a_warp_drawn_through_a_folders_frag(renderer)?;
     Ok(())
 }
@@ -1559,6 +1570,139 @@ fn a_result_is_cut_by_its_mask(renderer: &mut GlesRenderer) -> Result<()> {
         "  inside exact, outside and past a corner's arc transparent, drawn 1:1 and at twice \
          its size; with no mask, whole; a crop under an off-centre mask, cut where the \
          placement says"
+    );
+    Ok(())
+}
+
+/// **Case 12k: a crossfade mixes two results in one draw** (#389). The
+/// compositor's own `CrossfadeElement`, included by path, over two
+/// 148×98 results of one green window, one at 0.95 of its opacity and one at
+/// 0.80 (premultiplied), placed over the same box and drawn by
+/// `pool::paint` into a transparent target: at shares 0, 0.5 and 1 its
+/// centre is the first, their mix (0.875, 223) and the second, within 1, and
+/// never below both, which one over the other at opposite weights would be
+/// (0.69). Then the second result padded by 10 on every side, uncut, and
+/// the first cut by the part's mask, square: half way, a pixel in the
+/// padding is half the second alone (102), the first being nothing past its
+/// own result there, and the centre still their mix.
+fn a_crossfade_mixes_two_results_in_one_draw(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::Frame as _;
+    use smithay::backend::renderer::element::Id;
+    use smithay::backend::renderer::utils::CommitCounter;
+    use smithay::utils::Physical;
+    use solium_effects::fragment::{CROSSFADE_TEXTURE, Corners, MASKED_TEXTURE};
+    println!("\n=== FX2: a crossfade mixes two results in one draw ===");
+    let compile = |renderer: &mut GlesRenderer, source: &str, what: &str| {
+        renderer
+            .compile_custom_texture_shader(source, &crate::uniforms::registration(source))
+            .map_err(|err| anyhow!("{what} did not compile in every variant: {err}"))
+    };
+    let masked = compile(renderer, MASKED_TEXTURE, "MASKED_TEXTURE")?;
+    let program = compile(renderer, CROSSFADE_TEXTURE, "CROSSFADE_TEXTURE")?;
+    let (focused, unfocused) = ([0, 242, 0, 242], [0, 204, 0, 204]);
+    let mut pool = pool::Pool::new(0);
+    let mut carrier = pool
+        .carrier(renderer)
+        .ok_or_else(|| anyhow!("no carrier"))?;
+    let mut drawn = |renderer: &mut GlesRenderer,
+                     side: (i32, i32),
+                     element: crossfade::CrossfadeElement|
+     -> Result<Vec<u8>> {
+        let target = pool
+            .target(&mut pool::Gl(renderer), side.into(), pool::Format::Rgba8)
+            .ok_or_else(|| anyhow!("no pooled target"))?;
+        {
+            let mut bound = renderer
+                .bind(&mut carrier)
+                .map_err(|err| anyhow!("{err}"))?;
+            let mut frame =
+                pool::frame_for(renderer, &mut bound, &target).map_err(|err| anyhow!("{err}"))?;
+            pool::paint(&mut frame, side.into(), &[element], 1.0)
+                .map_err(|err| anyhow!("{err}"))?;
+            frame
+                .finish()
+                .map_err(|err| anyhow!("{err}"))?
+                .wait()
+                .map_err(|err| anyhow!("{err:?}"))?;
+        }
+        let read = read_rgba(renderer, target.texture())?;
+        drop(target);
+        Ok(read)
+    };
+    let green_at = |read: &[u8], side: (i32, i32), (x, y): (usize, usize)| -> Result<u8> {
+        let at = (y * usize::try_from(side.0)? + x) * 4;
+        let got = read.get(at..at + 4).unwrap_or_default();
+        match got {
+            [0, g, 0, a] if g == a => Ok(*g),
+            other => Err(anyhow!(
+                "({x}, {y}) is {other:?}, not a premultiplied green"
+            )),
+        }
+    };
+    let near = |got: u8, want: u8| got.abs_diff(want) <= 1;
+    // One box, both whole.
+    let side = (148, 98);
+    let (from, _) = upload(renderer, (148, 98), |_, _| focused)?;
+    let (to, _) = upload(renderer, (148, 98), |_, _| unfocused)?;
+    let place = Rectangle::<i32, Physical>::from_size(side.into());
+    let result = |texture: &GlesTexture,
+                  at: Rectangle<i32, Physical>,
+                  mask: Option<(Rectangle<f64, Physical>, Corners)>| {
+        element::EffectElement::new(
+            Id::new(),
+            CommitCounter::default(),
+            texture.clone(),
+            masked.clone(),
+        )
+        .at(at, mask, 1.0)
+    };
+    let mut read = Vec::new();
+    for (share, want) in [(0.0_f32, 242_u8), (0.5, 223), (1.0, 204)] {
+        let element = crossfade::CrossfadeElement::new(
+            result(&from, place, None),
+            result(&to, place, None),
+            share,
+            program.clone(),
+        );
+        let got = green_at(&drawn(renderer, side, element)?, side, (74, 49))?;
+        if !near(got, want) {
+            return Err(anyhow!(
+                "crossfaded at {share}, the centre is {got}, not {want}: \
+                 one result laid over the other, not mixed, reads 175 half way"
+            ));
+        }
+        read.push(format!("{share}: {got}"));
+    }
+    println!("  one box: {}", read.join(", "));
+    // The second padded by 10 and uncut; the first cut by the part.
+    let side = (168, 118);
+    let (padded, _) = upload(renderer, (168, 118), |_, _| unfocused)?;
+    let part = Rectangle::<i32, Physical>::new((10, 10).into(), (148, 98).into());
+    let mask = Some((
+        Rectangle::<f64, Physical>::new((0.0, 0.0).into(), (148.0, 98.0).into()),
+        Corners::all(0.0),
+    ));
+    let element = crossfade::CrossfadeElement::new(
+        result(&from, part, mask),
+        result(&padded, Rectangle::from_size(side.into()), None),
+        0.5,
+        program.clone(),
+    );
+    let read = drawn(renderer, side, element)?;
+    for ((x, y), want, what) in [
+        ((5, 5), 102_u8, "in the padding"),
+        ((84, 59), 223, "at the centre"),
+    ] {
+        let got = green_at(&read, side, (x, y))?;
+        if !near(got, want) {
+            return Err(anyhow!(
+                "padded, half way, ({x}, {y}) {what} is {got}, not {want}"
+            ));
+        }
+    }
+    pool.sweep(renderer);
+    println!(
+        "  mixed before it is laid over anything: no dip half way; past a result, nothing of it"
     );
     Ok(())
 }
