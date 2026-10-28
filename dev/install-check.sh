@@ -209,6 +209,8 @@ for entry in "${config_files[@]}"; do
 done
 check "solium-session.target binds graphical-session.target" \
     grep -qx "BindsTo=graphical-session.target" "$units/solium-session.target"
+check "  and stops it with itself" \
+    grep -qx "PropagatesStopTo=graphical-session.target" "$units/solium-session.target"
 check "  and is ordered before it" \
     grep -qx "Before=graphical-session.target" "$units/solium-session.target"
 check "  and leaves XDG autostart to solium-autostart.target" \
