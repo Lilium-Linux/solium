@@ -831,10 +831,14 @@ impl Solium {
                 Command::Run { program, args } => self.run(&program, &args),
                 Command::FolderTrust { absolute } => {
                     self.folder_trust.trust(&absolute);
-                    if let Some(entry) = self.folder.iter_mut().find(|entry| {
+                    // Copied only when an entry changes, so `Folder` is sent
+                    // again exactly then.
+                    if let Some(index) = self.folder.iter().position(|entry| {
                         crate::folder::path_from_uri(&entry.uri)
                             .is_some_and(|path| path.display().to_string() == absolute)
-                    }) {
+                    }) && let Some(entry) =
+                        std::rc::Rc::make_mut(&mut self.folder).get_mut(index)
+                    {
                         entry.trusted = true;
                     }
                 }

@@ -330,18 +330,6 @@ pub(crate) struct MonitorInfo {
     pub(crate) off: bool,
 }
 
-/// An installed application as a script sees it (03 §3.2.13), for
-/// `sol.apps()` -- `dock.lua`'s first-run pins check a candidate id against
-/// this list (`04-ui.md` §4.6's "checked against `sol.apps()`").
-#[derive(Clone, Debug, Default)]
-pub(crate) struct AppInfo {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) generic_name: String,
-    pub(crate) icon: String,
-    pub(crate) categories: Vec<String>,
-}
-
 /// What the compositor looked like when a handler was called.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Snapshot {
@@ -350,8 +338,9 @@ pub(crate) struct Snapshot {
     /// Every monitor, in the order the compositor holds them.
     pub(crate) monitors: Vec<MonitorInfo>,
     /// Installed, visible applications, by name (`crate::apps::scan`'s own
-    /// order). `sol.apps()`.
-    pub(crate) apps: Vec<AppInfo>,
+    /// order). `sol.apps()`. Shared, not copied, from one snapshot to the
+    /// next: a snapshot is taken for every event a script hears.
+    pub(crate) apps: std::rc::Rc<Vec<crate::apps::Entry>>,
     /// The keyboard, for `sol.keyboard()` and for a shell that wants to draw
     /// a layout indicator.
     pub(crate) keyboard: crate::keymap::State,
@@ -8276,7 +8265,7 @@ mod tests {
             screens: Vec::new(),
             text_input: None,
             problems: Vec::new(),
-            apps: Vec::new(),
+            apps: std::rc::Rc::default(),
         };
 
         let outcome = scripts.key("super+space", snapshot);
@@ -11413,7 +11402,7 @@ mod tests {
             screens: Vec::new(),
             text_input: None,
             problems: Vec::new(),
-            apps: Vec::new(),
+            apps: std::rc::Rc::default(),
         }
     }
 
@@ -11962,7 +11951,7 @@ mod tests {
             screens: Vec::new(),
             text_input: None,
             problems: Vec::new(),
-            apps: Vec::new(),
+            apps: std::rc::Rc::default(),
         }
     }
 
