@@ -722,6 +722,26 @@ local defaults = {
         serve = true,
     },
 
+    -- Media (#379).
+    --
+    -- Solium follows the MPRIS players on the session bus (mpv, Spotify,
+    -- Firefox and the rest), so a shell shows what is playing from `Media`
+    -- and the media keys below reach the player with no `playerctl`; Lua
+    -- hears `sol.on("media")`. The active player is the one playing, else
+    -- the last that played. Nested, players are followed only on the bus
+    -- SOLIUM_SESSION_BUS names.
+    media = {
+        watch = true,
+        -- Players left out, by the part of their bus name after
+        -- `org.mpris.MediaPlayer2.` (an instance's `.instance42` suffix
+        -- included). playerctld repeats whichever player it saw last, so it
+        -- would show every player twice.
+        ignore = { "playerctld" },
+        -- How often, in milliseconds, a playing player's `position` moves on
+        -- in a scene; 0 moves it only when the player says where it is.
+        position_interval_ms = 1000,
+    },
+
     -- Audio (#347): Solium reads PipeWire itself, so a shell's slider is
     -- live and a volume key's change is known to be the key's.
     audio = {

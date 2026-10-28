@@ -406,7 +406,7 @@ the models `Windows` ("Windows, live", below), `Workspaces` ("Workspaces, as
 the configuration has them", below), `Apps` and `Folder`, which every scene
 reads by name, but which are no singletons: Solium's own lock scenes and
 the pointer's scene, the scenes drawn over the lock, read empty ones under
-the same names, and a `Tray` with no items
+the same names, a `Tray` with no items and a `Media` with no players
 (`lock_auth::tests::a_lock_scene_reads_only_what_a_lock_may_show`,
 `lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`); the types `Grab` ("Popups that hold the
 pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
@@ -686,6 +686,25 @@ item sent or a PNG in its own `IconThemePath`, decoded and capped by Solium;
 to the service, which makes them on the bus and tells Lua as `tray` events
 with `origin = "scene"`. The lock's scenes read a `Tray` with no items.
 [ricing.md](ricing.md#tray) has a bar's tray with its menu, and the Lua side.
+
+**Media, live** (#379). `Media` is what Solium follows of the MPRIS players
+on the session bus: `players`, a row model in the order they appeared,
+`active` (the player the media keys reach: the one playing, else the last
+that played; a facade that is never null and reads `present: false` with no
+player), `available` and `positionInterval`. A player has `id`, `service`,
+`identity`, `desktopEntry`, `icon`, `status`, `playing`, `active`, `title`,
+`artist`, `album`, `art` (`image://solium/media/<id>/<revision>`: a local
+file or `data:` URI the player named, read, decoded and capped by Solium),
+`artUrl` (a network address, handed over as the player named it: Solium
+fetches nothing), `trackId`, `length` and `position` in seconds (`position`
+worked out on the compositor's clock from where the player last said it was,
+the rate and the time since, and told to bindings every `positionInterval`
+ms while it plays), `rate`, `volume`, `shuffle`, `loopStatus` and the `can*`
+flags. Its calls (`playPause`, `play`, `pause`, `next`, `previous`,
+`seek(offset)`, `setPosition(position)`, `setVolume(v)`) go straight to the
+service, which makes them on the bus. The lock's scenes read a `Media` with
+no players. [ricing.md](ricing.md#now-playing) has a now-playing card and
+the Lua side.
 
 A scene asks the compositor to do something about one entry the same way it
 asks anything else, `Solium.send(action, data)`, answered by `lua/actions.lua`

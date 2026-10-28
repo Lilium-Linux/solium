@@ -2,6 +2,7 @@
 #include "notifications.h"
 #include "audio.h"
 #include "tray.h"
+#include "media.h"
 
 #include "host.h"
 
@@ -520,6 +521,7 @@ SoliumRows *solium_rows_redacted(int model)
     static SoliumRows *apps = nullptr;
     static SoliumRows *folder = nullptr;
     static SoliumRows *tray = nullptr;
+    static SoliumRows *media = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -551,6 +553,12 @@ SoliumRows *solium_rows_redacted(int model)
             tray = new SoliumTrayRows();
         }
         return tray;
+    // And no media players: what someone listens to is theirs (#379).
+    case SOLIUM_QML_ROWS_MEDIA:
+        if (media == nullptr) {
+            media = new SoliumMediaRows();
+        }
+        return media;
     default:
         return nullptr;
     }
@@ -568,6 +576,7 @@ SoliumRows *solium_rows(int model)
     static SoliumRows *outputs = nullptr;
     static SoliumRows *inputs = nullptr;
     static SoliumRows *tray = nullptr;
+    static SoliumRows *media = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -623,6 +632,11 @@ SoliumRows *solium_rows(int model)
             tray = new SoliumTrayRows();
         }
         return tray;
+    case SOLIUM_QML_ROWS_MEDIA:
+        if (media == nullptr) {
+            media = new SoliumMediaRows();
+        }
+        return media;
     default:
         return nullptr;
     }

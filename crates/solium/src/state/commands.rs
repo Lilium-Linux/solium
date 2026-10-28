@@ -581,6 +581,20 @@ impl Solium {
                         reason: done.err(),
                     });
                 }
+                // A media action is the service's (#379).
+                Command::Act {
+                    attempt,
+                    action,
+                    data,
+                    ..
+                } if action.starts_with("media.") => {
+                    let done = crate::services::act_media(self, &action, &data);
+                    self.settled_attempts.push(crate::script::Settled {
+                        attempt,
+                        ok: done.is_ok(),
+                        reason: done.err(),
+                    });
+                }
                 // A tray action is the service's (#363).
                 Command::Act {
                     attempt,
@@ -689,6 +703,7 @@ impl Solium {
                 Command::Audio(Some(settings)) => self.services.audio.configure(settings),
                 Command::Audio(None) => self.services.audio.want(),
                 Command::Tray(config) => self.services.tray.configure(config),
+                Command::Media(config) => self.services.media.configure(config),
                 Command::Lock(settings) => {
                     self.logind.configure(settings, self.lock.is_some());
                 }

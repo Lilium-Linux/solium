@@ -385,6 +385,9 @@ pub(crate) struct Snapshot {
     pub(crate) audio: std::rc::Rc<crate::services::audio::View>,
     /// The tray as the service holds it, for `sol.tray()` (#363).
     pub(crate) tray: std::rc::Rc<crate::services::tray::View>,
+    /// The media players as the service holds them, and the time, for
+    /// `sol.media()` (#379).
+    pub(crate) media: crate::services::media::Seen,
 }
 
 /// One problem, as `sol.problems()` hands it over: an effect, a rule or the
@@ -835,6 +838,9 @@ pub(crate) enum Command {
     /// `sol.tray{ ... }`: whether Solium is the tray (#363). See
     /// `crate::services::tray::Config`.
     Tray(crate::services::tray::Config),
+    /// `sol.media{ ... }`: whether Solium follows the session's media
+    /// players (#379). See `crate::services::media::Config`.
+    Media(crate::services::media::Config),
     /// How Solium's own lock checks a password: `sol.lock`'s `lockout`,
     /// `secret_layout`, `helper_timeout_ms`, `retry` and `keypad` (#281). See
     /// `crate::lock_auth::Settings`.
@@ -978,6 +984,7 @@ impl Command {
             | Self::Notify(_)
             | Self::Audio(_)
             | Self::Tray(_)
+            | Self::Media(_)
             | Self::X11(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
@@ -2815,6 +2822,16 @@ impl Scripts {
         let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
         self.dispatch(snapshot, move |lua, _| {
             call_listeners(lua, "tray", data.clone())
+        })
+    }
+
+    /// Something changed in media (#379): a player `added`, `changed` or
+    /// `removed`, or another player `active`, for `sol.on("media")`.
+    /// `tests::media_events_reach_their_listeners_with_the_player`.
+    pub(crate) fn media_event(&mut self, event: &crate::json::Json, snapshot: Snapshot) -> Outcome {
+        let data = event.to_lua(&self.lua).unwrap_or(Value::Nil);
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "media", data.clone())
         })
     }
 
@@ -4702,6 +4719,62 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Tray(config));
+            })?;
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    // Media (#379). `sol.media{ watch = true }` follows the session's MPRIS
+    // players; with no table, `sol.media()` answers what it holds:
+    // `available`, `players` in the order they appeared, and `active`, each
+    // with its `position` where it is now. Its actions go through `sol.act`:
+    // `media.play_pause` and the rest, on the active player with no `id`.
+    // `tests::sol_media_sets_the_service_and_answers_its_players`.
+    sol.set(
+        "media",
+        lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
+            let Some(options) = options else {
+                let snapshot = snapshot(lua)?;
+                return snapshot.media.to_json().to_lua(lua);
+            };
+            let mut config = crate::services::media::Config::default();
+            match options.get::<Value>("watch") {
+                Ok(Value::Boolean(on)) => config.watch = on,
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(other) => tracing::warn!(
+                    value = describe(&other),
+                    "media.watch: true or false; keeping the default, false"
+                ),
+            }
+            match options.get::<Value>("ignore") {
+                Ok(Value::Table(names)) => {
+                    config.ignore = names
+                        .sequence_values::<String>()
+                        .filter_map(Result::ok)
+                        .take(64)
+                        .collect();
+                }
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(other) => tracing::warn!(
+                    value = describe(&other),
+                    "media.ignore: a list of player names; keeping the default"
+                ),
+            }
+            match options.get::<Value>("position_interval_ms") {
+                Ok(Value::Integer(ms)) => {
+                    config.position_interval_ms = u32::try_from(ms.clamp(0, 60_000)).unwrap_or(0);
+                }
+                Ok(Value::Number(ms)) if ms.is_finite() => {
+                    config.position_interval_ms = ms.clamp(0.0, 60_000.0) as u32;
+                }
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(other) => tracing::warn!(
+                    value = describe(&other),
+                    "media.position_interval_ms: milliseconds, 0 to 60000; keeping the default"
+                ),
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Media(config));
             })?;
             Ok(Value::Nil)
         })?,
@@ -8215,6 +8288,7 @@ mod tests {
             notifications: Default::default(),
             audio: Default::default(),
             tray: Default::default(),
+            media: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
                 id: 7,
@@ -11405,6 +11479,7 @@ mod tests {
             notifications: Default::default(),
             audio: Default::default(),
             tray: Default::default(),
+            media: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: Vec::new(),
             monitors: Vec::new(),
@@ -11893,6 +11968,7 @@ mod tests {
             notifications: Default::default(),
             audio: Default::default(),
             tray: Default::default(),
+            media: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: windows
                 .iter()
@@ -13304,6 +13380,84 @@ mod tests {
     }
 
     #[test]
+    fn sol_media_sets_the_service_and_answers_its_players() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-media",
+            r#"sol.media{ watch = true, ignore = { "kdeconnect" }, position_interval_ms = 250 }"#,
+        );
+        let configs: Vec<crate::services::media::Config> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Media(config) => Some(config),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            configs,
+            [crate::services::media::Config {
+                watch: true,
+                ignore: vec!["kdeconnect".to_owned()],
+                position_interval_ms: 250,
+            }]
+        );
+        let mut snapshot = one_screen(&[]);
+        let row = std::collections::BTreeMap::from([
+            ("id", crate::json::Json::Number(3.0)),
+            ("title", crate::json::Json::Text("Song".to_owned())),
+            ("active", crate::json::Json::Bool(true)),
+            ("playing", crate::json::Json::Bool(true)),
+            ("rate", crate::json::Json::Number(1.0)),
+            ("position", crate::json::Json::Number(10.0)),
+            ("positionAt", crate::json::Json::Number(1000.0)),
+        ]);
+        snapshot.media = crate::services::media::Seen {
+            view: std::rc::Rc::new(crate::services::media::View {
+                available: true,
+                active: 3,
+                position_interval_ms: 1000,
+                players: vec![row],
+            }),
+            now: std::time::Duration::from_secs(4),
+        };
+        assert_eq!(
+            scripts.evaluate_in(
+                snapshot,
+                "local m = sol.media(); return m.active.title .. ' ' .. m.players[1].id .. ' ' .. m.active.position .. ' ' .. tostring(m.available)"
+            ),
+            "Song 3 13 true"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn media_events_reach_their_listeners_with_the_player() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-media-events",
+            r#"sol.on("media", function(e) sol.status(e.what .. " " .. e.id .. " " .. e.player.title) end)"#,
+        );
+        let seen = crate::services::media::Seen {
+            view: std::rc::Rc::new(crate::services::media::View {
+                players: vec![std::collections::BTreeMap::from([
+                    ("id", crate::json::Json::Number(3.0)),
+                    ("title", crate::json::Json::Text("Song".to_owned())),
+                ])],
+                ..crate::services::media::View::default()
+            }),
+            now: std::time::Duration::ZERO,
+        };
+        let event = crate::services::media::Event {
+            what: "active",
+            id: 3,
+        }
+        .to_json(&seen);
+        let outcome = scripts.media_event(&event, one_screen(&[]));
+        assert_eq!(outcome.status.as_deref(), Some("active 3 Song"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn a_tray_action_is_refused_from_a_binding_at_the_lock() {
         let act = |action: &str| Command::Act {
             attempt: 0,
@@ -13314,6 +13468,8 @@ mod tests {
         assert!(act("tray.activate").reaches_past_the_lock());
         assert!(act("tray.open_menu").reaches_past_the_lock());
         assert!(!act("audio.mute").reaches_past_the_lock());
+        // A media key plays and pauses at the lock: it reaches no window.
+        assert!(!act("media.play_pause").reaches_past_the_lock());
     }
 
     #[test]
@@ -15675,6 +15831,74 @@ mod shipped {
                 "xf86monbrightnessup",
             ],
             "the shipped bindings that fire at the lock"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped media keys act on Solium's own media, and spawn
+    /// `playerctl` only when it follows no players** (#379).
+    #[test]
+    fn the_shipped_media_keys_act_on_the_active_player_and_fall_back_to_playerctl() {
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let directory = std::env::temp_dir().join("solium-shipped-media-keys");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("creating the entry directory");
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\ndofile({shipped:?} .. \"/init.lua\")\n"
+            ),
+        )
+        .expect("writing the entry point");
+        let mut scripts = Scripts::load(&entry).expect("loading the shipped init.lua");
+        let following = super::Snapshot {
+            media: crate::services::media::Seen {
+                view: std::rc::Rc::new(crate::services::media::View {
+                    available: true,
+                    ..crate::services::media::View::default()
+                }),
+                now: std::time::Duration::ZERO,
+            },
+            ..super::Snapshot::default()
+        };
+        let acted = |outcome: &super::Outcome| -> Vec<String> {
+            outcome
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    super::Command::Act { action, .. } => Some(action.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let spawned = |outcome: &super::Outcome| -> Vec<(String, Vec<String>)> {
+            outcome
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    super::Command::Spawn { program, args } => {
+                        Some((program.clone(), args.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        for (key, action) in [
+            ("XF86AudioPlay", "media.play_pause"),
+            ("XF86AudioPause", "media.play_pause"),
+            ("XF86AudioNext", "media.next"),
+            ("XF86AudioPrev", "media.previous"),
+        ] {
+            let outcome = scripts.key(key, following.clone());
+            assert_eq!(acted(&outcome), [action], "{key}");
+            assert!(spawned(&outcome).is_empty(), "{key} spawned nothing");
+        }
+        let alone = scripts.key("XF86AudioNext", super::Snapshot::default());
+        assert!(acted(&alone).is_empty());
+        assert_eq!(
+            spawned(&alone),
+            [("playerctl".to_owned(), vec!["next".to_owned()])]
         );
         let _ = std::fs::remove_dir_all(&directory);
     }

@@ -253,6 +253,9 @@ public:
         advanceAnimation();
     }
 
+    /* Where the compositor's clock is, origin or none. */
+    qint64 now() const { return m_elapsed; }
+
 private:
     qint64 m_elapsed = 0;
     qint64 m_origin = 0;
@@ -2127,6 +2130,11 @@ extern "C" int solium_qml_next_due_ms()
 extern "C" int solium_qml_animating()
 {
     return anything_animating() ? 1 : 0;
+}
+
+extern "C" long long solium_qml_clock_ms(void)
+{
+    return g_driver != nullptr ? static_cast<long long>(g_driver->now()) : 0;
 }
 
 extern "C" int solium_qml_drain(long long elapsed_ms, int advance)
