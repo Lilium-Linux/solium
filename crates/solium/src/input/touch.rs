@@ -271,6 +271,16 @@ fn target(state: &mut Solium, location: Point<f64, Logical>) -> TouchTarget {
     TouchTarget::Client
 }
 
+/// Let go of every finger moving `window`: the rest of its stream is nobody's,
+/// as a swallowed finger's is. See [`super::grab::let_go_of`].
+pub(crate) fn let_go_of(state: &mut Solium, window: &smithay::desktop::Window) {
+    for contact in state.touches.values_mut() {
+        if matches!(&contact.target, TouchTarget::Move(drag) if drag.window() == window) {
+            contact.target = TouchTarget::Swallowed;
+        }
+    }
+}
+
 /// Whether a finger owns the shared resize pipeline until its up/cancel.
 pub(crate) fn resizing(state: &Solium) -> bool {
     state

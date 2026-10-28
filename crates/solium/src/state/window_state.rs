@@ -218,6 +218,9 @@ impl Solium {
         let Some(screen) = output.and_then(|output| self.space.output_geometry(&output)) else {
             return;
         };
+        // A drag holding it lets go: the monitor is where it goes, and a drag
+        // that went on moving it left it fullscreen at an offset (#404).
+        crate::input::grab::let_go_of(self, window);
 
         // Where to come back to, kept before anything moves. The same slot a
         // maximise keeps, and for the same reason: a rect that was stored is a
