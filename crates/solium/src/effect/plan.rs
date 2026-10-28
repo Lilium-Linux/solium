@@ -530,6 +530,10 @@ pub(crate) struct Slots {
     /// A slot crossfading from the rule in its `Leaving` twin to its own,
     /// at how far the crossfade has got this pass, 0 to 1 (`effect::fade`).
     mix: HashMap<(Owner, Slot), f32>,
+    /// A `replace` handing its part over to its rule or back as the rule
+    /// comes or goes: the part's own pixels' share of the slot this pass,
+    /// above 0 and below 1 (`effect::fade`).
+    raw: HashMap<(Owner, Slot), f32>,
 }
 
 impl Slots {
@@ -567,6 +571,25 @@ impl Slots {
             return None;
         }
         self.mix.get(&(owner.clone(), slot)).copied()
+    }
+
+    /// A wanted `replace` slot whose rule is fading in or out: the part's own
+    /// pixels are mixed with its result at `share` this pass, the rest the
+    /// result's, rather than the result fading to nothing over a part not
+    /// drawn (#389).
+    /// `state::tests::real_client::a_replace_rule_coming_and_going_crossfades_with_its_part`.
+    pub(crate) fn set_raw(&mut self, owner: Owner, slot: Slot, share: f32) {
+        self.raw.insert((owner, slot), share);
+    }
+
+    /// The part's own pixels' share of a `replace` slot this pass, `None`
+    /// for a slot whose rule is not fading.
+    /// `state::tests::real_client::a_replace_rule_coming_and_going_crossfades_with_its_part`.
+    pub(crate) fn raw(&self, owner: &Owner, slot: Slot) -> Option<f32> {
+        if self.raw.is_empty() {
+            return None;
+        }
+        self.raw.get(&(owner.clone(), slot)).copied()
     }
 
     /// Every slot crossfading this pass: its owner and slot, the rule it

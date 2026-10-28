@@ -65,7 +65,7 @@ return {
 | `mask` | how the result is cut: `"shape"`, the part's own shape (the default: the client's own rectangle and rounded corners for `client`; the whole window rounded at its largest corner for `pane`; the band, as above, for `region:titlebar`; the rectangle for the rest), or `"alpha"`, the alpha of the part's own pixels, which needs `source = "self"` |
 | `memo` | `false` shares nothing of this rule's chain per monitor: each part runs its whole chain over xray, whatever `effects.memo.split` says (see *The memo*). `true` unless you say so |
 | `cut` | which xray a chain reading the `backdrop` reads: `"below"` (the default), every layer `effects.xray.layers` names below the part's own; or `"background"`, the wallpaper alone, even where `layers` has `"bottom"` |
-| `fade` | how the slot comes and goes as the rule starts and stops matching (a window gaining or losing the keyboard, say): `{ duration = 240, easing = "outCubic" }`, a duration in milliseconds from 0 to 60000 and a curve by name, `outCubic` when not given. The slot's result is drawn at an opacity that eases from 0 to 1 when the rule starts to fill the slot, and from 1 to 0 when it stops, the result drawn as it is and nothing run again for it; turned round part of the way, it goes back from where it got to. When the rule takes the slot over from another rule that has a `fade` too, the slot crossfades from that rule's result to its own over this rule's fade (*Crossfades*, below). Left out, or `false`, the slot is filled and emptied at once, and taken over at once |
+| `fade` | how the slot comes and goes as the rule starts and stops matching (a window gaining or losing the keyboard, say): `{ duration = 240, easing = "outCubic" }`, a duration in milliseconds from 0 to 60000 and a curve by name, `outCubic` when not given. The slot's result is drawn at an opacity that eases from 0 to 1 when the rule starts to fill the slot, and from 1 to 0 when it stops, the result drawn as it is and nothing run again for it; a `replace` instead crossfades from its part's own pixels to its result and back (*Crossfades*, below), so nothing behind the part shows through it on the way; turned round part of the way, it goes back from where it got to. When the rule takes the slot over from another rule that has a `fade` too, the slot crossfades from that rule's result to its own over this rule's fade (*Crossfades*, below). Left out, or `false`, the slot is filled and emptied at once, and taken over at once |
 
 A link may also give `reach` and `bleed`, in pixels, in place of the
 effect's own. A chain reads as far around its part as its first link
@@ -143,10 +143,20 @@ between the two. Under a warp (a tilt, a genie) a `behind` slot drawn
 beneath it lays its two results one over the other, and dips so for as
 long as a crossfade and a warp meet.
 
+A `replace` whose rule comes or goes, with no other rule to hand over to
+or from, crossfades with its part's own pixels the same way: a window
+going fullscreen, where a rule on `fullscreen = false` stops matching,
+passes from its see-through result to its own pixels, whole, over the
+rule's fade, and leaving fullscreen back again, never through nothing and
+with nothing popping in at the end. Once the crossfade is done nothing is
+left on the part, so a fullscreen window with no rule is drawn straight
+from its own buffers again. A `behind` or a `front` only adds to its part,
+so it fades from and to nothing.
+
 A rule without a `fade` takes its slot over at once, as one with a `fade`
 does from a rule without one: that rule's result is not kept, so the slot
-fades in from nothing. A third rule taking the slot part of the way
-through crossfades from the rule being crossfaded to.
+comes in as if it had held no rule. A third rule taking the slot part of
+the way through crossfades from the rule being crossfaded to.
 
 ## Tiers
 

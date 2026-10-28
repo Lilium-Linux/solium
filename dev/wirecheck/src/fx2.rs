@@ -1584,7 +1584,10 @@ fn a_result_is_cut_by_its_mask(renderer: &mut GlesRenderer) -> Result<()> {
 /// (0.69). Then the second result padded by 10 on every side, uncut, and
 /// the first cut by the part's mask, square: half way, a pixel in the
 /// padding is half the second alone (102), the first being nothing past its
-/// own result there, and the centre still their mix.
+/// own result there, and the centre still their mix. Last, three pictures,
+/// the two results and the part's own pixels (solid green) at a quarter, a
+/// quarter and a half, as a `replace` crossfading between two rules hands
+/// its part back: the centre is 239.
 fn a_crossfade_mixes_two_results_in_one_draw(renderer: &mut GlesRenderer) -> Result<()> {
     use smithay::backend::renderer::Frame as _;
     use smithay::backend::renderer::element::Id;
@@ -1659,11 +1662,13 @@ fn a_crossfade_mixes_two_results_in_one_draw(renderer: &mut GlesRenderer) -> Res
     let mut read = Vec::new();
     for (share, want) in [(0.0_f32, 242_u8), (0.5, 223), (1.0, 204)] {
         let element = crossfade::CrossfadeElement::new(
-            result(&from, place, None),
-            result(&to, place, None),
-            share,
+            &[
+                (result(&from, place, None), 1.0 - share),
+                (result(&to, place, None), share),
+            ],
             program.clone(),
-        );
+        )
+        .ok_or_else(|| anyhow!("no crossfade made of two pictures"))?;
         let got = green_at(&drawn(renderer, side, element)?, side, (74, 49))?;
         if !near(got, want) {
             return Err(anyhow!(
@@ -1683,11 +1688,13 @@ fn a_crossfade_mixes_two_results_in_one_draw(renderer: &mut GlesRenderer) -> Res
         Corners::all(0.0),
     ));
     let element = crossfade::CrossfadeElement::new(
-        result(&from, part, mask),
-        result(&padded, Rectangle::from_size(side.into()), None),
-        0.5,
+        &[
+            (result(&from, part, mask), 0.5),
+            (result(&padded, Rectangle::from_size(side.into()), None), 0.5),
+        ],
         program.clone(),
-    );
+    )
+    .ok_or_else(|| anyhow!("no crossfade made of two pictures"))?;
     let read = drawn(renderer, side, element)?;
     for ((x, y), want, what) in [
         ((5, 5), 102_u8, "in the padding"),
@@ -1700,9 +1707,31 @@ fn a_crossfade_mixes_two_results_in_one_draw(renderer: &mut GlesRenderer) -> Res
             ));
         }
     }
+    // Three: the two results and the part's own pixels (solid, 255), a
+    // quarter, a quarter and a half, as a `replace` crossfading between two
+    // rules hands its part back: 0.25 * 242 + 0.25 * 204 + 0.5 * 255 = 239.
+    let side = (148, 98);
+    let (own, _) = upload(renderer, (148, 98), |_, _| [0, 255, 0, 255])?;
+    let element = crossfade::CrossfadeElement::new(
+        &[
+            (result(&to, place, None), 0.25),
+            (result(&from, place, None), 0.25),
+            (result(&own, place, None), 0.5),
+        ],
+        program.clone(),
+    )
+    .ok_or_else(|| anyhow!("no crossfade made of three pictures"))?;
+    let got = green_at(&drawn(renderer, side, element)?, side, (74, 49))?;
+    if !near(got, 239) {
+        return Err(anyhow!(
+            "two results and the part's own pixels, a quarter, a quarter and a half: \
+             the centre is {got}, not 239"
+        ));
+    }
     pool.sweep(renderer);
     println!(
-        "  mixed before it is laid over anything: no dip half way; past a result, nothing of it"
+        "  mixed before it is laid over anything: no dip half way; past a result, nothing of \
+         it; with the part's own pixels, {got}"
     );
     Ok(())
 }

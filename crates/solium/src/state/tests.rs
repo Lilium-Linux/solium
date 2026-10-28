@@ -12724,6 +12724,118 @@ end)"#,
         );
     }
 
+    /// **A `replace` rule coming and going crossfades with its part**
+    /// (#389, the window that went see-through to nothing as it went
+    /// fullscreen and then popped back): one `replace` rule on `focused`,
+    /// fading over 200 ms. The window losing the keyboard keeps its slot
+    /// wanted, its rule's result mixed with its part's own pixels, their
+    /// share rising from 0 to 1 over the 200 ms, never fading to nothing
+    /// (its opacity stays whole), and then nothing wanted at all; the one
+    /// gaining it comes in from its own pixels the same way. Turned round
+    /// half way, each goes back from where it got to. A `behind` with the
+    /// same fade still fades to nothing.
+    #[test]
+    fn a_replace_rule_coming_and_going_crossfades_with_its_part() {
+        use crate::effect::plan::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::Slot;
+        use std::time::Duration;
+        fx2_fixture!(fixture, "rule-raw-crossfade");
+        let (first, second) = side_by_side_windows(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { focused = true }, part = "client", slot = "replace",
+                   effect = { "tint", amount = 0.9 },
+                   fade = { duration = 200, easing = "linear" } },
+                 { match = { focused = true }, part = "client", slot = "behind",
+                   effect = { "tint", amount = 0.5 },
+                   fade = { duration = 200, easing = "linear" } } }"#,
+        );
+        // Each window's `replace`: whether it is wanted, its part's share and
+        // its opacity; and its `behind`'s opacity, a pass at a time.
+        let pass = |fixture: &mut Fixture, after: u64| {
+            fixture.state.clock.advance(Duration::from_millis(after));
+            let slots: Slots = crate::render::build_slots(&mut fixture.state);
+            let inputs = crate::render::self_inputs(&fixture.state, &slots);
+            let on = |pane| {
+                let owner = Owner::Pane(pane, PaneSlot::Client);
+                let captured = inputs
+                    .iter()
+                    .any(|input| input.owner == owner && input.slot == Slot::Replace);
+                (
+                    slots.wanted(&owner, Slot::Replace),
+                    slots
+                        .raw(&owner, Slot::Replace)
+                        .map(|share| (share * 10.0).round() / 10.0),
+                    slots.opacity(&owner, Slot::Replace),
+                    slots
+                        .wanted(&owner, Slot::Behind)
+                        .then(|| (slots.opacity(&owner, Slot::Behind) * 10.0).round() / 10.0),
+                    captured,
+                )
+            };
+            (on(first), on(second))
+        };
+        focus(&mut fixture, first);
+        assert_eq!(
+            pass(&mut fixture, 0).0,
+            (true, Some(1.0), 1.0, Some(0.0), true),
+            "coming in from its own pixels, not from nothing"
+        );
+        assert_eq!(
+            pass(&mut fixture, 1000),
+            (
+                (true, None, 1.0, Some(1.0), true),
+                (false, None, 1.0, None, false)
+            ),
+            "settled"
+        );
+        focus(&mut fixture, second);
+        assert_eq!(
+            pass(&mut fixture, 0),
+            (
+                (true, None, 1.0, Some(1.0), true),
+                (true, Some(1.0), 1.0, Some(0.0), true)
+            ),
+            "the keyboard moved"
+        );
+        assert_eq!(
+            pass(&mut fixture, 40),
+            (
+                (true, Some(0.2), 1.0, Some(0.8), true),
+                (true, Some(0.8), 1.0, Some(0.2), true)
+            ),
+            "a fifth of the way"
+        );
+        assert_eq!(
+            pass(&mut fixture, 60),
+            (
+                (true, Some(0.5), 1.0, Some(0.5), true),
+                (true, Some(0.5), 1.0, Some(0.5), true)
+            ),
+            "half way"
+        );
+        // Back half way: each goes back from where it got to.
+        focus(&mut fixture, first);
+        let _ = pass(&mut fixture, 0);
+        assert_eq!(
+            pass(&mut fixture, 40),
+            (
+                (true, Some(0.3), 1.0, Some(0.7), true),
+                (true, Some(0.7), 1.0, Some(0.3), true)
+            ),
+            "turned round"
+        );
+        assert_eq!(
+            pass(&mut fixture, 100),
+            (
+                (true, None, 1.0, Some(1.0), true),
+                (false, None, 1.0, None, false)
+            ),
+            "back where they were, and nothing left on the window without the keyboard"
+        );
+    }
+
     /// **A rule on `fullscreen` applies from the configure that sets it**,
     /// the state the compositor last told the client.
     #[test]

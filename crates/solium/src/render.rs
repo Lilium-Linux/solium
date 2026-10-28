@@ -2331,11 +2331,13 @@ fn resolve_slots(
 /// has reached, and still wanted, fading out, once it stops matching, until
 /// it is gone (`effect::fade`); one without is wanted whole while it matches.
 /// A slot crossfading from another rule wants that rule in its `Leaving`
-/// twin too, with how far the crossfade has got.
+/// twin too, with how far the crossfade has got; a `replace` whose rule
+/// fades is mixed with its part's own pixels instead of fading to nothing.
 /// `style` is the pane's style's rules, which a key of the style's names.
 /// `state::tests::real_client::a_rule_whose_chain_is_not_bound_wants_no_slot`,
 /// `state::tests::real_client::a_rule_with_a_fade_eases_its_slot_in_and_out_with_the_focus`,
-/// `state::tests::real_client::two_replace_rules_on_focused_crossfade_as_the_keyboard_moves`.
+/// `state::tests::real_client::two_replace_rules_on_focused_crossfade_as_the_keyboard_moves`,
+/// `state::tests::real_client::a_replace_rule_coming_and_going_crossfades_with_its_part`.
 fn want_resolved(
     slots: &mut crate::effect::plan::Slots,
     state: &Solium,
@@ -2374,8 +2376,16 @@ fn want_resolved(
             continue;
         }
         slots.want(owner.clone(), slot, shown.key);
+        // A `replace` hands its part over to its result and back as its rule
+        // comes and goes, mixing the two, so nothing behind the window shows
+        // through it on the way and nothing pops at the end; `behind` and
+        // `front` only add, and come from and go to nothing.
         if shown.opacity < 1.0 {
-            slots.set_opacity(owner.clone(), slot, shown.opacity);
+            if slot == Slot::Replace {
+                slots.set_raw(owner.clone(), slot, 1.0 - shown.opacity);
+            } else {
+                slots.set_opacity(owner.clone(), slot, shown.opacity);
+            }
         }
         // Crossfading from another rule: that rule's result is wanted too, in
         // the slot's `Leaving` twin, so it is kept and run beside this one's
@@ -2664,7 +2674,10 @@ pub(crate) fn self_inputs(state: &Solium, slots: &Slots) -> Vec<SelfInput> {
         .wants()
         .filter_map(|(owner, slot, key)| {
             let chain = state.chains.get(key)?;
-            if chain.tier != crate::effect::rules::Tier::Own {
+            // And a `replace` mixed with its part as its rule fades, whatever
+            // its chain reads: the part's own pixels are what it mixes with
+            // (`slot_element`).
+            if chain.tier != crate::effect::rules::Tier::Own && slots.raw(owner, slot).is_none() {
                 return None;
             }
             let (found, scale) = part_of(state, owner)?;
@@ -4665,29 +4678,102 @@ fn slot_element(
     // A slot fading in or out with its rule is drawn at its fade's opacity,
     // its result as it is (`effect::fade`).
     let alpha = alpha * slots.opacity(owner, slot);
-    let own = placed_result(state, slots, owner, slot, part, scale, alpha, monitor);
-    let Some(share) = slots.mix(owner, slot) else {
-        return own.map(Element::Effect);
-    };
-    // Crossfading from the rule in its `Leaving` twin: both results mixed in
-    // one draw (`effect::crossfade`), or the one there is while the other has
-    // nothing to draw, or with no program to mix them, its own at once.
-    let leaving = placed_result(
-        state,
-        slots,
-        owner,
-        slot.leaving(),
-        part,
-        scale,
-        alpha,
-        monitor,
-    );
-    match (leaving, own, state.programs.crossfade_compiled()) {
-        (Some(from), Some(to), Some(program)) => Some(Element::Crossfade(
-            crate::effect::crossfade::CrossfadeElement::new(from, to, share, program.clone()),
-        )),
-        (from, to, _) => to.or(from).map(Element::Effect),
+    let (share, raw) = (slots.mix(owner, slot), slots.raw(owner, slot));
+    if share.is_none() && raw.is_none() {
+        return placed_result(state, slots, owner, slot, part, scale, alpha, monitor)
+            .map(Element::Effect);
     }
+    // Crossfading: from the rule in its `Leaving` twin, and for a `replace`
+    // whose rule comes or goes, with its part's own pixels, all mixed in one
+    // draw (`effect::crossfade`). A part with no capture of its own pixels
+    // (the titlebar) has its result faded over nothing instead.
+    let part_pixels = raw.and_then(|_| part_picture(state, slots, owner, slot, part, scale, alpha));
+    let (alpha, raw) = match (raw, &part_pixels) {
+        (Some(raw), None) => (alpha * (1.0 - raw), 0.0),
+        (raw, _) => (alpha, raw.unwrap_or(0.0)),
+    };
+    let own = placed_result(state, slots, owner, slot, part, scale, alpha, monitor);
+    let leaving = share.and_then(|_| {
+        placed_result(
+            state,
+            slots,
+            owner,
+            slot.leaving(),
+            part,
+            scale,
+            alpha,
+            monitor,
+        )
+    });
+    let results = 1.0 - raw;
+    let mut pictures = Vec::with_capacity(3);
+    match (own, leaving) {
+        (Some(own), Some(leaving)) => {
+            let share = share.unwrap_or(1.0);
+            pictures.push((own, results * share));
+            pictures.push((leaving, results * (1.0 - share)));
+        }
+        (Some(one), None) | (None, Some(one)) => pictures.push((one, results)),
+        (None, None) => {}
+    }
+    pictures.extend(part_pixels.map(|pixels| (pixels, raw)));
+    let program = state.programs.crossfade_compiled();
+    match (pictures.len(), program) {
+        (2.., Some(program)) => {
+            crate::effect::crossfade::CrossfadeElement::new(&pictures, program.clone())
+                .map(Element::Crossfade)
+        }
+        // One picture, or no program to mix them: the first, the slot's own
+        // result where it has one, at once.
+        _ => pictures
+            .into_iter()
+            .next()
+            .map(|(first, _)| Element::Effect(first)),
+    }
+}
+
+/// A `replace` slot's part's own pixels, as captured for it this pass, placed
+/// over the part as its result is and cut by the part's shape, at `alpha`:
+/// what the slot mixes its result with as its rule comes and goes. `None`
+/// for a part with no capture.
+fn part_picture(
+    state: &Solium,
+    slots: &Slots,
+    owner: &crate::effect::plan::Owner,
+    slot: Slot,
+    part: Mask,
+    scale: f64,
+    alpha: f32,
+) -> Option<crate::effect::element::EffectElement> {
+    use smithay::backend::renderer::Texture as _;
+    let key = slots.key(owner, slot)?;
+    let chain = state.chains.get(key)?;
+    let held = state
+        .store
+        .get(owner, slot)
+        .filter(|held| held.rule == key)?;
+    let texture = held.input.target()?.texture().clone();
+    let (_, part_scale) = part_of(state, owner)?;
+    let Mask::Rect { rect, radii } = part else {
+        return None;
+    };
+    let size = texture.size();
+    let (dst, mask) = slot_placement(
+        rect.to_physical(scale),
+        (size.w, size.h).into(),
+        padding(chain.reach, part_scale),
+        corners_times(radii, scale),
+    );
+    let program = state.programs.masked_compiled()?.clone();
+    Some(
+        crate::effect::element::EffectElement::new(
+            held.input.id().clone(),
+            held.input.commit(),
+            texture,
+            program,
+        )
+        .at(dst, Some(mask), alpha),
+    )
 }
 
 /// One rule's result in a slot (a crossfading slot's `Leaving` twin's

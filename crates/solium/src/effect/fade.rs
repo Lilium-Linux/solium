@@ -19,6 +19,14 @@
 //! weights: the one on top would cover the one below as well as add to it,
 //! so two pictures of a window at 0.95 and 0.80 would meet half way at 0.69
 //! and not 0.875, a dip in the middle of every change of focus.
+//!
+//! **A `replace` comes from and goes to its part, not nothing.** Its result
+//! takes its part's place, so fading it out over nothing would show what is
+//! behind the window through it, and the part would pop back at the end (a
+//! window going fullscreen, its see-through rule on `fullscreen = false`
+//! stopping). For a `replace`, the opacity worked out here is the result's
+//! share of a mix with the part's own pixels, drawn in the same one draw
+//! (`render::want_resolved`, `effect::crossfade`).
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
