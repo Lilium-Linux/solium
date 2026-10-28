@@ -1706,7 +1706,8 @@ util-linux-core (`solium-session`'s `flock`), pam (the modules and
 configuration behind `libpam.so.0`, which rpm finds itself) and util-linux
 (`/etc/pam.d/login`, which `dev/pam/solium` includes), each the package that
 has the file here, and `Recommends` xdg-desktop-portal and each backend
-`lilium-portals.conf` names, gtk and wlr, and foot: the shipped configuration
+`lilium-portals.conf` names, gtk and wlr, slurp, which wlr asks which screen
+to share, and foot: the shipped configuration
 has no launcher, so `super+return`'s terminal is how a program starts, and
 none of the terminals `init.lua` looks for is on Fedora Workstation.
 

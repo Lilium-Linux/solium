@@ -7733,7 +7733,7 @@ fn columns_from(columns: &Table) -> mlua::Result<Vec<solium_layout::Column>> {
 /// cannot assume any particular terminal or editor is installed, and a script
 /// that picks the first one that *is* beats one that silently does nothing on a
 /// machine set up differently from the author's.
-fn which(program: &str) -> bool {
+pub(crate) fn which(program: &str) -> bool {
     if program.contains('/') {
         return std::path::Path::new(program).is_file();
     }

@@ -75,6 +75,9 @@ Requires:       util-linux-core
 Recommends:     xdg-desktop-portal
 Recommends:     xdg-desktop-portal-gtk
 Recommends:     xdg-desktop-portal-wlr
+# What xdg-desktop-portal-wlr asks which screen to share, unless its own
+# configuration names another chooser (#378): the same check.
+Recommends:     slurp
 # The lock screen's password check (#281): PAM's modules and configuration,
 # and the `login` service dev/pam/solium includes. rpm finds libpam.so.0 itself
 # (pam-libs), but not these: the same check.

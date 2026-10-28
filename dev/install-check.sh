@@ -572,6 +572,8 @@ while IFS= read -r backend; do
     check "Recommends xdg-desktop-portal-$backend, which lilium-portals.conf names" \
         recommends "xdg-desktop-portal-$backend"
 done < <(sed -n 's/^[^#=]*=\([a-z]*\)$/\1/p' "$root/dev/session/lilium-portals.conf" | sort -u)
+check "Recommends slurp, which xdg-desktop-portal-wlr asks which screen to share" \
+    recommends slurp
 check "Recommends foot, which super+return opens when no other terminal is installed" \
     recommends foot
 check "  and init.lua still looks for it" grep -qx '    "foot",' "$root/crates/solium/lua/init.lua"
