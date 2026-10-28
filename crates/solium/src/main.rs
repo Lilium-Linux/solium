@@ -13,6 +13,7 @@ mod apps;
 mod assets;
 mod auth;
 mod autoreload;
+mod cadence;
 mod capture;
 mod check;
 mod cli;

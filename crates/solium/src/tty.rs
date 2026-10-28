@@ -666,11 +666,16 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 // next frame. Only this screen's: a monitor still waiting on
                 // its own flip has not freed anything.
                 screen.pending = false;
+                // The phase its vblanks keep, for a rest after a pass that
+                // queues nothing on it (`cadence.rs`).
+                screen.cadence.flipped(
+                    flip.map_or_else(crate::pacing::monotonic_now, |flip| flip.at),
+                );
                 state.send_frames();
                 // `owed` as well as the usual two: this screen may have been
                 // skipped while it was busy, and nothing else is going to ask
-                // on its behalf.
-                let owed = state.screens.iter().any(|screen| screen.owed);
+                // on its behalf. Not one that rests: the end of its rest asks.
+                let owed = state.owed_now(crate::pacing::monotonic_now());
                 if state.solium.redraw || state.animating || owed {
                     state.chain = flip.map(|flip| (crtc, flip));
                     state.render();
@@ -861,7 +866,14 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // And a Wayland client waiting on an X11 client's clipboard, as
             // the nested loop serves it (#362); see `settle_selection`.
             crate::xwayland::settle_selection(&mut state.solium, &state.handle);
-            if state.solium.redraw || state.animating {
+            // Only when a screen can be drawn: one waiting on its flip, or
+            // resting after a pass that queued nothing on it, is drawn by
+            // the flip or the end of its rest, which ask for the pass
+            // themselves; `redraw` stays set for them. Drawn on every event
+            // instead, a 1000 Hz mouse was 1,000 passes a second (#392).
+            if (state.solium.redraw || state.animating)
+                && state.drawable_now(crate::pacing::monotonic_now())
+            {
                 state.render();
             }
             state.solium.space.refresh();
@@ -984,6 +996,17 @@ struct Screen {
     /// A timer is armed to tell this screen's clients they may draw
     /// ([`State::answer_unqueued`]), so another pass arms none.
     answering: bool,
+    /// Resting until its next vblank after a pass that queued nothing on
+    /// it, so it is drawn at most once a refresh (#392). See `cadence.rs`.
+    cadence: crate::cadence::Cadence,
+}
+
+impl Screen {
+    /// Whether a pass at `now` may draw it: no flip of its own is pending
+    /// and it is not resting after a pass that queued nothing (`cadence.rs`).
+    fn ready(&self, now: Duration) -> bool {
+        !self.pending && !self.cadence.resting(now)
+    }
 }
 
 impl std::fmt::Debug for Screen {
@@ -1212,6 +1235,7 @@ impl State {
             blank,
             told: None,
             answering: false,
+            cadence: crate::cadence::Cadence::default(),
         });
         true
     }
@@ -1501,12 +1525,28 @@ impl State {
             && (self.solium.redraw
                 || self.animating
                 || self.screens.iter().any(|screen| screen.owed));
+        let now = crate::pacing::monotonic_now();
         crate::qml::wake::frame_coming(
             wanted,
             self.screens.iter().map(|screen| {
-                (!screen.pending).then(|| self.solium.power_step(&screen.output, screen.lit))
+                screen
+                    .ready(now)
+                    .then(|| self.solium.power_step(&screen.output, screen.lit))
             }),
         )
+    }
+
+    /// Whether a pass at `now` would draw some screen: one is neither
+    /// waiting on its flip nor resting (`cadence.rs`).
+    fn drawable_now(&self, now: Duration) -> bool {
+        self.screens.iter().any(|screen| screen.ready(now))
+    }
+
+    /// Whether a screen a pass at `now` could draw owes a frame.
+    fn owed_now(&self, now: Duration) -> bool {
+        self.screens
+            .iter()
+            .any(|screen| screen.owed && screen.ready(now))
     }
 
     /// Draw a frame on every screen that is ready for one.
@@ -1535,11 +1575,14 @@ impl State {
         // on the way off and back (`power.rs`). A frame in which no screen
         // draws a picture needs none of the work below, so a machine with
         // every screen off does none of it.
+        let ready_at = crate::pacing::monotonic_now();
         let steps: Vec<Option<Step>> = self
             .screens
             .iter()
             .map(|screen| {
-                (!screen.pending).then(|| self.solium.power_step(&screen.output, screen.lit))
+                screen
+                    .ready(ready_at)
+                    .then(|| self.solium.power_step(&screen.output, screen.lit))
             })
             .collect();
         let pictures = steps
@@ -1605,9 +1648,9 @@ impl State {
                 continue;
             };
             let Some(step) = step else {
-                // Its flip is pending. Remembered, because the flag that asked
-                // for this frame is about to be cleared by the screens that
-                // could draw it.
+                // Its flip is pending, or it rests until its vblank.
+                // Remembered, because the flag that asked for this frame is
+                // about to be cleared by the screens that could draw it.
                 if let Some(screen) = self.screens.get_mut(index) {
                     screen.owed = true;
                 }
@@ -1762,6 +1805,7 @@ impl State {
             // the timer needs a GPU, and no test reaches it.
             if !queued {
                 self.answer_unqueued(index);
+                self.rest(index);
             }
         }
 
@@ -1916,6 +1960,47 @@ impl State {
             self.solium
                 .send_frames_on(&screen.output, now, frame_interval(&screen.output));
             screen.told = Some(now);
+        }
+    }
+
+    /// Screen `index` was drawn and queued nothing: it rests until its next
+    /// vblank, and a timer then asks for the pass a flip would have asked
+    /// for. See `cadence.rs`; the timer needs a GPU, and no test reaches it.
+    fn rest(&mut self, index: usize) {
+        let Some(screen) = self.screens.get_mut(index) else {
+            return;
+        };
+        let now = crate::pacing::monotonic_now();
+        let until = screen
+            .cadence
+            .drew_nothing(now, frame_interval(&screen.output));
+        let crtc = screen.crtc;
+        let armed = self.handle.insert_source(
+            Timer::from_duration(until.saturating_sub(now)),
+            move |_, (), state: &mut State| {
+                state.rest_over(crtc);
+                TimeoutAction::Drop
+            },
+        );
+        if let Err(err) = armed {
+            // Not resting rather than resting for good with nothing to end it.
+            tracing::warn!(?err, "could not arm a screen's rest");
+            screen.cadence.woke();
+        }
+    }
+
+    /// The rest of the screen on `crtc` is over: the pass it owes, or that
+    /// anything else wants, is drawn now.
+    fn rest_over(&mut self, crtc: crtc::Handle) {
+        let Some(screen) = self.screens.iter_mut().find(|screen| screen.crtc == crtc) else {
+            return;
+        };
+        screen.cadence.woke();
+        if !self.active {
+            return;
+        }
+        if self.solium.redraw || self.animating || self.owed_now(crate::pacing::monotonic_now()) {
+            self.render();
         }
     }
 
