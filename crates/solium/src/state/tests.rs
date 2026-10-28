@@ -2164,6 +2164,33 @@ fn the_pointer_and_the_press_cannot_claim_different_things() {
     );
 }
 
+/// **A scene's shape is asserted only where it takes the press** (#373):
+/// where the claim is the scene's, the shape it asks for, over a mode and a
+/// frame below it alike, and nothing for its arrow; where the press is a
+/// mode's, a frame's or nobody's, the claim's own answer, whatever a scene
+/// asked.
+#[test]
+fn a_scenes_shape_is_asserted_only_where_it_takes_the_press() {
+    let asked = Some(CursorIcon::Crosshair);
+    assert_eq!(claim_of(true, false, None).cursor_over(asked), asked);
+    assert_eq!(
+        claim_of(true, true, Some(Chrome::Frame)).cursor_over(asked),
+        asked,
+        "a scene over a mode and a frame"
+    );
+    assert_eq!(
+        claim_of(true, false, None).cursor_over(None),
+        None,
+        "the arrow asks for nothing"
+    );
+    assert_eq!(claim_of(false, true, None).cursor_over(asked), None);
+    assert_eq!(
+        claim_of(false, false, Some(Chrome::Frame)).cursor_over(asked),
+        Some(CursorIcon::Default)
+    );
+    assert_eq!(claim_of(false, false, None).cursor_over(asked), None);
+}
+
 /// The frame band is the insets and only the insets.
 ///
 /// Two directions, because getting it wrong either way is a bug with a
@@ -36043,6 +36070,50 @@ end)
                 assert!(
                     !desk.state.pointer.assert(None),
                     "the pointer offered a resize for a press the scene holds"
+                );
+            }
+
+            /// **The pointer is the shape the scene under it asks for**
+            /// (#373): over a shell button whose scene asks for the pointing
+            /// hand, the hand; off the button, over the window under the
+            /// scene, not the scene's; back on it with the scene asking for
+            /// the arrow, not the hand either, and that without the pointer
+            /// moving, from the frame's own check.
+            #[test]
+            fn the_pointer_is_the_shape_the_scene_under_it_asks_for() {
+                use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+                let (mut desk, _, shell) = window_under_a_scene(button_over_the_window);
+                let ask = |desk: &mut Desk, icon: Option<CursorIcon>| {
+                    if let Some(stand) = desk
+                        .state
+                        .surfaces
+                        .get_mut(shell)
+                        .and_then(crate::scripted::Surface::stand_mut)
+                    {
+                        stand.cursor = icon;
+                    }
+                };
+                let hand = |desk: &mut Desk| {
+                    matches!(
+                        desk.state.pointer.showing(),
+                        CursorImageStatus::Named(CursorIcon::Pointer)
+                    )
+                };
+                ask(&mut desk, Some(CursorIcon::Pointer));
+                move_pointer(&mut desk.state, (630.0, 520.0), 10);
+                let on_the_button = hand(&mut desk);
+                move_pointer(&mut desk.state, (630.0, 560.0), 11);
+                let off_it = hand(&mut desk);
+                move_pointer(&mut desk.state, (630.0, 520.0), 12);
+                let back = hand(&mut desk);
+                ask(&mut desk, None);
+                desk.state.reassert_cursor();
+                let arrow = hand(&mut desk);
+                assert_eq!(
+                    (on_the_button, off_it, back, arrow),
+                    (true, false, true, false),
+                    "(the hand over the button, over the window beside it, over the button \
+                     again, once the scene asks for the arrow)"
                 );
             }
 

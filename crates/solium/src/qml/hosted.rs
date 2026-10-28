@@ -66,6 +66,7 @@ mod ffi {
             y: f64,
         ) -> c_int;
         pub(super) fn solium_qml_scene_pointer_leave(scene: *mut super::super::ffi::Scene);
+        pub(super) fn solium_qml_scene_cursor(scene: *const super::super::ffi::Scene) -> c_int;
         pub(super) fn solium_qml_scene_keypad_at(
             scene: *const super::super::ffi::Scene,
             x: f64,
@@ -578,6 +579,16 @@ impl Scene {
             1 => Hit::Hover,
             _ => Hit::Nothing,
         }
+    }
+
+    /// The shape the scene asks the pointer to be, where it was last told
+    /// the pointer is: the `cursorShape` of the item or handler under it, or
+    /// `None` where that is the arrow or nothing names one (#373). See
+    /// `cursor::qt`. `tests::a_scene_asks_for_the_cursor_of_the_item_under_the_pointer`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn cursor(&self) -> Option<smithay::input::pointer::CursorIcon> {
+        // SAFETY: the scene is live for as long as `self`.
+        crate::cursor::qt::icon(unsafe { ffi::solium_qml_scene_cursor(self.scene) })
     }
 
     /// The `SecretKeypad` key at a point, counted row by row from 0: what
@@ -2119,6 +2130,55 @@ pub(crate) mod tests {
             );
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A scene asks for the cursor of the item under the pointer** (#373):
+    /// a `MouseArea`'s `cursorShape` over its half, a `HoverHandler`'s over
+    /// the other's top, and nothing where no item names a shape. Read back
+    /// off the window Qt Quick set it on, as each motion was delivered.
+    #[test]
+    fn a_scene_asks_for_the_cursor_of_the_item_under_the_pointer() {
+        use smithay::input::pointer::CursorIcon;
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = hosted(
+                "solium-hosted-cursor",
+                "import QtQuick\nItem {\n \
+                 MouseArea { x: 0; y: 0; width: 32; height: 32; cursorShape: Qt.SizeFDiagCursor }\n \
+                 Item { x: 32; y: 0; width: 32; height: 16; HoverHandler { cursorShape: Qt.PointingHandCursor } } }\n",
+                "cursor-1",
+            );
+            let mut at = |x: f64, y: f64| {
+                scene.pointer_event(
+                    x,
+                    y,
+                    &ScenePointer {
+                        kind: PointerKind::Motion,
+                        buttons: 0,
+                        modifiers: 0,
+                        time: 0,
+                    },
+                );
+                scene.cursor()
+            };
+            // The scene is 64x32: the MouseArea is its left half, the
+            // HoverHandler the top of its right half.
+            let resize = at(10.0, 10.0);
+            let hand = at(48.0, 8.0);
+            let nothing = at(48.0, 24.0);
+            let again = at(10.0, 24.0);
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                [resize, hand, nothing, again],
+                [
+                    Some(CursorIcon::NwseResize),
+                    Some(CursorIcon::Pointer),
+                    None,
+                    Some(CursorIcon::NwseResize)
+                ],
+                "[over the MouseArea, the HoverHandler, neither, the MouseArea again]"
+            );
         });
     }
 
