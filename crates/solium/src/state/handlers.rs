@@ -567,12 +567,7 @@ impl XdgShellHandler for Solium {
             return;
         };
 
-        pointer.set_grab(
-            self,
-            MoveGrab::new(start_data, window, location),
-            serial,
-            Focus::Clear,
-        );
+        MoveGrab::start(self, &pointer, start_data, window, location, serial);
     }
 
     /// A popup asking to be moved — a submenu re-anchoring as the pointer

@@ -1167,9 +1167,10 @@ impl Solium {
     /// Recomputing would drop the resize cursor mid-drag and hand the pointer
     /// back to whatever client the cursor happened to be over, which is the one
     /// moment the shape must not change. Holding the last assertion for the
-    /// length of the grab is also what makes a move drag keep the arrow, and
-    /// what lets `input::pointer_button` assert a shape *as* it starts a grab
-    /// and have it stay for the drag. A press a hosted scene holds is held
+    /// length of the grab is also what lets a move drag keep the closed hand
+    /// `MoveGrab::start` asserts (#374), and `input::pointer_button` assert a
+    /// resize's shape *as* it starts the grab, and have it stay for the
+    /// drag. A press a hosted scene holds is held
     /// the same way, so the shape stays the scene's for the press (Ruling 8):
     /// `tests::real_client::reflow_on_close::hosted::a_press_a_scene_holds_keeps_its_shape_over_a_resize_border`.
     pub(crate) fn assert_cursor(&mut self, location: Point<f64, Logical>, grabbed: bool) {
