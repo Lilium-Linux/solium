@@ -1923,4 +1923,72 @@ mod tests {
         );
         assert!(!frame_coming(true, []), "no monitor at all");
     }
+
+    /// **A finished remove transition does not keep its scene animating**
+    /// (#392). A ListView's remove transition run to its end on its last row
+    /// leaves its Transition reading `running` for ever (qtdeclarative
+    /// v6.11.2), with nothing on the animation driver. Counted, it kept a
+    /// shell scene answering "animating" after a notification banner left,
+    /// and the hardware drew a pass every vblank of every monitor with
+    /// nothing changing. While the transition runs the scene must say it
+    /// animates; a second after it ended, it must not.
+    #[test]
+    fn a_finished_remove_transition_does_not_keep_its_scene_animating() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-remove-transition",
+                r"
+                import QtQuick
+
+                Item {
+                    width: 200
+                    height: 200
+                    property int step: 0
+                    onStepChanged: {
+                        if (step === 1) rows.append({ n: 1 })
+                        if (step === 2) rows.remove(0)
+                    }
+                    ListModel { id: rows }
+                    ListView {
+                        anchors.fill: parent
+                        model: rows
+                        delegate: Item { width: 50; height: 20 }
+                        add: Transition { NumberAnimation { property: 'x'; from: -50; duration: 300 } }
+                        remove: Transition { NumberAnimation { property: 'x'; to: -50; duration: 300 } }
+                    }
+                }
+                ",
+            );
+            // A frame as the compositor draws one: the tick, then the census,
+            // then the render.
+            let frame = |scene: &mut Scene| {
+                std::thread::sleep(Duration::from_millis(16));
+                crate::qml::tick(now());
+                let animating = scene.animation_in_flight();
+                let _ = scene.render();
+                animating
+            };
+            scene.set_int("step", 1);
+            for _ in 0..40 {
+                frame(&mut scene);
+            }
+            scene.set_int("step", 2);
+            // The ListView starts the transition as it lays itself out, in
+            // the first render after the row went, so from the frame after.
+            let seen: Vec<bool> = (0..64).map(|_| frame(&mut scene)).collect();
+            let leaving = seen.iter().skip(1).take(4).all(|animating| *animating);
+            let after = seen.last().copied().unwrap_or(true);
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                leaving,
+                "a row on its way out did not keep its scene animating"
+            );
+            assert!(
+                !after,
+                "a remove transition that ended a second ago still keeps its scene animating"
+            );
+        });
+    }
 }
