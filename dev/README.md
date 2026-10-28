@@ -442,6 +442,7 @@ that should not be.
 | `dev/cursor-check.sh` | the pointer is visible over empty desktop |
 | `cargo run -p wl-probe` | the protocols answer, a bar lands on the monitor it named, and a screenshot has the desktop in it the right way up |
 | `dev/screencopy-check.sh` | cropped screenshots match full-output pixels, with hosted QML and layer-shell content at 1x, 2x, fractional scale and on a second monitor |
+| `dev/screencast-check.sh` | a screen share keeps moving: xdg-desktop-portal-wlr streams a nested Solium into PipeWire, and the frames that arrive keep changing with the scene (#387) |
 | `dev/clipboard-check.sh` | copy and paste across the X11 boundary, all four ways |
 | `dev/present-check.sh` | a `pivot` is the point the matrix leaves alone, a raised window is drawn in front, clicks follow the rect a window is drawn at without following the `z` it is drawn above, a genie on a second monitor lands on its target, and a tilted window's menu is drawn whole and in front of it |
 | `dev/fence-check.sh` | skipping a capture's CPU fence wait (`SOLIUM_FENCE_WAIT=off`) changes no pixel |
@@ -768,6 +769,20 @@ Wayland-client tests are `cargo test -p solium layer_keyboard`.
 after normalising the output transform and `Y_INVERT` row-storage flag. The
 protocol buffer itself uses the output's buffer orientation; screenshots and
 recording clients apply that transform once (#353).
+
+`dev/screencast-check.sh` is screen sharing as an application gets it. It
+starts its own D-Bus session bus, its own PipeWire daemon on a socket in a
+fresh directory, a nested Solium showing a square that moves ten times a
+second, and `xdg-desktop-portal-wlr`; asks the backend for a stream the way the
+portal frontend does; links a GStreamer consumer to it by hand, there being no
+session manager; and counts the frames that arrive and how often the picture
+changed. It prints which protocol the backend chose. Nothing reaches the
+user's own bus, PipeWire or portal. It needs `xdg-desktop-portal-wlr`,
+`pipewire`, `gdbus` and GStreamer's `pipewiresrc`, and says it skipped when one
+is missing. `SOLIUM_CAST_SECONDS` sets how long it watches, and
+`SOLIUM_CHECK_DIR` where the logs and frames go. Before #387 it fails with one
+frame: the portal's `wlr-screencopy` path in 0.8.3 and 0.8.4 never asks for a
+second, and only `ext-image-copy-capture-v1` keeps a stream going.
 
 `WL_PROBE_SHM_LAYOUT=1` allocates the capture at a nonzero offset in a
 shared-memory pool, with padded rows and sentinel bytes around the buffer.

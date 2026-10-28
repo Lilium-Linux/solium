@@ -1,22 +1,20 @@
 //! `wlr-screencopy-unstable-v1`: handing a rendered frame to a client.
 //!
 //! This is screenshots, screen recording and screen sharing — all three, from
-//! one protocol. `grim` takes a picture with it, `wf-recorder` records with it,
-//! and `xdg-desktop-portal-wlr` shares a screen with it, which is what every
-//! conferencing application asks the portal for.
+//! one protocol. `wf-recorder` records with it, and `grim` and
+//! `xdg-desktop-portal-wlr` use it where the newer protocol below is not
+//! offered.
 //!
 //! Implemented by hand because Smithay has no handler for it. The protocol is
 //! small: a client asks for an output, is told what buffer to allocate, gives
 //! us one, and is told when it has been filled.
 //!
-//! ## Why the newer protocol is not this one
+//! ## And the newer protocol
 //!
-//! `ext-image-copy-capture-v1` replaces this and is where things are going.
-//! The `wayland-protocols` crate carries it, but Smithay 0.7 has no handler
-//! for it either. Choosing the superseded protocol is deliberate: it is the one
-//! the tools people already have speak, and a preview that cannot take a
-//! screenshot is a preview nobody can file a bug about.
-//! `ext-image-copy-capture-v1` is #47.
+//! `ext-image-copy-capture-v1` replaces this one, and `image_copy.rs` offers
+//! it beside it: a tool that only speaks the old one keeps working, and one
+//! that prefers the new one gets it. Both queue the same [`Capture`] and are
+//! filled by the same [`settle`]; only the asking and the answering differ.
 //!
 //! ## When the copy happens
 //!
@@ -44,20 +42,20 @@ use smithay::{
 
 use crate::state::Solium;
 
-/// The format captures are handed over in.
+/// The format captures are handed over in, by both protocols.
 ///
 /// One, deliberately. Every screencopy client in existence handles
 /// `Xrgb8888`, it is what the compositor renders into, and offering a list
 /// invites a client to pick the one path that was never exercised.
-const FORMAT: wl_shm::Format = wl_shm::Format::Xrgb8888;
+pub(crate) const FORMAT: wl_shm::Format = wl_shm::Format::Xrgb8888;
 
 /// Bytes per pixel in [`FORMAT`].
-const BYTES: i32 = 4;
+pub(crate) const BYTES: i32 = 4;
 
 /// The logical request expressed in the output's buffer orientation.
 /// Fractional edges are rounded together and clipped to the actual mode.
 #[expect(clippy::cast_possible_truncation, reason = "a region of one monitor")]
-fn capture_rect(
+pub(crate) fn capture_rect(
     region: Rectangle<i32, smithay::utils::Logical>,
     scale: f64,
     mode: smithay::utils::Size<i32, smithay::utils::Physical>,
@@ -77,14 +75,14 @@ fn capture_rect(
 
 /// Output state at announcement: a later change must not fill a stale buffer.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct OutputState {
-    mode: smithay::utils::Size<i32, smithay::utils::Physical>,
-    scale: f64,
-    transform: smithay::utils::Transform,
+pub(crate) struct OutputState {
+    pub(crate) mode: smithay::utils::Size<i32, smithay::utils::Physical>,
+    pub(crate) scale: f64,
+    pub(crate) transform: smithay::utils::Transform,
 }
 
 impl OutputState {
-    fn of(output: &Output) -> Option<Self> {
+    pub(crate) fn of(output: &Output) -> Option<Self> {
         Some(Self {
             mode: output.current_mode()?.size,
             scale: output.current_scale().fractional_scale(),
@@ -114,18 +112,55 @@ impl ScreencopyState {
     }
 }
 
+/// Who is waiting on a capture, and so how it is answered.
+#[derive(Debug)]
+pub(crate) enum Answer {
+    /// A `wlr-screencopy` frame.
+    Wlr(ZwlrScreencopyFrameV1),
+    /// An `ext-image-copy-capture-v1` frame, with the session it belongs to:
+    /// a capture that finds the monitor changed tells the session as well as
+    /// the frame. See `image_copy.rs`.
+    Ext {
+        frame: smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1,
+        session: smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1,
+    },
+}
+
+impl Answer {
+    /// The frame's protocol object, to find its capture by when it goes.
+    pub(crate) fn id(&self) -> smithay::reexports::wayland_server::backend::ObjectId {
+        match self {
+            Self::Wlr(frame) => frame.id(),
+            Self::Ext { frame, .. } => frame.id(),
+        }
+    }
+
+    /// Whether this capture may wait for a picture rather than be refused.
+    ///
+    /// `ext-image-copy-capture-v1` lets a capture wait for as long as the
+    /// picture takes to change, so one asked for while the session is locked
+    /// or its monitor is off waits for the unlock or for the monitor, and
+    /// a stream that was running carries on afterwards. `wlr-screencopy` has
+    /// no such allowance, and a screenshot tool left waiting looks hung, so
+    /// those are refused.
+    pub(crate) fn waits(&self) -> bool {
+        matches!(self, Self::Ext { .. })
+    }
+}
+
 /// What a client asked for, and what it is waiting on.
 #[derive(Debug)]
 pub(crate) struct Capture {
     /// The protocol object to answer.
-    pub(crate) frame: ZwlrScreencopyFrameV1,
+    pub(crate) frame: Answer,
     /// Which monitor.
     pub(crate) output: Output,
     /// The region of that monitor, in its own logical coordinates.
     pub(crate) region: Rectangle<i32, smithay::utils::Logical>,
     /// The size of the buffer the client was told to allocate, in pixels.
     pub(crate) size: smithay::utils::Size<i32, BufferCoords>,
-    output_state: OutputState,
+    /// The monitor as it was when that size was announced.
+    pub(crate) output_state: OutputState,
     /// Whether the pointer should be in the picture.
     pub(crate) cursor: bool,
     /// The buffer, once the client has handed one over.
@@ -305,7 +340,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
             zwlr_screencopy_frame_v1::Request::Copy { buffer } => (buffer, false),
             zwlr_screencopy_frame_v1::Request::CopyWithDamage { buffer } => (buffer, true),
             zwlr_screencopy_frame_v1::Request::Destroy => {
-                state.forget_capture(frame);
+                state.forget_capture(&frame.id());
                 return;
             }
             _ => return,
@@ -347,7 +382,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
         // renderer belongs to the backend's loop -- which is also the only
         // place where the frame being copied actually exists.
         state.pending_captures.push(Capture {
-            frame: frame.clone(),
+            frame: Answer::Wlr(frame.clone()),
             output: pending.output,
             region: pending.region,
             size: pending.size,
@@ -367,7 +402,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
     ) {
         // A client that goes away mid-capture leaves a queued request whose
         // buffer is gone with it.
-        state.forget_capture(frame);
+        state.forget_capture(&frame.id());
     }
 }
 
@@ -388,56 +423,82 @@ pub(crate) fn settle(
     // Taken, so a capture that fails cannot be retried forever and a scene
     // that damages during the copy queues for the *next* frame.
     let captures = std::mem::take(&mut state.pending_captures);
-    // Queued before the session locked, and about to be filled from a frame
-    // of the lock screen. See `Dispatch<ZwlrScreencopyManagerV1>`.
-    if state.lock.is_some() {
-        for capture in captures {
-            capture.frame.failed();
-        }
-        return;
-    }
+    let mut waiting = Vec::new();
     for capture in captures {
+        if waits(state, &capture) {
+            waiting.push(capture);
+            continue;
+        }
+        // Queued before the session locked, and about to be filled from a
+        // frame of the lock screen. See `Dispatch<ZwlrScreencopyManagerV1>`.
+        if state.lock.is_some() {
+            refuse(state, &capture);
+            continue;
+        }
         match fill(state, renderer, prepared, &capture) {
-            Ok(()) => {
-                // Row storage is top-down in the output's buffer orientation.
-                // Clients apply wl_output.transform separately from Y_INVERT.
-                capture
-                    .frame
-                    .flags(zwlr_screencopy_frame_v1::Flags::empty());
-                if capture.damage {
-                    // The whole region. A recorder uses this to skip encoding
-                    // an unchanged frame, and claiming less than actually
-                    // changed would drop real motion; claiming everything
-                    // costs it an encode it might have skipped.
-                    #[expect(
-                        clippy::cast_sign_loss,
-                        reason = "a region size is positive by construction"
-                    )]
-                    capture
-                        .frame
-                        .damage(0, 0, capture.size.w as u32, capture.size.h as u32);
-                }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default();
-                // The protocol splits the seconds into two halves, so both
-                // of these truncate on purpose.
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "a 64-bit second sent as two 32-bit halves"
-                )]
-                let (high, low) = {
-                    let seconds = now.as_secs();
-                    ((seconds >> 32) as u32, seconds as u32)
-                };
-                capture.frame.ready(high, low, now.subsec_nanos());
-            }
+            Ok(()) => match &capture.frame {
+                Answer::Wlr(frame) => ready(frame, &capture),
+                Answer::Ext { frame, .. } => crate::image_copy::ready(frame, &capture),
+            },
             Err(err) => {
                 tracing::warn!(?err, "a screen capture failed");
-                capture.frame.failed();
+                refuse(state, &capture);
             }
         }
     }
+    // Behind any queued while these were filled, which are none: nothing
+    // above dispatches a client.
+    state.pending_captures.extend(waiting);
+}
+
+/// Whether `capture` is left queued this pass rather than filled or refused.
+///
+/// Only a capture that may wait ([`Answer::waits`]), and only while there is
+/// nothing it may be shown: the session is locked, or its monitor is off.
+/// Nothing of the lock screen reaches a buffer either way; the difference is
+/// that a stream picks up again afterwards instead of ending.
+pub(crate) fn waits(state: &Solium, capture: &Capture) -> bool {
+    capture.frame.waits() && (state.lock.is_some() || state.power.is_off(&capture.output))
+}
+
+/// Tell a client its capture was not made.
+pub(crate) fn refuse(state: &Solium, capture: &Capture) {
+    match &capture.frame {
+        Answer::Wlr(frame) => frame.failed(),
+        Answer::Ext { .. } => crate::image_copy::failed(state, capture),
+    }
+}
+
+/// Answer a filled `wlr-screencopy` capture.
+fn ready(frame: &ZwlrScreencopyFrameV1, capture: &Capture) {
+    // Row storage is top-down in the output's buffer orientation.
+    // Clients apply wl_output.transform separately from Y_INVERT.
+    frame.flags(zwlr_screencopy_frame_v1::Flags::empty());
+    if capture.damage {
+        // The whole region. A recorder uses this to skip encoding
+        // an unchanged frame, and claiming less than actually
+        // changed would drop real motion; claiming everything
+        // costs it an encode it might have skipped.
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "a region size is positive by construction"
+        )]
+        frame.damage(0, 0, capture.size.w as u32, capture.size.h as u32);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    // The protocol splits the seconds into two halves, so both
+    // of these truncate on purpose.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a 64-bit second sent as two 32-bit halves"
+    )]
+    let (high, low) = {
+        let seconds = now.as_secs();
+        ((seconds >> 32) as u32, seconds as u32)
+    };
+    frame.ready(high, low, now.subsec_nanos());
 }
 
 /// Render the requested region and copy it into the client's buffer.

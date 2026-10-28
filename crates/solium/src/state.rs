@@ -429,7 +429,14 @@ pub(crate) struct Solium {
     /// recording and screen sharing. See `screencopy.rs`.
     #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
     pub(crate) screencopy_state: crate::screencopy::ScreencopyState,
-    /// Captures a client has asked for and not yet been given.
+    /// Registers `ext_output_image_capture_source_manager_v1` and
+    /// `ext_image_copy_capture_manager_v1`, the successor to the one above,
+    /// which screen sharing through the portal asks for first. See
+    /// `image_copy.rs`.
+    #[expect(dead_code, reason = "holds the globals; dropping it would remove them")]
+    pub(crate) image_copy_state: crate::image_copy::ImageCopyState,
+    /// Captures a client has asked for and not yet been given, by either
+    /// protocol.
     ///
     /// Drained by whichever backend is running, because reading pixels needs a
     /// renderer and that is the one place there is one.
@@ -1438,6 +1445,7 @@ impl Solium {
             rescan_outputs: false,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
+            image_copy_state: crate::image_copy::ImageCopyState::new::<Self>(&display_handle),
             pending_captures: Vec::new(),
             space: Space::default(),
             arrangement: monitor::Arrangement::default(),
@@ -2044,13 +2052,14 @@ impl Solium {
             .is_some_and(|pane| pane.decoration().is_some())
     }
 
-    /// Drop a queued capture whose frame has gone away.
+    /// Drop a queued capture whose frame has gone away, by the frame's id:
+    /// either protocol's.
     pub(crate) fn forget_capture(
         &mut self,
-        frame: &smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+        frame: &smithay::reexports::wayland_server::backend::ObjectId,
     ) {
         self.pending_captures
-            .retain(|capture| &capture.frame != frame);
+            .retain(|capture| &capture.frame.id() != frame);
     }
 
     /// Bring the compositor's own view of its windows back in line with the
