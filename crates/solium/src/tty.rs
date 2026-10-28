@@ -1628,7 +1628,17 @@ impl State {
         // before any output's buffer is bound, because it binds framebuffers
         // of its own.
         let prepared = if pictures {
-            render::prepare(&mut self.solium, renderer)
+            // What only a monitor this pass draws needs is made only for one
+            // (`drawing.rs`).
+            let drawing = crate::drawing::Drawing::only(
+                self.screens
+                    .iter()
+                    .zip(&steps)
+                    .filter(|(_, step)| matches!(step, Some(Step::Draw | Step::Wake)))
+                    .map(|(screen, _)| screen.output.name())
+                    .collect(),
+            );
+            render::prepare(&mut self.solium, renderer, drawing)
         } else {
             render::Prepared::default()
         };

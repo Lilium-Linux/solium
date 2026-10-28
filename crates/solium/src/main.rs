@@ -24,6 +24,7 @@ mod commit;
 mod cursor;
 mod decoration;
 mod dev;
+mod drawing;
 mod effect;
 mod explicit_sync;
 mod focus;

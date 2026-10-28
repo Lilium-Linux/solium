@@ -916,7 +916,11 @@ pub(crate) fn run() -> Result<()> {
             Vec::new()
         };
         let prepared = if wanted && pictures {
-            render::prepare(&mut state, backend.renderer())
+            render::prepare(
+                &mut state,
+                backend.renderer(),
+                crate::drawing::Drawing::every(),
+            )
         } else {
             render::Prepared::default()
         };
