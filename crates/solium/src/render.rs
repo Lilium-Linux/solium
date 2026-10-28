@@ -1164,6 +1164,11 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
         frame_tick(state);
     }
+    // The hosted scenes' regions, read after the tick has moved them and
+    // before anything this pass resolves a name or renders a scene: only a
+    // scene that changed is asked, so an idle desktop asks nothing.
+    // `state::tests::real_client::a_region_resolves_at_its_instances_place_on_its_monitor`.
+    state.read_regions();
 
     // Twice the largest monitor's bytes may wait on the pool's free list
     // (Ruling 10): `pool::tests::a_target_given_back_over_budget_is_dropped`.

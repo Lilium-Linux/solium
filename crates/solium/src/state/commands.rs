@@ -792,6 +792,7 @@ impl Solium {
                 }
                 Command::Effects { rules, settings } => self.apply_effects_set(rules, settings),
                 Command::Startup(first_frame) => self.apply_startup(first_frame),
+                Command::Anchoring(settings) => self.apply_anchoring(settings),
                 Command::Decoration { name } => {
                     // The slots windows occupy are kept; what changes is how
                     // much of each slot the frame takes, so every client is

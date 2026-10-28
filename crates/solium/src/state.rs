@@ -97,6 +97,7 @@ use crate::{
     },
 };
 
+mod anchors;
 mod close;
 mod commands;
 mod handlers;
@@ -273,6 +274,16 @@ pub(crate) struct Solium {
     /// The wallpaper is one of these and there is nothing in here that knows
     /// that. See `scripted.rs`.
     pub(crate) surfaces: crate::scripted::Surfaces,
+
+    /// The regions the hosted scenes publish (`Solium.region`), by name and
+    /// monitor, read once a pass by [`Self::read_regions`], and the names
+    /// they are kept under.
+    /// `tests::real_client::a_region_resolves_at_its_instances_place_on_its_monitor`.
+    pub(crate) anchors: crate::anchor::Registry,
+    pub(crate) names: crate::anchor::Names,
+    /// `config.anchors`: the edge strip, which monitor a name means, and
+    /// when a region counts as shown. See `Command::Anchoring`.
+    pub(crate) anchor_settings: crate::anchor::Settings,
 
     /// What Qt last took of each model hosted scenes read, so a frame sends
     /// only what changed since: `models::tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
@@ -1407,6 +1418,9 @@ impl Solium {
             power_state: crate::power::PowerState::new::<Self>(&display_handle),
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),
+            anchors: crate::anchor::Registry::default(),
+            names: crate::anchor::Names::default(),
+            anchor_settings: crate::anchor::Settings::default(),
             published: crate::models::Published::default(),
             focus_history: Vec::new(),
             after_close: crate::successor::Successor::UNCONFIGURED.to_vec(),
@@ -1900,18 +1914,31 @@ impl Solium {
             // scale; then the one in front of the user; then the primary.
             // `tests::a_genie_aimed_at_a_surface_aims_at_its_instance_on_the_windows_own_monitor`.
             present::Anchor::Surface(id) => {
-                let surface = self.surfaces.get(id)?;
                 let output = self
                     .pane_outer_of(pane)
                     .and_then(|slot| self.output_of(slot))
                     .or_else(|| self.active_output())
                     .or_else(|| self.primary_output())?;
-                let geometry = self.space.output_geometry(&output)?;
-                let primary = self.primary_output();
-                let area = surface.area_on(&output, geometry, primary.as_ref())?;
-                self.carried(id, &output, area).to_f64()
+                self.surface_drawn_on(id, &output)?.to_f64()
             }
         })
+    }
+
+    /// Where one monitor's instance of a scripted surface is drawn now: its
+    /// area there, carried by any selection holding it. What an aim at a
+    /// surface resolves to, and where a region's scene sits
+    /// (`anchor::Places::scene_origin`).
+    /// `tests::real_client::a_region_resolves_at_its_instances_place_on_its_monitor`.
+    pub(crate) fn surface_drawn_on(
+        &self,
+        id: crate::scripted::SurfaceId,
+        output: &Output,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let surface = self.surfaces.get(id)?;
+        let geometry = self.space.output_geometry(output)?;
+        let primary = self.primary_output();
+        let area = surface.area_on(output, geometry, primary.as_ref())?;
+        Some(self.carried(id, output, area))
     }
 
     /// Gather the presentation-feedback callbacks committed for this frame.

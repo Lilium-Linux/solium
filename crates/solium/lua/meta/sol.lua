@@ -678,6 +678,44 @@ function sol.effects(options) end
 ---@class sol.StartupOptions
 ---@field first_frame? sol.FirstFrameOptions
 
+---The built-in edge strip, `monitor/<which>/<edge>`.
+---@class sol.AnchorEdge
+---@field depth? integer Logical pixels deep, a whole number from 1 to 512. Default 24.
+---@field length? number A share of the edge, above 0 and at most 1. Default a third.
+
+---What `sol.anchoring` takes, `config.anchors`. A key left out keeps its
+---default; a key it does not know, or a value outside its bounds, is refused
+---whole, named by `sol.problems()` under `"anchors"`, and what was set stays.
+---@class sol.AnchorsOptions
+---@field edge? sol.AnchorEdge The built-in edge strip.
+---@field same? ("pane"|"sender"|"pointer"|"active"|"primary")[] Which monitor's copy of a name a window flies to: the first that answers. One to five, none twice. Default `{ "pane", "sender", "active", "primary" }`.
+---@field shown_opacity? number The opacity product (the region's times its parents') above which a region's pixels can be taken into a flight, 0 to 1. Default 1/255.
+
+---Where windows are flown to and from: the edge strip, which monitor a
+---name means, and when a region counts as shown (`config.anchors`).
+---Applied at once; with no table, the defaults.
+---@param options? sol.AnchorsOptions
+---@return nil
+function sol.anchoring(options) end
+
+---One region a hosted scene publishes, as `sol.anchors` lists it.
+---@class sol.Anchor
+---@field name string `<surface>/<path>`: the `sol.surface` name, then the item's `Solium.region`.
+---@field monitor string The monitor this copy is on: a surface on every monitor publishes one per monitor.
+---@field x number Where it is on the desktop now, logical pixels.
+---@field y number
+---@field w number
+---@field h number
+---@field radius number[] Its corners, `{ tl, tr, br, bl }` (`Solium.radius`).
+---@field shown boolean Visible, as opaque as `anchors.shown_opacity` asks, and wholly inside its scene.
+
+---The regions hosted scenes publish (`Solium.region`) whose names start
+---with `prefix`, every one without it, by name and then monitor. Read after
+---each polish of a scene that changed, so this is where they are now.
+---@param prefix? string
+---@return sol.Anchor[]
+function sol.anchors(prefix) end
+
 ---How the compositor starts: the first frame's gate. Applied at once; a
 ---reload re-reads it, and one with `on_reload` holds its frame again.
 ---With no table, the defaults.

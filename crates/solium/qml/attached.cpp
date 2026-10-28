@@ -429,10 +429,75 @@ SoliumCursor *SoliumAttached::cursor()
 
 void SoliumAttached::setRegion(const QString &region)
 {
-    if (region != m_region) {
-        m_region = region;
-        emit regionChanged();
+    if (region == m_region) {
+        return;
     }
+    m_region = region;
+    /* Kept on its scene's hosting, so the readout finds it; an emptied name
+     * leaves the list, and the readout reports the region gone. An object
+     * that is no item has no place to publish, and the log says so, once.
+     * `qml::hosted::tests::an_emptied_name_reports_the_region_gone`. */
+    SoliumHosting *hosting = solium_hosting_of(m_item);
+    QQuickItem *item = qobject_cast<QQuickItem *>(m_item);
+    if (hosting != nullptr && item == nullptr) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            qWarning("Solium.region publishes only an item's place; this %s publishes nothing",
+                     m_item != nullptr ? m_item->metaObject()->className() : "object");
+        }
+    }
+    if (hosting != nullptr && item != nullptr) {
+        if (region.isEmpty()) {
+            hosting->regions.removeAll(item);
+        } else if (!hosting->regions.contains(item)) {
+            hosting->regions.append(item);
+        }
+        hosting->regions_stale = true;
+    }
+    emit regionChanged();
+}
+
+void SoliumAttached::setRadius(const QVariant &radius)
+{
+    /* A number is four equal corners, a list of four is each in turn;
+     * anything else is no rounding, and the log says why.
+     * `qml::hosted::tests::a_radius_list_is_four_corners`. */
+    if (radius == m_radius) {
+        return;
+    }
+    m_radius = radius;
+    QVariant value = radius;
+    if (value.userType() == qMetaTypeId<QJSValue>()) {
+        value = value.value<QJSValue>().toVariant();
+    }
+    float corners[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const int type = value.typeId();
+    const bool number = type == QMetaType::Double || type == QMetaType::Float
+                        || type == QMetaType::Int || type == QMetaType::UInt
+                        || type == QMetaType::LongLong || type == QMetaType::ULongLong;
+    if (number) {
+        std::fill(corners, corners + 4, value.toFloat());
+    } else if (value.canConvert<QVariantList>()) {
+        const QVariantList list = value.toList();
+        if (list.size() == 4) {
+            for (int corner = 0; corner < 4; ++corner) {
+                corners[corner] = list.at(corner).toFloat();
+            }
+        } else {
+            qWarning("Solium.radius is a number or a list of four, [tl, tr, br, bl]; "
+                     "this list has %lld",
+                     static_cast<long long>(list.size()));
+        }
+    } else if (value.isValid()) {
+        qWarning("Solium.radius is a number or a list of four, [tl, tr, br, bl]");
+    }
+    std::copy(corners, corners + 4, m_corners);
+    SoliumHosting *hosting = solium_hosting_of(m_item);
+    if (hosting != nullptr) {
+        hosting->regions_stale = true;
+    }
+    emit radiusChanged();
 }
 
 void SoliumAttached::setMaterial(const QVariant &material)

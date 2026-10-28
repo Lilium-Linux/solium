@@ -43,6 +43,9 @@
 #             without it, at effects.xray.scale 0.5 too; and a plate there
 #             from the start, its backdrop blurred in the first frame drawn,
 #             after three held to the clear colour by SOLIUM_WARM_INJECT=3
+#   regions   three squares of pure colour on a hosted scene, each a
+#             `Solium.region`, one inside a Row in a parent scaled 2x:
+#             `sol.anchors` lists each where the capture shows it, within 1 px
 #   motion    a clear terminal with the wallpaper (bars no two places of
 #             which look alike) blurred behind it, held away from its
 #             layout place, at six moments of a glide, and half way through
@@ -654,7 +657,38 @@ section_motion() {
         || fail "motion: blur-tint's tint ran $runs times, or ran at rest"
 }
 
-all=(overlay t0 blur none fail tilt genie xray motion)
+# regions   where `sol.anchors` says each square is, against where the
+#           capture shows it.
+section_regions() {
+    SECTION_QML="$here/regions.qml" run_scene regions regions.lua \
+        SOLIUM_TRIGGER_AT=3000:super+a \
+        SOLIUM_CAPTURE_AT=3500 SOLIUM_CAPTURE_FRAMES=2 SOLIUM_CAPTURE_INTERVAL=100 || return
+    wait_frames 2 || return
+    local frame
+    frame="$(ls "$dir"/f-* | head -1)"
+    local colour name rgb listed seen
+    for colour in "red 255 0 0" "row/green 0 255 0" "blue 0 0 255"; do
+        name="${colour%% *}"
+        rgb="${colour#* }"
+        listed="$(grep -oE "anchor probe/$name [^ ]+ [-0-9.]+ [-0-9.]+ [-0-9.]+ [-0-9.]+ true" "$dir/log" | head -1 | cut -d' ' -f4-7)"
+        [[ -n "$listed" ]] || { fail "regions: sol.anchors listed no shown probe/$name; see $dir/log"; continue; }
+        # shellcheck disable=SC2086
+        seen="$(judge box "$frame" $rgb)" || { fail "regions: probe/$name is not in the capture"; continue; }
+        if python3 - "$listed" "$seen" <<'PY'
+import sys
+listed = [float(v) for v in sys.argv[1].split()]
+seen = [float(v) for v in sys.argv[2].split()]
+sys.exit(0 if all(abs(a - b) <= 1 for a, b in zip(listed, seen)) else 1)
+PY
+        then
+            pass "regions: probe/$name listed at $listed, drawn at $seen"
+        else
+            fail "regions: probe/$name listed at $listed but drawn at $seen"
+        fi
+    done
+}
+
+all=(overlay t0 blur none fail tilt genie xray motion regions)
 sections=("$@")
 [[ ${#sections[@]} -gt 0 ]] || sections=("${all[@]}")
 

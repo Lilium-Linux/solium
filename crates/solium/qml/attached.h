@@ -294,6 +294,16 @@ struct SoliumHosting
      * order, each with its data as `{"data": ...}` JSON. Ruling 15.
      * `qml::hosted::tests::solium_send_queues_every_action_with_its_data_in_order`. */
     QList<QPair<QString, QByteArray>> actions;
+    /* Every item of the scene that has taken a `Solium.region` name, in the
+     * order each first took one: where two publish one name, the later one
+     * wins. A destroyed item drops out by itself.
+     * `qml::hosted::tests::a_region_is_read_after_polish_through_a_scaled_parent`. */
+    QList<QPointer<QQuickItem>> regions;
+    /* Whether the regions must be read again though Qt has not marked the
+     * scene dirty: a name or a radius was set, or the threshold changed.
+     * True from the start, so a scene's first publish reads them.
+     * `qml::hosted::tests::an_emptied_name_reports_the_region_gone`. */
+    bool regions_stale = true;
 };
 
 /* What `sol.status` last set, for `Solium.status`: one per process, made on
@@ -352,11 +362,18 @@ class SoliumAttached : public QObject
      * `qml::pointer::tests::a_published_pointer_reaches_solium_cursor`,
      * `qml::pointer::tests::the_hotspot_the_root_sets_is_the_scenes`. */
     Q_PROPERTY(SoliumCursor *cursor READ cursor CONSTANT)
-    /* `Solium.region` and `Solium.material`: accepted on every item and read
-     * by nothing yet; `Solium.materialState` is "off" until materials exist
-     * (#199), so a scene shows its plain drawing.
-     * `qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`. */
+    /* `Solium.region`: a name for this item's place on screen, published to
+     * the compositor after each polish of a dirty scene, which a window can
+     * be flown to or from by `<surface>/<name>`; and `Solium.radius`, its
+     * corners, one number or `[tl, tr, br, bl]`. Only an item publishes one.
+     * `qml::hosted::tests::a_region_is_read_after_polish_through_a_scaled_parent`,
+     * `qml::hosted::tests::a_radius_list_is_four_corners`. */
     Q_PROPERTY(QString region READ region WRITE setRegion NOTIFY regionChanged)
+    Q_PROPERTY(QVariant radius READ radius WRITE setRadius NOTIFY radiusChanged)
+    /* `Solium.material`: accepted on every item and read by nothing yet;
+     * `Solium.materialState` is "off" until materials exist (#199), so a
+     * scene shows its plain drawing.
+     * `qml::pointer::tests::a_material_is_accepted_and_materials_are_off`. */
     Q_PROPERTY(QVariant material READ material WRITE setMaterial NOTIFY materialChanged)
     Q_PROPERTY(QString materialState READ materialState CONSTANT)
 public:
@@ -377,6 +394,11 @@ public:
     SoliumCursor *cursorIfMade() const { return m_cursor; }
     QString region() const { return m_region; }
     void setRegion(const QString &region);
+    QVariant radius() const { return m_radius; }
+    void setRadius(const QVariant &radius);
+    /* The radius as four corners: top-left, top-right, bottom-right,
+     * bottom-left. `qml::hosted::tests::a_radius_list_is_four_corners`. */
+    const float *corners() const { return m_corners; }
     QVariant material() const { return m_material; }
     void setMaterial(const QVariant &material);
     QString materialState() const { return QStringLiteral("off"); }
@@ -390,6 +412,7 @@ signals:
     void inputChanged();
     void statusChanged();
     void regionChanged();
+    void radiusChanged();
     void materialChanged();
 
 private:
@@ -398,6 +421,8 @@ private:
     SoliumKeyboard *m_keyboard = nullptr;
     SoliumCursor *m_cursor = nullptr;
     QString m_region;
+    QVariant m_radius;
+    float m_corners[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     QVariant m_material;
 };
 

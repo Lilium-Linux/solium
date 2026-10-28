@@ -499,6 +499,42 @@ impl Surface {
         }
     }
 
+    /// What every instance's scene published of its regions since it was
+    /// last asked: its owner, whether its scene is new (so what was held of
+    /// it before is no longer anything), and the changes. A stand-in
+    /// publishes nothing: a state test seeds the registry itself.
+    /// `state::tests::a_rebuilt_scene_replaces_its_regions`.
+    pub(crate) fn take_regions(
+        &mut self,
+    ) -> Vec<(crate::anchor::Owner, bool, Vec<crate::anchor::RegionChange>)> {
+        let surface = self.id;
+        self.instances
+            .iter_mut()
+            .filter_map(|(monitor, instance)| {
+                let (fresh, changes) = instance.take_regions();
+                (fresh || !changes.is_empty()).then(|| {
+                    let owner = crate::anchor::Owner {
+                        surface,
+                        output: monitor.clone(),
+                    };
+                    (owner, fresh, changes)
+                })
+            })
+            .collect()
+    }
+
+    /// Whether it has an instance on the monitor named `output`, or stands in
+    /// for one in a state test, whose regions are then its: what keeps an
+    /// owner's regions in the registry.
+    /// `state::tests::a_torn_down_scene_takes_its_regions_with_it`.
+    pub(crate) fn hosts_named(&self, output: &str) -> bool {
+        #[cfg(test)]
+        if self.stand.is_some() {
+            return true;
+        }
+        self.instances.contains_key(output)
+    }
+
     /// What this surface reserves on one monitor: the declaration, under what
     /// the instance there has set. The declaration counts whether or not the
     /// scene loaded (Ruling 10).

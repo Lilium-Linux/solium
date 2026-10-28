@@ -310,6 +310,26 @@ using ImageTargetTexture2D = void (*)(GLenum target, void *image);
  * through as if it were a real tiling. */
 constexpr unsigned long long kModifierInvalid = (1ULL << 56) - 1;
 
+/* One region as the host last read it: where it is in the scene, where it
+ * was at the last render (and that render's count), its corners, and
+ * whether its pixels could be taken.
+ * `qml::hosted::tests::rendered_is_the_rectangle_of_the_last_render`. */
+struct RegionState
+{
+    QRectF now;
+    QRectF rendered;
+    unsigned long long rendered_pass = 0;
+    float radius[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool shown = false;
+
+    bool operator==(const RegionState &other) const
+    {
+        return now == other.now && rendered == other.rendered
+            && rendered_pass == other.rendered_pass && shown == other.shown
+            && std::equal(radius, radius + 4, other.radius);
+    }
+};
+
 } // namespace
 
 struct SoliumQmlScene
@@ -404,6 +424,19 @@ struct SoliumQmlScene
      * long as it does, which is longer than any scene of ours. */
     QOpenGLContext *qt_context = nullptr;
     QSurface *qt_surface = nullptr;
+
+    /* A hosted scene's regions as last read, by path; the paths that
+     * changed since the last take, in order (a path no longer in `regions`
+     * is gone); the paths the last take handed out, which live until the
+     * next; the paths published twice that the log has named; how many times
+     * the publish polished it; how many times it rendered.
+     * `qml::hosted::tests::an_idle_scene_is_not_asked_for_its_regions`. */
+    QMap<QString, RegionState> regions;
+    QMap<QString, bool> regions_changed;
+    QList<QByteArray> regions_taken;
+    QSet<QString> regions_twice;
+    unsigned long long region_polishes = 0;
+    unsigned long long renders = 0;
 };
 
 namespace {
@@ -430,6 +463,12 @@ std::vector<SoliumQmlScene *> g_scenes;
  * that was already waiting to be drawn.
  * `qml::wake::tests::a_timer_fires_while_no_frame_is_drawn`. */
 unsigned long long g_dirtied = 0;
+
+/* `anchors.shown_opacity`: the opacity product a region must exceed for its
+ * pixels to be taken into a flight. "Wholly inside its scene" stays fixed: a
+ * crop outside the scene has no pixels.
+ * `qml::hosted::tests::a_region_hidden_or_transparent_is_published_not_shown`. */
+double g_region_threshold = 1.0 / 255.0;
 
 } // namespace
 
@@ -2523,6 +2562,155 @@ extern "C" int solium_qml_scene_ticking(const SoliumQmlScene *scene)
     return ticking || animation_running(scene->object) ? 1 : 0;
 }
 
+/* Read a hosted scene's regions as they are now, its items already
+ * polished, and note each that changed; with `rendered`, this is a render's
+ * read, which also sets where each region was drawn. A region is shown when
+ * its item is visible, its opacity times its parents' is above
+ * `anchors.shown_opacity`, and it lies wholly inside the scene. Two items
+ * publishing one path: the later in `SoliumHosting::regions` wins, and the
+ * log names the path once for the scene (Ruling M2).
+ * `qml::hosted::tests::a_region_is_read_after_polish_through_a_scaled_parent`,
+ * `qml::hosted::tests::a_region_hidden_or_transparent_is_published_not_shown`,
+ * `qml::hosted::tests::rendered_is_the_rectangle_of_the_last_render`. */
+static void read_regions(SoliumQmlScene *scene, bool rendered)
+{
+    SoliumHosting *hosting = scene->hosting;
+    if (hosting == nullptr) {
+        return;
+    }
+    if (rendered) {
+        ++scene->renders;
+    }
+    hosting->regions_stale = false;
+    if (hosting->regions.isEmpty() && scene->regions.isEmpty()) {
+        return;
+    }
+    hosting->regions.removeAll(QPointer<QQuickItem>());
+    const QQuickItem *content = scene->window->contentItem();
+    const QRectF bounds(0.0, 0.0, content->width(), content->height());
+    QMap<QString, RegionState> read;
+    for (const QPointer<QQuickItem> &item : std::as_const(hosting->regions)) {
+        const auto *attached = qobject_cast<SoliumAttached *>(
+            qmlAttachedPropertiesObject<SoliumAttachedType>(item.data(), false));
+        if (attached == nullptr || attached->region().isEmpty()) {
+            continue;
+        }
+        const QString path = attached->region();
+        RegionState state;
+        state.now = item->mapRectToScene(item->boundingRect());
+        double opacity = 1.0;
+        for (const QQuickItem *each = item.data(); each != nullptr; each = each->parentItem()) {
+            opacity *= each->opacity();
+        }
+        state.shown =
+            item->isVisible() && opacity > g_region_threshold && bounds.contains(state.now);
+        std::copy(attached->corners(), attached->corners() + 4, state.radius);
+        if (read.contains(path) && !scene->regions_twice.contains(path)) {
+            scene->regions_twice.insert(path);
+            qWarning("two items of one scene publish the region \"%s\"; the later one is "
+                     "published",
+                     qPrintable(path));
+        }
+        read.insert(path, state);
+    }
+    for (auto each = read.begin(); each != read.end(); ++each) {
+        RegionState next = each.value();
+        const auto held = scene->regions.constFind(each.key());
+        if (held != scene->regions.constEnd()) {
+            next.rendered = held->rendered;
+            next.rendered_pass = held->rendered_pass;
+        }
+        if (rendered && next.rendered != next.now) {
+            next.rendered = next.now;
+            next.rendered_pass = scene->renders;
+        }
+        if (held == scene->regions.constEnd() || !(*held == next)) {
+            scene->regions.insert(each.key(), next);
+            scene->regions_changed.insert(each.key(), true);
+        }
+    }
+    for (auto held = scene->regions.begin(); held != scene->regions.end();) {
+        if (read.contains(held.key())) {
+            ++held;
+            continue;
+        }
+        scene->regions_changed.insert(held.key(), true);
+        held = scene->regions.erase(held);
+    }
+}
+
+extern "C" void solium_qml_publish_regions()
+{
+    for (SoliumQmlScene *scene : g_scenes) {
+        SoliumHosting *hosting = scene->hosting;
+        if (hosting == nullptr || scene->control == nullptr
+            || !(scene->dirty || hosting->regions_stale)) {
+            continue;
+        }
+        if (hosting->regions.isEmpty() && scene->regions.isEmpty()) {
+            hosting->regions_stale = false;
+            continue;
+        }
+        scene->control->polishItems();
+        ++scene->region_polishes;
+        read_regions(scene, false);
+    }
+}
+
+extern "C" int solium_qml_scene_take_regions(SoliumQmlScene *scene, SoliumQmlRegion *out, int cap)
+{
+    if (scene == nullptr || out == nullptr || cap <= 0) {
+        return 0;
+    }
+    scene->regions_taken.clear();
+    scene->regions_taken.reserve(cap);
+    int taken = 0;
+    for (auto each = scene->regions_changed.begin();
+         each != scene->regions_changed.end() && taken < cap;) {
+        const QString path = each.key();
+        each = scene->regions_changed.erase(each);
+        scene->regions_taken.append(path.toUtf8());
+        SoliumQmlRegion &region = out[taken++];
+        region = SoliumQmlRegion{};
+        region.path = scene->regions_taken.last().constData();
+        const auto held = scene->regions.constFind(path);
+        if (held == scene->regions.constEnd()) {
+            region.gone = 1;
+            continue;
+        }
+        region.x = held->now.x();
+        region.y = held->now.y();
+        region.w = held->now.width();
+        region.h = held->now.height();
+        region.rx = held->rendered.x();
+        region.ry = held->rendered.y();
+        region.rw = held->rendered.width();
+        region.rh = held->rendered.height();
+        std::copy(held->radius, held->radius + 4, region.radius);
+        region.shown = held->shown ? 1 : 0;
+        region.rendered_pass = held->rendered_pass;
+    }
+    return taken;
+}
+
+extern "C" void solium_qml_set_region_threshold(double opacity)
+{
+    if (opacity == g_region_threshold) {
+        return;
+    }
+    g_region_threshold = opacity;
+    for (SoliumQmlScene *scene : g_scenes) {
+        if (scene->hosting != nullptr) {
+            scene->hosting->regions_stale = true;
+        }
+    }
+}
+
+extern "C" unsigned long long solium_qml_scene_region_polishes_for_test(const SoliumQmlScene *scene)
+{
+    return scene != nullptr ? scene->region_polishes : 0;
+}
+
 extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
 {
     if (scene == nullptr || scene->control == nullptr || scene->image.isNull()) {
@@ -2544,6 +2732,7 @@ extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)
     // per scene, which with a bar and a frame per window fills the journal with
     // warnings that look like errors and are not.
     scene->control->polishItems();
+    read_regions(scene, true);
     scene->control->sync();
     scene->control->render();
     scene->dirty = false;
@@ -2648,6 +2837,7 @@ extern "C" int solium_qml_scene_render_gpu(SoliumQmlScene *scene, int *fence_fd)
     // stops. Same five calls, one pair present in one path and absent in the
     // other, and neither is a copy of the other with a line missing.
     scene->control->polishItems();
+    read_regions(scene, true);
     scene->control->beginFrame();
     scene->control->sync();
     scene->control->render();

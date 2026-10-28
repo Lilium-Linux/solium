@@ -385,6 +385,10 @@ pub(crate) struct Snapshot {
     pub(crate) audio: std::rc::Rc<crate::services::audio::View>,
     /// The tray as the service holds it, for `sol.tray()` (#363).
     pub(crate) tray: std::rc::Rc<crate::services::tray::View>,
+    /// Every region the hosted scenes publish, by name and monitor, where
+    /// each is on the desktop, for `sol.anchors`: empty when none does.
+    /// `tests::sol_anchors_lists_the_regions_under_a_prefix`.
+    pub(crate) anchors: Vec<crate::anchor::Row>,
 }
 
 /// One problem, as `sol.problems()` hands it over: an effect, a rule or the
@@ -902,6 +906,11 @@ pub(crate) enum Command {
     /// checked (`warm::startup`), or why it was refused
     /// (`tests::sol_startup_reaches_the_compositor`).
     Startup(Result<crate::warm::FirstFrame, String>),
+    /// `sol.anchoring(config.anchors)`: the edge strip, which monitor a name
+    /// means and when a region counts as shown, read and checked
+    /// (`anchor::Settings::read`), or why it was refused
+    /// (`tests::sol_anchoring_reads_the_anchors_section`).
+    Anchoring(Result<crate::anchor::Settings, String>),
 }
 
 impl Command {
@@ -983,7 +992,8 @@ impl Command {
             | Self::Power { .. }
             | Self::Cursor(_)
             | Self::Effects { .. }
-            | Self::Startup(_) => false,
+            | Self::Startup(_)
+            | Self::Anchoring(_) => false,
         }
     }
 }
@@ -3839,6 +3849,55 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Where windows are flown to and from (`config.anchors`): the edge
+    // strip, which monitor a name means, and when a region counts as shown,
+    // each key left out keeping its default and a value out of bounds
+    // refused naming the key (`tests::sol_anchoring_reads_the_anchors_section`).
+    sol.set(
+        "anchoring",
+        lua.create_function(|lua, options: Option<Table>| {
+            let read = match options {
+                None => Ok(crate::anchor::Settings::default()),
+                Some(table) => anchoring_from(&table)?,
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Anchoring(read));
+            })
+        })?,
+    )?;
+
+    // The regions the hosted scenes publish (`Solium.region`) whose names
+    // start with `prefix`, every one without it: `{ name, monitor, x, y, w,
+    // h, radius = { tl, tr, br, bl }, shown }`, by name and monitor, where
+    // each is on the desktop now
+    // (`tests::sol_anchors_lists_the_regions_under_a_prefix`).
+    sol.set(
+        "anchors",
+        lua.create_function(|lua, prefix: Option<String>| {
+            let snapshot = snapshot(lua)?;
+            let prefix = prefix.unwrap_or_default();
+            let rows = lua.create_table()?;
+            for (index, anchor) in snapshot
+                .anchors
+                .iter()
+                .filter(|anchor| anchor.name.starts_with(&prefix))
+                .enumerate()
+            {
+                let row = lua.create_table()?;
+                row.set("name", anchor.name.clone())?;
+                row.set("monitor", anchor.monitor.clone())?;
+                row.set("x", anchor.rect.loc.x)?;
+                row.set("y", anchor.rect.loc.y)?;
+                row.set("w", anchor.rect.size.w)?;
+                row.set("h", anchor.rect.size.h)?;
+                row.set("radius", lua.create_sequence_from(anchor.radius)?)?;
+                row.set("shown", anchor.shown)?;
+                rows.set(index + 1, row)?;
+            }
+            Ok(rows)
+        })?,
+    )?;
+
     // How the compositor starts: the first desktop frame's gate
     // (`warm::Warm`), `startup.first_frame`, read and checked here and
     // applied at once (`tests::sol_startup_reaches_the_compositor`).
@@ -6605,6 +6664,82 @@ fn size_table(lua: &Lua, size: Option<Size<i32, Logical>>) -> mlua::Result<Value
     Ok(Value::Table(table))
 }
 
+/// `config.anchors` as `sol.anchoring` is handed it: `edge = { depth,
+/// length }`, `same = { … }` and `shown_opacity`, a key left out keeping its
+/// default. A key that is none of these, or a value of the wrong kind, is
+/// refused naming it; bounds are `anchor::Settings::read`'s.
+/// `tests::sol_anchoring_reads_the_anchors_section`.
+fn anchoring_from(options: &Table) -> mlua::Result<Result<crate::anchor::Settings, String>> {
+    const KEYS: [&str; 3] = ["edge", "same", "shown_opacity"];
+    let number = |value: Value, key: &str| -> Result<Option<f64>, String> {
+        match value {
+            Value::Nil => Ok(None),
+            // An integer too large for an `i32` is out of every bound here.
+            Value::Integer(number) => {
+                Ok(Some(i32::try_from(number).map_or(f64::INFINITY, f64::from)))
+            }
+            Value::Number(number) => Ok(Some(number)),
+            _ => Err(format!("{key} is a number")),
+        }
+    };
+    let (mut depth, mut length, mut same, mut opacity) = (None, None, None, None);
+    for pair in options.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let Value::String(key) = key else {
+            return Ok(Err(
+                "`anchors` takes named keys: edge, same, shown_opacity".to_owned()
+            ));
+        };
+        let key = key.to_str()?.to_owned();
+        let read: Result<(), String> = match key.as_str() {
+            "edge" => match value {
+                Value::Table(edge) => {
+                    let (given_depth, given_length) =
+                        (edge.get::<Value>("depth")?, edge.get::<Value>("length")?);
+                    number(given_depth, "anchors.edge.depth").and_then(|read| {
+                        depth = read;
+                        number(given_length, "anchors.edge.length").map(|read| length = read)
+                    })
+                }
+                _ => Err("anchors.edge is a table: { depth, length }".to_owned()),
+            },
+            "same" => match value {
+                Value::Table(list) => {
+                    let mut words = Vec::new();
+                    let mut read = Ok(());
+                    for word in list.sequence_values::<Value>() {
+                        match word? {
+                            Value::String(word) => words.push(word.to_str()?.to_owned()),
+                            _ => read = Err("anchors.same is a list of names".to_owned()),
+                        }
+                    }
+                    same = Some(words);
+                    read
+                }
+                _ => Err("anchors.same is a list of names".to_owned()),
+            },
+            "shown_opacity" => number(value, "anchors.shown_opacity").map(|read| opacity = read),
+            _ => {
+                let meant = solium_effects::spec::nearest(&key, &KEYS)
+                    .map(|meant| format!("; did you mean `{meant}`?"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "`{key}` is not an anchors key: edge, same, shown_opacity{meant}"
+                ))
+            }
+        };
+        if let Err(why) = read {
+            return Ok(Err(why));
+        }
+    }
+    Ok(crate::anchor::Settings::read(
+        depth,
+        length,
+        same.as_deref(),
+        opacity,
+    ))
+}
+
 fn snapshot(lua: &Lua) -> mlua::Result<Snapshot> {
     Ok(lua
         .app_data_ref::<Snapshot>()
@@ -8215,6 +8350,7 @@ mod tests {
             notifications: Default::default(),
             audio: Default::default(),
             tray: Default::default(),
+            anchors: Vec::new(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
                 id: 7,
@@ -11405,6 +11541,7 @@ mod tests {
             notifications: Default::default(),
             audio: Default::default(),
             tray: Default::default(),
+            anchors: Vec::new(),
             keyboard: crate::keymap::State::initial(),
             windows: Vec::new(),
             monitors: Vec::new(),
@@ -11893,6 +12030,7 @@ mod tests {
             notifications: Default::default(),
             audio: Default::default(),
             tray: Default::default(),
+            anchors: Vec::new(),
             keyboard: crate::keymap::State::initial(),
             windows: windows
                 .iter()
@@ -12696,6 +12834,135 @@ mod tests {
     /// checked into `Command::Startup`, with no table the default, and a
     /// refused value, a number that is not finite or an unknown key an
     /// `Err` naming what is wrong.
+    /// **`sol.anchors` lists the regions under a prefix**, every one with
+    /// none, each with its name, monitor, place on the desktop, corners and
+    /// whether it is shown.
+    #[test]
+    fn sol_anchors_lists_the_regions_under_a_prefix() {
+        let (directory, scripts) = loaded("solium-script-test-anchors-list", "");
+        let row = |name: &str, monitor: &str, x: f64, shown: bool| crate::anchor::Row {
+            name: name.to_owned(),
+            monitor: monitor.to_owned(),
+            rect: crate::anchor::Rect::new((x, 6.0).into(), (40.0, 40.0).into()),
+            radius: [1.0, 2.0, 3.0, 4.0],
+            shown,
+        };
+        let snapshot = Snapshot {
+            anchors: vec![
+                row("shell/bar/clock", "DP-1", 10.0, true),
+                row("shell/dock/icons/foot", "DP-1", 100.0, true),
+                row("shell/dock/icons/foot", "DP-2", 2640.0, false),
+            ],
+            ..Snapshot::default()
+        };
+        let said = scripts.evaluate_in(
+            snapshot.clone(),
+            r#"local out = {}
+               for _, a in ipairs(sol.anchors("shell/dock/")) do
+                 out[#out + 1] = string.format("%s %s %g,%g %gx%g %s %s", a.name, a.monitor,
+                   a.x, a.y, a.w, a.h, table.concat(a.radius, ","), tostring(a.shown))
+               end
+               return table.concat(out, ";") .. "|" .. #sol.anchors() .. "|" .. #sol.anchors("lock/")"#,
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            said,
+            "shell/dock/icons/foot DP-1 100,6 40x40 1.0,2.0,3.0,4.0 true;\
+             shell/dock/icons/foot DP-2 2640,6 40x40 1.0,2.0,3.0,4.0 false|3|0"
+        );
+    }
+
+    /// **`sol.anchoring` reads the anchors section**: each key into
+    /// `anchor::Settings`, a key left out keeping its default, and a value
+    /// out of bounds, of the wrong kind or under an unknown key refused
+    /// naming the key. The shipped section is the defaults.
+    #[test]
+    fn sol_anchoring_reads_the_anchors_section() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-anchoring",
+            r#"sol.anchoring({ edge = { depth = 40, length = 0.5 }, same = { "pointer", "primary" }, shown_opacity = 0.5 })
+               sol.anchoring({ edge = { depth = 40 } })
+               sol.anchoring()
+               sol.anchoring({ edge = { depth = 0 } })
+               sol.anchoring({ same = { "pane", "pane" } })
+               sol.anchoring({ shown_opacity = "half" })
+               sol.anchoring({ edges = {} })"#,
+        );
+        let read: Vec<Result<crate::anchor::Settings, String>> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Anchoring(read) => Some(read),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        let [all, depth_only, none, refused @ ..] = read.as_slice() else {
+            panic!("seven calls: {read:?}");
+        };
+        let defaults = crate::anchor::Settings::default();
+        assert_eq!(
+            all,
+            &Ok(crate::anchor::Settings {
+                edge: crate::anchor::Edge {
+                    depth: 40.0,
+                    length: 0.5
+                },
+                same: vec![crate::anchor::Same::Pointer, crate::anchor::Same::Primary],
+                shown_opacity: 0.5,
+            })
+        );
+        assert_eq!(
+            depth_only,
+            &Ok(crate::anchor::Settings {
+                edge: crate::anchor::Edge {
+                    depth: 40.0,
+                    ..defaults.edge
+                },
+                ..defaults.clone()
+            })
+        );
+        assert_eq!(none, &Ok(defaults.clone()));
+        let reasons: Vec<&str> = refused
+            .iter()
+            .filter_map(|read| read.as_ref().err())
+            .map(String::as_str)
+            .collect();
+        assert_eq!(reasons.len(), 4, "{refused:?}");
+        for (reason, names) in reasons.iter().zip([
+            "anchors.edge.depth",
+            "anchors.same",
+            "anchors.shown_opacity",
+            "`edges`",
+        ]) {
+            assert!(reason.contains(names), "{reason}");
+        }
+        assert!(reasons[0].contains("1 to 512"), "{}", reasons[0]);
+        assert!(reasons[3].contains("did you mean `edge`"), "{}", reasons[3]);
+    }
+
+    /// **The shipped `anchors` section is the defaults.**
+    #[test]
+    fn the_shipped_anchors_section_is_the_defaults() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-anchors", "return {}")
+        else {
+            return;
+        };
+        let handed: Vec<Result<crate::anchor::Settings, String>> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Anchoring(read) => Some(read),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(handed, vec![Ok(crate::anchor::Settings::default())]);
+    }
+
     #[test]
     fn sol_startup_reaches_the_compositor() {
         let directory = std::env::temp_dir().join(format!("solium-startup-{}", std::process::id()));

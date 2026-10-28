@@ -536,6 +536,54 @@ const char *solium_qml_lock_api_for_test(const char *which);
  * `qml::hosted::tests::an_unhosted_scene_may_bind_a_reserve_and_reserves_nothing`. */
 int solium_qml_scene_take_reserve(SoliumQmlScene *scene, int *edges);
 
+/* One region of a hosted scene (`Solium.region`), as it changed: its path
+ * as the item wrote it, whether it is gone, where it is in the scene now
+ * (x, y, w, h, logical pixels), where it was at the scene's last render (rx,
+ * ry, rw, rh; zero before its first), its corner radii (`Solium.radius`:
+ * top-left, top-right, bottom-right, bottom-left), whether its pixels could
+ * be taken (visible, its opacity times its parents' above the threshold, and
+ * wholly inside the scene), and the scene's render count when its rendered
+ * rectangle last changed. Fields later work needs are appended after these,
+ * so their order holds.
+ * `qml::hosted::tests::a_region_is_read_after_polish_through_a_scaled_parent`. */
+typedef struct SoliumQmlRegion
+{
+    const char *path;
+    int gone;
+    double x, y, w, h;
+    double rx, ry, rw, rh;
+    float radius[4];
+    int shown;
+    unsigned long long rendered_pass;
+} SoliumQmlRegion;
+
+/* Read the regions of every hosted scene Qt has marked dirty since its last
+ * render, or whose regions were named, renamed or re-thresholded since they
+ * were last read, after a polish, and keep what changed for
+ * solium_qml_scene_take_regions. Any other scene costs one test: nothing is
+ * polled. Each render reads its scene's regions again after its own polish,
+ * and sets where each was drawn.
+ * `qml::hosted::tests::an_idle_scene_is_not_asked_for_its_regions`,
+ * `qml::hosted::tests::rendered_is_the_rectangle_of_the_last_render`. */
+void solium_qml_publish_regions(void);
+
+/* The scene's region changes since the last take, at most `cap` of them into
+ * `out`, by path; returns how many. Call again while it returns `cap`. Each
+ * path lives until the next take.
+ * `qml::hosted::tests::an_emptied_name_reports_the_region_gone`,
+ * `qml::hosted::tests::more_regions_than_one_take_holds_are_all_taken`. */
+int solium_qml_scene_take_regions(SoliumQmlScene *scene, SoliumQmlRegion *out, int cap);
+
+/* The opacity product a region must exceed to count as shown,
+ * `anchors.shown_opacity`. A new value has every hosted scene read its
+ * regions once more at the next publish.
+ * `qml::hosted::tests::a_region_hidden_or_transparent_is_published_not_shown`. */
+void solium_qml_set_region_threshold(double opacity);
+
+/* How many times solium_qml_publish_regions has polished the scene. For
+ * tests. */
+unsigned long long solium_qml_scene_region_polishes_for_test(const SoliumQmlScene *scene);
+
 /* The scene's grab, when it changed since the last take: 1 and the newest
  * active grab's name in `*name` (valid until the next call), 0 when none is
  * active, -1 when nothing changed or for a scene that is not hosted. A scene

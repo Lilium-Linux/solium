@@ -81,6 +81,17 @@ mod ffi {
             scene: *mut super::super::ffi::Scene,
             edges: *mut c_int,
         ) -> c_int;
+        pub(super) fn solium_qml_publish_regions();
+        pub(super) fn solium_qml_scene_take_regions(
+            scene: *mut super::super::ffi::Scene,
+            out: *mut super::RawRegion,
+            cap: c_int,
+        ) -> c_int;
+        pub(super) fn solium_qml_set_region_threshold(opacity: f64);
+        #[cfg(test)]
+        pub(super) fn solium_qml_scene_region_polishes_for_test(
+            scene: *const super::super::ffi::Scene,
+        ) -> u64;
         pub(super) fn solium_qml_scene_take_grab(
             scene: *mut super::super::ffi::Scene,
             name: *mut *const c_char,
@@ -624,6 +635,135 @@ impl Scene {
             bottom: edge(edges[2]),
             left: edge(edges[3]),
         })
+    }
+}
+
+/// `SoliumQmlRegion` in `qml/host.h`: one region of a hosted scene, as it
+/// changed. Read into an [`crate::anchor::RegionChange`] at once, because
+/// `path` lives only until the scene's next take.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct RawRegion {
+    path: *const c_char,
+    gone: c_int,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    rx: f64,
+    ry: f64,
+    rw: f64,
+    rh: f64,
+    radius: [f32; 4],
+    shown: c_int,
+    rendered_pass: u64,
+}
+
+impl Default for RawRegion {
+    fn default() -> Self {
+        Self {
+            path: std::ptr::null(),
+            gone: 0,
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+            rx: 0.0,
+            ry: 0.0,
+            rw: 0.0,
+            rh: 0.0,
+            radius: [0.0; 4],
+            shown: 0,
+            rendered_pass: 0,
+        }
+    }
+}
+
+/// How many regions one take reads; a full take is followed by another.
+/// The size of a buffer on the stack, not a behaviour.
+const REGIONS_PER_TAKE: usize = 64;
+
+/// Have every hosted scene that changed since its last render, or whose
+/// regions were named or re-thresholded since, read its regions after a
+/// polish. Any other scene is not asked: an idle desktop asks nothing.
+/// Off the Qt thread in a test binary, nothing: no scene lives there.
+/// `tests::an_idle_scene_is_not_asked_for_its_regions`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn publish_regions() {
+    #[cfg(test)]
+    if !super::qt_test::is_the_qt_thread() {
+        return;
+    }
+    // SAFETY: walks only the host's own scenes, on the thread that owns them.
+    unsafe { ffi::solium_qml_publish_regions() }
+}
+
+/// `anchors.shown_opacity`: the opacity product a region must exceed to
+/// count as shown. A new value has every hosted scene read its regions once
+/// more at the next publish.
+/// `tests::a_region_hidden_or_transparent_is_published_not_shown`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_region_threshold(opacity: f64) {
+    #[cfg(test)]
+    if !super::qt_test::is_the_qt_thread() {
+        return;
+    }
+    // SAFETY: sets a process-global number and marks the host's own scenes.
+    unsafe { ffi::solium_qml_set_region_threshold(opacity) }
+}
+
+impl Scene {
+    /// What the scene's regions did since it was last asked, by path.
+    /// `tests::an_emptied_name_reports_the_region_gone`,
+    /// `tests::more_regions_than_one_take_holds_are_all_taken`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn take_regions(&mut self) -> Vec<crate::anchor::RegionChange> {
+        let rect =
+            |x: f64, y: f64, w: f64, h: f64| crate::anchor::Rect::new((x, y).into(), (w, h).into());
+        let mut changes = Vec::new();
+        loop {
+            let mut raw = [RawRegion::default(); REGIONS_PER_TAKE];
+            // SAFETY: the scene is live for as long as `self`, and `raw` has
+            // room for the `cap` the host may write.
+            let taken = unsafe {
+                ffi::solium_qml_scene_take_regions(
+                    self.scene,
+                    raw.as_mut_ptr(),
+                    c_int::try_from(REGIONS_PER_TAKE).unwrap_or(c_int::MAX),
+                )
+            };
+            let taken = usize::try_from(taken).unwrap_or(0).min(REGIONS_PER_TAKE);
+            for region in &raw[..taken] {
+                if region.path.is_null() {
+                    continue;
+                }
+                // SAFETY: the host's path is a NUL-terminated string that
+                // lives until the scene's next take, which is after this.
+                let path = unsafe { std::ffi::CStr::from_ptr(region.path) }
+                    .to_string_lossy()
+                    .into_owned();
+                changes.push(crate::anchor::RegionChange {
+                    path,
+                    gone: region.gone != 0,
+                    local: rect(region.x, region.y, region.w, region.h),
+                    rendered: rect(region.rx, region.ry, region.rw, region.rh),
+                    radius: region.radius,
+                    shown: region.shown != 0,
+                    rendered_pass: region.rendered_pass,
+                });
+            }
+            if taken < REGIONS_PER_TAKE {
+                return changes;
+            }
+        }
+    }
+
+    /// How many times [`publish_regions`] has polished this scene.
+    #[cfg(test)]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn region_polishes_for_test(&self) -> u64 {
+        // SAFETY: the scene is live for as long as `self`.
+        unsafe { ffi::solium_qml_scene_region_polishes_for_test(self.scene) }
     }
 }
 
@@ -4049,6 +4189,277 @@ pub(crate) mod tests {
             );
             drop(built);
             let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// `qml` hosted on a monitor of its own, laid out at 400×200 logical
+    /// pixels, for the region tests.
+    fn region_scene(name: &str, qml: &str) -> (PathBuf, Scene) {
+        let (directory, mut scene) = hosted(name, qml, name);
+        scene.resize(400, 200, 1.0);
+        (directory, scene)
+    }
+
+    /// One region, at the root's `at`, 40×40.
+    const ONE_REGION: &str = "import QtQuick\nimport Solium\nItem { property real at: 0\n Rectangle { x: at; width: 40; height: 40; Solium.region: \"card\" } }\n";
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> crate::anchor::Rect {
+        crate::anchor::Rect::new((x, y).into(), (w, h).into())
+    }
+
+    /// **A region is read after polish, through a scaled parent and a
+    /// positioner**: its place in the scene, before any render, with its
+    /// radius, shown.
+    #[test]
+    fn a_region_is_read_after_polish_through_a_scaled_parent() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene(
+                "solium-region-polish",
+                r#"import QtQuick
+                   import Solium
+                   Item {
+                     Item { x: 100; y: 20; scale: 2; transformOrigin: Item.TopLeft
+                       Row { spacing: 4
+                         Rectangle { width: 10; height: 10 }
+                         Rectangle { width: 10; height: 10; Solium.region: "dock/icons/foot"; Solium.radius: 3 } } } }"#,
+            );
+            super::publish_regions();
+            let changes = scene.take_regions();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let foot = changes
+                .iter()
+                .find(|c| c.path == "dock/icons/foot")
+                .expect("published");
+            assert_eq!(foot.local, rect(100.0 + 2.0 * 14.0, 20.0, 20.0, 20.0));
+            assert_eq!(foot.radius, [3.0; 4]);
+            assert!(foot.shown && !foot.gone);
+            assert_eq!(foot.rendered, rect(0.0, 0.0, 0.0, 0.0), "no render yet");
+        });
+    }
+
+    /// **An idle scene is not asked for its regions**: once it has rendered
+    /// and nothing moved, a publish neither polishes it nor reports anything.
+    #[test]
+    fn an_idle_scene_is_not_asked_for_its_regions() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene("solium-region-idle", ONE_REGION);
+            super::publish_regions();
+            let first = scene.take_regions();
+            assert!(scene.render().is_ok());
+            let rendered = scene.take_regions();
+            let polished = scene.region_polishes_for_test();
+            super::publish_regions();
+            let idle = scene.take_regions();
+            let polished_again = scene.region_polishes_for_test();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(
+                (first.len(), rendered.len()),
+                (1, 1),
+                "(the first read, the render's)"
+            );
+            assert!(idle.is_empty(), "an idle scene reported {idle:?}");
+            assert_eq!(polished_again, polished, "an idle scene was polished");
+        });
+    }
+
+    /// **`rendered` is the rectangle of the last render**, so a picture
+    /// taken from that render is cut where its pixels are; a move since is
+    /// `local` only.
+    #[test]
+    fn rendered_is_the_rectangle_of_the_last_render() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene("solium-region-rendered", ONE_REGION);
+            assert!(scene.render().is_ok());
+            let drawn = scene.take_regions();
+            scene.set_json("at", &crate::json::Json::Number(300.0));
+            super::publish_regions();
+            let moved = scene.take_regions();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let drawn = drawn.first().expect("the render's read");
+            assert_eq!(
+                (drawn.local, drawn.rendered),
+                (rect(0.0, 0.0, 40.0, 40.0), rect(0.0, 0.0, 40.0, 40.0))
+            );
+            let moved = moved.first().expect("a change");
+            assert_eq!((moved.local.loc.x, moved.rendered.loc.x), (300.0, 0.0));
+            assert_eq!(moved.rendered_pass, drawn.rendered_pass);
+        });
+    }
+
+    /// **A region hidden, transparent or partly outside its scene is
+    /// published, not shown**; and how opaque counts as shown is
+    /// `anchors.shown_opacity`, read again at once when it changes.
+    #[test]
+    fn a_region_hidden_or_transparent_is_published_not_shown() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene(
+                "solium-region-shown",
+                r#"import QtQuick
+                   import Solium
+                   Item {
+                     Rectangle { width: 10; height: 10; visible: false; Solium.region: "hidden" }
+                     Rectangle { width: 10; height: 10; opacity: 0; Solium.region: "clear" }
+                     Rectangle { x: 380; width: 40; height: 10; Solium.region: "half-out" }
+                     Item { opacity: 0.5
+                       Rectangle { width: 10; height: 10; opacity: 0.8; Solium.region: "faint" }
+                       Rectangle { width: 10; height: 10; opacity: 1.0; Solium.region: "fainter" } }
+                     Rectangle { width: 10; height: 10; opacity: 0.6; Solium.region: "plain" } }"#,
+            );
+            let shown = |changes: &[crate::anchor::RegionChange]| {
+                let mut shown: Vec<(String, bool)> =
+                    changes.iter().map(|c| (c.path.clone(), c.shown)).collect();
+                shown.sort();
+                shown
+            };
+            super::publish_regions();
+            let at_default = shown(&scene.take_regions());
+            super::set_region_threshold(0.45);
+            super::publish_regions();
+            let at_045 = shown(&scene.take_regions());
+            super::set_region_threshold(1.0 / 255.0);
+            super::publish_regions();
+            let back = scene.take_regions().len();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let named = |list: &[(&str, bool)]| {
+                list.iter()
+                    .map(|(path, shown)| ((*path).to_owned(), *shown))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                at_default,
+                named(&[
+                    ("clear", false),
+                    ("faint", true),
+                    ("fainter", true),
+                    ("half-out", false),
+                    ("hidden", false),
+                    ("plain", true)
+                ])
+            );
+            assert_eq!(
+                at_045,
+                named(&[("faint", false)]),
+                "at 0.45 only the region at 0.4 changes, read with no other change"
+            );
+            assert_eq!(
+                back, 1,
+                "back at the default, the region at 0.4 is shown again"
+            );
+        });
+    }
+
+    /// **A radius list is four corners**: `[tl, tr, br, bl]`, and a number
+    /// all four; a change of radius alone is reported.
+    #[test]
+    fn a_radius_list_is_four_corners() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene(
+                "solium-region-radius",
+                r#"import QtQuick
+                   import Solium
+                   Item { property var corners: [1, 2, 3, 4]
+                     Rectangle { width: 10; height: 10; Solium.region: "a"; Solium.radius: parent.corners } }"#,
+            );
+            super::publish_regions();
+            let listed = scene.take_regions();
+            scene.set_json("corners", &crate::json::Json::Number(6.0));
+            super::publish_regions();
+            let number = scene.take_regions();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(listed.first().map(|c| c.radius), Some([1.0, 2.0, 3.0, 4.0]));
+            assert_eq!(number.first().map(|c| c.radius), Some([6.0; 4]));
+        });
+    }
+
+    /// **An emptied name reports the region gone**, and a renamed one gone
+    /// under its old name and new under its new, in a scene that is clean:
+    /// a name changes no pixel, so nothing else would have it read.
+    #[test]
+    fn an_emptied_name_reports_the_region_gone() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene(
+                "solium-region-gone",
+                r#"import QtQuick
+                   import Solium
+                   Item { property string name: "a"
+                     Rectangle { width: 10; height: 10; Solium.region: parent.name } }"#,
+            );
+            super::publish_regions();
+            let first = scene.take_regions();
+            // Drawn after each step, so the scene is clean: a name changes no
+            // pixel, and is read all the same.
+            assert!(scene.render().is_ok());
+            let _ = scene.take_regions();
+            scene.set_string("name", "b");
+            super::publish_regions();
+            let renamed: Vec<(String, bool)> = scene
+                .take_regions()
+                .into_iter()
+                .map(|c| (c.path, c.gone))
+                .collect();
+            assert!(scene.render().is_ok());
+            let _ = scene.take_regions();
+            scene.set_string("name", "");
+            super::publish_regions();
+            let emptied: Vec<(String, bool)> = scene
+                .take_regions()
+                .into_iter()
+                .map(|c| (c.path, c.gone))
+                .collect();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(first.len(), 1);
+            assert_eq!(renamed, [("a".to_owned(), true), ("b".to_owned(), false)]);
+            assert_eq!(emptied, [("b".to_owned(), true)]);
+        });
+    }
+
+    /// **More regions than one take holds are all taken**: a full take is
+    /// followed by another, so a desktop of icons is never cut short.
+    #[test]
+    fn more_regions_than_one_take_holds_are_all_taken() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene(
+                "solium-region-many",
+                r#"import QtQuick
+                   import Solium
+                   Item { Repeater { model: 150
+                     Rectangle { x: index; width: 1; height: 1; Solium.region: "icons/" + index } } }"#,
+            );
+            super::publish_regions();
+            let mut paths: Vec<String> = scene.take_regions().into_iter().map(|c| c.path).collect();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            paths.sort();
+            paths.dedup();
+            assert_eq!(paths.len(), 150);
+        });
+    }
+
+    /// **Two items publishing one name: the later wins** (Ruling M2), the
+    /// later being the one that took the name last.
+    #[test]
+    fn two_items_publishing_one_name_the_later_wins() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = region_scene(
+                "solium-region-twice",
+                r#"import QtQuick
+                   import Solium
+                   Item {
+                     Rectangle { x: 10; width: 10; height: 10; Solium.region: "same" }
+                     Rectangle { x: 50; width: 10; height: 10; Solium.region: "same" } }"#,
+            );
+            super::publish_regions();
+            let changes = scene.take_regions();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes.first().map(|c| c.local.loc.x), Some(50.0));
         });
     }
 }

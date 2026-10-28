@@ -37,6 +37,9 @@
                                           only the clear colour (13, 13, 15) a held
                                           first frame draws; nothing when none is
   judge.py size A                         print the frame's width and height
+  judge.py box A R G B                    print the bounding box (x y w h) of the
+                                          pixels within 8 of R G B on every channel;
+                                          exit 1 when there are none
   judge.py live SHARP FRAME REF           of the pixels where FRAME differs from
                                           SHARP (the wallpaper with no rule) by more
                                           than 40 on a channel, so inside a blurred
@@ -122,6 +125,22 @@ def main(argv):
         if what == "differs":
             return 0 if worst > 0 else 1
         return 0 if worst <= tolerance else 1
+    if what == "box":
+        width, height, data = read(argv[2])
+        want = [int(value) for value in argv[3:6]]
+        xs, ys = [], []
+        for y in range(height):
+            row = y * width * 3
+            for x in range(width):
+                at = row + x * 3
+                if all(abs(data[at + i] - want[i]) <= 8 for i in range(3)):
+                    xs.append(x)
+                    ys.append(y)
+        if not xs:
+            print("none")
+            return 1
+        print(min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+        return 0
     if what == "edges":
         a = read(argv[2])
         box = region(a[0], a[1], *argv[3:7])

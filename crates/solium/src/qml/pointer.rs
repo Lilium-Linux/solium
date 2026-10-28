@@ -375,11 +375,12 @@ pub(crate) mod tests {
         });
     }
 
-    /// **`Solium.region` and `Solium.material` are accepted, and materials are
-    /// off** (#199): the issue's own liquid-glass pointer builds, reads
-    /// `Solium.materialState` as `"off"`, and so shows its plain drawing.
+    /// **`Solium.material` is accepted, and materials are off** (#199): the
+    /// issue's own liquid-glass pointer builds, reads `Solium.materialState`
+    /// as `"off"`, and so shows its plain drawing. (Its region is read as
+    /// every hosted scene's are: `qml::hosted::tests::a_region_is_read_after_polish_through_a_scaled_parent`.)
     #[test]
-    fn a_region_and_a_material_are_accepted_and_materials_are_off() {
+    fn a_material_is_accepted_and_materials_are_off() {
         on_the_qt_thread(|| {
             let (directory, path) = written(
                 "solium-pointer-material",
@@ -389,7 +390,6 @@ pub(crate) mod tests {
                 Item {
                     width: 40; height: 40
                     Solium.cursor.hotspot: Qt.point(6, 6)
-                    readonly property string region: glass.Solium.region
                     readonly property string state: glass.Solium.materialState
                     readonly property int alpha: Math.round(glass.color.a * 100)
                     Rectangle {
@@ -403,17 +403,13 @@ pub(crate) mod tests {
                 "#,
             );
             let mut scene = built(&path);
-            let read = (
-                scene.get_string_for_test("region"),
-                scene.get_string_for_test("state"),
-                scene.get_int("alpha"),
-            );
+            let read = (scene.get_string_for_test("state"), scene.get_int("alpha"));
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
             assert_eq!(
                 read,
-                ("pointer".to_owned(), "off".to_owned(), 80),
-                "(the region, the material's state, the glass's alpha x 100)"
+                ("off".to_owned(), 80),
+                "(the material's state, the glass's alpha x 100)"
             );
         });
     }

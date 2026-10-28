@@ -1759,6 +1759,24 @@ work. A scene of your own drawn with `sol.surface` takes the same two, as
 [shell-boundary.md](shell-boundary.md#what-a-hosted-shell-is-given) has `Grab`
 and `Solium.keyboard`.
 
+An item of a hosted scene can name its place on screen,
+`Solium.region: "dock/icons/" + appId`, with `Solium.radius` for its corners,
+and the compositor keeps it as `shell/dock/icons/<app>` on each monitor the
+shell is on; `sol.anchors("shell/dock/")` lists where each one is. They are
+what a window will fly to and from.
+[shell-boundary.md](shell-boundary.md#what-a-hosted-shell-is-given) has the
+rules ("Regions, by name"). Three settings shape them:
+
+```lua
+return {
+    anchors = {
+        edge = { depth = 24, length = 1 / 3 },          -- monitor/<which>/<edge>: a strip this deep and this share of the edge
+        same = { "pane", "sender", "active", "primary" }, -- which monitor's copy of a name a window means
+        shown_opacity = 1 / 255,                        -- how opaque a region must be for its pixels to be taken
+    },
+}
+```
+
 A bar can also be an ordinary client over `wlr-layer-shell`, which means any
 panel already written for that protocol works. A surface names the output it
 wants and the compositor honours it, so a bar on every screen is one surface
@@ -2035,10 +2053,10 @@ and goes there when its size in device pixels fits the plane, commonly 64 or
 128 pixels a side; there moving the mouse redraws nothing else. A larger one,
 such as this one at `size = 32` on a 2x monitor (104 pixels a side), is
 drawn with everything else where the plane is smaller.
-`Solium.region` and `Solium.material` are accepted, and materials are off
-until [#199](https://github.com/Lilium-Linux/solium/issues/199):
+`Solium.material` is accepted, and materials are off until
+[#199](https://github.com/Lilium-Linux/solium/issues/199):
 `Solium.materialState` reads `"off"`
-(`qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`).
+(`qml::pointer::tests::a_material_is_accepted_and_materials_are_off`).
 
 ### Your own colours
 

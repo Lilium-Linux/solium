@@ -1262,6 +1262,31 @@ local defaults = {
         fade = 180,
     },
 
+    -- Where windows are flown to and from: the regions hosted scenes name
+    -- with `Solium.region` (docs/shell-boundary.md, "Regions"), and the
+    -- built-in `monitor/...` names. A value outside its bounds is refused,
+    -- named by `sol.problems()` under "anchors", and what was set stays.
+    anchors = {
+        -- `monitor/<which>/<edge>` is a strip of that edge, centred along it
+        -- and inside the monitor: `depth` logical pixels deep (a whole
+        -- number, 1 to 512), `length` a share of the edge (above 0, at most
+        -- 1). By default the middle third, 24 pixels deep.
+        edge = { depth = 24, length = 1 / 3 },
+        -- Which monitor's copy of a name a window flies to, when the shell
+        -- runs on every monitor: the first of these that answers. "pane" is
+        -- the monitor under the window's centre, "sender" the one the
+        -- request came from (the scene that sent the action), "pointer" the
+        -- one under the pointer, then "active" and "primary". One to five
+        -- of them, none twice.
+        same = { "pane", "sender", "active", "primary" },
+        -- How opaque a region must be (its opacity times its parents') for
+        -- its pixels to be taken into a flight, 0 to 1. A fainter region is
+        -- still where a window flies; only its picture is not carried. A
+        -- region partly outside its scene is never shown: there are no
+        -- pixels to take there.
+        shown_opacity = 1 / 255,
+    },
+
     -- Reload automatically when a file this configuration loaded changes
     -- (#223): the configuration directory itself, every Lua module
     -- `require` found in it, your pane styles, your loading scenes and your

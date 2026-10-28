@@ -181,6 +181,11 @@ pub(crate) struct ShellSurface {
     /// What the scene last said it reserves.
     /// `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`.
     scene_reserve: SceneReserve,
+    /// Whether the scene is new since its regions were last taken: built, or
+    /// rebuilt for an edit, so what the compositor holds of the scene before
+    /// is no longer anything.
+    /// `state::tests::a_rebuilt_scene_replaces_its_regions`.
+    regions_fresh: bool,
 }
 
 /// One hit the scene answered: the point in the scene's own coordinates, the
@@ -306,6 +311,7 @@ impl ShellSurface {
             checked: Duration::ZERO,
             hit_cache: std::cell::Cell::new(None),
             scene_reserve: SceneReserve::default(),
+            regions_fresh: true,
         }
     }
 
@@ -407,6 +413,14 @@ impl ShellSurface {
         if let Some(reserve) = self.scene.take_reserve() {
             self.scene_reserve = reserve;
         }
+    }
+
+    /// What the scene's regions did since they were last taken, and whether
+    /// the scene is new since: then they are all it has.
+    /// `qml::hosted::tests::an_emptied_name_reports_the_region_gone`.
+    pub(crate) fn take_regions(&mut self) -> (bool, Vec<crate::anchor::RegionChange>) {
+        let fresh = std::mem::replace(&mut self.regions_fresh, false);
+        (fresh, self.scene.take_regions())
     }
 
     pub(crate) fn scene_reserve(&self) -> SceneReserve {
@@ -557,6 +571,7 @@ impl ShellSurface {
         ) {
             Ok(scene) => {
                 self.scene = scene;
+                self.regions_fresh = true;
                 self.hit_cache.set(None);
                 self.backing = match self.backing {
                     Backing::Memory { .. } => Backing::Memory {

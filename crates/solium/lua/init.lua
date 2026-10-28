@@ -23,6 +23,10 @@ sol.startup(config.startup)
 -- Which effects go where. See config.lua's `effects`.
 sol.effects(config.effects)
 sol.loading(config.loading)
+-- Where windows are flown to and from: the edge strip, which monitor's copy
+-- of a region a window means, and when a region counts as shown. See
+-- `config.lua`'s `anchors`.
+sol.anchoring(config.anchors)
 -- Reload automatically when a file this configuration loaded changes
 -- (#223). See `config.lua`.
 sol.auto_reload(config.reload)

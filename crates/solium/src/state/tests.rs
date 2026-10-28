@@ -4179,6 +4179,62 @@ mod real_client {
     /// surface, so `sol.surface` following `sol.monitor()` from screen to
     /// screen does not leave a whole Qt scene behind on each. No client, so
     /// the scene may be a real one (the #99 rule).
+    /// **A rebuilt scene replaces its regions**: a surface given another
+    /// scene file keeps its owner, monitor and all, and what the old scene
+    /// published is gone with it, not left beside the new scene's. Real
+    /// scenes and no client (the #99 rule).
+    #[test]
+    fn a_rebuilt_scene_replaces_its_regions() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            crate::qml::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-state-rebuilt-regions");
+            let _ = std::fs::create_dir_all(&directory);
+            let scene = |name: &str| {
+                let path = directory.join(format!("{name}.qml"));
+                std::fs::write(
+                    &path,
+                    format!(
+                        "import QtQuick\nimport Solium\nItem {{ Rectangle {{ width: 4; height: 4; Solium.region: \"{name}\" }} }}\n"
+                    ),
+                )
+                .expect("writing the scene");
+                path
+            };
+            let display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            let _ = side_by_side(&mut state, "rebuilt-left");
+            let declared = |path| {
+                crate::scripted::Declaration::for_test(
+                    "shell",
+                    path,
+                    crate::scripted::Layer::Top,
+                    crate::scripted::On::Monitor("rebuilt-left".to_owned()),
+                )
+            };
+            // Both written before either is built: the engine keeps what it
+            // found in a directory, as it does for a shell's own folder.
+            let (first, second) = (scene("first"), scene("second"));
+            state.declare_surface(declared(first));
+            state.read_regions();
+            let before: Vec<String> = state
+                .anchor_rows("")
+                .into_iter()
+                .map(|row| row.name)
+                .collect();
+            state.declare_surface(declared(second));
+            state.read_regions();
+            let after: Vec<String> = state
+                .anchor_rows("")
+                .into_iter()
+                .map(|row| row.name)
+                .collect();
+            drop(state);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert_eq!(before, ["shell/first"]);
+            assert_eq!(after, ["shell/second"], "the old scene's region was kept");
+        });
+    }
+
     #[test]
     fn a_surface_redeclared_onto_another_monitor_drops_its_scene_on_the_first() {
         crate::qml::qt_test::on_the_qt_thread(|| {
@@ -11040,6 +11096,324 @@ end)"#,
             to.loc.x >= 1920.0,
             "aimed at the dock on the pointer's monitor, at x = {}",
             to.loc.x
+        );
+    }
+
+    /// A `shell` surface on every monitor, its scenes stood in for (the #99
+    /// rule), whose regions a test seeds into the registry as its scenes'
+    /// takes would.
+    fn shell_standing_in(state: &mut Solium) -> crate::scripted::SurfaceId {
+        state.declare_surface(crate::scripted::Declaration::for_test(
+            "shell",
+            std::path::PathBuf::from("/nonexistent/solium-test-shell.qml"),
+            crate::scripted::Layer::Top,
+            crate::scripted::On::EveryMonitor,
+        ));
+        let id = state.surfaces.named("shell").expect("declared");
+        state
+            .surfaces
+            .get_mut(id)
+            .expect("live")
+            .stand_in(crate::scripted::Stand::solid());
+        id
+    }
+
+    /// One region of `surface`'s instance on `output`, as its scene's take
+    /// would report it, drawn where it is.
+    fn seed_region(
+        state: &mut Solium,
+        surface: crate::scripted::SurfaceId,
+        output: &str,
+        path: &str,
+        local: crate::anchor::Rect,
+    ) {
+        let owner = crate::anchor::Owner {
+            surface,
+            output: output.to_owned(),
+        };
+        let change = crate::anchor::RegionChange {
+            path: path.to_owned(),
+            gone: false,
+            local,
+            rendered: local,
+            radius: [6.0; 4],
+            shown: true,
+            rendered_pass: 1,
+        };
+        state
+            .anchors
+            .apply(&mut state.names, &owner, "shell", &[change]);
+    }
+
+    fn region_rect(x: f64, y: f64, w: f64, h: f64) -> crate::anchor::Rect {
+        crate::anchor::Rect::new((x, y).into(), (w, h).into())
+    }
+
+    /// **A region resolves at its instance's place on its monitor**: the
+    /// shell runs on both monitors, so `shell/dock/icons/foot` is a region on
+    /// each, and a window on the right one resolves the right one's, its
+    /// scene-local place carried to that monitor's origin; `sol.anchors`
+    /// lists both where they are on the desktop. A pass's read keeps
+    /// regions whose instance is still there.
+    #[test]
+    fn a_region_resolves_at_its_instances_place_on_its_monitor() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _ = (&conn, &mut queue, &mut client);
+        let (_left, _right) = side_by_side(&mut state, "regions-left");
+        let shell = shell_standing_in(&mut state);
+        seed_region(
+            &mut state,
+            shell,
+            "regions-left",
+            "dock/icons/foot",
+            region_rect(100.0, 6.0, 40.0, 40.0),
+        );
+        seed_region(
+            &mut state,
+            shell,
+            RIGHT_SCREEN,
+            "dock/icons/foot",
+            region_rect(80.0, 6.0, 40.0, 40.0),
+        );
+        state.read_regions();
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (2020, 100), false);
+        let id = state
+            .panes
+            .id_of(&window)
+            .expect("a pane for the window")
+            .get();
+        let chain = crate::anchor::parse_chain(&crate::anchor::Given::Text(
+            "shell/dock/icons/foot".to_owned(),
+        ))
+        .expect("a name");
+        let ctx = crate::anchor::Context {
+            id: Some(id),
+            app_id: None,
+            launch: None,
+            from: None,
+            output: None,
+        };
+        let resolved = crate::anchor::resolve(&chain, &ctx, &state.anchors, &state.names, &state)
+            .expect("the right monitor's icon resolves");
+        assert_eq!(resolved.rect, region_rect(1920.0 + 80.0, 6.0, 40.0, 40.0));
+        assert_eq!(resolved.radius, [6.0; 4]);
+        let listed: Vec<(String, String, f64)> = state
+            .anchor_rows("shell/dock/")
+            .into_iter()
+            .map(|row| (row.name, row.monitor, row.rect.loc.x))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "shell/dock/icons/foot".to_owned(),
+                    "regions-left".to_owned(),
+                    100.0
+                ),
+                (
+                    "shell/dock/icons/foot".to_owned(),
+                    RIGHT_SCREEN.to_owned(),
+                    2000.0
+                ),
+            ]
+        );
+    }
+
+    /// **A torn-down scene takes its regions with it**: the surface taken
+    /// away, the next pass's read forgets every region its instances
+    /// published, and only theirs.
+    #[test]
+    fn a_torn_down_scene_takes_its_regions_with_it() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _ = (&mut display, &conn, &mut queue, &mut client, &qh);
+        let (_left, _right) = side_by_side(&mut state, "torn-left");
+        let shell = shell_standing_in(&mut state);
+        seed_region(
+            &mut state,
+            shell,
+            "torn-left",
+            "bar/clock",
+            region_rect(0.0, 0.0, 40.0, 20.0),
+        );
+        state.declare_surface(crate::scripted::Declaration::for_test(
+            "panel",
+            std::path::PathBuf::from("/nonexistent/solium-test-panel.qml"),
+            crate::scripted::Layer::Top,
+            crate::scripted::On::EveryMonitor,
+        ));
+        let panel = state.surfaces.named("panel").expect("declared");
+        state
+            .surfaces
+            .get_mut(panel)
+            .expect("live")
+            .stand_in(crate::scripted::Stand::solid());
+        let owner = crate::anchor::Owner {
+            surface: panel,
+            output: "torn-left".to_owned(),
+        };
+        let change = crate::anchor::RegionChange {
+            path: "knob".to_owned(),
+            gone: false,
+            local: region_rect(0.0, 0.0, 1.0, 1.0),
+            rendered: region_rect(0.0, 0.0, 1.0, 1.0),
+            radius: [0.0; 4],
+            shown: true,
+            rendered_pass: 1,
+        };
+        state
+            .anchors
+            .apply(&mut state.names, &owner, "panel", &[change]);
+        state.read_regions();
+        assert_eq!(
+            state.anchor_rows("").len(),
+            2,
+            "both kept while their scenes are there"
+        );
+        assert!(state.surfaces.remove("shell"));
+        state.read_regions();
+        let left: Vec<&str> = state
+            .anchors
+            .under(&state.names, "")
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(left, ["panel/knob"]);
+    }
+
+    /// **Solium answers each `anchors.same` rule**: for a window centred on
+    /// the right monitor, `pane` is the right one, `sender` the monitor the
+    /// request names, `pointer` and `active` the one under the pointer, and
+    /// `primary` the first.
+    #[test]
+    fn solium_answers_each_same_rule() {
+        use crate::anchor::{Places as _, Same};
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _ = (&mut queue, &mut client);
+        let (_left, _right) = side_by_side(&mut state, "same-left");
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (2020, 100), false);
+        let id = state
+            .panes
+            .id_of(&window)
+            .expect("a pane for the window")
+            .get();
+        let ctx = crate::anchor::Context {
+            id: Some(id),
+            app_id: None,
+            launch: None,
+            from: None,
+            output: Some("same-left"),
+        };
+        move_pointer(&mut state, (300.0, 300.0), 1);
+        let answers = |state: &Solium| {
+            [
+                Same::Pane,
+                Same::Sender,
+                Same::Pointer,
+                Same::Active,
+                Same::Primary,
+            ]
+            .map(|how| state.monitor_by(how, &ctx))
+        };
+        let left = || Some("same-left".to_owned());
+        let right = || Some(RIGHT_SCREEN.to_owned());
+        assert_eq!(answers(&state), [right(), left(), left(), left(), left()]);
+        move_pointer(&mut state, (2500.0, 300.0), 2);
+        assert_eq!(answers(&state), [right(), left(), right(), right(), left()]);
+        let nowhere = crate::anchor::Context {
+            id: None,
+            output: None,
+            ..ctx
+        };
+        assert_eq!(state.monitor_by(Same::Pane, &nowhere), None);
+        assert_eq!(state.monitor_by(Same::Sender, &nowhere), None);
+    }
+
+    /// **`anchors.same` and `anchors.edge` reach resolution**, through the
+    /// command `sol.anchoring` pushes: the window on the right flies to the
+    /// right monitor's icon until `same = { "primary" }` sends it to the
+    /// left's, and the bottom edge strip takes `edge`'s shape; a refused
+    /// section keeps what was set and is a problem under "anchors".
+    #[test]
+    fn anchors_same_and_edge_reach_resolution() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _ = (&mut queue, &mut client);
+        let (_left, _right) = side_by_side(&mut state, "reach-left");
+        let shell = shell_standing_in(&mut state);
+        seed_region(
+            &mut state,
+            shell,
+            "reach-left",
+            "dock/icons/foot",
+            region_rect(100.0, 6.0, 40.0, 40.0),
+        );
+        seed_region(
+            &mut state,
+            shell,
+            RIGHT_SCREEN,
+            "dock/icons/foot",
+            region_rect(80.0, 6.0, 40.0, 40.0),
+        );
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (2020, 100), false);
+        let id = state
+            .panes
+            .id_of(&window)
+            .expect("a pane for the window")
+            .get();
+        let at = |state: &Solium, name: &str| {
+            let chain = crate::anchor::parse_chain(&crate::anchor::Given::Text(name.to_owned()))
+                .expect("a name");
+            let ctx = crate::anchor::Context {
+                id: Some(id),
+                app_id: None,
+                launch: None,
+                from: None,
+                output: None,
+            };
+            crate::anchor::resolve(&chain, &ctx, &state.anchors, &state.names, state)
+                .map(|resolved| resolved.rect)
+        };
+        assert_eq!(
+            at(&state, "shell/dock/icons/foot").map(|r| r.loc.x),
+            Some(2000.0)
+        );
+        assert_eq!(
+            at(&state, "monitor/same/bottom"),
+            Some(region_rect(1920.0 + 640.0, 1080.0 - 24.0, 640.0, 24.0))
+        );
+        state.apply_anchoring(crate::anchor::Settings::read(
+            Some(40.0),
+            Some(0.5),
+            Some(&["primary".to_owned()]),
+            None,
+        ));
+        assert_eq!(
+            at(&state, "shell/dock/icons/foot").map(|r| r.loc.x),
+            Some(100.0),
+            "anchors.same was not followed"
+        );
+        assert_eq!(
+            at(&state, "monitor/same/bottom"),
+            Some(region_rect(480.0, 1080.0 - 40.0, 960.0, 40.0)),
+            "anchors.edge was not followed"
+        );
+        state.apply_anchoring(crate::anchor::Settings::read(Some(0.0), None, None, None));
+        assert_eq!(
+            state.anchor_settings.edge.depth, 40.0,
+            "a refused section kept what was set"
+        );
+        assert!(
+            state
+                .snapshot()
+                .problems
+                .iter()
+                .any(|problem| problem.effect == "anchors"
+                    && problem.message.contains("anchors.edge.depth")),
+            "the refusal is a problem under \"anchors\""
         );
     }
 

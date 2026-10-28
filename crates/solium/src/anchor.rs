@@ -13,7 +13,6 @@
 //! `shell/dock/icons/foot`. The shell runs once per monitor, so one name is a
 //! region on each, and which monitor's copy a flight means is
 //! `anchors.same` ([`Settings`]).
-#![cfg_attr(not(test), expect(dead_code, reason = "Task A2 fills the registry"))]
 
 use std::collections::HashMap;
 

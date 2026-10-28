@@ -76,17 +76,14 @@ That gives, in order of how hard they would otherwise be:
   component, drawn over both ends while they are hidden and moved on the
   compositor's clock. One engine is what lets that instance be the component
   itself, with the same theme, rather than a picture of it.
-- **No protocol for shell geometry, planned.** A hosted dock's icon
-  rectangles need not be published to the compositor, because the
-  compositor's engine already has them. The plan is for a scene to name an
-  item as an anchor (`Solium.region`) and for an animation to aim at that
-  name, read again on every frame, so a genie follows an icon while it moves
-  and can never animate against a stale copy. Nothing of that is built yet;
-  it is tracked under Later in
-  [#169](https://github.com/Lilium-Linux/solium/issues/169). Today a genie
-  aims at a window, a `sol.surface` scene or a fixed rectangle
-  ([modes.md](modes.md)). Only a dock that runs as its own program would need
-  a protocol to hand its rectangles over.
+- **No protocol for shell geometry.** A hosted dock's icon rectangles need
+  not be published over a protocol, because the compositor's engine already
+  has them: a scene names an item (`Solium.region`), and the compositor reads
+  where it is after each polish of a scene that changed ("Regions, by name",
+  below), so nothing aims at a stale copy. Aiming an animation at a region by
+  its name is still to come: today a genie aims at a window, a `sol.surface`
+  scene or a fixed rectangle ([modes.md](modes.md)). Only a dock that runs as
+  its own program would need a protocol to hand its rectangles over.
 
 This is the arrangement Apple has, and it is unavailable to anyone configuring
 an existing compositor. It is the reason for writing one.
@@ -413,7 +410,7 @@ pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
 ("Workspaces, as the configuration has them"); the pane-style types
 `PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
 `KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
-`Solium` object, which any item can read, with exactly ten members:
+`Solium` object, which any item can read, with exactly eleven members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
 `Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
@@ -423,12 +420,13 @@ below); `Solium.send(action, data)`, what it asks Lua to do
 ([below](#what-a-hosted-shell-is-given)); `Solium.cursor`, the pointer, and
 the hotspot a pointer scene sets
 ([What a pointer scene is given](#what-a-pointer-scene-is-given));
-and `Solium.region`, `Solium.material` and `Solium.materialState`, which
-every item accepts and nothing reads until materials exist
-([#199](https://github.com/Lilium-Linux/solium/issues/199)), `materialState`
-reading `"off"` till then
+`Solium.region` and `Solium.radius`, a name for an item's place and its
+corners ("Regions, by name", below); and `Solium.material` and
+`Solium.materialState`, which every item accepts and nothing reads until
+materials exist ([#199](https://github.com/Lilium-Linux/solium/issues/199)),
+`materialState` reading `"off"` till then
 (`qml::hosted::tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`,
-`qml::pointer::tests::a_region_and_a_material_are_accepted_and_materials_are_off`).
+`qml::pointer::tests::a_material_is_accepted_and_materials_are_off`).
 Nothing else is public: `Insets`, `ClientTreatment` and `ClientShadow` are
 internal, and the row types have no name, so a shell's own `Monitor.qml` is
 not shadowed
@@ -771,6 +769,53 @@ So bind it to where the bar is going, never to an animated value. A change
 the scene makes on its own, from a `Timer`, is read after the frame it was
 made in
 (`state::tests::real_client::reflow_on_close::hosted::a_reserve_a_scene_changes_on_its_own_is_read_after_the_frame`).
+
+**Regions, by name.** `Rectangle { Solium.region: "dock/icons/" + appId;
+Solium.radius: 12 }` names an item's place on screen. The compositor reads
+it after each polish of a scene Qt has marked changed, through any scaled
+parent or positioner, before anything is drawn
+(`qml::hosted::tests::a_region_is_read_after_polish_through_a_scaled_parent`);
+a scene that has not changed is not asked, so an idle desktop reads nothing
+(`qml::hosted::tests::an_idle_scene_is_not_asked_for_its_regions`). It is
+kept as `<surface>/<path>`, the `sol.surface` name first, so the shell's
+`dock/icons/foot` is `shell/dock/icons/foot`, once per monitor the surface is
+on, at that instance's place on the desktop
+(`state::tests::real_client::a_region_resolves_at_its_instances_place_on_its_monitor`).
+A path is segments of letters, digits and `. _ % ~ -` joined by `/`; one
+that is not is skipped with a warning naming it
+(`anchor::tests::a_path_out_of_its_alphabet_is_skipped_by_the_registry`),
+and where two items of one scene publish one name, the one that took it
+later wins, named once in the log
+(`qml::hosted::tests::two_items_publishing_one_name_the_later_wins`).
+`Solium.radius` is one number or `[tl, tr, br, bl]`
+(`qml::hosted::tests::a_radius_list_is_four_corners`). Each region also
+carries where it was in the scene's last render, which is where its pixels
+are (`qml::hosted::tests::rendered_is_the_rectangle_of_the_last_render`), and
+whether it is shown: visible, its opacity times its parents' above
+`anchors.shown_opacity` (1/255 by default), and wholly inside its scene
+(`qml::hosted::tests::a_region_hidden_or_transparent_is_published_not_shown`).
+A region that is not shown is still published: a hidden dock's icon is
+still where a window would fly to. Emptying the name, destroying the item
+or tearing the scene down takes the region away
+(`qml::hosted::tests::an_emptied_name_reports_the_region_gone`,
+`state::tests::real_client::a_torn_down_scene_takes_its_regions_with_it`,
+`state::tests::real_client::a_rebuilt_scene_replaces_its_regions`).
+`sol.anchors(prefix)` lists them, `{ name, monitor, x, y, w, h, radius,
+shown }` where each is on the desktop now
+(`script::tests::sol_anchors_lists_the_regions_under_a_prefix`). Beside
+them are the built-in names `pane/<id>` (a window, where it is drawn) and
+`monitor/<connector|same|active|primary>`, with `/top`, `/bottom`, `/left`
+or `/right` for a strip of that edge, centred along it: by default its
+middle third, 24 pixels deep, which `anchors.edge = { depth, length }`
+changes. When a surface runs on every monitor, which monitor's copy a name
+means is `anchors.same`: by default the window's own monitor, then the one
+the request came from, the active one and the primary
+(`anchor::tests::the_monitor_names_resolve_to_a_monitor_or_the_middle_third_of_an_edge`,
+`state::tests::real_client::anchors_same_and_edge_reach_resolution`). The
+names `lock/`, `layer/`, `toplevel/` and `lua/` are kept for regions that are
+not a hosted scene's (`anchor::tests::a_reserved_namespace_is_refused_by_name`).
+Nothing flies to a region yet; launching a window out of its dock icon is
+next.
 
 **A way back to the configuration.** `Solium.send("windows.focus", { id:
 model.id })` sends a named action with data, an object, a value or nothing
