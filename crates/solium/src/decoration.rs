@@ -487,6 +487,10 @@ impl crate::render::Painted for LayerScene {
     fn animation_in_flight(&self) -> bool {
         self.scene.animation_in_flight()
     }
+
+    fn pacing(&self) -> crate::pacing::SceneId {
+        self.scene.pacing()
+    }
 }
 
 /// The layers of one depth, in the order they go into the frame.

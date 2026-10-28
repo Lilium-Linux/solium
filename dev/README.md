@@ -1472,9 +1472,10 @@ runs only when its part commits), `xray_builds` (xray cuts drawn this pass:
 one only when what is behind the windows changed) and `memo_runs` (memo
 prefixes run over a cut drawn anew; both every pass with
 `SOLIUM_XRAY_REBUILD=always`, and both on the PACING line as `xray=` and
-`memo=`), `panes`, `drew`, `scenes`, `animating`,
-`rendered`, `built`, `rebound`, `qml` (Qt's microseconds per scene),
-`clocks`, `gpu_mhz`, `mem_mhz`, `pstate`, `gpu` (`ok`, `unsupported`, `late`
+`memo=`), `panes`, `drew`, `scenes`, `animating`, `moving` (the scenes
+that answered `animating`, by name: what keeps the passes coming when
+nothing on screen changes), `rendered`, `built`, `rebound`, `qml` (Qt's
+microseconds per scene), `clocks`, `gpu_mhz`, `mem_mhz`, `pstate`, `gpu` (`ok`, `unsupported`, `late`
 or `disjoint`), `gpu_us`, `gpu_prep_us` (the captures), `gpu_effects_us` (the
 effect chains, timed as one region a run phase) and `gpu_out_us`. A flip
 record carries `flip` (the pass), `monitor`, `seq`, `at_ns`, `queued_ns` and

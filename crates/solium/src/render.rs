@@ -166,6 +166,11 @@ pub(crate) trait Painted {
     /// being asked, and `dev/wirecheck`'s appear case is what asks it, against
     /// a real Qt, by reading the animated value out of the object tree.
     fn animation_in_flight(&self) -> bool;
+
+    /// The scene as `SOLIUM_PACING` names it, for the trace's `moving`.
+    fn pacing(&self) -> crate::pacing::SceneId {
+        crate::pacing::SceneId::NONE
+    }
 }
 
 /// What one draw produced: the element, and whether there is more to come.
@@ -237,7 +242,7 @@ impl Drawn {
             let _census = crate::pacing::span(crate::pacing::Phase::Census);
             painted.something_new_to_draw() || painted.animation_in_flight()
         };
-        crate::pacing::scene_asked(animating);
+        crate::pacing::scene_asked(painted.pacing(), animating);
         Self {
             element: draw(painted),
             animating,
