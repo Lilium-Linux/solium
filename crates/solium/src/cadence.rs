@@ -49,11 +49,25 @@ impl Cadence {
         self.until.is_some_and(|until| now < until)
     }
 
-    /// The timer for its rest fired: the rest is over, whatever the clock
-    /// says. A timer that fired a little early must not leave the screen
-    /// resting with no timer left to end it.
-    /// `tests::the_timer_ends_the_rest_even_a_little_early`.
-    pub(crate) fn woke(&mut self) {
+    /// The timer armed for the rest that was to end at `until` fired:
+    /// whether that rest is over now. A timer of an earlier rest, one that a
+    /// later pass replaced, ends nothing. On the hardware such stale timers,
+    /// each ending the rest a pass had just begun, drew the 75 Hz monitor
+    /// again and again in the first millisecond after its vblank, each draw
+    /// arming one more for the next: 470 passes a second for a monitor with
+    /// nothing to show (#392). Ended early, the rest is over regardless, so
+    /// no screen is left resting with no timer left to end it.
+    /// `tests::only_the_timer_of_the_rest_in_force_ends_it`.
+    pub(crate) fn woke(&mut self, until: Duration) -> bool {
+        if self.until != Some(until) {
+            return false;
+        }
+        self.until = None;
+        true
+    }
+
+    /// The rest is over, whatever timer is armed: one could not be.
+    pub(crate) fn wake(&mut self) {
         self.until = None;
     }
 }
@@ -129,12 +143,25 @@ mod tests {
         assert!(!cadence.resting(us(15_001)), "a flip leaves it resting");
     }
 
+    /// **Only the timer of the rest in force ends it**: a timer armed for a
+    /// rest a later pass replaced fires and ends nothing; the rest's own
+    /// timer ends it, even fired a little early.
     #[test]
-    fn the_timer_ends_the_rest_even_a_little_early() {
+    fn only_the_timer_of_the_rest_in_force_ends_it() {
+        let interval = us(4_000);
         let mut cadence = Cadence::default();
-        cadence.drew_nothing(us(1_000), us(4_000));
-        assert!(cadence.resting(us(4_900)));
-        cadence.woke();
-        assert!(!cadence.resting(us(4_900)));
+        cadence.flipped(us(0));
+        let first = cadence.drew_nothing(us(1_000), interval);
+        // The rest ended at its vblank, and the pass there drew nothing.
+        assert!(cadence.woke(first));
+        let second = cadence.drew_nothing(us(4_010), interval);
+        assert_eq!(second, us(8_000));
+        assert!(
+            !cadence.woke(first),
+            "a timer of a rest already over ended the next one"
+        );
+        assert!(cadence.resting(us(4_300)));
+        assert!(cadence.woke(second), "its own timer did not end the rest");
+        assert!(!cadence.resting(us(7_900)));
     }
 }
