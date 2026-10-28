@@ -69,7 +69,13 @@ return {
 
 A link may also give `reach` and `bleed`, in pixels, in place of the
 effect's own. A chain reads as far around its part as its first link
-reaches, and draws as far beyond it as all its links bleed together.
+reaches, and draws as far beyond it as all its links bleed together. It runs
+over one box, its part grown on every side by the further of the two, since
+what it draws is the size of what it reads: a border drawn just outside a
+window needs `bleed = 3` and no `reach`, and reads nothing it did not ask for
+but transparency there. Whatever the box, `mask = "shape"` still cuts the
+result to its part's shape unless the chain reads `shape`, so an effect that
+draws outside its part reads `shape` and owns its edges.
 
 `sol.effects` may be called again at any time, and the rules it hands over
 replace the running ones. When they are the same rules with nothing changed
@@ -112,7 +118,7 @@ tier is fixed when the rules are applied: a reload is what changes it.
 | Tier | What the chain reads | What it costs | In this build |
 |---|---|---|---|
 | T0 | nothing of the frame: only `shape` and its own states (a border, a glow, a gradient) | no capture. It runs once, and again only when its params or the part's size change, whatever the window draws under it; while the part keeps changing size (a drag on its edge), at most `effects.motion_hz` times a second, its last result stretched over the part between. Its `sol_tex` reads a transparent texel | runs |
-| T1 | the part's own pixels: `self`, or its first input given `source = "self"` | a capture of the part, padded by the chain's `reach`, drawn again only when the part commits. The chain runs again only then, or when its params or the part's size change; otherwise its last result is placed as it was | runs |
+| T1 | the part's own pixels: `self`, or its first input given `source = "self"` | a capture of the part, padded by the chain's `reach` or its `bleed`, whichever is further, drawn again only when the part commits. The chain runs again only then, or when its params or the part's size change; otherwise its last result is placed as it was | runs |
 | T2 | the `backdrop`, what is behind the part, from xray: a sharp picture of the layers below the part's own, per monitor (`effects.xray`) | xray is drawn only on a monitor a T2 part is on, and again only when what is in it changes. The chain's start that reads only the backdrop (a blur) runs once per monitor and is shared (*The memo*); the rest runs per part, at the part's own size, again only when the part moves, its params change or xray is redrawn. A plain blur runs nothing per part: each part is a crop of the shared result | runs |
 | T3 | the live backdrop, with `source = "live"` or `"auto"` | | refused, naming X4.1 |
 

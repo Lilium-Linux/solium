@@ -14548,7 +14548,9 @@ end)"#,
     /// **Every wanted slot has its part's box, padded by its chain's reach**:
     /// a client's, a scripted surface's on its monitor and a layer
     /// surface's, each its own pixels plus twice the reach each way, the
-    /// part inside it; with no rule, none.
+    /// part inside it; with no rule, none. A chain that draws further than
+    /// it reads is padded by its bleed instead, so a border drawn outside
+    /// its part has the room to be drawn in (#375).
     #[test]
     fn every_wanted_slot_has_its_part_box_padded_by_its_reach() {
         use crate::effect::plan::{Owner, PaneSlot, PartBox};
@@ -14583,6 +14585,7 @@ end)"#,
         apply_rules(
             &mut fixture,
             r#"{ { match = "*", part = "client", slot = "behind", effect = { "tint", reach = 6 } },
+                 { match = "*", part = "client", slot = "front", effect = { "tint", bleed = 3 } },
                  { match = "*", part = "surface:dock", slot = "behind", effect = { "tint", reach = 2.5 } },
                  { match = "*", part = "layer_shell:restore-*", slot = "front", effect = "tint" } }"#,
         );
@@ -14599,6 +14602,15 @@ end)"#,
                 6,
                 [0.0; 4]
             ))
+        );
+        assert_eq!(
+            slots.boxed(&Owner::Pane(pane, PaneSlot::Client), Slot::Front),
+            Some(PartBox::around(
+                crate::offscreen::client_pixels(client, 1.0),
+                3,
+                [0.0; 4]
+            )),
+            "a bleed of 3 and no reach pads by 3"
         );
         let dock = fixture.state.surfaces.named("dock").expect("declared");
         assert_eq!(
