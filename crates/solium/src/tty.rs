@@ -375,7 +375,12 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     // already bound. See `session.rs` and its tests.
     let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
     signals.stop_timeout(settings.stop_timeout);
-    solium.session = crate::session::Session::begin(settings, place, crate::dev::session_bus());
+    solium.session = crate::session::Session::begin(
+        settings,
+        place,
+        crate::dev::session_bus(),
+        crate::session::wallet(),
+    );
     solium.session.wayland(&solium.socket_name);
     if !x11_coming {
         solium.session.x11(None);

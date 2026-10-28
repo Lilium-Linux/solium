@@ -1111,12 +1111,20 @@ systemctl --user add-wants solium-session.target plasma-polkit-agent.service
 
 A keyring that D-Bus starts on demand, such as KWallet's `kwalletd6`, needs no
 entry: once the environment is exported, the first program that asks for a
-secret starts it. It is not unlocked with the login password, though. Under
-Plasma, `plasma-kwallet-pam.service` runs `/usr/libexec/pam_kwallet_init`,
-which hands the wallet what PAM kept at login, through the socket named by
-`PAM_KWALLET5_LOGIN`. Solium does not export that variable to systemd, and the
-script does nothing without it, so the wallet asks for its password the first
-time it opens.
+secret starts it. The wallet `pam_kwallet` unlocked with the login password
+reaches the session in one more step (#377). At login, `pam_kwallet` starts a
+`ksecretd` that waits on a socket, named by `PAM_KWALLET5_LOGIN`, for the
+session's environment, and `/usr/libexec/pam_kwallet_init` sends it. Plasma
+runs that program itself, and marks its XDG autostart entry
+`X-systemd-skip=true`, so autostart never would. A Solium session runs it as
+`solium-kwallet-pam.service`, which `solium-session.target` wants: Solium adds
+`PAM_KWALLET5_LOGIN` to what it sends systemd (not D-Bus activation, which
+could never have it removed) when the login set it, and unsets it with the
+rest. The unit starts after the display is exported, because `ksecretd` opens
+its windows there, and before XDG autostart, so what that starts finds
+`org.freedesktop.secrets` owned. Without the variable, or without
+`pam_kwallet_init`, it does not start, and the wallet asks for its password
+the first time it opens.
 
 ## Summary
 

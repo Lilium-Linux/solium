@@ -10,6 +10,8 @@
 //!    `org.freedesktop.DBus.UpdateActivationEnvironment` with
 //!    `WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE`, and
 //!    again with `DISPLAY` once XWayland has one;
+//!    `PAM_KWALLET5_LOGIN` goes to systemd alone, when the login set it, for
+//!    `solium-kwallet-pam.service` ([`wallet`]);
 //! 2. `StartUnit` on `solium-session.target`, and on `solium-autostart.target`
 //!    while `session.autostart` is on, once X11 has answered one way or the
 //!    other, so an X11 program in `~/.config/autostart` finds `DISPLAY`;
@@ -141,6 +143,8 @@ pub(crate) struct Session {
     sink: Option<Box<dyn Sink>>,
     autostart: bool,
     desktop: String,
+    /// `PAM_KWALLET5_LOGIN`, when the login set it: see [`wallet`].
+    wallet: Option<String>,
     socket: Option<String>,
     display: Option<u32>,
     /// X11 has answered: a display, or none coming.
@@ -171,6 +175,7 @@ impl Session {
             sink: None,
             autostart: true,
             desktop: String::new(),
+            wallet: None,
             socket: None,
             display: None,
             settled: false,
@@ -183,8 +188,13 @@ impl Session {
     ///
     /// `bus` is `SOLIUM_SESSION_BUS`: the bus to tell instead of the session
     /// bus, and the only way to tell one at all from a start that is not the
-    /// session.
-    pub(crate) fn begin(settings: Settings, place: Place, bus: Option<String>) -> Self {
+    /// session. `wallet` is [`wallet`]'s answer.
+    pub(crate) fn begin(
+        settings: Settings,
+        place: Place,
+        bus: Option<String>,
+        wallet: Option<String>,
+    ) -> Self {
         if !settings.systemd {
             tracing::info!(
                 "session.systemd is off: systemd and D-Bus activation are not told about \
@@ -203,7 +213,7 @@ impl Session {
         }
         let desktop = desktop(std::env::var("XDG_CURRENT_DESKTOP").ok());
         match Worker::spawn(bus) {
-            Ok(worker) => Self::with_sink(settings, Box::new(worker), desktop),
+            Ok(worker) => Self::with_sink(settings, Box::new(worker), desktop, wallet),
             Err(err) => {
                 tracing::warn!(
                     ?err,
@@ -214,11 +224,17 @@ impl Session {
         }
     }
 
-    fn with_sink(settings: Settings, sink: Box<dyn Sink>, desktop: String) -> Self {
+    fn with_sink(
+        settings: Settings,
+        sink: Box<dyn Sink>,
+        desktop: String,
+        wallet: Option<String>,
+    ) -> Self {
         Self {
             sink: Some(sink),
             autostart: settings.autostart,
             desktop,
+            wallet,
             socket: None,
             display: None,
             settled: false,
@@ -290,10 +306,14 @@ impl Session {
 
     fn export(&mut self) {
         let variables = self.variables();
+        // systemd's alone: only a unit reads it, and D-Bus activation could
+        // never have it removed again.
+        // `the_wallet_socket_goes_to_systemd_alone_and_is_unset_on_exit`.
+        let wallet = self.wallet.as_ref().map(|socket| (WALLET, socket.clone()));
         let Some(sink) = self.sink.as_mut() else {
             return;
         };
-        for (name, _) in &variables {
+        for (name, _) in variables.iter().chain(&wallet) {
             if !self.exported.contains(name) {
                 self.exported.push(name);
             }
@@ -301,6 +321,7 @@ impl Session {
         sink.send(Call::SetEnvironment(
             variables
                 .iter()
+                .chain(&wallet)
                 .map(|(name, value)| format!("{name}={value}"))
                 .collect(),
         ));
@@ -343,6 +364,26 @@ impl Drop for Session {
 /// `a_nested_run_owns_no_name_unless_it_is_given_a_bus`.
 pub(crate) fn speaks(place: Place, bus: Option<&str>) -> bool {
     place == Place::Session || bus.is_some()
+}
+
+/// The variable `pam_kwallet` sets at login to the socket on which the
+/// `ksecretd` it started waits for the session's environment.
+const WALLET: &str = "PAM_KWALLET5_LOGIN";
+
+/// [`WALLET`] from this process's environment, when the login set it (#377).
+///
+/// Plasma hands the wallet unlocked at login to the session by running
+/// `pam_kwallet_init` itself, and marks its XDG autostart entry
+/// `X-systemd-skip`, so the systemd autostart a Solium session uses never
+/// runs it, and `org.freedesktop.secrets` is never owned. A Solium session
+/// runs it as `solium-kwallet-pam.service`, wanted by `solium-session.target`,
+/// which needs this variable in systemd's environment to know where to send
+/// the session's; without it, or without the helper, the unit's conditions
+/// leave it unstarted.
+pub(crate) fn wallet() -> Option<String> {
+    std::env::var(WALLET)
+        .ok()
+        .filter(|socket| !socket.is_empty())
 }
 
 /// `XDG_CURRENT_DESKTOP` as the session file's `DesktopNames` set it, or
@@ -672,7 +713,8 @@ mod tests {
 
     fn session(settings: Settings) -> (Session, Recorder) {
         let recorder = Recorder::default();
-        let session = Session::with_sink(settings, Box::new(recorder.clone()), "Lilium".into());
+        let session =
+            Session::with_sink(settings, Box::new(recorder.clone()), "Lilium".into(), None);
         (session, recorder)
     }
 
@@ -803,6 +845,70 @@ mod tests {
         assert_eq!(*recorder.finished.borrow(), 1);
     }
 
+    /// The socket `pam_kwallet` left for the login's `ksecretd` reaches
+    /// systemd, where `solium-kwallet-pam.service` finds it, with every
+    /// export, and is unset with the rest on exit. D-Bus activation is not
+    /// given it: nothing there reads it, and D-Bus could never take it back.
+    #[test]
+    fn the_wallet_socket_goes_to_systemd_alone_and_is_unset_on_exit() {
+        let recorder = Recorder::default();
+        let mut session = Session::with_sink(
+            Settings::default(),
+            Box::new(recorder.clone()),
+            "Lilium".into(),
+            Some("/run/user/1000/kwallet5.socket".into()),
+        );
+        session.wayland("wayland-6");
+        let calls = recorder.take();
+        assert_eq!(
+            calls[0],
+            Call::SetEnvironment(
+                [
+                    "WAYLAND_DISPLAY=wayland-6",
+                    "XDG_CURRENT_DESKTOP=Lilium",
+                    "XDG_SESSION_TYPE=wayland",
+                    "PAM_KWALLET5_LOGIN=/run/user/1000/kwallet5.socket",
+                ]
+                .map(str::to_owned)
+                .to_vec()
+            )
+        );
+        assert_eq!(
+            calls[1],
+            export(&[
+                "WAYLAND_DISPLAY=wayland-6",
+                "XDG_CURRENT_DESKTOP=Lilium",
+                "XDG_SESSION_TYPE=wayland",
+            ])[1]
+        );
+
+        // Before the target that wants the unit starts.
+        session.x11(Some(2));
+        let calls = recorder.take();
+        assert!(
+            matches!(&calls[0], Call::SetEnvironment(sent)
+                if sent.contains(&"PAM_KWALLET5_LOGIN=/run/user/1000/kwallet5.socket".to_owned())),
+            "{calls:?}"
+        );
+        assert_eq!(calls[2..], start());
+
+        session.end();
+        assert_eq!(
+            recorder.take().last(),
+            Some(&Call::UnsetEnvironment(
+                [
+                    "WAYLAND_DISPLAY",
+                    "XDG_CURRENT_DESKTOP",
+                    "XDG_SESSION_TYPE",
+                    "PAM_KWALLET5_LOGIN",
+                    "DISPLAY",
+                ]
+                .map(str::to_owned)
+                .to_vec()
+            ))
+        );
+    }
+
     #[test]
     fn session_systemd_false_tells_nobody_anything() {
         let mut session = Session::begin(
@@ -811,6 +917,7 @@ mod tests {
                 ..Settings::default()
             },
             Place::Session,
+            None,
             None,
         );
         assert!(session.is_off());
@@ -849,7 +956,7 @@ mod tests {
     /// own desktop, and its `WAYLAND_DISPLAY` is not ours to replace.
     #[test]
     fn a_nested_run_tells_nobody_unless_it_is_given_a_bus() {
-        assert!(Session::begin(Settings::default(), Place::Nested, None).is_off());
+        assert!(Session::begin(Settings::default(), Place::Nested, None, None).is_off());
     }
 
     /// `solium --tty` by hand, from a text console beside a desktop on another
@@ -863,7 +970,7 @@ mod tests {
         assert_eq!(place(&["--sessions"]), Place::Console);
         assert_eq!(place(&["--session"]), Place::Session);
         assert_eq!(place(&["--qml", "gpu", "--session"]), Place::Session);
-        let mut manual = Session::begin(Settings::default(), place(&[]), None);
+        let mut manual = Session::begin(Settings::default(), place(&[]), None, None);
         assert!(manual.is_off());
         manual.wayland("wayland-11");
         manual.x11(Some(5));
@@ -922,7 +1029,7 @@ mod tests {
     #[test]
     fn a_bus_that_is_not_there_costs_a_warning_and_not_the_session() {
         let address = "unix:path=/nonexistent/solium-session-test/bus".to_owned();
-        let mut session = Session::begin(Settings::default(), Place::Nested, Some(address));
+        let mut session = Session::begin(Settings::default(), Place::Nested, Some(address), None);
         assert!(!session.is_off());
         session.wayland("wayland-6");
         session.x11(None);
@@ -945,6 +1052,7 @@ mod tests {
             Settings::default(),
             Place::Nested,
             Some(format!("unix:path={}", path.display())),
+            None,
         );
         session.wayland("wayland-8");
         let started = std::time::Instant::now();
@@ -1138,7 +1246,8 @@ mod tests {
 
         /// A session, from its first export to its exit, told to this bus.
         fn play(&self, settings: Settings) -> Vec<String> {
-            let mut session = Session::begin(settings, Place::Session, Some(self.address.clone()));
+            let mut session =
+                Session::begin(settings, Place::Session, Some(self.address.clone()), None);
             assert!(!session.is_off());
             session.wayland("wayland-9");
             session.x11(Some(4));

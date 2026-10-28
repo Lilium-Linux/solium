@@ -194,6 +194,7 @@ fi
 config_files=(
     "solium-session.target:$units/solium-session.target"
     "solium-autostart.target:$units/solium-autostart.target"
+    "solium-kwallet-pam.service:$units/solium-kwallet-pam.service"
     "lilium-portals.conf:$portals/lilium-portals.conf"
 )
 
@@ -571,6 +572,7 @@ Installed Solium into $dest
                 ($(grep -m1 '^Exec=' "$staged_session"))
   units         $units/solium-session.target
                 $units/solium-autostart.target
+                $units/solium-kwallet-pam.service
   portals       $portals/lilium-portals.conf$config_note
   check         $check_line
   $path_note
