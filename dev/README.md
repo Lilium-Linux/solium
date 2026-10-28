@@ -280,7 +280,7 @@ reads one that file does not list.
 | `SOLIUM_LUA_INIT=<path>` | Load this configuration instead of `~/.config/solium/init.lua` or the shipped one. | |
 | `SOLIUM_TERMINAL=<command line>` | The terminal `super+return` opens, split on spaces. | |
 | `SOLIUM_PANE=<name or path>` | The frame style for this run. | |
-| `SOLIUM_FENCE_WAIT=off` | A window capture drops its fence instead of waiting for it on the CPU. The default waits, and each session's log says which it ran with. | |
+| `SOLIUM_FENCE_WAIT=on` | A window capture waits on the CPU for its GPU work. The default drops the fence unwaited, since the GPU orders the read after the draw on the one context (#392); each session's log says which it ran with. | |
 | `SOLIUM_RECAPTURE=always` | Draw every window capture (a warp's, a rounded client's, a self effect's part) on every pass, as before captures were kept until what they show changes, so every self effect's chain runs every pass too. For an A/B on one build, and the control of `dev/pacing-nested.sh`'s capture count. | |
 | `SOLIUM_XRAY_REBUILD=always` | Draw every wanted xray cut (the sharp picture of the layers behind the windows that T2 effects read) on every pass, and run every memo over it again, as if what is behind the windows changed each time. The control of the `xray_builds` and `memo_runs` counts. | |
 | `SOLIUM_WARM_INJECT=<passes>` | Hold the first desktop frame (`startup.first_frame`) for this many passes as if what it waits for were not ready, at most its `max_ms`: the frames drawn meanwhile are only the clear colour. Nested every pass is ready at once, so this is the control that shows the gate hold and let go (`dev/effects-check.sh xray`). | |

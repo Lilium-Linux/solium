@@ -376,13 +376,18 @@ pub(crate) fn trace_path() -> Option<PathBuf> {
 /// Whether a capture waits on the CPU for its GPU work.
 ///
 /// ```sh
-/// SOLIUM_FENCE_WAIT=off ./target/debug/solium --tty
+/// SOLIUM_FENCE_WAIT=on ./target/debug/solium --tty
 /// ```
 ///
-/// `off`, `0`, `no` or `skip` drop the fence unwaited; anything else, or
-/// nothing, keeps today's wait, and a word that is neither is named in the
-/// log. Read once and said once, so every session log records which it ran
-/// with. `tests::the_fence_wait_stays_on_unless_switched_off`.
+/// `on`, `1`, `yes` or `cpu` wait; anything else, or nothing, drops the
+/// fence unwaited, and a word that is neither is named in the log. Dropped
+/// by default since #392: every reader of a capture is on the context that
+/// drew it, where GL orders the read after the draw (wirecheck's cases 11c
+/// and 11d), #59 has landed beside it, and the wait was measured on the TTY
+/// at 2.4 ms of a pass's 3.2 ms at desktop clocks (`dev/pacing-tty.sh
+/// fence`), the main thread blocked on the GPU. Read once and said once, so every
+/// session log records which it ran with.
+/// `tests::the_fence_wait_is_off_unless_switched_on`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FenceWait {
     /// Wait for the GPU before sampling: `SyncPoint::wait`.
@@ -395,12 +400,12 @@ impl FenceWait {
     /// The mode a value names, and a warning when it names neither.
     pub(crate) fn named(value: Option<&str>) -> (Self, Option<String>) {
         match value.map(str::trim) {
-            None | Some("" | "on" | "1" | "yes" | "cpu") => (Self::Cpu, None),
-            Some("off" | "0" | "no" | "skip") => (Self::Skip, None),
+            None | Some("" | "off" | "0" | "no" | "skip") => (Self::Skip, None),
+            Some("on" | "1" | "yes" | "cpu") => (Self::Cpu, None),
             Some(other) => (
-                Self::Cpu,
+                Self::Skip,
                 Some(format!(
-                    "SOLIUM_FENCE_WAIT={other} is neither on nor off; captures wait on the CPU"
+                    "SOLIUM_FENCE_WAIT={other} is neither on nor off; captures are not waited for"
                 )),
             ),
         }
@@ -586,24 +591,25 @@ mod tests {
 
     use super::FenceWait;
 
-    /// **The wait stays on unless it is switched off**, by a word that says
-    /// so; anything else keeps it and says why. Two-valued rather than a flag,
-    /// so the knob still means something after the default flips (§6.5, C2).
+    /// **The wait is off unless it is switched on** (#392), by a word that
+    /// says so; anything else leaves it off and says why. Two-valued rather
+    /// than a flag, so the wait can still be asked for, for an A/B on one
+    /// build (§6.5, C2).
     #[test]
-    fn the_fence_wait_stays_on_unless_switched_off() {
-        assert_eq!(FenceWait::named(None), (FenceWait::Cpu, None));
-        for off in ["off", "0", "no", "skip"] {
+    fn the_fence_wait_is_off_unless_switched_on() {
+        assert_eq!(FenceWait::named(None), (FenceWait::Skip, None));
+        for off in ["off", "0", "no", "skip", ""] {
             assert_eq!(
                 FenceWait::named(Some(off)),
                 (FenceWait::Skip, None),
                 "{off}"
             );
         }
-        for on in ["on", "1", "yes", "cpu", ""] {
+        for on in ["on", "1", "yes", "cpu"] {
             assert_eq!(FenceWait::named(Some(on)), (FenceWait::Cpu, None), "{on}");
         }
         let (wait, warning) = FenceWait::named(Some("of"));
-        assert_eq!(wait, FenceWait::Cpu);
+        assert_eq!(wait, FenceWait::Skip);
         assert!(
             warning.is_some_and(|said| said.contains("of")),
             "a typo is named"

@@ -758,12 +758,13 @@ impl Finished for smithay::backend::renderer::sync::SyncPoint {
 
 /// Whether an offscreen draw that `finish` answered may be sampled.
 ///
-/// **Waited on, unless `SOLIUM_FENCE_WAIT=off`.** The fence says when the GPU
-/// has finished drawing into the texture. Every reader of a capture today is
-/// on the context that wrote it, where GL already orders the read after the
-/// write, so the wait buys nothing the GPU does not do anyway; it is kept as
-/// the default until #59 lands (§6.5, C2). wirecheck's cases 11c and 11d
-/// prove the order on the GPU, through smithay and through raw GL.
+/// **Not waited on, unless `SOLIUM_FENCE_WAIT=on`** (since #392). The fence
+/// says when the GPU has finished drawing into the texture. Every reader of
+/// a capture today is on the context that wrote it, where GL already orders
+/// the read after the write, so the wait bought nothing the GPU does not do
+/// anyway, and it held the main thread on the GPU in every pass that drew
+/// one. wirecheck's cases 11c and 11d prove the order on the GPU, through
+/// smithay and through raw GL.
 /// `tests::a_capture_waits_on_the_cpu_only_when_asked`,
 /// `tests::a_wait_that_fails_is_a_failed_capture`,
 /// `tests::a_frame_that_did_not_finish_is_a_failed_capture_either_way`.
