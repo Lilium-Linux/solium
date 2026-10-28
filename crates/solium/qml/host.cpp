@@ -313,6 +313,15 @@ constexpr unsigned long long kModifierInvalid = (1ULL << 56) - 1;
 
 } // namespace
 
+/* A Transition found running, and since when (`transition_moving`). The
+ * pointer says whether it is still the object it was: a freed one's address
+ * can be another's. */
+struct TransitionSeen
+{
+    QPointer<QObject> object;
+    qint64 since_ms = 0;
+};
+
 struct SoliumQmlScene
 {
     QQuickRenderControl *control = nullptr;
@@ -353,10 +362,9 @@ struct SoliumQmlScene
      * wake nothing: see solium_qml_scene_set_quiet. */
     bool quiet = false;
     QList<QPointer<QObject>> hushed;
-    /* Each Transition the last census found running with nothing on the
-     * animation driver, and the drain it was first found at: see
-     * `transition_moving`. Compared, never followed. */
-    mutable QHash<const QObject *, unsigned long long> unstarted;
+    /* Each Transition a census found running, and when on the compositor's
+     * clock it was first found so: see `transition_moving`. */
+    mutable QHash<const QObject *, TransitionSeen> transitions;
     /* Backing store for the last value handed out by take_string. */
     QByteArray taken;
     /* The last press, as Qt keeps it to make a double-click of the next one:
@@ -1963,9 +1971,9 @@ static bool anything_animating()
     return g_driver != nullptr && g_driver->isRunning();
 }
 
-/* How many times Qt's event queue has been drained: where an animation
- * started since the last drain joins the driver. See `transition_moving`. */
-static unsigned long long g_drains = 0;
+/* The compositor's clock as Qt was last brought to it, in milliseconds: by
+ * a frame's tick or a drain. What `transition_moving` measures by. */
+static qint64 g_clock_ms = 0;
 
 /* Advance every animation in the process, once for the whole frame.
  *
@@ -2011,6 +2019,7 @@ extern "C" void solium_qml_tick(long long elapsed_ms)
      * The clock comes to this frame before the events, as it does in
      * solium_qml_drain, so an animation they start is measured from here and
      * not from the last step; see CompositorAnimationDriver::moveTo. */
+    g_clock_ms = static_cast<qint64>(elapsed_ms);
     if (g_driver != nullptr) {
         g_driver->moveTo(static_cast<qint64>(elapsed_ms), anything_animating());
     }
@@ -2019,7 +2028,6 @@ extern "C" void solium_qml_tick(long long elapsed_ms)
         if (elapsed_ms - drained_at >= 16 || elapsed_ms < drained_at) {
             drained_at = elapsed_ms;
             QCoreApplication::processEvents();
-            ++g_drains;
         }
     }
     if (g_driver != nullptr) {
@@ -2146,6 +2154,7 @@ extern "C" int solium_qml_drain(long long elapsed_ms, int advance)
     }
     const unsigned long long before = g_dirtied;
     const auto now = static_cast<qint64>(elapsed_ms);
+    g_clock_ms = now;
     if (g_driver != nullptr) {
         g_driver->moveTo(now, anything_animating());
     }
@@ -2157,7 +2166,6 @@ extern "C" int solium_qml_drain(long long elapsed_ms, int advance)
     constexpr int passes = 4;
     for (int pass = 0; pass < passes; ++pass) {
         QCoreApplication::processEvents();
-        ++g_drains;
         if (solium_qml_next_due_ms() != 0) {
             break;
         }
@@ -2368,14 +2376,51 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  * (`qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`,
  * `qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`).
  */
-/* One walk of a scene's census: the Transitions it found running with
- * nothing on the driver, as `SoliumQmlScene::unstarted` keeps them. */
+/* One walk of a scene's census: the scene's Transitions found running, as
+ * `SoliumQmlScene::transitions` keeps them, and whether every one that reads
+ * running is to be believed (`solium_qml_scene_ticking`). */
 struct Census
 {
-    const QHash<const QObject *, unsigned long long> &before;
-    QHash<const QObject *, unsigned long long> now;
-    bool driver;
+    QHash<const QObject *, TransitionSeen> &seen;
+    bool believe_all;
 };
+
+/* The longest an animation can run once started, in milliseconds: its own
+ * duration, if it has one, and its children's, each repeated as its loops
+ * say; -1 when that is for ever. A sum over children, so a group's whole
+ * run whichever kind of group it is. */
+static qint64 longest_run(const QObject *animation)
+{
+    qint64 total = 0;
+    const QVariant duration = animation->property("duration");
+    if (duration.isValid()) {
+        total += std::max(0, duration.toInt());
+    }
+    for (const QObject *child : animation->children()) {
+        if (!child->inherits("QQuickAbstractAnimation")) {
+            continue;
+        }
+        const qint64 run = longest_run(child);
+        if (run < 0) {
+            return -1;
+        }
+        total += run;
+    }
+    const QVariant loops = animation->property("loops");
+    if (loops.isValid()) {
+        const int times = loops.toInt();
+        if (times < 0) {
+            return -1;
+        }
+        total *= std::max(1, times);
+    }
+    return total;
+}
+
+/* How long after a Transition starts it is believed, beyond the longest its
+ * animations can run: it starts as the event queue is next drained, which a
+ * frame's tick does at most every 16 ms, and its last step lands on a frame. */
+constexpr qint64 TRANSITION_SLACK_MS = 100;
 
 /*
  * Whether a Transition that reads `running` is moving anything (#392).
@@ -2388,23 +2433,31 @@ struct Census
  * `qml::wake::tests::a_finished_remove_transition_does_not_keep_its_scene_animating`).
  * On the hardware that was a notification banner leaving: a scene answering
  * "animating" with nothing to animate, and a pass every vblank of every
- * monitor until the session ended.
+ * monitor until the session ended, or, beside another animation, every
+ * pass that animation drew.
  *
- * A job that is really running is on the driver, which is then running too.
- * Not at once: a job joins the driver when the event queue is next drained
- * (`solium_qml_tick` says why), so the census just after a Transition starts
- * finds it running and the driver still idle. A Transition found so is
- * believed until a drain has gone by since it was first found so, and not
- * after: by then a running job would be on the driver.
+ * Nothing public tells such a Transition from one still running, and the
+ * animation driver cannot either: it runs for any animation anywhere. But a
+ * Transition's animations last no longer than their durations and loops
+ * say. So one is believed from when it is first found running for as long
+ * as its animations can run, and a little more, and not after; one whose
+ * animations loop for ever is believed for ever. Found not running, it is
+ * forgotten, so its next run is measured afresh.
+ * `qml::wake::tests::a_finished_remove_transition_does_not_keep_its_scene_animating_beside_another`.
  */
 static bool transition_moving(const QObject *transition, Census &census)
 {
-    if (census.driver) {
+    if (census.believe_all) {
         return true;
     }
-    const unsigned long long since = census.before.value(transition, g_drains);
-    census.now.insert(transition, since);
-    return since == g_drains;
+    auto seen = census.seen.find(transition);
+    if (seen == census.seen.end() || seen->object.isNull()) {
+        seen = census.seen.insert(
+            transition,
+            TransitionSeen{QPointer<QObject>(const_cast<QObject *>(transition)), g_clock_ms});
+    }
+    const qint64 longest = longest_run(transition);
+    return longest < 0 || g_clock_ms - seen->since_ms <= longest + TRANSITION_SLACK_MS;
 }
 
 static bool animation_running(const QObject *item, Census &census)
@@ -2421,7 +2474,9 @@ static bool animation_running(const QObject *item, Census &census)
             return true;
         }
     } else if (item->inherits("QQuickTransition")) {
-        if (item->property("running").toBool() && transition_moving(item, census)) {
+        if (!item->property("running").toBool()) {
+            census.seen.remove(item);
+        } else if (transition_moving(item, census)) {
             return true;
         }
     }
@@ -2465,10 +2520,10 @@ extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene)
     if (scene == nullptr || scene->object == nullptr) {
         return 0;
     }
-    Census census{scene->unstarted, {}, anything_animating()};
-    const bool running = animation_running(scene->object, census);
-    scene->unstarted = std::move(census.now);
-    return running ? 1 : 0;
+    /* What a freed object left is let go of before the walk. */
+    scene->transitions.removeIf([](const auto &entry) { return entry.value().object.isNull(); });
+    Census census{scene->transitions, false};
+    return animation_running(scene->object, census) ? 1 : 0;
 }
 
 /* Every object of the scene once: its QObject children, and the visual
@@ -2575,8 +2630,8 @@ extern "C" int solium_qml_scene_ticking(const SoliumQmlScene *scene)
     });
     /* Every Transition that reads running counts here: this asks what the
      * scene holds, not whether it moves. */
-    const QHash<const QObject *, unsigned long long> none;
-    Census census{none, {}, true};
+    QHash<const QObject *, TransitionSeen> none;
+    Census census{none, true};
     return ticking || animation_running(scene->object, census) ? 1 : 0;
 }
 
