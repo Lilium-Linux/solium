@@ -5053,6 +5053,79 @@ end)"#,
         );
     }
 
+    /// **A monitor resized without one coming or going tells the scripts
+    /// its new size, once**, as the nested window's do when its host resizes
+    /// it (#376): a `monitors` handler that places a bar on a rectangle it
+    /// reads from `sol.monitors()` has to hear of it, or the bar keeps the
+    /// old rectangle, off the screen.
+    #[test]
+    fn a_resized_monitor_tells_the_scripts_its_new_size() {
+        let directory = std::env::temp_dir().join("solium-state-resized-tells");
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"
+                told = 0
+                sol.on("monitors", function()
+                    told = told + 1
+                    for _, m in ipairs(sol.monitors()) do
+                        if m.name == "{RIGHT_SCREEN}" then
+                            sol.status(string.format("%d %dx%d", told, m.whole.w, m.whole.h))
+                        end
+                    end
+                end)
+                "#
+            ),
+        )
+        .expect("writing the test script");
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        let (left, right) = side_by_side(&mut state, "resized-tells-left");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the test script"),
+        ));
+        state.settle_monitors();
+        let before = state.status.clone();
+        let count = |status: &str| -> u32 {
+            status
+                .split(' ')
+                .next()
+                .and_then(|told| told.parse().ok())
+                .unwrap_or(0)
+        };
+
+        for output in [&left, &right] {
+            output.change_current_state(
+                Some(Mode {
+                    size: (2560, 1080).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                None,
+                None,
+            );
+        }
+        state.outputs_resized();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            before.ends_with(" 1920x1080"),
+            "the premise: the handler ran at the settle and read the old size, {before:?}"
+        );
+        assert!(
+            state.status.ends_with(" 2560x1080"),
+            "the handler did not hear the new size: {:?}",
+            state.status
+        );
+        assert_eq!(
+            count(&state.status),
+            count(&before) + 1,
+            "one resize, one `monitors` event: {before:?} then {:?}",
+            state.status
+        );
+    }
+
     /// **A resize that brings a monitor under a surface gives the surface an
     /// instance there**, as the nested window's resize does: its monitors
     /// share its width, so every one right of the first moves, and a surface

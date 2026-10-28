@@ -518,12 +518,15 @@ impl Solium {
     }
 
     /// The monitors changed size without one coming or going, as the nested
-    /// window's do when it is resized: place them again, and give every
-    /// surface an instance on each monitor it now covers.
+    /// window's do when it is resized: everything a hotplug does, the
+    /// scripts' `monitors` event among it, since a configuration that placed
+    /// a surface on a rectangle it read from `sol.monitors()` would otherwise
+    /// keep the old one, off the screen (#376). Places them again, and gives
+    /// every surface an instance on each monitor it now covers.
+    /// `tests::a_resized_monitor_tells_the_scripts_its_new_size`,
     /// `tests::real_client::a_resize_that_brings_a_monitor_under_a_surface_gives_it_an_instance_there`.
     pub(crate) fn outputs_resized(&mut self) {
-        self.place_outputs();
-        self.sync_instances();
+        self.settle_monitors();
     }
 
     pub(crate) fn settle_monitors(&mut self) {
