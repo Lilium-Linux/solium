@@ -793,12 +793,15 @@ fn listed(variable: &str, default: &str) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// Each backend a portal configuration names, in the order first named,
-/// with the portals it answers: `default` stands for every portal the file
-/// does not name. `none` and `*` name no backend.
-/// `tests::the_portals_say_which_backend_is_missing_and_what_it_answers`.
-fn named_backends(text: &str) -> Vec<(String, Vec<String>)> {
-    let mut named: Vec<(String, Vec<String>)> = Vec::new();
+/// Each portal a configuration's `[preferred]` section names, with the
+/// backends it lists for it in order: `default` stands for every portal the
+/// file does not name. A list is tried in order and the first backend that is
+/// installed answers, so `kwallet;gnome-keyring` needs either, not both.
+/// `none` and `*` name no backend.
+/// `tests::the_portals_say_which_backend_is_missing_and_what_it_answers`,
+/// `tests::a_missing_fallback_is_not_a_missing_backend`.
+fn preferred(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut entries: Vec<(String, Vec<String>)> = Vec::new();
     let mut preferred = false;
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
@@ -813,17 +816,17 @@ fn named_backends(text: &str) -> Vec<(String, Vec<String>)> {
         };
         let key = key.trim();
         let interface = key.rsplit('.').next().unwrap_or(key).to_owned();
-        for backend in value.split(';').map(str::trim) {
-            if backend.is_empty() || backend == "none" || backend == "*" {
-                continue;
-            }
-            match named.iter_mut().find(|(name, _)| name == backend) {
-                Some((_, interfaces)) => interfaces.push(interface.clone()),
-                None => named.push((backend.to_owned(), vec![interface.clone()])),
-            }
+        let backends: Vec<String> = value
+            .split(';')
+            .map(str::trim)
+            .filter(|backend| !backend.is_empty() && *backend != "none" && *backend != "*")
+            .map(str::to_owned)
+            .collect();
+        if !backends.is_empty() {
+            entries.push((interface, backends));
         }
     }
-    named
+    entries
 }
 
 /// Whether screen sharing, and every other portal [`PORTALS`] hands a
@@ -863,12 +866,44 @@ pub(crate) fn portals(
             return;
         }
     };
-    let named = named_backends(text);
-    let width = named.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
-    for (name, interfaces) in &named {
-        let mut answers: Vec<&str> = interfaces
+    let entries = preferred(text);
+    // Every backend named, in the order first named.
+    let mut named: Vec<&str> = Vec::new();
+    for backend in entries.iter().flat_map(|(_, backends)| backends) {
+        if !named.contains(&backend.as_str()) {
+            named.push(backend);
+        }
+    }
+    let found: Vec<(&str, Option<std::path::PathBuf>)> =
+        named.iter().map(|name| (*name, backend(name))).collect();
+    let installed = |name: &str| found.iter().any(|(n, path)| *n == name && path.is_some());
+    let width = named.iter().map(|name| name.len()).max().unwrap_or(0);
+    for (name, path) in &found {
+        if let Some(path) = path {
+            report.line(&format!("  {name:width$}  {}", path.display()));
+            continue;
+        }
+        // The portals this backend was named for that nothing else in their
+        // list answers: only those are left with no backend.
+        let (unanswered, answered): (Vec<_>, Vec<_>) = entries
             .iter()
-            .map(|interface| {
+            .filter(|(_, backends)| backends.iter().any(|b| b == name))
+            .partition(|(_, backends)| !backends.iter().any(|b| installed(b)));
+        if unanswered.is_empty() {
+            let by: Vec<&str> = answered
+                .iter()
+                .filter_map(|(_, backends)| backends.iter().find(|b| installed(b)))
+                .map(String::as_str)
+                .collect();
+            report.line(&format!(
+                "  {name:width$}  not installed, and not needed: {} first",
+                by.join(", ")
+            ));
+            continue;
+        }
+        let mut answers: Vec<&str> = unanswered
+            .iter()
+            .map(|(interface, _)| {
                 if interface == "default" {
                     "every portal not named"
                 } else {
@@ -882,15 +917,12 @@ pub(crate) fn portals(
         } else {
             (format!("{} and {last}", answers.join(", ")), "have")
         };
-        match backend(name) {
-            Some(path) => report.line(&format!("  {name:width$}  {}", path.display())),
-            None => report.line(&format!(
-                "  {name:width$}  missing: no {name}.portal, so {answers} {verb} no backend. \
-                 Install xdg-desktop-portal-{name}"
-            )),
-        }
+        report.line(&format!(
+            "  {name:width$}  missing: no {name}.portal, so {answers} {verb} no backend. \
+             Install xdg-desktop-portal-{name}"
+        ));
     }
-    if named.iter().any(|(name, _)| name == "wlr") && !slurp {
+    if named.contains(&"wlr") && !slurp {
         report.line(
             "  slurp  missing: not on PATH, and xdg-desktop-portal-wlr asks it which screen \
              to share. Install slurp",
@@ -1153,6 +1185,53 @@ mod tests {
         assert!(text.contains("  slurp  missing: not on PATH"), "{text}");
         assert!(text.contains("Install slurp"), "{text}");
         assert!(text.contains("  gtk  /x/portals/gtk.portal\n"), "{text}");
+    }
+
+    /// A backend listed after another for the same portal is a fallback: with
+    /// the first installed, the second missing leaves nothing unanswered and
+    /// is not called missing (`Secret=kwallet;gnome-keyring` on Plasma). With
+    /// neither, the portal is said to have no backend under each.
+    #[test]
+    fn a_missing_fallback_is_not_a_missing_backend() {
+        let conf =
+            "[preferred]\ndefault=gtk\norg.freedesktop.impl.portal.Secret=kwallet;gnome-keyring\n";
+        let (passed, text) = reported(|report| {
+            portals(
+                report,
+                Ok((Path::new("/x/lilium-portals.conf"), conf)),
+                &|name| {
+                    matches!(name, "gtk" | "kwallet")
+                        .then(|| PathBuf::from(format!("/x/portals/{name}.portal")))
+                },
+                true,
+            );
+        });
+        assert!(passed, "{text}");
+        assert!(!text.contains("missing"), "{text}");
+        assert!(
+            text.contains("  gnome-keyring  not installed, and not needed: kwallet first"),
+            "{text}"
+        );
+        assert!(text.contains("/x/portals/kwallet.portal"), "{text}");
+
+        let (_, text) = reported(|report| {
+            portals(
+                report,
+                Ok((Path::new("/x/lilium-portals.conf"), conf)),
+                &|name| (name == "gtk").then(|| PathBuf::from("/x/portals/gtk.portal")),
+                true,
+            );
+        });
+        assert!(
+            text.contains("  kwallet        missing: no kwallet.portal, so Secret has no backend"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "  gnome-keyring  missing: no gnome-keyring.portal, so Secret has no backend"
+            ),
+            "{text}"
+        );
     }
 
     /// With no `lilium-portals.conf` anywhere xdg-desktop-portal looks, that
