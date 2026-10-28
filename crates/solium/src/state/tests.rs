@@ -12984,6 +12984,7 @@ end)"#,
                 xrays: &*xrays,
                 motion: (std::time::Duration::ZERO, 0.0),
                 waited: false,
+                drawing: crate::drawing::Drawing::every(),
             };
             let mut runner = crate::render::tests::NoGpu::default();
             for nest in [crate::render::Nest::Inner, crate::render::Nest::Whole] {
@@ -14602,6 +14603,7 @@ end)"#,
             xrays: &*xrays,
             motion: (std::time::Duration::ZERO, 0.0),
             waited: false,
+            drawing: crate::drawing::Drawing::every(),
         };
         let mut runner = crate::render::tests::NoGpu::default();
         for nest in [crate::render::Nest::Inner, crate::render::Nest::Whole] {
@@ -32587,6 +32589,7 @@ end)
                     xrays: &*xrays,
                     motion: (std::time::Duration::ZERO, 0.0),
                     waited: false,
+                    drawing: crate::drawing::Drawing::every(),
                 };
                 let mut runner = crate::render::tests::NoGpu::default();
                 crate::render::run_slots(

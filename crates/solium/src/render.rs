@@ -1548,6 +1548,7 @@ impl Phases for Gpu<'_> {
             xrays: &*xrays,
             motion: (std::time::Duration::ZERO, 0.0),
             waited: false,
+            drawing: self.drawing.clone(),
         };
         let _ = with_carrier(pool, renderer, |renderer, carrier, pool| {
             let mut runner = GlRunner::new(renderer, carrier, timer.as_mut());
@@ -1640,6 +1641,7 @@ impl Phases for Gpu<'_> {
             xrays: &*xrays,
             motion: (instant, motion_hz),
             waited: false,
+            drawing: self.drawing.clone(),
         };
         let drawn = &*drawn;
         let _ = with_carrier(pool, renderer, |renderer, carrier, pool| {
@@ -2738,6 +2740,9 @@ pub(crate) struct RunCx<'a> {
     /// that runs it at its part's last place and size is then owed, whether
     /// or not the part moves again.
     pub(crate) waited: bool,
+    /// The monitors this pass draws: a T2 place on another, with a result
+    /// already, is not run again for it (`drawing.rs`).
+    pub(crate) drawing: crate::drawing::Drawing,
 }
 
 impl std::fmt::Debug for RunCx<'_> {
@@ -3131,6 +3136,7 @@ fn run_t2(
     let places = slots.places(owner, slot).to_vec();
     let (instant, hz) = cx.motion;
     let waited = &mut cx.waited;
+    let drawing = &cx.drawing;
     let state = cx.store.slot_mut(owner, slot, rule);
     state.seen = cx.pass;
     // A monitor the part left gives its result's targets back
@@ -3203,6 +3209,18 @@ fn run_t2(
             // tick of `effects.motion_hz`: its last result is drawn
             // where the part is, and it runs again at the next tick
             // (`effect::store::tests::a_moving_parts_suffix_runs_at_most_motion_hz_times_a_second`).
+            // On a monitor this pass does not draw: its last result stays,
+            // unseen, and the pass that draws that monitor runs it where the
+            // part is then (`drawing.rs`).
+            T2Work::Suffix | T2Work::Whole
+                if t2.held.output().is_some() && !drawing.draws(&place.monitor) =>
+            {
+                let Some(texture) = t2.held.output().cloned() else {
+                    continue;
+                };
+                *waited = true;
+                (texture, false, None)
+            }
             T2Work::Suffix | T2Work::Whole
                 if t2.held.output().is_some() && t2.waits(now, instant, motion) =>
             {
@@ -8680,6 +8698,7 @@ pub(crate) mod tests {
             xrays: &xrays,
             motion: (std::time::Duration::ZERO, 0.0),
             waited: false,
+            drawing: crate::drawing::Drawing::every(),
         };
         let (mut runner, mut pool) = (NoGpu::default(), crate::pool::Pool::new(0));
         for nest in [super::Nest::Inner, super::Nest::Whole] {
@@ -8774,6 +8793,7 @@ pub(crate) mod tests {
             xrays: &xrays,
             motion: (std::time::Duration::ZERO, 0.0),
             waited: false,
+            drawing: crate::drawing::Drawing::every(),
         };
         let mut runner = NoGpu::default();
         super::run_slots(
