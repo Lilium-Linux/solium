@@ -509,6 +509,7 @@
 ---| "click" # A pointer or finger press while a script holds input: `(x, y)`.
 ---| "touch" # A raw finger event: `(event)`, a `sol.TouchEvent`. Down precedes delivery so Lua can claim it with `sol.touch`; without a claim it observes normal delivery. Never delivered while locked, nor replayed on unlock.
 ---| "surface" # A hosted scene sent an action: `(surface, action, data)`, `data` a table, a value or `nil`. Every action is heard, in the order sent, in a dispatch after the one that sent it; a scene that sets an `action` string property is heard the same way, with `data` `nil`.
+---| "frame" # A window frame's layer sent an action with `Solium.send(name, data)`: `(id, name, data)`, the window's id, the name and its data. Heard in the order sent, in a dispatch after the one that sent it. `"close"`, `"maximize"` and `"minimize"` are the compositor's own and are not heard here.
 ---| "direction" # `sol.focus_direction` or `sol.move_direction` was called: `(verb, dir)`, `verb` being `"focus"` or `"move"`. The layout in charge answers.
 ---| "layout" # Arrange the windows you already hold again: `()`.
 ---| "monitors" # The monitors came, went or changed size, or were announced at startup or after a reload: `()`.
@@ -1163,6 +1164,20 @@ sol.decoration = sol.pane
 ---@return nil
 function sol.pane_values(values) end
 
+---Hand values to one window's frame alone (#417).
+---
+---Its layers read them as one object, `windowValues`, which `PaneStyle`
+---declares for an inline layer and a delegated layer declares itself
+---(`property var windowValues: ({})`): what the configuration keeps for that
+---window and its frame shows, its opacity on a quick-settings slider for one.
+---Merged by key, as `sol.pane_values` merges, and gone with the window; a
+---reload starts every window's afresh. A window that is not there is handed
+---nothing. What a frame sends back is heard with `sol.on("frame", ...)`.
+---@param id integer The window's id, as `sol.windows()` gives it.
+---@param values table
+---@return nil
+function sol.frame(id, values) end
+
 ---Every frame style `sol.pane` could be given, found in the folders the
 ---compositor looks in: sorted, bundles first, each name once.
 ---@return sol.DecorationEntry[]
@@ -1619,6 +1634,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "click", handler: fun(x: number, y: number))
 ---@overload fun(event: "touch", handler: fun(event: sol.TouchEvent))
 ---@overload fun(event: "surface", handler: fun(surface: string, action: string, data: any))
+---@overload fun(event: "frame", handler: fun(id: integer, name: string, data: any))
 ---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
 ---@overload fun(event: "layout"|"monitors"|"restore"|"problems", handler: fun())
 ---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))

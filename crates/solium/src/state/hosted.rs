@@ -123,6 +123,7 @@ impl Solium {
             self.settle_grabs();
             self.settle_keyboard();
             self.settle_actions();
+            self.settle_frames();
             if !self.scenes_to_settle {
                 break;
             }
@@ -771,16 +772,12 @@ impl Solium {
     pub(crate) fn deliver_scene_key(&mut self, key: SceneKey) {
         #[cfg(test)]
         self.scene_keys.push(key.clone());
-        if let Some(held) = self.hosted_keyboard.clone()
-            && let Some(surface) = self.surfaces.get_mut(held.surface)
-        {
-            surface.key(&held.output, &key);
-        }
+        self.key_to_holder(&key);
         // A key the keymap says does not repeat, a modifier or a group
         // toggle, does not.
         // `input::tests::a_held_modifier_does_not_repeat_into_the_scene`,
         // `input::tests::a_held_group_toggle_does_not_repeat_into_the_scene`.
-        if key.pressed && key.repeats && self.hosted_keyboard.is_some() {
+        if key.pressed && key.repeats && self.holds_keys() {
             let delay =
                 Duration::from_millis(u64::try_from(self.keyboard.repeat_delay).unwrap_or(600));
             self.scene_repeat = Some(SceneRepeat {
@@ -808,11 +805,12 @@ impl Solium {
     /// `input::tests::a_held_key_repeats_into_the_scene_at_the_keyboards_rate`,
     /// `input::tests::a_held_key_noticed_late_still_repeats_at_the_keyboards_rate`.
     pub(crate) fn repeat_scene_key(&mut self, now: Duration) {
+        let rate = u64::try_from(self.keyboard.repeat_rate).unwrap_or(0);
+        let holds = self.holds_keys();
         let Some(repeat) = self.scene_repeat.as_mut() else {
             return;
         };
-        let rate = u64::try_from(self.keyboard.repeat_rate).unwrap_or(0);
-        if self.hosted_keyboard.is_none() || rate == 0 {
+        if !holds || rate == 0 {
             self.scene_repeat = None;
             return;
         }
@@ -827,12 +825,30 @@ impl Solium {
         let key = repeat.key.clone();
         #[cfg(test)]
         self.scene_keys.push(key.clone());
-        if let Some(held) = self.hosted_keyboard.clone()
-            && let Some(surface) = self.surfaces.get_mut(held.surface)
-        {
-            surface.key(&held.output, &key);
-        }
+        self.key_to_holder(&key);
         self.redraw = true;
+    }
+
+    /// Whether a scene holds the keys: a hosted surface's holding the
+    /// keyboard (Ruling 14), or a window frame's holding a grab (#417).
+    fn holds_keys(&self) -> bool {
+        self.hosted_keyboard.is_some() || self.decorations.holding.is_some()
+    }
+
+    /// One key to the scene that holds the keys, whichever that is.
+    fn key_to_holder(&mut self, key: &SceneKey) {
+        if let Some(held) = self.hosted_keyboard.clone() {
+            if let Some(surface) = self.surfaces.get_mut(held.surface) {
+                surface.key(&held.output, key);
+            }
+        } else if let Some(pane) = self.decorations.holding
+            && let Some(decoration) = self
+                .panes
+                .get_mut(pane)
+                .and_then(crate::pane::Pane::decoration_mut)
+        {
+            decoration.key(key);
+        }
     }
 
     /// End a scene's hold on the keyboard, and tell the scene. With

@@ -831,6 +831,15 @@ impl Solium {
                         self.redraw = true;
                     }
                 }
+                // A window that is not there has no frame to tell (#417).
+                Command::FrameValues { id, fields } => {
+                    let pane = self.panes.by_script_id(id).map(Pane::id);
+                    if let Some(pane) = pane.and_then(|pane| self.panes.get_mut(pane))
+                        && pane.frame_values_mut().merge(fields)
+                    {
+                        self.redraw = true;
+                    }
+                }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Run { program, args } => self.run(&program, &args),
                 Command::FolderTrust { absolute } => {
@@ -1113,7 +1122,7 @@ impl Solium {
                 // the new one starts with none, so a key it no longer hands
                 // over is not left on screen
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
-                self.decorations.clear_values();
+                self.decorations.clear_values(&mut self.panes);
                 // Likewise: the old declaration is the previous session's,
                 // and a configuration that stops calling `sol.workspaces`
                 // must publish none, not what it last said. `workspaces.lua`

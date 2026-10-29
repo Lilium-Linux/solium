@@ -95,14 +95,21 @@ pub(crate) enum Action {
 
 impl Action {
     fn parse(name: &str) -> Option<Self> {
+        let action = Self::named(name);
+        if action.is_none() {
+            tracing::warn!(name, "the titlebar asked for something unknown");
+        }
+        action
+    }
+
+    /// The built-in action a name is, if it is one: what a layer's
+    /// `Solium.send` does itself rather than hand to `sol.on("frame")`.
+    pub(crate) fn named(name: &str) -> Option<Self> {
         match name {
             "close" => Some(Self::Close),
             "maximize" => Some(Self::ToggleMaximize),
             "minimize" => Some(Self::Minimize),
-            _ => {
-                tracing::warn!(name, "the titlebar asked for something unknown");
-                None
-            }
+            _ => None,
         }
     }
 }
@@ -217,6 +224,33 @@ pub(crate) struct Look<'a> {
     /// What the configuration hands every layer, as `values`.
     /// `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
     pub(crate) values: &'a Values,
+    /// The window the frame belongs to and its state (#417), `None` to
+    /// leave what was told last: a window that went is faded out with the
+    /// frame it had. `tests::a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes`.
+    pub(crate) window: Option<FrameWindow>,
+    /// What the configuration handed this window's frame, as
+    /// `windowValues`: `sol.frame(id, { key = value })`.
+    /// `tests::a_layer_is_told_its_windows_own_values`.
+    pub(crate) window_values: &'a Values,
+}
+
+/// The window a frame belongs to, as every layer is told it (#417):
+/// `windowId`, `pid` and the window's state, so a bar can act on its own
+/// window and show what it is, and the configuration can tell which frame
+/// sent it something (`sol.on("frame")`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrameWindow {
+    /// The window's id, as `sol.windows()` gives it.
+    pub(crate) id: u64,
+    /// Its process, as `sol.windows()` gives it; `-1` on a layer when it
+    /// cannot be told.
+    pub(crate) pid: Option<u32>,
+    pub(crate) maximized: bool,
+    pub(crate) fullscreen: bool,
+    /// No layout holds it in a tile: every window of a floating desktop, and
+    /// one a tiling layout let float.
+    pub(crate) floating: bool,
+    pub(crate) minimized: bool,
 }
 
 /// What a frame shows.
@@ -233,6 +267,10 @@ struct Shown {
     caret: Option<Rectangle<i32, Logical>>,
     /// Which generation of the configuration's values was last written.
     values: u64,
+    /// The window and its state, as last written.
+    window: Option<FrameWindow>,
+    /// Which generation of this window's own values was last written.
+    window_values: u64,
 }
 
 /// How a rasterised frame reaches the screen.
@@ -434,7 +472,7 @@ struct LayerScene {
     /// three layers of one style have three different canvases, and the cost of
     /// bleed is paid by the layer that asked for it. Read by [`spread`] for the
     /// canvas, by `overlay` below for the bands, and by
-    /// [`Decoration::pointer`], which has to put the pointer back into a
+    /// [`Decoration::pointer_event`], which has to put the pointer back into a
     /// coordinate frame this moved.
     bleed: Bleed,
     /// Whether this layer paints outside the space the style reserved.
@@ -473,6 +511,8 @@ struct LayerScene {
     /// When this layer was last drawn at a new size, for its `resizeHz`.
     /// `tests::a_layer_is_drawn_again_for_a_new_size_at_most_resize_hz_times_a_second`.
     resized_at: Option<std::time::Duration>,
+    /// Whether this layer holds a `Grab`, as its scene last said (#417).
+    grabbing: bool,
 }
 
 /// A decoration animates on its own clock -- a border easing to a new colour, a
@@ -610,7 +650,7 @@ impl Decoration {
         } else {
             (width.max(1), height.max(1))
         };
-        let mut scene = qml::Scene::for_host(path, built.0, built.1, None)?;
+        let mut scene = qml::Scene::for_frame(path, built.0, built.1, None)?;
         let insets = Insets {
             top: scene.get_int("insetTop").max(0),
             right: scene.get_int("insetRight").max(0),
@@ -661,6 +701,7 @@ impl Decoration {
                 asleep: false,
                 told: (0, 0),
                 resized_at: None,
+                grabbing: false,
             }],
             insets,
             // A single QML file has no manifest either, and `client.radius` is
@@ -974,7 +1015,37 @@ impl Decoration {
             pointer_inside,
             caret,
             values,
+            window,
+            window_values,
         } = *look;
+        // The window and its state, once per change:
+        // `tests::a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes`.
+        if let Some(window) = window
+            && self.shown.window != Some(window)
+        {
+            let id = i32::try_from(window.id).unwrap_or(i32::MAX);
+            let pid = window
+                .pid
+                .and_then(|pid| i32::try_from(pid).ok())
+                .unwrap_or(-1);
+            for layer in &mut self.layers {
+                layer.scene.set_int("windowId", id);
+                layer.scene.set_int("pid", pid);
+                layer.scene.set_bool("maximized", window.maximized);
+                layer.scene.set_bool("fullscreen", window.fullscreen);
+                layer.scene.set_bool("floating", window.floating);
+                layer.scene.set_bool("minimized", window.minimized);
+            }
+            self.shown.window = Some(window);
+        }
+        // This window's own values, as the configuration's are:
+        // `tests::a_layer_is_told_its_windows_own_values`.
+        if self.shown.window_values != window_values.generation {
+            for layer in &mut self.layers {
+                layer.scene.set_json("windowValues", &window_values.object);
+            }
+            self.shown.window_values = window_values.generation;
+        }
         // The caret on its own, written in place whenever it moves, comes or
         // goes, and not on the frames in between:
         // `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
@@ -1025,7 +1096,7 @@ impl Decoration {
     /// stays hovered forever, and a border lit by proximity stays lit.
     ///
     /// Sent raw, **not** shifted into a bleeding layer's canvas the way
-    /// [`Self::pointer`] shifts a real position. `(-1, -1)` means "off the end
+    /// [`Self::pointer_event`] shifts a real position. `(-1, -1)` means "off the end
     /// of everything", and a layer bleeding 24px to the left would receive
     /// `(23, 23)` — a point comfortably inside its canvas, so the leave event
     /// would arrive as a hover and the border lit by proximity would stay lit
@@ -1036,38 +1107,6 @@ impl Decoration {
             layer.scene.set_bool("pointerInside", false);
         }
         self.shown.pointer_inside = false;
-    }
-
-    /// Pointer input in frame-local coordinates.
-    ///
-    /// To **every** layer, which is the honest answer until input is scoped. A
-    /// layer is the size of the pane and the coordinates are the pane's, so a
-    /// press under a button in one layer is under whatever happens to be at
-    /// that spot in every other — and hover state that is never delivered is a
-    /// border that stays lit. Deciding which layer *wants* the press needs the
-    /// scene to say whether a `MouseArea` accepted it, which the spec's *Input,
-    /// scoped* section is about and which nothing here can answer yet. What
-    /// [`Self::take_action`] does in the meantime is decide which of the layers
-    /// that answered is *believed*, topmost first — a strictly better guess
-    /// than the one underneath, and one that needs nothing new from Qt.
-    ///
-    /// **Into each layer's own canvas**, which is not the pane's space once a
-    /// layer bleeds. `x` and `y` are measured from the pane's top-left corner
-    /// and a canvas starts `bleedLeft` to the left of it, so a layer with any
-    /// bleed would otherwise find every button `bleedLeft` to the right of
-    /// where the pointer really was — the close button lighting up while the
-    /// pointer is over the maximise one. This is only the frame the point is
-    /// expressed in; the *clip* is in the callers, both of which test the
-    /// pane's outer rect before they reach a decoration at all — see
-    /// `state::tests::a_point_in_the_bleed_is_not_in_the_pane`.
-    pub(crate) fn pointer(&mut self, x: f64, y: f64, pressed: Option<bool>) {
-        for layer in &mut self.layers {
-            layer.scene.pointer(
-                x + f64::from(layer.bleed.left),
-                y + f64::from(layer.bleed.top),
-                pressed,
-            );
-        }
     }
 
     /// Whether a control claims the finger's point. Pointer hover is separate:
@@ -1123,7 +1162,7 @@ impl Decoration {
     /// **Topmost first**, which is [`crate::render::PANE_ORDER`] read from the
     /// front — the order the compositor draws in — so that of the layers that
     /// *answered*, the one on top is believed. It arbitrates; it does not
-    /// decide who is asked. [`Self::pointer`] still delivers to every layer, so
+    /// decide who is asked. [`Self::pointer_event`] still delivers to every layer, so
     /// an `above` layer painting an opaque panel over a close button it has no
     /// `MouseArea` of its own for leaves that button the only answerer, and the
     /// window closes under the panel. Fixing *that* needs the scene to say
@@ -1167,6 +1206,107 @@ impl Decoration {
         });
         asked.first().copied()
     }
+
+    /// Every action a layer sent with `Solium.send(name, data)` since the
+    /// last call, layer by layer and each layer's in order (#417).
+    /// `state::tests::real_client::reflow_on_close::frames::a_frame_sends_a_named_action_with_its_data_to_lua`.
+    pub(crate) fn take_sent(&mut self) -> Vec<(String, crate::json::Json)> {
+        self.layers
+            .iter_mut()
+            .flat_map(|layer| std::iter::from_fn(|| layer.scene.take_action()).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// Read what each layer says of its grabs: whether one of them holds a
+    /// `Grab` now, and whether one began to since the last call (#417).
+    pub(crate) fn take_grabs(&mut self) -> (bool, bool) {
+        let mut began = false;
+        for layer in &mut self.layers {
+            match layer.scene.take_grab() {
+                crate::qml::hosted::GrabReport::Held(_) => {
+                    began |= !layer.grabbing;
+                    layer.grabbing = true;
+                }
+                crate::qml::hosted::GrabReport::Released => layer.grabbing = false,
+                crate::qml::hosted::GrabReport::Unchanged => {}
+            }
+        }
+        (self.holds_grab(), began)
+    }
+
+    /// Whether a layer holds a `Grab`, as last read.
+    pub(crate) fn holds_grab(&self) -> bool {
+        self.layers.iter().any(|layer| layer.grabbing)
+    }
+
+    /// Whether a point in the pane's own space is inside the target of a
+    /// grab a layer holds.
+    pub(crate) fn grab_contains(&self, x: f64, y: f64) -> bool {
+        self.layers.iter().any(|layer| {
+            layer.grabbing
+                && layer.scene.grab_contains(
+                    x + f64::from(layer.bleed.left),
+                    y + f64::from(layer.bleed.top),
+                )
+        })
+    }
+
+    /// Dismiss every grab a layer holds: each one's `onDismissed` runs.
+    pub(crate) fn dismiss_grabs(&mut self) {
+        for layer in &mut self.layers {
+            if layer.grabbing {
+                layer.scene.dismiss();
+            }
+        }
+    }
+
+    /// Pointer input in frame-local coordinates.
+    ///
+    /// To **every** layer, which is the honest answer until input is scoped. A
+    /// layer is the size of the pane and the coordinates are the pane's, so a
+    /// press under a button in one layer is under whatever happens to be at
+    /// that spot in every other — and hover state that is never delivered is a
+    /// border that stays lit. Deciding which layer *wants* the press needs the
+    /// scene to say whether a `MouseArea` accepted it, which the spec's *Input,
+    /// scoped* section is about and which nothing here can answer yet. What
+    /// [`Self::take_action`] does in the meantime is decide which of the layers
+    /// that answered is *believed*, topmost first — a strictly better guess
+    /// than the one underneath, and one that needs nothing new from Qt.
+    ///
+    /// **Into each layer's own canvas**, which is not the pane's space once a
+    /// layer bleeds. `x` and `y` are measured from the pane's top-left corner
+    /// and a canvas starts `bleedLeft` to the left of it, so a layer with any
+    /// bleed would otherwise find every button `bleedLeft` to the right of
+    /// where the pointer really was — the close button lighting up while the
+    /// pointer is over the maximise one. This is only the frame the point is
+    /// expressed in; the *clip* is in the callers, both of which test the
+    /// pane's outer rect before they reach a decoration at all — see
+    /// `state::tests::a_point_in_the_bleed_is_not_in_the_pane`.
+    /// With its button, the buttons held and the wheel, so a right press is
+    /// the right button and a wheel turn reaches a `WheelHandler` (#417).
+    /// `state::tests::real_client::reflow_on_close::frames::a_right_press_and_the_wheel_on_the_titlebar_reach_the_frame_and_not_the_client`.
+    pub(crate) fn pointer_event(
+        &mut self,
+        x: f64,
+        y: f64,
+        event: &crate::qml::hosted::ScenePointer,
+    ) {
+        for layer in &mut self.layers {
+            layer.scene.pointer_event(
+                x + f64::from(layer.bleed.left),
+                y + f64::from(layer.bleed.top),
+                event,
+            );
+        }
+    }
+
+    /// One key, to every layer: what the item with the keyboard focus in
+    /// each hears, while the frame holds a grab (#417).
+    pub(crate) fn key(&mut self, key: &crate::qml::hosted::SceneKey) {
+        for layer in &mut self.layers {
+            layer.scene.key(key);
+        }
+    }
 }
 
 /// The caret as a layer reads it: `{ valid, x, y, width, height }`, in the
@@ -1193,9 +1333,28 @@ fn caret_json(caret: Option<Rectangle<i32, Logical>>) -> crate::json::Json {
 /// without being drawn, and each layer's own picture.
 #[cfg(test)]
 impl Decoration {
+    /// [`Self::pointer_event`] as the left button alone: `None` is motion,
+    /// `Some(true)` a press and `Some(false)` its release.
+    pub(crate) fn pointer(&mut self, x: f64, y: f64, pressed: Option<bool>) {
+        for layer in &mut self.layers {
+            layer.scene.pointer(
+                x + f64::from(layer.bleed.left),
+                y + f64::from(layer.bleed.top),
+                pressed,
+            );
+        }
+    }
+
     /// Tell every layer what a frame tells it.
     pub(crate) fn tell_as_a_frame_would(&mut self, look: &Look<'_>, width: i32, height: i32) {
         self.tell(look, width, height);
+    }
+
+    /// The first layer's integer property `name`, as its root reads it now.
+    pub(crate) fn first_layer_int(&mut self, name: &str) -> i32 {
+        self.layers
+            .first_mut()
+            .map_or(i32::MIN, |layer| layer.scene.get_int(name))
     }
 
     /// Every layer's `layerOpacity` now, by name: how opaque the next frame
@@ -1361,7 +1520,7 @@ impl LayerScene {
                 (&manifest, Some(inline.as_str()))
             }
         };
-        let mut scene = qml::Scene::for_host(path, built.0, built.1, initial)?;
+        let mut scene = qml::Scene::for_frame(path, built.0, built.1, initial)?;
         // Where the pane's own corner is inside the canvas. Written once
         // because a declared bleed never changes; the pane's *size* does, and
         // that goes through `tell` with everything else that can move.
@@ -1459,6 +1618,7 @@ impl LayerScene {
             asleep: false,
             told: (0, 0),
             resized_at: None,
+            grabbing: false,
         })
     }
 
@@ -1776,6 +1936,14 @@ pub(crate) struct Decorations {
     /// What the configuration hands every layer as `values`.
     /// `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
     values: Values,
+    /// The frame whose layer holds a `Grab` (#417): the pointer over the
+    /// grab's target, and every key no binding takes, are that frame's, and
+    /// a press anywhere else dismisses it. One at a time, as a shell's.
+    /// `state::tests::real_client::reflow_on_close::frames::a_frame_holding_a_grab_takes_the_press_over_the_client_and_is_dismissed_outside`.
+    pub(crate) holding: Option<PaneId>,
+    /// The frame a press was given to, which is given its release wherever
+    /// the pointer is let go, as a shell's scene is (#417).
+    pub(crate) pressed: Option<PaneId>,
 }
 
 /// Values the configuration hands every layer of every pane, as one object,
@@ -1798,6 +1966,17 @@ pub(crate) struct Values {
 }
 
 impl Values {
+    /// None at all, for a test that tells a frame nothing of its own.
+    #[cfg(test)]
+    pub(crate) fn none() -> &'static Self {
+        static NONE: Values = Values {
+            fields: std::collections::BTreeMap::new(),
+            object: crate::json::Json::Object(std::collections::BTreeMap::new()),
+            generation: 0,
+        };
+        &NONE
+    }
+
     /// The values as the object a layer is handed, for `scenario`.
     #[cfg(test)]
     pub(crate) const fn object(&self) -> &crate::json::Json {
@@ -1823,7 +2002,7 @@ impl Values {
     /// Forget every value, as a reload does: they were the configuration's
     /// that handed them. A change like any other, so every frame is told.
     /// `tests::a_reload_starts_the_frames_values_afresh`.
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         if self.fields.is_empty() {
             return;
         }
@@ -1849,10 +2028,16 @@ impl Decorations {
         &self.values
     }
 
-    /// Forget what every `sol.pane_values{ ... }` handed over, for a reload.
+    /// Forget what every `sol.pane_values{ ... }` and `sol.frame(id, ...)`
+    /// handed over, for a reload.
     /// `tests::a_reload_starts_the_frames_values_afresh`.
-    pub(crate) fn clear_values(&mut self) {
+    pub(crate) fn clear_values(&mut self, panes: &mut Panes) {
         self.values.clear();
+        // Cleared in place, so a frame told some is told the empty object,
+        // by the generation that moved.
+        for pane in panes.iter_mut() {
+            pane.frame_values_mut().clear();
+        }
     }
 
     /// Merge what `sol.pane_values{ ... }` handed over; whether it changed.
@@ -1928,7 +2113,7 @@ impl Decorations {
             match build(self.style.as_deref(), width, height) {
                 Ok(fresh) => {
                     if let Some(pane) = panes.get_mut(id) {
-                        pane.set_frame(Frame::Styled(fresh));
+                        pane.set_frame(Frame::Styled(Box::new(fresh)));
                     }
                 }
                 Err(err) => {
@@ -1971,7 +2156,7 @@ impl Decorations {
         // failure arm wrote nothing, so that `Pending` was where a pane whose
         // frame would not build was left.
         match build(self.style.as_deref(), width, height) {
-            Ok(decoration) => pane.set_frame(Frame::Styled(decoration)),
+            Ok(decoration) => pane.set_frame(Frame::Styled(Box::new(decoration))),
             Err(err) => {
                 // An undecorated window is worse than a decorated one and much
                 // better than no window.
@@ -2792,6 +2977,8 @@ mod tests {
                     pointer_inside: false,
                     caret: None,
                     values: &Values::default(),
+                    window: None,
+                    window_values: crate::decoration::Values::none(),
                 },
                 60,
                 120,
@@ -3279,6 +3466,8 @@ mod tests {
                         pointer_inside: false,
                         caret: None,
                         values,
+                        window: None,
+                        window_values: crate::decoration::Values::none(),
                     },
                     60,
                     88,
@@ -3507,6 +3696,8 @@ mod tests {
                         pointer_inside: false,
                         caret: None,
                         values: &values,
+                        window: None,
+                        window_values: crate::decoration::Values::none(),
                     },
                     60,
                     88,
@@ -3539,6 +3730,200 @@ mod tests {
 
             tell(&mut decoration, "");
             assert_eq!(read(&mut decoration), ([false, false], 0, false, 0), "none");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A layer is told its window and its state, and told again when it
+    /// changes** (#417): `windowId`, `pid`, `maximized`, `fullscreen`,
+    /// `floating` and `minimized` reach a delegated layer's root and an
+    /// inline layer's `PaneStyle`; a change reaches both again, and a frame
+    /// told no window, one that went, keeps what it was told.
+    #[test]
+    fn a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-window",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            readonly property string said: windowId + " " + pid + " "
+                                + maximized + " " + fullscreen + " " + floating + " " + minimized
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer { depth: "above"; name: "inline"; Item {} }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property int windowId: 0
+                            property int pid: -1
+                            property bool maximized: false
+                            property bool fullscreen: false
+                            property bool floating: false
+                            property bool minimized: false
+                            readonly property string said: windowId + " " + pid + " "
+                                + maximized + " " + fullscreen + " " + floating + " " + minimized
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let values = Values::default();
+            let tell = |decoration: &mut Decoration, window: Option<FrameWindow>| {
+                decoration.tell(
+                    &Look {
+                        title: "a terminal",
+                        app_id: "",
+                        focused: true,
+                        pointer_inside: false,
+                        caret: None,
+                        values: &values,
+                        window,
+                        window_values: Values::none(),
+                    },
+                    60,
+                    88,
+                );
+            };
+            let read = |decoration: &Decoration| -> Vec<String> {
+                decoration
+                    .layers
+                    .iter()
+                    .map(|layer| layer.scene.get_string_for_test("said"))
+                    .collect()
+            };
+
+            let window = FrameWindow {
+                id: 7,
+                pid: Some(4242),
+                floating: true,
+                ..FrameWindow::default()
+            };
+            tell(&mut decoration, Some(window));
+            assert_eq!(read(&decoration), ["7 4242 false false true false"; 2]);
+
+            let maximized = FrameWindow {
+                maximized: true,
+                floating: false,
+                pid: None,
+                ..window
+            };
+            tell(&mut decoration, Some(maximized));
+            assert_eq!(
+                read(&decoration),
+                ["7 -1 true false false false"; 2],
+                "changed, with nothing else told"
+            );
+
+            tell(&mut decoration, None);
+            assert_eq!(
+                read(&decoration),
+                ["7 -1 true false false false"; 2],
+                "a window that went keeps what it was told"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A layer is told its window's own values** (#417): what
+    /// `sol.frame(id, { ... })` merged into the pane's values reaches a
+    /// delegated layer's root and an inline layer's `PaneStyle` as
+    /// `windowValues`, once per change, another pane's frame is told none of
+    /// it, and a reload's clearing reaches it as the empty object.
+    #[test]
+    fn a_layer_is_told_its_windows_own_values() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "told-window-values",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            readonly property real opacityTold: windowValues.opacity === undefined
+                                ? -1 : windowValues.opacity
+
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer { depth: "above"; name: "inline"; Item {} }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r#"
+                        import QtQuick
+
+                        Item {
+                            property var windowValues: ({})
+                            readonly property real opacityTold: windowValues.opacity === undefined
+                                ? -1 : windowValues.opacity
+                        }
+                        "#,
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut ours = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let mut theirs = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            let values = Values::default();
+            let mut own = Values::default();
+            let tell = |decoration: &mut Decoration, window_values: &Values| {
+                decoration.tell(
+                    &Look {
+                        title: "",
+                        app_id: "",
+                        focused: true,
+                        pointer_inside: false,
+                        caret: None,
+                        values: &values,
+                        window: None,
+                        window_values,
+                    },
+                    60,
+                    88,
+                );
+            };
+            let read = |decoration: &Decoration| -> Vec<f64> {
+                decoration
+                    .layers
+                    .iter()
+                    .map(|layer| layer.scene.get_real("opacityTold", f64::NAN))
+                    .collect()
+            };
+
+            tell(&mut ours, &own);
+            assert_eq!(read(&ours), [-1.0, -1.0], "none handed yet");
+
+            assert!(own.merge(std::collections::BTreeMap::from([(
+                "opacity".to_owned(),
+                crate::json::Json::Number(0.5)
+            )])));
+            tell(&mut ours, &own);
+            tell(&mut theirs, Values::none());
+            assert_eq!(read(&ours), [0.5, 0.5]);
+            assert_eq!(read(&theirs), [-1.0, -1.0], "another window's frame");
+
+            own.clear();
+            tell(&mut ours, &own);
+            assert_eq!(read(&ours), [-1.0, -1.0], "a reload starts them afresh");
 
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -3597,6 +3982,8 @@ mod tests {
                 pointer_inside: false,
                 caret,
                 values: &values,
+                window: None,
+                window_values: crate::decoration::Values::none(),
             };
             let read = |decoration: &mut Decoration| {
                 let [delegated, inline] = &mut decoration.layers[..] else {
@@ -3690,6 +4077,8 @@ mod tests {
                         pointer_inside: false,
                         caret: None,
                         values,
+                        window: None,
+                        window_values: crate::decoration::Values::none(),
                     },
                     60,
                     88,
@@ -3781,6 +4170,8 @@ mod tests {
                     pointer_inside: false,
                     caret: Some(Rectangle::new((25, 7).into(), (2, 16).into())),
                     values: &values,
+                    window: None,
+                    window_values: crate::decoration::Values::none(),
                 },
                 60,
                 88,
@@ -4202,7 +4593,7 @@ mod tests {
             let decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
             assert_eq!(decoration.rules(), &style.rules[..]);
             assert_eq!(decoration.rules_generation(), style.rules_generation);
-            let frame = crate::pane::Frame::Styled(decoration);
+            let frame = crate::pane::Frame::Styled(Box::new(decoration));
             let (rules, generation) = crate::render::style_rules(&frame);
             assert_eq!(
                 (rules.len(), generation),
@@ -4853,6 +5244,8 @@ mod tests {
                         pointer_inside: false,
                         caret: None,
                         values: &Values::default(),
+                        window: None,
+                        window_values: crate::decoration::Values::none(),
                     },
                     300,
                     200,
@@ -5459,6 +5852,8 @@ mod tests {
             pointer_inside: false,
             caret: None,
             values,
+            window: None,
+            window_values: crate::decoration::Values::none(),
         }
     }
 
@@ -5826,6 +6221,8 @@ mod tests {
                         pointer_inside: false,
                         caret: None,
                         values: &values,
+                        window: None,
+                        window_values: crate::decoration::Values::none(),
                     },
                     400,
                     300,

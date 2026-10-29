@@ -86,7 +86,7 @@ use smithay::{
 use zxdg_toplevel_decoration_v1::Mode;
 
 use crate::{
-    decoration::{Action, Decorations, Insets, TITLEBAR_HEIGHT},
+    decoration::{Action, Decorations, FrameWindow, Insets, TITLEBAR_HEIGHT},
     input::{grab::MoveGrab, profile::Profile, resize},
     layer, monitor,
     pane::Pane,
@@ -99,6 +99,7 @@ use crate::{
 
 mod close;
 mod commands;
+mod frames;
 mod handlers;
 mod held;
 mod hit_test;
@@ -166,7 +167,7 @@ fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logica
 /// override-redirect menu, or `pane = "none"` — which got a titlebar's
 /// worth of blank space above it with no titlebar in it. That is what an
 /// Electron application looked like here.
-const fn insets_for(frame: &crate::pane::Frame) -> Insets {
+fn insets_for(frame: &crate::pane::Frame) -> Insets {
     match frame {
         crate::pane::Frame::Pending => Insets {
             top: TITLEBAR_HEIGHT,
@@ -1999,6 +2000,30 @@ impl Solium {
             pane.client()
                 .map(|window| self.script_app_id(window))
                 .unwrap_or_default()
+        })
+    }
+
+    /// The window a pane's frame belongs to, and its state, as every layer
+    /// is told it (#417): `None` for a window that went, whose frame keeps
+    /// what it showed while it fades, as it keeps its title.
+    /// `decoration::tests::a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes`,
+    /// `tests::real_client::reflow_on_close::frames::a_frame_is_told_its_window_and_its_state`.
+    pub(crate) fn frame_window(&self, id: crate::pane::PaneId) -> Option<FrameWindow> {
+        let pane = self.panes.get(id)?;
+        if pane.left().is_some() {
+            return None;
+        }
+        let window = pane.client();
+        let states = window.map(window_states).unwrap_or_default();
+        Some(FrameWindow {
+            id: id.get(),
+            pid: window.and_then(|window| self.window_pid(window)),
+            maximized: states.maximized,
+            fullscreen: states.fullscreen,
+            // Held in no tile, nor out of one for a while: a maximised or
+            // fullscreen window keeps the tile it left.
+            floating: pane.placed().is_none() && pane.left_tile().is_none(),
+            minimized: pane.minimized(),
         })
     }
 

@@ -38,7 +38,6 @@ use smithay::{
 };
 
 use crate::{
-    decoration::Decoration,
     pane::Pane,
     qml::hosted::{PointerKind, ScenePointer},
     script,
@@ -47,6 +46,9 @@ use crate::{
 };
 
 use grab::MoveGrab;
+
+/// The left mouse button, as the kernel numbers it.
+const BTN_LEFT: u32 = 0x110;
 
 /// The right mouse button, as the kernel numbers it.
 const BTN_RIGHT: u32 = 0x111;
@@ -384,6 +386,32 @@ fn press(
             KeyPolicy::NoBindings => None,
         };
         return FilterResult::Intercept(Some(match binding {
+            Some(combo) => Action::Bound {
+                combo,
+                repeats: key_repeats(&handle),
+            },
+            None => Action::Scene(scene_key(&handle, modifiers, true)),
+        }));
+    }
+
+    // A window frame holding a grab (#417): its quick settings, dropped down
+    // over the window. A key a binding takes is the binding's, so the
+    // compositor's own keys work as they did; every other key is the
+    // frame's, Escape among them, and none reaches the window under it.
+    // `state::tests::real_client::reflow_on_close::frames::a_frame_holding_a_grab_takes_the_keys_no_binding_takes`.
+    if state.decorations.holding.is_some() {
+        let combos = combos_for(
+            modifiers,
+            handle.modified_sym(),
+            handle.raw_latin_sym_or_raw_current_sym(),
+        );
+        let bound = state.scripts.as_ref().and_then(|scripts| {
+            combos
+                .iter()
+                .find(|combo| scripts.has_binding(combo))
+                .cloned()
+        });
+        return FilterResult::Intercept(Some(match bound {
             Some(combo) => Action::Bound {
                 combo,
                 repeats: key_repeats(&handle),
@@ -1070,6 +1098,7 @@ pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, 
         || state.scene_press.is_some()
         || state.hosted_grab.is_some()
         || state.hosted_keyboard.is_some()
+        || state.decorations.holding.is_some()
         || state.pointed_above(location)
     {
         return;
@@ -1097,6 +1126,16 @@ pub(crate) fn follow_pointer(state: &mut Solium, location: Point<f64, Logical>, 
 /// (`state::tests::real_client::reflow_on_close::hosted::a_hovered_frame_hears_the_pointer_leave_onto_a_shell_button_over_it`,
 /// `state::tests::real_client::reflow_on_close::hosted::the_frames_are_kept_from_the_pointer_only_where_a_shell_takes_a_press`).
 fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
+    // A frame given a press has the pointer until every button is up,
+    // wherever it goes, with the buttons held, as a shell's scene has: a
+    // slider dragged off the window follows the pointer rather than hearing
+    // it leave (#417).
+    // `state::tests::real_client::reflow_on_close::frames::a_slider_dragged_off_the_frame_follows_the_pointer`.
+    if let Some(id) = state.decorations.pressed {
+        let motion = scene_event(state, PointerKind::Motion);
+        state.frame_pointer(id, location, &motion);
+        return;
+    }
     // The whole window, not just the frame band: a decoration that reacts to
     // the cursor wants to know where it is while it crosses the client too.
     let under = if state.frames_kept_from(location) {
@@ -1118,11 +1157,57 @@ fn hover_frame(state: &mut Solium, location: Point<f64, Logical>) {
     }
 
     state.hovered_frame = under.as_ref().map(|(id, _)| *id);
-    if let Some((id, local)) = under
-        && let Some(decoration) = state.panes.get_mut(id).and_then(Pane::decoration_mut)
-    {
-        decoration.pointer(local.x, local.y, None);
+    if let Some((id, local)) = under {
+        let motion = scene_event(state, PointerKind::Motion);
+        if let Some(decoration) = state.panes.get_mut(id).and_then(Pane::decoration_mut) {
+            decoration.pointer_event(local.x, local.y, &motion);
+        }
     }
+}
+
+/// A window frame's turn at a button, before the compositor's other
+/// interpretations of it (#417); whether it took the button.
+///
+/// The release of a press a frame was given is that frame's, wherever it is
+/// let go, as a shell scene's is (Ruling 7), and is taken once every button
+/// is up. When a drag of the window started at the press, the release goes
+/// on to the drag as well, which ends with it.
+///
+/// While a frame holds a grab, a press away from what it reaches over is
+/// none of the window's: it dismisses the grab and is swallowed, with its
+/// release, as a press outside a shell's popup is by default (Ruling 13).
+/// `state::tests::real_client::reflow_on_close::frames::a_frame_holding_a_grab_takes_the_press_over_the_client_and_is_dismissed_outside`.
+fn frame_button(
+    state: &mut Solium,
+    location: Point<f64, Logical>,
+    button: u32,
+    pressed: bool,
+    scene: Option<ScenePointer>,
+    grabbed: bool,
+) -> bool {
+    if !pressed && let Some(id) = state.decorations.pressed {
+        if let Some(scene) = scene {
+            state.frame_pointer(id, location, &scene);
+        }
+        if state.pointer_buttons == 0 {
+            state.decorations.pressed = None;
+            // The client under the pointer has it again at once, as after a
+            // press a shell's scene held.
+            if !grabbed {
+                state.repoint_clients();
+            }
+        }
+        return !grabbed;
+    }
+    let Some(holder) = state.decorations.holding else {
+        return false;
+    };
+    if !pressed || state.in_frame_grab(location) {
+        return false;
+    }
+    state.dismiss_frame_grab(holder);
+    state.swallowed.insert(button);
+    true
 }
 
 /// A button, pressed or let go: [`pointer_button`], with what a warp asked
@@ -1224,6 +1309,20 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
         GrabRoute::Passed | GrabRoute::NoGrab => {}
     }
 
+    // A window frame's turn (#417): the release of a press it took, and a
+    // press away from the grab one of its layers holds.
+    if frame_button(
+        state,
+        location,
+        button,
+        pressed,
+        scene,
+        pointer.is_grabbed(),
+    ) {
+        state.redraw = true;
+        return;
+    }
+
     // A button Qt has no name for, while a scene holds a press, is none of
     // the compositor's to interpret either: the pointer is the scene's until
     // every button is up (Ruling 7), and no scene is told of such a button
@@ -1316,34 +1415,35 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
             Chrome::Frame => {
                 let pressed = button_state == ButtonState::Pressed;
                 let id = under.pane;
-                let local = under.local;
-                let on_button = state
-                    .panes
-                    .get_mut(id)
-                    .and_then(Pane::decoration_mut)
-                    .is_some_and(|decoration| {
-                        decoration.pointer(local.x, local.y, Some(pressed));
-                        decoration.on_button()
-                    });
-
-                // Acted on release, so a press that lands on the wrong button
-                // can be dragged off it and abandoned.
-                if let Some(action) = state
-                    .panes
-                    .get_mut(id)
-                    .and_then(Pane::decoration_mut)
-                    .and_then(Decoration::take_action)
-                {
-                    state.frame_action(id, action);
+                // The button as it is, so a right press on the titlebar is a
+                // right press to its QML, and a press on a button can be
+                // dragged off it and abandoned, its release still the
+                // frame's (#417). A button Qt has no name for is not told.
+                // `state::tests::real_client::reflow_on_close::frames::a_right_press_and_the_wheel_on_the_titlebar_reach_the_frame_and_not_the_client`.
+                let on_button = match scene {
+                    Some(scene) => state.frame_pointer(id, location, &scene),
+                    None => false,
+                };
+                if pressed && scene.is_some() {
+                    state.decorations.pressed = Some(id);
                 }
+                // Over what a grab the frame holds reaches over the client,
+                // a press is the panel's, and never a drag.
+                let in_grab = state.frame_grab_at(id, under.local);
 
                 // Focus and dragging need a window. A frame around one that is
                 // still loading has neither, and its buttons work anyway --
                 // which is the point of giving it a frame: an application that
-                // is not coming can be dismissed before it arrives.
+                // is not coming can be dismissed before it arrives. Only the
+                // left button drags it: the others are the frame's to give a
+                // meaning to, a menu on the right one.
                 if pressed && let Some(window) = under.window {
                     state.focus_window(&window, serial, script::FocusSource::Click);
-                    if !on_button && let Some(geometry) = state.real_geometry(&window) {
+                    if !on_button
+                        && !in_grab
+                        && button == BTN_LEFT
+                        && let Some(geometry) = state.real_geometry(&window)
+                    {
                         let start_data = GrabStartData {
                             focus: None,
                             button,
@@ -1643,6 +1743,22 @@ fn pointer_axis<B: InputBackend>(state: &mut Solium, event: impl PointerAxisEven
             || (pointer.current_focus().is_none()
                 && state.surface_pointer(false, location, Some(wheel))))
     {
+        return;
+    }
+
+    // Over a window's frame, the wheel is the frame's, in Qt's terms as a
+    // scene's is: a titlebar that changes its application's volume is a
+    // `WheelHandler` in its QML (#417). What a grab the frame holds reaches
+    // over the client is its frame too.
+    // `state::tests::real_client::reflow_on_close::frames::a_right_press_and_the_wheel_on_the_titlebar_reach_the_frame_and_not_the_client`.
+    if moves
+        && !pointer.is_grabbed()
+        && !state.client_above(location)
+        && let Some(under) = state.chrome_under(location)
+        && matches!(under.chrome, Chrome::Frame)
+    {
+        state.frame_pointer(under.pane, location, &wheel);
+        state.redraw = true;
         return;
     }
 

@@ -484,6 +484,18 @@ impl Solium {
         // `state::tests::real_client::reflow_on_close::hosted::the_lock_forgets_the_presses_a_shell_swallowed`.
         self.dismiss_hosted_grab();
         self.swallowed.clear();
+        // And a window frame's, and the press a frame was given, whose
+        // release is the lock screen's (#417).
+        // `state::tests::real_client::reflow_on_close::frames::locking_the_session_dismisses_a_frames_grab_and_its_press`.
+        if let Some(pane) = self.decorations.holding.take()
+            && let Some(decoration) = self
+                .panes
+                .get_mut(pane)
+                .and_then(crate::pane::Pane::decoration_mut)
+        {
+            decoration.dismiss_grabs();
+        }
+        self.decorations.pressed = None;
         // And a scene's hold on the keyboard, which is the lock screen's now.
         // `state::tests::real_client::lock_focus::no_scene_holds_the_keyboard_while_the_session_is_locked`.
         self.end_keyboard_hold(false);

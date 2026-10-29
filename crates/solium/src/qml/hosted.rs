@@ -413,6 +413,29 @@ pub(crate) fn set_arrangement(json: &str) -> bool {
 }
 
 impl Scene {
+    /// A window frame's layer, hosted on no monitor (#417): `Solium.send`
+    /// queues what it sends, for `sol.on("frame")`, a `Grab` holds the
+    /// pointer and the keys for it, and its window is active, so an item
+    /// with `focus: true` hears the keys it is given. `Solium.monitor` reads
+    /// the absent row an unhosted scene reads.
+    /// `state::tests::real_client::reflow_on_close::frames::a_frame_sends_a_named_action_with_its_data_to_lua`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn for_frame(
+        qml_path: &Path,
+        width: i32,
+        height: i32,
+        initial: Option<&str>,
+    ) -> Result<Self> {
+        // SAFETY: a static empty string, which the host copies.
+        unsafe { ffi::solium_qml_host_next_on(c"".as_ptr()) };
+        let built = Self::for_host(qml_path, width, height, initial);
+        // Cleared whether or not the scene was built, so no later scene is
+        // hosted by accident, as `for_monitor` clears it.
+        // SAFETY: null is the documented "none".
+        unsafe { ffi::solium_qml_host_next_on(std::ptr::null()) };
+        built
+    }
+
     /// A scene hosted on one monitor: `Solium.monitor` inside it is that
     /// monitor's row, from the moment it is built.
     /// `tests::the_attached_type_shares_the_solium_uri_with_the_shipped_module`.

@@ -449,8 +449,11 @@ A `Theme.qml` of your own in `~/.config/solium/qml/Solium/` is meant to
 override the shipped one, and does not yet: the shipped module is found first
 ([#88](https://github.com/Lilium-Linux/solium/issues/88)).
 The attached `Solium` object and `Grab` belong to a hosted scene, which
-`sol.surface` builds on a monitor. Elsewhere (a pane's layers, the loading
-window, the pointer's scene, the fallback pointer) they build and do nothing:
+`sol.surface` builds on a monitor. A pane's layers are hosted on no monitor:
+`Solium.send` reaches `sol.on("frame")` and a `Grab` holds the pointer and the
+keys for the frame (the panes README, "Sending to Lua, and a panel over the
+window"), and the rest is as below. Elsewhere (the loading window, the
+pointer's scene, the fallback pointer) they build and do nothing:
 `Solium.monitor` is an
 absent row with an empty `name` and `present: false`, `Solium.surface.reserve`
 reserves nothing, and `Solium.keyboard` and a `Grab` hold nothing

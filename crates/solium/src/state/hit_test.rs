@@ -638,9 +638,13 @@ impl Solium {
         // moment its frame appears -- but there is no titlebar there yet for a
         // click to land on, and there never was: this is the `decoration()?`
         // that gated `frame_under`.
+        // And so is whatever a grab the frame holds reaches over the client:
+        // its quick settings, dropped down over the window (#417).
+        // `tests::real_client::reflow_on_close::frames::a_frame_holding_a_grab_takes_the_press_over_the_client_and_is_dismissed_outside`.
         let framed = pane.decoration().is_some()
             && drawn.covers(location)
-            && on_frame(outer.size, self.insets_of(pane.id()), in_outer);
+            && (on_frame(outer.size, self.insets_of(pane.id()), in_outer)
+                || self.frame_grab_at(pane.id(), in_outer));
 
         #[expect(
             clippy::cast_possible_truncation,
@@ -691,6 +695,20 @@ impl Solium {
             local: in_outer,
             outer,
         })
+    }
+
+    /// A point in a pane's own space, through the transform it is drawn
+    /// with, as [`Self::pane_chrome`] puts a press into it: where its frame's
+    /// layers hear the pointer. Wherever the point is, on the pane or not.
+    pub(crate) fn pane_local(
+        &self,
+        id: crate::pane::PaneId,
+        location: Point<f64, Logical>,
+    ) -> Option<Point<f64, Logical>> {
+        let pane = self.panes.get(id)?;
+        let outer = self.pane_outer(pane);
+        let drawn = self.drawn_at(pane, outer, self.clock.now());
+        Some(present::to_window_space(drawn, outer, location) - outer.loc.to_f64())
     }
 
     /// The window drawn at a point, topmost first, with its real geometry.
@@ -818,7 +836,14 @@ impl Solium {
         // it is let go of (Ruling 12), so no client has it meanwhile.
         // `tests::real_client::reflow_on_close::hosted::a_release_after_dragging_off_a_shell_button_reaches_the_scene`,
         // `tests::real_client::reflow_on_close::hosted::while_a_grab_is_held_the_pointer_is_the_scenes`.
-        if pointer && (self.scene_press.is_some() || self.hosted_grab.is_some()) {
+        // So does a press a window frame was given (#417), until it is let
+        // go of: a slider in a frame's panel dragged across the client is
+        // the frame's, and the client is told nothing of it.
+        if pointer
+            && (self.scene_press.is_some()
+                || self.hosted_grab.is_some()
+                || self.decorations.pressed.is_some())
+        {
             return None;
         }
 
@@ -903,6 +928,16 @@ impl Solium {
         // cover the point is still asked about its popups, and only about
         // those. `a_menu_past_its_parents_tile_takes_the_press` pins it.
         let covered = frame.covers(location);
+        // Where a grab its frame holds reaches over the client, the frame
+        // has the pointer, and the client none of it (#417).
+        if covered
+            && self.frame_grab_at(
+                pane.id(),
+                present::to_window_space(frame, outer, location) - outer.loc.to_f64(),
+            )
+        {
+            return PaneSurface::Covered;
+        }
         let (window, kind) = match pane.client() {
             Some(window) if covered => (window, WindowSurfaceType::ALL),
             // A popup and its own subsurfaces, and not the toplevel's tree.

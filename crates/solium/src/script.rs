@@ -698,6 +698,12 @@ pub(crate) enum Command {
     /// Hand every pane's layers these values, merged into what they have.
     /// `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
     PaneValues(std::collections::BTreeMap<String, crate::json::Json>),
+    /// Hand one window's frame these values, as `windowValues`, merged into
+    /// what it has (#417). `tests::sol_frame_hands_one_window_its_values`.
+    FrameValues {
+        id: u64,
+        fields: std::collections::BTreeMap<String, crate::json::Json>,
+    },
     /// End the session.
     Quit,
     /// Read the configuration again.
@@ -944,6 +950,8 @@ impl Command {
             }
             Self::Decoration { .. }
             | Self::PaneValues(_)
+            // What a frame shows, which is nothing over a lock.
+            | Self::FrameValues { .. }
             | Self::Reload
             // No window holds the shortcuts at the lock, and taking them back
             // gives a window nothing.
@@ -2932,6 +2940,27 @@ impl Scripts {
     /// `nil` (Ruling 15).
     /// `tests::a_surface_action_reaches_lua_with_its_data`,
     /// `tests::an_action_with_no_data_reaches_lua_as_nil`.
+    /// A window frame's layer sent something that is not a built-in action
+    /// (#417): `sol.on("frame", function(id, name, data) ... end)`, with the
+    /// window's id, the name it sent and its data, as a scene's `surface`
+    /// listeners hear theirs. `tests::frame_listeners_hear_the_window_the_name_and_the_data`.
+    pub(crate) fn frame_action(
+        &mut self,
+        id: u64,
+        name: &str,
+        data: &crate::json::Json,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        let data = data.to_lua(&self.lua).unwrap_or_else(|err| {
+            tracing::warn!(%err, name, "a frame's data did not reach Lua");
+            Value::Nil
+        });
+        let name = name.to_owned();
+        self.dispatch_as(FocusSource::Surface, snapshot, move |lua, _| {
+            call_listeners(lua, "frame", (id, name.clone(), data.clone()))
+        })
+    }
+
     pub(crate) fn surface_action(
         &mut self,
         name: &str,
@@ -5416,6 +5445,21 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let fields = crate::json::Json::object_from_lua(&values)?;
             with_pending(lua, |pending| {
                 pending.commands.push(Command::PaneValues(fields));
+            })
+        })?,
+    )?;
+
+    // Values for one window's frame alone, read there as `windowValues`
+    // (#417): what the configuration keeps for that window and the frame
+    // shows, its opacity for one. Merged by key, as `sol.pane_values` is,
+    // and gone with the window.
+    // `tests::sol_frame_hands_one_window_its_values`.
+    sol.set(
+        "frame",
+        lua.create_function(|lua, (id, values): (u64, mlua::Table)| {
+            let fields = crate::json::Json::object_from_lua(&values)?;
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::FrameValues { id, fields });
             })
         })?,
     )?;
@@ -13056,6 +13100,45 @@ mod tests {
         let data = crate::json::Json::parse(r#"{"id":7}"#).expect("valid JSON");
         let outcome = scripts.surface_action("shell", "windows.focus", &data, one_screen(&[]));
         assert_eq!(outcome.status.as_deref(), Some("shell windows.focus 7"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A frame's listeners hear the window, the name and the data**
+    /// (#417): `sol.on("frame", function(id, name, data))`.
+    #[test]
+    fn frame_listeners_hear_the_window_the_name_and_the_data() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-frame-action",
+            r#"sol.on("frame", function(id, name, data) sol.status(id .. " " .. name .. " " .. data.by) end)"#,
+        );
+        let data = crate::json::Json::parse(r#"{"by":0.05}"#).expect("valid JSON");
+        let outcome = scripts.frame_action(7, "volume", &data, one_screen(&[]));
+        assert_eq!(outcome.status.as_deref(), Some("7 volume 0.05"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.frame` hands one window its values** (#417): the window's id
+    /// and the table, as a command, and nothing for anything not a table.
+    #[test]
+    fn sol_frame_hands_one_window_its_values() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-frame-values",
+            r#"sol.frame(7, { opacity = 0.5, label = "a" })
+               sol.status(tostring(pcall(sol.frame, 7, 1)))"#,
+        );
+        let outcome = scripts.startup();
+        let handed: Vec<(u64, String)> = outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::FrameValues { id, fields } => {
+                    Some((*id, crate::json::Json::Object(fields.clone()).render()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(handed, [(7, r#"{"label":"a","opacity":0.5}"#.to_owned())]);
+        assert_eq!(outcome.status.as_deref(), Some("false"));
         let _ = std::fs::remove_dir_all(&directory);
     }
 

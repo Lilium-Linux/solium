@@ -5007,21 +5007,33 @@ fn chrome(
 ) {
     let title = state.pane_title(pane);
     let app_id = state.pane_app_id(pane);
-    let look = crate::decoration::Look {
-        title: &title,
-        app_id: &app_id,
-        focused: state.looks_focused(pane),
-        pointer_inside: state.pointer_over(pane),
-        // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
-        caret: state.caret_in(pane),
-        // `decoration::tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
-        values: state.decorations.values(),
-    };
+    let focused = state.looks_focused(pane);
+    let pointer_inside = state.pointer_over(pane);
+    // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
+    let caret = state.caret_in(pane);
+    // `decoration::tests::a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes`.
+    let window = state.frame_window(pane);
     let mut around = slots
         .map(|slots| layer_slots(state, slots, monitor, pane, depth, drawing))
         .unwrap_or_default();
     let mut animating = false;
-    if let Some(decoration) = state.panes.get_mut(pane).and_then(Pane::decoration_mut) {
+    if let Some((decoration, window_values)) = state
+        .panes
+        .get_mut(pane)
+        .and_then(Pane::decoration_with_values_mut)
+    {
+        let look = crate::decoration::Look {
+            title: &title,
+            app_id: &app_id,
+            focused,
+            pointer_inside,
+            caret,
+            // `decoration::tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
+            values: state.decorations.values(),
+            window,
+            // `decoration::tests::a_layer_is_told_its_windows_own_values`.
+            window_values,
+        };
         // Already `Element`s: a layer is a memory buffer on the software path
         // and a texture on the GPU one, and which of the two it is is the
         // decoration's own business rather than this function's.
@@ -5093,15 +5105,21 @@ pub(crate) fn one_layer(
     let drawing = layer_drawing_at(canvas, outer, at, scale, pass_now(state));
     let title = state.pane_title(pane);
     let app_id = state.pane_app_id(pane);
+    let focused = state.looks_focused(pane);
+    let pointer_inside = state.pointer_over(pane);
+    let caret = state.caret_in(pane);
+    let window = state.frame_window(pane);
+    let (decoration, window_values) = state.panes.get_mut(pane)?.decoration_with_values_mut()?;
     let look = crate::decoration::Look {
         title: &title,
         app_id: &app_id,
-        focused: state.looks_focused(pane),
-        pointer_inside: state.pointer_over(pane),
-        caret: state.caret_in(pane),
+        focused,
+        pointer_inside,
+        caret,
         values: state.decorations.values(),
+        window,
+        window_values,
     };
-    let decoration = state.panes.get_mut(pane)?.decoration_mut()?;
     let mut animating = false;
     let element = only_layer(index, |into, hook| {
         animating = decoration.layer_elements(renderer, depth, &look, drawing, into, hook);
