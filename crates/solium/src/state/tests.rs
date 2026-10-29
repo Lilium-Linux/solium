@@ -16081,6 +16081,173 @@ end)"#,
         );
     }
 
+    /// **#402: after a fast seam drag, a pane across the seam is in its
+    /// tile, however late its client answers.**
+    ///
+    /// The seam is dragged into the far pane faster than its client draws: it
+    /// is configured to 388 wide, then 288, and answers the 388 after the 288
+    /// has gone out. That answer was judged against the newest ask, read as a
+    /// refusal of it, and the release adopted the stale 388 at once, pinned
+    /// against the pane's far edge -- 100 to the left of its tile, over the
+    /// dragged pane -- where it stayed once the client drew the 288 it had been
+    /// asked for. It is the browser half over a terminal with bare desktop
+    /// beside it. Judged against the ask it answered, that answer is the
+    /// client keeping up and the pane waits for the next one.
+    ///
+    /// And a client that answers nothing more before its patience runs out is
+    /// landed at its tile's corner, its stale size cut to the tile, so the
+    /// answer that comes later fills the tile rather than leaving the pane
+    /// where the stale size had put it.
+    #[test]
+    fn a_pane_across_a_fast_seam_drag_lands_in_its_tile_however_late_its_client_answers() {
+        for answers in [true, false] {
+            tiled_fixture!(display, state, conn, queue, client, qh);
+            let (dragged, _dragged_toplevel, _dragged_surface, _dragged_xdg) =
+                open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            let (far, far_toplevel, far_surface, far_xdg) =
+                open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            state.map_stacked(dragged.clone(), (0, 0), false);
+            state.map_stacked(far.clone(), (512, 0), false);
+            state.sync_panes();
+            let dragged_pane = state.panes.id_of(&dragged).expect("a pane");
+            let far_pane = state.panes.id_of(&far).expect("a pane");
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+            client.surface_configures.clear();
+
+            let request = ResizeRequest {
+                window: dragged.clone(),
+                wanted: at(0, 0, 700, 600),
+                edge_at: (700.0, 300.0),
+                edges: ResizeEdge::Right,
+            };
+            state.begin_resize(&dragged);
+            let start = state.clock.now();
+            // Three frames of one quick gesture, each moving the seam, the
+            // last a whole throttle interval after the others: it is told
+            // the tile the drag ends on.
+            let mut tile = at(512, 0, 488, 600);
+            for (after, seam) in [(0, 600), (40, 650), (200, 700)] {
+                let now = start + Duration::from_millis(after);
+                state.clock.advance(now.saturating_sub(state.clock.now()));
+                tile = at(seam + 12, 0, 1000 - seam - 12, 600);
+                // The far pane first: the frame's flush, run with the other,
+                // then finds it placed already.
+                tiled_frame(&mut state, &request, far_pane, tile, now);
+                tiled_frame(&mut state, &request, dragged_pane, at(0, 0, seam, 600), now);
+            }
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            let far_id = wayland_client::Proxy::id(&far_toplevel);
+            let asked: Vec<(i32, i32)> = client
+                .configures
+                .iter()
+                .filter(|(to, ..)| to == &far_id)
+                .map(|(_, w, h)| (*w, *h))
+                .collect();
+            assert!(
+                asked.first() == Some(&(388, 600)) && asked.last() == Some(&(288, 600)),
+                "the premise: the far client was asked for 388, and last for 288: {asked:?}"
+            );
+            let xdg_id = wayland_client::Proxy::id(&far_xdg);
+            let serials: Vec<u32> = client
+                .surface_configures
+                .iter()
+                .filter(|(to, _)| to == &xdg_id)
+                .map(|(_, serial)| *serial)
+                .collect();
+
+            // It answers the first ask, the second already sent.
+            far_xdg.ack_configure(serials[0]);
+            commit_buffer(&client, &qh, &far_surface, 388, 600);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.release_resize(&dragged);
+            let released = state.clock.now();
+            paused_frame(&mut state, released);
+            state.sync_panes();
+
+            let outer = |state: &Solium| {
+                state.pane_outer(state.panes.get(far_pane).expect("the pane is still here"))
+            };
+            if answers {
+                assert!(
+                    state.holding_resize(far_pane),
+                    "an answer to the earlier ask is the client keeping up, not a \
+                     refusal of the newest, so the pane waits for the next"
+                );
+                assert_eq!(outer(&state), tile, "and waits in its tile");
+                far_xdg.ack_configure(serials[serials.len() - 1]);
+                commit_buffer(&client, &qh, &far_surface, 288, 600);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            } else {
+                state.clock.advance(crate::resizing::PATIENCE);
+                let now = state.clock.now();
+                paused_frame(&mut state, now);
+                state.sync_panes();
+                assert!(
+                    !state.holding_resize(far_pane),
+                    "the premise: its patience ran out"
+                );
+                assert_eq!(
+                    outer(&state),
+                    tile,
+                    "landed on its stale size, it is cut to its tile at the tile's \
+                     corner rather than pinned against its far edge over its neighbour"
+                );
+                far_xdg.ack_configure(serials[serials.len() - 1]);
+                commit_buffer(&client, &qh, &far_surface, 288, 600);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            }
+            let now = state.clock.now();
+            paused_frame(&mut state, now);
+            state.sync_panes();
+            assert!(
+                !state.holding_resize(far_pane),
+                "answered, nothing holds it"
+            );
+            assert_eq!(
+                outer(&state),
+                tile,
+                "answers {answers}: once its client has drawn the size it was asked \
+                 for, the pane across the seam is its tile"
+            );
+        }
+    }
+
     /// **Only a live gesture arms a bridge.**
     ///
     /// The keyboard `nudge` reaches `move_pane` through `Scripts::key` and

@@ -256,7 +256,7 @@ impl Solium {
             {
                 continue;
             }
-            match held.hold.settle(held.window.geometry().size, now) {
+            match held.hold.settle(crate::resizing::answer(&held.window), now) {
                 crate::resizing::Settle::Waiting => {
                     waiting = true;
                     kept.push(held);
@@ -590,12 +590,14 @@ impl Solium {
     /// it does, a client refusing a size it was offered, and a whole tiled
     /// gesture being orphaned.
     ///
-    /// **The slot stops filling its tile, and that is the honest outcome rather
-    /// than a shortcut.** A tiled pane whose client will not take the size the
-    /// layout gave it has a gap on one side of it whatever this does; putting
-    /// the gap against the edge that moved — which is what `anchored` does with
-    /// this pane's own edges — is the difference between the window staying
-    /// where the user put it and its far edge walking across the desktop. A
+    /// **A floating pane's slot is pinned against the edges the drag did not
+    /// move**, which is what `anchored` does with this pane's own edges: the
+    /// difference between the window staying where the user put it and its
+    /// far edge walking across the desktop. **A tiled pane stays at its tile's
+    /// corner** (#402, `resizing::Hold::lands`): its client is held inside the
+    /// tile, cut to it when larger, so a size it settled at for the moment
+    /// never carries it out of the tile, and an answer to the size it was asked
+    /// for, arriving after this, fills the tile. A
     /// client's minimum is read since #115 (`state::limits_of`) and the layouts
     /// keep a window at it where there is room, so a refusal that reaches this
     /// is one they could not avoid: a tile laid out `cramped`, or a size the
@@ -608,10 +610,14 @@ impl Solium {
         hold: &crate::resizing::Hold,
         taken: Size<i32, Logical>,
     ) {
-        let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
+        let Some((slot, tiled)) = self
+            .panes
+            .get(pane)
+            .map(|held| (held.slot(), held.placed().is_some()))
+        else {
             return;
         };
-        let landed = hold.anchored(slot, taken);
+        let landed = hold.lands(slot, taken, tiled);
         if let Some(pane) = self.panes.get_mut(pane) {
             pane.set_slot(landed);
         }
@@ -666,6 +672,7 @@ impl Solium {
         self.map_stacked(request.window.clone(), client.loc, false);
 
         let size = request.window.geometry().size;
+        let answer = crate::resizing::answer(&request.window);
         // **This pane's hold, wherever the last frame left it.** A bridge entry
         // means the layout claimed the drag on an earlier frame and has stopped
         // claiming it — `scrolling.lua`'s guard at screen x 0 is one frame of
@@ -695,7 +702,7 @@ impl Solium {
             // avoid; dropping it is how that is repaired rather than an
             // oversight, and the floating hold is the newer of the two.
             Some(held) if held.pane == pane => {
-                if let Some(tell) = held.hold.dragged(client, size, now) {
+                if let Some(tell) = held.hold.dragged(client, answer, now) {
                     size_window(&request.window, tell);
                 }
             }
@@ -720,7 +727,7 @@ impl Solium {
                 let hold = match carried {
                     Some(mut hold) => {
                         hold.rearm(released);
-                        if let Some(tell) = hold.dragged(client, size, now) {
+                        if let Some(tell) = hold.dragged(client, answer, now) {
                             size_window(&request.window, tell);
                         }
                         hold
@@ -797,11 +804,11 @@ impl Solium {
             .as_ref()
             .filter(|request| &request.window == window)
             .map_or(slot, |request| inner(request.wanted, self.insets_of(pane)));
-        let size = window.geometry().size;
+        let answer = crate::resizing::answer(window);
         let Some(held) = self.resize_hold.as_mut() else {
             return;
         };
-        let tell = held.hold.release(client, size, now);
+        let tell = held.hold.release(client, answer, now);
         size_window(window, tell);
         self.redraw = true;
     }
@@ -849,7 +856,7 @@ impl Solium {
             let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
                 continue;
             };
-            let committed = client.geometry().size;
+            let committed = crate::resizing::answer(&client);
             let Some(held) = self
                 .resize_bridge
                 .as_mut()
@@ -924,11 +931,12 @@ impl Solium {
             let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
                 continue;
             };
-            let committed = window.geometry().size;
+            let answer = crate::resizing::answer(&window);
+            let committed = answer.size;
             let Some(hold) = self.held_hold_mut(pane) else {
                 continue;
             };
-            let Some(tell) = hold.dragged(slot, committed, now) else {
+            let Some(tell) = hold.dragged(slot, answer, now) else {
                 continue;
             };
             size_window(&window, tell);
@@ -980,11 +988,11 @@ impl Solium {
             self.drop_resize_hold();
             return false;
         }
-        let size = window.geometry().size;
+        let answer = crate::resizing::answer(&window);
         let Some(held) = self.resize_hold.as_mut() else {
             return false;
         };
-        match held.hold.settle(size, now) {
+        match held.hold.settle(answer, now) {
             crate::resizing::Settle::Waiting => false,
             // The client is the size the pane is. Everything agrees again, so
             // there is nothing to hold and nothing to move.
@@ -1034,7 +1042,7 @@ impl Solium {
                 self.drop_bridged(pane);
                 continue;
             }
-            let committed = window.geometry().size;
+            let committed = crate::resizing::answer(&window);
             let Some(held) = self
                 .resize_bridge
                 .as_mut()
