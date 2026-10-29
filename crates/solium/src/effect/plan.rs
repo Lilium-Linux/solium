@@ -20,14 +20,9 @@ use crate::pane::PaneId;
 #[derive(Debug)]
 pub(crate) struct BoundChain {
     pub(crate) plan: Plan,
+    /// How far beyond its part the chain reads, its first link's.
     pub(crate) reach: f64,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no frame reads it yet: the cull grows a pane by its results' reach"
-        )
-    )]
+    /// How far beyond its part the chain draws, all its links' together.
     pub(crate) bleed: f64,
     pub(crate) tier: Tier,
     /// A hash of every link's name and bound params: a chain whose params
@@ -51,6 +46,20 @@ pub(crate) struct BoundChain {
 }
 
 impl BoundChain {
+    /// How far beyond its part a slot's box reaches: the further of how far
+    /// the chain reads (`reach`) and how far it draws (`bleed`), #375. One
+    /// box serves both, because a run draws into the box it reads: a border
+    /// drawn outside its part needs the room to draw in whether or not it
+    /// reads anything there, and what it reads past where it needs to is
+    /// transparent, or the backdrop. The mask still cuts a result to its
+    /// part's shape unless the chain reads `shape` and so owns its edges
+    /// (`render::cut_by_shape`).
+    /// `tests::a_chain_reaches_as_its_first_link_and_bleeds_as_all_of_them`,
+    /// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
+    pub(crate) fn extent(&self) -> f64 {
+        self.reach.max(self.bleed)
+    }
+
     /// Derive the memo split and one key per export from `plan`, the one
     /// copy: at bind, and after every write into `plan` (Task 59's
     /// `write_uniform`), so what a memo or a suffix runs is never a stale
@@ -867,12 +876,14 @@ mod tests {
             r#"{ { match = "*", part = "client", slot = "behind", effect = { { "wide" }, { "ring", bleed = 1 } } } }"#,
         );
         assert_eq!((chain.reach, chain.bleed), (6.0, 3.0));
+        assert_eq!(chain.extent(), 6.0, "reading further than it draws");
         assert_eq!(chain.tier, crate::effect::rules::Tier::Own);
         let chain = bound(
             &mut host,
             r#"{ { match = "*", part = "client", slot = "behind", effect = { "ring", reach = 4 } } }"#,
         );
         assert_eq!((chain.reach, chain.bleed), (4.0, 5.0));
+        assert_eq!(chain.extent(), 5.0, "drawing further than it reads");
         assert_eq!(chain.tier, crate::effect::rules::Tier::Generated);
         // And a chain's params are its key's: a chain whose params changed
         // runs again (`store::tests::a_param_or_size_change_reruns_the_chain`).

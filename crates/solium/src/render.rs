@@ -2394,8 +2394,9 @@ fn part_of(state: &Solium, owner: &crate::effect::plan::Owner) -> Option<(Found,
     }
 }
 
-/// How far a part's self capture is padded: its chain's reach on its
-/// monitor, rounded up to a whole physical pixel (Ruling 16).
+/// How far a part's box, and its self capture, is padded: its chain's
+/// extent (the further of its reach and its bleed, `BoundChain::extent`) on
+/// its monitor, rounded up to a whole physical pixel (Ruling 16).
 /// `state::tests::real_client::every_wanted_slot_has_its_part_box_padded_by_its_reach`.
 fn padding(reach: f64, scale: f64) -> i32 {
     #[expect(
@@ -2516,7 +2517,7 @@ pub(crate) fn record_boxes(state: &Solium, slots: &mut Slots) {
         let Some((found, scale)) = part_of(state, &owner) else {
             continue;
         };
-        let pad = padding(chain.reach, scale);
+        let pad = padding(chain.extent(), scale);
         let part = match (&found, found.source()) {
             (_, Some(source)) => crate::offscreen::part_box(state, &source, scale, pad),
             (Found::Titlebar(pane), None) => titlebar_box(state, *pane, scale, pad),
@@ -2606,7 +2607,7 @@ pub(crate) fn self_inputs(state: &Solium, slots: &Slots) -> Vec<SelfInput> {
                 slot,
                 found,
                 scale,
-                pad: padding(chain.reach, scale),
+                pad: padding(chain.extent(), scale),
             })
         })
         .collect()
