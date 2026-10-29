@@ -31,6 +31,7 @@ mod gputime;
 mod group;
 mod icon;
 mod idle;
+mod image_copy;
 mod input;
 mod json;
 mod keyboard_change;

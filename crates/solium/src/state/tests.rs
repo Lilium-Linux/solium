@@ -2914,6 +2914,13 @@ mod real_client {
     use wayland_protocols::ext::idle_notify::v1::client::{
         ext_idle_notification_v1, ext_idle_notifier_v1,
     };
+    use wayland_protocols::ext::image_capture_source::v1::client::{
+        ext_image_capture_source_v1, ext_output_image_capture_source_manager_v1,
+    };
+    use wayland_protocols::ext::image_copy_capture::v1::client::{
+        ext_image_copy_capture_frame_v1, ext_image_copy_capture_manager_v1,
+        ext_image_copy_capture_session_v1,
+    };
     use wayland_protocols::ext::session_lock::v1::client::{
         ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
     };
@@ -3072,6 +3079,20 @@ mod real_client {
         /// it was told failed.
         captures_offered: usize,
         captures_failed: usize,
+        /// `ext-image-copy-capture-v1`, the protocol a screen share through
+        /// the portal asks for first (#387): its two managers, and what its
+        /// sessions and frames have been told.
+        image_sources: Option<
+            ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
+        >,
+        image_copy: Option<ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1>,
+        /// Every `buffer_size`, `shm_format` and `done`, in order, so a test
+        /// can tell an announcement from its repeat.
+        copy_constraints: Vec<CopyConstraint>,
+        /// How many sessions were told `stopped`.
+        copy_stopped: usize,
+        /// Every frame's answer: `Ok` for `ready`, the reason for `failed`.
+        copy_answers: Vec<Result<(), u32>>,
         /// The surface this client's keyboard is on, as its own
         /// `enter`/`leave` events say -- the client's view, which is the
         /// one that matters, and not the server's.
@@ -3409,6 +3430,12 @@ mod real_client {
                 "zwlr_screencopy_manager_v1" => {
                     state.screencopy = Some(registry.bind(name, 3, qh, ()));
                 }
+                "ext_output_image_capture_source_manager_v1" => {
+                    state.image_sources = Some(registry.bind(name, 1, qh, ()));
+                }
+                "ext_image_copy_capture_manager_v1" => {
+                    state.image_copy = Some(registry.bind(name, 1, qh, ()));
+                }
                 "ext_session_lock_manager_v1" => {
                     state.locks = Some(registry.bind(name, 1, qh, ()));
                 }
@@ -3617,6 +3644,72 @@ mod real_client {
     wayland_client::delegate_noop!(
         Client: ignore zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1
     );
+    wayland_client::delegate_noop!(
+        Client: ignore ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1
+    );
+    wayland_client::delegate_noop!(
+        Client: ignore ext_image_capture_source_v1::ExtImageCaptureSourceV1
+    );
+    wayland_client::delegate_noop!(
+        Client: ignore ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1
+    );
+
+    /// One buffer constraint an `ext_image_copy_capture_session_v1` was
+    /// told. See [`Client::copy_constraints`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CopyConstraint {
+        Size(u32, u32),
+        Shm(u32),
+        Done,
+    }
+
+    /// See [`Client::copy_constraints`] and [`Client::copy_stopped`].
+    impl Dispatch<ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _session: &ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1,
+            event: ext_image_copy_capture_session_v1::Event,
+            _data: &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            match event {
+                ext_image_copy_capture_session_v1::Event::BufferSize { width, height } => state
+                    .copy_constraints
+                    .push(CopyConstraint::Size(width, height)),
+                ext_image_copy_capture_session_v1::Event::ShmFormat { format } => {
+                    state
+                        .copy_constraints
+                        .push(CopyConstraint::Shm(u32::from(format)));
+                }
+                ext_image_copy_capture_session_v1::Event::Done => {
+                    state.copy_constraints.push(CopyConstraint::Done);
+                }
+                ext_image_copy_capture_session_v1::Event::Stopped => state.copy_stopped += 1,
+                _ => {}
+            }
+        }
+    }
+
+    /// See [`Client::copy_answers`].
+    impl Dispatch<ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _frame: &ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1,
+            event: ext_image_copy_capture_frame_v1::Event,
+            _data: &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            match event {
+                ext_image_copy_capture_frame_v1::Event::Ready => state.copy_answers.push(Ok(())),
+                ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
+                    state.copy_answers.push(Err(u32::from(reason)));
+                }
+                _ => {}
+            }
+        }
+    }
 
     /// See [`Client::locked`] and [`Client::finished`].
     impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for Client {
@@ -20544,6 +20637,10 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
         /// Here, beside the lock's tests, for their fixture: the lock halves
         /// need the lock client, and the rest need no more than the
         /// application's client with a window.
+        mod image_copy {
+            include!("image_copy_tests.rs");
+        }
+
         mod power {
             use super::*;
             use crate::lock::LockFrame;

@@ -304,12 +304,14 @@ impl Solium {
             self.power.off.push(output.clone());
             // A capture waiting for this monitor's next frame is waiting for
             // one that is not coming. `an_off_monitor_cannot_be_captured`.
+            // Unless it may wait for the monitor to come back
+            // (`screencopy::Answer::waits`), which a stream's does.
             let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_captures)
                 .into_iter()
-                .partition(|capture| capture.output == *output);
+                .partition(|capture| capture.output == *output && !capture.frame.waits());
             self.pending_captures = kept;
             for capture in gone {
-                capture.frame.failed();
+                crate::screencopy::refuse(self, &capture);
             }
         }
         self.power.announce(output);
