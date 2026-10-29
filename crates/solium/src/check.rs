@@ -1068,6 +1068,18 @@ mod tests {
         (passed, String::from_utf8_lossy(&out).into_owned())
     }
 
+    /// A report with every run of spaces made one, for a test that reads its
+    /// words and not the width of its name column, which the longest name a
+    /// configuration lists sets (`gnome-keyring` beside `gtk` in the shipped
+    /// one).
+    fn words(text: &str) -> String {
+        text.lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
     /// As `run` brings Qt up for one file: software, whatever the machine.
     fn software_qt() {
         crate::qml::renderer::decide(
@@ -1143,18 +1155,19 @@ mod tests {
             );
         });
         assert!(passed, "{text}");
+        let text = words(&text);
         assert!(
             text.contains(
-                "  lilium-portals.conf  /usr/share/xdg-desktop-portal/lilium-portals.conf\n"
+                "lilium-portals.conf /usr/share/xdg-desktop-portal/lilium-portals.conf\n"
             ),
             "{text}"
         );
         assert!(
-            text.contains("  gtk  /usr/share/xdg-desktop-portal/portals/gtk.portal\n"),
+            text.contains("gtk /usr/share/xdg-desktop-portal/portals/gtk.portal\n"),
             "{text}"
         );
         assert!(
-            text.contains("  wlr  /usr/share/xdg-desktop-portal/portals/wlr.portal\n"),
+            text.contains("wlr /usr/share/xdg-desktop-portal/portals/wlr.portal\n"),
             "{text}"
         );
         assert!(!text.contains("missing"), "{text}");
@@ -1175,16 +1188,17 @@ mod tests {
             );
         });
         assert!(passed, "{text}");
+        let text = words(&text);
         assert!(
             text.contains(
-                "  wlr  missing: no wlr.portal, so ScreenCast and Screenshot have no backend. \
+                "wlr missing: no wlr.portal, so ScreenCast and Screenshot have no backend. \
                  Install xdg-desktop-portal-wlr"
             ),
             "{text}"
         );
-        assert!(text.contains("  slurp  missing: not on PATH"), "{text}");
+        assert!(text.contains("slurp missing: not on PATH"), "{text}");
         assert!(text.contains("Install slurp"), "{text}");
-        assert!(text.contains("  gtk  /x/portals/gtk.portal\n"), "{text}");
+        assert!(text.contains("gtk /x/portals/gtk.portal\n"), "{text}");
     }
 
     /// A backend listed after another for the same portal is a fallback: with
