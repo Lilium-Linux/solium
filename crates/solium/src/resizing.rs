@@ -877,11 +877,11 @@ impl Hold {
         let client = client.into();
         self.note(client);
         let client = client.size;
-        let Some(released) = self.released else {
+        if self.released.is_none() {
             // The pointer is still down. The drag owns the rectangle for as
             // long as that lasts, whatever the client has or has not said.
             return Settle::Waiting;
-        };
+        }
         // Asked *and* answered, or asked for the size it already had — which is
         // the same thing from here and is why this compares the size rather
         // than watching for a commit.
@@ -906,7 +906,7 @@ impl Hold {
         // Nothing at all. Give up rather than hold the space and the slot apart
         // for ever; see [`PATIENCE`], the default of the patience this hold
         // was given.
-        if now.saturating_sub(released) >= self.patience {
+        if self.overdue(now) {
             return Settle::Adopt(client);
         }
         Settle::Waiting
@@ -986,6 +986,20 @@ impl Hold {
     /// silence at the one moment a drag has just started.
     pub(crate) const fn rearm(&mut self, released: Option<Duration>) {
         self.released = released;
+    }
+
+    /// Whether this hold's patience is running: its gesture has ended, or its
+    /// glide or its window's first frame has come.
+    pub(crate) const fn armed(&self) -> bool {
+        self.released.is_some()
+    }
+
+    /// Whether this hold's patience has run out: its gesture ended, or its
+    /// glide landed, longer than its patience ago. What [`Self::settle`] gives
+    /// up waiting on.
+    pub(crate) fn overdue(&self, now: Duration) -> bool {
+        self.released
+            .is_some_and(|released| now.saturating_sub(released) >= self.patience)
     }
 
     /// Whether the client has walked away from what it is being offered, as

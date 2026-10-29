@@ -809,6 +809,18 @@ impl Solium {
         if pane.gone() || pane.ghost() {
             return;
         }
+        // A window that stood in for a launch going says the application is
+        // still starting, and its main window is on its way: the launch's
+        // patience starts again (#295).
+        // `launch_splash::a_splash_is_shown_over_the_launch_and_the_main_window_takes_the_slot`.
+        if let Some(launch) = pane.stands_for()
+            && let Some(waiting) = self.panes.get_mut(launch)
+        {
+            waiting.wait_again(now);
+        }
+        let Some(pane) = self.panes.get(id) else {
+            return;
+        };
         let window = pane.client().cloned();
         let outer = self.pane_outer(pane);
         let geometry = self.pane_geometry(pane);

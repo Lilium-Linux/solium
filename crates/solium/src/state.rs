@@ -2094,6 +2094,12 @@ impl Solium {
                 pane.client()
                     .is_some_and(|window| self.client_ready(window))
             })
+            // **And has answered the size its window was told** (#295): a
+            // client's first frame may be at a size of its own, drawn before
+            // it read the slot's, and the scene stays over it until the frame
+            // that fills the slot. `hold_arrival` holds it no longer than
+            // `resize.patience` after that first frame.
+            .filter(|pane| !self.holding_resize(pane.id()))
             .map(Pane::id)
             .collect();
         for id in ready {

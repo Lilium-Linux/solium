@@ -1266,6 +1266,16 @@ local defaults = {
         -- without waiting this long. The view goes to the window it brought
         -- forward, on its own workspace (`activate` in docs/modes.md, and
         -- `relaunching_an_application_whose_window_is_on_another_workspace_keeps_it_there_and_brings_it_into_view`).
+        --
+        -- A splash does not arrive either (#295). A window of the application
+        -- that names one size and only one -- Vesktop's 300x350 one, before
+        -- its main window -- is shown over the middle of the waiting window at
+        -- its own size, and the waiting window goes on waiting for a window
+        -- that can fill it. When the splash goes, this starts again. One still
+        -- there when this runs out was the application's window after all,
+        -- and becomes an ordinary one as the waiting window goes. (Bringing
+        -- the launch's activation token proves nothing: Vesktop's splash
+        -- brings it.)
         patience = 8000,
         -- Whether it takes its place in the layout straight away. With this
         -- off, the other windows only move aside once the application is

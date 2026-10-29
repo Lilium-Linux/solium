@@ -381,6 +381,18 @@ presentation transform, like where it is and how big, so the compositor applies
 it to the scene's picture as it draws it ([animation.md](animation.md#animations-you-should-not-write)).
 Set `fade = 0` to cut straight to the application.
 
+Some applications show a splash first, a small window of one fixed size, and
+their main window a moment later: Vesktop does. A window that names one size
+and only one cannot fill the waiting window, so it does not go into it: it is
+shown over the middle of the waiting window, at its own size, and the waiting
+window stays where it is until the main window arrives and fills it. When the
+splash goes, `patience` starts again. A fixed-size window that is the
+application's own, a calculator that cannot be resized say, is on screen and
+clickable at once, and becomes an ordinary window, with its frame, the keyboard
+and a place in the layout, when `patience` runs out with it still there; the
+waiting window goes then. The launch's activation token cannot tell the two
+apart sooner: Vesktop's splash brings it too.
+
 Your own scene goes in `~/.config/solium/qml/loading/`. It is handed the
 program's name and how long it has waited; the one that ships uses only the
 name, on the grounds that the window already *is* the window and the one fact

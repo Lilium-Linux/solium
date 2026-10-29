@@ -237,6 +237,44 @@ impl Solium {
         });
     }
 
+    /// Hold a window that has just arrived in a launch's pane at the pane's
+    /// slot, which its client has just been told, until the client answers
+    /// (#295): [`Self::hold_for_answer`]'s hold, with no patience running
+    /// yet. It starts at the window's first frame, [`Self::arrival_drawn`].
+    pub(super) fn hold_arrival(
+        &mut self,
+        pane: crate::pane::PaneId,
+        window: &Window,
+        now: Duration,
+    ) {
+        let Some(slot) = self.panes.get(pane).map(Pane::slot) else {
+            return;
+        };
+        let hold = crate::resizing::Hold::new(
+            ResizeEdge::None,
+            window.geometry().size,
+            slot,
+            now,
+            None,
+            self.resizing.patience,
+        );
+        self.answering.retain(|held| held.pane != pane);
+        self.answering.push(crate::resizing::Held {
+            window: window.clone(),
+            pane,
+            hold,
+        });
+    }
+
+    /// The window [`Self::hold_arrival`] holds has drawn its first frame:
+    /// `resize.patience` runs from now, as a drag's runs from the pointer
+    /// letting go.
+    pub(super) fn arrival_drawn(&mut self, pane: crate::pane::PaneId, now: Duration) {
+        if let Some(held) = self.answering.iter_mut().find(|held| held.pane == pane) {
+            held.hold.rearm(Some(now));
+        }
+    }
+
     /// Watch every window [`Self::answering`] holds, and end each hold when
     /// its client answers -- or, answering nothing, `resize.patience` after
     /// its glide landed, when the client's own size wins, as it does at the
@@ -256,9 +294,28 @@ impl Solium {
             {
                 continue;
             }
-            match held.hold.settle(crate::resizing::answer(&held.window), now) {
+            let answer = crate::resizing::answer(&held.window);
+            // **An xdg client that has acked no configure with a size in it
+            // has answered nothing yet** (#295), whatever it drew: a window
+            // that has just arrived draws once at a size of its own before
+            // it has read the one it was told. Weighed as an answer, that
+            // frame was a refusal, and the client's own size won on the spot.
+            // So it waits, for the hold's patience and no longer.
+            let unasked = answer.size != held.hold.asked().size
+                && held
+                    .window
+                    .toplevel()
+                    .is_some_and(|toplevel| toplevel.current_state().size.is_none());
+            let verdict = if unasked && !held.hold.overdue(now) {
+                crate::resizing::Settle::Waiting
+            } else {
+                held.hold.settle(answer, now)
+            };
+            match verdict {
                 crate::resizing::Settle::Waiting => {
-                    waiting = true;
+                    // A window that has not drawn yet asks for no frames: its
+                    // first commit asks for one (#295).
+                    waiting |= held.hold.armed();
                     kept.push(held);
                 }
                 crate::resizing::Settle::Done => {}

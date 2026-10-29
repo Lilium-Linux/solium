@@ -36,6 +36,13 @@ pub(crate) struct Limits {
 pub(crate) const MOST: i32 = 32_767;
 
 impl Limits {
+    /// Whether the client names one size and only one: a minimum, and a
+    /// maximum that is the same, on both sides. What an application's splash
+    /// says (#295, `Solium::stand_aside`).
+    pub(crate) fn fixed(self) -> bool {
+        self.min.w > 0 && self.min.h > 0 && self.min == self.max
+    }
+
     /// What a client said, each side over [`MOST`] read as `MOST`.
     fn said(min: Size<i32, Logical>, max: Size<i32, Logical>) -> Self {
         let side = |size: i32| size.min(MOST);
