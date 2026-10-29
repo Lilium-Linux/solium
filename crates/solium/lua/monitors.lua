@@ -103,6 +103,12 @@ function monitors.key(workspace, name)
     return tostring(workspace) .. "@" .. tostring(name)
 end
 
+-- The monitor name a `key` was made with: which screen a desk's state is for,
+-- when all that is to hand is the key it is kept under.
+function monitors.of_key(key)
+    return string.match(key, "^[^@]*@(.*)$")
+end
+
 -- The monitor named, as a rect, or the active one.
 function monitors.named(name)
     for _, monitor in ipairs(sol.monitors()) do

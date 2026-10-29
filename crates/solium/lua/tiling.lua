@@ -519,12 +519,10 @@ local function open_in(id, monitor, target, cursor)
             local index = workspaces.vacant(monitor, id, reflow_on_close() ~= "immediate")
             if index then
                 workspaces.of[id] = index
-                -- A new tree rather than the one that may be there. Nothing is
-                -- on that workspace, but its tree can still hold a window that
-                -- was on it: `workspaces.send` moves a window without telling
-                -- any tree, and only the next `adopt` sweeps the leaf it left.
-                -- Split, that leaf would keep half the screen for a window
-                -- that is not there. See
+                -- A new tree rather than the one that may be there: nothing
+                -- is on that workspace, so nothing a tree there holds is
+                -- wanted, and a leaf left in it would keep half the screen for
+                -- a window that is not there. See
                 -- `a_workspace_left_empty_by_a_send_is_given_whole`.
                 local fresh = sol.layout.tree()
                 tiling.trees[monitors.key(index, monitor)] = fresh
@@ -553,6 +551,22 @@ local function open_in(id, monitor, target, cursor)
     ))
     tree:insert(id, target, cursor.x, cursor.y, area)
     return nil
+end
+
+-- Lay out the tree kept under `key`, a desk that is not in view: `apply` walks
+-- only the desks in view, so this is what puts a hidden desk's windows in their
+-- tiles, ready for when the user goes there, and where their desk carries them
+-- until then. Nothing for a desk in view, which `apply` has laid out.
+local function arrange_hidden(key)
+    local monitor = monitors.of_key(key)
+    local tree = tiling.trees[key]
+    if not tree or not monitor or key == monitors.key(workspaces.on(monitor), monitor) then
+        return
+    end
+    local windows = by_id()
+    for _, slot in ipairs(tree:layout(options(monitor))) do
+        place(slot, windows[slot.id])
+    end
 end
 
 -- Open window `id` where `open_in` says, and see to what goes with it: the
@@ -593,14 +607,7 @@ local function settle_open(id, monitor, target, cursor)
     end
     tiling.apply()
     if elsewhere and not follows then
-        -- Its tree is not one `apply` walks, since that workspace is not in
-        -- view. Placed here so it is already in its tile when the user goes
-        -- there, and so that until then it is where its desk carries it.
-        local key = monitors.key(elsewhere, monitor)
-        local windows = by_id()
-        for _, slot in ipairs(tiling.trees[key]:layout(options(monitor))) do
-            place(slot, windows[slot.id])
-        end
+        arrange_hidden(monitors.key(elsewhere, monitor))
     end
 end
 
@@ -870,6 +877,38 @@ sol.on("close", function(id)
     tiling.unsized[id] = nil
     dialogs.forget(id)
     tiling.apply()
+end)
+
+-- A window moved to another workspace (#400) leaves the tree of the desk it
+-- was on for the tree of its new workspace on the monitor it is on, in the tile
+-- `adopt` would find it. Then,
+-- while tiling is in charge, both desks are laid out at once -- the one in view
+-- by `apply`, one out of view by `arrange_hidden` -- so the grid it left closes
+-- up and it is a tile of the one it joined. A window in no tree -- a dialog, one
+-- floated, minimized or being closed -- has no tile to carry. See
+-- `a_window_sent_to_another_workspace_leaves_one_grid_closed_up_and_is_a_tile_of_the_other`.
+workspaces.moved(function(id, _, to)
+    local left
+    for key, tree in pairs(tiling.trees) do
+        if tree:contains(id) then
+            left = key
+            tree:remove(id)
+        end
+    end
+    if not left then
+        return
+    end
+    local monitor = monitors.of(id)
+    local key = monitors.key(to, monitor)
+    local tree = tiling.trees[key] or sol.layout.tree()
+    tiling.trees[key] = tree
+    rejoin(tree, id, nil, nil, nil, options(monitor))
+    if not tiling.active then
+        return
+    end
+    tiling.apply()
+    arrange_hidden(left)
+    arrange_hidden(key)
 end)
 
 -- Dropped onto another window, the two trade places in the tree; dropped

@@ -18121,11 +18121,10 @@ mod dialogs {
             );
         }
 
-        /// **An empty workspace is given whole, even when its tree still holds
-        /// a window that was sent away.** `workspaces.send` moves a window
-        /// without telling any tree, so window 7, opened on workspace 2 and
-        /// sent to 3, leaves a leaf in workspace 2's tree. Workspace 2 is empty
-        /// all the same, and window 2 gets the whole of it rather than half.
+        /// **An empty workspace is given whole once the window on it was sent
+        /// away.** Window 7, opened on workspace 2 and sent to 3, leaves
+        /// workspace 2 empty, and window 2, overflowing to it, gets the whole
+        /// of it rather than half.
         #[test]
         fn a_workspace_left_empty_by_a_send_is_given_whole() {
             let (mut scripts, _) = tiling_with(&minimum(1300, 800));
@@ -19968,6 +19967,20 @@ mod directions {
             ))
         }
 
+        /// The desks whose arrangement in `module` holds window `id`, by the
+        /// key each is kept under in its `field`, sorted and joined by commas:
+        /// `holding("tiling", "trees", 4)` is the trees window 4 is a leaf of.
+        fn holding(&self, module: &str, field: &str, id: u64) -> String {
+            self.scripts.evaluate(&format!(
+                "local out = {{}}\n\
+                 for key, each in pairs(require(\"{module}\").{field}) do\n\
+                     if each:contains({id}) then out[#out + 1] = key end\n\
+                 end\n\
+                 table.sort(out)\n\
+                 return table.concat(out, \",\")"
+            ))
+        }
+
         /// What `Solium::reload` does, with the desk as it is.
         fn reload(&mut self) {
             let mut fresh = Scripts::load_carrying(&self.entry, self.scripts.kept())
@@ -20248,6 +20261,113 @@ mod directions {
             1,
             "an unknown tiling.move is named once, not per move: {said:?}"
         );
+    }
+
+    /// The whole of `area` but the shipped gap round it: the tile a window
+    /// alone on a screen is given.
+    fn whole(area: Rect) -> Rect {
+        Rect {
+            x: area.x + 12.0,
+            y: area.y + 12.0,
+            w: area.w - 24.0,
+            h: area.h - 24.0,
+        }
+    }
+
+    /// Whether `left` and `right` share any pixel.
+    fn overlap(left: Rect, right: Rect) -> bool {
+        left.x < right.x + right.w
+            && right.x < left.x + left.w
+            && left.y < right.y + right.h
+            && right.y < left.y + left.h
+    }
+
+    /// **A window sent to another workspace leaves one grid closed up and is a
+    /// tile of the other** (#400), on one monitor and on two.
+    ///
+    /// Window 4 sent from the grid to workspace 2: window 2 takes the right
+    /// column, and 4 is the whole of workspace 2, a leaf of that desk's tree
+    /// and of no other. Window 3 sent after it shares workspace 2 with it.
+    /// With a second monitor, a send from it leaves the first's grid alone
+    /// and its own desk closes up the same way.
+    #[test]
+    fn a_window_sent_to_another_workspace_leaves_one_grid_closed_up_and_is_a_tile_of_the_other() {
+        let mut desk = grid("", one_screen());
+        desk.focus(4);
+        desk.press("super+shift+2");
+        assert_eq!(desk.workspace_of(4), "2");
+        assert_eq!(desk.holding("tiling", "trees", 4), "2@DP-1");
+        let (one, two) = (desk.rect(1), desk.rect(2));
+        assert!(
+            about(two.y, one.y) && two.h > WIDE.h - 40.0,
+            "workspace 1's grid did not close up over window 4's tile: {:?}",
+            desk.rects()
+        );
+        assert!(
+            same(desk.rect(4), whole(WIDE)),
+            "window 4 is not the whole of workspace 2: {:?}",
+            desk.rects()
+        );
+
+        desk.focus(3);
+        desk.press("super+shift+2");
+        let (three, four) = (desk.rect(3), desk.rect(4));
+        assert_eq!(desk.holding("tiling", "trees", 3), "2@DP-1");
+        assert!(
+            inside(three, WIDE)
+                && inside(four, WIDE)
+                && !overlap(three, four)
+                && three.w * three.h + four.w * four.h > 0.9 * WIDE.w * WIDE.h,
+            "windows 3 and 4 do not share workspace 2 between them: {:?}",
+            desk.rects()
+        );
+        assert!(
+            desk.rect(1).h > WIDE.h - 40.0,
+            "workspace 1's grid did not close up over window 3's tile: {:?}",
+            desk.rects()
+        );
+
+        let mut desk = grid("", two_screens());
+        desk.open(5, "DP-2", (3280.0, 1280.0));
+        desk.open(6, "DP-2", (3280.0, 2400.0));
+        let start: Vec<Rect> = [1, 2, 3, 4].map(|id| desk.rect(id)).to_vec();
+        desk.focus(6);
+        desk.press("super+shift+3");
+        assert_eq!(desk.workspace_of(6), "3");
+        assert_eq!(desk.holding("tiling", "trees", 6), "3@DP-2");
+        assert_eq!(
+            desk.monitor(6),
+            "DP-2",
+            "a send keeps the window on its monitor"
+        );
+        assert!(
+            same(desk.rect(5), whole(TALL)) && same(desk.rect(6), whole(TALL)),
+            "DP-2's desk did not close up, or window 6 is not the whole of workspace 3: {:?}",
+            desk.rects()
+        );
+        assert!(
+            [1, 2, 3, 4]
+                .iter()
+                .zip(&start)
+                .all(|(id, was)| same(desk.rect(*id), *was)),
+            "a send on DP-2 moved DP-1's grid: {:?}",
+            desk.rects()
+        );
+    }
+
+    /// **A window sent from a scrolling strip leaves it for the other
+    /// workspace's** (#400): a column of its own there, and in no other strip.
+    #[test]
+    fn a_window_sent_from_a_scrolling_strip_leaves_it_for_the_other_workspaces() {
+        let mut desk = Desk::new("", one_screen());
+        desk.press("super+s");
+        desk.open(1, "DP-1", (1280.0, 720.0));
+        desk.open(2, "DP-1", (1280.0, 720.0));
+        desk.focus(2);
+        desk.press("super+shift+2");
+        assert_eq!(desk.workspace_of(2), "2");
+        assert_eq!(desk.holding("scrolling", "views", 2), "2@DP-1");
+        assert_eq!(desk.holding("scrolling", "views", 1), "1@DP-1");
     }
 
     /// **With no layout in charge, focus and move reach the nearest window
