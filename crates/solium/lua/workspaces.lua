@@ -383,17 +383,48 @@ function workspaces.step(dx, dy)
     workspaces.go((row - 1) * columns + col)
 end
 
+-- Who is told when a window changes workspace. See `workspaces.move`.
+local listeners = {}
+
+-- Be told `fn(id, from, to, why)` whenever window `id` changes workspace
+-- through `workspaces.move`: `from` and `to` are workspace indexes, and `why`
+-- is "sent". A layout takes the window out of the old desk's arrangement and into the
+-- new one's here, and lays out both if it is in charge. Every layout listens,
+-- in charge or not, so the arrangement it keeps for later is right too.
+function workspaces.moved(fn)
+    listeners[#listeners + 1] = fn
+end
+
+-- Move window `id` to workspace `index`, on the monitor it is on: the one way
+-- a window changes workspace. Its membership changes, every layout is told
+-- (`workspaces.moved`), and the desks are regrouped, so the desk it left and
+-- the desk it joined are both laid out in the same dispatch. Before #400 a
+-- send changed the membership alone and no layout heard of it: the grid it
+-- left kept a hole, and the window kept its old tile on the desk it joined.
+-- See `a_window_sent_to_another_workspace_leaves_one_grid_closed_up_and_is_a_tile_of_the_other`.
+function workspaces.move(id, index, why)
+    index = math.max(1, math.min(index, workspaces.count()))
+    local from = workspaces.at(id)
+    workspaces.of[id] = index
+    -- A window on no workspace in particular, sent to the one its monitor
+    -- shows, joins it where it already is: no desk changes.
+    if from ~= index then
+        for _, fn in ipairs(listeners) do
+            fn(id, from, index, why)
+        end
+    end
+    workspaces.apply()
+end
+
 -- Send the focused window to another workspace. It stays on its own monitor:
 -- a workspace is a screenful, and sending a window sideways through the
 -- workspaces should not also throw it at the other screen. The keyboard is the
 -- compositor's to move: a window its desk carries out of view gives it up as a
 -- closed one does (`focus.after_close`, #403).
 function workspaces.send(index)
-    index = math.max(1, math.min(index, workspaces.count()))
     for _, window in ipairs(sol.windows()) do
         if window.focused then
-            workspaces.of[window.id] = index
-            workspaces.apply()
+            workspaces.move(window.id, index, "sent")
             workspaces.announce()
             return
         end
@@ -494,9 +525,7 @@ end
 -- scene, which names the window rather than meaning the focused one. See
 -- `a_windows_send_from_a_scene_moves_the_window_it_names`.
 function workspaces.send_window(id, index)
-    index = math.max(1, math.min(index, workspaces.count()))
-    workspaces.of[id] = index
-    workspaces.apply()
+    workspaces.move(id, index, "sent")
     workspaces.announce()
 end
 

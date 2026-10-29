@@ -464,6 +464,51 @@ sol.on("close", function(id)
     scrolling.apply(config.scrolling.snap)
 end)
 
+-- Lay out the strip kept under `key`, a desk that is not in view, as
+-- `tiling.lua`'s `arrange_hidden` does a tree: `apply` walks only the desks
+-- in view. Nothing for a desk in view.
+local function arrange_hidden(key)
+    local monitor = monitors.of_key(key)
+    local view = scrolling.views[key]
+    if not view or not monitor or key == monitors.key(workspaces.on(monitor), monitor) then
+        return
+    end
+    for _, slot in ipairs(view:layout(options(monitor))) do
+        sol.place(slot.id, slot)
+    end
+end
+
+-- A window moved to another workspace (#400) leaves the strip of the desk it
+-- was on for its new workspace's strip on the monitor it is on, in a column of
+-- its own. Then, while scrolling is in charge,
+-- both strips are laid out, as `tiling.lua` lays out both trees. A window in
+-- no strip -- a dialog, one floated, minimized or being closed -- has no column
+-- to carry. `a_window_sent_from_a_scrolling_strip_leaves_it_for_the_other_workspaces`.
+workspaces.moved(function(id, _, to)
+    local left
+    for key, view in pairs(scrolling.views) do
+        if view:contains(id) then
+            left = key
+            view:remove(id)
+        end
+    end
+    if not left then
+        return
+    end
+    local monitor = monitors.of(id)
+    local key = monitors.key(to, monitor)
+    local view = scrolling.views[key] or sol.layout.scroller(config.scrolling)
+    scrolling.views[key] = view
+    local area = options(monitor)
+    view:insert(id, area)
+    if not scrolling.active then
+        return
+    end
+    scrolling.apply(config.scrolling.snap)
+    arrange_hidden(left)
+    arrange_hidden(key)
+end)
+
 -- Dropping a window on another column moves it there; dropped anywhere else
 -- it slides back. Without this a drag in a scrolling layout could not move a
 -- window at all, only pick it up and put it down again.
