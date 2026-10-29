@@ -1166,8 +1166,9 @@ local defaults = {
         -- Tell systemd's user manager and D-Bus activation WAYLAND_DISPLAY,
         -- DISPLAY, XDG_CURRENT_DESKTOP and XDG_SESSION_TYPE, and start
         -- solium-session.target, which starts graphical-session.target and
-        -- every unit you have attached to it. On exit the target is stopped
-        -- and the variables unset. `false` does none of it.
+        -- every unit you have attached to it. On exit the target, and
+        -- graphical-session.target with it, is stopped and the variables
+        -- unset. `false` does none of it.
         systemd = true,
         -- Whether solium-autostart.target starts beside it: XDG autostart,
         -- the programs in ~/.config/autostart and /etc/xdg/autostart, which

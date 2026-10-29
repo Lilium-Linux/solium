@@ -3,8 +3,12 @@
 # Solium starts this once it has told systemd and D-Bus activation where its
 # display is, and stops it on exit; solium-session stops it after a crash
 # (`session::tests::the_calls_reach_systemd_and_dbus_as_their_methods`,
-# dev/install-check.sh). Starting it starts graphical-session.target. A unit of
-# your own that should start with Solium says WantedBy=solium-session.target.
+# dev/install-check.sh). Starting it starts graphical-session.target, and
+# stopping it stops that too: the portals' Requisite= would otherwise keep it up
+# after the session has gone, and the next login would take it for another
+# desktop's (#393, `session::tests::a_session_ends_the_graphical_session_it_started`).
+# A unit of your own that should start with Solium says
+# WantedBy=solium-session.target.
 # It wants solium-kwallet-pam.service, which hands the wallet unlocked at
 # login to the session (#377) and does nothing where there is none.
 # XDG autostart is solium-autostart.target, started beside this one while
@@ -15,6 +19,7 @@
 Description=Solium session
 Documentation=man:systemd.special(7) https://github.com/Lilium-Linux/solium/blob/stage/docs/shell-boundary.md
 BindsTo=graphical-session.target
+PropagatesStopTo=graphical-session.target
 Before=graphical-session.target
 Wants=graphical-session-pre.target
 After=graphical-session-pre.target

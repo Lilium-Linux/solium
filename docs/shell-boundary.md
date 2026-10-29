@@ -1035,8 +1035,11 @@ sends them again with `DISPLAY` once XWayland has one. Then it starts
 wire.
 
 **On the way out** Solium stops `solium-session.target`, which takes the
-autostart target with it, and unsets the variables in systemd, so a Plasma
-login afterwards does not inherit a dead socket. It does so on a clean exit,
+autostart target and `graphical-session.target` with it, and unsets the
+variables in systemd, so a Plasma login afterwards does not inherit a dead
+socket. `graphical-session.target` goes by the target's `PropagatesStopTo=`:
+it stops by itself only once nothing needs it, and the portals'
+`Requisite=` on it would keep it up after the session has gone (#393). It does so on a clean exit,
 and on SIGTERM (how logind ends a session), SIGINT or SIGHUP (`signals.rs`). A
 Solium that cannot stop, because something inside it has stopped answering,
 ends itself `session.stop_timeout` (five seconds) after the signal, or at once
@@ -1051,7 +1054,7 @@ Two things are left behind even so. A SIGKILL of the whole session, which
 systemd sends to whatever of it is still running once its stop timeout has
 passed (45 seconds on Fedora 44), takes `solium-session` with it; the next
 Solium session stops any target an earlier one left running before it says
-anything. And under `dbus-daemon`, the D-Bus activation environment keeps the
+anything, `graphical-session.target` included. And under `dbus-daemon`, the D-Bus activation environment keeps the
 variables, because D-Bus has no call that removes one. Fedora's `dbus-broker`
 hands `UpdateActivationEnvironment` on to systemd's `SetEnvironment` (its
 launcher names that method), so there the unset should clear them for D-Bus
@@ -1067,7 +1070,15 @@ another VT shares them, and its display is not Solium's to replace. A nested
 Solium leaves the session it runs in alone for the same reason. And a Solium
 session that finds `graphical-session.target` already held by another desktop
 of the same user leaves systemd and D-Bus to that desktop, and says so in the
-log.
+log. Held means that a unit other than Solium's own, such as Plasma's
+`plasma-workspace.target`, pulls the target in (`Requires=`, `BindsTo=`,
+`Wants=` or `Upholds=`) and is up: that is how every desktop starts it, since
+it refuses a manual start. A `graphical-session.target` that only its own
+services keep up, which a session that ended without stopping it leaves
+behind, is held by nobody, and the new session stops it and starts its own.
+systemd answers this, not logind: logind cannot say which session a unit of
+the user manager belongs to, and a text login on another VT is a live session
+without being a desktop.
 
 `session.systemd = false` turns all of it off. `session.autostart = false`
 leaves out `solium-autostart.target`, and so XDG autostart, while
