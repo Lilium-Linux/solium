@@ -386,9 +386,10 @@ end
 -- Who is told when a window changes workspace. See `workspaces.move`.
 local listeners = {}
 
--- Be told `fn(id, from, to, why)` whenever window `id` changes workspace
--- through `workspaces.move`: `from` and `to` are workspace indexes, and `why`
--- is "sent". A layout takes the window out of the old desk's arrangement and into the
+-- Be told `fn(id, from, to, why, x, y)` whenever window `id` changes
+-- workspace through `workspaces.move`: `from` and `to` are workspace indexes,
+-- `why` is "sent" or "dropped", and `x, y` are where a dropped window was let
+-- go. A layout takes the window out of the old desk's arrangement and into the
 -- new one's here, and lays out both if it is in charge. Every layout listens,
 -- in charge or not, so the arrangement it keeps for later is right too.
 function workspaces.moved(fn)
@@ -402,7 +403,7 @@ end
 -- send changed the membership alone and no layout heard of it: the grid it
 -- left kept a hole, and the window kept its old tile on the desk it joined.
 -- See `a_window_sent_to_another_workspace_leaves_one_grid_closed_up_and_is_a_tile_of_the_other`.
-function workspaces.move(id, index, why)
+function workspaces.move(id, index, why, x, y)
     index = math.max(1, math.min(index, workspaces.count()))
     local from = workspaces.at(id)
     workspaces.of[id] = index
@@ -410,7 +411,7 @@ function workspaces.move(id, index, why)
     -- shows, joins it where it already is: no desk changes.
     if from ~= index then
         for _, fn in ipairs(listeners) do
-            fn(id, from, index, why)
+            fn(id, from, index, why, x, y)
         end
     end
     workspaces.apply()
@@ -429,6 +430,24 @@ function workspaces.send(index)
             return
         end
     end
+end
+
+-- Window `id` was let go at `x, y`, over a desk of the workspace its monitor
+-- now shows. A window that belonged to another workspace -- one switched away
+-- from mid-drag, or one dragged onto a monitor showing another -- moves to
+-- this one (#401), and true is said: the layouts have been told and have laid
+-- it out where it was let go, so the drop needs nothing more. False for a
+-- window already on that workspace, and for one on no workspace in
+-- particular, which is on whatever its monitor shows already.
+-- See `a_window_dropped_on_another_workspace_belongs_to_it_and_leaves_its_old_grid_closed_up`.
+function workspaces.drop(id, x, y)
+    local index = workspaces.on(monitors.of(id))
+    local was = workspaces.of[id]
+    if was == nil or was == index then
+        return false
+    end
+    workspaces.move(id, index, "dropped", x, y)
+    return true
 end
 
 function workspaces.announce()

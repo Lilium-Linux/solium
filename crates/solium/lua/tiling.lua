@@ -879,15 +879,31 @@ sol.on("close", function(id)
     tiling.apply()
 end)
 
--- A window moved to another workspace (#400) leaves the tree of the desk it
--- was on for the tree of its new workspace on the monitor it is on, in the tile
--- `adopt` would find it. Then,
+-- Window `id`, let go at `x, y`, into `tree`: the tile there, and not the
+-- largest tile, which is somewhere else. `rejoin` with a place turns the split
+-- rather than go under the minimum, and goes under it rather than leave the
+-- tile it was dropped on. Over another window, re-inserting there is the swap:
+-- out of its old seam, into the one under the pointer. Over nothing, it still
+-- belongs to the screen it landed on, so it rejoins that tree rather than
+-- falling out of the layout.
+local function let_go(tree, id, x, y, monitor)
+    -- Skip the window being dragged: it follows the cursor, so it is always
+    -- the topmost thing under it, and asking without skipping just names the
+    -- window in your hand.
+    local target = sol.window_at(x, y, id)
+    rejoin(tree, id, target, x, y, options(monitor), true)
+end
+
+-- A window moved to another workspace (#400, #401) leaves the tree of the desk
+-- it was on for the tree of its new workspace on the monitor it is on: where
+-- it was let go, for a drop; for a send, the tile `adopt` would find it. Then,
 -- while tiling is in charge, both desks are laid out at once -- the one in view
 -- by `apply`, one out of view by `arrange_hidden` -- so the grid it left closes
 -- up and it is a tile of the one it joined. A window in no tree -- a dialog, one
 -- floated, minimized or being closed -- has no tile to carry. See
--- `a_window_sent_to_another_workspace_leaves_one_grid_closed_up_and_is_a_tile_of_the_other`.
-workspaces.moved(function(id, _, to)
+-- `a_window_sent_to_another_workspace_leaves_one_grid_closed_up_and_is_a_tile_of_the_other`
+-- and `a_window_dropped_on_another_workspace_belongs_to_it_and_leaves_its_old_grid_closed_up`.
+workspaces.moved(function(id, _, to, why, x, y)
     local left
     for key, tree in pairs(tiling.trees) do
         if tree:contains(id) then
@@ -902,11 +918,15 @@ workspaces.moved(function(id, _, to)
     local key = monitors.key(to, monitor)
     local tree = tiling.trees[key] or sol.layout.tree()
     tiling.trees[key] = tree
-    rejoin(tree, id, nil, nil, nil, options(monitor))
+    if why == "dropped" then
+        let_go(tree, id, x, y, monitor)
+    else
+        rejoin(tree, id, nil, nil, nil, options(monitor))
+    end
     if not tiling.active then
         return
     end
-    tiling.apply()
+    tiling.apply(why == "dropped" and config.tiling.snap or nil)
     arrange_hidden(left)
     arrange_hidden(key)
 end)
@@ -917,6 +937,10 @@ sol.on("drop", function(id, x, y)
     if not tiling.active then
         return
     end
+    -- Let go over a desk of another workspace -- one switched to mid-drag, or
+    -- shown by the monitor it was dragged onto -- it moves to that workspace,
+    -- and a tiled window's move has laid out both desks.
+    local moved = workspaces.drop(id, x, y)
     -- A dialog stays where it was dropped, and joins no tree: it is in none,
     -- and the insert below is the one way it could get into one. `dropped`
     -- records the drag so the next pass does not undo it -- as an offset from
@@ -925,10 +949,9 @@ sol.on("drop", function(id, x, y)
         tiling.apply(config.tiling.snap)
         return
     end
-    -- Skip the window being dragged: it follows the cursor, so it is always
-    -- the topmost thing under it, and asking without skipping just names the
-    -- window in your hand.
-    local target = sol.window_at(x, y, id)
+    if moved then
+        return
+    end
     -- Where it was *dropped*, which after a drag across the boundary is the
     -- other monitor's tree. Taken out of every tree first, so a window moved
     -- between screens does not stay in the one it left.
@@ -936,19 +959,7 @@ sol.on("drop", function(id, x, y)
     for _, tree in pairs(tiling.trees) do
         tree:remove(id)
     end
-    local tree = tree_for(landed)
-    -- Where it was let go, and not the largest tile, which is somewhere else;
-    -- `rejoin` with a place turns the split rather than go under the minimum,
-    -- and goes under it rather than leave the tile it was dropped on.
-    if target and target ~= id then
-        -- Re-inserting where it was dropped is the swap: out of its old seam,
-        -- into the one under the pointer.
-        rejoin(tree, id, target, x, y, options(landed), true)
-    else
-        -- Dropped on nothing: it still belongs to whatever screen it landed
-        -- on, so it rejoins that tree rather than falling out of the layout.
-        rejoin(tree, id, nil, x, y, options(landed), true)
-    end
+    let_go(tree_for(landed), id, x, y, landed)
     tiling.apply(config.tiling.snap)
 end)
 

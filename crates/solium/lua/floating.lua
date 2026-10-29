@@ -227,6 +227,17 @@ sol.on("close", function(id)
     maximized[id] = nil
 end)
 
+-- A window let go over a desk of another workspace -- one switched to
+-- mid-drag, or shown by the monitor it was dragged onto -- belongs to that
+-- workspace now, and is shown where it was let go (#401). The layouts do this
+-- in their own `drop`; with none in charge, it is done here.
+-- `a_floating_window_dropped_on_the_other_monitors_workspace_belongs_to_it`.
+sol.on("drop", function(id, x, y)
+    if modes.current() == "floating" then
+        workspaces.drop(id, x, y)
+    end
+end)
+
 -- Exactly the combinations the last `bind_keys` call bound, so `unbind_keys`
 -- can let go of exactly those rather than asking `config.floating.snap`
 -- again -- which `config.floating.snap` may have moved off the plain arrows

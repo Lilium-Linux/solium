@@ -478,13 +478,14 @@ local function arrange_hidden(key)
     end
 end
 
--- A window moved to another workspace (#400) leaves the strip of the desk it
--- was on for its new workspace's strip on the monitor it is on, in a column of
--- its own. Then, while scrolling is in charge,
+-- A window moved to another workspace (#400, #401) leaves the strip of the
+-- desk it was on for its new workspace's strip on the monitor it is on, in a
+-- column of its own -- or, dropped over a window there, in that window's
+-- column, as a drop on its own desk goes. Then, while scrolling is in charge,
 -- both strips are laid out, as `tiling.lua` lays out both trees. A window in
 -- no strip -- a dialog, one floated, minimized or being closed -- has no column
 -- to carry. `a_window_sent_from_a_scrolling_strip_leaves_it_for_the_other_workspaces`.
-workspaces.moved(function(id, _, to)
+workspaces.moved(function(id, _, to, why, x, y)
     local left
     for key, view in pairs(scrolling.views) do
         if view:contains(id) then
@@ -501,6 +502,10 @@ workspaces.moved(function(id, _, to)
     scrolling.views[key] = view
     local area = options(monitor)
     view:insert(id, area)
+    local target = why == "dropped" and sol.window_at(x, y, id)
+    if target and view:contains(target) then
+        view:move_to_column_of(id, target, area)
+    end
     if not scrolling.active then
         return
     end
@@ -516,12 +521,19 @@ sol.on("drop", function(id, x, y)
     if not scrolling.active then
         return
     end
+    -- Let go over a desk of another workspace, it moves to that workspace,
+    -- and the move has put a window in a strip into its new desk's and laid
+    -- out both.
+    local moved = workspaces.drop(id, x, y)
     -- A dialog stays where it was dropped, and joins no strip: it is in none,
     -- and the insert below is the one way it could end up in one. `dropped`
     -- records the drag so the next pass does not undo it -- as an offset from
     -- the parent, so the dialog still follows the window it belongs to.
     if dialogs.dropped(id) then
         scrolling.apply(config.scrolling.snap)
+        return
+    end
+    if moved then
         return
     end
     -- Where it *landed*: a window dragged across the boundary belongs to the
