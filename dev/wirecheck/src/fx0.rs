@@ -38,6 +38,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_warp_redrawn_under_partial_damage_blends_once(renderer)?;
     clipped_programs_cut_the_clients_corners(renderer)?;
     a_captured_panes_pixels_match_its_flat_draw(renderer)?;
+    a_capture_is_the_picture_scanned_out(renderer)?;
     Ok(())
 }
 
@@ -985,6 +986,142 @@ fn a_captured_panes_pixels_match_its_flat_draw(renderer: &mut GlesRenderer) -> R
     println!(
         "  the composite's pixels match each element's own flat draw: the client wins inside \
          its quarter, `behind` outside it"
+    );
+    Ok(())
+}
+
+/// **Case 11k: a capture is the picture the monitor scans out** (#398). A
+/// monitor's frame goes to the screen through smithay's damage tracker; a
+/// capture of it (`screencopy::fill`) and a nested monitor of several
+/// (`offscreen::Screens::draw`) are drawn by hand through
+/// `pool::paint_over`. The same elements, drawn both ways onto the same
+/// background, must read back byte for byte the same: a gradient past every
+/// edge of the target by a pad -- a backdrop effect's result padded by its
+/// reach -- and a square across its bottom-right corner. And the hand-drawn
+/// loop as it was, handing each element the target's own rectangle as its
+/// damage, must not: that is the band a reach wide at the right and bottom
+/// that captures lost, so this case can tell the two apart.
+fn a_capture_is_the_picture_scanned_out(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::damage::OutputDamageTracker;
+    use smithay::backend::renderer::element::texture::TextureRenderElement;
+    use smithay::backend::renderer::element::{Element as _, Id, Kind, RenderElement};
+    use smithay::utils::Scale;
+    println!("\n=== FX0: a capture is the picture the monitor scans out ===");
+    let side = 64;
+    let pad = 12;
+    let background = Color32F::new(0.05, 0.05, 0.06, 1.0);
+
+    let grown = side + 2 * pad;
+    let mut gradient = Vec::with_capacity((grown * grown * 4) as usize);
+    for y in 0..grown {
+        for x in 0..grown {
+            gradient.extend_from_slice(&[(x * 255 / grown) as u8, (y * 255 / grown) as u8, 128, 255]);
+        }
+    }
+    let gradient = renderer
+        .import_memory(&gradient, Fourcc::Abgr8888, (grown, grown).into(), false)
+        .map_err(|err| anyhow!("{err}"))?;
+    let square = renderer
+        .import_memory(&[230_u8, 40, 20, 255].repeat(20 * 20), Fourcc::Abgr8888, (20, 20).into(), false)
+        .map_err(|err| anyhow!("{err}"))?;
+    let element = |texture: &GlesTexture, at: (i32, i32)| {
+        TextureRenderElement::from_static_texture(
+            Id::new(),
+            renderer.context_id(),
+            (f64::from(at.0), f64::from(at.1)),
+            texture.clone(),
+            1,
+            Transform::Normal,
+            None,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+    };
+    // Topmost first, as `render::elements` lists them.
+    let elements = [element(&square, (side - 10, side - 10)), element(&gradient, (-pad, -pad))];
+
+    let mut scanned: GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, (side, side).into())
+        .map_err(|err| anyhow!("{err}"))?;
+    {
+        let mut framebuffer = renderer.bind(&mut scanned).map_err(|err| anyhow!("{err}"))?;
+        let mut tracker = OutputDamageTracker::new((side, side), 1.0, Transform::Normal);
+        tracker
+            .render_output(renderer, &mut framebuffer, 0, &elements, background)
+            .map_err(|err| anyhow!("{err:?}"))?
+            .sync
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let scanned = read(renderer, &mut scanned, side)?;
+
+    let mut captured: GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, (side, side).into())
+        .map_err(|err| anyhow!("{err}"))?;
+    {
+        let mut framebuffer = renderer.bind(&mut captured).map_err(|err| anyhow!("{err}"))?;
+        let mut frame = renderer
+            .render(&mut framebuffer, (side, side).into(), Transform::Normal)
+            .map_err(|err| anyhow!("{err}"))?;
+        pool::paint_over(&mut frame, (side, side).into(), background, &elements, 1.0)
+            .map_err(|err| anyhow!("{err}"))?;
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let captured = read(renderer, &mut captured, side)?;
+
+    let mut before: GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, (side, side).into())
+        .map_err(|err| anyhow!("{err}"))?;
+    {
+        let mut framebuffer = renderer.bind(&mut before).map_err(|err| anyhow!("{err}"))?;
+        let mut frame = renderer
+            .render(&mut framebuffer, (side, side).into(), Transform::Normal)
+            .map_err(|err| anyhow!("{err}"))?;
+        let whole = [Rectangle::from_size((side, side).into())];
+        frame.clear(background, &whole).map_err(|err| anyhow!("{err}"))?;
+        for each in elements.iter().rev() {
+            RenderElement::<GlesRenderer>::draw(
+                each,
+                &mut frame,
+                each.src(),
+                each.geometry(Scale::from(1.0)),
+                &whole,
+                &[],
+            )
+            .map_err(|err| anyhow!("{err}"))?;
+        }
+        frame
+            .finish()
+            .map_err(|err| anyhow!("{err}"))?
+            .wait()
+            .map_err(|err| anyhow!("{err:?}"))?;
+    }
+    let before = read(renderer, &mut before, side)?;
+
+    if let Some(at) = scanned.iter().zip(&captured).position(|(a, b)| a != b) {
+        let pixel = (at / 4) as i32;
+        return Err(anyhow!(
+            "the capture differs from the scanned-out frame at ({}, {}): {:?} against {:?}",
+            pixel % side,
+            pixel / side,
+            &captured[at - at % 4..at - at % 4 + 4],
+            &scanned[at - at % 4..at - at % 4 + 4],
+        ));
+    }
+    if before == scanned {
+        return Err(anyhow!(
+            "the old capture loop draws the scanned-out frame too: this case cannot tell them apart"
+        ));
+    }
+    println!(
+        "  {side}x{side}, an element {pad} px past every edge and one across the corner: the \
+         capture is the scanned-out frame byte for byte, and the old loop is not"
     );
     Ok(())
 }

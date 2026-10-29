@@ -370,11 +370,29 @@ pub(crate) fn paint<E: RenderElement<GlesRenderer>>(
     elements: &[E],
     scale: f64,
 ) -> Result<(), GlesError> {
-    let whole = [Rectangle::from_size(size)];
     // Transparent, not black: a window's own corners are rounded, and anything
     // opaque here would draw a square behind them. Wirecheck's case 11f reads
     // a target painted with nothing back as transparent.
-    frame.clear(Color32F::TRANSPARENT, &whole)?;
+    paint_over(frame, size, Color32F::TRANSPARENT, elements, scale)
+}
+
+/// [`paint`], onto `background` rather than transparent: a monitor's whole
+/// picture drawn by hand, as a screen capture draws it (`screencopy::fill`)
+/// and the nested backend draws each monitor of several
+/// (`offscreen::Screens::draw`). Each element is handed the part of the frame
+/// it covers in its own space, as smithay's damage tracker hands it on the
+/// way to the screen, so a capture is the picture the monitor scans out
+/// (#398): handed the frame's own rectangle instead, an element whose corner
+/// is past the frame's -- a backdrop effect padded by its reach -- was drawn
+/// a reach short at the frame's right and bottom edges. Wirecheck's case 11k.
+pub(crate) fn paint_over<E: RenderElement<GlesRenderer>>(
+    frame: &mut GlesFrame<'_, '_>,
+    size: Size<i32, Physical>,
+    background: Color32F,
+    elements: &[E],
+    scale: f64,
+) -> Result<(), GlesError> {
+    frame.clear(background, &[Rectangle::from_size(size)])?;
     let mut first = Ok(());
     for element in draw_order(elements) {
         let (source, destination) = (element.src(), element.geometry(Scale::from(scale)));

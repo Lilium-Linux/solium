@@ -28,10 +28,7 @@ use smithay::{
         allocator::Fourcc,
         renderer::{
             Bind, Color32F, Frame as _, ImportAll, Offscreen, Renderer,
-            element::{
-                AsRenderElements, Element as _, Id, RenderElement,
-                surface::WaylandSurfaceRenderElement,
-            },
+            element::{AsRenderElements, Id, surface::WaylandSurfaceRenderElement},
             gles::{GlesRenderer, GlesTexture},
             utils::CommitCounter,
         },
@@ -901,25 +898,17 @@ impl Screens {
                         )
                     });
                     // The same background the backends clear to, so an empty
-                    // monitor looks like an empty monitor rather than a hole.
-                    frame
-                        .clear(
-                            Color32F::new(0.05, 0.05, 0.06, 1.0),
-                            &[Rectangle::from_size(size)],
-                        )
-                        .unwrap_or_else(|err| tracing::warn!(?err, "clearing a monitor failed"));
-
-                    let whole = [Rectangle::from_size(size)];
-                    // Reversed: this list is topmost-first, and drawing it in
-                    // that order onto a cleared buffer paints the top of the
-                    // stack first and everything else over it.
-                    for element in elements.iter().rev() {
-                        let source = element.src();
-                        let destination = element.geometry(Scale::from(scale));
-                        if let Err(err) = element.draw(&mut frame, source, destination, &whole, &[])
-                        {
-                            tracing::warn!(?err, index, "an element did not render");
-                        }
+                    // monitor looks like an empty monitor rather than a hole;
+                    // each element drawn over the part of it it covers, as the
+                    // damage tracker draws a monitor of its own (#398).
+                    if let Err(err) = crate::pool::paint_over(
+                        &mut frame,
+                        size,
+                        Color32F::new(0.05, 0.05, 0.06, 1.0),
+                        &elements,
+                        scale,
+                    ) {
+                        tracing::warn!(?err, index, "an element did not render");
                     }
 
                     if let (Some(timer), Some(stamp)) = (state.timer.as_mut(), stamp) {
