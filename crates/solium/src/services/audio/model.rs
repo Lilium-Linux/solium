@@ -93,9 +93,13 @@ impl Kind {
 /// the kernel say (#416).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct App {
-    /// Its process: `pipewire.sec.pid`, which PipeWire took from the socket
-    /// and so is the host's even for a sandboxed client, else
-    /// `application.process.id`.
+    /// Its process: the stream's `pipewire.sec.pid`, which PipeWire took
+    /// from the socket and so is the host's even for a sandboxed client,
+    /// else its `application.process.id`. A native PipeWire client's stream
+    /// says neither, so then its client's (`client.id`): the client's
+    /// `pipewire.sec.pid`, else its `application.process.id`. A stream's own
+    /// always comes first, as a PulseAudio client's client is
+    /// `pipewire-pulse`, whose socket is not the application's.
     pub(crate) pid: Option<u32>,
     /// That process and the ones that started it, nearest first
     /// (`state::ancestry`): what a window's process is looked for in, so a
