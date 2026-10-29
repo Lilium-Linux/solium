@@ -222,6 +222,7 @@ simply does not contain it. There is nothing to clean up.
 ```lua
 sol.on("open",   function(id) end)                 -- a window's life began
 sol.on("surface", function(surface, action, data) end) -- a hosted scene sent an action
+sol.on("frame", function(id, name, data) end)      -- a window's frame sent an action
 sol.on("closing", function(id) end)                -- a close was asked for
 sol.on("close_landed", function(id) end)           -- ...its animation has played
 sol.on("refused", function(id) end)                -- ...and declined: it is back
@@ -392,6 +393,29 @@ application has gone. To close up at once, handle `closing` (or
 `close_landed`), leave `leaving` windows out of any arrangement you build from
 `sol.windows()`, and put the window back on `refused`.
 
+**A window's frame talks to the configuration** (#417). A frame's layer
+sends any named action with data, `Solium.send("volume", { by = 0.05 })`, and
+`sol.on("frame", function(id, name, data))` hears it with the window's id;
+`"close"`, `"maximize"` and `"minimize"` are the compositor's own and go to
+no listener. The configuration answers with `sol.frame(id, { key = value })`,
+which that window's frame alone reads as `windowValues`, merged by key and
+gone with the window, as `sol.pane_values` is read by every frame as
+`values`. Each frame is also told its window's `windowId`, `pid` and state
+(`maximized`, `fullscreen`, `floating`, `minimized`). The panes README,
+"Sending to Lua, and a panel over the window", has the QML side.
+
+```lua
+-- A titlebar's quick settings: the window's opacity, kept per window.
+sol.on("frame", function(id, name, data)
+    if name == "opacity" then
+        sol.present(id, { opacity = data.value })
+        sol.frame(id, { opacity = data.value })
+    elseif name == "float" then
+        require("modes").toggle_floating(id)
+    end
+end)
+```
+
 **A minimized window is kept, and not shown** (#30). `sol.minimize(id)`,
 `super+m` (the focused window), the application's own minimize button and a
 frame's (`action = "minimize"`, #417) all minimize a window, and `sol.unminimize(id)` shows it again; so does focusing
@@ -492,7 +516,7 @@ has it -- scrolling does after every key it binds -- is told `false`
 | `"scroll"`, `"drop"` | a `scroll` or `drop` listener |
 | `"touch"` | a touch on a window |
 | `"hover"` | the pointer onto a window, with focus following the mouse |
-| `"surface"` | a hosted scene's action: a bar's window chip, the dock, a search |
+| `"surface"` | a hosted scene's action: a bar's window chip, the dock, a search, or a window frame's (`frame`) |
 | `"open"` | a window opening, or an `open` listener |
 | `"activate"` | an application bringing its window forward, or an `activate` listener |
 | `"settle"` | the window with the keyboard went, and the compositor found another |

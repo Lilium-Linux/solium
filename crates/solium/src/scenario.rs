@@ -507,6 +507,8 @@ fn on_the_qt_thread(path: &Path) {
                     pointer_inside: inside,
                     caret,
                     values: &values,
+                    window: None,
+                    window_values: crate::decoration::Values::none(),
                 },
                 size.0,
                 size.1,

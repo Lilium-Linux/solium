@@ -35452,6 +35452,8 @@ end)
                                 pointer_inside: false,
                                 caret: None,
                                 values: &values,
+                                window: None,
+                                window_values: crate::decoration::Values::none(),
                             },
                             64,
                             96,
@@ -35838,6 +35840,8 @@ end)
                                 pointer_inside: false,
                                 caret: None,
                                 values: &values,
+                                window: None,
+                                window_values: crate::decoration::Values::none(),
                             },
                             400,
                             332,
@@ -40367,6 +40371,518 @@ end)"#,
                     (Some(Json::Bool(true)), Some(Json::Bool(true))),
                     "(maximized once the compositor maximised it, once the client committed it)"
                 );
+            }
+        }
+
+        /// **#417: a frame that does more than draw**, against a real client
+        /// and real QML: what its layers are told of their window, what they
+        /// send to Lua, the right button and the wheel on the titlebar, and a
+        /// panel dropped down over the window that holds a grab.
+        mod frames {
+            use super::*;
+            use smithay::backend::input::ButtonState;
+
+            const BTN_LEFT: u32 = 0x110;
+            const BTN_RIGHT: u32 = 0x111;
+
+            /// The titlebar is the top 32 pixels. A right press on it opens a
+            /// panel 60 tall below it, over the client, which holds a grab
+            /// while it is open; the wheel anywhere on the frame sends
+            /// `volume` with how far it turned, in notches.
+            const FRAME: &str = r#"
+import QtQuick
+import Solium
+
+Item {
+    id: frame
+    property string action: ""
+    readonly property bool onButton: false
+    property int windowId: 0
+    property bool expanded: false
+    property int rights: 0
+    property int wheels: 0
+    property int panelPresses: 0
+    property int dismissals: 0
+    property int escapes: 0
+    property int slider: -1
+
+    MouseArea {
+        x: 0; y: 0; width: frame.width; height: 32
+        acceptedButtons: Qt.RightButton
+        onPressed: {
+            frame.rights += 1
+            frame.expanded = true
+            panel.forceActiveFocus()
+        }
+    }
+    WheelHandler {
+        target: null
+        onWheel: (event) => {
+            frame.wheels += 1
+            Solium.send("volume", { by: event.angleDelta.y / 120, id: frame.windowId })
+        }
+    }
+    Item {
+        id: panel
+        y: 32; width: frame.width; height: 60
+        visible: frame.expanded
+        Keys.onEscapePressed: {
+            frame.escapes += 1
+            frame.expanded = false
+        }
+        MouseArea {
+            anchors.fill: parent
+            onPressed: (mouse) => {
+                frame.panelPresses += 1
+                frame.slider = mouse.x
+            }
+            onPositionChanged: (mouse) => frame.slider = mouse.x
+        }
+    }
+    Grab {
+        active: frame.expanded
+        target: panel
+        onDismissed: {
+            frame.dismissals += 1
+            frame.expanded = false
+        }
+    }
+}
+"#;
+
+            /// A window framed by [`FRAME`] at (600, 500), with the keyboard,
+            /// a pointer bound, every layer built, and `events` recording what
+            /// `sol.on("frame")` hears. The style's folder, to remove.
+            fn framed() -> (Desk, Opened, std::path::PathBuf) {
+                static NEXT: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let style = std::env::temp_dir()
+                    .join(format!("solium-frames-{}-{serial}", std::process::id()));
+                std::fs::create_dir_all(&style).expect("a style folder");
+                std::fs::write(
+                    style.join("Pane.qml"),
+                    "import Solium\nPaneStyle {\n    insets.top: 32\n    \
+                     Layer { depth: \"frame\"; name: \"bar\"; source: \"Frame.qml\" }\n}\n",
+                )
+                .expect("writing the manifest");
+                std::fs::write(style.join("Frame.qml"), FRAME).expect("writing the layer");
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let _buffer = commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                desk.pump();
+                desk.install(
+                    "events = {}\n\
+                     sol.on(\"frame\", function(id, name, data)\n\
+                         events[#events + 1] = id .. \" \" .. name .. \" \" .. data.by .. \" \" .. data.id\n\
+                     end)",
+                );
+                desk.state
+                    .decorations
+                    .set_style(&mut desk.state.panes, Some(style.display().to_string()));
+                desk.state
+                    .decorations
+                    .insert(&mut desk.state.panes, opened.pane, 400, 300);
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(window.clone(), (600, 500), false);
+                desk.state.space.refresh();
+                desk.state.sync_panes();
+                desk.state.focus_window(
+                    &window,
+                    SERIAL_COUNTER.next_serial(),
+                    crate::script::FocusSource::Script,
+                );
+                desk.state.profile.focus_follows_mouse = false;
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.pump();
+                (desk, opened, style)
+            }
+
+            /// The point `local` of `pane`, on the screen.
+            fn at(desk: &Desk, pane: crate::pane::PaneId, local: (f64, f64)) -> (f64, f64) {
+                let outer = desk.state.pane_outer_of(pane).expect("outer");
+                (
+                    f64::from(outer.loc.x) + local.0,
+                    f64::from(outer.loc.y) + local.1,
+                )
+            }
+
+            fn region(desk: &Desk) -> Rectangle<i32, Logical> {
+                crate::monitor::union(&desk.state.space).expect("a monitor")
+            }
+
+            fn click(desk: &mut Desk, button: u32, time: u64) {
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    button,
+                    ButtonState::Pressed,
+                    time,
+                );
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    button,
+                    ButtonState::Released,
+                    time + 1,
+                );
+                desk.pump();
+            }
+
+            /// The frame's integer property `name`.
+            fn told(desk: &mut Desk, pane: crate::pane::PaneId, name: &str) -> i32 {
+                desk.state
+                    .panes
+                    .get_mut(pane)
+                    .and_then(Pane::decoration_mut)
+                    .expect("the frame")
+                    .first_layer_int(name)
+            }
+
+            /// The panel opened with a right press on the titlebar.
+            fn open_panel(desk: &mut Desk, pane: crate::pane::PaneId) {
+                let bar = at(desk, pane, (20.0, 16.0));
+                move_pointer(&mut desk.state, bar, 10);
+                click(desk, BTN_RIGHT, 11);
+                assert_eq!(
+                    desk.state.decorations.holding,
+                    Some(pane),
+                    "the premise: the panel holds its grab"
+                );
+            }
+
+            /// **A frame is told its window and its state** (#417): its id
+            /// and its process, and a maximise, a fullscreen and a minimize
+            /// each as the compositor set it, and whether a layout holds it in
+            /// a tile.
+            #[test]
+            fn a_frame_is_told_its_window_and_its_state() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a client");
+                let told = desk.state.frame_window(opened.pane).expect("a window");
+                assert_eq!(told.id, opened.pane.get());
+                assert_eq!(
+                    told.pid,
+                    Some(std::process::id()),
+                    "this process is the client"
+                );
+                assert!(told.floating, "no layout holds it in a tile");
+                assert!(!told.maximized && !told.fullscreen && !told.minimized);
+                desk.state.toggle_maximize(&window);
+                assert!(
+                    desk.state
+                        .frame_window(opened.pane)
+                        .is_some_and(|told| told.maximized)
+                );
+                desk.state.minimize(opened.pane);
+                assert!(
+                    desk.state
+                        .frame_window(opened.pane)
+                        .is_some_and(|told| told.minimized)
+                );
+            }
+
+            /// **A frame sends a named action with its data to Lua** (#417):
+            /// a layer's `Solium.send("volume", { by, id })` reaches
+            /// `sol.on("frame", id, name, data)` with the window's id; and
+            /// `Solium.send("minimize")` is the built-in action, which Lua
+            /// hears as the window minimized and not as a frame action.
+            #[test]
+            fn a_frame_sends_a_named_action_with_its_data_to_lua() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed();
+                    let id = opened.pane.get();
+                    // What every frame is told as it is drawn.
+                    let window = desk.state.frame_window(opened.pane);
+                    if let Some(decoration) = desk
+                        .state
+                        .panes
+                        .get_mut(opened.pane)
+                        .and_then(Pane::decoration_mut)
+                    {
+                        decoration.tell_as_a_frame_would(
+                            &crate::decoration::Look {
+                                title: "",
+                                app_id: "",
+                                focused: true,
+                                pointer_inside: true,
+                                caret: None,
+                                values: crate::decoration::Values::none(),
+                                window,
+                                window_values: crate::decoration::Values::none(),
+                            },
+                            400,
+                            300,
+                        );
+                    }
+                    assert_eq!(
+                        told(&mut desk, opened.pane, "windowId"),
+                        i32::try_from(id).expect("small")
+                    );
+                    let bar = at(&desk, opened.pane, (20.0, 16.0));
+                    move_pointer(&mut desk.state, bar, 10);
+                    let region = region(&desk);
+                    crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 11);
+                    desk.pump();
+                    assert_eq!(desk.events(), format!("{id} volume -1 {id}"));
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// **A right press and the wheel on the titlebar reach the frame,
+            /// and not the client** (#417): the right press is the right
+            /// button to the frame's QML, and moves nothing; the wheel turn
+            /// reaches its `WheelHandler`; the client is told neither.
+            #[test]
+            fn a_right_press_and_the_wheel_on_the_titlebar_reach_the_frame_and_not_the_client() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed();
+                    let before = desk.state.pane_outer_of(opened.pane);
+                    let bar = at(&desk, opened.pane, (20.0, 16.0));
+                    move_pointer(&mut desk.state, bar, 10);
+                    let region = region(&desk);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        BTN_RIGHT,
+                        ButtonState::Pressed,
+                        11,
+                    );
+                    move_pointer(&mut desk.state, (bar.0 + 40.0, bar.1 + 3.0), 12);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        BTN_RIGHT,
+                        ButtonState::Released,
+                        13,
+                    );
+                    crate::synth::send_axis(&mut desk.state, region, (0.0, 120.0), 14);
+                    desk.pump();
+                    assert_eq!(
+                        (
+                            told(&mut desk, opened.pane, "rights"),
+                            told(&mut desk, opened.pane, "wheels"),
+                            desk.state.pane_outer_of(opened.pane) == before,
+                            desk.client.buttons.clone(),
+                        ),
+                        (1, 1, true, Vec::new()),
+                        "(right presses the frame heard, wheel turns it heard, \
+                         the window where it was, the buttons the client was told)"
+                    );
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// **A frame holding a grab takes the press over the client, and
+            /// is dismissed outside** (#417): opened, the panel over the top
+            /// of the client takes a press there, which the client is not
+            /// told; a press on the client below the panel dismisses the grab
+            /// and is swallowed, with its release; and the next press there
+            /// is the client's.
+            #[test]
+            fn a_frame_holding_a_grab_takes_the_press_over_the_client_and_is_dismissed_outside() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed();
+                    let panel = at(&desk, opened.pane, (30.0, 50.0));
+                    let below = at(&desk, opened.pane, (30.0, 200.0));
+                    assert!(
+                        desk.state.surface_under(panel.into()).is_some(),
+                        "the premise: the client is under where the panel opens"
+                    );
+                    open_panel(&mut desk, opened.pane);
+                    move_pointer(&mut desk.state, panel, 20);
+                    assert!(
+                        desk.state.surface_under(panel.into()).is_none(),
+                        "the client has the pointer under the open panel"
+                    );
+                    click(&mut desk, BTN_LEFT, 21);
+                    move_pointer(&mut desk.state, below, 22);
+                    click(&mut desk, BTN_LEFT, 23);
+                    let after_dismissal = desk.client.buttons.clone();
+                    click(&mut desk, BTN_LEFT, 25);
+                    assert_eq!(
+                        (
+                            told(&mut desk, opened.pane, "panelPresses"),
+                            told(&mut desk, opened.pane, "dismissals"),
+                            told(&mut desk, opened.pane, "slider"),
+                            after_dismissal,
+                            desk.state.decorations.holding,
+                            desk.client.buttons.clone(),
+                        ),
+                        (
+                            1,
+                            1,
+                            30,
+                            Vec::new(),
+                            None,
+                            vec![(BTN_LEFT, true), (BTN_LEFT, false)]
+                        ),
+                        "(presses the panel took, times it was dismissed, where its slider is, \
+                         what the client was told until then, the frame holding, \
+                         what the client was told of the next click)"
+                    );
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// **A slider dragged off the frame follows the pointer** (#417):
+            /// a press in the panel holds the pointer for the frame until it
+            /// is let go of, wherever it goes, so the slider is dragged to
+            /// where the pointer is and the release dismisses nothing.
+            #[test]
+            fn a_slider_dragged_off_the_frame_follows_the_pointer() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed();
+                    open_panel(&mut desk, opened.pane);
+                    let panel = at(&desk, opened.pane, (30.0, 50.0));
+                    move_pointer(&mut desk.state, panel, 20);
+                    let region = region(&desk);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        BTN_LEFT,
+                        ButtonState::Pressed,
+                        21,
+                    );
+                    move_pointer(&mut desk.state, (panel.0 + 70.0, panel.1 + 300.0), 22);
+                    let dragged = told(&mut desk, opened.pane, "slider");
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        BTN_LEFT,
+                        ButtonState::Released,
+                        23,
+                    );
+                    desk.pump();
+                    assert_eq!(
+                        (
+                            dragged,
+                            told(&mut desk, opened.pane, "dismissals"),
+                            desk.state.decorations.holding,
+                            desk.client.buttons.clone(),
+                        ),
+                        (100, 0, Some(opened.pane), Vec::new()),
+                        "(where the slider was dragged to, times the panel was dismissed, \
+                         the frame holding, the buttons the client was told)"
+                    );
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// **Locking the session dismisses a frame's grab and its press**
+            /// (#417): the panel hears it is dismissed, no frame holds the
+            /// pointer or the keys, and a press the frame was given is
+            /// forgotten, its release being the lock screen's.
+            #[test]
+            fn locking_the_session_dismisses_a_frames_grab_and_its_press() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed();
+                    open_panel(&mut desk, opened.pane);
+                    let panel = at(&desk, opened.pane, (30.0, 50.0));
+                    move_pointer(&mut desk.state, panel, 20);
+                    let region = region(&desk);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        BTN_LEFT,
+                        ButtonState::Pressed,
+                        21,
+                    );
+                    let pressed = desk.state.decorations.pressed;
+                    desk.state.release_grabs();
+                    assert_eq!(
+                        (
+                            pressed,
+                            told(&mut desk, opened.pane, "dismissals"),
+                            desk.state.decorations.holding,
+                            desk.state.decorations.pressed,
+                        ),
+                        (Some(opened.pane), 1, None, None),
+                        "(the press the frame was given, times the panel was dismissed, \
+                         the frame holding, the press held after)"
+                    );
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// **A frame holding a grab takes the keys no binding takes**
+            /// (#417), on a `us,ru` keymap with Russian active: Escape
+            /// reaches the item with the frame's keyboard focus, and a letter
+            /// reaches it too, not the window; a binding still runs. Once the
+            /// panel has closed, a letter is the window's again.
+            #[test]
+            fn a_frame_holding_a_grab_takes_the_keys_no_binding_takes() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed();
+                    russian(&mut desk.state);
+                    desk.install("sol.bind(\"super+q\", function() sol.status(\"bound\") end)");
+                    open_panel(&mut desk, opened.pane);
+                    desk.pump();
+                    desk.client.key_events.clear();
+                    let region = region(&desk);
+                    crate::synth::key(&mut desk.state, region, "Cyrillic_ef", 30);
+                    crate::synth::key(&mut desk.state, region, "super+Cyrillic_shorti", 31);
+                    let bound = desk.state.status.clone();
+                    crate::synth::key(&mut desk.state, region, "Escape", 32);
+                    desk.pump();
+                    // Presses only: the release of a key a binding took goes
+                    // on to the window, as it always has.
+                    let pressed = |desk: &Desk| {
+                        desk.client
+                            .key_events
+                            .iter()
+                            .filter(|(_, pressed)| *pressed)
+                            .count()
+                    };
+                    let while_open = pressed(&desk);
+                    crate::synth::key(&mut desk.state, region, "Cyrillic_ef", 33);
+                    desk.pump();
+                    assert_eq!(
+                        (
+                            while_open,
+                            bound.as_str(),
+                            told(&mut desk, opened.pane, "escapes"),
+                            desk.state.decorations.holding,
+                            pressed(&desk),
+                        ),
+                        (0, "bound", 1, None, 1),
+                        "(the window was told no key while the panel was open, the binding \
+                         ran, the Escapes the panel heard, the frame holding, \
+                         the window told the letter after)"
+                    );
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
             }
         }
 

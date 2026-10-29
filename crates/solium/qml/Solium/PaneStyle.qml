@@ -188,6 +188,24 @@ Item {
     // `decoration::tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
     property var values: ({})
 
+    // The same, for this window alone: whatever the configuration handed it
+    // with `sol.frame(id, { key = value })`, its opacity for one. Merged by
+    // key, and gone with the window (#417).
+    // `decoration::tests::a_layer_is_told_its_windows_own_values`.
+    property var windowValues: ({})
+
+    // The window this frame belongs to: its id, as `sol.windows()` gives it
+    // and `sol.on("frame")` hears it, its process (-1 when it cannot be
+    // told), and its state, each written when it changes (#417). `floating`
+    // is a window no layout holds in a tile.
+    // `decoration::tests::a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes`.
+    property int windowId: 0
+    property int pid: -1
+    property bool maximized: false
+    property bool fullscreen: false
+    property bool floating: false
+    property bool minimized: false
+
     // Where the window's own rectangle is inside this scene.
     //
     // A layer is laid out on its **canvas** — the pane's outer rect grown by
@@ -214,7 +232,9 @@ Item {
 
     // And the two that go the other way: what a button under the pointer says
     // about itself, and what it asked for. The compositor reads `onButton` and
-    // *takes* `action`, clearing it — see `Decoration::take_action`.
+    // *takes* `action`, clearing it — see `Decoration::take_action`. Anything
+    // else, with data, goes to Lua with `Solium.send(name, data)`, which a
+    // configuration hears as `sol.on("frame", id, name, data)` (#417).
     property bool onButton: false
     property string action: ""
 

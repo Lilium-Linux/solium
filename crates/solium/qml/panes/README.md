@@ -143,15 +143,27 @@ When they change, in place, and to a frame built later as well:
 |---|---|
 | `caret` | where the focused text field's caret is, when this window has it: `{ valid, x, y, width, height }` in the pane's own space -- the space a layer with no bleed is laid out in -- and `valid: false` when the field goes or the keyboard leaves the window. Known from applications that say where their caret is, through `text-input-v3`. Exact while the window is at rest: it takes the client to sit just inside the insets, so while a resize places the client otherwise for a moment, it can be off by that much. Declared on `PaneStyle`; a delegated layer that wants it declares `property var caret: ({ valid: false })` |
 | `values` | whatever the configuration handed every pane with `sol.pane_values{ key = value }`, as one object. Each call merges its top-level keys into what is there, a key's value replaced whole, so two scripts that hand keys of their own both reach the layer. A general channel from Lua to the frames: a setting the configuration reads reaches the layer that draws by it, and the compositor never knows what it is. A reload starts it empty, so a key the reloaded configuration no longer hands over is gone. Declared on `PaneStyle`; a delegated layer declares `property var values: ({})` |
+| `windowValues` | whatever the configuration handed **this window's** frame with `sol.frame(id, { key = value })`, as one object, merged by key as `values` is: the window's own opacity for a quick-settings slider, a level, anything the configuration keeps per window. Gone with the window, and a reload starts it empty. Declared on `PaneStyle`; a delegated layer declares `property var windowValues: ({})` |
+| `windowId` | the window's id, as `sol.windows()` gives it and `sol.on("frame")` hears it |
+| `pid` | the window's process, as `sol.windows()` gives it: an X11 window's own, never Xwayland's; `-1` when it cannot be told |
+| `maximized`, `fullscreen` | the window's state, as the compositor last set it, so the frame changes the moment it is asked and not when the application answers |
+| `floating` | no layout holds the window in a tile: every window of a floating desktop, and a window a tiling layout let float. A maximised or fullscreen window is as it was before |
+| `minimized` | the window is put away |
+
+`windowId` to `minimized` are declared on `PaneStyle` as `int` and `bool`
+properties; a delegated layer declares the ones it reads, `property int
+windowId: 0`, `property int pid: -1` and the rest. A window that went keeps
+what its frame was last told while it fades.
 
 A layer drawing at the caret is drawn with its window, so whatever the window
 is doing -- moving, scaling in a thumbnail, fading -- the drawing does too.
 Every layer can also read the keyboard, `Keyboard` in `import Solium`: the
 live layout, its names, and whether Caps Lock and Num Lock are on
-(`docs/shell-boundary.md`, "The keyboard, live"). The attached `Solium` object
-and `Grab` are a hosted shell's. In a layer they build and do nothing, and
-`Solium.monitor` reads an absent row with an empty `name`
-(`docs/shell-boundary.md`, "The `Solium` QML module").
+(`docs/shell-boundary.md`, "The keyboard, live"). A layer is a hosted scene
+on no monitor: `Solium.send` and `Grab` work in it, as "Sending to Lua, and a
+panel over the window" below says, `Solium.monitor` reads an absent row with
+an empty `name`, and `Solium.surface.reserve` and `Solium.keyboard` hold
+nothing (`docs/shell-boundary.md`, "The `Solium` QML module").
 
 Once, at build, because neither ever changes for a style:
 
@@ -198,13 +210,79 @@ while it is anywhere over the window -- including over the client, which is how
 a border can follow the cursor. When it leaves, the layer is told with a
 position outside itself, so `MouseArea.containsMouse` goes false on its own. A
 layer with bleed is given the pointer in **its own canvas**, so a click lands on
-whatever that layer drew there. **Presses are narrower than hover**: they reach
+whatever that layer drew there. Each button is itself: a right press is
+`Qt.RightButton`, so a `MouseArea` with `acceptedButtons: Qt.RightButton` opens
+a menu on it, and a double press is a double-click. Only the left button drags
+the window. The wheel over the band reaches a `WheelHandler`, and the client
+hears nothing of it. A press the frame was given has the pointer until every
+button is up, wherever it goes, with its release: a slider dragged off the
+window follows the pointer. **Presses are narrower than hover**: they reach
 the layers only inside the band the insets reserve, so a button drawn over the
 client, out in the bleed, or in a style that reserves nothing cannot be
-pressed. Touch reaches no layer: a finger on a frame's close or maximise
+pressed -- unless a layer holds a grab over it, below. Touch reaches no layer: a finger on a frame's close or maximise
 button, or on its edge, presses nothing and resizes nothing
 ([#181](https://github.com/Lilium-Linux/solium/issues/181)), though outside
 the `tablet` and `phone` form factors the tap still focuses the window.
+
+## Sending to Lua, and a panel over the window
+
+A layer sends any named action, with data, to the configuration with
+`Solium.send(name, data)` from anywhere in its QML, inline or delegated. Lua
+hears it as `sol.on("frame", function(id, name, data) ... end)`, with the
+window's id, in the order sent, in a dispatch after the one that sent it.
+`"close"`, `"maximize"` and `"minimize"` are the built-in actions, as they
+are for `action`, and are not handed to Lua. Lua answers with
+`sol.frame(id, { key = value })`, which the layer reads as `windowValues`.
+
+```qml
+// The titlebar changes its application's volume, and the configuration
+// keeps the window's opacity, which the frame shows on a slider.
+WheelHandler { target: null; onWheel: (e) => Solium.send("volume", { by: e.angleDelta.y / 1200 }) }
+Slider { value: frame.windowValues.opacity ?? 1
+         onMoved: Solium.send("opacity", { value: value }) }
+```
+
+```lua
+sol.on("frame", function(id, name, data)
+    if name == "opacity" then
+        sol.present(id, { opacity = data.value })
+        sol.frame(id, { opacity = data.value })
+    end
+end)
+```
+
+A layer can drop a panel down over the window, quick settings for one, and
+hold the pointer and the keys while it is open, with the same `Grab` a shell's
+popup uses:
+
+```qml
+Item {
+    id: panel
+    y: frame.insetTop; width: frame.width; height: 160
+    visible: frame.expanded
+    Keys.onEscapePressed: frame.expanded = false
+}
+Grab { active: frame.expanded; target: panel; onDismissed: frame.expanded = false }
+// and, where it opens: frame.expanded = true; panel.forceActiveFocus()
+```
+
+While a layer's grab is active:
+
+- a press, a release, the wheel and hover inside the grab's target are the
+  frame's, over the client as over the band, and the client is told none of
+  it; a press there never drags the window;
+- a press anywhere else, on the client, another window, the desktop or a
+  bar, dismisses it (`onDismissed`) and is swallowed with its release, as a
+  press outside a shell's popup is;
+- every key no binding takes is the frame's, delivered to the item with its
+  keyboard focus (give it `focus: true` or `forceActiveFocus()`), so Escape
+  closes it; the window under it is told no key until it closes. Bindings,
+  the compositor's own keys among them, still run;
+- it ends when the grab is no longer active, and is dismissed when the window
+  loses the keyboard, is minimized or goes, or the session locks.
+
+One frame holds a grab at a time, as one shell scene does: a frame that
+starts one dismisses the one another held.
 
 ## What it costs
 

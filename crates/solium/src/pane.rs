@@ -259,21 +259,12 @@ pub(crate) struct Left {
 /// [`crate::decoration::Decoration`] from it; what it builds it hands to the
 /// pane. See "Pane ownership" in `docs/design/2026-09-08-pane-styles-design.md`.
 ///
-/// **There is no `large_enum_variant` suppression on this any more, and its
-/// absence is the measurement.** There was one, justified by
-/// `size_of::<Decoration>()` being 248; a decoration then became a *list* of
-/// layers, its scene and its backing moved behind that list's pointer, and it
-/// is now **112 bytes** — under clippy's 200-byte threshold, so the lint does
-/// not fire at all and an `#[expect]` for it is an unfulfilled expectation and
-/// a warning of its own. The niche is unchanged and still load-bearing, which
-/// is what `a_frame_costs_what_the_decoration_in_it_costs` pins: a `Vec`'s
-/// pointer is non-null, so the discriminant still lands inside the payload and
-/// `Frame` is 112 as well. `Pane` is 712.
-///
-/// Those three literals have gone stale once already — bleed put the pane's
-/// size into `Shown`, eight bytes, and all three moved together. They are here
-/// to give the threshold a scale and nothing depends on them, which is why the
-/// test is a relation and not two numbers.
+/// **The decoration is boxed, and that is the measurement too.** A decoration
+/// was under clippy's 200-byte `large_enum_variant` threshold until what it
+/// remembers telling its layers grew with #417 (its window's state and
+/// its own values) and took it to 208. Boxing it puts one allocation on each
+/// framed window and takes every pane's frame down to two words:
+/// `a_frame_costs_two_words` pins that.
 #[derive(Debug, Default)]
 pub(crate) enum Frame {
     /// A client is still coming, or its frame has not been built yet. Keep
@@ -293,12 +284,11 @@ pub(crate) enum Frame {
     /// clothes — and it leaves when the pane does, which is the table
     /// reconciliation this whole change exists to delete.
     ///
-    /// Not boxed. Measured: `size_of::<Decoration>()` is 112 and `Frame` with
-    /// this arm inline is also 112, because the discriminant lands in a niche.
-    /// A `Box` here buys an allocation per decorated window and saves nothing —
-    /// and a decoration's own scenes are already behind one pointer, since a
-    /// style is a `Vec` of layers.
-    Styled(crate::decoration::Decoration),
+    /// Boxed, since what a frame remembers telling its layers (its window's
+    /// state among it, #417) grew a `Decoration` past 200 bytes, and every
+    /// pane, framed or not, would carry that inline. One allocation per
+    /// decorated window, made when its frame is built.
+    Styled(Box<crate::decoration::Decoration>),
 }
 
 /// The two tiles a pane can hold -- the one it is in and the one it left for a
@@ -468,6 +458,10 @@ pub(crate) struct Pane {
     /// by `PaneId` in a table beside the panes has to be reconciled by hand,
     /// and one that is not is kept for ever.
     frame: Frame,
+    /// What the configuration handed this window's frame alone, as its
+    /// layers' `windowValues`: `sol.frame(id, { ... })` (#417). Kept across a
+    /// change of style, and gone with the window.
+    frame_values: crate::decoration::Values,
     /// When this pane's close request goes out, once it has finished leaving.
     ///
     /// A *deadline*, not a start: `Solium::close_pane` animates the window
@@ -665,6 +659,7 @@ impl Pane {
                 since: now,
             },
             frame: Frame::Pending,
+            frame_values: crate::decoration::Values::default(),
             closing_at: None,
             asked_at: None,
             answered: false,
@@ -703,6 +698,7 @@ impl Pane {
                 launch: None,
             },
             frame: Frame::Pending,
+            frame_values: crate::decoration::Values::default(),
             closing_at: None,
             asked_at: None,
             answered: false,
@@ -989,9 +985,9 @@ impl Pane {
     }
 
     /// This pane's frame scene, if one has been built.
-    pub(crate) const fn decoration(&self) -> Option<&crate::decoration::Decoration> {
+    pub(crate) fn decoration(&self) -> Option<&crate::decoration::Decoration> {
         match &self.frame {
-            Frame::Styled(decoration) => Some(decoration),
+            Frame::Styled(decoration) => Some(decoration.as_ref()),
             Frame::Pending | Frame::None => None,
         }
     }
@@ -1005,9 +1001,24 @@ impl Pane {
     /// going through [`crate::decoration::Decorations`] — a second writer of
     /// the fact this change exists to keep in one place. Everything that
     /// decides *whether* there is a frame goes through `set_frame`.
-    pub(crate) const fn decoration_mut(&mut self) -> Option<&mut crate::decoration::Decoration> {
+    pub(crate) fn decoration_mut(&mut self) -> Option<&mut crate::decoration::Decoration> {
         match &mut self.frame {
-            Frame::Styled(decoration) => Some(decoration),
+            Frame::Styled(decoration) => Some(decoration.as_mut()),
+            Frame::Pending | Frame::None => None,
+        }
+    }
+
+    /// The decoration to draw, with what the configuration handed it alone
+    /// (`frame_values`), at once: the frame is told the one as it draws the
+    /// other.
+    pub(crate) fn decoration_with_values_mut(
+        &mut self,
+    ) -> Option<(
+        &mut crate::decoration::Decoration,
+        &crate::decoration::Values,
+    )> {
+        match &mut self.frame {
+            Frame::Styled(decoration) => Some((decoration.as_mut(), &self.frame_values)),
             Frame::Pending | Frame::None => None,
         }
     }
@@ -1030,6 +1041,13 @@ impl Pane {
     /// The same, to build a grid into or pin a version on.
     pub(crate) fn meshes_mut(&mut self) -> &mut crate::effect::geometry::Meshes {
         &mut self.meshes
+    }
+
+    /// What the configuration handed this window's frame, to merge into or
+    /// clear. See the field; it is read with the frame it is drawn by,
+    /// [`Self::decoration_with_values_mut`].
+    pub(crate) const fn frame_values_mut(&mut self) -> &mut crate::decoration::Values {
+        &mut self.frame_values
     }
 
     /// Say what is drawn around this pane's client.
@@ -1513,6 +1531,11 @@ impl Panes {
 
     pub(crate) fn get(&self, id: PaneId) -> Option<&Pane> {
         self.panes.iter().find(|pane| pane.id == id)
+    }
+
+    /// Bottom to top, to write to.
+    pub(crate) fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Pane> {
+        self.panes.iter_mut()
     }
 
     pub(crate) fn get_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
@@ -2265,31 +2288,17 @@ mod tests {
         assert!(!pane.awaits(&[1, 2, 3]));
     }
 
-    /// **A `Frame` costs what the decoration inside it costs, and not a byte
-    /// more.**
+    /// **A `Frame` costs two words, whatever a decoration grows to.**
     ///
-    /// The claim the `#[expect(clippy::large_enum_variant)]` on `Frame` used to
-    /// carry in prose, asserted instead — because that comment's number went
-    /// stale the moment a `Decoration` changed shape, and a suppression with a
-    /// false number attached is worse than one with no reason at all.
-    ///
-    /// Written as a relation rather than as two literals on purpose. The
-    /// numbers move whenever anything in a decoration moves — they already have
-    /// once, 104 to 112, when bleed put the pane's size into `Shown` — and the
-    /// fact worth keeping is not what they are but that they are *equal*: the
-    /// discriminant lands in a niche inside the payload, so the three-armed
-    /// enum is free relative to the one arm that carries anything. Lose the
-    /// niche and this fails, which is exactly when boxing would be worth
-    /// re-arguing.
+    /// The decoration is boxed (#417 grew it past 200 bytes): the box is one
+    /// word, and its non-null niche holds one of the two other arms, so the
+    /// tag takes a second. Unbox the decoration and this fails.
     #[test]
-    fn a_frame_costs_what_the_decoration_in_it_costs() {
+    fn a_frame_costs_two_words() {
         assert_eq!(
             size_of::<Frame>(),
-            size_of::<crate::decoration::Decoration>(),
-            "`Frame::Styled` stopped fitting its discriminant into a niche, so \
-             a pane now pays for the tag as well as for the decoration -- and \
-             the case for boxing, which was rejected on these two numbers being \
-             equal, is worth making again"
+            2 * size_of::<usize>(),
+            "`Frame` is no longer two words: the decoration was unboxed"
         );
     }
 

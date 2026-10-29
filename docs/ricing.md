@@ -162,11 +162,29 @@ is still called a decoration; it lives in
 A layer is also told where the focused text field's caret is, as `caret`, in
 the pane's own space; whatever the configuration hands every pane with
 `sol.pane_values{ key = value }`, as `values`, which a delegated layer
-declares as `property var values: ({})`; and it can read the keyboard's layout
-and locks as the `Keyboard` singleton. That is how `KeyboardPillLayer {}` draws
+declares as `property var values: ({})`; its window's id, process and state
+(`windowId`, `pid`, `maximized`, `fullscreen`, `floating`, `minimized`), and
+what the configuration handed that window alone with
+`sol.frame(id, { key = value })`, as `windowValues`; and it can read the
+keyboard's layout and locks as the `Keyboard` singleton. That is how `KeyboardPillLayer {}` draws
 the keyboard pill: the panes README's
 [What the compositor sets on every layer](../crates/solium/qml/panes/README.md#what-the-compositor-sets-on-every-layer)
 has each of them.
+
+### A titlebar that does things
+
+A frame is QML, so a titlebar can do whatever its QML does, and talk to your
+configuration both ways (#417). A button sets `action` to `"close"`,
+`"maximize"` or `"minimize"`; anything else is
+`Solium.send("name", { ... })`, which your Lua hears as
+`sol.on("frame", function(id, name, data) ... end)`, and answers with
+`sol.frame(id, { ... })`. A right press on the titlebar is the right button to
+its QML, the wheel over it reaches a `WheelHandler`, and a panel dropped down
+over the window, quick settings for one, holds the pointer and the keys while
+it is open with a `Grab`, as a shell's popup does: a press outside it, or
+Escape if you handle it, closes it. The panes README,
+[Sending to Lua, and a panel over the window](../crates/solium/qml/panes/README.md#sending-to-lua-and-a-panel-over-the-window),
+has the whole of it.
 
 ### Rounded corners
 
