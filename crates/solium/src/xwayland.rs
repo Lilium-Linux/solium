@@ -37,6 +37,27 @@ use smithay::{
 
 use crate::{pane::Pane, state::Solium};
 
+mod focus;
+
+/// XWayland's window manager, smithay's, and the connection of ours that keeps
+/// the X server's input focus on the X11 window with the keyboard (#399; see
+/// `focus`).
+#[derive(Debug)]
+pub(crate) struct Xwm {
+    pub(crate) wm: X11Wm,
+    focus: Option<focus::Focus>,
+}
+
+impl Xwm {
+    /// `wm` managing XWayland on display `display`.
+    fn new(wm: X11Wm, display: u32) -> Self {
+        Self {
+            wm,
+            focus: focus::Focus::start(display),
+        }
+    }
+}
+
 /// Whether a window of this type places itself, the way override-redirect does.
 ///
 /// Issue #104: Steam's top-bar dropdowns opened away from the button that
@@ -390,7 +411,7 @@ where
         } => match X11Wm::start_wm::<D>(loop_handle.clone(), x11_socket, client.clone()) {
             Ok(wm) => {
                 let solium = data.solium();
-                solium.xwm = Some(wm);
+                solium.xwm = Some(Xwm::new(wm, display_number));
                 solium.x11_display = Some(display_number);
                 tracing::info!(display = display_number, "XWayland is up");
                 solium.session.x11(Some(display_number));
@@ -473,9 +494,11 @@ impl XwmHandler for Solium {
                   this is created, so there is no order in which it is absent"
     )]
     fn xwm_state(&mut self, _xwm: XwmId) -> &mut X11Wm {
-        self.xwm
+        &mut self
+            .xwm
             .as_mut()
             .expect("the X11 window manager is what asked us")
+            .wm
     }
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
@@ -975,7 +998,10 @@ where
         let Some(xwm) = solium.xwm.as_mut() else {
             continue;
         };
-        if let Err(err) = xwm.send_selection(selection, mime_type, fd, handle.clone()) {
+        if let Err(err) = xwm
+            .wm
+            .send_selection(selection, mime_type, fd, handle.clone())
+        {
             tracing::warn!(?err, ?selection, "an X11 selection could not be read");
         }
     }
@@ -985,7 +1011,12 @@ where
 ///
 /// X11 wants to be told which window is active in its own terms as well as
 /// through the keyboard focus, and a client that is not told draws itself
-/// unfocused however much typing goes into it.
+/// unfocused however much typing goes into it. Twice over: `_NET_WM_STATE`
+/// says it is the active one, and the X server's input focus, set the way
+/// the window's ICCCM model asks, is what tells it it has the keyboard. A
+/// game reading the mouse through SDL turns its camera only in the window
+/// with that focus (#399). Anything else having the keyboard takes the X
+/// focus to nothing.
 pub(crate) fn activate(solium: &mut Solium, surface: Option<&WlSurface>) {
     let Some(xwm) = solium.xwm.as_mut() else {
         return;
@@ -1006,8 +1037,16 @@ pub(crate) fn activate(solium: &mut Solium, surface: Option<&WlSurface>) {
             }
         }
     }
+    if let Some(focus) = xwm.focus.as_ref() {
+        focus.give(
+            focused
+                .as_ref()
+                .filter(|x11| !x11.is_override_redirect())
+                .map(X11Surface::window_id),
+        );
+    }
     if let Some(x11) = focused {
-        if let Err(err) = xwm.raise_window(&x11) {
+        if let Err(err) = xwm.wm.raise_window(&x11) {
             tracing::warn!(?err, "could not raise an X11 window");
         }
         let _ = SERIAL_COUNTER.next_serial();

@@ -1200,7 +1200,7 @@ impl SelectionHandler for Solium {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
-        let Some(xwm) = self.xwm.as_mut() else {
+        let Some(xwm) = self.xwm.as_mut().map(|xwm| &mut xwm.wm) else {
             return;
         };
         let mimes = source.map(|source| source.mime_types());
