@@ -257,6 +257,15 @@ Item {
         && typeof style.layers[style.layerIndex].layerOpacity === "number"
         ? style.layers[style.layerIndex].layerOpacity : 1
 
+    // The `growTop` of the inline layer this scene draws, at the root where
+    // the compositor reads it: how much more than `insets.top` the window's
+    // frame takes at the top (`Layer.qml`). 0 in a manifest.
+    // `state::tests::real_client::reflow_on_close::frames::a_floating_windows_frame_grows_and_its_client_moves_down_at_its_size`.
+    readonly property real growTop: style.layerIndex >= 0
+        && style.layerIndex < style.layers.length
+        && typeof style.layers[style.layerIndex].growTop === "number"
+        ? style.layers[style.layerIndex].growTop : 0
+
     // The `resizeHz` of the inline layer this scene draws, at the root where
     // the compositor reads it: how often, at most, it draws the layer again
     // for a new size while the window's size keeps changing (`Layer.qml`).

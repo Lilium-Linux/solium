@@ -2,14 +2,19 @@
 //! what its layers send, the grab one of them holds while it is expanded over
 //! the window, and the presses and keys that grab takes.
 
-use smithay::utils::{Logical, Point};
+use std::time::Duration;
+
+use smithay::{
+    desktop::Window,
+    utils::{Logical, Point, Rectangle},
+};
 
 use crate::{
     decoration::Action,
     json::Json,
     pane::{Pane, PaneId},
     qml::hosted::ScenePointer,
-    state::Solium,
+    state::{Solium, inner, placement::over_the_arrangement},
 };
 
 impl Solium {
@@ -162,5 +167,156 @@ impl Solium {
                 .get(pane)
                 .and_then(Pane::decoration)
                 .is_some_and(|decoration| decoration.grab_contains(local.x, local.y))
+    }
+
+    /// Follow every frame's `growTop` (#423), once a frame, after the QML
+    /// clock has moved and before anything is laid out or drawn
+    /// (`render::frame_tick`), so a titlebar growing by a `Behavior` moves
+    /// its window's content on the frame it draws itself taller.
+    ///
+    /// The frame reserves `insets.top` and the largest `growTop` of its
+    /// layers above the client, and its window's top edge stays where it is:
+    ///
+    /// * **A floating window** keeps its client's size. Its pane grows
+    ///   taller and the client moves down, on the frame the value moved.
+    ///   `tests::real_client::reflow_on_close::frames::a_floating_windows_frame_grows_and_its_client_moves_down_at_its_size`.
+    /// * **A window held in a size**, in a layout's tile or maximised, keeps
+    ///   its pane, and its client is given that much less height. Not on
+    ///   every frame of an animation: while the value moves the client's
+    ///   last picture is held in the smaller rectangle, as `resize.fill`
+    ///   says, and the client is configured once, on the first frame the
+    ///   value has stood still.
+    ///   `tests::real_client::reflow_on_close::frames::a_held_windows_client_is_configured_smaller_once_its_frame_has_grown`.
+    ///
+    /// A fullscreen window has no frame, and a window leaving keeps the
+    /// rectangle it left at, so neither is followed.
+    pub(crate) fn follow_growth(&mut self, now: Duration) {
+        let mut moved = Vec::new();
+        let mut settled = Vec::new();
+        for pane in self.panes.iter_mut() {
+            if pane.leaving() || pane.gone() {
+                continue;
+            }
+            let id = pane.id();
+            let Some(decoration) = pane.decoration_mut() else {
+                continue;
+            };
+            let wanted = decoration.wanted_grow();
+            if wanted != decoration.grow() {
+                moved.push((id, wanted));
+            } else if decoration.take_grow_settled() {
+                settled.push(id);
+            }
+        }
+        for (id, wanted) in moved {
+            self.grow_frame(id, wanted, now);
+        }
+        for id in settled {
+            self.configure_grown(id, now);
+        }
+    }
+
+    /// Whether a pane is held in a size: in a layout's tile, or maximised.
+    fn held_in_a_size(pane: &Pane) -> bool {
+        pane.placed().is_some() || pane.client().is_some_and(over_the_arrangement)
+    }
+
+    /// Make one pane's frame reserve `wanted` more at the top, its window's
+    /// top edge where it was. See [`Self::follow_growth`].
+    fn grow_frame(&mut self, id: PaneId, wanted: i32, now: Duration) {
+        let Some(pane) = self.panes.get(id) else {
+            return;
+        };
+        // Before the grow moves: where the window's frame is now, and so
+        // where it stays.
+        let outer = self.pane_outer(pane);
+        let geometry = self.pane_geometry(pane);
+        let slot = pane.slot();
+        let held = Self::held_in_a_size(pane);
+        let window = pane.client().cloned();
+        let was = pane
+            .decoration()
+            .map_or(0, crate::decoration::Decoration::grow);
+        if let Some(decoration) = self.panes.get_mut(id).and_then(Pane::decoration_mut) {
+            decoration.set_grow(wanted);
+        }
+        self.redraw = true;
+        let Some(window) = window else {
+            // Nothing to move but the slot a scene stands in for its
+            // application, which is the client's rectangle as anything's is.
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_slot(Rectangle::new(
+                    (slot.loc.x, slot.loc.y + wanted - was).into(),
+                    slot.size,
+                ));
+            }
+            return;
+        };
+        if held {
+            // The pane stays; the client is what is left of it under the
+            // taller frame, held there until it is told.
+            let client = inner(outer, self.insets_of(id));
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_slot(client);
+            }
+            self.relocate(&window, client.loc);
+            // Held again at every step, so the hold's patience runs from the
+            // last one: never out while the frame is still moving, and out
+            // `resize.patience` after it stops being followed at all -- a
+            // style switched to none part of the way -- where the client's
+            // own size wins, as at the end of any change.
+            self.hold_for_answer(id, &window, now, now);
+        } else {
+            // The client keeps its size and moves down by what the frame
+            // took. The slot too, which a drag on the window's edge holds.
+            let by = wanted - was;
+            let to: Point<i32, Logical> = (geometry.loc.x, geometry.loc.y + by).into();
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.set_slot(Rectangle::new(
+                    (slot.loc.x, slot.loc.y + by).into(),
+                    slot.size,
+                ));
+            }
+            self.relocate(&window, to);
+            // An X11 client is told where it is; a Wayland one never is.
+            if let Some(x11) = window.x11_surface()
+                && !x11.is_override_redirect()
+                && let Err(err) = x11.configure(Some(Rectangle::new(to, window.geometry().size)))
+            {
+                tracing::warn!(?err, "could not move an X11 window under its frame");
+            }
+        }
+    }
+
+    /// A window held in a size whose frame has stopped growing: its client
+    /// is configured, once, to what the frame leaves it, and held there
+    /// until it answers, or `resize.patience` runs out.
+    fn configure_grown(&mut self, id: PaneId, now: Duration) {
+        let Some(pane) = self.panes.get(id).filter(|pane| Self::held_in_a_size(pane)) else {
+            return;
+        };
+        let Some(window) = pane.client().cloned() else {
+            return;
+        };
+        let client = pane.slot();
+        crate::state::size_window(&window, client);
+        self.hold_for_answer(id, &window, now, now);
+        self.redraw = true;
+    }
+
+    /// Move a window in the space without changing where it is in the
+    /// stack: what a frame growing over it does, which is not a raise.
+    fn relocate(&mut self, window: &Window, to: Point<i32, Logical>) {
+        let above: Vec<Window> = self
+            .space
+            .elements()
+            .skip_while(|element| *element != window)
+            .skip(1)
+            .cloned()
+            .collect();
+        self.space.map_element(window.clone(), to, false);
+        for element in &above {
+            self.space.raise_element(element, false);
+        }
     }
 }

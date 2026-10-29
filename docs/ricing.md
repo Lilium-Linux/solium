@@ -186,6 +186,17 @@ Escape if you handle it, closes it. The panes README,
 [Sending to Lua, and a panel over the window](../crates/solium/qml/panes/README.md#sending-to-lua-and-a-panel-over-the-window),
 has the whole of it.
 
+A titlebar can also grow and push the window's content down, rather than drop
+a panel over it: a layer's `growTop`, animated with a `Behavior`, makes the
+frame reserve that much more at the top for this window alone. A floating
+window grows taller with its content moved down at its size; a tiled or
+maximised one keeps its size and its application is given that much less
+height, once, when the value stops moving. The grown band is the frame's, so
+what you draw there is pressed and the application hears nothing of it. The
+panes README,
+[A titlebar that grows](../crates/solium/qml/panes/README.md#a-titlebar-that-grows),
+has the details.
+
 ### Rounded corners
 
 ```qml

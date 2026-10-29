@@ -77,6 +77,20 @@ Item {
     // `decoration::tests::a_layer_fading_by_its_opacity_draws_no_new_picture`.
     property real layerOpacity: 1
 
+    // How much more room than the style's `insets.top` this window's frame
+    // takes at the top, in logical pixels: a titlebar growing taller and
+    // pushing the window's content down rather than drawing over it. The
+    // frame reserves `insets.top` and the largest `growTop` of its layers,
+    // and every layer is told the sum as `insetTop`. A floating window grows
+    // taller and its content moves down at its size; a window held in a size
+    // (tiled, maximised) keeps it, and its application is given that much
+    // less height once the value stops moving. Animate it with a `Behavior`:
+    // the compositor follows it every frame. 0 unless bound. A delegated
+    // layer declares `property real growTop` on its own root instead, as it
+    // declares `dormant`.
+    // `state::tests::real_client::reflow_on_close::frames::a_floating_windows_frame_grows_and_its_client_moves_down_at_its_size`.
+    property real growTop: 0
+
     // How often, at most, the compositor draws this layer again for a new
     // size while its window's size keeps changing (a drag on its edge, a
     // layout's sweep), in times a second, from 5 to 1000: between, the
