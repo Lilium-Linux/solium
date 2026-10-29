@@ -511,10 +511,9 @@ fn fill(
     use anyhow::Context as _;
     use smithay::backend::{
         allocator::Fourcc,
-        renderer::element::{Element as _, RenderElement},
         renderer::{Bind, Color32F, ExportMem, Frame as _, Offscreen, Renderer},
     };
-    use smithay::utils::{Physical, Scale, Size};
+    use smithay::utils::{Physical, Size};
 
     anyhow::ensure!(
         OutputState::of(&capture.output) == Some(capture.output_state),
@@ -569,21 +568,16 @@ fn fill(
             let mut frame = renderer
                 .render(&mut framebuffer, size, transform.invert())
                 .context("rendering the capture")?;
-            frame
-                .clear(
-                    Color32F::new(0.05, 0.05, 0.06, 1.0),
-                    &[smithay::utils::Rectangle::from_size(upright)],
-                )
-                .context("clearing the capture")?;
-            let whole = [smithay::utils::Rectangle::from_size(upright)];
-            // Reversed: the list is topmost-first, and drawing it in that order
-            // onto a cleared buffer paints the top of the stack first.
-            for element in elements.iter().rev() {
-                let source = element.src();
-                let destination = element.geometry(Scale::from(scale));
-                if let Err(err) = element.draw(&mut frame, source, destination, &whole, &[]) {
-                    tracing::warn!(?err, "an element did not render into a capture");
-                }
+            // The picture the monitor scans out, element for element, onto
+            // the colour the backends clear to (#398).
+            if let Err(err) = crate::pool::paint_over(
+                &mut frame,
+                upright,
+                Color32F::new(0.05, 0.05, 0.06, 1.0),
+                &elements,
+                scale,
+            ) {
+                tracing::warn!(?err, "an element did not render into a capture");
             }
             frame
                 .finish()
