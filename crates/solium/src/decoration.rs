@@ -577,6 +577,15 @@ pub(crate) struct Decoration {
     layers: Vec<LayerScene>,
     /// What the style asked to reserve, read once when it was built.
     insets: Insets,
+    /// How much more than `insets.top` the frame reserves just now, in
+    /// logical pixels: the largest `growTop` its layers declare, as
+    /// `Solium::follow_growth` last applied it (#423). 0 for every frame
+    /// that never declares one, which reserves what its style says.
+    grow: i32,
+    /// Whether `grow` changed at the last frame and has not been seen
+    /// standing still since: a window held in a size is configured for it
+    /// only once it has (`Self::take_grow_settled`).
+    grow_settling: bool,
     /// What the style runs on the client's own pixels, read once when it was
     /// built.
     ///
@@ -704,6 +713,8 @@ impl Decoration {
                 grabbing: false,
             }],
             insets,
+            grow: 0,
+            grow_settling: false,
             // A single QML file has no manifest either, and `client.radius` is
             // declared on `PaneStyle`. So a decoration that is one file runs
             // no effects and costs no pass, which is what it has always cost.
@@ -748,6 +759,8 @@ impl Decoration {
             // format rests on: the client is placed once, so three layers each
             // answering would be three answers to one question.
             insets: style.insets,
+            grow: 0,
+            grow_settling: false,
             // And the same, one line down, for the same reason: `client.radius`
             // is declared on `PaneStyle` once, and every layer is *told* it
             // rather than asked for it. See `LayerScene::build`.
@@ -761,15 +774,70 @@ impl Decoration {
 
     /// The client's size, inside whatever this frame reserves.
     fn client_size(&self) -> (i32, i32) {
+        let insets = self.insets();
         (
-            (self.buffer_size.0 - self.insets.horizontal()).max(1),
-            (self.buffer_size.1 - self.insets.vertical()).max(1),
+            (self.buffer_size.0 - insets.horizontal()).max(1),
+            (self.buffer_size.1 - insets.vertical()).max(1),
         )
     }
 
-    /// What this frame reserves around its client.
+    /// What this frame reserves around its client: what its style declared,
+    /// and at the top as much more as its layers' `growTop` asks for (#423).
+    ///
+    /// The one answer every reader takes, through `Solium::insets_of`: the
+    /// client's place, the hit test, the titlebar region, the slots around
+    /// the pane and `sol.windows()` all follow the frame as it grows.
+    /// `state::tests::real_client::reflow_on_close::frames::a_floating_windows_frame_grows_and_its_client_moves_down_at_its_size`.
     pub(crate) const fn insets(&self) -> Insets {
-        self.insets
+        Insets {
+            top: self.insets.top + self.grow,
+            ..self.insets
+        }
+    }
+
+    /// How much more room at the top the layers ask for now: the largest
+    /// `growTop` any of them declares, dormant or not, in whole logical
+    /// pixels, from 0 to [`qml::MAX_SIDE`]. 0 when none declares
+    /// one. Read every frame, after the QML clock has moved, by
+    /// `Solium::follow_growth`, which applies it with [`Self::set_grow`].
+    pub(crate) fn wanted_grow(&self) -> i32 {
+        self.layers
+            .iter()
+            .map(LayerScene::grow_top)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// How much more room at the top this frame reserves just now.
+    pub(crate) const fn grow(&self) -> i32 {
+        self.grow
+    }
+
+    /// Reserve `grow` more at the top, and tell every layer: `insetTop` is
+    /// the top it reserves now, and the next draw tells each its client's
+    /// share again and copies its whole picture. Marks the change as not yet
+    /// settled.
+    pub(crate) fn set_grow(&mut self, grow: i32) {
+        if grow == self.grow {
+            return;
+        }
+        self.grow = grow;
+        self.grow_settling = true;
+        let top = self.insets().top;
+        for layer in &mut self.layers {
+            layer.scene.set_int("insetTop", top);
+            // Told its size again with the new inset, and drawn whole: the
+            // band that stopped being one has to stop being drawn as one.
+            layer.told = (0, 0);
+            layer.buffer_size = (0, 0);
+        }
+    }
+
+    /// Whether the grow changed at an earlier frame and has stood still
+    /// since, once: what a window held in a size waits for before its client
+    /// is configured smaller (#423). Spends the answer.
+    pub(crate) fn take_grow_settled(&mut self) -> bool {
+        std::mem::take(&mut self.grow_settling)
     }
 
     /// What this style runs on the client's own pixels.
@@ -867,7 +935,7 @@ impl Decoration {
         // layer's canvas would tell it the window is larger than it is.
         self.buffer_size = (pixels(width), pixels(height));
 
-        let insets = self.insets;
+        let insets = self.insets();
         let mut animating = false;
         for layer in awake_at(self.layers.iter_mut(), depth) {
             // Per layer, because this is the whole of bleed: its own canvas,
@@ -991,7 +1059,7 @@ impl Decoration {
     #[cfg(test)]
     fn tell(&mut self, look: &Look<'_>, width: i32, height: i32) {
         self.tell_look(look);
-        let insets = self.insets;
+        let insets = self.insets();
         for layer in &mut self.layers {
             layer.tell_size((width, height), insets);
         }
@@ -1350,6 +1418,14 @@ impl Decoration {
         self.tell(look, width, height);
     }
 
+    /// Write the integer property `name` on every layer's root, as a test's
+    /// stand-in for whatever a layer's own QML would change.
+    pub(crate) fn set_layers_int(&mut self, name: &str, value: i32) {
+        for layer in &mut self.layers {
+            layer.scene.set_int(name, value);
+        }
+    }
+
     /// The first layer's integer property `name`, as its root reads it now.
     pub(crate) fn first_layer_int(&mut self, name: &str) -> i32 {
         self.layers
@@ -1638,6 +1714,23 @@ impl LayerScene {
         #[expect(clippy::cast_possible_truncation, reason = "an alpha, clamped to 0..1")]
         let alpha = read.clamp(0.0, 1.0) as f32;
         alpha
+    }
+
+    /// How much more room at the top of its window this layer asks for: its
+    /// root's `growTop`, in logical pixels, rounded to a whole one and held
+    /// to 0..[`qml::MAX_SIDE`]; 0 for a root that declares none or
+    /// one that is not a number (#423).
+    fn grow_top(&self) -> i32 {
+        let read = self.scene.get_real("growTop", 0.0);
+        if !read.is_finite() {
+            return 0;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "held to 0..MAX_SIDE, which is an i32"
+        )]
+        let grow = read.round().clamp(0.0, f64::from(qml::MAX_SIDE)) as i32;
+        grow
     }
 
     /// How often, at most, this layer is drawn again for a new size while its
@@ -2105,13 +2198,23 @@ impl Decorations {
         // from the one it replaces. Collected for the same reason the
         // `frames.iter()` this replaces was: the walk cannot be holding the
         // panes while the loop writes to them.
-        let existing: Vec<(PaneId, (i32, i32))> = panes
+        //
+        // **The grow comes across too** (#423): the client sits where the
+        // old frame's grow put it, so the new frame reserves the same until
+        // its own layers say otherwise, and a frame that grows no more gives
+        // the room back the way any shrink does, rather than by its window's
+        // top edge jumping.
+        let existing: Vec<(PaneId, (i32, i32), i32)> = panes
             .iter()
-            .filter_map(|pane| Some((pane.id(), pane.decoration()?.client_size())))
+            .filter_map(|pane| {
+                let decoration = pane.decoration()?;
+                Some((pane.id(), decoration.client_size(), decoration.grow()))
+            })
             .collect();
-        for (id, (width, height)) in existing {
+        for (id, (width, height), grow) in existing {
             match build(self.style.as_deref(), width, height) {
-                Ok(fresh) => {
+                Ok(mut fresh) => {
+                    fresh.set_grow(grow);
                     if let Some(pane) = panes.get_mut(id) {
                         pane.set_frame(Frame::Styled(Box::new(fresh)));
                     }

@@ -165,11 +165,11 @@ panel over the window" below says, `Solium.monitor` reads an absent row with
 an empty `name`, and `Solium.surface.reserve` and `Solium.keyboard` hold
 nothing (`docs/shell-boundary.md`, "The `Solium` QML module").
 
-Once, at build, because neither ever changes for a style:
+Once, at build, because none of them changes for a style:
 
 | property | |
 |---|---|
-| `insetTop`, `insetRight`, `insetBottom`, `insetLeft` | what `Pane.qml` reserved, so a bar can size itself to its own band without a second copy of the number |
+| `insetTop`, `insetRight`, `insetBottom`, `insetLeft` | what `Pane.qml` reserved, so a bar can size itself to its own band without a second copy of the number. `insetTop` is told again whenever the frame grows (`growTop`, below): it is always the top the frame reserves now |
 | `bleedLeft`, `bleedTop` | where the window's own corner is inside this layer's canvas |
 | `clientRadiusTopLeft`, `clientRadiusTopRight`, `clientRadiusBottomLeft`, `clientRadiusBottomRight` | what the compositor is cutting each corner of the client to, in logical pixels, so a bar or a border can hug that curve. Written on every layer of every style, zeroes included — a corner left unwritten reads back 0, which is indistinguishable from one the style really squared |
 | `clientRadius` | the **largest** of the four above, for a layer that wants one number. Its use is an outward hug (`radius: clientRadius + 2`), and a hug has to clear the biggest cut; a layer that needs one particular corner reads it by name. Written on every layer of every style, zero included. `rounded/Frame.qml` is the worked example |
@@ -189,6 +189,7 @@ Read back by the compositor:
 | `onButton` | `true` while the pointer is over a button. A press on the frame starts a window drag unless some layer says this |
 | `dormant` | `true` while the layer has nothing to draw, so it is not drawn, and in software keeps no image. An inline layer binds it on its `Layer` and `PaneStyle` hands it on; a delegated layer declares `property bool dormant` on its own root |
 | `layerOpacity` | how opaque the compositor draws the layer's picture, from 0 to 1, over the window's own opacity; 1 when not declared. Applied as the layer is composited, so animating it draws no new picture: a fade by it is one blend per frame and nothing of Qt's, where a fade of an item's `opacity` draws the whole layer again on every frame of it. An inline layer binds it on its `Layer`; a delegated layer declares `property real layerOpacity` on its own root |
+| `growTop` | how much more than `insets.top` this window's frame takes at the top just now, in logical pixels; 0 when not declared. The frame reserves `insets.top` plus the largest `growTop` of its layers, and every layer is told the sum as `insetTop`. Followed every frame, so a `Behavior` on it animates the window's content moving down. See "A titlebar that grows" below. An inline layer binds it on its `Layer`; a delegated layer declares `property real growTop` on its own root |
 | `resizeHz` | how often, at most, the compositor draws the layer again for a new size while the window's size keeps changing (a drag on its edge, a layout's sweep), in times a second, from 5 to 1000; 0, or not declared, draws it at every size. Between, its last picture is drawn stretched to the window, as the application's own is until it has drawn at the new size, and the last size is drawn within a `1 / resizeHz` second of the window stopping. A layer with something new to draw (a title, a focus change, an animation of its own) is drawn at once. Told no new size while it is held, so a layer laid out by `paneWidth` lays out nothing it is not drawn at. An inline layer binds it on its `Layer`; a delegated layer declares `property real resizeHz` on its own root |
 
 A layer declares only the ones it uses; one that positions nothing against the
@@ -283,6 +284,53 @@ While a layer's grab is active:
 
 One frame holds a grab at a time, as one shell scene does: a frame that
 starts one dismisses the one another held.
+
+## A titlebar that grows
+
+A panel dropped over the window covers its content. A titlebar can instead
+grow taller and push the content down, with `growTop`: the frame then
+reserves `insets.top + growTop` at the top, for this window alone.
+
+```qml
+// Frame.qml, a delegated layer, under `insets.top: 32`
+Item {
+    id: frame
+    property int insetTop: 32          // told: the top the frame reserves now
+    property bool expanded: false
+    property real growTop: expanded ? 120 : 0
+    Behavior on growTop { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+
+    MouseArea {                        // a right press on the bar opens it
+        width: frame.width; height: 32
+        acceptedButtons: Qt.RightButton
+        onPressed: frame.expanded = !frame.expanded
+    }
+    Item {
+        y: 32; width: frame.width; height: frame.insetTop - 32
+        clip: true
+        // ... the quick settings, in the room the bar has grown
+    }
+}
+```
+
+- **A floating window** grows taller: its top edge stays where it is and its
+  content moves down by `growTop`, the size it was. The application is told
+  nothing.
+- **A window held in a size**, in a layout's tile or maximised, keeps its
+  size, and its application is given `growTop` less height. While the value
+  moves, its last picture is held in what is left, fitted as `resize.fill`
+  says, and the application is configured once, on the first frame the value
+  has stood still, so an animation does not resize it on every frame.
+- **A fullscreen window** has no frame, so `growTop` does nothing there.
+
+Everything follows the frame's real size from the frame it moves: the band a
+press goes to the frame in (the grown part is the frame's, so a `MouseArea`
+or a `Grab` target there is pressed and the application hears nothing), the
+resize edges, `part = "region:titlebar"` and the slots around the pane, the
+blur behind it, a capture, and the `x`, `y`, `w` and `h` of `sol.windows()`.
+With several layers, the largest `growTop` wins; each is read whether its
+layer is dormant or not. Shrinking it back to 0 gives the room back the same
+way.
 
 ## What it costs
 

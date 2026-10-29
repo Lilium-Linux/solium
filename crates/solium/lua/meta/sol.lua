@@ -61,7 +61,7 @@
 
 ---One row of `sol.windows()`: a window a layout may arrange, as it was at the
 ---moment the handler was called. `x`, `y`, `w` and `h` are where the window
----lives, frame included.
+---lives, frame included, and a titlebar its frame has grown (`growTop`) with it.
 ---@class sol.Window: sol.Rect
 ---@field id integer The window's id, which every other call takes.
 ---@field title string The window's title; the program's name until its application arrives.

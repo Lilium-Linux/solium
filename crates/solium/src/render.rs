@@ -1242,6 +1242,11 @@ pub(crate) fn prepare(
 /// However long the publish took, the exit's bound and its animation start
 /// together.
 /// `lock_auth::tests::the_exit_lasts_exit_ms_from_its_first_frame_however_late_that_comes`.
+///
+/// And then, with every animation where this frame has it, the frames'
+/// `growTop` is followed (#423), so a titlebar growing moves its window's
+/// content in the frame that draws it taller, and everything laid out or hit
+/// from here on sees the frame at that size: `Solium::follow_growth`.
 pub(crate) fn frame_tick(state: &mut Solium) {
     state.publish_models();
     let now = state.clock.now();
@@ -1249,6 +1254,7 @@ pub(crate) fn frame_tick(state: &mut Solium) {
         tracing::debug!("the lock's exit is drawn from this frame");
     }
     crate::qml::tick(now);
+    state.follow_growth(now);
 }
 
 /// The first desktop frame's gate (`warm::Warm`, spec C14), asked once a

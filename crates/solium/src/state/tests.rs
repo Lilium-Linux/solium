@@ -39925,6 +39925,12 @@ Item {
             /// a pointer bound, every layer built, and `events` recording what
             /// `sol.on("frame")` hears. The style's folder, to remove.
             fn framed() -> (Desk, Opened, std::path::PathBuf) {
+                framed_by(FRAME)
+            }
+
+            /// A style folder whose one `frame` layer is `layer`, under
+            /// `insets.top: 32`.
+            fn style_of(layer: &str) -> std::path::PathBuf {
                 static NEXT: std::sync::atomic::AtomicUsize =
                     std::sync::atomic::AtomicUsize::new(0);
                 let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -39937,7 +39943,13 @@ Item {
                      Layer { depth: \"frame\"; name: \"bar\"; source: \"Frame.qml\" }\n}\n",
                 )
                 .expect("writing the manifest");
-                std::fs::write(style.join("Frame.qml"), FRAME).expect("writing the layer");
+                std::fs::write(style.join("Frame.qml"), layer).expect("writing the layer");
+                style
+            }
+
+            /// [`framed`], with `layer` as the frame's one layer.
+            fn framed_by(layer: &str) -> (Desk, Opened, std::path::PathBuf) {
+                let style = style_of(layer);
                 let mut desk = Desk::new();
                 let opened = desk.open_surface();
                 let _buffer = commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
@@ -40032,6 +40044,323 @@ Item {
                     Some(pane),
                     "the premise: the panel holds its grab"
                 );
+            }
+
+            /// A layer that grows its window's titlebar by `grow`, at once,
+            /// and is told what the frame reserves as `insetTop`.
+            const GROWS: &str = r#"
+import QtQuick
+
+Item {
+    property int grow: 0
+    property real growTop: grow
+    property int insetTop: 0
+    property string action: ""
+    readonly property bool onButton: false
+}
+"#;
+
+            /// The same, eased over 160 ms, as a titlebar opening its quick
+            /// settings would.
+            const EASES: &str = r#"
+import QtQuick
+
+Item {
+    property int grow: 0
+    property real growTop: grow
+    Behavior on growTop { NumberAnimation { duration: 160 } }
+    property int insetTop: 0
+    property string action: ""
+    readonly property bool onButton: false
+}
+"#;
+
+            /// Ask every layer of `pane`'s frame to grow by `by`.
+            fn grow_to(desk: &mut Desk, pane: crate::pane::PaneId, by: i32) {
+                desk.state
+                    .panes
+                    .get_mut(pane)
+                    .and_then(Pane::decoration_mut)
+                    .expect("the frame")
+                    .set_layers_int("grow", by);
+            }
+
+            /// One frame, `ms` after the last: the QML clock moves, the
+            /// frames' growth is followed, and the client hears what it was
+            /// told.
+            fn frame(desk: &mut Desk, ms: u64) {
+                std::thread::sleep(Duration::from_millis(ms));
+                desk.state.clock.advance(Duration::from_millis(ms));
+                crate::render::frame_tick(&mut desk.state);
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.pump();
+            }
+
+            /// How many configures this toplevel has been sent.
+            fn configures(desk: &Desk, toplevel: &xdg_toplevel::XdgToplevel) -> usize {
+                let id = wayland_client::Proxy::id(toplevel);
+                desk.client
+                    .configures
+                    .iter()
+                    .filter(|(to, _, _)| *to == id)
+                    .count()
+            }
+
+            /// The client's own rectangle, where the space has it.
+            fn client_rect(desk: &Desk, pane: crate::pane::PaneId) -> Rectangle<i32, Logical> {
+                let window = desk
+                    .state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::client)
+                    .expect("a client");
+                desk.state.real_geometry(window).expect("mapped")
+            }
+
+            /// **A floating window's frame grows and its client moves down at
+            /// its size** (#423): a layer's `growTop` of 40 makes the frame
+            /// reserve 72 at the top and tells every layer so as `insetTop`;
+            /// the window's top edge stays where it was, its pane is 40
+            /// taller, and the client is 40 lower and the size it was,
+            /// configured with nothing. The 40 under the titlebar is the
+            /// frame's, so a press there is not the client's. Back to 0, the
+            /// window is exactly where it began.
+            #[test]
+            fn a_floating_windows_frame_grows_and_its_client_moves_down_at_its_size() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed_by(GROWS);
+                    frame(&mut desk, 16);
+                    let outer = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    let client = client_rect(&desk, opened.pane);
+                    let sent = configures(&desk, &opened.toplevel);
+                    let below_the_bar = Point::<f64, Logical>::from((
+                        f64::from(outer.loc.x) + 20.0,
+                        f64::from(outer.loc.y) + 52.0,
+                    ));
+                    assert!(
+                        desk.state
+                            .chrome_under(below_the_bar)
+                            .is_none_or(|under| !matches!(
+                                under.chrome,
+                                crate::state::Chrome::Frame
+                            )),
+                        "the premise: 52 down is the client's before the frame grows"
+                    );
+
+                    grow_to(&mut desk, opened.pane, 40);
+                    frame(&mut desk, 16);
+                    let grown = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    assert_eq!(grown.loc, outer.loc, "the window's top edge stayed");
+                    assert_eq!(
+                        (grown.size.w, grown.size.h),
+                        (outer.size.w, outer.size.h + 40),
+                        "the pane is 40 taller"
+                    );
+                    let moved = client_rect(&desk, opened.pane);
+                    assert_eq!(
+                        (moved.loc.x, moved.loc.y),
+                        (client.loc.x, client.loc.y + 40),
+                        "the client moved down by 40"
+                    );
+                    assert_eq!(moved.size, client.size, "at its size");
+                    assert_eq!(desk.state.insets_of(opened.pane).top, 72);
+                    assert_eq!(told(&mut desk, opened.pane, "insetTop"), 72);
+                    assert!(
+                        desk.state
+                            .chrome_under(below_the_bar)
+                            .is_some_and(|under| under.pane == opened.pane
+                                && matches!(under.chrome, crate::state::Chrome::Frame)),
+                        "52 down is the frame's band now"
+                    );
+                    frame(&mut desk, 16);
+                    frame(&mut desk, 16);
+                    assert_eq!(
+                        configures(&desk, &opened.toplevel),
+                        sent,
+                        "a floating client is not configured for its frame growing"
+                    );
+
+                    grow_to(&mut desk, opened.pane, 0);
+                    frame(&mut desk, 16);
+                    frame(&mut desk, 16);
+                    assert_eq!(
+                        desk.state.pane_outer_of(opened.pane),
+                        Some(outer),
+                        "back to 0, the window is where it began"
+                    );
+                    assert_eq!(client_rect(&desk, opened.pane), client);
+                    assert_eq!(told(&mut desk, opened.pane, "insetTop"), 32);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// A window framed by `layer` in a tiling layout's one tile, its
+            /// client having answered its tile. The style's folder, to remove.
+            fn tiled_by(layer: &str) -> (Desk, Opened, std::path::PathBuf) {
+                let style = style_of(layer);
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                desk.state
+                    .decorations
+                    .set_style(&mut desk.state.panes, Some(style.display().to_string()));
+                desk.state
+                    .decorations
+                    .insert(&mut desk.state.panes, opened.pane, 400, 300);
+                desk.arrange("tiling", "");
+                desk.answer(&opened);
+                frame(&mut desk, 16);
+                frame(&mut desk, 16);
+                (desk, opened, style)
+            }
+
+            /// **A held window's client is configured smaller once its frame
+            /// has grown** (#423): in a tile, a `growTop` eased from 0 to 40
+            /// is followed frame by frame -- the frame reserving every step
+            /// of the way, the client held in what is left of the tile and
+            /// told nothing while it moves -- and once it stands still the
+            /// client is configured once, 40 shorter. Eased back to 0, it is
+            /// configured once more, to the size it had.
+            #[test]
+            fn a_held_windows_client_is_configured_smaller_once_its_frame_has_grown() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = tiled_by(EASES);
+                    let outer = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    let tile = desk.placed(opened.pane);
+                    assert_eq!(outer, tile, "the premise: the window fills its tile");
+                    let client = client_rect(&desk, opened.pane);
+                    let sent = configures(&desk, &opened.toplevel);
+
+                    grow_to(&mut desk, opened.pane, 40);
+                    let mut seen = Vec::new();
+                    for _ in 0..30 {
+                        frame(&mut desk, 16);
+                        let top = desk.state.insets_of(opened.pane).top;
+                        seen.push(top);
+                        assert_eq!(
+                            desk.state.pane_outer_of(opened.pane),
+                            Some(outer),
+                            "the pane stays its tile while the frame grows"
+                        );
+                        assert_eq!(
+                            configures(&desk, &opened.toplevel),
+                            sent,
+                            "the client is told nothing while the frame grows: {seen:?}"
+                        );
+                        if top == 72 {
+                            break;
+                        }
+                    }
+                    assert!(
+                        seen.iter().any(|top| *top > 32 && *top < 72),
+                        "the frame followed the ease through its steps: {seen:?}"
+                    );
+                    assert_eq!(seen.last(), Some(&72), "and landed on 40 more: {seen:?}");
+                    frame(&mut desk, 16);
+                    assert_eq!(
+                        configures(&desk, &opened.toplevel),
+                        sent + 1,
+                        "configured once it stood still"
+                    );
+                    assert_eq!(
+                        last_configured(&desk.client, &opened.toplevel),
+                        Some((client.size.w, client.size.h - 40)),
+                        "40 shorter"
+                    );
+                    let held = client_rect(&desk, opened.pane);
+                    assert_eq!(
+                        (held.loc.x, held.loc.y),
+                        (client.loc.x, client.loc.y + 40),
+                        "under the taller frame"
+                    );
+                    commit_buffer(
+                        &desk.client,
+                        &desk.qh,
+                        &opened.surface,
+                        client.size.w,
+                        client.size.h - 40,
+                    );
+                    frame(&mut desk, 16);
+                    frame(&mut desk, 16);
+                    assert_eq!(
+                        configures(&desk, &opened.toplevel),
+                        sent + 1,
+                        "and only once"
+                    );
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(outer));
+
+                    grow_to(&mut desk, opened.pane, 0);
+                    for _ in 0..30 {
+                        frame(&mut desk, 16);
+                        if desk.state.insets_of(opened.pane).top == 32 {
+                            break;
+                        }
+                    }
+                    assert_eq!(
+                        configures(&desk, &opened.toplevel),
+                        sent + 1,
+                        "nothing told while it shrinks"
+                    );
+                    frame(&mut desk, 16);
+                    assert_eq!(
+                        last_configured(&desk.client, &opened.toplevel),
+                        Some((client.size.w, client.size.h)),
+                        "back to 0, configured to the size it had"
+                    );
+                    assert_eq!(configures(&desk, &opened.toplevel), sent + 2);
+                    commit_buffer(
+                        &desk.client,
+                        &desk.qh,
+                        &opened.surface,
+                        client.size.w,
+                        client.size.h,
+                    );
+                    frame(&mut desk, 16);
+                    frame(&mut desk, 16);
+                    assert_eq!(client_rect(&desk, opened.pane), client);
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(outer));
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// **A `growTop` of 0 is no change at all** (#423): a layer that
+            /// declares it and never moves it leaves a held window and a
+            /// floating one where they were, their clients configured with
+            /// nothing.
+            #[test]
+            fn a_grow_of_nothing_moves_and_tells_nothing() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    for tiled in [true, false] {
+                        let (mut desk, opened, style) = if tiled {
+                            tiled_by(GROWS)
+                        } else {
+                            framed_by(GROWS)
+                        };
+                        let outer = desk.state.pane_outer_of(opened.pane);
+                        let client = client_rect(&desk, opened.pane);
+                        let sent = configures(&desk, &opened.toplevel);
+                        grow_to(&mut desk, opened.pane, 0);
+                        for _ in 0..4 {
+                            frame(&mut desk, 16);
+                        }
+                        assert_eq!(
+                            desk.state.pane_outer_of(opened.pane),
+                            outer,
+                            "tiled {tiled}"
+                        );
+                        assert_eq!(client_rect(&desk, opened.pane), client, "tiled {tiled}");
+                        assert_eq!(
+                            configures(&desk, &opened.toplevel),
+                            sent,
+                            "tiled {tiled}: nothing configured"
+                        );
+                        assert_eq!(desk.state.insets_of(opened.pane).top, 32);
+                        let _ = std::fs::remove_dir_all(&style);
+                    }
+                });
             }
 
             /// **A frame is told its window and its state** (#417): its id
