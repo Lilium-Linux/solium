@@ -51,6 +51,7 @@ portals="$destdir$config_home/xdg-desktop-portal"
 config_files=(
     "solium-session.target:$units/solium-session.target"
     "solium-autostart.target:$units/solium-autostart.target"
+    "solium-kwallet-pam.service:$units/solium-kwallet-pam.service"
     "lilium-portals.conf:$portals/lilium-portals.conf"
 )
 
@@ -194,9 +195,9 @@ check "share/solium/lua is a copy of crates/solium/lua" diff -r "$root/crates/so
 check "share/solium/effects is a copy of crates/solium/effects" diff -r "$root/crates/solium/effects" "$share/effects"
 check "a file left by an earlier install is gone" [ ! -e "$share/qml/removed-since.qml" ]
 check "nothing staged is a symlink" [ -z "$(find "$destdir" -type l)" ]
-# The binary, solium-session, the helper, the session file, the PAM file, three
+# The binary, solium-session, the helper, the session file, the PAM file, four
 # configuration files and the record of them.
-expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 9))
+expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 10))
 check "exactly those files, solium-session, the helper, the session and PAM files, the units, the portal choice and their record ($expected_files)" \
     [ "$(count_files "$destdir")" -eq "$expected_files" ]
 for entry in "${config_files[@]}"; do
@@ -218,6 +219,18 @@ check "solium-autostart.target wants XDG autostart" \
 check "  and stops with solium-session.target, after which it starts" \
     [ "$(grep -c -x -e "PartOf=solium-session.target" -e "After=solium-session.target" \
         "$units/solium-autostart.target")" = 2 ]
+check "solium-session.target wants the wallet's hand-off" \
+    grep -qx "Wants=solium-kwallet-pam.service" "$units/solium-session.target"
+check "  which runs pam_kwallet_init" \
+    grep -qx "ExecStart=/usr/libexec/pam_kwallet_init" "$units/solium-kwallet-pam.service"
+check "  only where the login left a socket and the helper is installed" \
+    [ "$(grep -c -x -e "ConditionEnvironment=PAM_KWALLET5_LOGIN" \
+        -e "ConditionPathExists=/usr/libexec/pam_kwallet_init" \
+        "$units/solium-kwallet-pam.service")" = 2 ]
+check "  after the session's display is exported, before XDG autostart, and stops with it" \
+    [ "$(grep -c -x -e "PartOf=solium-session.target" -e "After=solium-session.target" \
+        -e "Before=solium-autostart.target xdg-desktop-autostart.target" \
+        "$units/solium-kwallet-pam.service")" = 3 ]
 check "the portals: gtk, Inhibit to gtk by name, and wlr for ScreenCast and Screenshot" \
     diff <(grep -v '^#' "$portals/lilium-portals.conf") <(printf '%s\n' '[preferred]' default=gtk \
         org.freedesktop.impl.portal.Inhibit=gtk \
@@ -397,7 +410,9 @@ check "  says it kept both" \
         "$work/own-install.log")" -ge 2 ]
 check "  replaces a copy it wrote earlier" \
     cmp -s "$root/dev/session/solium-autostart.target" "$own_units/solium-autostart.target"
-check "  and records only that one" [ "$(wc -l <"$own$prefix/share/solium/config.sha256")" -eq 1 ]
+check "  writes the unit that was not there" \
+    cmp -s "$root/dev/session/solium-kwallet-pam.service" "$own_units/solium-kwallet-pam.service"
+check "  and records only those two" [ "$(wc -l <"$own$prefix/share/solium/config.sha256")" -eq 2 ]
 DESTDIR="$own" "$install_sh" --uninstall --session-dir "$sessions" >"$work/own-uninstall.log" 2>&1
 check "uninstall exits 0" [ $? -eq 0 ]
 check "  removes the unit it wrote" [ ! -e "$own_units/solium-autostart.target" ]
@@ -436,7 +451,7 @@ check "  with Exec=/usr/bin/solium-session" grep -qx "Exec=/usr/bin/solium-sessi
 check "  the only line that differs from dev/session/solium.desktop" \
     diff <(grep -v '^Exec=' "$root/dev/session/solium.desktop") <(grep -v '^Exec=' "$sys_session")
 for entry in "solium-session.target:lib/systemd/user" "solium-autostart.target:lib/systemd/user" \
-    "lilium-portals.conf:share/xdg-desktop-portal"; do
+    "solium-kwallet-pam.service:lib/systemd/user" "lilium-portals.conf:share/xdg-desktop-portal"; do
     name="${entry%%:*}"
     path="$sys/usr/${entry#*:}/$name"
     check "/usr/${entry#*:}/$name is a copy of dev/session/$name" cmp -s "$root/dev/session/$name" "$path"
@@ -445,8 +460,8 @@ done
 check "nothing went into XDG_CONFIG_HOME" [ ! -e "$sys$broken" ]
 check "share/solium has no session file, no PAM file and no checksums" \
     [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/solium.pam" -a ! -e "$sys_share/config.sha256" ]
-check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 8)))" \
-    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 8))" ]
+check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 9)))" \
+    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 9))" ]
 check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
 check "--check passed, using the staged /usr/share/solium" \
     grep -qF -- "--check passed (ok: " "$work/system.log"
@@ -631,7 +646,7 @@ echo "\$*" >>"$wrap/systemctl.log"
 STANDIN
 chmod +x "$wrap/bin/solium" "$wrap/fakebin/systemctl"
 stop_line="--user stop solium-session.target solium-autostart.target"
-unset_line="--user unset-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
+unset_line="--user unset-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PAM_KWALLET5_LOGIN"
 # solium-session with the stand-in in mode $1, is-active answering $2 for
 # solium-session.target and $3 (inactive unless given) for
 # graphical-session.target. The log is wrapper-$4.log, or wrapper-$1.log.
@@ -690,7 +705,7 @@ check "exits 0" [ $? -eq 0 ]
 check "no file is left under DESTDIR" [ "$(count_files "$destdir")" -eq 0 ]
 check "  the units and the portal choice included" \
     [ ! -e "$units/solium-session.target" -a ! -e "$units/solium-autostart.target" \
-        -a ! -e "$portals/lilium-portals.conf" ]
+        -a ! -e "$units/solium-kwallet-pam.service" -a ! -e "$portals/lilium-portals.conf" ]
 check "share/solium is gone" [ ! -e "$share" ]
 mapfile -t lines < <(grep -E '^  sudo ' "$work/uninstall.log")
 expected="  sudo rm -f $sessions/solium.desktop"

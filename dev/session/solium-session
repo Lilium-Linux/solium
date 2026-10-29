@@ -28,7 +28,7 @@ fi
 trap : HUP INT TERM
 "$here/solium" --tty --session 9>&-
 status=$?
-variables="WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
+variables="WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PAM_KWALLET5_LOGIN"
 if systemctl --user --quiet is-active solium-session.target; then
     echo "solium-session: Solium ended (status $status) and left solium-session.target running; stopping it" >&2
     systemctl --user stop solium-session.target solium-autostart.target

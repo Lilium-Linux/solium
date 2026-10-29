@@ -131,5 +131,6 @@ XDG_CONFIG_HOME="$PWD/check-config" target/install/release/solium --check
 %{_datadir}/wayland-sessions/solium.desktop
 %{_userunitdir}/solium-session.target
 %{_userunitdir}/solium-autostart.target
+%{_userunitdir}/solium-kwallet-pam.service
 %dir %{_datadir}/xdg-desktop-portal
 %{_datadir}/xdg-desktop-portal/lilium-portals.conf

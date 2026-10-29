@@ -1497,7 +1497,7 @@ dev/install.sh --uninstall     # remove it again; prints `sudo rm -f …` for bo
 | | |
 |---|---|
 | `--prefix DIR` | where to install, default `~/.local`: `DIR/bin/solium`, `DIR/bin/solium-session` (what the session file starts: `solium --tty --session`, and the clean-up after a Solium that crashed), `DIR/libexec/solium-auth` (the lock screen's password helper, #281, which `solium` looks for there), `DIR/share/solium/{qml,lua,effects}`, the generated `DIR/share/solium/solium.desktop`, and `DIR/share/solium/solium.pam`, a copy of `dev/pam/solium` for the printed `sudo` line to put in `/etc/pam.d/solium`. `/usr` and `/usr/local` are system prefixes, below |
-| `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`: `systemd/user/solium-session.target`, `systemd/user/solium-autostart.target` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
+| `XDG_CONFIG_HOME=` | where the session's other files go, default `~/.config`: `systemd/user/solium-session.target`, `systemd/user/solium-autostart.target`, `systemd/user/solium-kwallet-pam.service` and `xdg-desktop-portal/lilium-portals.conf`, copied from `dev/session/` |
 | `--session-dir DIR` | where the display manager reads sessions, default `/usr/local/share/wayland-sessions`. Only the printed `sudo` line writes there. Refused with a system prefix |
 | `--no-build` | install the release binary already in `target/install` |
 | `--no-check` | skip the installed binary's `--check`: for a package built from source, whose binary still finds its build tree during `%install` and would fail the asset check |

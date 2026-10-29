@@ -466,10 +466,15 @@ pub(crate) fn run() -> Result<()> {
     );
     // Nested, the session this window is in keeps its own environment: this
     // tells nobody unless `SOLIUM_SESSION_BUS` names a bus. See `session.rs`.
+    // The wallet's login socket is the host session's, never this one's.
     let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
     signals.stop_timeout(settings.stop_timeout);
-    state.session =
-        crate::session::Session::begin(settings, crate::session::Place::Nested, dev::session_bus());
+    state.session = crate::session::Session::begin(
+        settings,
+        crate::session::Place::Nested,
+        dev::session_bus(),
+        None,
+    );
     state.session.wayland(&socket_name);
     if !x11_coming {
         state.session.x11(None);

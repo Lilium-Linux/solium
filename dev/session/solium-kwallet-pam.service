@@ -1,0 +1,26 @@
+# The wallet unlocked at login, handed to a Solium session (#377).
+#
+# pam_kwallet unlocks the wallet with the login's password and starts a
+# ksecretd that waits on a socket for the session's environment;
+# pam_kwallet_init sends it. Plasma runs that itself and marks its XDG
+# autostart entry X-systemd-skip, so nothing in a Solium session would, and
+# org.freedesktop.secrets would never be owned. solium-session.target wants
+# this. Solium puts the socket's PAM_KWALLET5_LOGIN in systemd's environment
+# when the login set it (`session::tests::the_wallet_socket_goes_to_systemd_alone_and_is_unset_on_exit`);
+# without it, or without kwallet-pam's helper, this does not start.
+# After the session's display is exported, which the target's start is,
+# because ksecretd opens its windows there; before XDG autostart, so what it
+# starts finds the secrets. dev/install.sh puts it beside the targets.
+[Unit]
+Description=Unlock the KWallet unlocked at login in a Solium session
+PartOf=solium-session.target
+After=solium-session.target
+Before=solium-autostart.target xdg-desktop-autostart.target
+ConditionEnvironment=PAM_KWALLET5_LOGIN
+ConditionPathExists=/usr/libexec/pam_kwallet_init
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/pam_kwallet_init
+TimeoutStartSec=10
+Slice=background.slice
