@@ -127,6 +127,8 @@ mod ffi {
             name: *const c_char,
         ) -> c_int;
         #[cfg(test)]
+        pub(super) fn solium_qml_let_go_for_test(scene: *mut Scene) -> c_int;
+        #[cfg(test)]
         pub(super) fn solium_qml_theme_mark_for_test(import_path: *const c_char) -> c_int;
         #[cfg(test)]
         pub(super) fn solium_qml_input_context_for_test() -> *const c_char;
@@ -1740,6 +1742,17 @@ impl Scene {
         }
     }
 
+    /// Let an object go in this scene the way a `Repeater` or a `Loader` lets
+    /// an item go, with `deleteLater` asked for from outside any event. See
+    /// `solium_qml_let_go_for_test` in `qml/host.cpp`, and
+    /// `tests::a_scene_freed_deletes_what_its_items_let_go_of_first`.
+    #[cfg(test)]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn let_go_for_test(&mut self) {
+        // SAFETY: the scene is live for as long as `self`.
+        let _ = unsafe { ffi::solium_qml_let_go_for_test(self.scene) };
+    }
+
     /// How many layers the style at this scene's root declares.
     ///
     /// `-1` when the root is not a `PaneStyle` at all, which is a different
@@ -1977,6 +1990,44 @@ mod tests {
                 );
             }
             assert_eq!(super::warnings_since(mark), 2);
+        });
+    }
+
+    /// **A scene freed deletes what its items let go of first** (#395). An
+    /// object let go of with `deleteLater` from a call into the host, as a
+    /// `Repeater` lets go of a delegate when the compositor changes its model,
+    /// is not deleted by draining Qt's events: the compositor runs no Qt event
+    /// loop. It goes when its scene is freed, while the scene's window, its
+    /// context and its hosting record are still there -- not from Qt's exit
+    /// handlers once they are gone, where every session ended on a corrupted
+    /// heap.
+    #[test]
+    #[expect(unsafe_code, reason = "asking the Qt host what became of the object")]
+    fn a_scene_freed_deletes_what_its_items_let_go_of_first() {
+        super::qt_test::on_the_qt_thread(|| {
+            super::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-qml-test-let-go");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            let path = directory.join("Scene.qml");
+            std::fs::write(&path, "import QtQuick\nItem {}\n").expect("writing the scene");
+            let mut scene = super::Scene::for_host(&path, 64, 16, None).expect("the scene builds");
+            scene.let_go_for_test();
+            let _ = super::drain(std::time::Duration::ZERO, false);
+            // SAFETY: no scene is passed, so the host only reads its own flag.
+            let waiting = unsafe { super::ffi::solium_qml_let_go_for_test(std::ptr::null_mut()) };
+            assert_eq!(
+                waiting, 0,
+                "the premise: draining Qt's events does not delete it"
+            );
+            drop(scene);
+            // SAFETY: as above.
+            let after = unsafe { super::ffi::solium_qml_let_go_for_test(std::ptr::null_mut()) };
+            assert_eq!(
+                after, 1,
+                "freeing the scene left it waiting (0), or deleted it after the window (2)"
+            );
+            let _ = std::fs::remove_dir_all(&directory);
         });
     }
 
