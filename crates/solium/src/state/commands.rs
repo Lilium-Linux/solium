@@ -956,6 +956,12 @@ impl Solium {
         if self.dispatching == 0 && self.scenes_to_settle {
             self.settle_scenes();
         }
+        // A window whose desk a selection has just put away gives the
+        // keyboard up, once the whole dispatch has said where every desk is
+        // going (#403).
+        if self.dispatching == 0 {
+            self.keyboard_off_a_put_away_window();
+        }
         // A warp, once every command of the outermost dispatch is applied
         // and every handler it ran has run: the window it names is where
         // the layout has just put it (#220).

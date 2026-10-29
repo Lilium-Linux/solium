@@ -28987,12 +28987,9 @@ end)
             /// fires before its application exists and a window with no
             /// client cannot be given the keyboard (`window_by_id`), so that
             /// request does nothing. Until the application arrives the
-            /// keyboard stays on the window it was on, now a screen away --
-            /// where `super+2` onto an empty workspace leaves it as well. That
-            /// gap is asserted below as it stands, because `tiling.lua` and
-            /// `config.lua` describe it; closing it is a rule about a desk
-            /// carried away taking the keyboard with it, which is `go`'s case
-            /// as much as this one's.
+            /// keyboard is on nothing: the window it was on is a screen away
+            /// now, on a desk a selection has put away, and gives it up as
+            /// one sent there does (#403).
             ///
             /// The half this pins is the arrival. The keyboard used to be
             /// given in `new_toplevel` and is given at the window's first
@@ -29018,10 +29015,14 @@ end)
                     .id_of(&working)
                     .expect("an open window has a pane");
                 assert!(
-                    desk.state.focused_window() == Some(working.clone())
-                        && !headed_on_stage(&desk.state, left),
-                    "the gap as it stands: until the application arrives the keyboard is \
-                     on the window the view has just left"
+                    !headed_on_stage(&desk.state, left),
+                    "the premise: the view has left the window that was working"
+                );
+                assert_eq!(
+                    desk.state.focused_window(),
+                    None,
+                    "until the application arrives the keyboard is on nothing, and not on \
+                     {working:?}, which the view has just left"
                 );
 
                 let arrived = arrives(&mut desk);
@@ -29036,6 +29037,57 @@ end)
                     &mut desk,
                     &arrived,
                     "a key typed after the application arrived did not reach it",
+                );
+            }
+
+            /// **#403: a window sent to another workspace leaves the
+            /// keyboard on a window in view, and with none, on nothing.**
+            /// `super+shift+2` moved the focused window onto a desk a
+            /// selection carries a screen away and left the keyboard on it,
+            /// so what was typed next went into a window nobody could see.
+            /// The keyboard goes where `focus.after_close` sends it, as it
+            /// does when a window closes; here the one window left on screen.
+            #[test]
+            fn a_window_sent_to_another_workspace_leaves_the_keyboard_on_the_one_in_view() {
+                let (mut desk, working) = working_in(SHIPPED_HEARING_FOCUS, Some("super+t"));
+                let (sent, _, pane) = desk.open();
+                assert_eq!(
+                    desk.state.focused_window(),
+                    Some(sent.clone()),
+                    "the premise: the window opened has the keyboard"
+                );
+
+                assert!(desk.state.trigger("super+shift+2"));
+                desk.pump();
+                assert_eq!(
+                    workspace_of(&desk, pane),
+                    "2",
+                    "the premise: the window was sent to workspace 2"
+                );
+                assert_eq!(showing(&desk), "1", "the premise: the view stayed");
+                assert!(
+                    !headed_on_stage(&desk.state, pane),
+                    "the premise: it is parked a screen away"
+                );
+                assert_eq!(
+                    desk.state.focused_window(),
+                    Some(working.clone()),
+                    "the keyboard stayed on the window sent away"
+                );
+                typed_into(
+                    &mut desk,
+                    &working,
+                    "a key typed after the send went somewhere else",
+                );
+
+                // The last window in view, sent too: nothing is left on screen
+                // to type into, and nothing has the keyboard.
+                assert!(desk.state.trigger("super+shift+2"));
+                desk.pump();
+                assert_eq!(
+                    desk.state.focused_window(),
+                    None,
+                    "the keyboard stayed on a window sent away with nothing left in view"
                 );
             }
 
@@ -31444,6 +31496,12 @@ end)
                     crate::script::FocusSource::Script,
                 );
                 assert!(desk.state.trigger("super+2"), "super+2 was not handled");
+                // Carried away, `right` gave the keyboard up (#403), and the
+                // window that took it was raised. Put back over `a`, where it
+                // was focused, so a walk topmost first meets it first.
+                desk.state
+                    .space
+                    .raise_element(&window_of(&desk, right.pane), false);
                 desk.state.clock.advance(Duration::from_secs(1));
                 let now = desk.state.clock.now();
                 desk.state.settle(now);

@@ -383,6 +383,39 @@ impl Solium {
         self.settle_focus();
     }
 
+    /// Take the keyboard off a window a selection has put away, as off a
+    /// window whose close has landed, once a dispatch has been applied whole.
+    ///
+    /// **#403: a window sent to another workspace kept the keyboard.**
+    /// `workspaces.lua` carries a desk away with a selection, and sending the
+    /// focused window there moved it into that desk and told nobody about the
+    /// keyboard, so what was typed next went into a window nobody could see. A
+    /// switch onto an empty workspace left the keyboard behind the same way.
+    /// Here rather than in the script that sent it, because it is the
+    /// compositor that knows a selection has put the window away
+    /// ([`Self::carried_by_a_selection`], the rule that already refuses such a
+    /// window an activation), and any configuration's desks are selections.
+    ///
+    /// The keyboard goes where `config.focus.after_close` sends it for the mode
+    /// in charge, with the window remembered where it stood, as
+    /// [`Self::minimize`] hands it on: the window under the pointer, the one
+    /// taking its place, the topmost; and with nothing left on screen, to
+    /// nothing, which loses no keystroke to a window out of sight.
+    /// `real_client::reflow_on_close::keyboard_at_open::a_window_sent_to_another_workspace_leaves_the_keyboard_on_the_one_in_view`.
+    pub(super) fn keyboard_off_a_put_away_window(&mut self) {
+        let Some(window) = self.focused_window() else {
+            return;
+        };
+        let Some(pane) = self.panes.id_of(&window) else {
+            return;
+        };
+        if !self.carried_by_a_selection(pane) {
+            return;
+        }
+        self.note_keyboard_left(pane);
+        self.hand_off_keyboard(&window);
+    }
+
     /// Give `window` the keyboard, and tell scripts `focus` with `source`,
     /// what moved it (#220).
     /// `tests::real_client::follow::the_compositors_own_focus_changes_say_what_they_are`.
