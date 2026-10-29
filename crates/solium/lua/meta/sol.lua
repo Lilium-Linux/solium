@@ -71,6 +71,7 @@
 ---@field parent? integer|false The window it belongs to; `false` when the client named a parent that is not on screen, absent when it named none.
 ---@field leaving boolean Whether it is closing: between `closing` and `close` or `refused`.
 ---@field minimized boolean Whether it is minimized (`sol.minimize`, or its application's own button): still mapped and alive, but drawn only while a present on it plays out or `sol.show_minimized` shows it, under no pointer or finger, and never holding the keyboard. Between `minimize` and `unminimize`.
+---@field above boolean Whether it is kept above every window that is not (`sol.keep_above`). Kept across a reload; gone with the window.
 ---@field app_id string The application's own name: a Wayland `app_id`, an X11 `WM_CLASS` class. Empty until the application arrives.
 ---@field min? sol.Size The smallest the application says it can be, frame included; absent when it set no limit.
 ---@field max? sol.Size The largest the application says it can be, frame included; absent when it set no limit.
@@ -1463,6 +1464,19 @@ function sol.unminimize(id) end
 ---@param shown? boolean `true` when left out.
 ---@return nil
 function sol.show_minimized(id, shown) end
+
+---Keep a window above every window that is not, or stop: in what is drawn and
+---in what is clicked. A click or the keyboard raises a window only among its
+---own kind, so focusing another window never puts it over one kept above;
+---windows kept above keep their usual order among themselves, and a window's
+---dialogs stay over it. A focused fullscreen window still covers it, and the
+---bars and the lock are as they were. The window's own state: a reload keeps
+---it, and it goes with the window. The row's `above` says which. With no id,
+---the focused window; with nothing focused, nothing happens.
+---@param id? integer
+---@param on? boolean|"toggle" `true` when left out.
+---@return nil
+function sol.keep_above(id, on) end
 
 ---Perform an action of the vocabulary: the same names a scene sends with
 ---`Solium.send`, `windows.focus`, `windows.close`, `windows.fullscreen`,

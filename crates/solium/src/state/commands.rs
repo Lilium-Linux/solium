@@ -516,6 +516,11 @@ impl Solium {
                         self.show_minimized(pane, shown);
                     }
                 }
+                Command::KeepAbove { id, on } => {
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
+                        self.keep_above(pane, on);
+                    }
+                }
                 Command::Place {
                     id,
                     rect,

@@ -197,7 +197,8 @@ Item {
     // The window this frame belongs to: its id, as `sol.windows()` gives it
     // and `sol.on("frame")` hears it, its process (-1 when it cannot be
     // told), and its state, each written when it changes (#417). `floating`
-    // is a window no layout holds in a tile.
+    // is a window no layout holds in a tile; `keptAbove` one kept above the
+    // others with `sol.keep_above` (#424).
     // `decoration::tests::a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes`.
     property int windowId: 0
     property int pid: -1
@@ -205,6 +206,7 @@ Item {
     property bool fullscreen: false
     property bool floating: false
     property bool minimized: false
+    property bool keptAbove: false
 
     // Where the window's own rectangle is inside this scene.
     //

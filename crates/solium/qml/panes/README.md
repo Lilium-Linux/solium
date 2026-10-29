@@ -149,8 +149,9 @@ When they change, in place, and to a frame built later as well:
 | `maximized`, `fullscreen` | the window's state, as the compositor last set it, so the frame changes the moment it is asked and not when the application answers |
 | `floating` | no layout holds the window in a tile: every window of a floating desktop, and a window a tiling layout let float. A maximised or fullscreen window is as it was before |
 | `minimized` | the window is put away |
+| `keptAbove` | the window is kept above the others, with `sol.keep_above`, so a Keep Above button shows that it is on |
 
-`windowId` to `minimized` are declared on `PaneStyle` as `int` and `bool`
+`windowId` to `keptAbove` are declared on `PaneStyle` as `int` and `bool`
 properties; a delegated layer declares the ones it reads, `property int
 windowId: 0`, `property int pid: -1` and the rest. A window that went keeps
 what its frame was last told while it fades.

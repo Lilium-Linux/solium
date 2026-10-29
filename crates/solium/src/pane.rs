@@ -554,6 +554,11 @@ pub(crate) struct Pane {
     /// (`sol.show_minimized`). Only read while the window is minimized, and
     /// cleared when it is shown again. It still takes no pointer or touch.
     shown_minimized: bool,
+    /// Whether this window is kept above every window that is not (#424):
+    /// `sol.keep_above`. The window's own state and not the configuration's,
+    /// so a reload keeps it, and it goes with the pane when the window
+    /// closes. Read by `Solium::stack_kept_above`. See `WindowInfo::above`.
+    above: bool,
     /// A window shrinking back out of fullscreen or maximised, until its
     /// shrink lands. `None` for every other pane, and cleared once it has
     /// landed. Written by `Solium::transition`, read by `Solium::lifted_on`
@@ -641,6 +646,7 @@ impl Pane {
             cramped: false,
             minimized: false,
             shown_minimized: false,
+            above: false,
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
@@ -678,6 +684,7 @@ impl Pane {
             cramped: false,
             minimized: false,
             shown_minimized: false,
+            above: false,
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
@@ -728,6 +735,16 @@ impl Pane {
     /// Show this window while it is minimized, or stop. See the field.
     pub(crate) const fn set_shown_minimized(&mut self, shown: bool) {
         self.shown_minimized = shown;
+    }
+
+    /// Whether this window is kept above the others. See the field.
+    pub(crate) const fn above(&self) -> bool {
+        self.above
+    }
+
+    /// Keep this window above the others, or stop. See the field.
+    pub(crate) const fn set_above(&mut self, above: bool) {
+        self.above = above;
     }
 
     /// Whether this pane is shrinking back out of fullscreen or maximised.
