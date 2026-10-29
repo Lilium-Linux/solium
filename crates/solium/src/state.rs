@@ -614,9 +614,10 @@ pub(crate) struct Solium {
     // out of a table beside it. See `close_pane` and `settle_refused`.
     /// When the last memory report went out; see `memory_report`.
     pub(crate) reported_at: std::time::Duration,
-    /// XWayland's window manager, once XWayland has started. `None` means no
-    /// X11 support this session, which is a working session with fewer apps.
-    pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
+    /// XWayland's window manager, and the connection of ours that keeps the X
+    /// input focus with the keyboard, once XWayland has started. `None` means
+    /// no X11 support this session, which is a working session with fewer apps.
+    pub(crate) xwm: Option<crate::xwayland::Xwm>,
     /// The X display number XWayland took, for `DISPLAY` in children.
     pub(crate) x11_display: Option<u32>,
     /// `config.x11`, handed over by `sol.x11`: the `WM_CLASS` names

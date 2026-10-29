@@ -25,6 +25,7 @@ applies here. They are credited because the ideas are theirs.
 | Where | Behaviour of | Their licence |
 |---|---|---|
 | `crates/solium/src/explicit_sync.rs` | [Smithay 0.7](https://github.com/Smithay/smithay/tree/v0.7.0/src/wayland/drm_syncobj)'s acquire-transaction blocker and last-buffer-reference release contract; integration and GPU retirement are Solium's own | MIT |
+| `crates/solium/src/xwayland/focus.rs` | [Smithay 0.7](https://github.com/Smithay/smithay/tree/v0.7.0/src/xwayland/xwm/surface.rs)'s `X11Surface` keyboard target: ICCCM §4.1.7's input models read from `WM_HINTS.input` and `WM_TAKE_FOCUS`, the focus reverting to nothing, and `None` when an X11 window loses the keyboard | MIT |
 | `crates/solium/lua/scrolling.lua`, and the rest of `crates/layout/src/scroller.rs` | [niri](https://github.com/niri-wm/niri)'s scrolling layout: columns, and a view anchored to the focused one | GPL-3.0-or-later |
 | `crates/solium/lua/tiling.lua`, `crates/layout/src/tree.rs` | [Hyprland](https://github.com/hyprwm/Hyprland)'s dwindle layout (`CDwindleAlgorithm`) | BSD-3-Clause |
 | `crates/solium/src/services/tray/` | [KDE Plasma](https://invent.kde.org/plasma/plasma-workspace)'s `StatusNotifierWatcher` and tray host where the specification is silent: an item's name as its bus name and object path together, a path registered on the sender's own connection, and the menu opened when an item refuses `Activate` | GPL-2.0-or-later |

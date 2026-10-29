@@ -925,13 +925,19 @@ game does (#361). Its window is one flat blue, so a capture shows where it is.
 
     DISPLAY=:1 ./target/debug/x11-probe request
     DISPLAY=:1 ./target/debug/x11-probe mapped
+    DISPLAY=:1 ./target/debug/x11-probe focus
 
 `request` maps a 640x480 window and asks, through the `_NET_WM_STATE` client
 message, for fullscreen, to leave it, to be maximised and to be restored.
 `mapped` maps a window as a Wine or Proton game started fullscreen does: no
 frame (Motif hints), at exactly the first monitor's rectangle, with
 `_NET_WM_STATE_FULLSCREEN` in its own property; then it asks to leave, to be
-maximised and to be restored. Each step waits `X11_PROBE_HOLD` milliseconds,
+maximised and to be restored. `focus` maps two windows one after the other and
+checks that each, given the keyboard as it opens, also holds the X server's own
+input focus, which is what tells an X11 application it has the keyboard and
+what SDL's relative mouse mode waits for (#399): a Passive one, which the window
+manager focuses, and a Globally Active one, which declines `WM_HINTS.input` and
+focuses itself when sent `WM_TAKE_FOCUS`. Each step waits `X11_PROBE_HOLD` milliseconds,
 1500 by default, and prints the window's rectangle and state; the exit status
 is non-zero if any answer was not the one asked for. The display number is in
 Solium's log, on the line `XWayland is up`. A burst of captures beside it shows

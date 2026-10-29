@@ -17,6 +17,16 @@
 //! written into its own property before mapping; and then asks to leave, to
 //! be maximised, and to be restored.
 //!
+//!     DISPLAY=:1 cargo run -p x11-probe -- focus
+//!
+//! `focus` maps two windows one after the other and checks that each one,
+//! given the keyboard as it opens, holds the X server's own input focus too,
+//! which is what tells an X11 application it has the keyboard (#399). The
+//! first is ICCCM's Passive kind, which the window manager sets the focus on.
+//! The second is Globally Active: it declines `WM_HINTS.input`, lists
+//! `WM_TAKE_FOCUS`, and sets the focus itself when the window manager sends
+//! it one, as the probe does.
+//!
 //! Each step waits `X11_PROBE_HOLD` milliseconds (1500 by default) for the
 //! compositor to answer and to be captured, then prints the window's state
 //! and rectangle. The exit status is zero only if every answer was the one
@@ -27,8 +37,8 @@ use std::time::Duration;
 use x11rb::connection::Connection as _;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, PropMode,
-    Window, WindowClass,
+    Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, InputFocus,
+    PropMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -210,7 +220,11 @@ fn main() {
     let mapped = match mode.as_str() {
         "request" => false,
         "mapped" => true,
-        other => panic!("no such mode {other:?}: `request` or `mapped`"),
+        "focus" => {
+            let failed = focus(&conn, root, monitor, Duration::from_millis(hold));
+            std::process::exit(i32::from(failed));
+        }
+        other => panic!("no such mode {other:?}: `request`, `mapped` or `focus`"),
     };
     let rect = if mapped {
         monitor
@@ -323,4 +337,115 @@ fn main() {
     probe.check("asked to be restored", &seen, ok);
 
     std::process::exit(i32::from(probe.failed));
+}
+
+/// `focus`: see the module header. Returns whether a step failed.
+fn focus(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) -> bool {
+    let atom = |name: &str| {
+        conn.intern_atom(false, name.as_bytes())
+            .expect("asking for an atom")
+            .reply()
+            .expect("an atom")
+            .atom
+    };
+    let protocols = atom("WM_PROTOCOLS");
+    let take_focus = atom("WM_TAKE_FOCUS");
+    let open = |name: &str, globally_active: bool| {
+        let window = conn.generate_id().expect("a window id");
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            i16::try_from(monitor.x + 100).expect("x fits"),
+            i16::try_from(monitor.y + 100).expect("y fits"),
+            640,
+            480,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .background_pixel(0x0033_66cc)
+                .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::FOCUS_CHANGE),
+        )
+        .expect("creating a window");
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            format!("x11-probe focus {name}").as_bytes(),
+        )
+        .expect("naming the window");
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"x11-probe\0x11-probe\0",
+        )
+        .expect("classing the window");
+        if globally_active {
+            // WM_HINTS with only the input flag set, and input False.
+            conn.change_property32(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_HINTS,
+                AtomEnum::WM_HINTS,
+                &[1, 0, 0, 0, 0, 0, 0, 0, 0],
+            )
+            .expect("declining WM_HINTS.input");
+            conn.change_property32(
+                PropMode::REPLACE,
+                window,
+                protocols,
+                AtomEnum::ATOM,
+                &[take_focus],
+            )
+            .expect("listing WM_TAKE_FOCUS");
+        }
+        conn.map_window(window).expect("mapping the window");
+        conn.flush().expect("flushing");
+        window
+    };
+    // Wait `hold`, taking the focus the way a Globally Active client does
+    // when the window manager asks.
+    let wait = || {
+        let until = std::time::Instant::now() + hold;
+        while std::time::Instant::now() < until {
+            while let Some(event) = conn.poll_for_event().expect("reading events") {
+                if let x11rb::protocol::Event::ClientMessage(message) = event
+                    && message.type_ == protocols
+                    && message.data.as_data32()[0] == take_focus
+                {
+                    let time = message.data.as_data32()[1];
+                    println!("     asked to take the focus: window {:#x}", message.window);
+                    conn.set_input_focus(InputFocus::PARENT, message.window, time)
+                        .expect("taking the focus");
+                    conn.flush().expect("flushing");
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let focused = || {
+        conn.get_input_focus()
+            .expect("asking the input focus")
+            .reply()
+            .expect("the input focus")
+            .focus
+    };
+
+    let mut failed = false;
+    for (name, globally_active) in [("passive", false), ("globally-active", true)] {
+        let window = open(name, globally_active);
+        wait();
+        let has = focused();
+        let ok = has == window;
+        println!(
+            "{} {name} window {window:#x} opened: the X input focus is on {has:#x}",
+            if ok { "ok  " } else { "FAIL" },
+        );
+        failed |= !ok;
+    }
+    failed
 }
