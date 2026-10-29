@@ -1997,24 +1997,27 @@ impl State {
         let armed = self.handle.insert_source(
             Timer::from_duration(until.saturating_sub(now)),
             move |_, (), state: &mut State| {
-                state.rest_over(crtc);
+                state.rest_over(crtc, until);
                 TimeoutAction::Drop
             },
         );
         if let Err(err) = armed {
             // Not resting rather than resting for good with nothing to end it.
             tracing::warn!(?err, "could not arm a screen's rest");
-            screen.cadence.woke();
+            screen.cadence.wake();
         }
     }
 
-    /// The rest of the screen on `crtc` is over: the pass it owes, or that
-    /// anything else wants, is drawn now.
-    fn rest_over(&mut self, crtc: crtc::Handle) {
+    /// The rest of the screen on `crtc` that was to end at `until` is over:
+    /// the pass it owes, or that anything else wants, is drawn now. A timer
+    /// of a rest since replaced does nothing (`Cadence::woke`).
+    fn rest_over(&mut self, crtc: crtc::Handle, until: Duration) {
         let Some(screen) = self.screens.iter_mut().find(|screen| screen.crtc == crtc) else {
             return;
         };
-        screen.cadence.woke();
+        if !screen.cadence.woke(until) {
+            return;
+        }
         if !self.active {
             return;
         }
