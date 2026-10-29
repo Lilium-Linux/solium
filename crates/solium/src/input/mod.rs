@@ -1349,12 +1349,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                             button,
                             location,
                         };
-                        pointer.set_grab(
-                            state,
-                            MoveGrab::new(start_data, window, geometry.loc),
-                            serial,
-                            Focus::Clear,
-                        );
+                        MoveGrab::start(state, &pointer, start_data, window, geometry.loc, serial);
                     }
                 }
                 return;
@@ -1491,12 +1486,7 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                     button,
                     location,
                 };
-                pointer.set_grab(
-                    state,
-                    MoveGrab::new(start_data, window, geometry.loc),
-                    serial,
-                    Focus::Clear,
-                );
+                MoveGrab::start(state, &pointer, start_data, window, geometry.loc, serial);
                 return;
             }
 

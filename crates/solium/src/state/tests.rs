@@ -34675,6 +34675,126 @@ end)
                 });
             }
 
+            /// Whether the pointer shows the closed hand a move holds.
+            fn closed_hand(desk: &mut Desk) -> bool {
+                use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+                matches!(
+                    desk.state.pointer.showing(),
+                    CursorImageStatus::Named(CursorIcon::Grabbing)
+                )
+            }
+
+            /// **A window moved by its titlebar shows the closed hand for as
+            /// long as the drag lasts, and the titlebar's arrow after**
+            /// (#374): the press starts the move with the hand, the motion
+            /// keeps it, frame after frame, and the first frame after the
+            /// release asks again what is under the pointer.
+            #[test]
+            fn a_titlebar_move_shows_the_closed_hand_until_it_ends() {
+                with_touch_window(true, |desk, _, window, before| {
+                    use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+                    let region = region(desk);
+                    let at = (
+                        f64::from(before.loc.x) + 100.0,
+                        f64::from(before.loc.y) + 16.0,
+                    );
+                    move_pointer(&mut desk.state, at, 10_000);
+                    let origin = desk
+                        .state
+                        .space
+                        .element_location(&window)
+                        .expect("window origin");
+                    let before_the_press = closed_hand(desk);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        0x110,
+                        ButtonState::Pressed,
+                        11_000,
+                    );
+                    let pressed = closed_hand(desk);
+                    move_pointer(&mut desk.state, (at.0 + 100.0, at.1 + 50.0), 12_000);
+                    desk.state.reassert_cursor();
+                    let dragging = closed_hand(desk);
+                    let moved = desk.state.space.element_location(&window);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        0x110,
+                        ButtonState::Released,
+                        13_000,
+                    );
+                    desk.state.reassert_cursor();
+                    let after = desk.state.pointer.showing();
+                    assert_eq!(
+                        (before_the_press, pressed, dragging),
+                        (false, true, true),
+                        "(the hand before the press, as it starts the move, while it drags)"
+                    );
+                    assert_eq!(
+                        moved,
+                        Some(origin + Point::from((100, 50))),
+                        "the premise: the titlebar drag moved the window"
+                    );
+                    assert!(
+                        matches!(after, CursorImageStatus::Named(CursorIcon::Default)),
+                        "the titlebar's arrow is not back after the move: {after:?}"
+                    );
+                });
+            }
+
+            /// **A window moved with the modifier shows the closed hand too**,
+            /// from the press to the release, and not after it (#374).
+            #[test]
+            fn a_modifier_move_shows_the_closed_hand_until_it_ends() {
+                with_touch_window(false, |desk, _, window, before| {
+                    let region = region(desk);
+                    let at = (
+                        f64::from(before.loc.x) + 200.0,
+                        f64::from(before.loc.y) + 150.0,
+                    );
+                    move_pointer(&mut desk.state, at, 10_000);
+                    let origin = desk
+                        .state
+                        .space
+                        .element_location(&window)
+                        .expect("window origin");
+                    crate::input::key(&mut desk.state, SUPER_L.into(), KeyState::Pressed, 11);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        0x110,
+                        ButtonState::Pressed,
+                        12_000,
+                    );
+                    let pressed = closed_hand(desk);
+                    move_pointer(&mut desk.state, (at.0 + 60.0, at.1 + 40.0), 13_000);
+                    desk.state.reassert_cursor();
+                    let dragging = closed_hand(desk);
+                    let moved = desk.state.space.element_location(&window);
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        0x110,
+                        ButtonState::Released,
+                        14_000,
+                    );
+                    crate::input::key(&mut desk.state, SUPER_L.into(), KeyState::Released, 15);
+                    desk.state.reassert_cursor();
+                    let after = closed_hand(desk);
+                    assert_eq!(
+                        moved,
+                        Some(origin + Point::from((60, 40))),
+                        "the premise: the modifier drag moved the window"
+                    );
+                    assert_eq!(
+                        (pressed, dragging, after),
+                        (true, true, false),
+                        "(the hand as the move starts, while it drags, after it)"
+                    );
+                });
+            }
+
             #[test]
             fn a_finger_on_a_tiled_seam_moves_the_seam() {
                 with_touch_window(false, |desk, opened, _, _| {

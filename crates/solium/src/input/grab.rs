@@ -12,19 +12,31 @@
 //!   without the compositor drawing anything at all.
 //! * The drag modifier from the input profile, for windows with no titlebar to
 //!   reach for.
+//!
+//! And a third, the compositor's own frame's titlebar. Every one starts
+//! through [`MoveGrab::start`], which shows the window held ([`SHAPE`]) for as
+//! long as the drag lasts (#374).
 
 use smithay::{
     desktop::Window,
     input::pointer::{
-        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
-        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
-        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab,
-        PointerInnerHandle, RelativeMotionEvent,
+        AxisFrame, ButtonEvent, CursorIcon, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
+        GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData,
+        MotionEvent, PointerGrab, PointerHandle, PointerInnerHandle, RelativeMotionEvent,
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, Serial},
 };
 
 use crate::state::Solium;
+
+/// What the pointer shows for as long as a window is being moved (#374):
+/// the closed hand, `grabbing`, because the window is held. `move`, the
+/// four-way arrow, says that something *can* be moved, which is a promise
+/// made before the press; once the button is down and the window follows the
+/// hand, every toolkit shows the hand closed on it. A resize shows the edge's
+/// double arrow for the same length of time (`resize::cursor`).
+pub(crate) const SHAPE: CursorIcon = CursorIcon::Grabbing;
 
 /// Drags a window with the pointer until the button is released.
 pub(crate) struct MoveGrab {
@@ -44,7 +56,34 @@ pub(crate) struct MoveDrag {
 }
 
 impl MoveGrab {
-    pub(crate) fn new(
+    /// Move `window` with `pointer` until the button that started it goes
+    /// up, the pointer showing it held ([`SHAPE`]) meanwhile. The shape is
+    /// asserted as the compositor's own over its chrome is, and held for the
+    /// grab as a resize's is (`Solium::assert_cursor` says nothing while the
+    /// pointer is grabbed); the first frame after the grab ends asks again
+    /// what is under the pointer.
+    /// `state::tests::real_client::reflow_on_close::hosted::a_titlebar_move_shows_the_closed_hand_until_it_ends`,
+    /// `state::tests::real_client::reflow_on_close::hosted::a_modifier_move_shows_the_closed_hand_until_it_ends`.
+    pub(crate) fn start(
+        state: &mut Solium,
+        pointer: &PointerHandle<Solium>,
+        start_data: GrabStartData<Solium>,
+        window: Window,
+        window_location: Point<i32, Logical>,
+        serial: Serial,
+    ) {
+        if state.pointer.assert(Some(SHAPE)) {
+            state.redraw = true;
+        }
+        pointer.set_grab(
+            state,
+            Self::new(start_data, window, window_location),
+            serial,
+            Focus::Clear,
+        );
+    }
+
+    fn new(
         start_data: GrabStartData<Solium>,
         window: Window,
         window_location: Point<i32, Logical>,
@@ -225,5 +264,10 @@ impl PointerGrab<Solium> for MoveGrab {
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut Solium) {}
+    /// The drag is over: the next frame asks again what is under the
+    /// pointer (`Solium::reassert_cursor`), which takes [`SHAPE`] away.
+    /// Asked then rather than here, where the seat is held: see `button`.
+    fn unset(&mut self, data: &mut Solium) {
+        data.redraw = true;
+    }
 }
