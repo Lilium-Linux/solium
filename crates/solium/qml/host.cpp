@@ -1707,6 +1707,17 @@ extern "C" void solium_qml_scene_free(SoliumQmlScene *scene)
         delete scene->root;
     }
     delete scene->object;
+    // Then every deferred delete waiting, before the context, the hosting
+    // record and the window the scene's items were made with go (#395). A
+    // Repeater, a ListView or a Loader deletes the items it lets go of later,
+    // not at once, and items let go of on the way out are deleted with them.
+    // Nothing else ever would: the compositor never runs a Qt event loop, and
+    // outside one Qt delivers a deferred delete only from inside the event
+    // that asked for it, so one asked for from a call into this file waits.
+    // Left waiting, they were deleted from Qt's exit handlers, after all of
+    // this was gone, and every session ended on a corrupted heap.
+    // `qml::tests::a_scene_freed_deletes_what_its_items_let_go_of_first`.
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     delete scene->context;
     delete scene->hosting;
     delete scene->component;
@@ -2219,6 +2230,30 @@ extern "C" int solium_qml_scene_watch_for_test(SoliumQmlScene *scene, int fd, co
                          }
                      });
     return 1;
+}
+
+/* For tests: an object let go of the way a Repeater, a ListView or a Loader
+ * lets go of an item, with deleteLater asked for from a call into this file
+ * rather than from inside an event; and, given no scene, what became of the
+ * last one: 0 still waiting, 1 deleted while the scene it was let go of in
+ * still had its window, 2 deleted after.
+ * `qml::tests::a_scene_freed_deletes_what_its_items_let_go_of_first`. */
+namespace {
+int g_let_go = 0;
+} // namespace
+
+extern "C" int solium_qml_let_go_for_test(SoliumQmlScene *scene)
+{
+    if (scene == nullptr) {
+        return g_let_go;
+    }
+    g_let_go = 0;
+    const QPointer<QQuickWindow> window(scene->window);
+    auto *item = new QObject();
+    QObject::connect(item, &QObject::destroyed,
+                     [window]() { g_let_go = window.isNull() ? 2 : 1; });
+    item->deleteLater();
+    return 0;
 }
 
 /* For tests: which `Solium.Theme` an engine given `import_path` the way the

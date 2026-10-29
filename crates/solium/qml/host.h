@@ -325,6 +325,9 @@ long long solium_qml_clock_ms(void);
  * `qml::wake::tests::a_ready_descriptor_reaches_its_scene_with_no_frame_drawn`.
  */
 int solium_qml_scene_watch_for_test(SoliumQmlScene *scene, int fd, const char *name);
+/* For tests: an object let go of with deleteLater from outside any event, and,
+ * given no scene, whether it has been deleted yet (`qml/host.cpp`). */
+int solium_qml_let_go_for_test(SoliumQmlScene *scene);
 
 /*
  * For tests: which `Solium.Theme` an engine given `import_path` the way the
