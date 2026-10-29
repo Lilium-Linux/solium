@@ -294,10 +294,12 @@ function workspaces.go(index, monitor)
             and not window.minimized
         then
             sol.focus(window.id)
-            -- A switch away to an empty workspace leaves the keyboard on the
-            -- window it hid, so coming back focuses the window that already
-            -- has it, and its `focus` says the keyboard did not move. The
-            -- view did, so the pointer is taken to it here instead (#220).
+            -- A window that kept the keyboard while out of view -- one on no
+            -- workspace in particular, which the view carries along -- is
+            -- focused again here, and its `focus` says the keyboard did not
+            -- move. The view did, so the pointer is taken to it here instead
+            -- (#220). Any other window carried away gave the keyboard up
+            -- (#403).
             -- `a_switch_to_an_empty_workspace_takes_the_pointer_to_the_middle_or_leaves_it`.
             if window.focused then
                 follow.window(window.id, sol.focus_source())
@@ -383,7 +385,9 @@ end
 
 -- Send the focused window to another workspace. It stays on its own monitor:
 -- a workspace is a screenful, and sending a window sideways through the
--- workspaces should not also throw it at the other screen.
+-- workspaces should not also throw it at the other screen. The keyboard is the
+-- compositor's to move: a window its desk carries out of view gives it up as a
+-- closed one does (`focus.after_close`, #403).
 function workspaces.send(index)
     index = math.max(1, math.min(index, workspaces.count()))
     for _, window in ipairs(sol.windows()) do
