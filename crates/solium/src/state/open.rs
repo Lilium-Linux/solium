@@ -12,7 +12,10 @@ use super::*;
 /// grandchild. Walking up from the client finds the launch that started it
 /// anyway. Bounded because this runs when a window appears and `/proc` is not
 /// free, and because a chain longer than this is not a launch we started.
-fn ancestry(pid: u32) -> Vec<u32> {
+///
+/// And the same walk for an application's playback stream, whose process may
+/// be a helper its window's process started (#416, `services::audio::pw`).
+pub(crate) fn ancestry(pid: u32) -> Vec<u32> {
     const GENERATIONS: usize = 8;
     let mut family = Vec::with_capacity(GENERATIONS);
     let mut current = pid;

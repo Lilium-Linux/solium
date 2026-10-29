@@ -755,6 +755,8 @@ void solium_qml_register_types()
     qmlRegisterAnonymousType<SoliumNotifications>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumAudioEndpoint>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumAudioRows>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumAudioStream>(SOLIUM_NATIVE_URI, 1);
+    qmlRegisterAnonymousType<SoliumAudioStreamRows>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumAudio>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumTrayItem>(SOLIUM_NATIVE_URI, 1);
     qmlRegisterAnonymousType<SoliumTrayRows>(SOLIUM_NATIVE_URI, 1);
@@ -779,8 +781,10 @@ void solium_qml_name_scope(QQmlContext *context, bool redacted)
     // Notifications show on the lock as anywhere (Illia, 2026-10-01): the
     // lock's scenes read the same one (#346).
     context->setContextProperty(QStringLiteral("Notifications"), solium_notifications());
-    // Audio is no one's private matter: the lock's OSD may show the volume.
-    context->setContextProperty(QStringLiteral("Audio"), solium_audio());
+    // The volume is no one's private matter: the lock's OSD may show it.
+    // Which applications are playing, and what, is (#416): the lock's
+    // scenes read an `Audio` with no streams.
+    context->setContextProperty(QStringLiteral("Audio"), solium_audio(redacted));
     // The tray reaches into applications: the lock's scenes read one with no
     // items (#363).
     context->setContextProperty(QStringLiteral("Tray"), solium_tray(redacted));

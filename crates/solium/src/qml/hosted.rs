@@ -169,6 +169,8 @@ pub(crate) enum Model {
     Tray = 9,
     /// `Media.players` (#379).
     Media = 10,
+    /// `Audio.streams` (#416).
+    AudioStreams = 11,
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
@@ -213,8 +215,9 @@ pub(crate) fn set_notifications_state(json: &str) -> bool {
     unsafe { ffi::solium_qml_set_notifications_state(json.as_ptr()) != 0 }
 }
 
-/// `Audio`'s own values (#347): `available`, `ready`, and the `output` and
-/// `input` facades' rows, as one JSON object. Whether Qt took it.
+/// `Audio`'s own values (#347): `available`, `ready`, the `output` and
+/// `input` facades' rows, and each window's streams as one, by the window's
+/// id, for `Audio.forWindow` (#416), as one JSON object. Whether Qt took it.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
 pub(crate) fn set_audio_state(json: &str) -> bool {
     touched();

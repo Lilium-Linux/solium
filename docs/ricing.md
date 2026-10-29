@@ -1620,6 +1620,48 @@ An endpoint has `id`, `name`, `label`, `kind` (`speakers`, `headphones`,
 `makeDefault()`. A card's volume is written through its route, as
 WirePlumber does, so the hardware mixer moves and the level is remembered.
 
+Every application playing is there too, as `Audio.streams`, each with its
+`app` (the application's name), `appId`, `binary`, `pid`, `mediaName` (what it
+plays), `icon` and `windows`, the ids of the windows it is, with the volume,
+`muted` and the calls an endpoint has but `makeDefault()`. A stream's volume is
+its own, over the device's: 1.0 leaves the application as loud as it is.
+
+A window's own volume, a titlebar's scroll or a slider in its quick settings,
+is `Audio.forWindow(id)`: the window's streams as one stream that is never
+null, `present` while it has any, its `volume` the loudest of theirs, `muted`
+while every one is, `count` of them, and every call acting on all of them
+together, so a browser's three tabs move as one. A window is matched to its
+streams by its process: the stream's own, then the processes that started it,
+so a browser whose sound comes from a helper process, or a player started in a
+terminal, is found; failing that, by its application id, `org.mozilla.firefox`
+naming Firefox's stream by its last part.
+
+```qml
+// A taskbar's button for each window: the wheel over it is that window's
+// volume.
+Repeater {
+    model: Windows
+    delegate: Item {
+        id: button
+        required property var model
+        readonly property var sound: Audio.forWindow(model.id)
+        width: 32; height: 32
+        WheelHandler {
+            target: null
+            enabled: button.sound.present
+            onWheel: (event) => button.sound.adjust(
+                event.angleDelta.y > 0 ? button.sound.step : -button.sound.step)
+        }
+    }
+}
+```
+
+Lua reads the same: `sol.audio().streams`, and `sol.audio().windows[id]` for
+one window's, and sets a window's with
+`sol.act("audio.volume", { window = id, by = 0.05 })` or
+`sol.act("audio.mute", { window = id, value = "toggle" })`. The lock's scenes
+read no streams: which applications are playing, and what, is no one else's.
+
 The volume keys in the shipped configuration go through the same service,
 capped at `config.lua`'s `audio.max`. Lua hears every change, and who made
 it, which is what an on-screen display needs:

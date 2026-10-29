@@ -117,6 +117,15 @@ pub(crate) fn act_tray(
 fn settle_audio(state: &mut Solium) {
     let now = state.clock.now();
     state.services.audio.settle(now);
+    // The windows the streams are matched to, only while there are streams
+    // to match (#416): the walk is over every pane, and most of the time no
+    // application is playing anything.
+    let windows = if state.services.audio.has_streams() {
+        audio_windows(state)
+    } else {
+        Vec::new()
+    };
+    state.services.audio.tell_windows(windows);
     state.services.audio.refresh_view();
     let events = std::mem::take(&mut state.services.audio.events);
     for event in events {
@@ -129,6 +138,24 @@ fn settle_audio(state: &mut Solium) {
         state.scripts = Some(scripts);
         state.apply(outcome);
     }
+}
+
+/// Every window with a client, its process and its application id, as
+/// `sol.windows()` gives them: what a playback stream is matched to (#416).
+fn audio_windows(state: &Solium) -> Vec<audio::model::WindowKey> {
+    state
+        .panes
+        .iter()
+        .filter(|pane| pane.managed() && !pane.gone())
+        .filter_map(|pane| {
+            let window = pane.client()?;
+            Some(audio::model::WindowKey {
+                id: pane.id().get(),
+                pid: state.window_pid(window),
+                app_id: state.script_app_id(window),
+            })
+        })
+        .collect()
 }
 
 /// Who asked, for audio's origin: a binding's handler, a scene, or a script.

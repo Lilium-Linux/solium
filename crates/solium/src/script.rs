@@ -4771,9 +4771,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
 
     // Audio (03 §3.2.5, #347). `sol.audio{ max = 1.0, step = 0.05 }` sets its
     // limits; `sol.audio()` answers what it is: `available`, `ready`,
-    // `output`, `input`, `outputs` and `inputs`. Either starts it. Volume and
-    // mute go through `sol.act`: `audio.volume { target, value | by }`,
-    // `audio.mute { target, value }`, `audio.default { endpoint }`.
+    // `output`, `input`, `outputs` and `inputs`, every application's playback
+    // stream as `streams`, and each window's streams as one, by the window's
+    // id, as `windows` (#416). Either starts it. Volume and mute go through
+    // `sol.act`: `audio.volume { target | window, value | by }`,
+    // `audio.mute { target | window, value }`, `audio.default { endpoint }`.
     // `tests::sol_audio_sets_its_limits_and_answers_its_endpoints`.
     sol.set(
         "audio",
@@ -4793,7 +4795,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         )?;
                     }
                 }
-                for (key, rows) in [("outputs", &view.outputs), ("inputs", &view.inputs)] {
+                for (key, rows) in [
+                    ("outputs", &view.outputs),
+                    ("inputs", &view.inputs),
+                    ("streams", &view.streams),
+                ] {
                     let list = lua.create_table()?;
                     for (index, row) in rows.iter().enumerate() {
                         list.set(
@@ -4803,6 +4809,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     }
                     table.set(key, list)?;
                 }
+                let windows = lua.create_table()?;
+                for (id, row) in &view.windows {
+                    windows.set(
+                        *id,
+                        crate::services::notifications::object(row).to_lua(lua)?,
+                    )?;
+                }
+                table.set("windows", windows)?;
                 return Ok(Value::Table(table));
             };
             let mut settings = crate::services::audio::model::Settings::default();
@@ -13274,13 +13288,29 @@ mod tests {
             input: None,
             outputs: Vec::new(),
             inputs: Vec::new(),
+            streams: vec![std::collections::BTreeMap::from([
+                ("id", crate::json::Json::Number(41.0)),
+                ("app", crate::json::Json::Text("Firefox".to_owned())),
+                (
+                    "windows",
+                    crate::json::Json::List(vec![crate::json::Json::Number(7.0)]),
+                ),
+            ])],
+            windows: std::collections::BTreeMap::from([(
+                7,
+                std::collections::BTreeMap::from([
+                    ("volume", crate::json::Json::Number(0.25)),
+                    ("count", crate::json::Json::Number(1.0)),
+                ]),
+            )]),
         });
         assert_eq!(
             scripts.evaluate_in(
                 snapshot,
-                "local a = sol.audio(); return a.output.label .. ' ' .. a.output.volume .. ' ' .. tostring(a.input) .. ' ' .. #a.outputs"
+                "local a = sol.audio(); return a.output.label .. ' ' .. a.output.volume .. ' ' .. tostring(a.input) .. ' ' .. #a.outputs \
+                 .. ' ' .. a.streams[1].app .. ' ' .. a.streams[1].windows[1] .. ' ' .. a.windows[7].volume"
             ),
-            "Speakers 0.5 nil 0"
+            "Speakers 0.5 nil 0 Firefox 7 0.25"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -13300,6 +13330,7 @@ mod tests {
             muted: true,
             origin: crate::services::audio::volume::Origin::External,
             bus: crate::services::audio::model::Kind::Bluetooth,
+            stream: false,
         });
         let outcome = scripts.audio_event(&event, one_screen(&[]));
         assert_eq!(

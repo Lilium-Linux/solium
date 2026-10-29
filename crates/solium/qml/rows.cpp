@@ -522,6 +522,7 @@ SoliumRows *solium_rows_redacted(int model)
     static SoliumRows *folder = nullptr;
     static SoliumRows *tray = nullptr;
     static SoliumRows *media = nullptr;
+    static SoliumRows *streams = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -559,6 +560,12 @@ SoliumRows *solium_rows_redacted(int model)
             media = new SoliumMediaRows();
         }
         return media;
+    // Nor which applications are playing, nor what (#416).
+    case SOLIUM_QML_ROWS_AUDIO_STREAMS:
+        if (streams == nullptr) {
+            streams = new SoliumAudioStreamRows();
+        }
+        return streams;
     default:
         return nullptr;
     }
@@ -577,6 +584,7 @@ SoliumRows *solium_rows(int model)
     static SoliumRows *inputs = nullptr;
     static SoliumRows *tray = nullptr;
     static SoliumRows *media = nullptr;
+    static SoliumRows *streams = nullptr;
     if (QCoreApplication::instance() == nullptr) {
         return nullptr;
     }
@@ -637,6 +645,11 @@ SoliumRows *solium_rows(int model)
             media = new SoliumMediaRows();
         }
         return media;
+    case SOLIUM_QML_ROWS_AUDIO_STREAMS:
+        if (streams == nullptr) {
+            streams = new SoliumAudioStreamRows();
+        }
+        return streams;
     default:
         return nullptr;
     }

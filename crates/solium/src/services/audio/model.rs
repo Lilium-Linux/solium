@@ -89,8 +89,62 @@ impl Kind {
     }
 }
 
+/// Which application one playback stream is, as its node's properties and
+/// the kernel say (#416).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct App {
+    /// Its process: `pipewire.sec.pid`, which PipeWire took from the socket
+    /// and so is the host's even for a sandboxed client, else
+    /// `application.process.id`.
+    pub(crate) pid: Option<u32>,
+    /// That process and the ones that started it, nearest first
+    /// (`state::ancestry`): what a window's process is looked for in, so a
+    /// browser whose sound is played by a helper it started is matched to
+    /// the browser's windows.
+    pub(crate) family: Vec<u32>,
+    /// `application.name`.
+    pub(crate) name: String,
+    /// `pipewire.access.portal.app_id` for a sandboxed client, else
+    /// `application.id`.
+    pub(crate) id: String,
+    /// `application.process.binary`.
+    pub(crate) binary: String,
+    /// `media.name`: what it plays, as the application calls it.
+    pub(crate) media: String,
+    /// `application.icon_name`, else `media.icon_name`.
+    pub(crate) icon: String,
+}
+
+impl App {
+    /// Whether a window's application id names this application: equal to
+    /// its id, its binary or its name, or the last part of a reverse-domain
+    /// id (`org.mozilla.firefox`) equal to one of them, letter case aside.
+    /// `tests::a_window_is_matched_to_its_stream_by_pid_then_by_app`.
+    fn named_by(&self, app_id: &str) -> bool {
+        let app_id = app_id.trim();
+        if app_id.is_empty() {
+            return false;
+        }
+        let last = app_id.rsplit('.').next().unwrap_or(app_id);
+        [&self.id, &self.binary, &self.name]
+            .into_iter()
+            .filter(|ours| !ours.is_empty())
+            .any(|ours| ours.eq_ignore_ascii_case(app_id) || ours.eq_ignore_ascii_case(last))
+    }
+}
+
+/// What a window is matched to its streams by: its id, its process and its
+/// application id, as `sol.windows()` gives them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WindowKey {
+    pub(crate) id: u64,
+    pub(crate) pid: Option<u32>,
+    pub(crate) app_id: String,
+}
+
 /// What the PipeWire thread saw of one endpoint: a sink or a source node,
-/// with its device's route when it has one.
+/// with its device's route when it has one; or an application's playback
+/// stream, with `app` saying whose.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Seen {
     /// `node.name`: what identifies it across replugs and restarts.
@@ -111,6 +165,10 @@ pub(crate) struct Seen {
     pub(crate) port_kind: String,
     /// `running`, `idle`, `suspended` or `error`.
     pub(crate) state: String,
+    /// The application, for a playback stream (`Stream/Output/Audio`);
+    /// `None` for a sink or a source (#416). Boxed, as most of what is seen
+    /// is a sink or a source, and every `Fact` would carry its size.
+    pub(crate) app: Option<Box<App>>,
 }
 
 /// What the PipeWire thread tells the event loop.
@@ -172,6 +230,12 @@ impl Endpoint {
     pub(crate) fn pending(&self) -> bool {
         self.writer.pending()
     }
+
+    /// Whether it is an application's playback stream rather than a sink or
+    /// a source.
+    pub(crate) const fn is_stream(&self) -> bool {
+        self.seen.app.is_some()
+    }
 }
 
 /// An event for `sol.on("audio")`.
@@ -186,6 +250,8 @@ pub(crate) struct Event {
     pub(crate) muted: bool,
     pub(crate) origin: Origin,
     pub(crate) bus: Kind,
+    /// Whether it is an application's playback stream (#416).
+    pub(crate) stream: bool,
 }
 
 /// What the configuration says: `sol.audio{ max, step }`.
@@ -236,8 +302,53 @@ impl Audio {
         self.last_id
     }
 
+    /// Every sink, source and playback stream.
     pub(crate) fn endpoints(&self) -> impl Iterator<Item = &Endpoint> {
         self.endpoints.values()
+    }
+
+    /// Whether any application is playing through a stream now (#416).
+    pub(crate) fn has_streams(&self) -> bool {
+        self.endpoints.values().any(Endpoint::is_stream)
+    }
+
+    /// Which windows each playback stream is, by the stream's id (#416).
+    ///
+    /// By process first: the stream's own, then each that started it, the
+    /// nearest first, and the first that is a window's process gives the
+    /// stream to every window of that process. So a browser whose sound is
+    /// played by a helper it started is the browser's, and a player started
+    /// from a terminal, which has no window of its own, is the terminal's.
+    /// A stream no window's process is in the family of is given by its
+    /// application to the windows whose application id names it
+    /// ([`App::named_by`]), for a client whose process the stream does not
+    /// say. A stream may be no window's, and a window may have several.
+    /// `tests::a_window_is_matched_to_its_stream_by_pid_then_by_app`.
+    pub(crate) fn windows_of_streams(&self, windows: &[WindowKey]) -> BTreeMap<u32, Vec<u64>> {
+        let mut owned = BTreeMap::new();
+        for endpoint in self.endpoints.values() {
+            let Some(app) = &endpoint.seen.app else {
+                continue;
+            };
+            let family = app.pid.filter(|_| app.family.is_empty()).into_iter();
+            let by_process = family.chain(app.family.iter().copied()).find_map(|pid| {
+                let ids: Vec<u64> = windows
+                    .iter()
+                    .filter(|window| window.pid == Some(pid))
+                    .map(|window| window.id)
+                    .collect();
+                (!ids.is_empty()).then_some(ids)
+            });
+            let ids = by_process.unwrap_or_else(|| {
+                windows
+                    .iter()
+                    .filter(|window| app.named_by(&window.app_id))
+                    .map(|window| window.id)
+                    .collect()
+            });
+            owned.insert(endpoint.id, ids);
+        }
+        owned
     }
 
     pub(crate) fn default_of(&self, direction: Direction) -> Option<&Endpoint> {
@@ -279,6 +390,7 @@ impl Audio {
                 let muted = seen.muted;
                 let direction = seen.direction;
                 let kind = seen.kind;
+                let stream = seen.app.is_some();
                 match self.endpoints.get_mut(&name) {
                     None => {
                         self.endpoints.insert(
@@ -299,6 +411,7 @@ impl Audio {
                             muted,
                             origin: Origin::External,
                             bus: kind,
+                            stream,
                         });
                     }
                     Some(endpoint) => {
@@ -326,6 +439,7 @@ impl Audio {
                                 muted,
                                 origin,
                                 bus: kind,
+                                stream,
                             });
                         }
                         if was_muted != muted {
@@ -347,6 +461,7 @@ impl Audio {
                                 muted,
                                 origin,
                                 bus: kind,
+                                stream,
                             });
                         }
                     }
@@ -354,6 +469,13 @@ impl Audio {
             }
             Fact::Gone(name) => {
                 if let Some(endpoint) = self.endpoints.remove(&name) {
+                    // A stream is named by its node, which never comes back:
+                    // its id goes with it, where an endpoint's is kept for
+                    // the next time it is plugged in.
+                    if endpoint.is_stream() {
+                        self.ids.remove(&name);
+                        self.mutes.remove(&name);
+                    }
                     events.push(Event {
                         what: "removed",
                         id: endpoint.id,
@@ -363,6 +485,7 @@ impl Audio {
                         muted: endpoint.seen.muted,
                         origin: Origin::External,
                         bus: endpoint.seen.kind,
+                        stream: endpoint.is_stream(),
                     });
                 }
             }
@@ -390,6 +513,7 @@ impl Audio {
                                 muted: endpoint.seen.muted,
                                 origin: Origin::External,
                                 bus: endpoint.seen.kind,
+                                stream: false,
                             });
                         }
                     }
@@ -471,6 +595,19 @@ impl Audio {
         })
     }
 
+    /// Whether every one of these streams is muted, as last asked or seen,
+    /// which a window's toggle reads.
+    pub(crate) fn all_muted(&self, ids: &[u32]) -> bool {
+        ids.iter().all(|id| {
+            self.resolve(&Which::Id(*id)).is_some_and(|endpoint| {
+                match self.mutes.get(&endpoint.seen.name) {
+                    Some((asked, ..)) => *asked,
+                    None => endpoint.seen.muted,
+                }
+            })
+        })
+    }
+
     /// A new default asked for.
     pub(crate) fn request_default(&self, id: u32) -> Result<Command, &'static str> {
         let endpoint = self.resolve(&Which::Id(id)).ok_or("unknown-endpoint")?;
@@ -523,6 +660,7 @@ mod tests {
             port_label: "Speakers".to_owned(),
             port_kind: "speaker".to_owned(),
             state: "running".to_owned(),
+            app: None,
         }
     }
 
@@ -538,6 +676,96 @@ mod tests {
         );
         audio.apply(Fact::Ready, ms(0));
         audio
+    }
+
+    /// Firefox's playback stream: process 300, started by 200, started by
+    /// 100.
+    fn firefox_stream(node: u32, volume: f64) -> Seen {
+        Seen {
+            name: format!("stream#{node}"),
+            label: "Firefox".to_owned(),
+            direction: Direction::Output,
+            kind: Kind::Other,
+            channels: volume::channels(volume::to_linear(volume), 2),
+            muted: false,
+            step: None,
+            route: None,
+            port_label: String::new(),
+            port_kind: String::new(),
+            state: "running".to_owned(),
+            app: Some(Box::new(App {
+                pid: Some(300),
+                family: vec![300, 200, 100],
+                name: "Firefox".to_owned(),
+                id: String::new(),
+                binary: "firefox".to_owned(),
+                media: "AudioStream".to_owned(),
+                icon: "firefox".to_owned(),
+            })),
+        }
+    }
+
+    fn window(id: u64, pid: Option<u32>, app_id: &str) -> WindowKey {
+        WindowKey {
+            id,
+            pid,
+            app_id: app_id.to_owned(),
+        }
+    }
+
+    /// **A window is matched to its stream by its process, then by its
+    /// application** (#416): the nearest of the stream's process and the
+    /// ones that started it that is a window's gives the stream to every
+    /// window of that process; with none, a window whose application id
+    /// names the stream's application has it; and a stream no window is
+    /// the process or the application of is no window's.
+    #[test]
+    fn a_window_is_matched_to_its_stream_by_pid_then_by_app() {
+        let mut audio = ready_with_speakers(0.5);
+        audio.apply(Fact::Seen(firefox_stream(41, 0.5)), ms(0));
+        let id = audio
+            .endpoints()
+            .find(|each| each.is_stream())
+            .expect("the stream")
+            .id;
+        assert!(audio.has_streams());
+        // Its helper's parent, 200, has two windows; 100 has one too, further
+        // up, and a window of another application has none of it.
+        let windows = [
+            window(1, Some(200), "org.mozilla.firefox"),
+            window(2, Some(200), "org.mozilla.firefox"),
+            window(3, Some(100), "foot"),
+            window(4, Some(999), "org.mozilla.firefox"),
+        ];
+        assert_eq!(audio.windows_of_streams(&windows)[&id], vec![1, 2]);
+        // No window of any process in the family: by the application, which
+        // a reverse-domain id names by its last part.
+        let windows = [
+            window(4, Some(999), "org.mozilla.firefox"),
+            window(5, None, "kitty"),
+            window(6, None, "FIREFOX"),
+        ];
+        assert_eq!(audio.windows_of_streams(&windows)[&id], vec![4, 6]);
+        assert_eq!(
+            audio.windows_of_streams(&[window(5, None, "kitty")])[&id],
+            Vec::<u64>::new()
+        );
+        // The speakers are no window's: only streams are matched.
+        assert_eq!(audio.windows_of_streams(&windows).len(), 1);
+    }
+
+    /// **A stream's id goes with it**, where a sink's is kept for its
+    /// replug: a stream is named by its node, which never comes back, so a
+    /// session's thousand short sounds leave nothing behind.
+    #[test]
+    fn a_stream_s_id_goes_with_it() {
+        let mut audio = ready_with_speakers(0.5);
+        audio.apply(Fact::Seen(firefox_stream(41, 0.5)), ms(0));
+        let (events, _) = audio.apply(Fact::Gone("stream#41".to_owned()), ms(10));
+        assert_eq!(events[0].what, "removed");
+        assert!(events[0].stream);
+        assert!(!audio.has_streams());
+        assert!(!audio.ids.contains_key("stream#41"));
     }
 
     #[test]

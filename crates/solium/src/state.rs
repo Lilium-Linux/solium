@@ -128,6 +128,7 @@ pub(crate) use hosted::{GrabRoute, HostedGrab, HostedKeyboard, SceneRepeat};
 #[cfg(test)]
 use monitors::anywhere_on;
 use open::Claimed;
+pub(crate) use open::ancestry;
 #[cfg(test)]
 use open::{ClientKind, FirstFocus, first_focus};
 pub(crate) use placement::Standing;

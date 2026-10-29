@@ -36,6 +36,8 @@ pub(crate) struct Published {
     /// `Audio.outputs` and `.inputs`, and its own values, as last taken (#347).
     audio_outputs: Vec<diff::Row>,
     audio_inputs: Vec<diff::Row>,
+    /// `Audio.streams` (#416).
+    audio_streams: Vec<diff::Row>,
     audio_state: Option<String>,
     /// `Tray.items`, and its own values, as last taken (#363).
     tray: Vec<diff::Row>,
@@ -188,13 +190,19 @@ impl crate::state::Solium {
                 rows(&audio.inputs),
                 crate::qml::hosted::apply_rows,
             );
+            let streams = publish(
+                Model::AudioStreams,
+                &mut self.published.audio_streams,
+                rows(&audio.streams),
+                crate::qml::hosted::apply_rows,
+            );
             let state = audio_state(audio);
             let values = self.published.audio_state.as_deref() == Some(state.as_str())
                 || crate::qml::hosted::set_audio_state(&state);
             if values {
                 self.published.audio_state = Some(state);
             }
-            outputs && inputs && values
+            outputs && inputs && streams && values
         });
         // The tray (#363): its items, and its own values.
         let tray = self.services.tray.view();
@@ -369,11 +377,19 @@ fn audio_state(view: &crate::services::audio::View) -> String {
         row.as_ref()
             .map_or(Json::Null, crate::services::notifications::object)
     };
+    // Each window's streams as one, by the window's id, for the facades
+    // `Audio.forWindow` hands out (#416).
+    let windows = view
+        .windows
+        .iter()
+        .map(|(id, row)| (id.to_string(), crate::services::notifications::object(row)))
+        .collect();
     Json::Object(std::collections::BTreeMap::from([
         ("available".to_owned(), Json::Bool(view.available)),
         ("ready".to_owned(), Json::Bool(view.ready)),
         ("output".to_owned(), facade(&view.output)),
         ("input".to_owned(), facade(&view.input)),
+        ("windows".to_owned(), Json::Object(windows)),
     ]))
     .render()
 }

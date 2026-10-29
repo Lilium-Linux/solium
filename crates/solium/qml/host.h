@@ -612,6 +612,8 @@ int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
 #define SOLIUM_QML_ROWS_TRAY 9
 /* `Media.players` (#379, media.h). */
 #define SOLIUM_QML_ROWS_MEDIA 10
+/* `Audio.streams` (#416, audio.h). */
+#define SOLIUM_QML_ROWS_AUDIO_STREAMS 11
 
 /* Apply one batch of row operations, rendered by `crate::models::diff::render`,
  * to a model: in order, every row's values written before any row is

@@ -1,8 +1,9 @@
 //! PipeWire, on a thread of its own (03 §3.2.5, "Lifecycle").
 //!
 //! The thread runs PipeWire's own main loop. It binds every sink and source
-//! node, and every audio device, with only the params it uses (`Props` for a
-//! node, `Route` for a device), and the `default` metadata. It turns what
+//! node, every application's playback stream (`Stream/Output/Audio`, #416),
+//! and every audio device, with only the params it uses (`Props` for a node,
+//! `Route` for a device), and the `default` metadata. It turns what
 //! they say into [`Fact`]s for the event loop, and the event loop's
 //! [`Command`]s into params set: a card's volume through its route, so the
 //! hardware mixer moves and WirePlumber remembers it, and a node's own
@@ -24,7 +25,7 @@ use pw::{
 };
 
 use super::{
-    model::{Command, Direction, Fact, Kind, Seen},
+    model::{App, Command, Direction, Fact, Kind, Seen},
     volume::Target,
 };
 
@@ -105,6 +106,10 @@ struct NodeEntry {
     is_virtual: bool,
     bus: String,
     form_factor: String,
+    /// Whose it is, for an application's playback stream: then its name is
+    /// `stream#<global id>`, as `node.name` is no one's own for a stream
+    /// (two tabs of a browser are two streams of one name).
+    app: Option<App>,
 }
 
 struct DeviceEntry {
@@ -128,6 +133,24 @@ impl State {
     /// card's route when it has one, else from its own `Props`.
     fn seen(&self, id: u32) -> Option<Seen> {
         let node = self.nodes.get(&id)?;
+        // A stream has no card, no route and no kind of its own: its volume
+        // and mute are its node's own `Props`.
+        if let Some(app) = &node.app {
+            return Some(Seen {
+                name: node.name.clone(),
+                label: node.label.clone(),
+                direction: node.direction,
+                kind: Kind::Other,
+                channels: node.volumes.clone(),
+                muted: node.mute,
+                step: None,
+                route: None,
+                port_label: String::new(),
+                port_kind: String::new(),
+                state: node.state.clone(),
+                app: Some(Box::new(app.clone())),
+            });
+        }
         let route = node.device.and_then(|(device, profile_device)| {
             let entry = self.devices.get(&device)?;
             let route = entry.routes.iter().find(|route| {
@@ -156,6 +179,7 @@ impl State {
             port_label: route.map_or_else(String::new, |(_, route, _)| route.description.clone()),
             port_kind: port_type.to_owned(),
             state: node.state.clone(),
+            app: None,
         })
     }
 
@@ -243,12 +267,13 @@ fn run(
                 };
                 match global.type_ {
                     ObjectType::Node => {
-                        let direction = match props.get("media.class") {
-                            Some("Audio/Sink") => Direction::Output,
-                            Some("Audio/Source") => Direction::Input,
+                        let (direction, stream) = match props.get("media.class") {
+                            Some("Audio/Sink") => (Direction::Output, false),
+                            Some("Audio/Source") => (Direction::Input, false),
+                            Some("Stream/Output/Audio") => (Direction::Output, true),
                             _ => return,
                         };
-                        bind_node(&registry, global, direction, &state);
+                        bind_node(&registry, global, direction, stream, &state);
                     }
                     ObjectType::Device if props.get("media.class") == Some("Audio/Device") => {
                         bind_device(&registry, global, &state);
@@ -287,6 +312,7 @@ fn bind_node(
     registry: &pw::registry::Registry,
     global: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
     direction: Direction,
+    stream: bool,
     state: &Rc<RefCell<State>>,
 ) {
     let Ok(proxy) = registry.bind::<pw::node::Node, _>(global) else {
@@ -304,15 +330,26 @@ fn bind_node(
                     return;
                 };
                 if let Some(props) = info.props() {
-                    if let Some(name) = props.get("node.name") {
+                    if let Some(app) = node.app.as_mut() {
+                        read_app(app, &|key| props.get(key));
+                        let label = [app.name.as_str(), app.media.as_str()]
+                            .into_iter()
+                            .chain(props.get("node.description"))
+                            .chain(props.get("node.name"))
+                            .find(|label| !label.is_empty())
+                            .unwrap_or_default();
+                        label.clone_into(&mut node.label);
+                    } else if let Some(name) = props.get("node.name") {
                         name.clone_into(&mut node.name);
                     }
-                    let label = props
-                        .get("node.nick")
-                        .filter(|nick| !nick.is_empty())
-                        .or_else(|| props.get("node.description"))
-                        .unwrap_or_default();
-                    label.clone_into(&mut node.label);
+                    if node.app.is_none() {
+                        let label = props
+                            .get("node.nick")
+                            .filter(|nick| !nick.is_empty())
+                            .or_else(|| props.get("node.description"))
+                            .unwrap_or_default();
+                        label.clone_into(&mut node.label);
+                    }
                     node.device = props
                         .get("device.id")
                         .and_then(|device| device.parse().ok())
@@ -367,16 +404,27 @@ fn bind_node(
         })
         .register();
     proxy.subscribe_params(&[ParamType::Props]);
+    let app = stream.then(|| {
+        let mut app = App::default();
+        if let Some(props) = global.props {
+            read_app(&mut app, &|key| props.get(key));
+        }
+        app
+    });
     state.borrow_mut().nodes.insert(
         id,
         NodeEntry {
             proxy,
             _listener: listener,
-            name: global
-                .props
-                .and_then(|p| p.get("node.name"))
-                .unwrap_or_default()
-                .to_owned(),
+            name: if stream {
+                format!("stream#{id}")
+            } else {
+                global
+                    .props
+                    .and_then(|p| p.get("node.name"))
+                    .unwrap_or_default()
+                    .to_owned()
+            },
             label: String::new(),
             direction,
             device: None,
@@ -386,8 +434,40 @@ fn bind_node(
             is_virtual: false,
             bus: String::new(),
             form_factor: String::new(),
+            app,
         },
     );
+}
+
+/// An application's stream's properties, as `get` reads them, written into
+/// `app`: its process, and the family of processes that started it, read
+/// from `/proc` once for each process it says it is (#416).
+/// `tests::a_stream_says_whose_it_is`.
+fn read_app<'a>(app: &mut App, get: &dyn Fn(&str) -> Option<&'a str>) {
+    let text = |key: &str| get(key).unwrap_or_default().to_owned();
+    // The socket's, which PipeWire read from the kernel, before the one the
+    // client says: in a sandbox the client's own is its namespace's.
+    let pid = get("pipewire.sec.pid")
+        .or_else(|| get("application.process.id"))
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .filter(|pid| *pid > 1);
+    if pid != app.pid {
+        app.pid = pid;
+        app.family = pid.map(crate::state::ancestry).unwrap_or_default();
+    }
+    app.name = text("application.name");
+    app.id = get("pipewire.access.portal.app_id")
+        .filter(|id| !id.is_empty())
+        .or_else(|| get("application.id"))
+        .unwrap_or_default()
+        .to_owned();
+    app.binary = text("application.process.binary");
+    app.media = text("media.name");
+    app.icon = get("application.icon_name")
+        .filter(|icon| !icon.is_empty())
+        .or_else(|| get("media.icon_name"))
+        .unwrap_or_default()
+        .to_owned();
 }
 
 fn bind_device(
@@ -711,6 +791,51 @@ fn perform(state: &State, command: Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A stream says whose it is** (#416): its process from the socket
+    /// before the one the client claims, its application's name, id (a
+    /// sandbox's first), binary, what it plays and its icon.
+    #[test]
+    fn a_stream_says_whose_it_is() {
+        let props = std::collections::HashMap::from([
+            ("pipewire.sec.pid", "4242"),
+            ("application.process.id", "2"),
+            ("application.name", "Firefox"),
+            ("application.id", "firefox"),
+            ("pipewire.access.portal.app_id", "org.mozilla.firefox"),
+            ("application.process.binary", "firefox-bin"),
+            ("media.name", "AudioStream"),
+            ("media.icon_name", "audio-x-generic"),
+        ]);
+        let mut app = App::default();
+        read_app(&mut app, &|key| props.get(key).copied());
+        assert_eq!(app.pid, Some(4242));
+        assert_eq!(app.family.first(), Some(&4242), "itself first");
+        assert_eq!(
+            (
+                app.name.as_str(),
+                app.id.as_str(),
+                app.binary.as_str(),
+                app.media.as_str(),
+                app.icon.as_str()
+            ),
+            (
+                "Firefox",
+                "org.mozilla.firefox",
+                "firefox-bin",
+                "AudioStream",
+                "audio-x-generic"
+            )
+        );
+        let props = std::collections::HashMap::from([("application.process.id", "77")]);
+        let mut app = App::default();
+        read_app(&mut app, &|key| props.get(key).copied());
+        assert_eq!(
+            app.pid,
+            Some(77),
+            "the client's own, when the socket says nothing"
+        );
+    }
 
     #[test]
     fn the_default_metadata_s_json_names_the_node() {

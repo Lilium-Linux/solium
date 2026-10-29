@@ -668,8 +668,15 @@ device, `outputs` and `inputs`, row models of every sink and source, and
 `isDefault`, `portLabel`, `portKind`, `state` and `direction`. Its calls
 (`setVolume`, `adjust`, `setMuted`, `toggleMuted`, `makeDefault`) go straight
 to the service, which writes one change at a time per device, the newest, and
-tells Lua with `origin = "scene"`. [ricing.md](ricing.md#volume) has a slider
-and the Lua side.
+tells Lua with `origin = "scene"`. `streams` (#416) is a row model of every
+application's playback stream: `id`, `label`, `app`, `appId`, `binary`, `pid`,
+`mediaName`, `icon`, `windows` (the ids of the windows it is), and the
+volume, `muted` and calls of an endpoint but `makeDefault`.
+`forWindow(id)` is a facade, never null, of one window's streams as one,
+`present` while it has any, every call setting all of them; the same object
+for the same window while a scene holds it. The lock's scenes read an `Audio`
+with no streams, and every `forWindow` absent. [ricing.md](ricing.md#volume)
+has a slider, a window's volume and the Lua side.
 
 **The tray, live** (#363). `Tray` is what Solium, as the session's
 `org.kde.StatusNotifierWatcher` and its host, holds of the items applications
