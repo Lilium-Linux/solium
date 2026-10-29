@@ -1479,7 +1479,9 @@ function sol.act(action, data, done) end
 
 ---Start a program, with its arguments as separate strings:
 ---`sol.spawn("foot", "-e", "htop")`. A loading window is opened for it, which
----its first window fills; a command that opens none wants `sol.run`.
+---its first window fills -- its first that can: a splash, a window of one
+---fixed size, is shown over it instead -- and a command that opens none wants
+---`sol.run`.
 ---
 ---The program gets the environment Solium was started with, not what Qt and
 ---the libraries it loads have written into Solium's own since. On top of that:

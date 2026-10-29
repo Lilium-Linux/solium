@@ -38,7 +38,10 @@ compositor. They do not choose desktop policy.
 A pane has a stable identity and a layout slot. Its content can be a QML scene,
 a mapped client or the retained picture of a closing window. The pane can exist
 before an application connects, so launching reserves its place immediately.
-When the matching client maps, it takes over the same pane.
+When the matching client maps, it takes over the same pane, held at the pane's
+slot until it has drawn at the size it was told. A first window that names one
+size and only one, a splash, cannot fill the slot: it is shown over the pane
+instead, and the pane waits for the next window.
 
 Launch matching uses activation tokens and process ancestry. Relaunching an
 existing single-instance application activates its existing window and removes

@@ -77,6 +77,9 @@ impl CompositorHandler for Solium {
                 // `real_client::client_sizes::a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`
                 // and `a_window_that_opens_with_a_minimum_hears_it_once`.
                 self.notice_limits(&window);
+                // Before the show, so that a window that cannot fill the
+                // launch it arrived in is shown on its own (#295).
+                self.stand_aside(&window);
                 self.show_if_new(&window);
             }
         }
@@ -244,14 +247,20 @@ impl XdgShellHandler for Solium {
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Activated);
         });
-        // A client may not attach a buffer until it has been configured once.
-        surface.send_configure();
 
         let window = Window::new_wayland_window(surface.clone());
         self.map_stacked(window.clone(), (0, 0), true);
         // On the same line as the map, so nothing can observe a mapped window
         // that has no pane -- `trigger_open` is about to ask for its id.
         self.adopt_or_open(window);
+        // A client may not attach a buffer until it has been configured once.
+        // After the adoption, which configures a window arriving in a
+        // launch's pane with the pane's size: that is then its first
+        // configure, and the client never hears one without a size first
+        // and draws a frame at a size of its own (#295).
+        if !surface.is_initial_configure_sent() {
+            surface.send_configure();
+        }
 
         // No keyboard yet. It is given at the window's first frame, once a
         // layout has said where the window goes: see `offer_keyboard`.
@@ -829,7 +838,7 @@ impl XdgDecorationHandler for Solium {
 
 impl Solium {
     /// Agree a decoration mode with a client and act on it.
-    fn decorate(&mut self, toplevel: &ToplevelSurface, mode: Mode) {
+    pub(super) fn decorate(&mut self, toplevel: &ToplevelSurface, mode: Mode) {
         let server_side = mode != Mode::ClientSide;
 
         toplevel.with_pending_state(|state| {
@@ -843,7 +852,14 @@ impl Solium {
         // The frame belongs to the pane, so a client with no pane gets none.
         // It has still been told its mode, which is the part it is waiting on.
         let window = self.window_for(toplevel.wl_surface());
-        let Some(id) = window.as_ref().and_then(|window| self.panes.id_of(window)) else {
+        // Nor does an unmanaged one: a window standing in for a launch is
+        // bare until it becomes an ordinary window, and is framed then from
+        // the mode agreed here (#295, `Solium::promote`).
+        let Some(id) = window
+            .as_ref()
+            .and_then(|window| self.panes.id_of(window))
+            .filter(|id| self.panes.get(*id).is_some_and(Pane::managed))
+        else {
             tracing::debug!(server_side, "decoration agreed for a window with no pane");
             if toplevel.is_initial_configure_sent() {
                 toplevel.send_pending_configure();
@@ -851,8 +867,21 @@ impl Solium {
             return;
         };
 
+        // **A window still arriving in a launch's window keeps that window's
+        // shape** (#295): the launch's window reserved room for a frame, and
+        // a client drawing its own takes that room away. Its client rectangle
+        // is grown into it again below, so the window is the shape it was
+        // while it waited, rather than a titlebar shorter.
+        let arriving = self
+            .panes
+            .get(id)
+            .filter(|held| held.arriving())
+            .map(|held| self.pane_outer(held));
+
         if server_side {
-            let real = window.and_then(|window| self.real_geometry(&window));
+            let real = window
+                .as_ref()
+                .and_then(|window| self.real_geometry(window));
             let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
             let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
             self.decorations.insert(&mut self.panes, id, width, height);
@@ -862,6 +891,16 @@ impl Solium {
             // coming. For a client drawing its own, none is.
             self.decorations.remove(&mut self.panes, id);
             self.decorations.set_bare(&mut self.panes, id);
+        }
+        if let Some(outer) = arriving
+            && let Some(window) = window.as_ref()
+        {
+            let slot = inner(outer, self.insets_of(id));
+            if let Some(held) = self.panes.get_mut(id) {
+                held.set_slot(slot);
+            }
+            size_window(window, slot);
+            self.hold_arrival(id, window, self.clock.now());
         }
 
         // The client has to learn its mode before it draws, or it decides for

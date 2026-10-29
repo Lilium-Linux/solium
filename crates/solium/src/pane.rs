@@ -96,6 +96,10 @@ pub(crate) enum Content {
         /// window with nothing in it is worse than one with a scene, and much
         /// better than no window at all.
         scene: Option<Box<crate::surface::ShellSurface>>,
+        /// When its patience began: the launch, or the moment a window that
+        /// stood in for its application went (#295,
+        /// [`Pane::wait_again`]). What [`Pane::expired`] counts from.
+        since: Duration,
     },
     /// A client's window, mapped and drawing for itself.
     Client {
@@ -116,12 +120,29 @@ pub(crate) enum Content {
         /// application is already there underneath as it goes — a dissolve
         /// rather than a cut.
         faded: Option<Duration>,
+        /// The launch this window arrived in, kept until the window is first
+        /// shown, so that an arrival that cannot take the launch's slot can
+        /// hand it back (#295): see [`Pane::give_back_launch`]. `None` for a
+        /// window nobody launched, and for one shown or claimed by its token.
+        launch: Option<Launch>,
     },
     /// The remains of a window whose client has gone, on screen for the length
     /// of its fade and not a moment longer (#126). Boxed: it carries two
     /// rectangles, a title, two lists and a picture, and a window that is not
     /// leaving should not pay for them. See [`Left`].
     Leaving(Box<Left>),
+}
+
+/// What a launch's pane was waiting for, as [`Content::Loading`] holds it
+/// (all but its scene's source, which nothing reads):
+/// carried by the window that arrives in the pane until that window is first
+/// shown, so the pane can go back to waiting if the arrival turns out to be a
+/// window that cannot fill it (#295, [`Pane::give_back_launch`]).
+#[derive(Debug)]
+pub(crate) struct Launch {
+    program: String,
+    pid: Option<u32>,
+    since: Duration,
 }
 
 /// How long a pane whose client has gone stays on screen.
@@ -517,6 +538,17 @@ pub(crate) struct Pane {
     /// and every path that asks what is on screen asks for panes. What they
     /// are not is *windows*.
     managed: bool,
+    /// The launch this window is standing in for, while it does (#295).
+    ///
+    /// A window an application shows before its main one -- a splash, which
+    /// names one size and only one -- arrives in the launch's pane and cannot
+    /// take its slot, so it is given a pane of its own instead: unmanaged, so
+    /// no layout makes room for it, drawn at its own size over the middle of
+    /// the launch's pane and just above it, while that pane goes on waiting
+    /// for a window that can fill it. See `Solium::stand_aside`. Cleared when
+    /// it turns out to be the application's window after all
+    /// (`Solium::promote`).
+    stands_for: Option<PaneId>,
     /// The pooled targets this pane's captures are drawn into, kept across the
     /// frames of an animation: a warp's, and its popups'. See
     /// [`crate::keyed::Captures`].
@@ -630,6 +662,7 @@ impl Pane {
                 pid,
                 source,
                 scene: scene.map(Box::new),
+                since: now,
             },
             frame: Frame::Pending,
             closing_at: None,
@@ -640,6 +673,7 @@ impl Pane {
             adopted: false,
             drawn: crate::present::Slot::default(),
             managed: true,
+            stands_for: None,
             captures: crate::keyed::Captures::default(),
             meshes: crate::effect::geometry::Meshes::default(),
             limits: crate::state::Limits::default(),
@@ -666,6 +700,7 @@ impl Pane {
                 window,
                 scene: None,
                 faded: None,
+                launch: None,
             },
             frame: Frame::Pending,
             closing_at: None,
@@ -676,6 +711,7 @@ impl Pane {
             adopted: false,
             drawn: crate::present::Slot::default(),
             managed: true,
+            stands_for: None,
             captures: crate::keyed::Captures::default(),
             meshes: crate::effect::geometry::Meshes::default(),
             limits: crate::state::Limits::default(),
@@ -761,6 +797,23 @@ impl Pane {
     /// Mark this pane as one that places itself. See the field.
     pub(crate) const fn unmanage(&mut self) {
         self.managed = false;
+    }
+
+    /// Mark this pane as a window a layout places, again: a window that stood
+    /// in for a launch and turned out to be the application's (#295).
+    pub(crate) const fn manage(&mut self) {
+        self.managed = true;
+    }
+
+    /// The launch this pane's window stands in for. See the field.
+    pub(crate) const fn stands_for(&self) -> Option<PaneId> {
+        self.stands_for
+    }
+
+    /// Say which launch this pane's window stands in for, or that it no longer
+    /// stands in for one.
+    pub(crate) const fn stand_for(&mut self, launch: Option<PaneId>) {
+        self.stands_for = launch;
     }
 
     /// How this pane is being drawn. `present` is the only thing that reads it.
@@ -1197,17 +1250,90 @@ impl Pane {
         // The scene comes across with it. See `Content::Client::scene`: the
         // client has mapped and has not painted, and letting go of what is on
         // screen now would leave a hole for however long that takes.
-        let scene = match &mut self.content {
-            Content::Loading { scene, .. } => scene.take(),
-            Content::Client { scene, .. } => scene.take(),
-            Content::Leaving(_) => None,
+        let (scene, launch) = match &mut self.content {
+            Content::Loading {
+                program,
+                pid,
+                scene,
+                since,
+                ..
+            } => (
+                scene.take(),
+                Some(Launch {
+                    program: std::mem::take(program),
+                    pid: *pid,
+                    since: *since,
+                }),
+            ),
+            Content::Client { scene, launch, .. } => (scene.take(), launch.take()),
+            Content::Leaving(_) => (None, None),
         };
         self.content = Content::Client {
             window,
             scene,
             faded: None,
+            launch,
         };
         self.adopted = true;
+    }
+
+    /// The window that arrived in this launch's pane has been shown, or has
+    /// claimed it by its token: it is the application's, and the pane will
+    /// not go back to waiting (#295).
+    pub(crate) fn arrived(&mut self) {
+        if let Content::Client { launch, .. } = &mut self.content {
+            *launch = None;
+        }
+    }
+
+    /// Whether a window has arrived in this launch's pane and not yet been
+    /// shown: one [`Self::give_back_launch`] could still hand back.
+    pub(crate) const fn arriving(&self) -> bool {
+        matches!(
+            self.content,
+            Content::Client {
+                launch: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Hand back the window that arrived in this launch's pane, and wait for
+    /// the application again, as the pane did before it arrived: the same
+    /// program, process, scene and patience (#295). `None`, and nothing
+    /// changed, for a pane that is not [`Self::arriving`].
+    pub(crate) fn give_back_launch(&mut self) -> Option<Window> {
+        let Content::Client {
+            window,
+            scene,
+            launch,
+            ..
+        } = &mut self.content
+        else {
+            return None;
+        };
+        let launch = launch.take()?;
+        let window = window.clone();
+        let scene = scene.take();
+        self.content = Content::Loading {
+            program: launch.program,
+            pid: launch.pid,
+            // Nothing reads it: see the field.
+            source: PathBuf::new(),
+            scene,
+            since: launch.since,
+        };
+        self.adopted = false;
+        Some(window)
+    }
+
+    /// Start this launch's patience again from `now`: the window that stood
+    /// in for its application has gone, which says the application is still
+    /// starting (#295). Nothing for a pane that is not waiting.
+    pub(crate) fn wait_again(&mut self, now: Duration) {
+        if let Content::Loading { since, .. } = &mut self.content {
+            *since = now;
+        }
     }
 
     /// The application has painted: begin letting go of the scene over it.
@@ -1316,7 +1442,7 @@ impl Pane {
     /// may take to arrive. A pane with a client is the client's problem.
     pub(crate) fn expired(&self, now: Duration, patience: Duration) -> bool {
         match &self.content {
-            Content::Loading { .. } => now.saturating_sub(self.opened) >= patience,
+            Content::Loading { since, .. } => now.saturating_sub(*since) >= patience,
             Content::Leaving(left) => now.saturating_sub(left.since) >= LEAVING,
             Content::Client { .. } => false,
         }
@@ -1559,6 +1685,22 @@ impl Panes {
                     .take_while(|each| each.ghost())
                     .count();
             ordered.insert(at, pane);
+        }
+        // **A window standing in for a launch rides just above the launch's
+        // pane** (#295), which rode to the top above: it is drawn over the
+        // middle of that pane, and under it, it would not be seen at all.
+        let standing: Vec<(PaneId, PaneId)> = ordered
+            .iter()
+            .filter_map(|pane| pane.stands_for.map(|launch| (pane.id, launch)))
+            .collect();
+        for (stand_in, launch) in standing {
+            let at = |id: PaneId, ordered: &[Pane]| ordered.iter().position(|pane| pane.id == id);
+            if let (Some(below), Some(launch)) = (at(stand_in, &ordered), at(launch, &ordered))
+                && below < launch
+            {
+                let pane = ordered.remove(below);
+                ordered.insert(launch, pane);
+            }
         }
         self.panes = ordered;
 

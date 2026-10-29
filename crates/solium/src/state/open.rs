@@ -303,8 +303,22 @@ impl Solium {
             return Claimed::Relaunched;
         }
 
+        // **A window standing in for this launch that brings its token is
+        // still standing in** (#295). The token is the launch's, so it has
+        // arrived and asks for nothing more; but it says only that the window
+        // is the application's, which a splash is too: Vesktop's splash
+        // brings it, a second before the main window that fills the pane.
+        // Claimed into the pane, it is the bug this fixed. See
+        // `Self::stand_aside`.
+        if self.panes.get(wrong).and_then(Pane::stands_for) == Some(pane) {
+            return Claimed::Arrived;
+        }
+
         if let Some(held) = self.panes.get_mut(pane) {
             held.adopt(window.clone());
+            // Claimed by its token: it is the application's whatever it is,
+            // and has been shown already, in the window it opened in.
+            held.arrived();
         }
         // The pane it opened in goes, and with it the frame and the id nothing
         // should have learned. Retired rather than left empty: `sync_panes`
@@ -388,11 +402,156 @@ impl Solium {
         // at a size it chose for itself, and that frame is visible -- so the
         // window that has been standing there at the right size all along
         // flickers to the wrong one and back at the exact moment it fills.
+        // `new_toplevel` sends nothing before this, so this is the client's
+        // first configure and not its second (#295).
+        //
+        // **And held at its slot until it answers** (#295), as a window a
+        // fullscreen change has told a new size is (`hold_for_answer`). A
+        // client may still draw once at a size of its own before it answers
+        // -- one that acked nothing yet, or one that is slow -- and the pane
+        // was drawn at that size, in the corner of its slot, for that frame.
+        // The hold keeps the slot the pane's rectangle and the scene over it
+        // until the client commits what it was asked for. Its patience runs
+        // from the client's first frame (`show_if_new`), not from here: a
+        // client may take a second to draw anything at all, and nothing of it
+        // is on screen meanwhile.
         if let Some(window) = self.panes.get(id).and_then(Pane::client).cloned() {
             size_window(&window, slot);
-            self.map_stacked(window, slot.loc, false);
+            self.map_stacked(window.clone(), slot.loc, false);
+            self.hold_arrival(id, &window, self.clock.now());
         }
         id.get()
+    }
+
+    /// Hand a window that arrived in a launch's pane back, if it cannot take
+    /// the pane's slot, and show it on its own while the pane goes on waiting
+    /// (#295). Asked at every commit until the window is first shown, after
+    /// [`Self::notice_limits`] and before [`Self::show_if_new`]: the size
+    /// limits that decide it are double-buffered, so they are known from the
+    /// client's first commit and not at `new_toplevel`, where the window was
+    /// adopted.
+    ///
+    /// **Which window that is: one that names one size and only one.** An
+    /// `xdg_toplevel` whose minimum is its maximum, both set, and not the
+    /// slot's size. That is what an application's splash says -- Vesktop's is
+    /// 300x350 and maps a second or more before the main window, which is a
+    /// second window of the same process -- and it is a window that can never
+    /// be the slot's size whatever it is told, so putting it in the slot only
+    /// draws the slot at its size. Adopted, the pane shrank to the splash,
+    /// left with it, and the main window opened as a window of its own.
+    /// Weighed and not used: a window that unmaps before another of the same
+    /// application maps is the definition, but is known only afterwards, and
+    /// the pane has been drawn at the splash's size by then; a parent is set
+    /// by dialogs, not splashes, and before a main window there is nothing to
+    /// be the parent of; X11's `_NET_WM_WINDOW_TYPE_SPLASH` is already
+    /// unmanaged (`xwayland::places_itself`) and an X11 window is never
+    /// adopted. A window with a minimum and no matching maximum, however
+    /// large, is an application's window, and its launch's pane takes it as
+    /// it always has (`a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says`).
+    ///
+    /// **Shown, without taking the slot**: an unmanaged pane of its own, so
+    /// no layout makes room for it and nothing sizes it, bare, drawn at its
+    /// own size over the middle of the launch's pane and just above it
+    /// (`Panes::sync`), and not given the keyboard. The launch's pane goes on
+    /// as it was before the window arrived -- same id, slot, frame, scene and
+    /// patience -- and the next window of the application arrives in it, with
+    /// the crossfade every launch has. If the window was the application's
+    /// after all -- a calculator that cannot be resized -- it says so by still
+    /// being there when the launch's patience runs out, and becomes an
+    /// ordinary window then: [`Self::promote`]. Not by bringing the launch's
+    /// activation token, which a splash brings too (Electron's does), so that
+    /// is no evidence either way (`claim_into`). Until then it is on screen
+    /// and takes the pointer, but not the keyboard.
+    /// `launch_splash::a_splash_is_shown_over_the_launch_and_the_main_window_takes_the_slot`.
+    pub(super) fn stand_aside(&mut self, window: &Window) {
+        let Some(launch) = self.panes.id_of(window) else {
+            return;
+        };
+        let Some(held) = self.panes.get(launch).filter(|held| held.arriving()) else {
+            return;
+        };
+        let limits = crate::state::limits_of(window);
+        if !limits.fixed() || limits.max == held.slot().size {
+            return;
+        }
+        let Some(window) = self.panes.get_mut(launch).and_then(Pane::give_back_launch) else {
+            return;
+        };
+        self.answering.retain(|held| held.pane != launch);
+        // The launch's frame, as `open_loading` gave it: the client may have
+        // asked to draw its own decorations, which took it away and grew the
+        // slot into its room (`decorate`). The window keeps its shape: the
+        // slot gives the room back.
+        if let Some(outer) = self.pane_outer_of(launch) {
+            self.decorations.unset_bare(&mut self.panes, launch);
+            self.decorations
+                .insert(&mut self.panes, launch, outer.size.w, outer.size.h);
+            let slot = inner(outer, self.insets_of(launch));
+            if let Some(held) = self.panes.get_mut(launch) {
+                held.set_slot(slot);
+            }
+        }
+        let now = self.clock.now();
+        let size = window.geometry().size;
+        let at = self.space.element_location(&window).unwrap_or_default();
+        let stand_in = self
+            .panes
+            .mapped(window.clone(), Rectangle::new(at, size), now);
+        if let Some(pane) = self.panes.get_mut(stand_in) {
+            pane.unmanage();
+            pane.stand_for(Some(launch));
+        }
+        self.decorations.set_bare(&mut self.panes, stand_in);
+        // Told it may be the size it chose, which is what it was going to be.
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| state.size = None);
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_pending_configure();
+            }
+        }
+        tracing::debug!(
+            pane = launch.get(),
+            stand_in = stand_in.get(),
+            "a window that cannot fill its launch's window is shown over it instead"
+        );
+        self.redraw = true;
+    }
+
+    /// A window that stood in for a launch is the application's window after
+    /// all (#295): the launch's pane goes, as one whose application never came
+    /// does, and the window becomes an ordinary one -- managed, framed as its
+    /// client agreed, placed by the layouts through `open`, and offered the
+    /// keyboard -- where it stands. Reached by the launch's patience running
+    /// out while it is still there (`settle_loading`).
+    /// `launch_splash::a_window_still_standing_in_when_the_launchs_patience_runs_out_becomes_the_window`.
+    pub(super) fn promote(&mut self, stand_in: crate::pane::PaneId) {
+        let Some(launch) = self.panes.get(stand_in).and_then(Pane::stands_for) else {
+            return;
+        };
+        let Some(window) = self.panes.get(stand_in).and_then(Pane::client).cloned() else {
+            return;
+        };
+        tracing::debug!(
+            pane = launch.get(),
+            window = stand_in.get(),
+            "the window standing in for a launch is the application's, and the launch's \
+             window dissolves"
+        );
+        if self.panes.get(launch).is_some_and(Pane::is_loading) {
+            self.depart(launch);
+        }
+        if let Some(pane) = self.panes.get_mut(stand_in) {
+            pane.manage();
+            pane.stand_for(None);
+        }
+        self.decorations.unset_bare(&mut self.panes, stand_in);
+        if let Some(toplevel) = window.toplevel()
+            && let Some(mode) = toplevel.with_pending_state(|state| state.decoration_mode)
+        {
+            self.decorate(toplevel, mode);
+        }
+        self.introduce(&window, stand_in);
+        self.redraw = true;
     }
 
     /// Start a program as a client of this compositor, from
@@ -645,6 +804,19 @@ impl Solium {
             return false;
         }
         for (id, program) in gone {
+            // A window standing in for it is the application's after all
+            // (#295): it is still there when the patience is out, which a
+            // splash is not. It takes over, and the launch's window goes the
+            // same way as below. See `Self::promote`.
+            let standing = self
+                .panes
+                .iter()
+                .find(|pane| pane.stands_for() == Some(id))
+                .map(Pane::id);
+            if let Some(stand_in) = standing {
+                self.promote(stand_in);
+                continue;
+            }
             tracing::info!(program, "gave up on an application that never arrived");
             // The way every window goes: the layout is told while the pane is
             // still here, and it fades out of its place as the layout closes
@@ -738,9 +910,35 @@ impl Solium {
         // remembered slot, the other from a fresh fit -- rather than inside
         // whichever branch a bug happened to surface in.
         if !self.panes.get(pane).is_some_and(Pane::managed) {
+            // Except a window standing in for a launch (#295), which nothing
+            // else places: over the middle of the launch's window, at its own
+            // size. See `Self::stand_aside`.
+            if let Some(over) = self
+                .panes
+                .get(pane)
+                .and_then(Pane::stands_for)
+                .and_then(|launch| self.pane_outer_of(launch))
+            {
+                let area = self.work_area_of(over).unwrap_or(over);
+                let centred = |start: i32, room: i32, side: i32, lo: i32, span: i32| {
+                    (start + (room - side) / 2).clamp(lo, (lo + span - side).max(lo))
+                };
+                let at = Point::from((
+                    centred(over.loc.x, over.size.w, size.w, area.loc.x, area.size.w),
+                    centred(over.loc.y, over.size.h, size.h, area.loc.y, area.size.h),
+                ));
+                self.map_stacked(window.clone(), at, false);
+            }
             return;
         }
+        self.introduce(window, pane);
+    }
 
+    /// The managed half of [`Self::show_if_new`]: a window's frame, its size
+    /// and place, its `open` and its keyboard, the first time it is shown --
+    /// or when a window that stood in for a launch becomes an ordinary one
+    /// ([`Self::promote`]).
+    fn introduce(&mut self, window: &Window, pane: crate::pane::PaneId) {
         // A client that never negotiates still gets a frame.
         //
         // `Frame::Pending` reserves `TITLEBAR_HEIGHT` -- see `insets_for` --
@@ -794,6 +992,13 @@ impl Solium {
             // room than it was first told.
             size_window(window, slot);
             self.map_stacked(window.clone(), slot.loc, false);
+            // Its first frame: the application has arrived for good, and the
+            // hold `adopt_or_open` put on it starts its patience now.
+            let now = self.clock.now();
+            if let Some(held) = self.panes.get_mut(pane) {
+                held.arrived();
+            }
+            self.arrival_drawn(pane, now);
             // Its place was decided at the launch, so the keyboard is decided
             // now: nothing was asked of a script on the way here.
             self.offer_keyboard(window, pane);
