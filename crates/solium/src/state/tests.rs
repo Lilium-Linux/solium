@@ -16439,6 +16439,82 @@ end)"#,
         assert_eq!(outer(&state), tile, "and it stays in the rectangle it had");
     }
 
+    /// **#226: a window still answering a placement keeps the placed size
+    /// across a style change.** Tiling turned off, a configuration glides
+    /// every window back where it floated and changes the frame style in the
+    /// same breath. The client had not drawn its floating size yet, so the
+    /// space still had its tile's size; the restyle read that and asked the
+    /// client for it again, and the window went back to the size of its tile
+    /// a moment after it had left it.
+    #[test]
+    fn a_window_still_answering_a_placement_keeps_the_placed_size_when_its_frame_changes() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (0, 0), false);
+        state.sync_panes();
+        let pane = state.panes.id_of(&window).expect("a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let floated = at(100, 100, 800, 500);
+        let now = state.clock.now();
+        let was = state.pane_outer_of(pane).expect("a mapped pane");
+        state.move_pane(
+            pane,
+            floated,
+            was,
+            AnimationSpec::default(),
+            now,
+            Standing::Free,
+        );
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_ne!(
+            window.geometry().size,
+            floated.size,
+            "the premise: its client has not drawn the placed size yet"
+        );
+
+        // The restyle's own two steps around a frame change. No Qt here to
+        // build a frame, so the room it leaves is the same on both sides, and
+        // what is checked is the size: the newest ask must still be the
+        // placed one, whatever the client last drew.
+        let outers = state.outers_before_restyle();
+        state.keep_outers(outers, now);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let id = wayland_client::Proxy::id(&toplevel);
+        assert_eq!(
+            client
+                .configures
+                .iter()
+                .filter(|(to, ..)| to == &id)
+                .map(|(_, w, h)| (*w, *h))
+                .next_back(),
+            Some((800, 500)),
+            "its client is last asked for the placed size, not the size it is \
+             leaving"
+        );
+    }
+
     /// **Only a live gesture arms a bridge.**
     ///
     /// The keyboard `nudge` reaches `move_pane` through `Scripts::key` and

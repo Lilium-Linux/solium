@@ -1148,7 +1148,10 @@ impl Solium {
     /// **A held pane's from its slot** (#405), which is the rectangle a drag
     /// holding it has made the truth ([`Self::held_slot`]); the space has its
     /// client's last committed size, which the drag has moved on from. Every
-    /// other window's from the space, as it always was.
+    /// other window's from the space, at the size it was last asked for if
+    /// its client has not drawn that yet ([`crate::resizing::unanswered`]):
+    /// a window a layout has just placed is on its way to that size, and
+    /// putting it back into its committed one undid the placement (#226).
     pub(super) fn outers_before_restyle(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
         self.space
             .elements()
@@ -1162,7 +1165,10 @@ impl Solium {
                         .panes
                         .get(pane)
                         .map(|held| grown(held.slot(), self.insets_of(pane))),
-                    None => self.outer_geometry(window),
+                    None => self.real_geometry(window).map(|real| {
+                        let size = crate::resizing::unanswered(window).unwrap_or(real.size);
+                        grown(Rectangle::new(real.loc, size), self.frame_insets(window))
+                    }),
                 };
                 outer.map(|outer| (window.clone(), outer))
             })

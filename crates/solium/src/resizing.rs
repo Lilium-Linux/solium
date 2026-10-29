@@ -594,6 +594,37 @@ pub(crate) fn answer(window: &smithay::desktop::Window) -> Answer {
     }
 }
 
+/// The size a window has been asked for and has not drawn yet: the newest
+/// configure its client has not acked, or the one it acked and has not
+/// committed. `None` once it has drawn what it was last asked, for an X11
+/// window (its protocol has no ack to tell by), and for an ask that left the
+/// size to the client.
+///
+/// Read where the window's size is taken to keep it: the space answers the
+/// client's last committed size, which during a glide is the size the window
+/// is leaving. A style change read that and asked the client for it again,
+/// so a window glided out of its tile was put back to its tile's size (#226).
+/// `a_window_still_answering_a_placement_keeps_the_placed_size_when_its_frame_changes`.
+pub(crate) fn unanswered(window: &smithay::desktop::Window) -> Option<Size<i32, Logical>> {
+    let surface = window.toplevel()?.wl_surface();
+    smithay::wayland::compositor::with_states(surface, |states| {
+        let attributes = states
+            .data_map
+            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()?
+            .lock()
+            .ok()?;
+        match attributes.pending_configures().last() {
+            Some(configure) => configure.state.size,
+            None => attributes
+                .last_acked
+                .as_ref()
+                .and_then(|acked| acked.size)
+                .filter(|size| attributes.current.size != Some(*size)),
+        }
+    })
+    .filter(|size| size.w > 0 && size.h > 0)
+}
+
 /// Whether `given` is near enough to `asked` to be a rounding. See [`ROUNDING`].
 fn rounds(asked: Size<i32, Logical>, given: Size<i32, Logical>) -> bool {
     let near = |asked: i32, given: i32| {
