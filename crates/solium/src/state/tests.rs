@@ -12809,6 +12809,226 @@ end)"#,
         }
     }
 
+    /// **Two `replace` rules on `focused` crossfade as the keyboard moves**
+    /// (#389): a window's own pixels at 0.95 with the keyboard and 0.80
+    /// without, each rule fading over 200 ms. The window losing the keyboard
+    /// has its `replace` slot wanted by the rule without it, whole, mixed
+    /// from the rule with it, wanted in the slot's `Leaving` twin, from 0 to
+    /// all the new one's over the 200 ms, and then that rule alone; the one
+    /// gaining it the other way round. The keyboard back half way, the first
+    /// window crossfades back from where it got to. Frames are owed while
+    /// any crossfade moves.
+    #[test]
+    fn two_replace_rules_on_focused_crossfade_as_the_keyboard_moves() {
+        use crate::effect::plan::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::Slot;
+        use std::time::Duration;
+        fx2_fixture!(fixture, "rule-crossfade");
+        let (first, second) = side_by_side_windows(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { focused = true }, part = "client", slot = "replace",
+                   effect = { "tint", amount = 0.95 },
+                   fade = { duration = 200, easing = "linear" } },
+                 { match = { focused = false }, part = "client", slot = "replace",
+                   effect = { "tint", amount = 0.80 },
+                   fade = { duration = 200, easing = "linear" } } }"#,
+        );
+        // Each window's `replace`: the rule it shows, its crossfade's share
+        // and the rule it crossfades from, a pass at a time.
+        let pass = |fixture: &mut Fixture, after: u64| {
+            fixture.state.clock.advance(Duration::from_millis(after));
+            fixture.state.redraw = false;
+            let slots: Slots = crate::render::build_slots(&mut fixture.state);
+            let on = |pane| {
+                let owner = Owner::Pane(pane, PaneSlot::Client);
+                (
+                    slots.key(&owner, Slot::Replace).map(|key| key.index),
+                    slots
+                        .mix(&owner, Slot::Replace)
+                        .map(|share| (share * 10.0).round() / 10.0),
+                    slots.key(&owner, Slot::LeavingReplace).map(|key| key.index),
+                    slots.opacity(&owner, Slot::Replace),
+                )
+            };
+            let crossfades = slots.crossfades().count();
+            (on(first), on(second), crossfades, fixture.state.redraw)
+        };
+        focus(&mut fixture, first);
+        let _ = pass(&mut fixture, 0);
+        // Settled: each whole, crossfading from nothing.
+        let settled = pass(&mut fixture, 1000);
+        assert_eq!(
+            settled,
+            (
+                (Some(0), None, None, 1.0),
+                (Some(1), None, None, 1.0),
+                0,
+                false
+            ),
+            "settled"
+        );
+        focus(&mut fixture, second);
+        for (after, wanted) in [
+            (
+                0,
+                (
+                    (Some(1), Some(0.0), Some(0), 1.0),
+                    (Some(0), Some(0.0), Some(1), 1.0),
+                    2,
+                    true,
+                ),
+            ),
+            (
+                100,
+                (
+                    (Some(1), Some(0.5), Some(0), 1.0),
+                    (Some(0), Some(0.5), Some(1), 1.0),
+                    2,
+                    true,
+                ),
+            ),
+        ] {
+            let seen = pass(&mut fixture, after);
+            assert_eq!(seen, wanted, "{after} ms after the keyboard moved");
+        }
+        // Back half way: the first window crossfades back from there.
+        focus(&mut fixture, first);
+        let back = pass(&mut fixture, 0);
+        assert_eq!(
+            (back.0, back.1),
+            (
+                (Some(0), Some(0.5), Some(1), 1.0),
+                (Some(1), Some(0.5), Some(0), 1.0)
+            ),
+            "turned round"
+        );
+        let done = pass(&mut fixture, 150);
+        assert_eq!(
+            done,
+            (
+                (Some(0), None, None, 1.0),
+                (Some(1), None, None, 1.0),
+                0,
+                false
+            ),
+            "back where they were"
+        );
+    }
+
+    /// **A `replace` rule coming and going crossfades with its part**
+    /// (#389, the window that went see-through to nothing as it went
+    /// fullscreen and then popped back): one `replace` rule on `focused`,
+    /// fading over 200 ms. The window losing the keyboard keeps its slot
+    /// wanted, its rule's result mixed with its part's own pixels, their
+    /// share rising from 0 to 1 over the 200 ms, never fading to nothing
+    /// (its opacity stays whole), and then nothing wanted at all; the one
+    /// gaining it comes in from its own pixels the same way. Turned round
+    /// half way, each goes back from where it got to. A `behind` with the
+    /// same fade still fades to nothing.
+    #[test]
+    fn a_replace_rule_coming_and_going_crossfades_with_its_part() {
+        use crate::effect::plan::{Owner, PaneSlot, Slots};
+        use crate::effect::rules::Slot;
+        use std::time::Duration;
+        fx2_fixture!(fixture, "rule-raw-crossfade");
+        let (first, second) = side_by_side_windows(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { focused = true }, part = "client", slot = "replace",
+                   effect = { "tint", amount = 0.9 },
+                   fade = { duration = 200, easing = "linear" } },
+                 { match = { focused = true }, part = "client", slot = "behind",
+                   effect = { "tint", amount = 0.5 },
+                   fade = { duration = 200, easing = "linear" } } }"#,
+        );
+        // Each window's `replace`: whether it is wanted, its part's share and
+        // its opacity; and its `behind`'s opacity, a pass at a time.
+        let pass = |fixture: &mut Fixture, after: u64| {
+            fixture.state.clock.advance(Duration::from_millis(after));
+            let slots: Slots = crate::render::build_slots(&mut fixture.state);
+            let inputs = crate::render::self_inputs(&fixture.state, &slots);
+            let on = |pane| {
+                let owner = Owner::Pane(pane, PaneSlot::Client);
+                let captured = inputs
+                    .iter()
+                    .any(|input| input.owner == owner && input.slot == Slot::Replace);
+                (
+                    slots.wanted(&owner, Slot::Replace),
+                    slots
+                        .raw(&owner, Slot::Replace)
+                        .map(|share| (share * 10.0).round() / 10.0),
+                    slots.opacity(&owner, Slot::Replace),
+                    slots
+                        .wanted(&owner, Slot::Behind)
+                        .then(|| (slots.opacity(&owner, Slot::Behind) * 10.0).round() / 10.0),
+                    captured,
+                )
+            };
+            (on(first), on(second))
+        };
+        focus(&mut fixture, first);
+        assert_eq!(
+            pass(&mut fixture, 0).0,
+            (true, Some(1.0), 1.0, Some(0.0), true),
+            "coming in from its own pixels, not from nothing"
+        );
+        assert_eq!(
+            pass(&mut fixture, 1000),
+            (
+                (true, None, 1.0, Some(1.0), true),
+                (false, None, 1.0, None, false)
+            ),
+            "settled"
+        );
+        focus(&mut fixture, second);
+        assert_eq!(
+            pass(&mut fixture, 0),
+            (
+                (true, None, 1.0, Some(1.0), true),
+                (true, Some(1.0), 1.0, Some(0.0), true)
+            ),
+            "the keyboard moved"
+        );
+        assert_eq!(
+            pass(&mut fixture, 40),
+            (
+                (true, Some(0.2), 1.0, Some(0.8), true),
+                (true, Some(0.8), 1.0, Some(0.2), true)
+            ),
+            "a fifth of the way"
+        );
+        assert_eq!(
+            pass(&mut fixture, 60),
+            (
+                (true, Some(0.5), 1.0, Some(0.5), true),
+                (true, Some(0.5), 1.0, Some(0.5), true)
+            ),
+            "half way"
+        );
+        // Back half way: each goes back from where it got to.
+        focus(&mut fixture, first);
+        let _ = pass(&mut fixture, 0);
+        assert_eq!(
+            pass(&mut fixture, 40),
+            (
+                (true, Some(0.3), 1.0, Some(0.7), true),
+                (true, Some(0.7), 1.0, Some(0.3), true)
+            ),
+            "turned round"
+        );
+        assert_eq!(
+            pass(&mut fixture, 100),
+            (
+                (true, None, 1.0, Some(1.0), true),
+                (false, None, 1.0, None, false)
+            ),
+            "back where they were, and nothing left on the window without the keyboard"
+        );
+    }
+
     /// **A rule on `fullscreen` applies from the configure that sets it**,
     /// the state the compositor last told the client.
     #[test]

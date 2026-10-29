@@ -7,6 +7,7 @@
 //! and text; this module holds Lua, GL and everything per frame (Ruling 2).
 
 pub(crate) mod beneath;
+pub(crate) mod crossfade;
 pub(crate) mod element;
 pub(crate) mod fade;
 pub(crate) mod geometry;

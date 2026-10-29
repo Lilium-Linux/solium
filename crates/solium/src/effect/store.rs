@@ -358,6 +358,29 @@ impl Store {
             .or_insert_with(|| SlotState::fresh(rule))
     }
 
+    /// Before a pass, for a slot crossfading from rule `from` to rule `to`
+    /// (`effect::fade`): whichever of the slot and its `Leaving` twin holds
+    /// each rule's state, `to`'s is put in the slot and `from`'s in the twin,
+    /// and any other rule's state there goes back at the next sweep. So the
+    /// rule a slot crossfades away from keeps its result, captured and run
+    /// as it was, rather than starting afresh, and a crossfade turned round
+    /// part of the way gets each back where it is wanted.
+    /// `tests::a_crossfading_slot_keeps_both_rules_states`.
+    pub(crate) fn arrange(&mut self, owner: &Owner, slot: Slot, to: RuleKey, from: RuleKey) {
+        let here = (owner.clone(), slot.placed());
+        let twin = (owner.clone(), slot.leaving());
+        let held = [self.slots.remove(&here), self.slots.remove(&twin)];
+        for state in held.into_iter().flatten() {
+            if state.rule == to && !self.slots.contains_key(&here) {
+                self.slots.insert(here.clone(), state);
+            } else if state.rule == from && !self.slots.contains_key(&twin) {
+                self.slots.insert(twin.clone(), state);
+            } else {
+                self.retired.push(state);
+            }
+        }
+    }
+
     /// A slot's state as it is, made by [`Self::slot_mut`] this pass.
     /// `state::tests::real_client::a_self_rule_captures_the_client_once_until_it_commits`.
     pub(crate) fn get_mut(&mut self, owner: &Owner, slot: Slot) -> Option<&mut SlotState> {
@@ -501,6 +524,45 @@ mod tests {
         let other = RuleKey { index: 1, ..rule() };
         assert_eq!(store.slot_mut(&owner, Slot::Replace, other).params, 0);
         assert_eq!(store.len(), 1);
+    }
+
+    /// **A crossfading slot keeps both rules' states** (#389): handed over
+    /// from one rule to another, the first's state, params and all, moves to
+    /// the slot's `Leaving` twin rather than starting afresh, and the second
+    /// starts afresh in the slot; turned round, each goes back where it is
+    /// wanted; a third rule's state there is given back.
+    #[test]
+    fn a_crossfading_slot_keeps_both_rules_states() {
+        let mut store = Store::default();
+        let mut pool = crate::pool::Pool::new(0);
+        let owner = client(1);
+        let (first, second, third) = (
+            rule(),
+            RuleKey { index: 1, ..rule() },
+            RuleKey { index: 2, ..rule() },
+        );
+        store.slot_mut(&owner, Slot::Replace, first).params = 7;
+        store.arrange(&owner, Slot::Replace, second, first);
+        assert_eq!(
+            store.slot_mut(&owner, Slot::LeavingReplace, first).params,
+            7,
+            "the rule crossfaded from kept its state"
+        );
+        store.slot_mut(&owner, Slot::Replace, second).params = 9;
+        store.arrange(&owner, Slot::Replace, first, second);
+        assert_eq!(store.slot_mut(&owner, Slot::Replace, first).params, 7);
+        assert_eq!(
+            store.slot_mut(&owner, Slot::LeavingReplace, second).params,
+            9
+        );
+        assert_eq!(store.len(), 2);
+        store.arrange(&owner, Slot::Replace, third, second);
+        assert_eq!(store.len(), 1, "the first rule's state is given back");
+        assert_eq!(
+            store.slot_mut(&owner, Slot::LeavingReplace, second).params,
+            9
+        );
+        store.sweep(0, &mut pool);
     }
 
     /// The passes count up, so a slot marked in one is older than the next.

@@ -300,6 +300,116 @@ pub const MASK_RADII_UNIFORM: &str = "mask_radii";
 /// The texture's size in its own pixels.
 pub const MASK_SIZE_UNIFORM: &str = "mask_size";
 
+/// Up to three pictures of one slot mixed in one draw as the slot crossfades
+/// (`effect::fade` in the compositor): two rules' results, and for a
+/// `replace` the part's own pixels, each weighted, the weights summing to 1.
+/// Each pixel is `w.x * first + w.y * second + w.z * third`: `first` read
+/// through smithay's `tex`, `second` and `third` through
+/// [`CROSSFADE_SECOND_UNIFORM`] and [`CROSSFADE_THIRD_UNIFORM`], bound to
+/// texture units 1 and 2, at `v_coords * map.xy + map.zw`. Each is nothing
+/// outside its own picture (its bounds, `(x0, y0, x1, y1)` in its texture's
+/// coordinates), and cut by the part's mask where `crossfade_cut` says, the
+/// mask measured as in [`MASKED_TEXTURE`]. Mixed before it is laid over
+/// anything, so the same picture at two opacities crossfades through every
+/// opacity between and never below both. A texture program in smithay's
+/// contract, every variant handled as [`MASKED_TEXTURE`] handles them.
+/// `tests::the_crossfade_program_mixes_its_pictures_in_one_draw`.
+pub const CROSSFADE_TEXTURE: &str = r"#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+uniform sampler2D crossfade_second;
+uniform sampler2D crossfade_third;
+
+uniform float alpha;
+uniform vec3 crossfade_weights;
+uniform vec4 crossfade_second_map;
+uniform vec4 crossfade_third_map;
+uniform vec4 crossfade_first_bounds;
+uniform vec4 crossfade_second_bounds;
+uniform vec4 crossfade_third_bounds;
+uniform vec3 crossfade_cut;
+uniform vec4 mask_rect;
+uniform vec4 mask_radii;
+uniform vec2 mask_size;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+// 1 inside a picture's own bounds and 0 past them: what lies beyond a
+// picture in its texture (the rest of a memo it is a crop of) is not its.
+float within(vec2 at, vec4 bounds) {
+    vec2 over = step(bounds.xy, at) * step(at, bounds.zw);
+    return over.x * over.y;
+}
+
+void main() {
+    vec4 colour = texture2D(tex, v_coords);
+#if defined(NO_ALPHA)
+    colour = vec4(colour.rgb, 1.0) * alpha;
+#else
+    colour = colour * alpha;
+#endif
+    vec2 second_at = v_coords * crossfade_second_map.xy + crossfade_second_map.zw;
+    vec2 third_at = v_coords * crossfade_third_map.xy + crossfade_third_map.zw;
+    vec4 first = colour * within(v_coords, crossfade_first_bounds);
+    vec4 second = texture2D(crossfade_second, second_at) * alpha * within(second_at, crossfade_second_bounds);
+    vec4 third = texture2D(crossfade_third, third_at) * alpha * within(third_at, crossfade_third_bounds);
+    // MASKED_TEXTURE's mask, applied to each as its rule asks.
+    vec2 px = v_coords * mask_size - mask_rect.xy;
+    vec2 half_size = mask_rect.zw * 0.5;
+    vec2 at = px - half_size;
+    float picked = at.x < 0.0 ? (at.y < 0.0 ? mask_radii.x : mask_radii.z) : (at.y < 0.0 ? mask_radii.y : mask_radii.w);
+    float r = min(picked, min(half_size.x, half_size.y));
+    vec2 p = abs(at) - (half_size - vec2(r));
+    float away = min(max(p.x, p.y), 0.0) + length(max(p, 0.0)) - r;
+    float coverage = clamp(0.5 - away, 0.0, 1.0);
+    vec3 kept = mix(vec3(1.0), vec3(coverage), crossfade_cut) * crossfade_weights;
+    colour = first * kept.x + second * kept.y + third * kept.z;
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        colour = vec4(0.0, 0.2, 0.0, 0.2) + colour * 0.8;
+#endif
+    gl_FragColor = colour;
+}
+";
+/// The sampler [`CROSSFADE_TEXTURE`] reads its second picture from, on
+/// texture unit 1.
+pub const CROSSFADE_SECOND_UNIFORM: &str = "crossfade_second";
+/// The sampler it reads its third picture from, on texture unit 2.
+pub const CROSSFADE_THIRD_UNIFORM: &str = "crossfade_third";
+/// Each picture's weight, summing to 1.
+pub const CROSSFADE_WEIGHTS_UNIFORM: &str = "crossfade_weights";
+/// The second picture's texture coordinate from the first's,
+/// `(mul.x, mul.y, add.x, add.y)`.
+pub const CROSSFADE_SECOND_MAP_UNIFORM: &str = "crossfade_second_map";
+/// The third picture's, likewise.
+pub const CROSSFADE_THIRD_MAP_UNIFORM: &str = "crossfade_third_map";
+/// The first picture in its texture's coordinates, `(x0, y0, x1, y1)`.
+pub const CROSSFADE_FIRST_BOUNDS_UNIFORM: &str = "crossfade_first_bounds";
+/// The second picture in its texture's coordinates.
+pub const CROSSFADE_SECOND_BOUNDS_UNIFORM: &str = "crossfade_second_bounds";
+/// The third picture in its texture's coordinates.
+pub const CROSSFADE_THIRD_BOUNDS_UNIFORM: &str = "crossfade_third_bounds";
+/// Whether the mask cuts each picture, 1 or 0.
+pub const CROSSFADE_CUT_UNIFORM: &str = "crossfade_cut";
+
 /// The 3x3 matrix taking a surface's texture coordinate to the client's own
 /// physical pixels, column-major. Computed per draw by whoever draws the
 /// surface; wirecheck's case 11h sets it by hand.
@@ -769,12 +879,14 @@ mod tests {
         );
     }
 
-    /// For both texture programs: [`ROUNDED_CORNERS`] and [`MASKED_TEXTURE`].
+    /// For every texture program: [`ROUNDED_CORNERS`], [`MASKED_TEXTURE`] and
+    /// [`CROSSFADE_TEXTURE`].
     #[test]
     fn the_shader_handles_every_variant_smithay_compiles_it_into() {
         for (name, source) in [
             ("ROUNDED_CORNERS", ROUNDED_CORNERS),
             ("MASKED_TEXTURE", MASKED_TEXTURE),
+            ("CROSSFADE_TEXTURE", CROSSFADE_TEXTURE),
         ] {
             for required in [
                 "#if defined(NO_ALPHA)",
@@ -796,6 +908,53 @@ mod tests {
                 has_line_in(source, "colour = vec4(colour.rgb, 1.0) * alpha;"),
                 "{name}: NO_ALPHA has to replace the alpha channel, not sample it"
             );
+        }
+    }
+
+    /// **The crossfade program mixes its pictures in one draw** (#389): it
+    /// declares what the compositor sets, measures its mask as
+    /// [`MASKED_TEXTURE`] does, cuts each picture by it as told, and sums
+    /// the three at their weights before anything is laid under them, once.
+    /// Wirecheck draws it (case 12k).
+    #[test]
+    fn the_crossfade_program_mixes_its_pictures_in_one_draw() {
+        assert!(CROSSFADE_TEXTURE.starts_with("#version 100\n"));
+        assert!(has_line_in(CROSSFADE_TEXTURE, "//_DEFINES_"));
+        for declaration in [
+            format!("uniform sampler2D {CROSSFADE_SECOND_UNIFORM};"),
+            format!("uniform sampler2D {CROSSFADE_THIRD_UNIFORM};"),
+            format!("uniform vec3 {CROSSFADE_WEIGHTS_UNIFORM};"),
+            format!("uniform vec4 {CROSSFADE_SECOND_MAP_UNIFORM};"),
+            format!("uniform vec4 {CROSSFADE_THIRD_MAP_UNIFORM};"),
+            format!("uniform vec4 {CROSSFADE_FIRST_BOUNDS_UNIFORM};"),
+            format!("uniform vec4 {CROSSFADE_SECOND_BOUNDS_UNIFORM};"),
+            format!("uniform vec4 {CROSSFADE_THIRD_BOUNDS_UNIFORM};"),
+            format!("uniform vec3 {CROSSFADE_CUT_UNIFORM};"),
+            format!("uniform vec4 {MASK_RECT_UNIFORM};"),
+            format!("uniform vec4 {MASK_RADII_UNIFORM};"),
+            format!("uniform vec2 {MASK_SIZE_UNIFORM};"),
+        ] {
+            assert!(
+                has_line_in(CROSSFADE_TEXTURE, &declaration),
+                "no `{declaration}`"
+            );
+        }
+        for line in [
+            "vec2 px = v_coords * mask_size - mask_rect.xy;",
+            "float coverage = clamp(0.5 - away, 0.0, 1.0);",
+        ] {
+            assert!(has_line_in(MASKED_TEXTURE, line), "MASKED_TEXTURE: {line}");
+            assert!(
+                has_line_in(CROSSFADE_TEXTURE, line),
+                "CROSSFADE_TEXTURE: {line}"
+            );
+        }
+        for line in [
+            "vec3 kept = mix(vec3(1.0), vec3(coverage), crossfade_cut) * crossfade_weights;",
+            "colour = first * kept.x + second * kept.y + third * kept.z;",
+            "gl_FragColor = colour;",
+        ] {
+            assert!(has_line_in(CROSSFADE_TEXTURE, line), "no `{line}`");
         }
     }
 

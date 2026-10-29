@@ -53,11 +53,44 @@ pub(crate) enum Family {
 
 /// Where around a part an effect sits: below it, above it, or in its place.
 /// `tests::a_rule_reads_its_part_slot_match_and_chain`.
+///
+/// The three `Leaving` slots are no rule's: each holds the result a slot is
+/// crossfading away from (`effect::fade`), the rule it showed before, run and
+/// kept beside the rule it hands over to until the crossfade is done, and
+/// drawn mixed with it in its slot's place, never on its own.
+/// `effect::fade::tests::a_slot_crossfades_from_one_rule_to_the_next`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Slot {
     Behind,
     Front,
     Replace,
+    LeavingBehind,
+    LeavingFront,
+    LeavingReplace,
+}
+
+impl Slot {
+    /// Where a slot's result crossfading away is kept: its `Leaving` twin.
+    /// `effect::fade::tests::a_slot_crossfades_from_one_rule_to_the_next`.
+    pub(crate) fn leaving(self) -> Self {
+        match self {
+            Self::Behind | Self::LeavingBehind => Self::LeavingBehind,
+            Self::Front | Self::LeavingFront => Self::LeavingFront,
+            Self::Replace | Self::LeavingReplace => Self::LeavingReplace,
+        }
+    }
+
+    /// The slot a result is drawn in: its own, or for a `Leaving` one the
+    /// slot it crossfades in. What decides where around its part a result
+    /// goes, and how it is captured and run.
+    /// `effect::fade::tests::a_slot_crossfades_from_one_rule_to_the_next`.
+    pub(crate) fn placed(self) -> Self {
+        match self {
+            Self::Behind | Self::LeavingBehind => Self::Behind,
+            Self::Front | Self::LeavingFront => Self::Front,
+            Self::Replace | Self::LeavingReplace => Self::Replace,
+        }
+    }
 }
 
 /// What a rule's `match` read; a key not given matches anything, so
@@ -847,6 +880,7 @@ impl Resolved {
             Slot::Behind => self.behind,
             Slot::Front => self.front,
             Slot::Replace => self.replace,
+            Slot::LeavingBehind | Slot::LeavingFront | Slot::LeavingReplace => None,
         }
     }
 
@@ -975,6 +1009,8 @@ impl Rules {
                     Slot::Behind => resolved.behind = key,
                     Slot::Front => resolved.front = key,
                     Slot::Replace => resolved.replace = key,
+                    // Never read from a rule: `parse` makes none.
+                    Slot::LeavingBehind | Slot::LeavingFront | Slot::LeavingReplace => {}
                 }
             }
         }
