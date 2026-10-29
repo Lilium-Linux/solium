@@ -1004,7 +1004,7 @@ fn a_captured_panes_pixels_match_its_flat_draw(renderer: &mut GlesRenderer) -> R
 fn a_capture_is_the_picture_scanned_out(renderer: &mut GlesRenderer) -> Result<()> {
     use smithay::backend::renderer::damage::OutputDamageTracker;
     use smithay::backend::renderer::element::texture::TextureRenderElement;
-    use smithay::backend::renderer::element::{Element as _, Id, Kind, RenderElement as _};
+    use smithay::backend::renderer::element::{Element as _, Id, Kind, RenderElement};
     use smithay::utils::Scale;
     println!("\n=== FX0: a capture is the picture the monitor scans out ===");
     let side = 64;
@@ -1086,8 +1086,15 @@ fn a_capture_is_the_picture_scanned_out(renderer: &mut GlesRenderer) -> Result<(
         let whole = [Rectangle::from_size((side, side).into())];
         frame.clear(background, &whole).map_err(|err| anyhow!("{err}"))?;
         for each in elements.iter().rev() {
-            each.draw(&mut frame, each.src(), each.geometry(Scale::from(1.0)), &whole, &[])
-                .map_err(|err| anyhow!("{err}"))?;
+            RenderElement::<GlesRenderer>::draw(
+                each,
+                &mut frame,
+                each.src(),
+                each.geometry(Scale::from(1.0)),
+                &whole,
+                &[],
+            )
+            .map_err(|err| anyhow!("{err}"))?;
         }
         frame
             .finish()
