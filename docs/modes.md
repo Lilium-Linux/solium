@@ -378,6 +378,13 @@ the unlock is still down or a scene holds the keyboard, the hand-off waits,
 and when it comes it goes by the compositor's own rule -- the window under the
 pointer, then the topmost -- not by `after_close`.
 
+**A window carried out of view gives the keyboard up the same way** (#403).
+When a dispatch has put the focused window on a desk a selection carries away
+-- `super+shift+2` sending it to another workspace, a switch onto an empty one
+-- the keyboard leaves it by `after_close`, as if it had closed where it stood,
+and with nothing left on screen it is on nothing. What you type next never goes
+into a window you cannot see.
+
 A layout that listens for neither event hears exactly what it always heard --
 `close`, once the window is gone -- so a mode written before these two existed
 keeps working unchanged, and keeps its slot for a closing window until the
@@ -507,8 +514,8 @@ moved, and `direction.lua` takes the pointer after it, to where it went, as
 `scrolling.lua` does for its keys that move a column or push a window out of
 one; a workspace switch that leaves no window to take the keyboard has
 `workspaces.lua` take it to the middle of the monitor, or leave it, as
-`focus.cursor.empty_workspace` says, and one back to the window the keyboard
-stayed on while it was hidden takes it to that window
+`focus.cursor.empty_workspace` says, and the keyboard is on nothing until you
+come back or open a window there
 (`script::directions::a_move_takes_the_pointer_to_where_the_window_went`,
 `script::directions::in_scrolling_a_key_takes_the_pointer_along_only_if_it_moves_the_keyboard_or_its_window`,
 `script::directions::a_switch_to_an_empty_workspace_takes_the_pointer_to_the_middle_or_leaves_it`).
