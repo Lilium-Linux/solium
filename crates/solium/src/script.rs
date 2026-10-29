@@ -19981,6 +19981,20 @@ mod directions {
             ))
         }
 
+        /// Window `id` dragged until its centre is at `at`, on `monitor`, and
+        /// let go there with the pointer on it: the `drop` a move grab ends
+        /// with, and what it asked for applied.
+        fn drop(&mut self, id: u64, monitor: &str, at: (f64, f64)) {
+            if let Some(window) = self.windows.iter_mut().find(|window| window.id == id) {
+                window.rect.x = at.0 - window.rect.w / 2.0;
+                window.rect.y = at.1 - window.rect.h / 2.0;
+                window.monitor = monitor.to_owned();
+            }
+            self.cursor = at;
+            let outcome = self.scripts.dropped(id, at.0, at.1, self.snapshot());
+            self.apply(&outcome.commands);
+        }
+
         /// What `Solium::reload` does, with the desk as it is.
         fn reload(&mut self) {
             let mut fresh = Scripts::load_carrying(&self.entry, self.scripts.kept())
@@ -20355,6 +20369,52 @@ mod directions {
         );
     }
 
+    /// **A window dropped on another workspace belongs to it, and its old
+    /// grid closes up** (#401): across monitors showing different
+    /// workspaces, and on one monitor switched to another workspace mid-drag.
+    /// Either way the workspace it belongs to is the one whose tree holds it.
+    #[test]
+    fn a_window_dropped_on_another_workspace_belongs_to_it_and_leaves_its_old_grid_closed_up() {
+        let mut desk = grid("", two_screens());
+        assert_eq!(
+            desk.scripts
+                .evaluate("require(\"workspaces\").showing[\"DP-2\"] = 3 return \"\""),
+            ""
+        );
+        desk.drop(2, "DP-2", (3280.0, 1280.0));
+        assert_eq!(desk.workspace_of(2), "3");
+        assert_eq!(desk.holding("tiling", "trees", 2), "3@DP-2");
+        assert!(
+            same(desk.rect(2), whole(TALL)),
+            "window 2 is not the whole of the desk it was dropped on: {:?}",
+            desk.rects()
+        );
+        let four = desk.rect(4);
+        assert!(
+            about(four.y, whole(WIDE).y) && four.h > WIDE.h - 40.0,
+            "the grid did not close up over window 2's tile: {:?}",
+            desk.rects()
+        );
+
+        let mut desk = grid("", one_screen());
+        let three = desk.rect(3);
+        desk.press("super+2");
+        desk.drop(1, "DP-1", (900.0, 500.0));
+        assert_eq!(desk.workspace_of(1), "2");
+        assert_eq!(desk.holding("tiling", "trees", 1), "2@DP-1");
+        assert!(
+            same(desk.rect(1), whole(WIDE)),
+            "window 1 is not the whole of the workspace it was dropped on: {:?}",
+            desk.rects()
+        );
+        let now = desk.rect(3);
+        assert!(
+            about(now.x, three.x) && about(now.y, whole(WIDE).y) && now.h > WIDE.h - 40.0,
+            "workspace 1's grid, out of view, did not close up over window 1's tile: {:?}",
+            desk.rects()
+        );
+    }
+
     /// **A window sent from a scrolling strip leaves it for the other
     /// workspace's** (#400): a column of its own there, and in no other strip.
     #[test]
@@ -20368,6 +20428,37 @@ mod directions {
         assert_eq!(desk.workspace_of(2), "2");
         assert_eq!(desk.holding("scrolling", "views", 2), "2@DP-1");
         assert_eq!(desk.holding("scrolling", "views", 1), "1@DP-1");
+    }
+
+    /// **A floating window dropped on the other monitor's workspace belongs
+    /// to it** (#401): with no layout in charge the drop moves it all the
+    /// same, so it is shown where it was let go.
+    #[test]
+    fn a_floating_window_dropped_on_the_other_monitors_workspace_belongs_to_it() {
+        let mut desk = Desk::floating(
+            two_screens(),
+            &[(
+                1,
+                "DP-1",
+                Rect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 800.0,
+                    h: 600.0,
+                },
+            )],
+        );
+        assert_eq!(
+            desk.scripts.evaluate(
+                "local workspaces = require(\"workspaces\")\n\
+                 workspaces.of[1] = 1\n\
+                 workspaces.showing[\"DP-2\"] = 3\n\
+                 return \"\""
+            ),
+            ""
+        );
+        desk.drop(1, "DP-2", (3280.0, 1280.0));
+        assert_eq!(desk.workspace_of(1), "3");
     }
 
     /// **With no layout in charge, focus and move reach the nearest window
