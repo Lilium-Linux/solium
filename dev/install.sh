@@ -452,6 +452,7 @@ out with:
 # configuration, not this user's. dev/install-check.sh's "a system prefix"
 # installs with a broken one.
 check_line="skipped (--no-check)"
+portal_missing=""
 if [[ $run_check -eq 1 ]]; then
     echo "checking $bin --check ..."
     check_log="$(mktemp -t solium-install-check-XXXXXX.log)"
@@ -485,6 +486,10 @@ $expected. $not_checked"
 $helper. $not_checked"
     fi
     checked="$(grep -m1 '^  ok:' "$check_log" || true)"
+    # What the portals lack, which --check says and does not fail on (#378):
+    # without it a program asking to share the screen finds none, and says
+    # nothing why.
+    portal_missing="$(sed -n '/^the portals/,/^[^ ]/{/missing:/p}' "$check_log")"
     check_line="$bin --check passed${checked:+ (${checked#  })}, using $chosen"
 fi
 
@@ -494,6 +499,13 @@ if [[ ${#config_kept[@]} -gt 0 ]]; then
   kept          these, because this script did not write them as they are now
                 (a link, or edited since): compare each with dev/session/
 $(printf '                  %s\n' "${config_kept[@]}")"
+fi
+portal_note=""
+if [[ -n "$portal_missing" ]]; then
+    portal_note="
+warning: screen sharing and the other portals are missing pieces (solium --check):
+$portal_missing
+"
 fi
 reload_note=""
 if [[ -z "$destdir" && ${#config_written[@]} -gt 0 ]]; then
@@ -576,7 +588,7 @@ Installed Solium into $dest
   portals       $portals/lilium-portals.conf$config_note
   check         $check_line
   $path_note
-$reload_note$session_note
+$reload_note$session_note$portal_note
 $login_note
 
 Getting back: Plasma Login remembers the last session, so it offers Solium

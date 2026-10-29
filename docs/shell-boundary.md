@@ -1075,6 +1075,21 @@ leaves out `solium-autostart.target`, and so XDG autostart, while
 `dev/install.sh` puts both targets in `~/.config/systemd/user` and
 `lilium-portals.conf` in `~/.config/xdg-desktop-portal`.
 
+**Screen sharing** goes through the portal too. `lilium-portals.conf` gives
+ScreenCast and Screenshot to `xdg-desktop-portal-wlr`, which records through
+Solium's wlr-screencopy and asks `slurp` which screen to share, and everything
+else to `xdg-desktop-portal-gtk`. Nothing pulls those in by itself: without
+`xdg-desktop-portal-wlr` a browser, OBS or Vesktop finds no screen to share and
+says nothing why, and without `slurp`, its default chooser, it has no way to
+ask which screen to share. On Fedora:
+
+```sh
+sudo dnf install xdg-desktop-portal-wlr slurp xdg-desktop-portal-gtk
+```
+
+The Fedora package recommends all three, and `solium --check` (which
+`dev/install.sh` runs) says which of them is missing, under *the portals*.
+
 A program that should start with a Solium session can do it in one of two
 ways.
 

@@ -3,7 +3,9 @@
 //! tested; [`run`] turns the report into the exit status (spec §6.5, C7).
 //! `--check` checks the configuration, then the scenes it declares at load,
 //! your own pane styles, your own effect folders and the effects the
-//! configuration names, and the scenes this run's environment names.
+//! configuration names, and the scenes this run's environment names. Then,
+//! said and never failed, what the installation gives the lock screen and
+//! the portals (`lock`, `portals`).
 //! `tests::a_config_that_does_not_load_still_fails`,
 //! `tests::a_file_that_does_not_load_fails`,
 //! `tests::a_surface_whose_scene_does_not_load_fails`,
@@ -726,6 +728,208 @@ pub(crate) fn lock(report: &mut Report, helper: Result<&Path, &str>, pam: Option
     }
 }
 
+/// The portal configuration a Solium session's xdg-desktop-portal reads:
+/// `XDG_CURRENT_DESKTOP` is `Lilium` there (`session::desktop`), and
+/// `dev/session/` ships it.
+const PORTALS: &str = "lilium-portals.conf";
+
+/// Where xdg-desktop-portal looks for [`PORTALS`], first wins: the user's
+/// configuration, `$XDG_CONFIG_DIRS`, `/etc`, then `$XDG_DATA_HOME` and
+/// `$XDG_DATA_DIRS`, each with `xdg-desktop-portal` under it.
+fn portal_config_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|home| home.join(".config")));
+    dirs.extend(config_home);
+    dirs.extend(listed("XDG_CONFIG_DIRS", "/etc/xdg"));
+    dirs.push("/etc".into());
+    dirs.extend(data_dirs());
+    dirs.into_iter()
+        .map(|dir| dir.join("xdg-desktop-portal"))
+        .collect()
+}
+
+/// Where xdg-desktop-portal finds its backends' `.portal` files:
+/// `$XDG_DESKTOP_PORTAL_DIR` when set, which replaces the rest, otherwise
+/// `xdg-desktop-portal/portals` under `$XDG_DATA_HOME` and each of
+/// `$XDG_DATA_DIRS`.
+fn portal_backend_dirs() -> Vec<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_DESKTOP_PORTAL_DIR").filter(|dir| !dir.is_empty()) {
+        return vec![dir.into()];
+    }
+    data_dirs()
+        .into_iter()
+        .map(|dir| dir.join("xdg-desktop-portal/portals"))
+        .collect()
+}
+
+/// `$XDG_DATA_HOME` (or `~/.local/share`), then each of `$XDG_DATA_DIRS`
+/// (or `/usr/local/share` and `/usr/share`).
+fn data_dirs() -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        });
+    home.into_iter()
+        .chain(listed("XDG_DATA_DIRS", "/usr/local/share:/usr/share"))
+        .collect()
+}
+
+/// A colon-separated list of directories from `variable`, or `default`.
+fn listed(variable: &str, default: &str) -> Vec<std::path::PathBuf> {
+    let value = std::env::var(variable)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_owned());
+    value
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+/// Each portal a configuration's `[preferred]` section names, with the
+/// backends it lists for it in order: `default` stands for every portal the
+/// file does not name. A list is tried in order and the first backend that is
+/// installed answers, so `kwallet;gnome-keyring` needs either, not both.
+/// `none` and `*` name no backend.
+/// `tests::the_portals_say_which_backend_is_missing_and_what_it_answers`,
+/// `tests::a_missing_fallback_is_not_a_missing_backend`.
+fn preferred(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut entries: Vec<(String, Vec<String>)> = Vec::new();
+    let mut preferred = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            preferred = line == "[preferred]";
+            continue;
+        }
+        if !preferred || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let interface = key.rsplit('.').next().unwrap_or(key).to_owned();
+        let backends: Vec<String> = value
+            .split(';')
+            .map(str::trim)
+            .filter(|backend| !backend.is_empty() && *backend != "none" && *backend != "*")
+            .map(str::to_owned)
+            .collect();
+        if !backends.is_empty() {
+            entries.push((interface, backends));
+        }
+    }
+    entries
+}
+
+/// Whether screen sharing, and every other portal [`PORTALS`] hands a
+/// backend, has that backend installed (#378): the file, each backend's
+/// `.portal`, and `slurp`, the screen chooser xdg-desktop-portal-wlr asks
+/// unless told otherwise, wherever `wlr` is named.
+///
+/// Said, never failed, as [`lock`] is: they are the installation's, a
+/// checkout has no [`PORTALS`] until `dev/install.sh` puts it in place, and
+/// the package only recommends the backends. Without them, a program that
+/// asks to share the screen finds no screen to share and says nothing why.
+/// `tests::the_portals_say_where_each_backend_is`,
+/// `tests::the_portals_say_which_backend_is_missing_and_what_it_answers`,
+/// `tests::the_portals_say_when_their_configuration_is_missing`.
+pub(crate) fn portals(
+    report: &mut Report,
+    config: Result<(&Path, &str), &[std::path::PathBuf]>,
+    backend: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    slurp: bool,
+) {
+    report.line("the portals, screen sharing among them");
+    let text = match config {
+        Ok((path, text)) => {
+            report.line(&format!("  {PORTALS}  {}", path.display()));
+            text
+        }
+        Err(searched) => {
+            report.line(&format!(
+                "  {PORTALS}  missing: not in {}, so xdg-desktop-portal picks the backends \
+                 by its own rules and screen sharing may have none. dev/install.sh installs it",
+                searched
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            return;
+        }
+    };
+    let entries = preferred(text);
+    // Every backend named, in the order first named.
+    let mut named: Vec<&str> = Vec::new();
+    for backend in entries.iter().flat_map(|(_, backends)| backends) {
+        if !named.contains(&backend.as_str()) {
+            named.push(backend);
+        }
+    }
+    let found: Vec<(&str, Option<std::path::PathBuf>)> =
+        named.iter().map(|name| (*name, backend(name))).collect();
+    let installed = |name: &str| found.iter().any(|(n, path)| *n == name && path.is_some());
+    let width = named.iter().map(|name| name.len()).max().unwrap_or(0);
+    for (name, path) in &found {
+        if let Some(path) = path {
+            report.line(&format!("  {name:width$}  {}", path.display()));
+            continue;
+        }
+        // The portals this backend was named for that nothing else in their
+        // list answers: only those are left with no backend.
+        let (unanswered, answered): (Vec<_>, Vec<_>) = entries
+            .iter()
+            .filter(|(_, backends)| backends.iter().any(|b| b == name))
+            .partition(|(_, backends)| !backends.iter().any(|b| installed(b)));
+        if unanswered.is_empty() {
+            let by: Vec<&str> = answered
+                .iter()
+                .filter_map(|(_, backends)| backends.iter().find(|b| installed(b)))
+                .map(String::as_str)
+                .collect();
+            report.line(&format!(
+                "  {name:width$}  not installed, and not needed: {} first",
+                by.join(", ")
+            ));
+            continue;
+        }
+        let mut answers: Vec<&str> = unanswered
+            .iter()
+            .map(|(interface, _)| {
+                if interface == "default" {
+                    "every portal not named"
+                } else {
+                    interface.as_str()
+                }
+            })
+            .collect();
+        let last = answers.pop().unwrap_or_default();
+        let (answers, verb) = if answers.is_empty() {
+            (last.to_owned(), "has")
+        } else {
+            (format!("{} and {last}", answers.join(", ")), "have")
+        };
+        report.line(&format!(
+            "  {name:width$}  missing: no {name}.portal, so {answers} {verb} no backend. \
+             Install xdg-desktop-portal-{name}"
+        ));
+    }
+    if named.contains(&"wlr") && !slurp {
+        report.line(
+            "  slurp  missing: not on PATH, and xdg-desktop-portal-wlr asks it which screen \
+             to share. Install slurp",
+        );
+    }
+}
+
 /// `solium --check [<file>]`: the configuration, one QML file, or one effect
 /// folder; the exit status is the report's.
 /// `tests/cli.rs`'s `check_qml_on_a_broken_file_exits_one`,
@@ -812,6 +1016,26 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                 crate::auth::helper().map(crate::auth::Helper::path),
                 crate::auth::pam_file(),
             );
+            let searched = portal_config_dirs();
+            let found = searched.iter().find_map(|dir| {
+                let path = dir.join(PORTALS);
+                std::fs::read_to_string(&path).ok().map(|text| (path, text))
+            });
+            let backends = portal_backend_dirs();
+            portals(
+                &mut report,
+                found
+                    .as_ref()
+                    .map(|(path, text)| (path.as_path(), text.as_str()))
+                    .ok_or(searched.as_slice()),
+                &|name| {
+                    backends
+                        .iter()
+                        .map(|dir| dir.join(format!("{name}.portal")))
+                        .find(|path| path.is_file())
+                },
+                crate::script::which("slurp"),
+            );
         }
     }
     if report.passed() {
@@ -825,7 +1049,9 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Report, config, effect_folder, effects, knobs, lock, qml_file, styles_in};
+    use super::{
+        Report, config, effect_folder, effects, knobs, lock, portals, qml_file, styles_in,
+    };
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -894,6 +1120,159 @@ mod tests {
             text.contains("Install dev/pam/solium as /etc/pam.d/solium"),
             "{text}"
         );
+    }
+
+    /// Every backend `lilium-portals.conf` names, where it is found, and
+    /// nothing missing: the report passes and says where each one is.
+    #[test]
+    fn the_portals_say_where_each_backend_is() {
+        let shipped = include_str!("../../../dev/session/lilium-portals.conf");
+        let (passed, text) = reported(|report| {
+            portals(
+                report,
+                Ok((
+                    Path::new("/usr/share/xdg-desktop-portal/lilium-portals.conf"),
+                    shipped,
+                )),
+                &|name| {
+                    Some(PathBuf::from(format!(
+                        "/usr/share/xdg-desktop-portal/portals/{name}.portal"
+                    )))
+                },
+                true,
+            );
+        });
+        assert!(passed, "{text}");
+        assert!(
+            text.contains(
+                "  lilium-portals.conf  /usr/share/xdg-desktop-portal/lilium-portals.conf\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  gtk  /usr/share/xdg-desktop-portal/portals/gtk.portal\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  wlr  /usr/share/xdg-desktop-portal/portals/wlr.portal\n"),
+            "{text}"
+        );
+        assert!(!text.contains("missing"), "{text}");
+    }
+
+    /// The shipped file with no `wlr.portal` and no `slurp`: screen sharing's
+    /// backend is named with what it answers and the package to install, and
+    /// so is its chooser, and the report still passes (see `portals`).
+    #[test]
+    fn the_portals_say_which_backend_is_missing_and_what_it_answers() {
+        let shipped = include_str!("../../../dev/session/lilium-portals.conf");
+        let (passed, text) = reported(|report| {
+            portals(
+                report,
+                Ok((Path::new("/x/lilium-portals.conf"), shipped)),
+                &|name| (name == "gtk").then(|| PathBuf::from("/x/portals/gtk.portal")),
+                false,
+            );
+        });
+        assert!(passed, "{text}");
+        assert!(
+            text.contains(
+                "  wlr  missing: no wlr.portal, so ScreenCast and Screenshot have no backend. \
+                 Install xdg-desktop-portal-wlr"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("  slurp  missing: not on PATH"), "{text}");
+        assert!(text.contains("Install slurp"), "{text}");
+        assert!(text.contains("  gtk  /x/portals/gtk.portal\n"), "{text}");
+    }
+
+    /// A backend listed after another for the same portal is a fallback: with
+    /// the first installed, the second missing leaves nothing unanswered and
+    /// is not called missing (`Secret=kwallet;gnome-keyring` on Plasma). With
+    /// neither, the portal is said to have no backend under each.
+    #[test]
+    fn a_missing_fallback_is_not_a_missing_backend() {
+        let conf =
+            "[preferred]\ndefault=gtk\norg.freedesktop.impl.portal.Secret=kwallet;gnome-keyring\n";
+        let (passed, text) = reported(|report| {
+            portals(
+                report,
+                Ok((Path::new("/x/lilium-portals.conf"), conf)),
+                &|name| {
+                    matches!(name, "gtk" | "kwallet")
+                        .then(|| PathBuf::from(format!("/x/portals/{name}.portal")))
+                },
+                true,
+            );
+        });
+        assert!(passed, "{text}");
+        assert!(!text.contains("missing"), "{text}");
+        assert!(
+            text.contains("  gnome-keyring  not installed, and not needed: kwallet first"),
+            "{text}"
+        );
+        assert!(text.contains("/x/portals/kwallet.portal"), "{text}");
+
+        let (_, text) = reported(|report| {
+            portals(
+                report,
+                Ok((Path::new("/x/lilium-portals.conf"), conf)),
+                &|name| (name == "gtk").then(|| PathBuf::from("/x/portals/gtk.portal")),
+                true,
+            );
+        });
+        assert!(
+            text.contains("  kwallet        missing: no kwallet.portal, so Secret has no backend"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "  gnome-keyring  missing: no gnome-keyring.portal, so Secret has no backend"
+            ),
+            "{text}"
+        );
+    }
+
+    /// With no `lilium-portals.conf` anywhere xdg-desktop-portal looks, that
+    /// is what is said, with where it looked; and `slurp` is asked for only
+    /// where a configuration names `wlr`.
+    #[test]
+    fn the_portals_say_when_their_configuration_is_missing() {
+        let searched = [
+            PathBuf::from("/a/xdg-desktop-portal"),
+            PathBuf::from("/b/xdg-desktop-portal"),
+        ];
+        let (passed, text) = reported(|report| {
+            portals(report, Err(&searched), &|_| None, false);
+        });
+        assert!(passed, "{text}");
+        assert!(
+            text.contains(
+                "  lilium-portals.conf  missing: not in /a/xdg-desktop-portal, /b/xdg-desktop-portal"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("slurp"), "{text}");
+
+        let (_, text) = reported(|report| {
+            portals(
+                report,
+                Ok((
+                    Path::new("/x/lilium-portals.conf"),
+                    "[preferred]\ndefault=gtk\n",
+                )),
+                &|_| None,
+                false,
+            );
+        });
+        assert!(
+            text.contains(
+                "  gtk  missing: no gtk.portal, so every portal not named has no backend"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("slurp"), "{text}");
     }
 
     /// A configuration that does not load fails, and says why.
