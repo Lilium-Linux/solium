@@ -16,6 +16,11 @@
 //! And a third, the compositor's own frame's titlebar. Every one starts
 //! through [`MoveGrab::start`], which shows the window held ([`SHAPE`]) for as
 //! long as the drag lasts (#374).
+//!
+//! A drag holds its window only while the window is the pointer's to place. A
+//! window made fullscreen or maximised mid-drag is the compositor's again, and
+//! [`let_go_of`] ends the drag there: a fullscreen window kept following the
+//! pointer and covered its monitor at an offset (#404).
 
 use smithay::{
     desktop::Window,
@@ -25,7 +30,7 @@ use smithay::{
         GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData,
         MotionEvent, PointerGrab, PointerHandle, PointerInnerHandle, RelativeMotionEvent,
     },
-    utils::{Logical, Point, Serial},
+    utils::{Logical, Point, SERIAL_COUNTER, Serial},
 };
 
 use crate::state::Solium;
@@ -37,6 +42,36 @@ use crate::state::Solium;
 /// hand, every toolkit shows the hand closed on it. A resize shows the edge's
 /// double arrow for the same length of time (`resize::cursor`).
 pub(crate) const SHAPE: CursorIcon = CursorIcon::Grabbing;
+
+/// End every move drag holding `window`, the pointer's and each finger's,
+/// without a drop: the window has stopped being the drag's to place.
+///
+/// For a window going fullscreen or maximised, which covers a rectangle of
+/// the compositor's choosing; a drag that went on moving it put it there at an
+/// offset, with the desk showing along two edges (#404). No drop, because the
+/// window was not let go of anywhere: a layout asked where it landed would
+/// move it in its tree while it covers the monitor. The button still held is
+/// nobody's once the grab has gone, and its release reaches whatever is under
+/// the pointer.
+///
+/// Never from inside a pointer grab's own callback, which holds the seat's
+/// lock: a key, a client's request or a script asks for fullscreen, never the
+/// pointer's own events.
+/// `state::tests::real_client::fullscreen_glides::a_window_made_fullscreen_mid_drag_covers_its_monitor_and_the_drag_ends`.
+pub(crate) fn let_go_of(state: &mut Solium, window: &Window) {
+    if let Some(pointer) = state.seat.get_pointer()
+        && pointer
+            .with_grab(|_, grab| {
+                grab.downcast_ref::<MoveGrab>()
+                    .is_some_and(|grab| grab.drag.window == *window)
+            })
+            .unwrap_or(false)
+    {
+        let time = u32::try_from(state.clock.now().as_millis()).unwrap_or(u32::MAX);
+        pointer.unset_grab(state, SERIAL_COUNTER.next_serial(), time);
+    }
+    super::touch::let_go_of(state, window);
+}
 
 /// Drags a window with the pointer until the button is released.
 pub(crate) struct MoveGrab {
@@ -94,6 +129,11 @@ impl MoveGrab {
 }
 
 impl MoveDrag {
+    /// The window being dragged.
+    pub(crate) const fn window(&self) -> &Window {
+        &self.window
+    }
+
     pub(crate) fn new(
         window: Window,
         window_location: Point<i32, Logical>,

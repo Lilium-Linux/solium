@@ -7282,6 +7282,95 @@ end)"#,
             );
         }
 
+        /// **#404: a window made fullscreen while it is being dragged covers
+        /// its monitor, and the drag is over.** `super+f` with super already
+        /// held for a drag is easy to press by accident; the grab went on
+        /// moving the window by the pointer, so it ended fullscreen at an
+        /// offset with the desk showing along two edges. Maximised the same:
+        /// the work area is where it goes, not the pointer.
+        #[test]
+        fn a_window_made_fullscreen_mid_drag_covers_its_monitor_and_the_drag_ends() {
+            use smithay::backend::input::ButtonState;
+            use smithay::input::pointer::{Focus, GrabStartData};
+            for (name, key, covers) in [
+                ("fullscreen-mid-drag", "super+f", screen()),
+                ("maximize-mid-drag", "super+shift+m", screen()),
+            ] {
+                let mut desk = Desk::new(name, SCRIPT);
+                let region = Rectangle::new((0, 0).into(), (1920, 1080).into());
+                let pointer = desk
+                    .state
+                    .seat
+                    .get_pointer()
+                    .expect("the seat has a pointer");
+                let mut time = 1_000_u64;
+                let mut motion = |state: &mut Solium, by: (f64, f64)| {
+                    time += 8_000;
+                    crate::synth::send_motion(state, region, by.into(), time);
+                };
+                let at = pointer.current_location();
+                motion(&mut desk.state, (500.0 - at.x, 350.0 - at.y));
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Pressed,
+                    100_000,
+                );
+                // What a press on a frame, or a client's `xdg_toplevel.move`,
+                // starts: the grab that follows the pointer.
+                let start = GrabStartData {
+                    focus: None,
+                    button: 0x110,
+                    location: pointer.current_location(),
+                };
+                let grab = crate::input::grab::MoveGrab::new(
+                    start,
+                    desk.window.clone(),
+                    (300, 200).into(),
+                );
+                pointer.set_grab(
+                    &mut desk.state,
+                    grab,
+                    SERIAL_COUNTER.next_serial(),
+                    Focus::Clear,
+                );
+                motion(&mut desk.state, (60.0, 40.0));
+                assert_eq!(
+                    desk.state.real_geometry(&desk.window).map(|real| real.loc),
+                    Some((360, 240).into()),
+                    "{name}: the premise: the drag moves the window"
+                );
+
+                assert!(desk.state.trigger(key), "{key} was not handled");
+                desk.pump();
+                assert!(!pointer.is_grabbed(), "{name}: the drag is over");
+                motion(&mut desk.state, (-170.0, 50.0));
+                motion(&mut desk.state, (-90.0, 30.0));
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    200_000,
+                );
+                desk.answer(1920, 1080);
+                desk.land();
+                assert_eq!(
+                    desk.state
+                        .real_geometry(&desk.window)
+                        .map(|real| real.loc.to_f64()),
+                    Some(covers.loc),
+                    "{name}: where it lives is the corner of what it covers"
+                );
+                assert_eq!(
+                    desk.drawn(desk.state.clock.now()),
+                    covers,
+                    "{name}: drawn over exactly what it covers"
+                );
+            }
+        }
+
         /// **And one that never answers is held only so long**:
         /// `resizing::PATIENCE` past the landing, as a drag's hold is, and
         /// then drawn at the size it has, where it lives.

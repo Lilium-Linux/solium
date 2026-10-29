@@ -1240,6 +1240,11 @@ impl Solium {
             }
         });
 
+        // Maximised, a drag holding it lets go, as going fullscreen does: the
+        // work area is where it goes, not the pointer (#404).
+        if maximized {
+            crate::input::grab::let_go_of(self, window);
+        }
         window_state::write_maximized(window, maximized);
         window_state::tell(window, back, Some(tiled), window_state::Sending::Now);
         if let Some(back) = back {
