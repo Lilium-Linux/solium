@@ -495,8 +495,9 @@ how the windows re-flow when it changes
 Scripts load before the screens are known — on the hardware backend, before
 the GPU is even opened — so a rect computed at load time is computed against
 zeros. The event fires once when the monitors are first known, again on every
-hotplug and again on every reload, which is when a placement needs redoing
-anyway. A surface whose `on` is `"every-monitor"`, `"primary"` or a connector
+hotplug, again when a monitor changes size without one coming or going (a
+nested Solium whose window is resized), and again on every reload, which is
+when a placement needs redoing anyway. A surface whose `on` is `"every-monitor"`, `"primary"` or a connector
 name needs no event: declare it at the top of the script, and the compositor
 builds its scene on each monitor it names as that monitor arrives, as
 `wallpaper.lua` and `shell.lua` do. Only a rect computed from the monitors

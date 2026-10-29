@@ -604,20 +604,24 @@ pub(crate) fn run() -> Result<()> {
                 // window opening on the screen you are not looking at.
                 let count = i32::try_from(outputs.len()).unwrap_or(1).max(1);
                 let width = (size.w / count).max(1);
+                let wanted = (width, size.h).into();
                 for (monitor, _) in &outputs {
-                    monitor.change_current_state(
-                        Some(Mode {
-                            size: (width, size.h).into(),
-                            refresh: 60_000,
-                        }),
-                        None,
-                        None,
-                        None,
-                    );
+                    // Only a size that changed: the host also sends this for
+                    // a window that was moved or refocused, and each one
+                    // that resized is a `monitors` event for the scripts.
+                    // The refresh is the host monitor's, as it was made.
+                    let current = monitor.current_mode();
+                    if current.map(|mode| mode.size) != Some(wanted) {
+                        let mode = Mode {
+                            size: wanted,
+                            refresh: current.map_or(60_000, |mode| mode.refresh),
+                        };
+                        monitor.change_current_state(Some(mode), None, None, None);
+                        // Their positions depend on their widths, so the
+                        // arrangement is decided again rather than kept.
+                        resized = true;
+                    }
                 }
-                // Their positions depend on their widths, so the arrangement
-                // is decided again rather than kept.
-                resized = true;
             }
             WinitEvent::Input(event) => {
                 // The union, not one monitor: the host reports a position
@@ -670,6 +674,8 @@ pub(crate) fn run() -> Result<()> {
             monitor_reported = true;
         }
 
+        // Once for every resize this dispatch brought, however many: a host
+        // dragging the window's edge sends one per step.
         if resized {
             resized = false;
             state.outputs_resized();
