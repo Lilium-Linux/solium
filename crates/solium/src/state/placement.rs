@@ -789,6 +789,7 @@ impl Solium {
         now: Duration,
     ) -> bool {
         let committed = window.geometry().size;
+        let answer = crate::resizing::answer(window);
         // **And anything else the toplevel is carrying.** A maximise, a
         // fullscreen or a decoration mode agreed before the initial configure
         // went out is a pending change somebody else wrote and is waiting on.
@@ -810,9 +811,9 @@ impl Solium {
             .and_then(|bridge| bridge.panes.iter_mut().find(|held| held.pane == pane))
             .map(|held| {
                 if dragging && !pending {
-                    held.hold.dragged(client, committed, now)
+                    held.hold.dragged(client, answer, now)
                 } else {
-                    held.hold.placed(client, committed, now)
+                    held.hold.placed(client, answer, now)
                 }
                 .is_some()
             });
@@ -923,7 +924,9 @@ impl Solium {
             Some(mut hold) => {
                 hold.retargeted(edges);
                 hold.rearm(released);
-                let told = hold.dragged(client, committed, now).is_some();
+                let told = hold
+                    .dragged(client, crate::resizing::answer(window), now)
+                    .is_some();
                 (hold, told)
             }
             // A pane joining the bridge hears immediately, and only the offers

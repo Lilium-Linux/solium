@@ -556,6 +556,44 @@ const CELL: i32 = 24;
 /// frame behind, and the ask it is not answering is the live one.
 const SILENCE: u32 = 2;
 
+/// What a client has said about its size: the size it has committed, and the
+/// size of the configure it was answering when it committed it, where its
+/// protocol says (#402).
+///
+/// **Which ask an answer answers.** Configures go out faster than a slow client
+/// draws, so on a fast drag a client is routinely still answering an ask the
+/// drag has since moved past. Judged against the newest ask, that answer read
+/// as a refusal of it: [`Hold::settle`] then took the client's stale size at
+/// the release, and a pane held at a minimum the whole time was moved by that
+/// stale size and left there once the client caught up. An xdg client says
+/// which configure it is answering, by acking it before the commit, so its
+/// answer is judged against that ask. An X11 window says nothing of the kind,
+/// and `to` is `None`: its answer is judged against the newest ask, as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Answer {
+    /// The size the client has committed.
+    pub(crate) size: Size<i32, Logical>,
+    /// The size of the configure it acked before committing it, if it says.
+    pub(crate) to: Option<Size<i32, Logical>>,
+}
+
+impl From<Size<i32, Logical>> for Answer {
+    fn from(size: Size<i32, Logical>) -> Self {
+        Self { size, to: None }
+    }
+}
+
+/// A window's [`Answer`]: its committed size and, for an xdg toplevel, the
+/// size of the configure its current state was acked from.
+pub(crate) fn answer(window: &smithay::desktop::Window) -> Answer {
+    Answer {
+        size: window.geometry().size,
+        to: window
+            .toplevel()
+            .and_then(|toplevel| toplevel.current_state().size),
+    }
+}
+
 /// Whether `given` is near enough to `asked` to be a rounding. See [`ROUNDING`].
 fn rounds(asked: Size<i32, Logical>, given: Size<i32, Logical>) -> bool {
     let near = |asked: i32, given: i32| {
@@ -684,7 +722,8 @@ impl Hold {
     /// size it was offered will never bring the factor back to 1, and a
     /// stretched window that never un-stretches is worse than the shake this
     /// module was written to remove.
-    fn note(&mut self, client: Size<i32, Logical>) {
+    fn note(&mut self, client: impl Into<Answer>) {
+        let Answer { size: client, to } = client.into();
         if client == self.since {
             return;
         }
@@ -693,13 +732,19 @@ impl Hold {
         // and the count of intervals it has been silent for starts again. See
         // [`SILENCE`].
         self.unanswered = 0;
-        if client == self.asked.size {
+        // **The ask it answered, which is not always the newest** (#402): a
+        // client that says it is answering an earlier configure is judged
+        // against that one. Taking what it was offered then is tracking the
+        // drag, a frame or two behind it, and declines nothing it has yet to
+        // hear; see [`Answer`].
+        let answered = to.unwrap_or(self.asked.size);
+        if client == answered {
             // It took what it was offered, so whatever it declined earlier in
             // this gesture it is tracking now: a drag that went under Firefox's
             // minimum width and came back out of it stretches again.
             self.declined = None;
         } else {
-            self.declined = Some(self.asked.size);
+            self.declined = Some(answered);
         }
     }
 
@@ -713,7 +758,7 @@ impl Hold {
     fn offered(
         &mut self,
         wanted: Rectangle<i32, Logical>,
-        client: Size<i32, Logical>,
+        client: impl Into<Answer>,
         now: Duration,
         throttled: bool,
     ) -> Option<Rectangle<i32, Logical>> {
@@ -767,7 +812,7 @@ impl Hold {
     pub(crate) fn dragged(
         &mut self,
         wanted: Rectangle<i32, Logical>,
-        client: Size<i32, Logical>,
+        client: impl Into<Answer>,
         now: Duration,
     ) -> Option<Rectangle<i32, Logical>> {
         self.offered(wanted, client, now, true)
@@ -792,7 +837,7 @@ impl Hold {
     pub(crate) fn placed(
         &mut self,
         wanted: Rectangle<i32, Logical>,
-        client: Size<i32, Logical>,
+        client: impl Into<Answer>,
         now: Duration,
     ) -> Option<Rectangle<i32, Logical>> {
         self.offered(wanted, client, now, false)
@@ -817,7 +862,7 @@ impl Hold {
     pub(crate) fn release(
         &mut self,
         wanted: Rectangle<i32, Logical>,
-        client: Size<i32, Logical>,
+        client: impl Into<Answer>,
         now: Duration,
     ) -> Rectangle<i32, Logical> {
         self.note(client);
@@ -828,8 +873,10 @@ impl Hold {
     }
 
     /// Where this hold stands. See [`Settle`].
-    pub(crate) fn settle(&mut self, client: Size<i32, Logical>, now: Duration) -> Settle {
+    pub(crate) fn settle(&mut self, client: impl Into<Answer>, now: Duration) -> Settle {
+        let client = client.into();
         self.note(client);
+        let client = client.size;
         let Some(released) = self.released else {
             // The pointer is still down. The drag owns the rectangle for as
             // long as that lasts, whatever the client has or has not said.
@@ -899,6 +946,29 @@ impl Hold {
             slot.loc.y
         };
         Rectangle::new((x, y).into(), size)
+    }
+
+    /// Where a pane lands when its client's own `size` wins: [`Self::anchored`]
+    /// for a pane in no tile, and the corner of its `slot` for one in a tile.
+    ///
+    /// **A tiled pane stays in its tile** (#402). Its client is held inside
+    /// the tile at rest (#133): cut to it when larger, at the tile's corner
+    /// with the rest of the tile showing when smaller, as a client that rounds
+    /// to its cell grid always is. Pinned against its far edge instead, a size
+    /// the client had committed for an earlier ask put the pane outside the
+    /// tile, over its neighbour, and once the client answered the ask it had
+    /// been sent the pane stayed there, or ran past the edge of the screen,
+    /// until a layout next placed it.
+    pub(crate) fn lands(
+        &self,
+        slot: Rectangle<i32, Logical>,
+        size: Size<i32, Logical>,
+        tiled: bool,
+    ) -> Rectangle<i32, Logical> {
+        if tiled {
+            return Rectangle::new(slot.loc, (size.w.max(1), size.h.max(1)).into());
+        }
+        self.anchored(slot, size)
     }
 
     /// Hand this hold to a gesture that has just started on the same window.
