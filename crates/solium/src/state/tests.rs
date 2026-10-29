@@ -16248,6 +16248,111 @@ end)"#,
         }
     }
 
+    /// **#405: a pane a drag is holding keeps its outer rectangle across a
+    /// style change.** Tiling turned off mid seam drag swaps the border-only
+    /// frame for one with a titlebar. Every other window keeps its outer
+    /// rectangle and its client gives the titlebar its room; the pane across
+    /// the seam, held by the drag, kept its client's rectangle instead and the
+    /// titlebar went on outside it, above the top of the screen.
+    #[test]
+    fn a_held_pane_keeps_its_outer_rectangle_when_its_frame_changes() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (dragged, _dragged_toplevel, _dragged_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (far, far_toplevel, far_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(dragged.clone(), (0, 0), false);
+        state.map_stacked(far.clone(), (512, 0), false);
+        state.sync_panes();
+        let dragged_pane = state.panes.id_of(&dragged).expect("a pane");
+        let far_pane = state.panes.id_of(&far).expect("a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let request = ResizeRequest {
+            window: dragged.clone(),
+            wanted: at(0, 0, 600, 600),
+            edge_at: (600.0, 300.0),
+            edges: ResizeEdge::Right,
+        };
+        state.begin_resize(&dragged);
+        let tile = at(612, 0, 388, 600);
+        let now = state.clock.now();
+        tiled_frame(&mut state, &request, dragged_pane, at(0, 0, 600, 600), now);
+        tiled_frame(&mut state, &request, far_pane, tile, now);
+        assert!(
+            state.holding_resize(far_pane),
+            "the premise: the drag holds it"
+        );
+        let outer = |state: &Solium| {
+            state.pane_outer(state.panes.get(far_pane).expect("the pane is still here"))
+        };
+        assert_eq!(outer(&state), tile, "the premise: it is its tile");
+        client.configures.clear();
+
+        // The frame changes under it: one reserving a titlebar, as `pane =`
+        // a titled style does. No Qt here to build one, and a frame on its
+        // way reserves the same room.
+        let outers = state.outers_before_restyle();
+        for pane in [dragged_pane, far_pane] {
+            if let Some(held) = state.panes.get_mut(pane) {
+                held.set_frame(crate::pane::Frame::Pending);
+            }
+        }
+        state.keep_outers(outers, now);
+        state.sync_panes();
+        assert_eq!(
+            outer(&state),
+            tile,
+            "the new frame comes out of the rectangle it held, and does not go on \
+             outside it"
+        );
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let far_id = wayland_client::Proxy::id(&far_toplevel);
+        assert_eq!(
+            client
+                .configures
+                .iter()
+                .filter(|(to, ..)| to == &far_id)
+                .map(|(_, w, h)| (*w, *h))
+                .next_back(),
+            Some((388, 600 - TITLEBAR_HEIGHT)),
+            "its client is told the room the new frame leaves it"
+        );
+
+        // Let go, and the client answers what it was told.
+        state.release_resize(&dragged);
+        commit_buffer(&client, &qh, &far_surface, 388, 600 - TITLEBAR_HEIGHT);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let now = state.clock.now();
+        paused_frame(&mut state, now);
+        state.sync_panes();
+        assert!(
+            !state.holding_resize(far_pane),
+            "answered, nothing holds it"
+        );
+        assert_eq!(outer(&state), tile, "and it stays in the rectangle it had");
+    }
+
     /// **Only a live gesture arms a bridge.**
     ///
     /// The keyboard `nudge` reaches `move_pane` through `Scripts::key` and

@@ -811,20 +811,9 @@ impl Solium {
                     // The slots windows occupy are kept; what changes is how
                     // much of each slot the frame takes, so every client is
                     // resized to whatever the new decoration left it.
-                    let slots: Vec<(Window, Rectangle<i32, Logical>)> = self
-                        .space
-                        .elements()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .filter_map(|window| {
-                            self.outer_geometry(&window).map(|outer| (window, outer))
-                        })
-                        .collect();
+                    let slots = self.outers_before_restyle();
                     if self.decorations.set_style(&mut self.panes, name) {
-                        for (window, outer) in slots {
-                            self.resize_to(&window, outer);
-                        }
+                        self.keep_outers(slots, now);
                         self.redraw = true;
                         // Resizing each window in place keeps a floating
                         // arrangement looking right, but a tiled one is the

@@ -1084,6 +1084,77 @@ impl Solium {
         moved
     }
 
+    /// Every mapped window's outer rectangle, read before a style change
+    /// changes how much of it a frame takes: what [`Self::keep_outers`] puts
+    /// each window back into.
+    ///
+    /// **A held pane's from its slot** (#405), which is the rectangle a drag
+    /// holding it has made the truth ([`Self::held_slot`]); the space has its
+    /// client's last committed size, which the drag has moved on from. Every
+    /// other window's from the space, as it always was.
+    pub(super) fn outers_before_restyle(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.space
+            .elements()
+            .filter_map(|window| {
+                let outer = match self
+                    .panes
+                    .id_of(window)
+                    .filter(|pane| self.held_hold(*pane).is_some())
+                {
+                    Some(pane) => self
+                        .panes
+                        .get(pane)
+                        .map(|held| grown(held.slot(), self.insets_of(pane))),
+                    None => self.outer_geometry(window),
+                };
+                outer.map(|outer| (window.clone(), outer))
+            })
+            .collect()
+    }
+
+    /// Put every window back into the outer rectangle it had before a style
+    /// change, its client resized to whatever the new frame leaves it.
+    ///
+    /// **A pane a drag is holding included** (#405). Its slot is the truth
+    /// about its size until its client answers, so resizing it in the space
+    /// alone left the slot at the old client rectangle and the new frame's
+    /// insets went on outside it: tiling turned off mid seam drag put the
+    /// pane across the seam's new titlebar above the top of the screen. So its
+    /// slot takes the client rectangle the new frame leaves, and its hold the
+    /// configure that says so, as a layout placing it would
+    /// (`crate::resizing::Hold::placed`): the hold then waits for the answer
+    /// to that, not to the size from before the style changed.
+    pub(super) fn keep_outers(
+        &mut self,
+        outers: Vec<(Window, Rectangle<i32, Logical>)>,
+        now: Duration,
+    ) {
+        for (window, outer) in outers {
+            let Some(pane) = self
+                .panes
+                .id_of(&window)
+                .filter(|pane| self.held_hold(*pane).is_some())
+            else {
+                self.resize_to(&window, outer);
+                continue;
+            };
+            // `insets_of`, as `hold_resize` writes a held slot: what every
+            // reader of it grows it by.
+            let client = inner(outer, self.insets_of(pane));
+            if let Some(held) = self.panes.get_mut(pane) {
+                held.set_slot(client);
+            }
+            self.map_stacked(window.clone(), client.loc, false);
+            let answer = crate::resizing::answer(&window);
+            if let Some(tell) = self
+                .held_hold_mut(pane)
+                .and_then(|hold| hold.placed(client, answer, now))
+            {
+                size_window(&window, tell);
+            }
+        }
+    }
+
     /// Offer a resize to scripts. Returns whether a layout took it.
     ///
     /// **`request.edge_at` is where the dragged edge should go, per axis.** Not
