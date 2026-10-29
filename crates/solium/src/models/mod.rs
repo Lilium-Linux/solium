@@ -13,6 +13,8 @@ pub(crate) mod pointer;
 pub(crate) mod windows;
 pub(crate) mod workspaces;
 
+use std::rc::Rc;
+
 use crate::qml::hosted::Model;
 
 /// What Qt last took, per model.
@@ -50,10 +52,41 @@ pub(crate) struct Published {
     /// `Apps.ready`, once true never sent false again (a rescan never empties
     /// the index back to nothing worth distrusting it over).
     apps_ready: bool,
+    /// What each shared list or service view was when Qt last took the rows
+    /// made from it: a pass whose list or view is the same `Rc` builds no
+    /// rows from it, and diffs and sends nothing (#392).
+    /// `tests::an_unchanged_source_is_not_made_into_rows_again`.
+    sources: Sources,
     /// `keyboard::tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
     keyboard: keyboard::Published,
     /// `pointer::tests::a_named_shape_reaches_solium_cursor_shape`.
     pointer: pointer::Published,
+}
+
+/// The shared lists and service views `publish_models` last made rows from,
+/// and Qt took.
+#[derive(Debug, Default)]
+struct Sources {
+    apps: Option<Rc<Vec<crate::apps::Entry>>>,
+    folder: Option<Rc<Vec<crate::folder::Entry>>>,
+    notifications: Option<Rc<crate::services::notifications::View>>,
+    audio: Option<Rc<crate::services::audio::View>>,
+    tray: Option<Rc<crate::services::tray::View>>,
+    media: Option<Rc<crate::services::media::View>>,
+}
+
+/// Send what is made from `now` with `send`, unless Qt has already taken
+/// what was made from this very `now`: the same `Rc`, which `taken` holds,
+/// so its address cannot be freed and reused by another. `taken` becomes
+/// `now` once `send` says Qt has all of it; refused, the next pass sends
+/// again. `tests::an_unchanged_source_is_not_made_into_rows_again`.
+fn publish_from<T>(taken: &mut Option<Rc<T>>, now: &Rc<T>, send: impl FnOnce(&T) -> bool) {
+    if taken.as_ref().is_some_and(|taken| Rc::ptr_eq(taken, now)) {
+        return;
+    }
+    if send(now) {
+        *taken = Some(Rc::clone(now));
+    }
 }
 
 impl crate::state::Solium {
@@ -84,27 +117,28 @@ impl crate::state::Solium {
         // inotify in this version (see `apps.rs`'s module doc for why), so
         // this is the one rescan trigger there is.
         if self.apps_scan_pending {
-            self.apps = crate::apps::scan(
+            self.apps = Rc::new(crate::apps::scan(
                 &crate::apps::search_dirs(),
                 &crate::apps::preferred_locales(),
-            );
+            ));
             self.apps_scan_pending = false;
             if !self.published.apps_ready && crate::qml::hosted::set_apps_ready(true) {
                 self.published.apps_ready = true;
             }
         }
-        let apps = apps::rows(&self.apps);
-        publish(
-            Model::Apps,
-            &mut self.published.apps,
-            apps,
-            crate::qml::hosted::apply_rows,
-        );
+        // Rows only from a list Qt has not taken: a scan is a new list.
+        publish_from(&mut self.published.sources.apps, &self.apps, |list| {
+            publish(
+                Model::Apps,
+                &mut self.published.apps,
+                apps::rows(list),
+                crate::qml::hosted::apply_rows,
+            )
+        });
         // Notifications (#346): the service's rows and its own values, read
         // by session scenes and by the lock's alike (notifications show on
         // the lock: Illia's 2026-10-01 answer).
         // `models::tests::publish_models_carries_notifications_to_their_rows`.
-        let view = self.services.notifications.view();
         let rows = |rows: &[std::collections::BTreeMap<&'static str, crate::json::Json>]| {
             rows.iter()
                 .map(|values| diff::Row {
@@ -117,72 +151,85 @@ impl crate::state::Solium {
                 })
                 .collect::<Vec<_>>()
         };
-        publish(
-            Model::NotificationBanners,
-            &mut self.published.notification_banners,
-            rows(&view.banners),
-            crate::qml::hosted::apply_rows,
-        );
-        publish(
-            Model::NotificationHistory,
-            &mut self.published.notification_history,
-            rows(&view.history),
-            crate::qml::hosted::apply_rows,
-        );
-        let state = notifications_state(&view);
-        if self.published.notifications_state.as_deref() != Some(state.as_str())
-            && crate::qml::hosted::set_notifications_state(&state)
-        {
-            self.published.notifications_state = Some(state);
-        }
+        let view = self.services.notifications.view();
+        publish_from(&mut self.published.sources.notifications, &view, |view| {
+            let banners = publish(
+                Model::NotificationBanners,
+                &mut self.published.notification_banners,
+                rows(&view.banners),
+                crate::qml::hosted::apply_rows,
+            );
+            let history = publish(
+                Model::NotificationHistory,
+                &mut self.published.notification_history,
+                rows(&view.history),
+                crate::qml::hosted::apply_rows,
+            );
+            let state = notifications_state(view);
+            let values = self.published.notifications_state.as_deref() == Some(state.as_str())
+                || crate::qml::hosted::set_notifications_state(&state);
+            if values {
+                self.published.notifications_state = Some(state);
+            }
+            banners && history && values
+        });
         // Audio (#347): its endpoints, and the default output and input.
         let audio = self.services.audio.view();
-        publish(
-            Model::AudioOutputs,
-            &mut self.published.audio_outputs,
-            rows(&audio.outputs),
-            crate::qml::hosted::apply_rows,
-        );
-        publish(
-            Model::AudioInputs,
-            &mut self.published.audio_inputs,
-            rows(&audio.inputs),
-            crate::qml::hosted::apply_rows,
-        );
-        let state = audio_state(&audio);
-        if self.published.audio_state.as_deref() != Some(state.as_str())
-            && crate::qml::hosted::set_audio_state(&state)
-        {
-            self.published.audio_state = Some(state);
-        }
+        publish_from(&mut self.published.sources.audio, &audio, |audio| {
+            let outputs = publish(
+                Model::AudioOutputs,
+                &mut self.published.audio_outputs,
+                rows(&audio.outputs),
+                crate::qml::hosted::apply_rows,
+            );
+            let inputs = publish(
+                Model::AudioInputs,
+                &mut self.published.audio_inputs,
+                rows(&audio.inputs),
+                crate::qml::hosted::apply_rows,
+            );
+            let state = audio_state(audio);
+            let values = self.published.audio_state.as_deref() == Some(state.as_str())
+                || crate::qml::hosted::set_audio_state(&state);
+            if values {
+                self.published.audio_state = Some(state);
+            }
+            outputs && inputs && values
+        });
         // The tray (#363): its items, and its own values.
         let tray = self.services.tray.view();
-        publish(
-            Model::Tray,
-            &mut self.published.tray,
-            rows(&tray.items),
-            crate::qml::hosted::apply_rows,
-        );
-        let state = tray_state(&tray);
-        if self.published.tray_state.as_deref() != Some(state.as_str())
-            && crate::qml::hosted::set_tray_state(&state)
-        {
-            self.published.tray_state = Some(state);
-        }
+        publish_from(&mut self.published.sources.tray, &tray, |tray| {
+            let items = publish(
+                Model::Tray,
+                &mut self.published.tray,
+                rows(&tray.items),
+                crate::qml::hosted::apply_rows,
+            );
+            let state = tray_state(tray);
+            let values = self.published.tray_state.as_deref() == Some(state.as_str())
+                || crate::qml::hosted::set_tray_state(&state);
+            if values {
+                self.published.tray_state = Some(state);
+            }
+            items && values
+        });
         // Media (#379): its players, and its own values.
         let media = self.services.media.view();
-        publish(
-            Model::Media,
-            &mut self.published.media,
-            rows(&media.players),
-            crate::qml::hosted::apply_rows,
-        );
-        let state = media_state(&media);
-        if self.published.media_state.as_deref() != Some(state.as_str())
-            && crate::qml::hosted::set_media_state(&state)
-        {
-            self.published.media_state = Some(state);
-        }
+        publish_from(&mut self.published.sources.media, &media, |media| {
+            let players = publish(
+                Model::Media,
+                &mut self.published.media,
+                rows(&media.players),
+                crate::qml::hosted::apply_rows,
+            );
+            let state = media_state(media);
+            let values = self.published.media_state.as_deref() == Some(state.as_str())
+                || crate::qml::hosted::set_media_state(&state);
+            if values {
+                self.published.media_state = Some(state);
+            }
+            players && values
+        });
         // `Folder`: the desktop directory, resolved once (again on a
         // reload) and rescanned wholesale whenever `folder_scan_pending`
         // asks for one or the inotify watch says something changed.
@@ -192,28 +239,31 @@ impl crate::state::Solium {
         if self.folder_scan_pending {
             self.folder_dir = crate::folder::desktop_dir();
             self.folder_watcher.set_path(self.folder_dir.as_deref());
-            self.folder = self
-                .folder_dir
-                .as_deref()
-                .map(|dir| crate::folder::scan(dir, &self.folder_trust))
-                .unwrap_or_default();
+            self.folder = Rc::new(
+                self.folder_dir
+                    .as_deref()
+                    .map(|dir| crate::folder::scan(dir, &self.folder_trust))
+                    .unwrap_or_default(),
+            );
             self.folder_scan_pending = false;
         } else if self.folder_dir.is_some()
             && (std::mem::take(&mut self.folder_changed) | self.folder_watcher.poll())
         {
-            self.folder = self
-                .folder_dir
-                .as_deref()
-                .map(|dir| crate::folder::scan(dir, &self.folder_trust))
-                .unwrap_or_default();
+            self.folder = Rc::new(
+                self.folder_dir
+                    .as_deref()
+                    .map(|dir| crate::folder::scan(dir, &self.folder_trust))
+                    .unwrap_or_default(),
+            );
         }
-        let folder = folder::rows(&self.folder);
-        publish(
-            Model::Folder,
-            &mut self.published.folder,
-            folder,
-            crate::qml::hosted::apply_rows,
-        );
+        publish_from(&mut self.published.sources.folder, &self.folder, |list| {
+            publish(
+                Model::Folder,
+                &mut self.published.folder,
+                folder::rows(list),
+                crate::qml::hosted::apply_rows,
+            )
+        });
         let dirs_desktop = self
             .folder_dir
             .as_deref()
@@ -294,6 +344,8 @@ impl crate::state::Solium {
         ] {
             publish(model, last, Vec::new(), crate::qml::hosted::apply_rows);
         }
+        // What the rows were made from is gone from Qt with them.
+        self.published.sources = Sources::default();
         if crate::qml::hosted::set_status("") {
             self.published.status = Some(String::new());
         }
@@ -379,19 +431,22 @@ fn notifications_state(view: &crate::services::notifications::View) -> String {
     .render()
 }
 
+/// Whether Qt has `next` now: nothing to send, or the batch was taken.
 fn publish(
     model: Model,
     last: &mut Vec<diff::Row>,
     next: Vec<diff::Row>,
     apply: fn(Model, &str) -> bool,
-) {
+) -> bool {
     let ops = diff::diff(last, &next);
     if ops.is_empty() {
-        return;
+        return true;
     }
-    if apply(model, &diff::render(&ops)) {
+    let taken = apply(model, &diff::render(&ops));
+    if taken {
         *last = next;
     }
+    taken
 }
 
 #[cfg(test)]
@@ -400,7 +455,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::diff::{Row, diff, render};
-    use super::{Model, publish};
+    use super::{Model, publish, publish_from};
     use crate::json::Json;
 
     thread_local! {
@@ -426,6 +481,48 @@ mod tests {
                 ("width", Json::Number(width)),
             ]),
         }
+    }
+
+    /// **An unchanged source is not made into rows again** (#392): the app
+    /// list, the desktop folder and each service's view are shared and
+    /// replaced whole when they change, so a pass that finds the one Qt took
+    /// builds nothing from it; a new one is sent, and one Qt refused is sent
+    /// again on the next pass.
+    #[test]
+    fn an_unchanged_source_is_not_made_into_rows_again() {
+        let mut taken = None;
+        let mut made = Vec::new();
+        let list = std::rc::Rc::new(vec!["firefox"]);
+        publish_from(&mut taken, &list, |list| {
+            made.push(list.clone());
+            true
+        });
+        publish_from(&mut taken, &list, |list| {
+            made.push(list.clone());
+            true
+        });
+        assert_eq!(
+            made,
+            vec![vec!["firefox"]],
+            "the same list was made into rows twice"
+        );
+
+        let rescanned = std::rc::Rc::new(vec!["firefox", "foot"]);
+        publish_from(&mut taken, &rescanned, |_| false);
+        publish_from(&mut taken, &rescanned, |list| {
+            made.push(list.clone());
+            true
+        });
+        assert_eq!(
+            made,
+            vec![vec!["firefox"], vec!["firefox", "foot"]],
+            "a new list, refused once, was not sent again"
+        );
+        publish_from(&mut taken, &rescanned, |list| {
+            made.push(list.clone());
+            true
+        });
+        assert_eq!(made.len(), 2, "a list Qt took was sent again");
     }
 
     /// **A batch Qt cannot take is sent again once it can**: refused, what Qt

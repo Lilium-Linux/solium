@@ -63,6 +63,7 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
+#include <QtCore/QHash>
 #include <QtCore/QMap>
 
 #include <QtCore/QAbstractAnimation>
@@ -356,6 +357,10 @@ struct SoliumQmlScene
      * wake nothing: see solium_qml_scene_set_quiet. */
     bool quiet = false;
     QList<QPointer<QObject>> hushed;
+    /* Each Transition the last census found running with nothing on the
+     * animation driver, and the drain it was first found at: see
+     * `transition_moving`. Compared, never followed. */
+    mutable QHash<const QObject *, unsigned long long> unstarted;
     /* Backing store for the last value handed out by take_string. */
     QByteArray taken;
     /* The last press, as Qt keeps it to make a double-click of the next one:
@@ -1962,6 +1967,10 @@ static bool anything_animating()
     return g_driver != nullptr && g_driver->isRunning();
 }
 
+/* How many times Qt's event queue has been drained: where an animation
+ * started since the last drain joins the driver. See `transition_moving`. */
+static unsigned long long g_drains = 0;
+
 /* Advance every animation in the process, once for the whole frame.
  *
  * The driver and the event loop are one per process, not one per scene, so
@@ -2014,6 +2023,7 @@ extern "C" void solium_qml_tick(long long elapsed_ms)
         if (elapsed_ms - drained_at >= 16 || elapsed_ms < drained_at) {
             drained_at = elapsed_ms;
             QCoreApplication::processEvents();
+            ++g_drains;
         }
     }
     if (g_driver != nullptr) {
@@ -2156,6 +2166,7 @@ extern "C" int solium_qml_drain(long long elapsed_ms, int advance)
     constexpr int passes = 4;
     for (int pass = 0; pass < passes; ++pass) {
         QCoreApplication::processEvents();
+        ++g_drains;
         if (solium_qml_next_due_ms() != 0) {
             break;
         }
@@ -2366,7 +2377,46 @@ extern "C" int solium_qml_scene_dirty(const SoliumQmlScene *scene)
  * (`qml::wake::tests::a_clock_scene_repaints_once_a_second_with_no_other_damage`,
  * `qml::wake::tests::a_timer_beside_an_undrawn_animation_fires_with_no_frame_drawn`).
  */
-static bool animation_running(const QObject *item)
+/* One walk of a scene's census: the Transitions it found running with
+ * nothing on the driver, as `SoliumQmlScene::unstarted` keeps them. */
+struct Census
+{
+    const QHash<const QObject *, unsigned long long> &before;
+    QHash<const QObject *, unsigned long long> now;
+    bool driver;
+};
+
+/*
+ * Whether a Transition that reads `running` is moving anything (#392).
+ *
+ * Its `running` is a count of its instances, raised as each one's job starts
+ * and lowered as it stops, and an instance can go without lowering it: a
+ * ListView's remove transition, run to its end on the last row, leaves its
+ * Transition `running` for ever, its delegate and its job gone (seen with
+ * qtdeclarative v6.11.2:
+ * `qml::wake::tests::a_finished_remove_transition_does_not_keep_its_scene_animating`).
+ * On the hardware that was a notification banner leaving: a scene answering
+ * "animating" with nothing to animate, and a pass every vblank of every
+ * monitor until the session ended.
+ *
+ * A job that is really running is on the driver, which is then running too.
+ * Not at once: a job joins the driver when the event queue is next drained
+ * (`solium_qml_tick` says why), so the census just after a Transition starts
+ * finds it running and the driver still idle. A Transition found so is
+ * believed until a drain has gone by since it was first found so, and not
+ * after: by then a running job would be on the driver.
+ */
+static bool transition_moving(const QObject *transition, Census &census)
+{
+    if (census.driver) {
+        return true;
+    }
+    const unsigned long long since = census.before.value(transition, g_drains);
+    census.now.insert(transition, since);
+    return since == g_drains;
+}
+
+static bool animation_running(const QObject *item, Census &census)
 {
     /* Of the three kinds only a Flickable is an item, so an item is asked one
      * inherits() and not three. */
@@ -2380,12 +2430,12 @@ static bool animation_running(const QObject *item)
             return true;
         }
     } else if (item->inherits("QQuickTransition")) {
-        if (item->property("running").toBool()) {
+        if (item->property("running").toBool() && transition_moving(item, census)) {
             return true;
         }
     }
     for (const QObject *child : item->children()) {
-        if (animation_running(child)) {
+        if (animation_running(child, census)) {
             return true;
         }
     }
@@ -2411,7 +2461,7 @@ static bool animation_running(const QObject *item)
      * would visit the whole subtree twice at every level. */
     if (as_item != nullptr) {
         for (const QQuickItem *child : as_item->childItems()) {
-            if (child->parent() != item && animation_running(child)) {
+            if (child->parent() != item && animation_running(child, census)) {
                 return true;
             }
         }
@@ -2424,7 +2474,10 @@ extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene)
     if (scene == nullptr || scene->object == nullptr) {
         return 0;
     }
-    return animation_running(scene->object) ? 1 : 0;
+    Census census{scene->unstarted, {}, anything_animating()};
+    const bool running = animation_running(scene->object, census);
+    scene->unstarted = std::move(census.now);
+    return running ? 1 : 0;
 }
 
 /* Every object of the scene once: its QObject children, and the visual
@@ -2529,7 +2582,11 @@ extern "C" int solium_qml_scene_ticking(const SoliumQmlScene *scene)
             ticking = true;
         }
     });
-    return ticking || animation_running(scene->object) ? 1 : 0;
+    /* Every Transition that reads running counts here: this asks what the
+     * scene holds, not whether it moves. */
+    const QHash<const QObject *, unsigned long long> none;
+    Census census{none, {}, true};
+    return ticking || animation_running(scene->object, census) ? 1 : 0;
 }
 
 extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)

@@ -3869,7 +3869,7 @@ mod tests {
         use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
         state.status = "a window's secret title".to_owned();
         state.apps_scan_pending = false;
-        state.apps = vec![crate::apps::Entry {
+        state.apps = std::rc::Rc::new(vec![crate::apps::Entry {
             id: "solium-lock-redaction-test".to_owned(),
             name: "Redacted".to_owned(),
             untranslated_name: "Redacted".to_owned(),
@@ -3881,7 +3881,7 @@ mod tests {
             terminal: false,
             path: None,
             source: PathBuf::from("/nonexistent/solium-lock-redaction-test.desktop"),
-        }];
+        }]);
         state.workspaces = Some(Declared {
             arrangement: Arrangement {
                 kind: "grid".to_owned(),

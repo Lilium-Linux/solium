@@ -313,7 +313,10 @@ pub(crate) struct Solium {
     /// Installed, visible applications: `Apps`' rows and `sol.apps()`
     /// (03 §3.2.13). Filled by `crate::apps::scan` when
     /// [`Self::apps_scan_pending`] asks for one; empty until the first scan.
-    pub(crate) apps: Vec<crate::apps::Entry>,
+    /// Shared, so a snapshot holds it without a copy, and replaced whole by
+    /// a scan, so `publish_models` sends `Apps` only when it is a new list
+    /// (#392).
+    pub(crate) apps: std::rc::Rc<Vec<crate::apps::Entry>>,
     /// True from startup, and again after a reload
     /// (`state/commands.rs::reload_from`), until `publish_models` has
     /// rescanned. No worker thread and no inotify in this version (see
@@ -322,7 +325,10 @@ pub(crate) struct Solium {
 
     /// The desktop folder's entries: `Folder`'s rows (04-ui.md §4.9). Empty
     /// until the first scan, and whenever [`Self::folder_dir`] is `None`.
-    pub(crate) folder: Vec<crate::folder::Entry>,
+    /// Replaced whole by a scan, or copied on a change
+    /// (`std::rc::Rc::make_mut`), so `publish_models` sends `Folder` only
+    /// when it is a new one (#392).
+    pub(crate) folder: std::rc::Rc<Vec<crate::folder::Entry>>,
     /// `Solium.dirs.desktop`, resolved once and again on a reload
     /// (`state/commands.rs::reload_from`); `None` when nothing names a
     /// desktop directory or it is `$HOME` itself.
@@ -1420,9 +1426,9 @@ impl Solium {
             keyboard_left: None,
             urgent: std::collections::HashSet::new(),
             workspaces: None,
-            apps: Vec::new(),
+            apps: std::rc::Rc::default(),
             apps_scan_pending: true,
-            folder: Vec::new(),
+            folder: std::rc::Rc::default(),
             folder_dir: None,
             folder_scan_pending: true,
             folder_watcher: crate::folder::Watcher::new(),

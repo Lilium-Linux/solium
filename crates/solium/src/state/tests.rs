@@ -19817,7 +19817,7 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         .lock_scenes
                         .use_scene(scene_file("keeps-rows", "import QtQuick\nItem {}\n"));
                     session.state.apps_scan_pending = false;
-                    session.state.apps = vec![crate::apps::Entry {
+                    session.state.apps = std::rc::Rc::new(vec![crate::apps::Entry {
                         id: "solium-keeps-rows-test".to_owned(),
                         name: "Kept".to_owned(),
                         untranslated_name: "Kept".to_owned(),
@@ -19831,7 +19831,7 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                         source: std::path::PathBuf::from(
                             "/nonexistent/solium-keeps-rows-test.desktop",
                         ),
-                    }];
+                    }]);
                     let directory = std::env::temp_dir().join(format!(
                         "solium-native-lock-keeps-rows-session-{}",
                         std::process::id()

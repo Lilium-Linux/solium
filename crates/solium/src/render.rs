@@ -166,6 +166,11 @@ pub(crate) trait Painted {
     /// being asked, and `dev/wirecheck`'s appear case is what asks it, against
     /// a real Qt, by reading the animated value out of the object tree.
     fn animation_in_flight(&self) -> bool;
+
+    /// The scene as `SOLIUM_PACING` names it, for the trace's `moving`.
+    fn pacing(&self) -> crate::pacing::SceneId {
+        crate::pacing::SceneId::NONE
+    }
 }
 
 /// What one draw produced: the element, and whether there is more to come.
@@ -237,7 +242,7 @@ impl Drawn {
             let _census = crate::pacing::span(crate::pacing::Phase::Census);
             painted.something_new_to_draw() || painted.animation_in_flight()
         };
-        crate::pacing::scene_asked(animating);
+        crate::pacing::scene_asked(painted.pacing(), animating);
         Self {
             element: draw(painted),
             animating,
@@ -1143,7 +1148,11 @@ pub(crate) fn note_formats(state: &mut Solium, found: crate::pool::Formats) {
 /// backdrop behind it by its speed times `prepare`'s own time.
 /// `state::tests::real_client::a_gliding_windows_t2_place_is_measured_at_the_passs_instant`,
 /// `tests::the_walk_draws_at_the_passs_instant`.
-pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepared {
+pub(crate) fn prepare(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    drawing: crate::drawing::Drawing,
+) -> Prepared {
     // Everything here is the compositor's own work, ahead of any output, apart
     // from the tick below — which is entirely Qt's and is measured separately
     // for exactly that reason. See `pacing::Phase`.
@@ -1191,6 +1200,7 @@ pub(crate) fn prepare(state: &mut Solium, renderer: &mut GlesRenderer) -> Prepar
         overs: Vec::new(),
         hidden: Vec::new(),
         pass: 0,
+        drawing,
     };
     let slots = effect_phases(&mut gpu);
     let Gpu {
@@ -1333,6 +1343,9 @@ struct Gpu<'a> {
     hidden: Vec<crate::pane::PaneId>,
     /// The store's pass, set by `resolve`.
     pass: u64,
+    /// The monitors this pass draws: a cut of another is kept as it is
+    /// (`drawing.rs`).
+    drawing: crate::drawing::Drawing,
 }
 
 impl std::fmt::Debug for Gpu<'_> {
@@ -1425,6 +1438,12 @@ impl Phases for Gpu<'_> {
         let now = state.clock.now();
         for scene in needed {
             let SceneRef::Surface(id, monitor) = scene;
+            // Not for a monitor whose cuts `xray` keeps as they are:
+            // `elements` renders the scene when that monitor is drawn
+            // (`drawing.rs`).
+            if keeps_every_cut(&self.drawing, &state.xrays, &monitor) {
+                continue;
+            }
             let Some(output) = output_named(state, &monitor) else {
                 continue;
             };
@@ -1461,6 +1480,16 @@ impl Phases for Gpu<'_> {
         }
         let mut jobs = Vec::new();
         for (monitor, cut) in wanted {
+            // A monitor this pass does not draw keeps the cut it has, and
+            // no memo over it runs: the pass that draws it draws it then
+            // (`drawing.rs`).
+            if self
+                .drawing
+                .may_keep(&monitor, state.xrays.texture(&monitor, cut).is_some())
+            {
+                state.xrays.drawn(&monitor, cut, false);
+                continue;
+            }
             let Some(output) = output_named(state, &monitor) else {
                 continue;
             };
@@ -3363,6 +3392,20 @@ fn output_named(state: &Solium, name: &str) -> Option<smithay::output::Output> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SceneRef {
     Surface(crate::scripted::SurfaceId, String),
+}
+
+/// Whether the `xray` phase keeps every cut wanted on `monitor` as it is,
+/// so the `scenes` phase need render nothing for them (`drawing.rs`).
+fn keeps_every_cut(
+    drawing: &crate::drawing::Drawing,
+    xrays: &crate::effect::xray::Xrays,
+    monitor: &str,
+) -> bool {
+    xrays
+        .wanted()
+        .iter()
+        .filter(|(wanted, _)| wanted == monitor)
+        .all(|(wanted, cut)| drawing.may_keep(wanted, xrays.texture(wanted, *cut).is_some()))
 }
 
 /// Every scripted surface in a wanted xray cut, on that cut's monitor, each

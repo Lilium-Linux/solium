@@ -15,11 +15,12 @@ use crate::state::Solium;
 /// `state::tests::real_client::reflow_on_close::hosted::focus_order_is_most_recent_first`,
 /// `state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`.
 pub(crate) fn rows(state: &Solium) -> Vec<Row> {
-    let snapshot = state.snapshot();
+    // Only the windows, and not a whole snapshot: this runs every pass (#392).
+    let windows = state.window_infos();
     // `focusOrder` counts only the windows listed, so a window that closed
     // leaves no gap, and one never focused is last.
     // `state::tests::real_client::reflow_on_close::hosted::a_closed_window_leaves_no_gap_in_focus_order`.
-    let listed: HashSet<u64> = snapshot.windows.iter().map(|info| info.id).collect();
+    let listed: HashSet<u64> = windows.iter().map(|info| info.id).collect();
     let ranks: HashMap<u64, usize> = state
         .focus_history
         .iter()
@@ -27,8 +28,7 @@ pub(crate) fn rows(state: &Solium) -> Vec<Row> {
         .enumerate()
         .map(|(rank, id)| (*id, rank))
         .collect();
-    let mut rows: Vec<Row> = snapshot
-        .windows
+    let mut rows: Vec<Row> = windows
         .iter()
         .filter_map(|info| {
             let pane = state.panes.by_script_id(info.id)?;

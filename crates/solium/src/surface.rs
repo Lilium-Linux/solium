@@ -204,6 +204,10 @@ impl crate::render::Painted for ShellSurface {
     fn animation_in_flight(&self) -> bool {
         self.scene.animation_in_flight()
     }
+
+    fn pacing(&self) -> crate::pacing::SceneId {
+        self.scene.pacing()
+    }
 }
 
 impl ShellSurface {

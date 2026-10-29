@@ -325,6 +325,11 @@ struct Counters {
     /// This pass's Qt time for scenes past the slots.
     /// `tests::more_scenes_than_slots_land_in_other`.
     scene_other: Cell<u64>,
+    /// The scenes that answered "animating" this pass, as `id + 1`, 0 for an
+    /// empty slot: the trace's `moving`, which names what keeps the passes
+    /// coming when nothing on screen changes (#392).
+    /// `tests::a_trace_names_the_scenes_that_answered_animating`.
+    moving: [Cell<u32>; SCENE_SLOTS],
     /// `SOLIUM_TRACE`'s file, when it is set and could be opened.
     /// `tests::a_counted_pass_is_traced_with_its_gpu_time`.
     trace: RefCell<Option<Trace>>,
@@ -375,6 +380,7 @@ thread_local! {
             free_ids: RefCell::new(Vec::new()),
             scene_spent: [const { Cell::new((0, 0)) }; SCENE_SLOTS],
             scene_other: Cell::new(0),
+            moving: [const { Cell::new(0) }; SCENE_SLOTS],
             trace: RefCell::new(None),
             t_ns: Cell::new(0),
             panes_seen: Cell::new(0),
@@ -814,6 +820,22 @@ impl Counters {
         }
     }
 
+    /// Note `id` among this pass's animating scenes, once; past the slots,
+    /// it is counted in `animating` only. No allocation.
+    /// `tests::a_trace_names_the_scenes_that_answered_animating`.
+    fn moved(&self, id: SceneId) {
+        if id == SceneId::NONE {
+            return;
+        }
+        let key = id.0.saturating_add(1);
+        if self.moving.iter().any(|slot| slot.get() == key) {
+            return;
+        }
+        if let Some(slot) = self.moving.iter().find(|slot| slot.get() == 0) {
+            slot.set(key);
+        }
+    }
+
     /// This pass's time for one scene. For the tests.
     #[cfg(test)]
     fn spent_by(&self, id: SceneId) -> u64 {
@@ -897,6 +919,22 @@ impl Counters {
             }
         }
         qml.push('}');
+        let mut moving = String::from("[");
+        if let Ok(labels) = self.labels.try_borrow() {
+            for key in self.moving.iter().map(Cell::get).filter(|key| *key != 0) {
+                let label = usize::try_from(key.saturating_sub(1))
+                    .ok()
+                    .and_then(|id| labels.get(id))
+                    .and_then(Option::as_deref);
+                if let Some(label) = label {
+                    if moving.len() > 1 {
+                        moving.push(',');
+                    }
+                    moving.push_str(&crate::scripted::json_string(label));
+                }
+            }
+        }
+        moving.push(']');
         let clocks = self.clocks.get().unwrap_or_default();
         format!(
             concat!(
@@ -906,7 +944,7 @@ impl Counters {
                 r#""xray_builds":{},"memo_runs":{},"#,
                 r#""meshes_refused":{},"#,
                 r#""panes":{},"drew":{},"#,
-                r#""scenes":{},"animating":{},"rendered":{},"built":{},"rebound":{},"qml":{},"#,
+                r#""scenes":{},"animating":{},"moving":{},"rendered":{},"built":{},"rebound":{},"qml":{},"#,
                 r#""clocks":"{}","gpu_mhz":{},"mem_mhz":{},"pstate":{}"#
             ),
             pass,
@@ -933,6 +971,7 @@ impl Counters {
             self.drew.get(),
             self.scenes.get(),
             self.animating.get(),
+            moving,
             self.rendered.get(),
             self.built.get(),
             self.rebound.get(),
@@ -988,6 +1027,9 @@ pub(crate) fn frame() -> Frame {
             slot.set((0, 0));
         }
         counters.scene_other.set(0);
+        for slot in &counters.moving {
+            slot.set(0);
+        }
         // `tests::a_traced_pass_and_its_flip_through_the_backends_calls`.
         if counters
             .trace
@@ -1080,8 +1122,9 @@ pub(crate) fn qml(id: SceneId) -> Span {
     })
 }
 
-/// A scene was asked whether it still has somewhere to go, and answered.
-pub(crate) fn scene_asked(animating: bool) {
+/// A scene was asked whether it still has somewhere to go, and answered;
+/// one that said yes is named in the pass's trace record (`moving`).
+pub(crate) fn scene_asked(id: SceneId, animating: bool) {
     COUNTERS.with(|counters| {
         if !counters.live.get() {
             return;
@@ -1091,6 +1134,7 @@ pub(crate) fn scene_asked(animating: bool) {
             counters
                 .animating
                 .set(counters.animating.get().saturating_add(1));
+            counters.moved(id);
         }
     });
 }
@@ -2853,6 +2897,7 @@ mod tests {
         "drew",
         "scenes",
         "animating",
+        "moving",
         "rendered",
         "built",
         "rebound",
@@ -2904,6 +2949,29 @@ mod tests {
             record.contains(r#""qml":{"rounded/Pane":700,"wallpaper/Wallpaper":50},"#),
             "{record}"
         );
+    }
+
+    /// **A trace names the scenes that answered "animating"**, once each, so
+    /// a pass loop that never rests says which scene keeps it going (#392).
+    #[test]
+    fn a_trace_names_the_scenes_that_answered_animating() {
+        let counters = counters();
+        let bar = counters.intern("shell/Bar@DP-1");
+        let cursor = counters.intern("cursor/Cursor");
+        counters.moved(bar);
+        counters.moved(SceneId::NONE);
+        counters.moved(bar);
+        counters.moved(cursor);
+        let record = counters.pass_record(1, ms(5), false);
+        assert!(
+            record.contains(r#""moving":["shell/Bar@DP-1","cursor/Cursor"],"#),
+            "{record}"
+        );
+        for slot in &counters.moving {
+            slot.set(0);
+        }
+        let record = counters.pass_record(2, ms(5), false);
+        assert!(record.contains(r#""moving":[],"#), "{record}");
     }
 
     /// Buffered, and flushed once a second: never a synchronous write per pass.
@@ -3121,6 +3189,7 @@ mod tests {
             free_ids: std::cell::RefCell::new(Vec::new()),
             scene_spent: [const { std::cell::Cell::new((0, 0)) }; super::SCENE_SLOTS],
             scene_other: std::cell::Cell::new(0),
+            moving: [const { std::cell::Cell::new(0) }; super::SCENE_SLOTS],
             trace: std::cell::RefCell::new(None),
             t_ns: std::cell::Cell::new(0),
             panes_seen: std::cell::Cell::new(0),
