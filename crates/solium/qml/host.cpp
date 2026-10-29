@@ -80,6 +80,7 @@
 #include <QtCore/QSocketNotifier>
 #include <QtCore/QUrl>
 #include <QtCore/QVariant>
+#include <QtGui/QCursor>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QStyleHints>
 #include <QtGui/QImage>
@@ -3282,6 +3283,22 @@ extern "C" void solium_qml_scene_pointer_event(SoliumQmlScene *scene, int kind, 
         again.setTimestamp(time);
         QCoreApplication::sendEvent(scene->window, &again);
     }
+}
+
+/* The shape the scene's window asks the pointer to be, as a Qt::CursorShape:
+ * what Qt Quick set on it from the cursorShape of the item or handler under
+ * the point it was last told of (QQuickWindowPrivate::updateCursor, on the
+ * window itself, since this render control names no other window to set it
+ * on), or Qt::ArrowCursor where nothing there names one (#373).
+ * `qml::hosted::tests::a_scene_asks_for_the_cursor_of_the_item_under_the_pointer`. */
+extern "C" int solium_qml_scene_cursor(const SoliumQmlScene *scene)
+{
+#if QT_CONFIG(cursor)
+    if (scene != nullptr && scene->window != nullptr) {
+        return static_cast<int>(scene->window->cursor().shape());
+    }
+#endif
+    return static_cast<int>(Qt::ArrowCursor);
 }
 
 extern "C" int solium_qml_scene_hit(const SoliumQmlScene *scene, double x, double y)

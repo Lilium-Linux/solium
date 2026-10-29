@@ -401,6 +401,11 @@ impl ShellSurface {
         self.scene.leave();
     }
 
+    /// The shape the scene asks the pointer to be (`qml::Scene::cursor`).
+    pub(crate) fn cursor(&self) -> Option<smithay::input::pointer::CursorIcon> {
+        self.scene.cursor()
+    }
+
     /// Read what the scene reserves, if it said something new.
     /// `qml::hosted::tests::a_scene_reserve_is_reported_once_per_change`.
     pub(crate) fn take_reserve(&mut self) {

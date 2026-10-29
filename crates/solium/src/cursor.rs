@@ -31,8 +31,10 @@
 //!    that vanishes the moment that window closes. *We say*: over a titlebar
 //!    or a resize border the compositor asserts a cursor through
 //!    [`Pointer::assert`] — the arrow over chrome, the matching double arrow
-//!    over each of the eight resize edges — and that assertion outranks both
-//!    client sources rather than joining the queue with them. See the
+//!    over each of the eight resize edges, and over a hosted scene that takes
+//!    the press the shape the scene's `cursorShape` asks for (#373, see
+//!    [`qt`]) — and that assertion outranks both client sources rather than
+//!    joining the queue with them. See the
 //!    precedence below for where the boundary between the two rules is.
 //!
 //! **The precedence is last-writer-wins *over a client's own surface*, and
@@ -93,6 +95,7 @@
 //! before it ever gets that far, which is [`shape::resolve`].
 
 pub(crate) mod flight;
+pub(crate) mod qt;
 pub(crate) mod scene;
 pub(crate) mod shape;
 pub(crate) mod theme;

@@ -400,6 +400,21 @@ impl Claim {
             Self::Surface | Self::Mode | Self::Nothing => None,
         }
     }
+
+    /// The cursor the compositor asserts, given the shape the scene that
+    /// takes the press here asks for, `scene` (#373): that shape where the
+    /// claim is the scene's, and otherwise [`Claim::cursor`], whatever the
+    /// scene asked. A scene's `cursorShape` reaches the pointer where its
+    /// press would, and nowhere else: not where only its hover is, which
+    /// leaves the window or the frame under it the pointer (Ruling 8), and
+    /// not where a mode owns the press.
+    /// `tests::a_scenes_shape_is_asserted_only_where_it_takes_the_press`.
+    pub(crate) fn cursor_over(self, scene: Option<CursorIcon>) -> Option<CursorIcon> {
+        match self {
+            Self::Surface => scene,
+            Self::Chrome(_) | Self::Mode | Self::Nothing => self.cursor(),
+        }
+    }
 }
 
 /// `pointer_button`'s precedence chain, as a rule rather than as a sequence of
@@ -1146,6 +1161,23 @@ impl Solium {
         )
     }
 
+    /// The scripted surface whose scene [`Self::claim_under`] gives the
+    /// press at `location` to, on its monitor: the one a grab is held for,
+    /// or the one on top there. The pointer reads that scene's shape off it
+    /// (#373).
+    fn scene_taking_press(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(crate::scripted::SurfaceId, Output)> {
+        if let Some(grab) = &self.hosted_grab {
+            return Some((grab.surface, grab.output.clone()));
+        }
+        match self.topmost_above(location, Some(Asking::Press)) {
+            Some(Above::Script(output, id, _)) => Some((id, output)),
+            _ => None,
+        }
+    }
+
     /// Say what the pointer is over the compositor's own chrome, or stop
     /// saying.
     ///
@@ -1172,11 +1204,27 @@ impl Solium {
     /// and have it stay for the drag. A press a hosted scene holds is held
     /// the same way, so the shape stays the scene's for the press (Ruling 8):
     /// `tests::real_client::reflow_on_close::hosted::a_press_a_scene_holds_keeps_its_shape_over_a_resize_border`.
+    ///
+    /// **Over a scene that takes the press, the scene's shape** (#373): the
+    /// `cursorShape` Qt set on its window for the item under the pointer,
+    /// asserted like the compositor's own, and given back with the claim
+    /// ([`Claim::cursor_over`]). Read after the motion was delivered to the
+    /// scene, so it is the shape for this point, and again each frame.
+    /// `tests::real_client::reflow_on_close::hosted::the_pointer_is_the_shape_the_scene_under_it_asks_for`.
     pub(crate) fn assert_cursor(&mut self, location: Point<f64, Logical>, grabbed: bool) {
         if grabbed || self.scene_press.is_some() {
             return;
         }
-        let icon = self.claim_under(location).cursor();
+        let claim = self.claim_under(location);
+        // Asked only over a scene: anywhere else no scene's shape is the
+        // pointer's, and the scripted surfaces are not walked again.
+        let asked = if claim == Claim::Surface {
+            self.scene_taking_press(location)
+                .and_then(|(id, output)| self.surfaces.get(id)?.cursor(&output))
+        } else {
+            None
+        };
+        let icon = claim.cursor_over(asked);
         if self.pointer.assert(icon) {
             self.redraw = true;
         }

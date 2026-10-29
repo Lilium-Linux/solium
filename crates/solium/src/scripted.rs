@@ -453,6 +453,19 @@ impl Surface {
             .map_or(Hit::Nothing, |instance| instance.hit(area, location))
     }
 
+    /// The shape this surface's scene on one monitor asks the pointer to be
+    /// (#373), `None` with no scene there.
+    /// `state::tests::real_client::reflow_on_close::hosted::the_pointer_is_the_shape_the_scene_under_it_asks_for`.
+    pub(crate) fn cursor(&self, output: &Output) -> Option<smithay::input::pointer::CursorIcon> {
+        #[cfg(test)]
+        if let Some(stand) = self.stand.as_ref() {
+            return stand.cursor;
+        }
+        self.instances
+            .get(&output.name())
+            .and_then(ShellSurface::cursor)
+    }
+
     /// Tell this surface's scene on one monitor that the pointer left it.
     /// `state::tests::real_client::reflow_on_close::hosted::the_scene_hears_the_pointer_leave_when_it_moves_off_its_items`.
     pub(crate) fn leave(&mut self, output: &Output) {
@@ -801,6 +814,8 @@ pub(crate) struct Stand {
     pub(crate) let_go: u32,
     /// Actions the scene queued, taken at the next settle.
     pub(crate) actions: Vec<(String, Json)>,
+    /// The shape the scene asks the pointer to be.
+    pub(crate) cursor: Option<smithay::input::pointer::CursorIcon>,
 }
 
 #[cfg(test)]
@@ -820,6 +835,7 @@ impl Stand {
             keyboard: None,
             let_go: 0,
             actions: Vec::new(),
+            cursor: None,
         }
     }
 }
