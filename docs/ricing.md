@@ -2411,8 +2411,13 @@ window trails behind, and the size of the strip
 (`state::tests::real_client::reflow_on_close::minimize::config_minimize_motion_is_how_long_the_genie_plays`,
 `state::tests::real_client::reflow_on_close::minimize::config_minimize_spread_is_the_genies_spread`,
 `state::tests::real_client::reflow_on_close::minimize::config_minimize_slot_is_the_strip_the_window_goes_into`)
-([Your own animation feel](#your-own-animation-feel) times them). Rebind any
-of them in `bindings`:
+([Your own animation feel](#your-own-animation-feel) times them).
+`sol.keep_above(id, "toggle")` keeps a window over every window that is not,
+clicks included, until it is asked again. A frame's Keep Above button sends a
+name of its own with `Solium.send`, your `sol.on("frame")` listener calls
+`sol.keep_above(id, "toggle")`, and the frame is told `keptAbove` to show it
+is on. A focused fullscreen window still covers it. Rebind any of them in
+`bindings`:
 
 ```lua
 return {

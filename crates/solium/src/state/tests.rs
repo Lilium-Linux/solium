@@ -40378,6 +40378,195 @@ end)"#,
         /// and real QML: what its layers are told of their window, what they
         /// send to Lua, the right button and the wheel on the titlebar, and a
         /// panel dropped down over the window that holds a grab.
+        /// A window kept above the others (#424).
+        mod above {
+            use super::*;
+            use smithay::backend::input::ButtonState;
+
+            /// Two windows 400 by 300, `a` at (100, 100) and `b` at
+            /// (300, 200), overlapping between (300, 200) and (500, 400); `b`
+            /// focused last and so on top; a pointer bound; and `super+a`
+            /// keeping `a` above, `super+b` toggling it.
+            fn two() -> (Desk, Opened, Opened) {
+                let mut desk = Desk::new();
+                let a = desk.open_surface();
+                let b = desk.open_surface();
+                for opened in [&a, &b] {
+                    let _buffer = commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                }
+                desk.pump();
+                for (opened, at) in [(&a, (100, 100)), (&b, (300, 200))] {
+                    let window = window_of(&desk, opened.pane);
+                    desk.state.space.map_element(window, at, false);
+                }
+                desk.state.space.refresh();
+                desk.state.profile.focus_follows_mouse = false;
+                let id = a.pane.get();
+                desk.install(&format!(
+                    "sol.bind(\"super+a\", function() sol.keep_above({id}) end)\n\
+                     sol.bind(\"super+b\", function() sol.keep_above({id}, \"toggle\") end)"
+                ));
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                for opened in [&a, &b] {
+                    focus(&mut desk, opened.pane);
+                }
+                // Whatever opening them started, landed.
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.state.sync_panes();
+                desk.pump();
+                (desk, a, b)
+            }
+
+            fn window_of(desk: &Desk, pane: crate::pane::PaneId) -> Window {
+                desk.state
+                    .panes
+                    .get(pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a client")
+            }
+
+            /// `pane`'s window given the keyboard, as a click gives it, and
+            /// the frame's stack taken.
+            fn focus(desk: &mut Desk, pane: crate::pane::PaneId) {
+                let window = window_of(desk, pane);
+                desk.state.focus_window(
+                    &window,
+                    SERIAL_COUNTER.next_serial(),
+                    crate::script::FocusSource::Script,
+                );
+                desk.state.sync_panes();
+                desk.pump();
+            }
+
+            /// Where the two overlap.
+            const BOTH: (f64, f64) = (400.0, 300.0);
+
+            /// The pane whose window is under `at`.
+            fn under(desk: &Desk, at: (f64, f64)) -> Option<crate::pane::PaneId> {
+                desk.state
+                    .window_under(at.into())
+                    .and_then(|(window, _)| desk.state.panes.id_of(&window))
+            }
+
+            /// Whether `pane`'s row in `sol.windows()` says it is kept above.
+            fn row_above(desk: &Desk, pane: crate::pane::PaneId) -> bool {
+                desk.state
+                    .snapshot()
+                    .windows
+                    .iter()
+                    .find(|row| row.id == pane.get())
+                    .is_some_and(|row| row.above)
+            }
+
+            /// A left click at `at`, through the real input path.
+            fn click(desk: &mut Desk, at: (f64, f64), time: u64) {
+                move_pointer(&mut desk.state, at, time);
+                let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+                for (state, at) in [
+                    (ButtonState::Pressed, time + 1),
+                    (ButtonState::Released, time + 2),
+                ] {
+                    crate::synth::send_button(&mut desk.state, region, 0x110, state, at);
+                }
+                desk.state.sync_panes();
+                desk.pump();
+            }
+
+            /// **A kept-above window stays over a window focused after it,
+            /// and takes its click** (#424): `sol.keep_above` puts `a` over
+            /// `b`, which had been focused last; focusing `b` again raises it
+            /// only among the windows not kept above, so `a` is still drawn
+            /// and hit where the two overlap, and a click there focuses `a`.
+            /// Its row says `above`, and its frame is told `keptAbove`.
+            #[test]
+            fn a_kept_above_window_stays_over_a_window_focused_after_it_and_takes_its_click() {
+                let (mut desk, a, b) = two();
+                assert_eq!(under(&desk, BOTH), Some(b.pane), "the premise: b is on top");
+                assert!(!row_above(&desk, a.pane));
+
+                assert!(desk.state.trigger("super+a"), "the binding ran");
+                desk.state.sync_panes();
+                assert_eq!(under(&desk, BOTH), Some(a.pane), "kept above, a is over b");
+                assert!(row_above(&desk, a.pane) && !row_above(&desk, b.pane));
+                assert!(
+                    desk.state
+                        .frame_window(a.pane)
+                        .is_some_and(|told| told.kept_above),
+                    "its frame is told keptAbove"
+                );
+
+                focus(&mut desk, b.pane);
+                assert!(desk.state.is_focused(&window_of(&desk, b.pane)));
+                assert_eq!(
+                    under(&desk, BOTH),
+                    Some(a.pane),
+                    "b focused after it is still under it"
+                );
+                click(&mut desk, BOTH, 10);
+                assert!(
+                    desk.state.is_focused(&window_of(&desk, a.pane)),
+                    "the click where a covers b is a's"
+                );
+                click(&mut desk, (650.0, 450.0), 20);
+                assert!(
+                    desk.state.is_focused(&window_of(&desk, b.pane)),
+                    "a click on b where nothing covers it focuses b"
+                );
+                assert_eq!(under(&desk, BOTH), Some(a.pane), "and raises it under a");
+            }
+
+            /// **Toggled off, a window is stacked as any other** (#424):
+            /// `sol.keep_above(id, "toggle")` turns it off, the row says so,
+            /// and the next window focused goes over it.
+            #[test]
+            fn toggled_off_a_window_is_stacked_as_any_other() {
+                let (mut desk, a, b) = two();
+                assert!(desk.state.trigger("super+b"), "the binding ran");
+                desk.state.sync_panes();
+                assert!(row_above(&desk, a.pane), "toggled on");
+                assert!(desk.state.trigger("super+b"));
+                desk.state.sync_panes();
+                assert!(!row_above(&desk, a.pane), "and off again");
+                assert_eq!(
+                    under(&desk, BOTH),
+                    Some(a.pane),
+                    "off, it stays where it was until something is raised over it"
+                );
+                focus(&mut desk, b.pane);
+                assert_eq!(under(&desk, BOTH), Some(b.pane), "b focused goes over it");
+            }
+
+            /// **A focused fullscreen window covers one kept above** (#424),
+            /// as in KWin: `b` fullscreen and focused is over `a` everywhere,
+            /// and lifted over the bars as a fullscreen window is.
+            #[test]
+            fn a_focused_fullscreen_window_covers_one_kept_above() {
+                let (mut desk, a, b) = two();
+                assert!(desk.state.trigger("super+a"));
+                desk.state.sync_panes();
+                assert_eq!(under(&desk, BOTH), Some(a.pane));
+                let window = window_of(&desk, b.pane);
+                desk.state.toggle_fullscreen(&window);
+                focus(&mut desk, b.pane);
+                let _answer = commit_buffer(&desk.client, &desk.qh, &b.surface, 1920, 1080);
+                desk.pump();
+                desk.state.clock.advance(Duration::from_secs(2));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.state.sync_panes();
+                assert_eq!(
+                    under(&desk, (150.0, 150.0)),
+                    Some(b.pane),
+                    "fullscreen and focused, b covers a"
+                );
+                let screen = Rectangle::new((0, 0).into(), (1920, 1080).into());
+                assert_eq!(desk.state.lifted_on(screen), Some(b.pane), "and is lifted");
+            }
+        }
+
         mod frames {
             use super::*;
             use smithay::backend::input::ButtonState;

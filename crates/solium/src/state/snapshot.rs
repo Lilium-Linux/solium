@@ -458,6 +458,7 @@ impl Solium {
                     // `the_window_list_says_which_windows_are_leaving`.
                     leaving: pane.leaving(),
                     minimized: pane.minimized(),
+                    above: pane.above(),
                     app_id: pane
                         .client()
                         .map(|window| self.script_app_id(window))

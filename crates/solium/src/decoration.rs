@@ -251,6 +251,8 @@ pub(crate) struct FrameWindow {
     /// one a tiling layout let float.
     pub(crate) floating: bool,
     pub(crate) minimized: bool,
+    /// Kept above every window that is not (#424): `sol.keep_above`.
+    pub(crate) kept_above: bool,
 }
 
 /// What a frame shows.
@@ -1103,6 +1105,7 @@ impl Decoration {
                 layer.scene.set_bool("fullscreen", window.fullscreen);
                 layer.scene.set_bool("floating", window.floating);
                 layer.scene.set_bool("minimized", window.minimized);
+                layer.scene.set_bool("keptAbove", window.kept_above);
             }
             self.shown.window = Some(window);
         }

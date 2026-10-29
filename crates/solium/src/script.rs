@@ -190,6 +190,10 @@ pub(crate) struct WindowInfo {
     /// again (`unminimize`).
     /// `real_client::reflow_on_close::minimize::sol_minimize_marks_the_row_fires_once_and_leaves_the_client_mapped`.
     pub(crate) minimized: bool,
+    /// Whether this window is kept above every window that is not (#424):
+    /// `sol.keep_above`. Cleared when it closes; kept across a reload.
+    /// `real_client::reflow_on_close::above::a_kept_above_window_stays_over_a_window_focused_after_it_and_takes_its_click`.
+    pub(crate) above: bool,
     /// Which application this is, by the name it gives itself: its xdg
     /// `app_id`, or an X11 window's `WM_CLASS` class. Empty for a window
     /// whose application has not arrived, or said nothing. See
@@ -682,6 +686,12 @@ pub(crate) enum Command {
         id: u64,
         shown: bool,
     },
+    /// Keep a window above every window that is not, or stop (#424):
+    /// `sol.keep_above`. `None` toggles it.
+    KeepAbove {
+        id: u64,
+        on: Option<bool>,
+    },
     /// One press and release delivered to a window, as a device would
     /// deliver it: `sol.press`. A key gives the window the keyboard first,
     /// and the focus is told with `source`, what the handler that asked was
@@ -932,6 +942,7 @@ impl Command {
             | Self::Minimize { .. }
             | Self::Unminimize { .. }
             | Self::ShowMinimized { .. }
+            | Self::KeepAbove { .. }
             | Self::Press { .. }
             | Self::Place { .. }
             | Self::Unplace { .. }
@@ -3938,6 +3949,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("parent", window.parent.to_value(lua)?)?;
                 entry.set("leaving", window.leaving)?;
                 entry.set("minimized", window.minimized)?;
+                entry.set("above", window.above)?;
                 entry.set("app_id", window.app_id.clone())?;
                 entry.set("min", size_table(lua, window.min)?)?;
                 entry.set("max", size_table(lua, window.max)?)?;
@@ -6272,6 +6284,37 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Keep a window above every window that is not, or stop (#424): `on` is
+    // `true`, `false` or `"toggle"`, and `true` when left out; the id is the
+    // focused window's when it is left out, as the toggles' is. A window kept
+    // above stays over the others in what is drawn and in what is clicked,
+    // and a click or the keyboard raises a window only among its own kind. A
+    // focused fullscreen window still covers it. Anything else for `on` is an
+    // error naming what it was given.
+    // `real_client::reflow_on_close::above::a_kept_above_window_stays_over_a_window_focused_after_it_and_takes_its_click`.
+    sol.set(
+        "keep_above",
+        lua.create_function(|lua, (id, on): (Option<u64>, mlua::Value)| {
+            let on = match on {
+                mlua::Value::Nil | mlua::Value::Boolean(true) => Some(true),
+                mlua::Value::Boolean(false) => Some(false),
+                mlua::Value::String(word) if word.to_string_lossy() == "toggle" => None,
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "sol.keep_above: `on` is true, false or \"toggle\", not {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let Some(id) = id.or_else(|| focused_id(lua)) else {
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::KeepAbove { id, on });
+            })
+        })?,
+    )?;
+
     sol.set(
         "toggle_maximize",
         lua.create_function(|lua, id: Option<u64>| {
@@ -8353,6 +8396,7 @@ mod tests {
                 parent: Parentage::None,
                 leaving: false,
                 minimized: false,
+                above: false,
                 app_id: String::new(),
                 min: None,
                 max: None,
@@ -11321,6 +11365,7 @@ mod tests {
             parent,
             leaving: false,
             minimized: false,
+            above: false,
             app_id: String::new(),
             min: None,
             max: None,
@@ -12040,6 +12085,7 @@ mod tests {
                     parent: Parentage::None,
                     leaving: false,
                     minimized: false,
+                    above: false,
                     app_id: String::new(),
                     min: None,
                     max: None,
@@ -16264,6 +16310,7 @@ mod dialogs {
             parent: Parentage::None,
             leaving: false,
             minimized: false,
+            above: false,
             app_id: String::new(),
             min: None,
             max: None,
@@ -19834,6 +19881,7 @@ mod directions {
             parent: Parentage::None,
             leaving: false,
             minimized: false,
+            above: false,
             app_id: String::new(),
             min: None,
             max: None,
@@ -21628,6 +21676,7 @@ mod directions {
                 },
                 WindowInfo {
                     minimized: true,
+                    above: false,
                     ..window(2, "DP-1", WIDE)
                 },
                 WindowInfo {

@@ -97,6 +97,7 @@ use crate::{
     },
 };
 
+mod above;
 mod close;
 mod commands;
 mod frames;
@@ -2025,6 +2026,7 @@ impl Solium {
             // fullscreen window keeps the tile it left.
             floating: pane.placed().is_none() && pane.left_tile().is_none(),
             minimized: pane.minimized(),
+            kept_above: pane.above(),
         })
     }
 
@@ -2150,6 +2152,11 @@ impl Solium {
         // rather than the pane being skipped, so `Panes::sync` still sees every
         // window in the space and in the space's order — the ordering is the
         // other half of what this call is for.
+        //
+        // Put in order first for the windows kept above (#424), so the order
+        // the panes take, and so what is drawn and what is clicked, has them
+        // over the rest: `Self::stack_kept_above`.
+        self.stack_kept_above();
         let stack: Vec<(Window, Rectangle<i32, Logical>)> = self
             .space
             .elements()
