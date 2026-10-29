@@ -87,6 +87,10 @@ pub(crate) const DEFAULT_STYLE: &str = "top";
 pub(crate) enum Action {
     Close,
     ToggleMaximize,
+    /// Put the window away, as `sol.minimize` and the application's own
+    /// button do: the configuration hears `minimize` and plays it (#417).
+    /// `state::tests::real_client::reflow_on_close::minimize::a_frames_minimize_button_minimizes_its_window_through_the_configuration`.
+    Minimize,
 }
 
 impl Action {
@@ -94,6 +98,7 @@ impl Action {
         match name {
             "close" => Some(Self::Close),
             "maximize" => Some(Self::ToggleMaximize),
+            "minimize" => Some(Self::Minimize),
             _ => {
                 tracing::warn!(name, "the titlebar asked for something unknown");
                 None
@@ -4532,6 +4537,7 @@ mod tests {
     fn button_names_map_to_actions() {
         assert_eq!(Action::parse("close"), Some(Action::Close));
         assert_eq!(Action::parse("maximize"), Some(Action::ToggleMaximize));
+        assert_eq!(Action::parse("minimize"), Some(Action::Minimize));
         // Unknown names are ignored rather than guessed at: a typo in QML must
         // not close a window.
         assert_eq!(Action::parse("clos"), None);

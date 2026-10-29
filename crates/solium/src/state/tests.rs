@@ -40142,6 +40142,84 @@ end
                 assert!(in_state(&window, State::Suspended));
             }
 
+            /// **A frame's minimize button minimizes its window through the
+            /// configuration** (#417): a click on a layer that asks for
+            /// `"minimize"` puts the window away as `sol.minimize` does, so
+            /// the `minimize` listener hears it, with the window already
+            /// minimized in its snapshot, and plays it.
+            #[test]
+            fn a_frames_minimize_button_minimizes_its_window_through_the_configuration() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let style = std::env::temp_dir()
+                        .join(format!("solium-frame-minimize-{}", std::process::id()));
+                    std::fs::create_dir_all(&style).expect("a style folder");
+                    std::fs::write(
+                        style.join("Pane.qml"),
+                        "import Solium\nPaneStyle {\n    insets.top: 32\n    \
+                         Layer { depth: \"frame\"; name: \"bar\"; source: \"Frame.qml\" }\n}\n",
+                    )
+                    .expect("writing the manifest");
+                    // The whole layer is the button.
+                    std::fs::write(
+                        style.join("Frame.qml"),
+                        "import QtQuick\nItem {\n    id: frame\n    \
+                         property string action: \"\"\n    \
+                         readonly property bool onButton: true\n    \
+                         MouseArea { anchors.fill: parent; onClicked: frame.action = \"minimize\" }\n}\n",
+                    )
+                    .expect("writing the layer");
+                    let mut desk = Desk::new();
+                    let opened = desk.open_surface();
+                    let pane = opened.pane;
+                    desk.install(HEARD);
+                    desk.state
+                        .decorations
+                        .set_style(&mut desk.state.panes, Some(style.display().to_string()));
+                    desk.state
+                        .decorations
+                        .insert(&mut desk.state.panes, pane, 64, 96);
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    let outer = desk.state.pane_outer_of(pane).expect("outer");
+                    let at = (f64::from(outer.loc.x) + 10.0, f64::from(outer.loc.y) + 16.0);
+                    assert!(
+                        matches!(
+                            desk.state.chrome_under(at.into()),
+                            Some(under) if matches!(under.chrome, crate::state::Chrome::Frame)
+                        ),
+                        "the premise: the point is on the frame"
+                    );
+                    move_pointer(&mut desk.state, at, 10);
+                    let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        0x110,
+                        smithay::backend::input::ButtonState::Pressed,
+                        11,
+                    );
+                    crate::synth::send_button(
+                        &mut desk.state,
+                        region,
+                        0x110,
+                        smithay::backend::input::ButtonState::Released,
+                        12,
+                    );
+                    desk.pump();
+                    assert_eq!(minimized(&desk, pane), Some(true));
+                    assert!(
+                        desk.events()
+                            .ends_with(&format!("minimize {}_", pane.get())),
+                        "the configuration did not hear it: {}",
+                        desk.events()
+                    );
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
             /// **Focusing a minimized window shows it first**: `sol.focus`
             /// and a window asking to be brought forward each fire
             /// `unminimize` before `focus`, and the window has the keyboard.

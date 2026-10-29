@@ -2286,6 +2286,10 @@ impl Solium {
                     self.toggle_maximize(&window);
                 }
             }
+            // The one minimize there is, `sol.minimize`'s and the
+            // application's own button's, so the configuration's `minimize`
+            // listener plays it whichever asked.
+            Action::Minimize => self.minimize(pane),
         }
     }
 
