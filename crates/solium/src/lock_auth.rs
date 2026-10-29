@@ -3856,6 +3856,8 @@ mod tests {
                     readonly property int listed: list.count
                     readonly property int arranged: Object.keys(Workspaces.arrangement).length
                     readonly property int tray: Tray.items.count
+                    readonly property int media: Media.players.count
+                    readonly property int playing: Media.active.present ? 1 : 0
                     readonly property string monitor: Solium.monitor.name
                     readonly property int layouts: Keyboard.layouts.length
                     WorkspaceList { id: list }
@@ -3916,12 +3918,28 @@ mod tests {
                 },
             )));
         state.services.tray.refresh_view();
+        state.services.media.apply(
+            crate::services::media::server::Fact::Read(Box::new(
+                crate::services::media::server::ReadPlayer {
+                    key: "org.mpris.MediaPlayer2.mpv".to_owned(),
+                    props: crate::services::media::model::Props {
+                        title: "a song someone keeps to themselves".to_owned(),
+                        ..crate::services::media::model::Props::default()
+                    },
+                    position: None,
+                    art: None,
+                },
+            )),
+            std::time::Duration::ZERO,
+        );
+        state.services.media.refresh_view();
     }
 
     /// What a scene reading `READS_THE_SESSION` reads of the session: the
     /// status, the apps, the workspaces, a `WorkspaceList` of them, the
-    /// arrangement and the tray's items.
-    fn session_read(scene: &mut crate::qml::Scene) -> (String, i32, i32, i32, i32, i32) {
+    /// arrangement, the tray's items and the media players (the active one
+    /// counted with them).
+    fn session_read(scene: &mut crate::qml::Scene) -> (String, i32, i32, i32, i32, i32, i32) {
         (
             scene.get_string_for_test("status"),
             scene.get_int("apps"),
@@ -3929,28 +3947,31 @@ mod tests {
             scene.get_int("listed"),
             scene.get_int("arranged"),
             scene.get_int("tray"),
+            scene.get_int("media") + scene.get_int("playing"),
         )
     }
 
     /// Whether `read` is the whole session `fill_the_session` made.
-    fn reads_it_all(read: &(String, i32, i32, i32, i32, i32)) -> bool {
-        let (status, apps, workspaces, listed, arranged, tray) = read;
+    fn reads_it_all(read: &(String, i32, i32, i32, i32, i32, i32)) -> bool {
+        let (status, apps, workspaces, listed, arranged, tray, media) = read;
         status == "a window's secret title"
             && *apps >= 1
             && *workspaces >= 2
             && *listed >= 2
             && *arranged > 0
             && *tray >= 1
+            && *media >= 2
     }
 
     /// What a scene that reads only what a lock may show reads of it.
-    fn read_empty() -> (String, i32, i32, i32, i32, i32) {
-        (String::new(), 0, 0, 0, 0, 0)
+    fn read_empty() -> (String, i32, i32, i32, i32, i32, i32) {
+        (String::new(), 0, 0, 0, 0, 0, 0)
     }
 
     /// **A lock scene reads only what a lock may show, at all times**:
     /// `Solium.status`, `Apps`, `Workspaces`, a `WorkspaceList`, the
-    /// arrangement and `Tray.items` read empty in it while Solium holds the
+    /// arrangement, `Tray.items`, `Media.players` and `Media.active` read
+    /// empty in it while Solium holds the
     /// lock, through the entry and after it, and still empty once it is
     /// unlocked and the scene waits, quiet, for the next lock; the monitor
     /// and the keyboard read in

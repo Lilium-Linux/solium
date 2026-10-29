@@ -47,6 +47,9 @@ sol.notifications(config.notifications)
 -- The tray: Solium as the session's StatusNotifierWatcher, so applications'
 -- tray icons come to it. A shell draws them from `Tray`. See `config.lua`.
 sol.tray(config.tray or { serve = true })
+-- Media: the session's MPRIS players, for the media keys below and for a
+-- shell's now-playing card, `Media`. See `config.lua`.
+sol.media(config.media or { watch = true })
 -- Audio: the volume keys below, and `Audio` for a shell's slider. See
 -- `config.lua`.
 sol.audio(config.audio or {})
@@ -212,7 +215,9 @@ end)
 -- and `false` there unbinds one. Volume through Solium's own audio (#347),
 -- capped at `audio.max`, with shift for a 1% step, so a key's change reaches
 -- `sol.on("audio")` as the key's; brightness through `brightnessctl`; media
--- through `playerctl`; Print through `grim`, shift+Print a region with
+-- through Solium's own media (#379), on the active player, and through
+-- `playerctl` only when Solium follows no players (`media.watch` off);
+-- Print through `grim`, shift+Print a region with
 -- `slurp`, into ~/Pictures/Screenshots and onto the clipboard when `wl-copy`
 -- is there.
 --
@@ -246,10 +251,20 @@ sol.bind("XF86AudioMute", mute("output"), AT_THE_LOCK)
 sol.bind("XF86AudioMicMute", mute("input"), AT_THE_LOCK)
 sol.bind("XF86MonBrightnessUp", run("brightnessctl", "set", "5%+"), HELD)
 sol.bind("XF86MonBrightnessDown", run("brightnessctl", "set", "5%-"), HELD)
-sol.bind("XF86AudioPlay", run("playerctl", "play-pause"), AT_THE_LOCK)
-sol.bind("XF86AudioPause", run("playerctl", "play-pause"), AT_THE_LOCK)
-sol.bind("XF86AudioNext", run("playerctl", "next"), AT_THE_LOCK)
-sol.bind("XF86AudioPrev", run("playerctl", "previous"), AT_THE_LOCK)
+local function media(action, playerctl)
+    return function()
+        if sol.media().available then
+            sol.act("media." .. action)
+        else
+            sol.spawn("playerctl", playerctl)
+        end
+    end
+end
+-- Pause toggles too: many keyboards' one play/pause key sends it.
+sol.bind("XF86AudioPlay", media("play_pause", "play-pause"), AT_THE_LOCK)
+sol.bind("XF86AudioPause", media("play_pause", "play-pause"), AT_THE_LOCK)
+sol.bind("XF86AudioNext", media("next", "next"), AT_THE_LOCK)
+sol.bind("XF86AudioPrev", media("previous", "previous"), AT_THE_LOCK)
 -- One shell line each, so the file name and the clipboard step stay in one
 -- place a user can read and copy; the name sorts by time.
 local SHOT = 'dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"; mkdir -p "$dir"; '

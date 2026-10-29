@@ -38,6 +38,9 @@ pub(crate) struct Published {
     /// `Tray.items`, and its own values, as last taken (#363).
     tray: Vec<diff::Row>,
     tray_state: Option<String>,
+    /// `Media.players`, and its own values, as last taken (#379).
+    media: Vec<diff::Row>,
+    media_state: Option<String>,
     /// What `Solium.status`, `Workspaces.arrangement` and `Solium.dirs.desktop`
     /// last took.
     /// `tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
@@ -166,6 +169,20 @@ impl crate::state::Solium {
         {
             self.published.tray_state = Some(state);
         }
+        // Media (#379): its players, and its own values.
+        let media = self.services.media.view();
+        publish(
+            Model::Media,
+            &mut self.published.media,
+            rows(&media.players),
+            crate::qml::hosted::apply_rows,
+        );
+        let state = media_state(&media);
+        if self.published.media_state.as_deref() != Some(state.as_str())
+            && crate::qml::hosted::set_media_state(&state)
+        {
+            self.published.media_state = Some(state);
+        }
         // `Folder`: the desktop directory, resolved once (again on a
         // reload) and rescanned wholesale whenever `folder_scan_pending`
         // asks for one or the inotify watch says something changed.
@@ -273,6 +290,7 @@ impl crate::state::Solium {
             (Model::Windows, &mut self.published.windows),
             (Model::Workspaces, &mut self.published.workspaces),
             (Model::Tray, &mut self.published.tray),
+            (Model::Media, &mut self.published.media),
         ] {
             publish(model, last, Vec::new(), crate::qml::hosted::apply_rows);
         }
@@ -315,6 +333,19 @@ fn tray_state(view: &crate::services::tray::View) -> String {
         ("available".to_owned(), Json::Bool(view.available)),
         ("serving".to_owned(), Json::Bool(view.serving)),
         ("owner".to_owned(), owner_json(view.owner.as_ref())),
+    ]))
+    .render()
+}
+
+/// `Media`'s own values, as the JSON object the host reads.
+fn media_state(view: &crate::services::media::View) -> String {
+    use crate::json::Json;
+    Json::Object(std::collections::BTreeMap::from([
+        ("available".to_owned(), Json::Bool(view.available)),
+        (
+            "positionInterval".to_owned(),
+            Json::Number(f64::from(view.position_interval_ms)),
+        ),
     ]))
     .render()
 }

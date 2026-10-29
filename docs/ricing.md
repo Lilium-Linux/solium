@@ -1732,6 +1732,92 @@ sol.bind("super+shift+s", function()
 end)
 ```
 
+### Now playing
+
+Solium follows the media players on the session bus (MPRIS: mpv with
+`mpv-mpris`, Spotify, Firefox, VLC and the rest), so a shell shows what is
+playing and the media keys reach the player with no `playerctl`.
+`config.lua`'s `media` table turns it on, as it is in the shipped
+configuration:
+
+```lua
+return { media = { watch = true, ignore = { "playerctld" }, position_interval_ms = 1000 } }
+```
+
+`Media.active` is the player the keys reach: the one playing, else the last
+that played. It is never null, so a card can bind to it straight away and
+hide itself on `present`. `Media.players` lists every player, in the order
+they appeared; `Media.get(id)` finds one. A lock's scenes read no players:
+what someone listens to is theirs. A now-playing card, as a sketch:
+
+```qml
+Row {
+    readonly property var player: Media.active
+    visible: player.present
+    spacing: 8
+    Image {
+        width: 40; height: 40
+        // Art Solium read itself; a scene that wants art from the network
+        // fetches `artUrl` itself.
+        source: player.art
+        sourceSize: Qt.size(80, 80)
+    }
+    Column {
+        Text { text: player.title; textFormat: Text.PlainText; color: "white" }
+        Text { text: player.artist; textFormat: Text.PlainText; color: "gray" }
+        // Moves on by itself while it plays, every `position_interval_ms`.
+        Rectangle {
+            width: 160 * (player.length > 0 ? player.position / player.length : 0)
+            height: 2; color: "white"
+        }
+    }
+    Text {
+        text: player.playing ? "⏸" : "▶"
+        TapHandler { onTapped: player.playPause() }
+    }
+}
+```
+
+A player has `id`, `service` (its bus name), `identity` (its own name,
+`Spotify`), `desktopEntry`, `icon`, `status` (`playing`, `paused` or
+`stopped`), `playing`, `active`, `title`, `artist` (its artists joined),
+`album`, `art`, `artUrl`, `trackId`, `length` and `position` (in seconds),
+`rate`, `volume` and `shuffle` (null when it offers none), `loopStatus`, and
+what it says it can do: `canPlay`, `canPause`, `canGoNext`,
+`canGoPrevious`, `canSeek` and `canControl`. `art` is
+`image://solium/media/...`: a picture the player named on disk or sent
+inline, read, decoded (PNG or JPEG) and capped by Solium. `artUrl` is a
+picture the player names on the network, as it named it: Solium fetches
+nothing, and a scene that shows it makes the request from the compositor's
+own process, so only bind it when you want that. Titles and names are the
+player's own text: show them with `textFormat: Text.PlainText`.
+
+Its calls go straight to the player: `playPause()`, `play()`, `pause()`,
+`next()`, `previous()`, `seek(offset)` (seconds, forward or back),
+`setPosition(position)` (seconds into the track) and `setVolume(v)` (its own
+volume, 0.0 to 1.0). One the player says it cannot do is not made.
+
+Lua reads the same with `sol.media()`, each player's `position` where it is
+now, hears changes with `sol.on("media")`, and acts with `media.*`, on the
+active player unless an `id` names another:
+
+```lua
+sol.on("media", function(e)
+    if e.what == "active" and e.player then
+        sol.log("now playing in " .. e.player.identity .. ": " .. e.player.title)
+    end
+end)
+
+-- Ten seconds back, and the next track, from the keyboard.
+sol.bind("super+comma", function() sol.act("media.seek", { offset = -10 }) end)
+sol.bind("super+period", function() sol.act("media.next") end)
+```
+
+The shipped `XF86AudioPlay`, `Pause`, `Next` and `Prev` keys send
+`media.play_pause`, `media.next` and `media.previous`, at the lock too, and
+spawn `playerctl` only when `media.watch` is off. Nested, players are
+followed only on the bus `SOLIUM_SESSION_BUS` names.
+
 ### Bars, docks and wallpapers
 
 A shell — bar, dock and launcher together — can be hosted inside the

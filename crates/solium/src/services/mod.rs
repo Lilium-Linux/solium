@@ -9,6 +9,7 @@
 //! than that.
 
 pub(crate) mod audio;
+pub(crate) mod media;
 pub(crate) mod notifications;
 pub(crate) mod tray;
 
@@ -22,6 +23,7 @@ pub(crate) struct Services {
     pub(crate) notifications: notifications::Service,
     pub(crate) audio: audio::Service,
     pub(crate) tray: tray::Service,
+    pub(crate) media: media::Service,
 }
 
 impl Services {
@@ -30,6 +32,7 @@ impl Services {
             notifications: notifications::Service::new(notifications::Service::state_file()),
             audio: audio::Service::default(),
             tray: tray::Service::default(),
+            media: media::Service::default(),
         }
     }
 }
@@ -40,6 +43,32 @@ pub(crate) fn settle(state: &mut Solium) {
     settle_notifications(state);
     settle_audio(state);
     settle_tray(state);
+    settle_media(state);
+}
+
+fn settle_media(state: &mut Solium) {
+    let now = state.clock.now();
+    state.services.media.settle(now);
+    state.services.media.refresh_view();
+    let events = std::mem::take(&mut state.services.media.events);
+    let seen = state.services.media.seen(now);
+    for event in events {
+        let json = event.to_json(&seen);
+        let snapshot = state.snapshot();
+        let Some(mut scripts) = state.scripts.take() else {
+            break;
+        };
+        let outcome = scripts.media_event(&json, snapshot);
+        state.scripts = Some(scripts);
+        state.apply(outcome);
+    }
+}
+
+/// A `media.*` action, from Lua (a media key's binding) or a scene (#379).
+/// Done at the lock too: a player plays or pauses, and no window is reached.
+pub(crate) fn act_media(state: &mut Solium, action: &str, data: &Json) -> Result<(), &'static str> {
+    let now = state.clock.now();
+    state.services.media.act(action, data, now)
 }
 
 fn settle_tray(state: &mut Solium) {

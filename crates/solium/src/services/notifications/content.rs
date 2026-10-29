@@ -305,7 +305,7 @@ pub(crate) fn image_path(text: &str) -> Option<Result<Image, Refused>> {
     Some(read_png(Path::new(&path)))
 }
 
-fn percent_decode(text: &str) -> String {
+pub(crate) fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -325,6 +325,13 @@ fn percent_decode(text: &str) -> String {
 }
 
 fn read_png(path: &Path) -> Result<Image, Refused> {
+    decode_png(&read_file(path)?)
+}
+
+/// A regular file's bytes, at most [`IMAGE_PATH_MAX_BYTES`] of them, read
+/// without waiting on anything that is not a file: notifications' images and
+/// media's album art (#379).
+pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>, Refused> {
     use std::{io::Read, os::unix::fs::OpenOptionsExt};
     // Asked of the path first, and opened without blocking: a FIFO or a
     // device named here would otherwise hang the worker, and every
@@ -355,12 +362,12 @@ fn read_png(path: &Path) -> Result<Image, Refused> {
     if bytes.len() as u64 > IMAGE_PATH_MAX_BYTES {
         return Err(Refused::TooLarge);
     }
-    decode_png(&bytes)
+    Ok(bytes)
 }
 
 /// PNG bytes to RGBA, any colour type and depth the decoder expands to 8-bit
 /// samples, with a pixel budget so a tiny file cannot claim a huge canvas.
-fn decode_png(bytes: &[u8]) -> Result<Image, Refused> {
+pub(crate) fn decode_png(bytes: &[u8]) -> Result<Image, Refused> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(|_| Refused::Unreadable)?;

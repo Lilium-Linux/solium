@@ -310,6 +310,14 @@ int solium_qml_animating(void);
 int solium_qml_drain(long long elapsed_ms, int advance);
 
 /*
+ * The compositor's clock, in milliseconds, as solium_qml_tick or
+ * solium_qml_drain last brought it: what a value that moves with time (a
+ * media player's position, #379) is worked out against when it is read.
+ * 0 before the host has started.
+ */
+long long solium_qml_clock_ms(void);
+
+/*
  * For tests: watch `fd` for reading from inside Qt, with a QSocketNotifier the
  * scene's root owns, adding the bytes each read gets to the int property
  * `name`; end of file stops the watch. `fd` must stay open until the scene is
@@ -599,6 +607,8 @@ int solium_qml_scene_take_action(SoliumQmlScene *scene, const char **action,
 #define SOLIUM_QML_ROWS_AUDIO_INPUTS 8
 /* `Tray.items` (#363, tray.h). */
 #define SOLIUM_QML_ROWS_TRAY 9
+/* `Media.players` (#379, media.h). */
+#define SOLIUM_QML_ROWS_MEDIA 10
 
 /* Apply one batch of row operations, rendered by `crate::models::diff::render`,
  * to a model: in order, every row's values written before any row is

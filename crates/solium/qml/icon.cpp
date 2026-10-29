@@ -27,6 +27,7 @@
 #include "icon.h"
 #include "notifications.h"
 #include "tray.h"
+#include "media.h"
 
 #include <QtCore/QCache>
 #include <QtCore/QMutex>
@@ -64,8 +65,8 @@ QImage SoliumIconProvider::requestImage(const QString &id, QSize *size,
                                         const QSize &requestedSize)
 {
     // `id` is everything after `image://solium/`: `icon/<name>?size=...`,
-    // and the pictures services hand over, below (album art and avatar
-    // images are P1/P2, 03 §3.2.14's own table).
+    // and the pictures services hand over, below (avatar images are P2, 03
+    // §3.2.14's own table).
     // `notification/<id>/<revision>` (#346): an image Rust decoded, with its
     // limits, and handed over; the revision only makes a replaced image a
     // new URL.
@@ -89,6 +90,20 @@ QImage SoliumIconProvider::requestImage(const QString &id, QSize *size,
         const QString rest = id.mid(tray.size());
         QImage image = solium_tray_image(rest.section(QLatin1Char('/'), 0, 0).toUInt(),
                                          rest.section(QLatin1Char('/'), 1, 1));
+        if (!image.isNull() && requestedSize.isValid()
+            && (image.width() > requestedSize.width() || image.height() > requestedSize.height())) {
+            image = image.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+        if (size != nullptr && !image.isNull()) {
+            *size = image.size();
+        }
+        return image;
+    }
+    // `media/<id>/<revision>` (#379): a player's album art, read from a
+    // local file or a `data:` URI and decoded by Rust, within its limits.
+    const QString media = QStringLiteral("media/");
+    if (id.startsWith(media)) {
+        QImage image = solium_media_art(id.mid(media.size()).section(QLatin1Char('/'), 0, 0).toUInt());
         if (!image.isNull() && requestedSize.isValid()
             && (image.width() > requestedSize.width() || image.height() > requestedSize.height())) {
             image = image.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);

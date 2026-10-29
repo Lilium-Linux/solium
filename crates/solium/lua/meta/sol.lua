@@ -500,6 +500,7 @@
 ---| "notifications" # Something happened to a notification: `(event)`, a `sol.NotificationEvent`.
 ---| "audio" # Something changed in audio: `(event)`, a `sol.AudioEvent`, with who changed it.
 ---| "tray" # Something changed in the tray: `(event)`, a `sol.TrayEvent`.
+---| "media" # Something changed in media: `(event)`, a `sol.MediaEvent`.
 ---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
@@ -924,6 +925,65 @@ function sol.audio(options) end
 ---@param options sol.TrayOptions
 ---@return nil
 function sol.tray(options) end
+
+---@class sol.MediaPlayer
+---@field id integer Solium's id for it, never given out twice in a run.
+---@field service string Its bus name: `org.mpris.MediaPlayer2.mpv`.
+---@field identity string Its own name for itself: `mpv`, `Spotify`. The player's own text, as are `title`, `artist` and `album`: show it as plain text.
+---@field desktopEntry string Its `.desktop` file's name, without the suffix, or empty.
+---@field icon string `image://solium/icon/<desktopEntry>`, or empty.
+---@field status "playing"|"paused"|"stopped"
+---@field playing boolean
+---@field active boolean It is the active player: the one the media keys reach.
+---@field title string
+---@field artist string Its artists, joined with ", ".
+---@field album string
+---@field art string The album art Solium read from a local file or a `data:` URI: `image://solium/media/<id>/<revision>`, or empty.
+---@field artUrl string Album art the player names on the network (`https://...`), as it named it, or empty. Solium fetches nothing; a scene that shows it fetches it itself.
+---@field trackId string The track's object path, or empty.
+---@field length number The track's length, in seconds; 0 when it is not known.
+---@field position number Seconds into the track, where it is now: in `sol.media()` and an event, worked out from where it was, the rate and the time since.
+---@field positionAt number When `position` was read, in milliseconds on the compositor's clock, in a scene's row. In Lua, `position` is already where it is now.
+---@field rate number 1.0 is normal speed.
+---@field volume? number Its own volume, 0.0 to 1.0, when it offers one.
+---@field shuffle? boolean When it offers it.
+---@field loopStatus ""|"none"|"track"|"playlist" Empty when it does not offer it.
+---@field canPlay boolean What it says it can do, and false for all when it says it cannot be controlled.
+---@field canPause boolean
+---@field canGoNext boolean
+---@field canGoPrevious boolean
+---@field canSeek boolean
+---@field canControl boolean
+
+---@class sol.MediaEvent
+---@field what "added"|"changed"|"removed"|"active" `changed` covers a seek; `active` is another player, or none, becoming the one the keys reach.
+---@field id integer The player; for `active`, the one active now, or 0 for none.
+---@field player? sol.MediaPlayer The player as it is now, for all but `removed` (and `active` with none).
+
+---@class sol.MediaState
+---@field available boolean Whether players are followed at all.
+---@field players sol.MediaPlayer[] In the order they appeared.
+---@field active? sol.MediaPlayer The one playing, else the last that played, else the newest.
+
+---@class sol.MediaOptions
+---@field watch? boolean Follow the MPRIS players on the session bus. False by default. A nested run follows them only on the bus `SOLIUM_SESSION_BUS` names.
+---@field ignore? string[] Players left out, by the part of their bus name after `org.mpris.MediaPlayer2.`, an instance's suffix (`.instance42`) included. `{ "playerctld" }` by default.
+---@field position_interval_ms? integer How often a playing player's `position` moves on in a scene, 0 to 60000; 0 moves it only when the player says where it is. 1000 by default.
+
+---Media (#379): with a table, whether Solium follows the session's media
+---players; with none, what it follows now. Its actions go through `sol.act`,
+---each on the player `id` names, or the active one with no `id`:
+---`media.play_pause`, `media.play`, `media.pause`, `media.next`,
+---`media.previous`, `media.seek { offset }` (seconds, forward or back),
+---`media.set_position { position }` (seconds into the track) and
+---`media.volume { value }` or `{ by }` (the player's own volume, 0.0 to 1.0).
+---One the player says it cannot do is refused (`"unsupported"`), as is one
+---with no player (`"no-player"`) or with none followed (`"unavailable"`).
+---They are done at the lock too: no window is reached.
+---@overload fun(): sol.MediaState
+---@param options sol.MediaOptions
+---@return nil
+function sol.media(options) end
 
 ---@class sol.NotifyAction
 ---@field key string `default` for a click on the body.

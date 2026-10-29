@@ -131,6 +131,15 @@ mod ffi {
             len: usize,
         ) -> c_int;
         pub(super) fn solium_qml_drop_tray_image(id: u32, kind: u32);
+        pub(super) fn solium_qml_set_media_state(json: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_media_art(
+            id: u32,
+            width: c_int,
+            height: c_int,
+            rgba: *const u8,
+            len: usize,
+        ) -> c_int;
+        pub(super) fn solium_qml_drop_media_art(id: u32);
         pub(super) fn solium_qml_take_service_call(
             action: *mut *const c_char,
             data_json: *mut *const c_char,
@@ -157,6 +166,8 @@ pub(crate) enum Model {
     AudioInputs = 8,
     /// `Tray.items` (#363).
     Tray = 9,
+    /// `Media.players` (#379).
+    Media = 10,
 }
 
 /// Apply one batch of row operations, rendered by `models::diff::render`, to
@@ -298,6 +309,47 @@ pub(crate) fn set_tray_image(
 pub(crate) fn drop_tray_image(id: u32, kind: u32) {
     // SAFETY: no pointer, nothing to outlive.
     unsafe { ffi::solium_qml_drop_tray_image(id, kind) }
+}
+
+/// `Media`'s own values (#379): `available` and `positionInterval`, as one
+/// JSON object. Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_media_state(json: &str) -> bool {
+    touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_set_media_state(json.as_ptr()) != 0 }
+}
+
+/// A player's album art, for `image://solium/media/<id>/<revision>` (#379):
+/// straight RGBA, read, decoded and capped by `services::media::content`.
+/// Whether Qt took it.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_media_art(
+    id: u32,
+    image: &crate::services::notifications::content::Image,
+) -> bool {
+    let (Ok(width), Ok(height)) = (c_int::try_from(image.width), c_int::try_from(image.height))
+    else {
+        return false;
+    };
+    if image.rgba.len() != image.width as usize * image.height as usize * 4 {
+        return false;
+    }
+    touched();
+    // SAFETY: the bytes outlive the call, and the host copies them.
+    unsafe {
+        ffi::solium_qml_set_media_art(id, width, height, image.rgba.as_ptr(), image.rgba.len()) != 0
+    }
+}
+
+/// A player's album art let go.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn drop_media_art(id: u32) {
+    // SAFETY: no pointer, nothing to outlive.
+    unsafe { ffi::solium_qml_drop_media_art(id) }
 }
 
 /// One call a scene made on a service's object (`n.dismiss()`,
@@ -2739,6 +2791,113 @@ pub(crate) mod tests {
             assert!(super::apply_rows(
                 super::Model::Tray,
                 &render(&diff(&rows, &[]))
+            ));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+        });
+    }
+
+    /// **A media player reaches a scene, its position moves on, and its calls
+    /// go to Rust** (#379): `Media.players` counts it, `Media.active` follows
+    /// the row marked active, its `position` is worked out on the
+    /// compositor's clock whenever it is read again (on a change, and on the
+    /// ticker `positionInterval` sets while it plays), and
+    /// `player.playPause()` and `player.seek(offset)` are queued for
+    /// `take_service_call`, in order, with the player's id.
+    #[test]
+    fn a_media_player_reaches_a_scene_its_position_moves_on_and_its_calls_are_queued() {
+        use crate::{
+            json::Json,
+            models::diff::{Row, diff, render},
+        };
+        use std::{collections::BTreeMap, time::Duration};
+
+        on_the_qt_thread(|| {
+            while super::take_service_call().is_some() {}
+            let (directory, mut scene) = hosted(
+                "solium-hosted-media",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property int count: Media.players.count
+                    readonly property int present: Media.active.present ? 1 : 0
+                    readonly property string title: Media.active.title
+                    readonly property int tenths: Math.round(Media.active.position * 10)
+                    property int go: 0
+                    onGoChanged: {
+                        Media.active.playPause()
+                        Media.get(5).seek(-2.5)
+                    }
+                }
+                "#,
+                "media-1",
+            );
+            assert_eq!(scene.get_int("present"), 0, "no player: an empty facade");
+            crate::qml::tick(Duration::from_secs(100));
+            let row = |title: &str| Row {
+                key: "5".to_owned(),
+                values: BTreeMap::from([
+                    ("id", Json::Number(5.0)),
+                    ("title", Json::Text(title.to_owned())),
+                    ("active", Json::Bool(true)),
+                    ("playing", Json::Bool(true)),
+                    ("rate", Json::Number(1.0)),
+                    ("length", Json::Number(200.0)),
+                    ("position", Json::Number(10.0)),
+                    ("positionAt", Json::Number(100_000.0)),
+                ]),
+            };
+            let first = vec![row("Song")];
+            assert!(super::apply_rows(
+                super::Model::Media,
+                &render(&diff(&[], &first))
+            ));
+            assert_eq!(
+                (
+                    scene.get_int("count"),
+                    scene.get_int("present"),
+                    scene.get_string_for_test("title"),
+                    scene.get_int("tenths")
+                ),
+                (1, 1, "Song".to_owned(), 100)
+            );
+            // Two and a half seconds on, a change reads it where it is now.
+            crate::qml::tick(Duration::from_millis(102_500));
+            let renamed = vec![row("Song (live)")];
+            assert!(super::apply_rows(
+                super::Model::Media,
+                &render(&diff(&first, &renamed))
+            ));
+            assert_eq!(scene.get_int("tenths"), 125);
+            // And with nothing changing, the ticker reads it again.
+            assert!(super::set_media_state(
+                r#"{"available":true,"positionInterval":20}"#
+            ));
+            std::thread::sleep(Duration::from_millis(60));
+            crate::qml::drain(Duration::from_millis(103_000), true);
+            assert_eq!(scene.get_int("tenths"), 130);
+            scene.set_int("go", 1);
+            assert_eq!(
+                super::take_service_call(),
+                Some((
+                    "media.play_pause".to_owned(),
+                    Json::parse(r#"{"id":5}"#).unwrap_or(Json::Null)
+                ))
+            );
+            assert_eq!(
+                super::take_service_call(),
+                Some((
+                    "media.seek".to_owned(),
+                    Json::parse(r#"{"id":5,"offset":-2.5}"#).unwrap_or(Json::Null)
+                ))
+            );
+            assert!(super::set_media_state(
+                r#"{"available":false,"positionInterval":0}"#
+            ));
+            assert!(super::apply_rows(
+                super::Model::Media,
+                &render(&diff(&renamed, &[]))
             ));
             drop(scene);
             let _ = std::fs::remove_dir_all(&directory);
