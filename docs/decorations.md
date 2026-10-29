@@ -132,9 +132,12 @@ field's caret is when this window has it, and `values`, whatever the
 configuration handed every pane with `sol.pane_values{ ... }`; the `Keyboard`
 singleton is there to read as well. The panes README says what each holds.
 
-**`action` is how a button asks for something.** Set it to `"close"` or
-`"maximize"`; the compositor takes it and clears it, so a press is acted on
-once, on release.
+**`action` is how a button asks for something.** Set it to `"close"`,
+`"maximize"` or `"minimize"`; the compositor takes it and clears it, so a
+press is acted on once, on release. `"minimize"` puts the window away the way
+`super+m` and the application's own button do, so whatever your configuration
+does on `sol.on("minimize")`, the genie into its dock button for one, plays
+for the frame's button too.
 
 **`onButton` is how a button keeps a press from dragging the window.** A press
 on the frame starts a window move unless a layer says the pointer is over a

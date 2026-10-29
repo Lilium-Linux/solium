@@ -173,7 +173,7 @@ Read back by the compositor:
 
 | property | |
 |---|---|
-| `action` | set to `"close"` or `"maximize"` to ask for it; cleared once taken |
+| `action` | set to `"close"`, `"maximize"` or `"minimize"` to ask for it; cleared once taken. `"minimize"` puts the window away as `sol.minimize` does, so the configuration's `minimize` listener plays it |
 | `onButton` | `true` while the pointer is over a button. A press on the frame starts a window drag unless some layer says this |
 | `dormant` | `true` while the layer has nothing to draw, so it is not drawn, and in software keeps no image. An inline layer binds it on its `Layer` and `PaneStyle` hands it on; a delegated layer declares `property bool dormant` on its own root |
 | `layerOpacity` | how opaque the compositor draws the layer's picture, from 0 to 1, over the window's own opacity; 1 when not declared. Applied as the layer is composited, so animating it draws no new picture: a fade by it is one blend per frame and nothing of Qt's, where a fade of an item's `opacity` draws the whole layer again on every frame of it. An inline layer binds it on its `Layer`; a delegated layer declares `property real layerOpacity` on its own root |

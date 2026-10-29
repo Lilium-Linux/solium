@@ -393,8 +393,8 @@ application has gone. To close up at once, handle `closing` (or
 `sol.windows()`, and put the window back on `refused`.
 
 **A minimized window is kept, and not shown** (#30). `sol.minimize(id)`,
-`super+m` (the focused window) and the application's own minimize button all
-minimize a window, and `sol.unminimize(id)` shows it again; so does focusing
+`super+m` (the focused window), the application's own minimize button and a
+frame's (`action = "minimize"`, #417) all minimize a window, and `sol.unminimize(id)` shows it again; so does focusing
 it -- `sol.focus`, a click in the overview, an application asking to be
 brought forward. Its client stays mapped and alive, and is told it is
 suspended where its protocol has the word: an xdg toplevel's `suspended`
