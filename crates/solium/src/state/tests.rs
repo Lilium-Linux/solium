@@ -7291,7 +7291,7 @@ end)"#,
         #[test]
         fn a_window_made_fullscreen_mid_drag_covers_its_monitor_and_the_drag_ends() {
             use smithay::backend::input::ButtonState;
-            use smithay::input::pointer::{Focus, GrabStartData};
+            use smithay::input::pointer::GrabStartData;
             for (name, key, covers) in [
                 ("fullscreen-mid-drag", "super+f", screen()),
                 ("maximize-mid-drag", "super+shift+m", screen()),
@@ -7324,16 +7324,13 @@ end)"#,
                     button: 0x110,
                     location: pointer.current_location(),
                 };
-                let grab = crate::input::grab::MoveGrab::new(
+                crate::input::grab::MoveGrab::start(
+                    &mut desk.state,
+                    &pointer,
                     start,
                     desk.window.clone(),
                     (300, 200).into(),
-                );
-                pointer.set_grab(
-                    &mut desk.state,
-                    grab,
                     SERIAL_COUNTER.next_serial(),
-                    Focus::Clear,
                 );
                 motion(&mut desk.state, (60.0, 40.0));
                 assert_eq!(
