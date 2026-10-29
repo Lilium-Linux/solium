@@ -1,8 +1,10 @@
 //! PipeWire, on a thread of its own (03 §3.2.5, "Lifecycle").
 //!
 //! The thread runs PipeWire's own main loop. It binds every sink and source
-//! node, and every audio device, with only the params it uses (`Props` for a
-//! node, `Route` for a device), and the `default` metadata. It turns what
+//! node, every application's playback stream (`Stream/Output/Audio`, #416),
+//! every client (for whose a stream is, [`Owners`]), and every audio device,
+//! with only the params it uses (`Props` for a node,
+//! `Route` for a device), and the `default` metadata. It turns what
 //! they say into [`Fact`]s for the event loop, and the event loop's
 //! [`Command`]s into params set: a card's volume through its route, so the
 //! hardware mixer moves and WirePlumber remembers it, and a node's own
@@ -24,7 +26,7 @@ use pw::{
 };
 
 use super::{
-    model::{Command, Direction, Fact, Kind, Seen},
+    model::{App, Command, Direction, Fact, Kind, Seen},
     volume::Target,
 };
 
@@ -94,6 +96,26 @@ struct Route {
 struct NodeEntry {
     _listener: pw::node::NodeListener,
     proxy: pw::node::Node,
+    node: Node,
+}
+
+impl std::ops::Deref for NodeEntry {
+    type Target = Node;
+
+    fn deref(&self) -> &Node {
+        &self.node
+    }
+}
+
+impl std::ops::DerefMut for NodeEntry {
+    fn deref_mut(&mut self) -> &mut Node {
+        &mut self.node
+    }
+}
+
+/// What a node has said of itself, apart from its proxy.
+#[derive(Debug)]
+struct Node {
     name: String,
     label: String,
     direction: Direction,
@@ -105,6 +127,134 @@ struct NodeEntry {
     is_virtual: bool,
     bus: String,
     form_factor: String,
+    /// Whose it is, for an application's playback stream: then its name is
+    /// `stream#<global id>`, as `node.name` is no one's own for a stream
+    /// (two tabs of a browser are two streams of one name).
+    app: Option<App>,
+}
+
+/// A node's properties, as a key's lookup.
+type Props<'p, 'a> = &'p dyn Fn(&str) -> Option<&'a str>;
+
+impl Node {
+    /// A node as its registry entry says it, which carries fewer properties
+    /// than its info.
+    fn new(
+        id: u32,
+        direction: Direction,
+        stream: bool,
+        props: Props<'_, '_>,
+        owners: &mut Owners,
+    ) -> Self {
+        let app = stream.then(|| {
+            let mut app = App::default();
+            let (own, client) = read_app(&mut app, props);
+            owners.stream(id, own, client);
+            settle_pid(&mut app, owners.pid(id));
+            app
+        });
+        Self {
+            name: if stream {
+                format!("stream#{id}")
+            } else {
+                props("node.name").unwrap_or_default().to_owned()
+            },
+            label: String::new(),
+            direction,
+            device: None,
+            volumes: Vec::new(),
+            mute: false,
+            state: "idle".to_owned(),
+            is_virtual: false,
+            bus: String::new(),
+            form_factor: String::new(),
+            app,
+        }
+    }
+
+    /// One info event of it: its state, and its properties when the event
+    /// carries them. PipeWire sends a node's properties only in an event
+    /// that changed them; the others (a stream starting to play) carry an
+    /// empty set, which must not empty what the node said before.
+    /// `tests::a_stream_keeps_whose_it_is_when_it_starts_to_play`.
+    fn learn(
+        &mut self,
+        id: u32,
+        props: Props<'_, '_>,
+        props_changed: bool,
+        state: &str,
+        owners: &mut Owners,
+    ) {
+        state.clone_into(&mut self.state);
+        if !props_changed {
+            return;
+        }
+        if let Some(app) = self.app.as_mut() {
+            let (own, client) = read_app(app, props);
+            owners.stream(id, own, client);
+            settle_pid(app, owners.pid(id));
+            let label = [app.name.as_str(), app.media.as_str()]
+                .into_iter()
+                .chain(props("node.description"))
+                .chain(props("node.name"))
+                .find(|label| !label.is_empty())
+                .unwrap_or_default();
+            label.clone_into(&mut self.label);
+        } else {
+            if let Some(name) = props("node.name") {
+                name.clone_into(&mut self.name);
+            }
+            let label = props("node.nick")
+                .filter(|nick| !nick.is_empty())
+                .or_else(|| props("node.description"))
+                .unwrap_or_default();
+            label.clone_into(&mut self.label);
+        }
+        self.device = props("device.id")
+            .and_then(|device| device.parse().ok())
+            .zip(props("card.profile.device").and_then(|d| d.parse().ok()));
+        self.is_virtual = props("node.virtual") == Some("true") || props("device.id").is_none();
+        self.bus = props("device.bus").unwrap_or_default().to_owned();
+        self.form_factor = props("device.form-factor").unwrap_or_default().to_owned();
+    }
+
+    /// Its process settled again, after its client's was learnt.
+    fn own(&mut self, id: u32, owners: &Owners) {
+        if let Some(app) = self.app.as_mut() {
+            settle_pid(app, owners.pid(id));
+        }
+    }
+
+    /// What the event loop is told of an application's stream: its volume
+    /// and mute are its node's own `Props`, as a stream has no card, no
+    /// route and no kind of its own.
+    fn stream_seen(&self) -> Option<Seen> {
+        let app = self.app.as_ref()?;
+        Some(Seen {
+            name: self.name.clone(),
+            label: self.label.clone(),
+            direction: self.direction,
+            kind: Kind::Other,
+            channels: self.volumes.clone(),
+            muted: self.mute,
+            step: None,
+            route: None,
+            port_label: String::new(),
+            port_kind: String::new(),
+            state: self.state.clone(),
+            app: Some(Box::new(app.clone())),
+        })
+    }
+}
+
+/// A node's state, as a scene reads it.
+fn state_name(state: &pw::node::NodeState<'_>) -> &'static str {
+    match state {
+        pw::node::NodeState::Running => "running",
+        pw::node::NodeState::Idle | pw::node::NodeState::Creating => "idle",
+        pw::node::NodeState::Suspended => "suspended",
+        pw::node::NodeState::Error(_) => "error",
+    }
 }
 
 struct DeviceEntry {
@@ -115,8 +265,103 @@ struct DeviceEntry {
     form_factor: String,
 }
 
+struct ClientEntry {
+    _listener: pw::client::ClientListener,
+    _proxy: pw::client::Client,
+}
+
+/// A client's processes: the socket's, which PipeWire read from the kernel
+/// (`pipewire.sec.pid`), and the one it says (`application.process.id`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClientPids {
+    sec: Option<u32>,
+    process: Option<u32>,
+}
+
+impl ClientPids {
+    fn read<'a>(get: &dyn Fn(&str) -> Option<&'a str>) -> Self {
+        Self {
+            sec: pid_of(get("pipewire.sec.pid")),
+            process: pid_of(get("application.process.id")),
+        }
+    }
+}
+
+/// A process id as PipeWire writes one; none for the kernel's or init's.
+fn pid_of(text: Option<&str>) -> Option<u32> {
+    text.and_then(|pid| pid.parse::<u32>().ok())
+        .filter(|pid| *pid > 1)
+}
+
+/// Whose each stream is, by process (#416): the stream's own process when
+/// its node says one (a PulseAudio client's, as `pipewire-pulse` writes it),
+/// else its client's (a native PipeWire client's, whose node says none).
+/// The two can arrive in either order, so a client learnt late names the
+/// streams it now owns. `tests::a_native_stream_is_its_client_s`.
+#[derive(Debug, Default)]
+struct Owners {
+    /// Each stream's own process and its client, as its node says them.
+    streams: HashMap<u32, (Option<u32>, Option<u32>)>,
+    clients: HashMap<u32, ClientPids>,
+}
+
+impl Owners {
+    /// A stream's node said its own process and its client; what it said
+    /// before stands where it now says nothing (its registry entry carries
+    /// fewer properties than its info).
+    fn stream(&mut self, node: u32, own: Option<u32>, client: Option<u32>) {
+        let entry = self.streams.entry(node).or_default();
+        *entry = (own.or(entry.0), client.or(entry.1));
+    }
+
+    /// A stream's process: its own, else its client's socket's, else the one
+    /// its client says.
+    fn pid(&self, node: u32) -> Option<u32> {
+        let (own, client) = *self.streams.get(&node)?;
+        own.or_else(|| {
+            let client = self.clients.get(&client?)?;
+            client.sec.or(client.process)
+        })
+    }
+
+    /// A client's processes, learnt: the streams whose process they may have
+    /// changed, those of this client that say none of their own.
+    fn client(&mut self, id: u32, pids: ClientPids) -> Vec<u32> {
+        let entry = self.clients.entry(id).or_default();
+        let merged = ClientPids {
+            sec: pids.sec.or(entry.sec),
+            process: pids.process.or(entry.process),
+        };
+        if *entry == merged {
+            return Vec::new();
+        }
+        *entry = merged;
+        self.streams
+            .iter()
+            .filter(|(_, (own, client))| own.is_none() && *client == Some(id))
+            .map(|(node, _)| *node)
+            .collect()
+    }
+
+    /// A stream or a client gone (a global id is one object's alone).
+    fn forget(&mut self, id: u32) {
+        self.streams.remove(&id);
+        self.clients.remove(&id);
+    }
+}
+
+/// A stream's process, settled: its family read again only when it changed.
+fn settle_pid(app: &mut App, pid: Option<u32>) {
+    if pid != app.pid {
+        app.pid = pid;
+        app.family = pid.map(crate::state::ancestry).unwrap_or_default();
+    }
+}
+
 struct State {
     nodes: HashMap<u32, NodeEntry>,
+    clients: HashMap<u32, ClientEntry>,
+    owners: Owners,
     devices: HashMap<u32, DeviceEntry>,
     metadata: Option<(pw::metadata::MetadataListener, pw::metadata::Metadata)>,
     defaults: (Option<String>, Option<String>),
@@ -128,6 +373,9 @@ impl State {
     /// card's route when it has one, else from its own `Props`.
     fn seen(&self, id: u32) -> Option<Seen> {
         let node = self.nodes.get(&id)?;
+        if node.app.is_some() {
+            return node.stream_seen();
+        }
         let route = node.device.and_then(|(device, profile_device)| {
             let entry = self.devices.get(&device)?;
             let route = entry.routes.iter().find(|route| {
@@ -156,6 +404,7 @@ impl State {
             port_label: route.map_or_else(String::new, |(_, route, _)| route.description.clone()),
             port_kind: port_type.to_owned(),
             state: node.state.clone(),
+            app: None,
         })
     }
 
@@ -187,6 +436,8 @@ fn run(
     let registry = core.get_registry_rc()?;
     let state = Rc::new(RefCell::new(State {
         nodes: HashMap::new(),
+        clients: HashMap::new(),
+        owners: Owners::default(),
         devices: HashMap::new(),
         metadata: None,
         defaults: (None, None),
@@ -243,13 +494,15 @@ fn run(
                 };
                 match global.type_ {
                     ObjectType::Node => {
-                        let direction = match props.get("media.class") {
-                            Some("Audio/Sink") => Direction::Output,
-                            Some("Audio/Source") => Direction::Input,
+                        let (direction, stream) = match props.get("media.class") {
+                            Some("Audio/Sink") => (Direction::Output, false),
+                            Some("Audio/Source") => (Direction::Input, false),
+                            Some("Stream/Output/Audio") => (Direction::Output, true),
                             _ => return,
                         };
-                        bind_node(&registry, global, direction, &state);
+                        bind_node(&registry, global, direction, stream, &state);
                     }
+                    ObjectType::Client => bind_client(&registry, global, &state),
                     ObjectType::Device if props.get("media.class") == Some("Audio/Device") => {
                         bind_device(&registry, global, &state);
                     }
@@ -264,8 +517,10 @@ fn run(
             let state = state.clone();
             move |id| {
                 let mut state = state.borrow_mut();
+                state.owners.forget(id);
+                state.clients.remove(&id);
                 if let Some(node) = state.nodes.remove(&id) {
-                    let _ = state.facts.send(Fact::Gone(node.name));
+                    let _ = state.facts.send(Fact::Gone(node.node.name));
                 }
                 if state.devices.remove(&id).is_some() {
                     // Its nodes go with it, each told on its own.
@@ -287,6 +542,7 @@ fn bind_node(
     registry: &pw::registry::Registry,
     global: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
     direction: Direction,
+    stream: bool,
     state: &Rc<RefCell<State>>,
 ) {
     let Ok(proxy) = registry.bind::<pw::node::Node, _>(global) else {
@@ -300,43 +556,19 @@ fn bind_node(
             move |info| {
                 let Some(state) = state.upgrade() else { return };
                 let mut borrowed = state.borrow_mut();
-                let Some(node) = borrowed.nodes.get_mut(&id) else {
+                let State { nodes, owners, .. } = &mut *borrowed;
+                let Some(node) = nodes.get_mut(&id) else {
                     return;
                 };
-                if let Some(props) = info.props() {
-                    if let Some(name) = props.get("node.name") {
-                        name.clone_into(&mut node.name);
-                    }
-                    let label = props
-                        .get("node.nick")
-                        .filter(|nick| !nick.is_empty())
-                        .or_else(|| props.get("node.description"))
-                        .unwrap_or_default();
-                    label.clone_into(&mut node.label);
-                    node.device = props
-                        .get("device.id")
-                        .and_then(|device| device.parse().ok())
-                        .zip(
-                            props
-                                .get("card.profile.device")
-                                .and_then(|d| d.parse().ok()),
-                        );
-                    node.is_virtual = props.get("node.virtual") == Some("true")
-                        || props.get("device.id").is_none();
-                    node.bus = props.get("device.bus").unwrap_or_default().to_owned();
-                    node.form_factor = props
-                        .get("device.form-factor")
-                        .unwrap_or_default()
-                        .to_owned();
-                }
-                node.state = match info.state() {
-                    pw::node::NodeState::Running => "running",
-                    pw::node::NodeState::Idle => "idle",
-                    pw::node::NodeState::Suspended => "suspended",
-                    pw::node::NodeState::Creating => "idle",
-                    pw::node::NodeState::Error(_) => "error",
-                }
-                .to_owned();
+                let props = info.props();
+                let get = |key: &str| props.and_then(|props| props.get(key));
+                node.learn(
+                    id,
+                    &get,
+                    info.change_mask().contains(pw::node::NodeChangeMask::PROPS),
+                    state_name(&info.state()),
+                    owners,
+                );
                 drop(borrowed);
                 state.borrow().tell(id);
             }
@@ -367,27 +599,103 @@ fn bind_node(
         })
         .register();
     proxy.subscribe_params(&[ParamType::Props]);
-    state.borrow_mut().nodes.insert(
+    let mut borrowed = state.borrow_mut();
+    let props = global.props;
+    let get = |key: &str| props.and_then(|props| props.get(key));
+    let node = Node::new(id, direction, stream, &get, &mut borrowed.owners);
+    borrowed.nodes.insert(
         id,
         NodeEntry {
-            proxy,
             _listener: listener,
-            name: global
-                .props
-                .and_then(|p| p.get("node.name"))
-                .unwrap_or_default()
-                .to_owned(),
-            label: String::new(),
-            direction,
-            device: None,
-            volumes: Vec::new(),
-            mute: false,
-            state: "idle".to_owned(),
-            is_virtual: false,
-            bus: String::new(),
-            form_factor: String::new(),
+            proxy,
+            node,
         },
     );
+}
+
+/// An application's stream's properties, as `get` reads them, written into
+/// `app` (#416), and the two that say whose it is, for [`Owners`]: the
+/// stream's own process, if its node says one, and its client.
+/// `tests::a_stream_says_whose_it_is`.
+fn read_app<'a>(
+    app: &mut App,
+    get: &dyn Fn(&str) -> Option<&'a str>,
+) -> (Option<u32>, Option<u32>) {
+    let text = |key: &str| get(key).unwrap_or_default().to_owned();
+    // The socket's, which PipeWire read from the kernel, before the one the
+    // client says: in a sandbox the client's own is its namespace's.
+    let own = pid_of(get("pipewire.sec.pid")).or_else(|| pid_of(get("application.process.id")));
+    let client = get("client.id").and_then(|id| id.parse::<u32>().ok());
+    app.name = text("application.name");
+    app.id = get("pipewire.access.portal.app_id")
+        .filter(|id| !id.is_empty())
+        .or_else(|| get("application.id"))
+        .unwrap_or_default()
+        .to_owned();
+    app.binary = text("application.process.binary");
+    app.media = text("media.name");
+    app.icon = get("application.icon_name")
+        .filter(|icon| !icon.is_empty())
+        .or_else(|| get("media.icon_name"))
+        .unwrap_or_default()
+        .to_owned();
+    (own, client)
+}
+
+/// Every client, for whose a stream is: a native PipeWire client's stream
+/// says no process, and its client says the socket's (#416).
+fn bind_client(
+    registry: &pw::registry::Registry,
+    global: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
+    state: &Rc<RefCell<State>>,
+) {
+    let Ok(proxy) = registry.bind::<pw::client::Client, _>(global) else {
+        return;
+    };
+    let id = global.id;
+    let listener = proxy
+        .add_listener_local()
+        .info({
+            let state = Rc::downgrade(state);
+            move |info| {
+                let Some(state) = state.upgrade() else { return };
+                let Some(props) = info.props().filter(|_| {
+                    info.change_mask()
+                        .contains(pw::client::ClientChangeMask::PROPS)
+                }) else {
+                    return;
+                };
+                client_learnt(&state, id, ClientPids::read(&|key| props.get(key)));
+            }
+        })
+        .register();
+    state.borrow_mut().clients.insert(
+        id,
+        ClientEntry {
+            _listener: listener,
+            _proxy: proxy,
+        },
+    );
+    if let Some(props) = global.props {
+        client_learnt(state, id, ClientPids::read(&|key| props.get(key)));
+    }
+}
+
+/// A client's processes, learnt: each stream of it that says none of its
+/// own is now its, and told again, whichever of the two came first.
+fn client_learnt(state: &Rc<RefCell<State>>, id: u32, pids: ClientPids) {
+    let mut borrowed = state.borrow_mut();
+    let State { nodes, owners, .. } = &mut *borrowed;
+    let streams = owners.client(id, pids);
+    for node in &streams {
+        if let Some(entry) = nodes.get_mut(node) {
+            entry.own(*node, owners);
+        }
+    }
+    drop(borrowed);
+    for node in streams {
+        state.borrow().tell(node);
+    }
 }
 
 fn bind_device(
@@ -711,6 +1019,229 @@ fn perform(state: &State, command: Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A stream says whose it is** (#416): its process from the socket
+    /// before the one the client claims, its application's name, id (a
+    /// sandbox's first), binary, what it plays and its icon.
+    #[test]
+    fn a_stream_says_whose_it_is() {
+        let props = std::collections::HashMap::from([
+            ("pipewire.sec.pid", "4242"),
+            ("application.process.id", "2"),
+            ("application.name", "Firefox"),
+            ("application.id", "firefox"),
+            ("pipewire.access.portal.app_id", "org.mozilla.firefox"),
+            ("application.process.binary", "firefox-bin"),
+            ("media.name", "AudioStream"),
+            ("media.icon_name", "audio-x-generic"),
+        ]);
+        let mut app = App::default();
+        let (own, client) = read_app(&mut app, &|key| props.get(key).copied());
+        assert_eq!((own, client), (Some(4242), None));
+        settle_pid(&mut app, own);
+        assert_eq!(app.pid, Some(4242));
+        assert_eq!(app.family.first(), Some(&4242), "itself first");
+        assert_eq!(
+            (
+                app.name.as_str(),
+                app.id.as_str(),
+                app.binary.as_str(),
+                app.media.as_str(),
+                app.icon.as_str()
+            ),
+            (
+                "Firefox",
+                "org.mozilla.firefox",
+                "firefox-bin",
+                "AudioStream",
+                "audio-x-generic"
+            )
+        );
+        let props = std::collections::HashMap::from([("application.process.id", "77")]);
+        let mut app = App::default();
+        assert_eq!(
+            read_app(&mut app, &|key| props.get(key).copied()).0,
+            Some(77),
+            "the client's own, when the socket says nothing"
+        );
+    }
+
+    /// The nodes and clients a nested session's PipeWire showed: `pw-play`
+    /// (native) says no process on its node, `paplay` (through
+    /// `pipewire-pulse`) says its own, and its client's socket is
+    /// `pipewire-pulse`'s.
+    fn pw_play_node() -> HashMap<&'static str, &'static str> {
+        HashMap::from([
+            ("application.name", "pw-play"),
+            ("media.name", "song.wav"),
+            ("client.id", "108"),
+        ])
+    }
+
+    fn paplay_node() -> HashMap<&'static str, &'static str> {
+        HashMap::from([
+            ("application.name", "paplay"),
+            ("application.process.id", "1095238"),
+            ("client.id", "53"),
+        ])
+    }
+
+    fn client(sec: &'static str, process: &'static str) -> ClientPids {
+        let props = HashMap::from([
+            ("pipewire.sec.pid", sec),
+            ("application.process.id", process),
+        ]);
+        ClientPids::read(&|key| props.get(key).copied())
+    }
+
+    fn stream(owners: &mut Owners, node: u32, props: &HashMap<&str, &'static str>) {
+        let (own, client) = read_app(&mut App::default(), &|key| props.get(key).copied());
+        owners.stream(node, own, client);
+    }
+
+    /// **A native stream is its client's** (#416): a node that says no
+    /// process is its client's socket's process, else the one its client
+    /// says.
+    #[test]
+    fn a_native_stream_is_its_client_s() {
+        let mut owners = Owners::default();
+        assert_eq!(
+            owners.client(108, client("5150", "5151")),
+            Vec::<u32>::new()
+        );
+        stream(&mut owners, 120, &pw_play_node());
+        assert_eq!(owners.pid(120), Some(5150), "the socket's first");
+
+        let mut owners = Owners::default();
+        let props = HashMap::from([("application.process.id", "5151")]);
+        owners.client(108, ClientPids::read(&|key| props.get(key).copied()));
+        stream(&mut owners, 120, &pw_play_node());
+        assert_eq!(owners.pid(120), Some(5151), "else the one it says");
+
+        owners.forget(108);
+        assert_eq!(owners.pid(120), None, "a client gone takes its process");
+    }
+
+    /// **A PulseAudio stream is its own** (#416): its client is
+    /// `pipewire-pulse`, whose socket's process is never the stream's.
+    #[test]
+    fn a_pulse_stream_is_its_own_and_not_pipewire_pulse_s() {
+        let mut owners = Owners::default();
+        owners.client(53, client("2379", "1095238"));
+        stream(&mut owners, 130, &paplay_node());
+        assert_eq!(owners.pid(130), Some(1_095_238));
+        assert_eq!(
+            owners.client(53, client("2379", "1")),
+            Vec::<u32>::new(),
+            "its client learnt again names none of its streams"
+        );
+        assert_eq!(owners.pid(130), Some(1_095_238));
+    }
+
+    /// **A client learnt after its stream** (#416) names the stream, which is
+    /// then its; one learnt again unchanged names none.
+    #[test]
+    fn a_client_learnt_after_its_stream_names_it() {
+        let mut owners = Owners::default();
+        stream(&mut owners, 120, &pw_play_node());
+        stream(&mut owners, 130, &paplay_node());
+        assert_eq!(owners.pid(120), None, "no process before its client");
+        assert_eq!(owners.client(108, client("5150", "")), vec![120]);
+        assert_eq!(owners.pid(120), Some(5150));
+        assert_eq!(owners.client(108, client("5150", "")), Vec::<u32>::new());
+        // The node's registry entry, then its info without the client:
+        // what it said before stands.
+        owners.stream(120, None, None);
+        assert_eq!(owners.pid(120), Some(5150));
+        let mut app = App::default();
+        settle_pid(&mut app, owners.pid(120));
+        assert_eq!(app.family.first(), Some(&5150));
+    }
+
+    fn lookup<'a>(
+        props: &'a HashMap<&'static str, &'static str>,
+    ) -> impl Fn(&str) -> Option<&'a str> {
+        |key| props.get(key).copied()
+    }
+
+    /// **A stream keeps whose it is when it starts to play** (#416): a
+    /// node's info sends its properties after its registry entry, and an
+    /// info that changes only its state (paused to playing) carries none,
+    /// which must not empty its application, its process or a sink's card.
+    #[test]
+    fn a_stream_keeps_whose_it_is_when_it_starts_to_play() {
+        let mut owners = Owners::default();
+        let global = HashMap::from([("media.class", "Stream/Output/Audio")]);
+        let mut node = Node::new(130, Direction::Output, true, &lookup(&global), &mut owners);
+        assert_eq!(
+            node.stream_seen()
+                .and_then(|seen| seen.app)
+                .map(|app| app.pid),
+            Some(None)
+        );
+        let info = paplay_node();
+        node.learn(130, &lookup(&info), true, "idle", &mut owners);
+        // What PipeWire sends when it starts to play: its state, and an
+        // empty set of properties, as they did not change.
+        node.learn(130, &lookup(&HashMap::new()), false, "running", &mut owners);
+        let seen = node.stream_seen().expect("a stream");
+        let app = seen.app.expect("whose");
+        assert_eq!((app.name.as_str(), app.pid), ("paplay", Some(1_095_238)));
+        assert_eq!(app.family.first(), Some(&1_095_238));
+        assert_eq!(
+            (seen.label.as_str(), seen.state.as_str()),
+            ("paplay", "running")
+        );
+
+        let mut sink = Node::new(
+            40,
+            Direction::Output,
+            false,
+            &lookup(&HashMap::new()),
+            &mut owners,
+        );
+        let info = HashMap::from([
+            ("node.name", "alsa_output.usb"),
+            ("node.description", "Headset"),
+            ("device.id", "38"),
+            ("card.profile.device", "1"),
+            ("device.bus", "usb"),
+        ]);
+        sink.learn(40, &lookup(&info), true, "suspended", &mut owners);
+        sink.learn(40, &lookup(&HashMap::new()), false, "running", &mut owners);
+        assert_eq!(
+            (
+                sink.name.as_str(),
+                sink.label.as_str(),
+                sink.device,
+                sink.bus.as_str()
+            ),
+            ("alsa_output.usb", "Headset", Some((38, 1)), "usb"),
+            "a sink keeps its card too"
+        );
+    }
+
+    /// **A native stream whose client comes after it** (#416) is the
+    /// client's once the client is learnt, and told so.
+    #[test]
+    fn a_native_stream_is_its_client_s_once_the_client_is_learnt() {
+        let mut owners = Owners::default();
+        let mut node = Node::new(
+            120,
+            Direction::Output,
+            true,
+            &lookup(&HashMap::new()),
+            &mut owners,
+        );
+        let info = pw_play_node();
+        node.learn(120, &lookup(&info), true, "running", &mut owners);
+        assert_eq!(node.app.as_ref().and_then(|app| app.pid), None);
+        let streams = owners.client(108, client("5150", "5151"));
+        assert_eq!(streams, vec![120], "the stream is told again");
+        node.own(120, &owners);
+        let app = node.stream_seen().and_then(|seen| seen.app).expect("whose");
+        assert_eq!((app.name.as_str(), app.pid), ("pw-play", Some(5150)));
+    }
 
     #[test]
     fn the_default_metadata_s_json_names_the_node() {

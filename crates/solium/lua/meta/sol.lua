@@ -833,6 +833,29 @@ function sol.notifications(options) end
 ---@field state "running"|"idle"|"suspended"|"error"
 ---@field direction "output"|"input"
 
+---An application's playback stream (#416).
+---@class sol.AudioStream
+---@field id integer Solium's id for it, for as long as it plays; a stream that stops and starts again is a new one.
+---@field label string The application's name, else what it plays.
+---@field app string `application.name`.
+---@field appId string A sandboxed application's id (`pipewire.access.portal.app_id`), else `application.id`; often empty.
+---@field binary string `application.process.binary`.
+---@field pid integer Its process, as the kernel told PipeWire; -1 when it is not known.
+---@field mediaName string What it plays, as the application names it.
+---@field icon string `image://solium/icon/<name>`, or empty when the application names none.
+---@field volume number Perceptual, as `wpctl` shows it, its own: 1.0 leaves the application as loud as it is.
+---@field muted boolean
+---@field pending boolean
+---@field step number `audio.step`.
+---@field max number `audio.max`.
+---@field state "running"|"idle"|"suspended"|"error"
+---@field windows integer[] The windows it is, by id: those of the nearest of its process and the processes that started it that has windows, else those whose application id names its application. Empty for none.
+
+---A window's streams as one (#416): the first stream's fields, with the loudest of their volumes, `muted` only when every one is, and these.
+---@class sol.AudioWindow: sol.AudioStream
+---@field count integer How many streams it has.
+---@field streams integer[] Their ids.
+
 ---@class sol.AudioState
 ---@field available boolean Whether PipeWire is reachable.
 ---@field ready boolean Whether the first full picture has arrived.
@@ -840,6 +863,8 @@ function sol.notifications(options) end
 ---@field input? sol.AudioEndpoint The default input.
 ---@field outputs sol.AudioEndpoint[]
 ---@field inputs sol.AudioEndpoint[]
+---@field streams sol.AudioStream[] Every application's playback stream.
+---@field windows table<integer, sol.AudioWindow> Each window that has a stream, by the window's id.
 
 ---@class sol.AudioEvent
 ---@field what "volume"|"mute"|"default"|"added"|"removed"
@@ -850,6 +875,7 @@ function sol.notifications(options) end
 ---@field muted boolean
 ---@field origin "binding"|"scene"|"script"|"external" Who changed it: a key binding's handler, a scene's control, Lua, or not Solium at all (the device's own buttons, another mixer).
 ---@field bus string Its kind, as `sol.AudioEndpoint.kind`: an OSD can tell a headset's own button (`external` on `bluetooth`) from a mixer.
+---@field stream boolean Whether it is an application's playback stream rather than a sink or a source.
 
 ---@class sol.AudioOptions
 ---@field max? number The loudest anything may set, 1.0 being 100%; up to 1.5. 1.0 by default.
@@ -858,7 +884,11 @@ function sol.notifications(options) end
 ---Audio (#347): with a table, its limits; with none, what it is now. Either
 ---starts it. Changes go through `sol.act`: `audio.volume { target = "output"
 ---| "input" | id, value = v }` or `{ target, by = d }`, `audio.mute { target,
----value = true | false | "toggle" }`, `audio.default { endpoint = id }`.
+---value = true | false | "toggle" }`, `audio.default { endpoint = id }`. A
+---stream's id is a target like an endpoint's; `window = id` in place of
+---`target` sets every stream of that window together (#416): a `value` each
+---to it, `by` each from where it is, and a toggle mutes them all unless every
+---one is muted; a window with none is answered `unknown-endpoint`.
 ---@overload fun(): sol.AudioState
 ---@param options sol.AudioOptions
 ---@return nil
