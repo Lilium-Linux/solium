@@ -6544,8 +6544,9 @@ fn panes(
             crate::resizing::trace::line(
                 "drawn",
                 format_args!(
-                    "pane={} frame={},{} {}x{} slot={},{} {}x{} committed={}x{} \
-                     factor={across:.4},{down:.4} fill={fill:?} held={}",
+                    "pane={} frame={},{} {}x{} slot={},{} {}x{} client={:.0},{:.0} \
+                     {:.0}x{:.0} committed={}x{} factor={across:.4},{down:.4} \
+                     fill={fill:?} held={} at_us={}",
                     pane.get(),
                     frame.rect.loc.x,
                     frame.rect.loc.y,
@@ -6555,9 +6556,17 @@ fn panes(
                     slot.loc.y,
                     slot.size.w,
                     slot.size.h,
+                    client.loc.x,
+                    client.loc.y,
+                    client.size.w,
+                    client.size.h,
                     real.size.w,
                     real.size.h,
                     u8::from(state.holding_resize(pane)),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_micros(),
                 ),
             );
         }
