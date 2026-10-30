@@ -1205,7 +1205,14 @@ pub(crate) fn prepare(
         pass: 0,
         drawing,
     };
+    // What the pool makes in the effect phases, for the pass record: a
+    // capture or an effect step at a size it had no target of, which a drag
+    // on a window's edge asks for on every frame (#428).
+    let made = gpu.state.pool.made();
     let slots = effect_phases(&mut gpu);
+    crate::pacing::targets_made(
+        u32::try_from(gpu.state.pool.made().saturating_sub(made)).unwrap_or(u32::MAX),
+    );
     let Gpu {
         state,
         warps,

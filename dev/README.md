@@ -1495,7 +1495,10 @@ runs only when its part commits), `xray_builds` (xray cuts drawn this pass:
 one only when what is behind the windows changed) and `memo_runs` (memo
 prefixes run over a cut drawn anew; both every pass with
 `SOLIUM_XRAY_REBUILD=always`, and both on the PACING line as `xray=` and
-`memo=`), `panes`, `drew`, `scenes`, `animating`, `moving` (the scenes
+`memo=`), `meshes_refused`, `targets_made` (render targets the pool made
+this pass rather than handed out again: a capture or an effect step at a
+size it had none of, which a drag on a window's edge does on every frame of
+it), `panes`, `drew`, `scenes`, `animating`, `moving` (the scenes
 that answered `animating`, by name: what keeps the passes coming when
 nothing on screen changes), `rendered`, `built`, `rebound`, `qml` (Qt's
 microseconds per scene), `clocks`, `gpu_mhz`, `mem_mhz`, `pstate`, `gpu` (`ok`, `unsupported`, `late`

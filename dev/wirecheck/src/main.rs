@@ -1439,12 +1439,15 @@ fn poke(scene: *mut c_void, pixels: i32, scale: f64) {
 /// does Qt Quick map the scene's logical coordinates onto the first
 /// `width`x`height` pixels, top row first after `mirror_for_the_compositor`,
 /// or does it stretch the scene, shrink it, or put it at the bottom?
-/// `place_in_buffer` in `host.cpp` declares the render target at the scene's
-/// own size over the larger texture, with the ratio `scale`. It first gave
-/// the target the whole buffer, and this case failed it at scale 2 on this
-/// odd-sized buffer: Qt rounds the target's size over the ratio to whole
-/// logical pixels for its projection, so the 192x160 scene lost its last
-/// column and row (894 bytes).
+/// `place_in_buffer` in `host.cpp` declares the render target at
+/// `target_size`: as much of the buffer as is whole logical pixels, so Qt does
+/// not make a new target, a depth-stencil buffer and a framebuffer object at
+/// every size a frame is drawn at (#428). On 2026-10-16 it gave the target
+/// the whole buffer, and this case failed it at scale 2 on this odd-sized
+/// buffer: Qt rounds the target's size over the ratio to whole logical pixels
+/// for its projection, so the 192x160 scene lost its last column and row (894
+/// bytes); `target_size` rounds the target down to whole logical pixels for
+/// that reason.
 ///
 /// Three sizes in one buffer, as a window frame being dragged is drawn: the
 /// scene rebound from a buffer its own size onto one larger by an odd amount
@@ -1454,8 +1457,8 @@ fn poke(scene: *mut c_void, pixels: i32, scale: f64) {
 /// corner must be `quadrants.qml`'s picture at that size byte for byte (the
 /// reading the pointer's route already holds to `expected_argb`, case 6),
 /// the same picture must *not* be at the buffer's bottom-left (so the check
-/// can tell top from bottom), and no byte outside the corner may change: Qt's
-/// target is the corner, so it neither draws nor clears past it.
+/// can tell top from bottom), and no byte outside the corner may be drawn:
+/// Qt clears what its target covers there, and nothing else.
 /// Then the compositor's own element over the corner (`Gpu::element`'s
 /// source rectangle, from the texture's origin) must draw exactly what the
 /// same picture uploaded with `import_memory` and drawn the same way does.
@@ -1557,9 +1560,13 @@ fn in_a_larger_buffer(
         let (bad, first_bad) = differing(&corner(0), &want);
         let bottom = usize::try_from(room.1)? - height;
         let (mirrored, _) = differing(&corner(bottom), &want);
-        // What Qt touched outside the corner: nothing, neither drawn nor
-        // cleared, since its target is the corner.
+        // What Qt did outside the corner: cleared what its target covers
+        // there, since the target is as much of the buffer as Qt draws one to
+        // one (`target_size` in host.cpp), and drew nothing. A byte there
+        // that changed to anything but transparent is a scene drawn past its
+        // corner, or a corner in the wrong place.
         let mut outside = 0;
+        let mut cleared = 0;
         for (y, (line, was)) in raw
             .chunks_exact(row)
             .zip(before.chunks_exact(row))
@@ -1567,14 +1574,18 @@ fn in_a_larger_buffer(
         {
             for (x, (byte, old)) in line.iter().zip(was.iter()).enumerate() {
                 if (y >= height || x >= width) && byte != old {
-                    outside += 1;
+                    if *byte == 0 {
+                        cleared += 1;
+                    } else {
+                        outside += 1;
+                    }
                 }
             }
         }
         println!(
             "  {lw}x{lh} logical, {w}x{h} px in a {}x{} buffer: the top-left corner \
              differs from the picture in {bad} of {} bytes, the bottom-left in {mirrored}; \
-             {outside} bytes outside the corner changed",
+             outside the corner {outside} bytes drawn, {cleared} cleared",
             room.0,
             room.1,
             want.len()
@@ -1598,7 +1609,7 @@ fn in_a_larger_buffer(
         }
         if outside != 0 {
             return Err(anyhow!(
-                "{outside} bytes outside the {w}x{h} corner of a {}x{} buffer changed in a \
+                "{outside} bytes outside the {w}x{h} corner of a {}x{} buffer were drawn in a \
                  frame drawn into the corner",
                 room.0,
                 room.1
@@ -1672,18 +1683,28 @@ fn resize_cost(
     scale: f64,
 ) -> Result<()> {
     println!("\n=== what a window frame costs per frame of a drag (WIRECHECK_TIME_RESIZE) ===");
-    let path = CString::new(
-        repo()
-            .join("crates/solium/qml/panes/glass/Frame.qml")
-            .as_os_str()
-            .as_encoded_bytes(),
-    )?;
-    for (name, policy) in [
+    // `WIRECHECK_FRAME=<path>` times another frame: a configuration's own
+    // layer, as `rounded-violet`'s were timed for #428.
+    let frame = std::env::var_os("WIRECHECK_FRAME").map_or_else(
+        || repo().join("crates/solium/qml/panes/glass/Frame.qml"),
+        std::path::PathBuf::from,
+    );
+    println!("  {}", frame.display());
+    let path = CString::new(frame.as_os_str().as_encoded_bytes())?;
+    // The third is the floor: the size held and the scene changed (a new
+    // title each frame), what a frame redrawn at the size it has costs.
+    for (name, policy, grows) in [
         (
             "a buffer its own size",
             buffers::Buffers::new(0, buffers::SHRINK),
+            1,
         ),
-        ("qml.buffers' default", Some(buffers::Buffers::default())),
+        ("qml.buffers' default", Some(buffers::Buffers::default()), 1),
+        (
+            "the same size, a new title each frame",
+            Some(buffers::Buffers::default()),
+            0,
+        ),
     ] {
         let policy = policy.ok_or_else(|| anyhow!("a policy out of its bounds"))?;
         let (w0, h) = (1150, 850);
@@ -1703,7 +1724,7 @@ fn resize_cost(
         };
         restore(renderer)?;
         if scene.is_null() {
-            return Err(anyhow!("the glass bar would not build"));
+            return Err(anyhow!("{} would not build", frame.display()));
         }
         unsafe {
             solium_qml_scene_resize(scene, w0, h, scale);
@@ -1714,7 +1735,11 @@ fn resize_cost(
         let mut spent = Vec::new();
         let mut rebinds = 0;
         for step in 0..300 {
-            let size = (w0 + step, h);
+            let size = (w0 + step * grows, h);
+            if grows == 0 {
+                let title = CString::new(format!("wirecheck {step}"))?;
+                unsafe { solium_qml_scene_set_string(scene, c"title".as_ptr(), title.as_ptr()) };
+            }
             let started = std::time::Instant::now();
             let room = (target.width, target.height);
             match buffers::plan(policy, Some(room), size, drawn == Some(size), false) {
@@ -1740,6 +1765,10 @@ fn resize_cost(
             let mut fence: c_int = -1;
             let rendered = unsafe { solium_qml_scene_render_gpu(scene, &raw mut fence) };
             restore(renderer)?;
+            if rendered == 2 && grows == 0 {
+                println!("  {name}: nothing in this scene shows a title");
+                break;
+            }
             if rendered != 1 {
                 return Err(anyhow!("render_gpu returned {rendered} at {size:?}"));
             }
@@ -1751,6 +1780,12 @@ fn resize_cost(
                 .map_err(|err| anyhow!("import_dmabuf: {err}"))?;
             spent.push(started.elapsed().as_micros());
             drawn = Some(size);
+        }
+        if spent.is_empty() {
+            restore(renderer)?;
+            unsafe { solium_qml_scene_free(scene) };
+            restore(renderer)?;
+            continue;
         }
         spent.sort_unstable();
         let at = |q: f64| {
@@ -1768,6 +1803,73 @@ fn resize_cost(
         unsafe { solium_qml_scene_free(scene) };
         restore(renderer)?;
     }
+    Ok(())
+}
+
+/// What a pane's capture costs per frame of a drag that widens it a pixel a
+/// frame, against the same capture redrawn at the size it has: the pool's
+/// target taken at the new size and the old one given back, as
+/// `keyed::Capture::target_for` does, then cleared through its framebuffer as
+/// a capture is drawn. Printed, not judged, with `WIRECHECK_TIME_RESIZE`.
+/// The budget is the compositor's for a 2560x1440 monitor (twice its bytes),
+/// so what the pool keeps and drops is what it keeps and drops there (#428).
+fn capture_cost(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::{Color32F, Frame as _};
+    println!("\n=== what a pane's capture costs per frame of a drag (WIRECHECK_TIME_RESIZE) ===");
+    let mut carrier = fx0::pool::Pool::<GlesTexture>::new(0)
+        .carrier(renderer)
+        .ok_or_else(|| anyhow!("no carrier"))?;
+    for (name, grows) in [("a new size each frame", 1), ("the same size", 0)] {
+        let mut pool = fx0::pool::Pool::new(2 * 2560 * 1440 * 4);
+        let mut held: Option<fx0::pool::Target> = None;
+        let mut spent = Vec::new();
+        let made = pool.made();
+        for step in 0..300 {
+            let size = (1150 + step * grows, 850);
+            let started = std::time::Instant::now();
+            let target = match held.take() {
+                Some(target) if (target.size().w, target.size().h) == size => target,
+                old => {
+                    if let Some(old) = old {
+                        pool.give_back(old);
+                    }
+                    pool.target(
+                        &mut fx0::pool::Gl(renderer),
+                        size.into(),
+                        fx0::pool::Format::Rgba8,
+                    )
+                    .ok_or_else(|| anyhow!("no pooled target at {size:?}"))?
+                }
+            };
+            {
+                let mut bound = renderer
+                    .bind(&mut carrier)
+                    .map_err(|err| anyhow!("{err}"))?;
+                let mut frame = fx0::pool::frame_for(renderer, &mut bound, &target)
+                    .map_err(|err| anyhow!("{err}"))?;
+                frame
+                    .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size.into())])
+                    .map_err(|err| anyhow!("{err}"))?;
+                let _ = frame.finish().map_err(|err| anyhow!("{err}"))?;
+            }
+            pool.sweep(renderer);
+            spent.push(started.elapsed().as_micros());
+            held = Some(target);
+        }
+        let made = pool.made() - made;
+        drop(held);
+        pool.sweep(renderer);
+        spent.sort_unstable();
+        println!(
+            "  {name}: 300 frames, {made} targets made, a frame p50 {} us p95 {} us max {} us",
+            spent[spent.len() / 2],
+            spent[spent.len() * 95 / 100],
+            spent[spent.len() - 1]
+        );
+    }
+    renderer
+        .with_context(|gl| unsafe { gl.Finish() })
+        .map_err(|err| anyhow!("{err}"))?;
     Ok(())
 }
 
@@ -2762,6 +2864,7 @@ fn main() -> Result<()> {
     in_a_larger_buffer(&gbm, &mut renderer, &qml, logical, scale)?;
     if std::env::var_os("WIRECHECK_TIME_RESIZE").is_some() {
         resize_cost(&gbm, &mut renderer, scale)?;
+        capture_cost(&mut renderer)?;
     }
 
     println!("\n=== every scene the compositor builds, on a GPU host ===");

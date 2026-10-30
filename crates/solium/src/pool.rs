@@ -136,15 +136,9 @@ impl<T: Clone> Pool<T> {
 
     /// How many targets the pool has made, not counting those it handed out
     /// again from its free list: wirecheck's cases 12l and 12p see a second
-    /// run, and a result drawn, make none.
+    /// run, and a result drawn, make none, and each pass's record carries
+    /// how many it made (`pacing::targets_made`).
     /// `tests::the_pool_counts_the_targets_it_made`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "wirecheck's cases 12l and 12p count what a run makes"
-        )
-    )]
     pub(crate) fn made(&self) -> usize {
         self.made
     }

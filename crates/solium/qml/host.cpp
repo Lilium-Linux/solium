@@ -364,6 +364,11 @@ struct SoliumQmlScene
      * samples only the width-by-height corner of it. See place_in_buffer. */
     int buffer_width = 0;
     int buffer_height = 0;
+    /* GPU scenes only: the size the render target Qt draws into was last
+     * declared at, which is not the scene's size while it fits the target's
+     * (target_size). 0 before the first. */
+    int target_width = 0;
+    int target_height = 0;
     /* Device pixels per logical one. See solium_qml_scene_resize. */
     double scale = 1.0;
     /* Whether the scene has changed since it was last rendered. */
@@ -1335,6 +1340,60 @@ static void mirror_for_the_compositor(QQuickRenderTarget *target)
 }
 
 /*
+ * The size to declare a GPU scene's render target at, in device pixels, for a
+ * scene of `width` by `height` at `scale` on a buffer of `buffer_width` by
+ * `buffer_height`: the largest size within the buffer whose sides are whole
+ * logical pixels, when the scene fits in it, and the scene's own size when it
+ * does not.
+ *
+ * Why not simply the scene's size, as before 2026-10-30: Qt makes its render
+ * target again whenever the declared size changes, and making one is a new
+ * depth-stencil renderbuffer of that size, a new framebuffer object and a new
+ * texture wrapper, the old ones deleted (`createRhiRenderTarget` in Qt 6.11's
+ * qquickrendertarget.cpp). A window frame changes size on every frame of a
+ * drag on its edge, so that was every frame: on the 260 Hz TTY trace of
+ * 2026-10-30, rounded-violet's two layers took 0.8 to 1.4 ms and 0.4 to
+ * 0.9 ms in the passes where the window had a new size, against 0.24 and
+ * 0.14 ms re-rendered at the size they had (#428). A target the size of the
+ * buffer is made once a buffer.
+ *
+ * Why rounded down to whole logical pixels: Qt's projection is the target's
+ * size over the ratio *rounded to whole logical pixels* (`renderSceneGraph`,
+ * `pixelSize / devicePixelRatio`, a QSize), so a target whose sides are not
+ * whole logical pixels draws the scene a fraction too small. That is why the
+ * whole buffer was abandoned as the target on 2026-10-16: on a 293-pixel
+ * buffer at scale 2, a 192-pixel scene lost its last column and row. A side
+ * that is a whole number of `grain` device pixels is a whole number of
+ * logical ones; `grain` is 1 at scales 1 and 2, 5 at 1.25 and 3 at 1.5. A
+ * scene in the last few pixels of its buffer, past the rounded size, is
+ * declared at its own size for as long as it is there.
+ *
+ * What the larger target costs: Qt clears all of it on every render, which,
+ * on a buffer at most `qml.buffers.step` pixels a side larger than its scene,
+ * is a clear and no more.
+ */
+static QSize target_size(int width, int height, int buffer_width, int buffer_height,
+                         double scale)
+{
+    int grain = 0;
+    for (int pixels = 1; pixels <= 1200; ++pixels) {
+        const double logical = pixels / scale;
+        if (qAbs(logical - qRound(logical)) < 1e-6) {
+            grain = pixels;
+            break;
+        }
+    }
+    if (grain > 0) {
+        const int w = buffer_width / grain * grain;
+        const int h = buffer_height / grain * grain;
+        if (w >= width && h >= height) {
+            return QSize(w, h);
+        }
+    }
+    return QSize(width, height);
+}
+
+/*
  * Draw a GPU scene at `width` by `height` device pixels, at `scale`, into the
  * top-left corner of the buffer it is on, which can be larger.
  *
@@ -1347,34 +1406,29 @@ static void mirror_for_the_compositor(QQuickRenderTarget *target)
  * drawn here, into the buffer the scene has.
  *
  * How it lands in the corner, one to one: the render target is declared at
- * the *scene's* size over the larger texture. Qt sizes its viewport, its
- * scissor and its depth-stencil buffer from the target's declared pixel size,
- * and derives its projection from that size over the device pixel ratio, so
- * everything about the frame is what it was on a buffer exactly the scene's
- * size: the scene's logical rect maps onto exactly width by height pixels,
- * and anything it draws past its own bounds is clipped there. The viewport's
- * origin is the texture's first row (GL's bottom-left), which the mirror
- * (mirror_for_the_compositor) makes the scene's top, so the scene is the
- * top-left corner as the compositor reads the buffer, and the rest is not
- * touched: Qt neither draws nor clears outside the corner.
+ * target_size, the largest size within the buffer whose sides are whole
+ * logical pixels, and Qt derives its viewport, its projection and its
+ * depth-stencil buffer from that declared size over the device pixel ratio.
+ * A logical pixel is then exactly `scale` device ones, so the scene's
+ * logical rectangle lands on the width by height pixels in the corner. The
+ * viewport's origin is the texture's first row (GL's bottom-left), which the
+ * mirror (mirror_for_the_compositor) makes the scene's top, so the scene is
+ * the top-left corner as the compositor reads the buffer. Qt clears the rest
+ * of the target, which nothing samples.
  *
- * Not the whole buffer as the target, which is the first thing tried
- * (2026-10-16): Qt's projection rect is the target's pixel size over the
- * ratio *rounded to whole logical pixels* (a QSize), so on a 293-pixel
- * buffer at scale 2 a logical pixel came out 293/147 device pixels and a
- * 192-pixel scene lost its last column and row. Measured by
- * `dev/wirecheck`'s "a scene in a buffer larger than itself", which reads
- * the corner back byte for byte at scales 1, 1.25 and 2.
- *
- * The target is set again whenever it changes, the texture, the size or the
- * ratio: Qt then makes the framebuffer and depth-stencil wrappers again, at
- * a fraction of a new buffer's cost, and nothing else.
+ * The target is set again only when it changes: a new texture, a new ratio,
+ * or a scene that has left the rounded size for its own (target_size). A new
+ * size within the buffer is a new layout and a render and nothing else.
+ * Measured by `dev/wirecheck`'s "a scene in a buffer larger than itself",
+ * which reads the corner back byte for byte at scales 1, 1.25 and 2.
  */
 static void place_in_buffer(SoliumQmlScene *scene, int width, int height, double scale,
                             bool new_texture)
 {
-    const bool changed =
-        new_texture || scene->width != width || scene->height != height || scene->scale != scale;
+    const QSize target =
+        target_size(width, height, scene->buffer_width, scene->buffer_height, scale);
+    const bool changed = new_texture || scene->target_width != target.width() ||
+        scene->target_height != target.height() || scene->scale != scale;
     scene->width = width;
     scene->height = height;
     scene->scale = scale;
@@ -1387,11 +1441,12 @@ static void place_in_buffer(SoliumQmlScene *scene, int width, int height, double
     size_root(scene, logical_width, logical_height);
 
     if (changed) {
-        QQuickRenderTarget target =
-            QQuickRenderTarget::fromOpenGLTexture(scene->texture, QSize(width, height));
-        target.setDevicePixelRatio(scale);
-        mirror_for_the_compositor(&target);
-        scene->window->setRenderTarget(target);
+        QQuickRenderTarget rt = QQuickRenderTarget::fromOpenGLTexture(scene->texture, target);
+        rt.setDevicePixelRatio(scale);
+        mirror_for_the_compositor(&rt);
+        scene->window->setRenderTarget(rt);
+        scene->target_width = target.width();
+        scene->target_height = target.height();
     }
     scene->dirty = true;
 }
@@ -1638,6 +1693,8 @@ extern "C" SoliumQmlScene *solium_qml_scene_new_gpu(const char *qml_path, int wi
     target.setDevicePixelRatio(scene->scale);
     mirror_for_the_compositor(&target);
     scene->window->setRenderTarget(target);
+    scene->target_width = width;
+    scene->target_height = height;
 
     const char *reason = nullptr;
     if (!load_component(scene, qml_path, initial_json, &reason)) {
