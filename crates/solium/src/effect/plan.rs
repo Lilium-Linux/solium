@@ -487,6 +487,7 @@ pub(crate) fn place_on(
     let map = BoxMap {
         offset: [(local.loc.x / mw) as f32, (local.loc.y / mh) as f32],
         scale: [(local.size.w / mw) as f32, (local.size.h / mh) as f32],
+        extent: [1.0, 1.0],
     };
     let own = padded.size.to_physical_precise_round(scale);
     (px, map, own)

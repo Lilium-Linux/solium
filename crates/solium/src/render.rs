@@ -1601,16 +1601,25 @@ impl Phases for Gpu<'_> {
             ) else {
                 continue;
             };
+            // The size it is drawn at, in the corner of a target with room
+            // (`offscreen::draw`, #428).
+            let size = (
+                u32::try_from(job.size.w).unwrap_or(1),
+                u32::try_from(job.size.h).unwrap_or(1),
+            );
             match crate::offscreen::kept(state, &job) {
                 Some((texture, _id, commit)) => {
                     self.drawn
-                        .insert(input.owner, input.slot, texture, false, commit);
+                        .insert(input.owner, input.slot, (texture, size), false, commit);
                 }
-                None => jobs.push((job, (input.owner, input.slot))),
+                None => jobs.push((job, (input.owner, input.slot, size))),
             }
         }
-        for ((owner, slot), texture, _id, commit) in crate::offscreen::draw(state, renderer, jobs) {
-            self.drawn.insert(owner, slot, texture, true, commit);
+        for ((owner, slot, size), texture, _id, commit) in
+            crate::offscreen::draw(state, renderer, jobs)
+        {
+            self.drawn
+                .insert(owner, slot, (texture, size), true, commit);
         }
     }
 
@@ -3015,10 +3024,15 @@ pub(crate) fn run_slots(
             continue;
         }
         let (first, redrawn) = match chain.tier {
+            // Read through the corner of its target it was drawn in (#428).
             Tier::Own => match drawn.get(&owner, slot) {
-                Some((texture, captured)) => {
-                    (Some(texture.clone()), input_redrawn(chain.tier, captured))
-                }
+                Some(((texture, size), captured)) => (
+                    Some((
+                        texture.clone(),
+                        BoxMap::corner(*size, texture_size(texture)),
+                    )),
+                    input_redrawn(chain.tier, captured),
+                ),
                 None => continue,
             },
             // A generated chain reads nothing of the frame: no capture, never
@@ -3026,7 +3040,10 @@ pub(crate) fn run_slots(
             // first pass and again only when its params or its padded size
             // change (`tests::twenty_runs_in_a_phase_open_one_region`,
             // `effect::store::tests::a_generated_effect_runs_once_and_not_again_until_its_size_or_params_change`).
-            Tier::Generated => (runner.blank(pool), input_redrawn(chain.tier, false)),
+            Tier::Generated => (
+                runner.blank(pool).map(|blank| (blank, BoxMap::WHOLE)),
+                input_redrawn(chain.tier, false),
+            ),
             // T3 was refused at load (Ruling 14); T2 ran above.
             Tier::Xray | Tier::Live => continue,
         };
@@ -3055,7 +3072,9 @@ pub(crate) fn run_slots(
         cx.waited |= waits;
         if waits || !state.needs_run(redrawn, params, size) {
             if let Some(texture) = state.held.output().cloned()
-                && let Some(ready) = ready_from(state, cx.masked.as_ref(), texture, false, part)
+                && let Some(used) = state.held.output_size()
+                && let Some(ready) =
+                    ready_from(state, cx.masked.as_ref(), texture, used, false, part)
             {
                 slots.set_ready(owner, slot, ready);
             }
@@ -3063,7 +3082,7 @@ pub(crate) fn run_slots(
         }
         let textures: Vec<(&str, GlesTexture, BoxMap)> = first
             .into_iter()
-            .map(|texture| (chain.plan.first_input.as_str(), texture, BoxMap::WHOLE))
+            .map(|(texture, map)| (chain.plan.first_input.as_str(), texture, map))
             .collect();
         let inputs = Inputs {
             padded: size,
@@ -3076,6 +3095,9 @@ pub(crate) fn run_slots(
             // part's own edge beyond it, in `behind` and `front` transparent
             // (`effect::run::tests::the_first_input_is_clamped_to_its_edge_texels`).
             clamp_first: slot.placed() == Slot::Replace && chain.tier == Tier::Own,
+            // A slot's part changes size with its window, so its steps are
+            // drawn into targets with room (#428).
+            room: true,
         };
         if !began {
             runner.begin();
@@ -3092,7 +3114,7 @@ pub(crate) fn run_slots(
             &keys,
         );
         match outcome {
-            Outcome::Done(texture, sync) => {
+            Outcome::Done(texture, used, sync) => {
                 let _ = crate::offscreen::settle(
                     Ok::<_, std::convert::Infallible>(sync),
                     crate::dev::fence_wait(),
@@ -3101,7 +3123,9 @@ pub(crate) fn run_slots(
                 crate::pacing::effect_ran();
                 state.ran(params, size);
                 state.ran_at = Some(instant);
-                if let Some(ready) = ready_from(state, cx.masked.as_ref(), texture, true, part) {
+                if let Some(ready) =
+                    ready_from(state, cx.masked.as_ref(), texture, used, true, part)
+                {
                     slots.set_ready(owner, slot, ready);
                 }
             }
@@ -3293,6 +3317,9 @@ fn run_t2(
                     time: cx.now,
                     transition: crate::effect::run::Transition::default(),
                     clamp_first: false,
+                    // A T2 place's result is drawn whole, beneath a warp as
+                    // well as in its slot: exact targets, as before (#428).
+                    room: false,
                 };
                 let keys = Keys {
                     params: chain.params_hash,
@@ -3313,7 +3340,7 @@ fn run_t2(
                     &inputs,
                     &keys,
                 ) {
-                    Outcome::Done(texture, sync) => {
+                    Outcome::Done(texture, _, sync) => {
                         let _ = crate::offscreen::settle(
                             Ok::<_, std::convert::Infallible>(sync),
                             crate::dev::fence_wait(),
@@ -3591,6 +3618,16 @@ pub(crate) fn t2_key(
 
 /// A part's box in a memo's own pixels.
 /// `tests::a_crop_is_the_parts_box_in_the_memos_pixels`.
+/// A texture's size, as a run's sizes take it.
+fn texture_size(texture: &GlesTexture) -> (u32, u32) {
+    use smithay::backend::renderer::Texture as _;
+    let size = texture.size();
+    (
+        u32::try_from(size.w).unwrap_or(1),
+        u32::try_from(size.h).unwrap_or(1),
+    )
+}
+
 pub(crate) fn crop_of(
     map: crate::effect::run::BoxMap,
     memo: (u32, u32),
@@ -4144,6 +4181,9 @@ pub(crate) fn run_xray(
             time: cx.now,
             transition: crate::effect::run::Transition::default(),
             clamp_first: false,
+            // A memo is a monitor's size, and read whole and cropped: exact
+            // targets, as before (#428).
+            room: false,
         };
         let keys = Keys {
             params: key.upto,
@@ -4174,7 +4214,7 @@ pub(crate) fn run_xray(
             )
         };
         match outcome {
-            Outcome::Done(_, sync) => {
+            Outcome::Done(_, _, sync) => {
                 let _ = crate::offscreen::settle(
                     Ok::<_, std::convert::Infallible>(sync),
                     crate::dev::fence_wait(),
@@ -4206,6 +4246,7 @@ fn ready_from(
     state: &mut crate::effect::store::SlotState,
     masked: Option<&GlesTexProgram>,
     texture: GlesTexture,
+    used: (u32, u32),
     rerun: bool,
     part: crate::effect::plan::PartBox,
 ) -> Option<crate::effect::plan::Ready> {
@@ -4214,13 +4255,11 @@ fn ready_from(
         crate::effect::element::Placement::of(part.padded, None, 1.0),
         rerun,
     );
+    let element =
+        crate::effect::element::EffectElement::new(state.id.clone(), commit, texture, program)
+            .in_corner(used);
     Some(crate::effect::plan::Ready {
-        element: crate::effect::element::EffectElement::new(
-            state.id.clone(),
-            commit,
-            texture,
-            program,
-        ),
+        element,
         padded: part.padded,
         reach: part.reach,
     })
@@ -11825,6 +11864,7 @@ pub(crate) mod tests {
         let map = crate::effect::run::BoxMap {
             offset: [0.25, 0.5],
             scale: [0.125, 0.25],
+            extent: [1.0, 1.0],
         };
         assert_eq!(
             super::crop_of(map, (2560, 1440)),
@@ -11842,6 +11882,7 @@ pub(crate) mod tests {
             map: crate::effect::run::BoxMap {
                 offset: [0.05, 0.05],
                 scale: [0.1, 0.1],
+                extent: [1.0, 1.0],
             },
             own: (200, 100).into(),
             part: crate::effect::plan::PartBox::around((100, 60).into(), 0, [0.0; 4]),

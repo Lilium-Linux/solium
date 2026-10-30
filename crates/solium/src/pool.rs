@@ -179,6 +179,30 @@ impl<T: Clone> Pool<T> {
         })
     }
 
+    /// A target of `format` with room for `size`: one that [`has_room_for`]
+    /// it, from the free list or made at [`room_for`] `size`. What is drawn
+    /// into it is drawn in its top-left `size` corner ([`frame_in`]), and read
+    /// through that corner alone, so a part that changes size on every frame
+    /// of a drag on its edge takes the target it has, rather than one made
+    /// and one dropped a frame (#428).
+    /// `tests::a_target_with_room_serves_every_size_within_it`,
+    /// `tests::a_target_far_larger_than_its_size_is_made_again_snug`.
+    pub(crate) fn target_with_room<A: Alloc<Tex = T>>(
+        &mut self,
+        alloc: &mut A,
+        size: Size<i32, Physical>,
+        format: Format,
+    ) -> Option<Target<T>> {
+        if let Some(at) = self
+            .free
+            .iter()
+            .position(|held| held.format == format && has_room_for(held.size, size))
+        {
+            return Some(self.free.swap_remove(at));
+        }
+        self.target(alloc, room_for(size), format)
+    }
+
     /// Hand a target back for reuse; over budget it is dropped instead.
     /// `tests::a_target_given_back_over_budget_is_dropped`,
     /// `tests::rgba16f_counts_eight_bytes_a_pixel_against_the_budget`.
@@ -238,6 +262,33 @@ impl Pool<GlesTexture> {
             gl.DeleteFramebuffers(i32::try_from(doomed.len()).unwrap_or(0), doomed.as_ptr());
         });
     }
+}
+
+/// The step a target with room grows in, in pixels a side: the same as
+/// `qml.buffers`' default, for the same reason (`qml::buffers`). A window
+/// dragged by its edge is given a new target once per 128 pixels it grows,
+/// not once a frame.
+pub(crate) const ROOM: i32 = 128;
+
+/// The size a target with room for `size` is made at: each side rounded up to
+/// a whole number of [`ROOM`]s. `tests::a_target_with_room_serves_every_size_within_it`.
+pub(crate) fn room_for(size: Size<i32, Physical>) -> Size<i32, Physical> {
+    let side = |pixels: i32| {
+        let steps = pixels.max(1).saturating_add(ROOM - 1) / ROOM;
+        steps.saturating_mul(ROOM).max(pixels)
+    };
+    (side(size.w), side(size.h)).into()
+}
+
+/// Whether a target of `have` serves `size`: as large on each side, and less
+/// than two [`ROOM`]s larger, so a part that shrank far is given a snug one
+/// rather than holding the memory of the largest size it ever reached, and a
+/// size wavering across a step's edge is not given a new one each time
+/// (`qml::buffers`' `shrink`).
+/// `tests::a_target_far_larger_than_its_size_is_made_again_snug`.
+pub(crate) fn has_room_for(have: Size<i32, Physical>, size: Size<i32, Physical>) -> bool {
+    let side = |have: i32, size: i32| have >= size && have - size < 2 * ROOM;
+    side(have.w, size.w) && side(have.h, size.h)
 }
 
 /// [`Alloc`] on a real renderer. Wirecheck's case 11f.
@@ -324,13 +375,31 @@ pub(crate) fn probe_formats(renderer: &mut GlesRenderer) -> Formats {
 }
 
 /// A frame of `target`'s size, opened on the bound carrier, drawing into the
-/// target's own framebuffer object: wirecheck's case 11f.
+/// target's own framebuffer object: wirecheck's case 11f. The compositor
+/// draws through [`frame_in`], at the size it drew for (#428).
+#[expect(
+    dead_code,
+    reason = "wirecheck's cases draw into whole targets with it"
+)]
 pub(crate) fn frame_for<'frame, 'buffer, T>(
     renderer: &'frame mut GlesRenderer,
     carrier: &'frame mut GlesTarget<'buffer>,
     target: &Target<T>,
 ) -> Result<GlesFrame<'frame, 'buffer>, GlesError> {
-    let mut frame = renderer.render(carrier, target.size, Transform::Normal)?;
+    frame_in(renderer, carrier, target, target.size)
+}
+
+/// A frame of `size`, the top-left corner of `target` ([`Pool::target_with_room`]),
+/// opened on the bound carrier and drawing into the target's own
+/// framebuffer object: everything drawn lands in the corner, and the rest of
+/// the target is not touched. Wirecheck's case 12r.
+pub(crate) fn frame_in<'frame, 'buffer, T>(
+    renderer: &'frame mut GlesRenderer,
+    carrier: &'frame mut GlesTarget<'buffer>,
+    target: &Target<T>,
+    size: Size<i32, Physical>,
+) -> Result<GlesFrame<'frame, 'buffer>, GlesError> {
+    let mut frame = renderer.render(carrier, size, Transform::Normal)?;
     let fbo = target.fbo();
     // SAFETY: inside the frame's own context, which made the framebuffer.
     frame.with_context(|gl| unsafe { gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo) })?;
@@ -557,6 +626,61 @@ mod tests {
             .expect("a target");
         assert_eq!(pool.made(), 2);
         assert_eq!(pool.made(), usize::try_from(alloc.textures).expect("small"));
+    }
+
+    /// **A target with room serves every size within it** (#428): a part
+    /// widened a pixel a frame from 1150 to 1270 by 850 is served by the one
+    /// target made at 1152x896, handed back and taken again each frame, and
+    /// the next step's worth of growth makes one more, at 1280.
+    #[test]
+    fn a_target_with_room_serves_every_size_within_it() {
+        let (mut pool, mut alloc) = (Pool::<u32>::new(64 << 20), Counted::default());
+        assert_eq!(super::room_for(size(1150, 850)), size(1152, 896));
+        assert_eq!(super::room_for(size(1152, 896)), size(1152, 896));
+        for width in 1150..=1152 {
+            let target = pool
+                .target_with_room(&mut alloc, size(width, 850), Format::Rgba8)
+                .expect("a target");
+            assert_eq!(target.size(), size(1152, 896));
+            pool.give_back(target);
+        }
+        assert_eq!(alloc.textures, 1, "one target for every size within it");
+        let grown = pool
+            .target_with_room(&mut alloc, size(1153, 850), Format::Rgba8)
+            .expect("a target");
+        assert_eq!(grown.size(), size(1280, 896));
+        assert_eq!(alloc.textures, 2);
+        let rgba16f = pool
+            .target_with_room(&mut alloc, size(1150, 850), Format::Rgba16f)
+            .expect("a target");
+        assert_eq!(rgba16f.format(), Format::Rgba16f, "never another format's");
+        assert_eq!(alloc.textures, 3);
+    }
+
+    /// **A target far larger than its size is made again snug**: two
+    /// [`super::ROOM`]s or more larger on a side is not room but memory held
+    /// for a size the part has left, as `qml.buffers`' `shrink` says of a
+    /// scene's buffer; less than that, it still serves.
+    #[test]
+    fn a_target_far_larger_than_its_size_is_made_again_snug() {
+        use super::has_room_for;
+        assert!(has_room_for(size(1280, 896), size(1153, 850)));
+        assert!(has_room_for(size(1280, 896), size(1025, 769)));
+        assert!(
+            !has_room_for(size(1280, 896), size(1024, 850)),
+            "two steps narrower"
+        );
+        assert!(!has_room_for(size(1280, 896), size(1281, 850)), "too small");
+        let (mut pool, mut alloc) = (Pool::<u32>::new(64 << 20), Counted::default());
+        let large = pool
+            .target_with_room(&mut alloc, size(1280, 896), Format::Rgba8)
+            .expect("a target");
+        pool.give_back(large);
+        let snug = pool
+            .target_with_room(&mut alloc, size(600, 400), Format::Rgba8)
+            .expect("a target");
+        assert_eq!(snug.size(), size(640, 512));
+        assert_eq!(alloc.textures, 2);
     }
 
     /// Another size is another target.

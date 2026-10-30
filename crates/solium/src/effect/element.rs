@@ -84,6 +84,12 @@ pub(crate) fn src_of(placement: Placement, size: (i32, i32)) -> Rectangle<f64, B
         .unwrap_or_else(|| Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into()))
 }
 
+/// The `size` top-left corner of a texture, as a crop.
+/// `tests::a_result_in_its_whole_texture_is_not_cropped`.
+pub(crate) fn corner_crop(size: (u32, u32)) -> Rectangle<f64, Buffer> {
+    Rectangle::from_size((f64::from(size.0), f64::from(size.1)).into())
+}
+
 /// The commit after this placement: moved when the chain re-ran or the
 /// placement differs.
 /// `tests::an_output_keeps_its_id_and_moves_its_commit_only_when_rerun_or_moved`.
@@ -219,6 +225,24 @@ impl EffectElement {
         }
     }
 
+    /// The same result drawn in the `size` top-left corner of its texture,
+    /// as a run with room draws it (`run::Inputs::room`, #428): cropped to
+    /// that corner, and left whole when the corner is the whole texture, so
+    /// a result in a texture of exactly its size is placed as it always was.
+    /// `tests::a_result_in_its_whole_texture_is_not_cropped`, wirecheck's
+    /// case 12r.
+    pub(crate) fn in_corner(self, size: (u32, u32)) -> Self {
+        let texture = self.texture.size();
+        let (w, h) = (
+            i32::try_from(size.0).unwrap_or(i32::MAX),
+            i32::try_from(size.1).unwrap_or(i32::MAX),
+        );
+        if (w, h) == (texture.w, texture.h) {
+            return self;
+        }
+        self.cropped(corner_crop(size))
+    }
+
     /// Its texture, which a crossfade reads it from (`effect::crossfade`).
     pub(crate) fn texture(&self) -> &GlesTexture {
         &self.texture
@@ -314,6 +338,30 @@ mod tests {
     use solium_effects::fragment::Corners;
 
     use super::{MaskUniforms, Placement};
+
+    /// **A result in its whole texture is not cropped** (#428): a run with
+    /// room draws in a texture's corner and is cropped to it; the corner as
+    /// a crop is that many pixels from the texture's origin, and a result
+    /// whose corner is its whole texture keeps the uncropped placement it
+    /// always had (`EffectElement::in_corner`, which wirecheck's case 12r
+    /// draws).
+    #[test]
+    fn a_result_in_its_whole_texture_is_not_cropped() {
+        assert_eq!(
+            super::corner_crop((1150, 850)),
+            Rectangle::new((0.0, 0.0).into(), (1150.0, 850.0).into())
+        );
+        let whole = Placement::of(Rectangle::new((0, 0).into(), (1150, 850).into()), None, 1.0);
+        assert_eq!(
+            super::src_of(whole, (1150, 850)),
+            super::corner_crop((1150, 850))
+        );
+        assert_eq!(
+            super::src_of(whole.cropped(super::corner_crop((1150, 850))), (1280, 896)),
+            super::corner_crop((1150, 850)),
+            "the corner of a larger texture"
+        );
+    }
 
     /// **An output keeps its id, and moves its commit only when re-run or
     /// moved**: placing the same result at the same rect twice is no damage.

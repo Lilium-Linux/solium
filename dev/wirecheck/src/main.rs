@@ -1819,7 +1819,11 @@ fn capture_cost(renderer: &mut GlesRenderer) -> Result<()> {
     let mut carrier = fx0::pool::Pool::<GlesTexture>::new(0)
         .carrier(renderer)
         .ok_or_else(|| anyhow!("no carrier"))?;
-    for (name, grows) in [("a new size each frame", 1), ("the same size", 0)] {
+    for (name, grows, room) in [
+        ("a new size each frame, exact", 1, false),
+        ("a new size each frame, with room (#428)", 1, true),
+        ("the same size", 0, false),
+    ] {
         let mut pool = fx0::pool::Pool::new(2 * 2560 * 1440 * 4);
         let mut held: Option<fx0::pool::Target> = None;
         let mut spent = Vec::new();
@@ -1827,17 +1831,25 @@ fn capture_cost(renderer: &mut GlesRenderer) -> Result<()> {
         for step in 0..300 {
             let size = (1150 + step * grows, 850);
             let started = std::time::Instant::now();
+            let fits = |target: &fx0::pool::Target| {
+                if room {
+                    fx0::pool::has_room_for(target.size(), size.into())
+                } else {
+                    (target.size().w, target.size().h) == size
+                }
+            };
             let target = match held.take() {
-                Some(target) if (target.size().w, target.size().h) == size => target,
+                Some(target) if fits(&target) => target,
                 old => {
                     if let Some(old) = old {
                         pool.give_back(old);
                     }
-                    pool.target(
-                        &mut fx0::pool::Gl(renderer),
-                        size.into(),
-                        fx0::pool::Format::Rgba8,
-                    )
+                    let alloc = &mut fx0::pool::Gl(renderer);
+                    if room {
+                        pool.target_with_room(alloc, size.into(), fx0::pool::Format::Rgba8)
+                    } else {
+                        pool.target(alloc, size.into(), fx0::pool::Format::Rgba8)
+                    }
                     .ok_or_else(|| anyhow!("no pooled target at {size:?}"))?
                 }
             };
@@ -1845,7 +1857,7 @@ fn capture_cost(renderer: &mut GlesRenderer) -> Result<()> {
                 let mut bound = renderer
                     .bind(&mut carrier)
                     .map_err(|err| anyhow!("{err}"))?;
-                let mut frame = fx0::pool::frame_for(renderer, &mut bound, &target)
+                let mut frame = fx0::pool::frame_in(renderer, &mut bound, &target, size.into())
                     .map_err(|err| anyhow!("{err}"))?;
                 frame
                     .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size.into())])
