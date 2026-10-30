@@ -25,9 +25,10 @@ promised. Check the [current status](docs/status.md) and
 
 The shipped preview shell includes a bottom bar, an autohiding top dock,
 application and window search, and desktop icons. It is configuration built
-on Solium's public API, and can be replaced or disabled. A complete desktop
-service stack, native lock UI and touch interaction with compositor UI are
-still unfinished.
+on Solium's public API, and can be replaced or disabled. Solium has its own
+lock screen, takes touch on its own UI as on windows, and serves notifications
+and audio to scenes and Lua. Media, power, network and Bluetooth services,
+gestures and input methods are still unfinished.
 
 ![An earlier nested Solium session with QML window frames](docs/desktop.png)
 
@@ -42,14 +43,15 @@ window-frame rendering, rather than the current desktop appearance.
 | Presentation | Animated placement, opacity and mesh transforms; immediate launch, resize and close feedback |
 | Appearance | QML window frames, wallpaper and hosted desktop scenes; reloadable Lua/QML; effects authored in Lua and GLSL |
 | Displays | Multiple monitors, hotplug, per-output scale and refresh rate, configurable arrangement and screen power |
-| Input | Keyboard layouts, bindings that work with non-Latin layouts, per-device libinput settings, cursor themes |
-| Session integration | External lockers through session-lock, idle inhibition, logind lock/sleep integration, systemd and XDG autostart |
+| Input | Keyboard layouts, bindings that work with non-Latin layouts, per-device libinput settings, cursor themes; touch on windows and compositor UI |
+| Desktop services | The notification server, and PipeWire audio with per-application streams, for QML scenes and Lua |
+| Session integration | Solium's own lock screen with an optional PIN, external lockers through session-lock, idle inhibition, logind lock/sleep integration, systemd and XDG autostart |
 
 Implementation is not a guarantee that every application or device works.
-Important gaps include input methods, clipboard managers, multi-GPU output,
-compositor touch/gestures and end-to-end portal validation. Explicit DRM sync
-is available on capable devices; Vulkan/NVIDIA hardware validation remains
-tracked in [#59](https://github.com/Lilium-Linux/solium/issues/59).
+Important gaps include input methods, clipboard privacy, multi-GPU output,
+gestures and portals checked on hardware. Explicit DRM sync is available on
+capable devices; Vulkan/NVIDIA hardware validation remains tracked in
+[#59](https://github.com/Lilium-Linux/solium/issues/59).
 [Known limitations](docs/gaps.md) explains these and links to their issues.
 
 ## Building
@@ -265,6 +267,14 @@ project. The bundled preview is one configuration of the compositor.
 | Understand support and plans | [Status](docs/status.md), [known limitations](docs/gaps.md), [roadmap](docs/roadmap.md) |
 | Develop Solium | [Contributing](CONTRIBUTING.md), [architecture](docs/architecture.md), [development tools](dev/README.md) |
 | Report a problem | [Issue tracker](https://github.com/Lilium-Linux/solium/issues), [security policy](SECURITY.md) |
+
+## AI assistance
+
+Solium is actively developed with AI assistance: AI coding agents generate
+code, review changes and help manage tasks and the issue board. The maintainer
+decides what lands. Every change starts from an issue, passes the project's
+checks, and is reviewed and merged by the maintainer. Commits and pull
+requests carry no AI attribution, so this section is the project's disclosure.
 
 ## License and credits
 
