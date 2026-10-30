@@ -1548,6 +1548,52 @@ local defaults = {
             -- and at most 1; anything else is read as 0.6.
             size = 0.6,
         },
+
+        -- Atrium, the desktop as a stage and a strip (#449): `lua/atrium.lua`.
+        -- The window you use, and its group, stay where they live; every
+        -- other group on the desk is a live card in a strip down the left of
+        -- the work area, most recent at the top. A card clicked, or reached
+        -- any other way -- Alt+Tab, the taskbar, the overview -- brings its
+        -- group onto the stage. A card shift-clicked, or dragged onto the
+        -- stage, joins the stage's group; a stage window dropped on the strip
+        -- leaves it. Only while floating is in charge.
+        atrium = {
+            -- On whenever floating is in charge. `key` turns it off and on
+            -- again until you restart (it survives `super+shift+r`).
+            enabled = true,
+            key = "super+a",
+            -- The strip's width, in logical pixels (80 or more), and how many
+            -- cards it shows; older groups wait off the edge.
+            strip = 220,
+            cards = 6,
+            -- How the cards stand: degrees turned about their left edge, and
+            -- the viewer's distance in pixels, as `sol.present` takes them.
+            tilt = 14,
+            perspective = 1100,
+            -- How far apart, in pixels, the windows of one group are fanned.
+            fan = 14,
+            card = {
+                -- A card's height, as a share of its width.
+                aspect = 0.72,
+                -- Room under each card for its icons, in pixels.
+                spacing = 64,
+                -- How opaque the windows behind a group's front window are.
+                behind = 0.92,
+                -- How large a group's application icons are, in pixels.
+                icon = 44,
+            },
+            -- A card under the pointer: how much larger it grows, and what
+            -- share of its tilt it keeps.
+            hover = { lift = 1.06, tilt = 0.5 },
+            -- How far, in pixels, a press on a card moves before it is a drag.
+            drag = 8,
+            -- "overlap": the strip slides off the edge while a stage window
+            -- covers it, and comes back when the pointer touches the edge.
+            -- "never": it stays, under the window.
+            hide = "overlap",
+            -- The spring every move of atrium's rides on.
+            motion = { stiffness = 300, damping = 32 },
+        },
     },
 
     tiling = {
