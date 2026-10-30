@@ -1568,7 +1568,7 @@ local defaults = {
             cards = 6,
             -- How the cards stand: degrees turned about their left edge, and
             -- the viewer's distance in pixels, as `sol.present` takes them.
-            tilt = 14,
+            tilt = 26,
             perspective = 1100,
             -- How far apart, in pixels, the windows of one group are fanned.
             fan = 14,
@@ -1582,11 +1582,20 @@ local defaults = {
                 -- How large a group's application icons are, in pixels.
                 icon = 44,
             },
-            -- A card under the pointer: how much larger it grows, and what
-            -- share of its tilt it keeps.
-            hover = { lift = 1.06, tilt = 0.5 },
-            -- How far, in pixels, a press on a card moves before it is a drag.
-            drag = 8,
+            -- A card under the pointer comes forward: `lift` times larger,
+            -- keeping `tilt` of its tilt (0, flat), `shift` pixels out
+            -- towards the stage, and the cards above and below it `part`
+            -- pixels further away.
+            hover = { lift = 1.12, tilt = 0, shift = 28, part = 20 },
+            -- A card dragged out of the strip: how far, in pixels, a press
+            -- moves before it is a drag; over how many pixels past the strip
+            -- it turns from a card into its windows, flat and at their own
+            -- size; and the spring it follows the pointer on.
+            drag = {
+                threshold = 8,
+                reach = 320,
+                motion = { stiffness = 1400, damping = 75 },
+            },
             -- "overlap": the strip slides off the edge while a stage window
             -- covers it, and comes back when the pointer touches the edge.
             -- "never": it stays, under the window.

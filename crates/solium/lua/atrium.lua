@@ -47,6 +47,8 @@ local atrium = {}
 --   peek       monitors whose hidden strip the pointer has brought back
 --   hover      the card under the pointer, by monitor
 --   aside      another overlay (the overview, Alt+Tab, the desk stack) is up
+--   drag       the card being dragged out: its desk, number and where on its
+--              front window it was picked up
 local kept = sol.keep("atrium", {
     desks = {},
     presented = {},
@@ -59,6 +61,11 @@ kept.presented = kept.presented or {}
 kept.surfaces = kept.surfaces or {}
 kept.peek = kept.peek or {}
 kept.hover = kept.hover or {}
+-- Nothing holds the input and nothing is being dragged at a load: an overlay
+-- up across a reload grabs again as it comes back, and a drag in flight lost
+-- its press with the scene that held it.
+kept.aside = nil
+kept.drag = nil
 
 atrium.desks = kept.desks
 
@@ -75,11 +82,13 @@ local function settings()
     local motion = type(given.motion) == "table" and given.motion or {}
     local hover = type(given.hover) == "table" and given.hover or {}
     local card = type(given.card) == "table" and given.card or {}
+    local drag = type(given.drag) == "table" and given.drag or {}
+    local dragging = type(drag.motion) == "table" and drag.motion or {}
     return {
         enabled = given.enabled ~= false,
         strip = number(given.strip, 220, 80),
         cards = math.floor(number(given.cards, 6, 1)),
-        tilt = number(given.tilt, 14, -89),
+        tilt = number(given.tilt, 26, -89),
         perspective = number(given.perspective, 1100, 100),
         fan = number(given.fan, 14),
         hide = given.hide == "never" and "never" or "overlap",
@@ -87,9 +96,16 @@ local function settings()
         spacing = number(card.spacing, 64),
         behind = math.min(1, number(card.behind, 0.92)),
         icon = math.floor(number(card.icon, 44, 8)),
-        lift = number(hover.lift, 1.06, 0.1),
-        hover_tilt = number(hover.tilt, 0.5),
-        drag = number(given.drag, 8),
+        lift = number(hover.lift, 1.12, 0.1),
+        hover_tilt = number(hover.tilt, 0),
+        shift = number(hover.shift, 28, -1000),
+        part = number(hover.part, 20, -1000),
+        threshold = number(drag.threshold, 8),
+        reach = number(drag.reach, 320, 1),
+        drag_motion = {
+            stiffness = number(dragging.stiffness, 1400, 1),
+            damping = number(dragging.damping, 75, 1),
+        },
         motion = {
             stiffness = number(motion.stiffness, 300, 1),
             damping = number(motion.damping, 32, 1),
@@ -221,7 +237,9 @@ local function reconcile(windows, by_id)
 end
 
 -- Group `index` of desk `key` onto the stage, and window `id` to the front of
--- it. True when anything moved.
+-- it. True when anything moved. The two trade places: the group that was on
+-- the stage takes the card the other one left, and every other card stays
+-- where it is, so nothing in the strip moves but the two that swapped.
 local function to_stage(key, index, id)
     local groups = kept.desks[key]
     if not groups or not groups[index] then
@@ -229,7 +247,7 @@ local function to_stage(key, index, id)
     end
     local moved = false
     if index > 1 then
-        table.insert(groups, 1, table.remove(groups, index))
+        groups[1], groups[index] = groups[index], groups[1]
         moved = true
     end
     local group = groups[1]
@@ -399,34 +417,57 @@ local function arrange_desk(key, area, by_id, set, children)
 
     local boxes = slots(area, set, #groups - 1)
     local cards = {}
+    local held = kept.drag and kept.drag.key == key and kept.drag.card or nil
     for index = 2, #groups do
         local k = index - 1
         local box = boxes[k]
         local waiting = box == nil
         box = box or boxes[#boxes]
-        local lift = (hovered == k and not hidden) and set.lift or 1
-        local tilt = (hovered == k) and set.tilt * set.hover_tilt or set.tilt
-        local drawn = fanned(groups[index], by_id, box, set.fan)
-        for at, card in ipairs(drawn) do
-            local w, h = card.w * lift, card.h * lift
-            local x = card.x - (w - card.w) / 2
-            local y = card.y - (h - card.h) / 2
-            local opacity = at == 1 and 1 or set.behind
-            if hidden or waiting then
-                x = x - set.strip
-                opacity = 0
+        -- The card under the pointer comes forward: flat, larger, and out to
+        -- the right towards the stage; the cards above and below it part.
+        local lift, tilt, dx, dy = 1, set.tilt, 0, 0
+        if hovered and not hidden then
+            if hovered == k then
+                lift, tilt, dx = set.lift, set.tilt * set.hover_tilt, set.shift
+            elseif k < hovered then
+                dy = -set.part
+            else
+                dy = set.part
             end
-            -- Behind the stage, unless the strip has been brought back over it.
-            local z = (peeking and 100 or 0) - k - at * 0.1
-            local rect = { x = x, y = y, w = w, h = h }
-            present(card.id, {
-                x = x, y = y, w = w, h = h,
-                rotate_y = tilt, pivot_x = 0, perspective = set.perspective,
-                opacity = opacity, z = z,
-            })
-            -- A dialog goes into its window's card, out of sight.
-            for _, child in ipairs(children[card.id] or {}) do
-                present(child, { x = rect.x, y = rect.y, w = rect.w, h = rect.h, opacity = 0, z = z })
+        end
+        local drawn = fanned(groups[index], by_id, box, set.fan)
+        local front = drawn[1]
+        for at, card in ipairs(drawn) do
+            -- Grown from the front window's left edge and middle, so the card
+            -- reaches towards the stage rather than spreading both ways.
+            local w, h = card.w * lift, card.h * lift
+            local x = front.x + (card.x - front.x) * lift + dx
+            local y = front.y + front.h / 2 + (card.y - front.y - front.h / 2) * lift + dy
+            local opacity = at == 1 and 1 or set.behind
+            if held == k then
+                -- Being dragged: `drag` draws it, following the pointer, and
+                -- it is kept as it is drawn rather than let go of.
+                touched[card.id] = true
+                for _, child in ipairs(children[card.id] or {}) do
+                    touched[child] = true
+                end
+            else
+                if hidden or waiting then
+                    x = x - set.strip
+                    opacity = 0
+                end
+                -- Behind the stage, unless the strip has been brought back
+                -- over it.
+                local z = (peeking and 100 or 0) - k - at * 0.1
+                present(card.id, {
+                    x = x, y = y, w = w, h = h,
+                    rotate_y = tilt, pivot_x = 0, perspective = set.perspective,
+                    opacity = opacity, z = z,
+                })
+                -- A dialog goes into its window's card, out of sight.
+                for _, child in ipairs(children[card.id] or {}) do
+                    present(child, { x = x, y = y, w = w, h = h, opacity = 0, z = z })
+                end
             end
         end
         if not waiting and in_view then
@@ -444,6 +485,11 @@ local function arrange_desk(key, area, by_id, set, children)
             for _, id in ipairs(groups[index]) do
                 name = math.min(name, id)
             end
+            -- Where it is picked (its slot, which never moves under the
+            -- pointer, so a card growing out from under it does not flicker)
+            -- and where its icons go (under its front window as drawn).
+            local fx = front.x + dx
+            local fy = front.y + front.h / 2 - front.h * lift / 2 + dy
             cards[#cards + 1] = {
                 card = k,
                 key = name,
@@ -451,7 +497,10 @@ local function arrange_desk(key, area, by_id, set, children)
                 y = box.y - area.y,
                 w = box.w,
                 h = box.h,
+                ix = fx - area.x,
+                iy = fy + front.h * lift - area.y,
                 icons = apps,
+                dragged = held == k,
             }
         end
     end
@@ -484,7 +533,7 @@ local function declare_strip(monitor, area, set, drawn)
             peeking = drawn.peeking,
             hovered = drawn.hovered,
             iconSize = set.icon,
-            dragThreshold = set.drag,
+            dragThreshold = set.threshold,
             lift = set.lift,
         },
     })
@@ -571,16 +620,61 @@ local function pick(monitor, card, join)
     sol.focus(chosen[1])
 end
 
--- A card being dragged out of the strip: its group follows the pointer, flat
--- and in front of everything, at the size it has in its card. `x` and `y` are
--- the strip scene's, from the column's top-left corner.
-local function drag(monitor, card, x, y)
+-- ## Dragging a card out
+
+-- How far a dragged window has turned into a card, from 0 (a window, as any
+-- window being dragged is) to 1 (a card), by how near the pointer at `x` is to
+-- the strip: 1 over the strip, falling to 0 at `drag.reach` pixels past its
+-- edge. One measure for both ways across, so a card pulled out and a window
+-- pushed in change the same way at the same place.
+function atrium.closeness(area, x)
+    local set = settings()
+    local edge = area.x + set.strip
+    return math.max(0, math.min(1, (edge + set.reach - x) / set.reach))
+end
+
+-- Where a group is drawn while it is dragged with its front window's point
+-- (`fx`, `fy`, shares of the window) under the pointer at `x`, `y`: the card,
+-- at `t` 1, the windows at their own size and as they stand to one another,
+-- at `t` 0, and in between, everything between.
+local function morph(group, by_id, card_rects, x, y, fx, fy, t)
+    local front = by_id[group[1]]
+    local card = card_rects[1]
+    if not front or not card then
+        return {}
+    end
+    local scale = (card.w / front.w) * t + (1 - t)
+    local fw, fh = front.w * scale, front.h * scale
+    local fx0, fy0 = x - fx * fw, y - fy * fh
+    local out = {}
+    for at, id in ipairs(group) do
+        local window = by_id[id]
+        local each = card_rects[at]
+        if window and each then
+            local live_x, live_y = (window.x - front.x) * scale, (window.y - front.y) * scale
+            local card_x = (each.x - card.x) * (fw / card.w)
+            local card_y = (each.y - card.y) * (fh / card.h)
+            out[at] = {
+                id = id,
+                x = fx0 + live_x * (1 - t) + card_x * t,
+                y = fy0 + live_y * (1 - t) + card_y * t,
+                w = window.w * scale,
+                h = window.h * scale,
+            }
+        end
+    end
+    return out
+end
+
+-- The group of card `card` on the desk `monitor` shows, with what dragging it
+-- needs: the desk, the work area, the windows by id and its card's rects.
+local function dragged_group(monitor, card)
     local key = showing(monitor)
     local groups = kept.desks[key]
     local index = (tonumber(card) or 0) + 1
     local area = monitors.named(monitor)
     if not groups or index < 2 or not groups[index] or not area then
-        return
+        return nil
     end
     local set = settings()
     local by_id = {}
@@ -589,17 +683,76 @@ local function drag(monitor, card, x, y)
     end
     local boxes = slots(area, set, #groups - 1)
     local box = boxes[index - 1] or boxes[#boxes]
-    local drawn = fanned(groups[index], by_id, box, set.fan)
-    local dx = area.x + (tonumber(x) or 0) - (box.x + box.w / 2)
-    local dy = area.y + (tonumber(y) or 0) - (box.y + box.h / 2)
-    sol.animate({ easing = { spring = { stiffness = 900, damping = 60 } } })
-    for at, each in ipairs(drawn) do
+    return {
+        key = key, index = index, area = area, by_id = by_id, set = set,
+        group = groups[index], rects = fanned(groups[index], by_id, box, set.fan),
+    }
+end
+
+-- A card being dragged: `x`, `y` is the pointer and `px`, `py` where the press
+-- was, both the strip scene's. The group follows the pointer, held by the
+-- point it was picked up at, turning from card into windows as it leaves the
+-- strip and back as it returns.
+local function drag(monitor, card, x, y, px, py)
+    local it = dragged_group(monitor, card)
+    if not it then
+        return
+    end
+    local gx, gy = it.area.x + (tonumber(x) or 0), it.area.y + (tonumber(y) or 0)
+    local held = kept.drag
+    if not held or held.key ~= it.key or held.card ~= it.index - 1 then
+        -- Picked up: where on the front window, as shares of it.
+        local front = it.rects[1]
+        local ax, ay = it.area.x + (tonumber(px) or 0), it.area.y + (tonumber(py) or 0)
+        held = {
+            key = it.key, card = it.index - 1, monitor = monitor,
+            fx = math.max(0, math.min(1, (ax - front.x) / front.w)),
+            fy = math.max(0, math.min(1, (ay - front.y) / front.h)),
+        }
+        kept.drag = held
+        kept.hover[monitor] = nil
+        atrium.arrange()
+    end
+    local t = atrium.closeness(it.area, gx)
+    local set = it.set
+    sol.animate({ easing = { spring = set.drag_motion } })
+    for at, each in ipairs(morph(it.group, it.by_id, it.rects, gx, gy, held.fx, held.fy, t)) do
         present(each.id, {
-            x = each.x + dx, y = each.y + dy, w = each.w, h = each.h,
-            rotate_y = 0, pivot_x = 0, perspective = set.perspective,
-            opacity = at == 1 and 1 or set.behind, z = 200 - at * 0.1,
+            x = each.x, y = each.y, w = each.w, h = each.h,
+            rotate_y = set.tilt * t, pivot_x = 0, perspective = set.perspective,
+            opacity = at == 1 and 1 or (1 - t) + set.behind * t, z = 200 - at * 0.1,
         })
     end
+end
+
+-- A dragged card let go at `x`, `y`. Over the strip it goes back into its
+-- place. Anywhere past it, its windows live where they were let go, at their
+-- own size, and join the stage: they were already drawn there, more or less
+-- grown, and grow the rest of the way.
+local function drop(monitor, card, x, y)
+    local held = kept.drag
+    kept.drag = nil
+    local it = dragged_group(monitor, card)
+    if not it or not held then
+        atrium.arrange()
+        return
+    end
+    local gx, gy = it.area.x + (tonumber(x) or 0), it.area.y + (tonumber(y) or 0)
+    if gx < it.area.x + it.set.strip then
+        atrium.arrange()
+        return
+    end
+    for _, each in ipairs(morph(it.group, it.by_id, it.rects, gx, gy, held.fx, held.fy, 0)) do
+        sol.place(each.id, { x = math.floor(each.x), y = math.floor(each.y),
+            w = math.floor(each.w), h = math.floor(each.h), tile = false })
+    end
+    local groups = kept.desks[it.key]
+    table.remove(groups, it.index)
+    for at = #it.group, 1, -1 do
+        table.insert(groups[1], 1, it.group[at])
+    end
+    atrium.arrange()
+    sol.focus(it.group[1])
 end
 
 -- ## What atrium is told
@@ -693,9 +846,9 @@ sol.on("surface", function(surface, action, data)
     if action == "pick" then
         pick(monitor, data.card, data.join == true)
     elseif action == "drag" then
-        drag(monitor, data.card, data.x, data.y)
+        drag(monitor, data.card, data.x, data.y, data.px, data.py)
     elseif action == "drop" then
-        atrium.arrange()
+        drop(monitor, data.card, data.x, data.y)
     elseif action == "hover" then
         local card = tonumber(data.card) or 0
         kept.hover[monitor] = card > 0 and card or nil
@@ -729,23 +882,24 @@ modes.watch(function(name)
 end)
 
 -- Another overlay up -- the overview, Alt+Tab, the desk stack -- presents the
--- windows itself, and clears every one of them as it leaves. Each says so by
--- naming itself as the mode in charge with `sol.status`, and saying nothing
--- again as it leaves, so that is what atrium listens to: it stands aside, its
--- strip down, while one is up, and lays the cards out again once it has gone.
--- Wrapped here rather than asked of each overlay, so one written after this
--- file, or in a configuration, is stood aside for too.
-local status = sol.status
-sol.status = function(text)
-    status(text)
-    local up = type(text) == "string" and text ~= "" and modes.registered[text] == nil
-    if up and not kept.aside then
+-- windows itself, and clears every one of them as it leaves. Each holds the
+-- input while it is up (`sol.grab_input`), and nothing else does, so that is
+-- what atrium listens to: it stands aside, its strip down, while one is up,
+-- and lays the cards out again once it has let go. Wrapped here rather than
+-- asked of each overlay, so one written after this file, or in a
+-- configuration, is stood aside for too. Not `sol.status`: a workspace
+-- switch names itself there too, and is no overlay.
+local grab_input = sol.grab_input
+sol.grab_input = function(grabbed)
+    grab_input(grabbed)
+    if grabbed and not kept.aside then
         kept.aside = true
+        kept.drag = nil
         for name in pairs(kept.surfaces) do
             sol.surface(name, false)
             kept.surfaces[name] = nil
         end
-    elseif not up and kept.aside then
+    elseif not grabbed and kept.aside then
         kept.aside = nil
         -- The overlay cleared every window it presented, cards included.
         kept.presented = {}
