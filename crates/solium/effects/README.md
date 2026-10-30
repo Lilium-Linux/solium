@@ -427,7 +427,7 @@ is checked as `effect.lua`'s own keys are, and a key a stage does not take is
 refused with the one you probably meant. A name an effect saves or makes a
 state is a new GLSL name, because every pass reads it as `sol_<name>`:
 lower-case letters, digits and `_`, not one of the `sol_` names below, and
-not another of its names followed by `_box` or `_sampler`. An effect may not
+not another of its names followed by `_box`, `_clamp` or `_sampler`. An effect may not
 use itself, directly or through others, and one effect runs at most 256
 passes, its states' included. `depends = "region"`, an outline a region publishes, waits
 for regions, and is refused.
@@ -496,7 +496,7 @@ error at its line.
 | `sol_tex(uv)` | the pass's input: the previous pass's result, or the effect's first input in the first pass, clamped at its edge |
 | `sol_texel`, `sol_size` | one texel of that input, in `uv`; the size of what the pass draws, in pixels |
 | `p_<param>` | each of the effect's params, declared from `params`: a number is a `float` (an `int` with `int = true`), a boolean an `int` 0 or 1, four numbers a `vec4`; a word has none |
-| `sol_<name>(uv)`, `SOL_HAS_<name>` | another texture the effect reads, by name: `sol_self`, `sol_backdrop`, a name it saved, or a state's. One the pass does not list in its `uses` reads transparent and its `SOL_HAS_<name>` is 0, so one file can be written for both cases |
+| `sol_<name>(uv)`, `SOL_HAS_<name>` | another texture the effect reads, by name: `sol_self`, `sol_backdrop`, a name it saved, or a state's. A read past its picture's edge reads that edge, as `sol_tex` does. One the pass does not list in its `uses` reads transparent and its `SOL_HAS_<name>` is 0, so one file can be written for both cases |
 | `sol_shape(uv)`, `sol_sdf(px)` | the part's shape: its coverage, and its signed distance in pixels, negative inside, exact for a rounded box |
 | `sol_content`, `sol_to_content(uv)`, `sol_to_uv(px)`, `sol_sdf_rrect(px, size, radii)` | the part's rectangle inside the box the pass draws, the maps between `uv` and the part's pixels, and the rounded-box distance itself |
 | `sol_box_px`, `sol_radii` | the box the pass draws, in pixels, and the part's four corner radii in pixels, top-left, top-right, bottom-left and bottom-right, which `sol_sdf` rounds it by |
