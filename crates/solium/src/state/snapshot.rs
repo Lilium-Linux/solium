@@ -418,13 +418,17 @@ impl Solium {
                     return None;
                 }
                 let outer = self.pane_outer(pane);
+                // Where it is going, for a script: the size its client was
+                // last asked for until it draws it (#431). What is drawn
+                // stays `outer`.
+                let asked = self.asked_outer(pane);
                 // The two match keys a rule reads that nothing else here
                 // says, from where the rules read them, so a rule can be
                 // tried in Lua first: `real_client::sol_windows_carries_every_window_match_key`.
                 let facts = self.window_facts(pane.id(), crate::effect::rules::Keys::default());
                 Some(WindowInfo {
                     id: pane.id().get(),
-                    rect: to_rect(outer),
+                    rect: to_rect(asked),
                     drawn: Drawn {
                         slot: outer,
                         frame: self.drawn_at(pane, outer, now),

@@ -16515,6 +16515,64 @@ end)"#,
         );
     }
 
+    /// **#431: a script reads a window back where it put it.** A layout or
+    /// a configuration that places a window and reads `sol.windows()` before
+    /// the client has answered read the size the client was still drawing:
+    /// toggling tiling and floating quickly, a configuration that remembers
+    /// where each window floated remembered a size it was leaving, and the
+    /// windows drifted a little each time.
+    #[test]
+    fn a_script_reads_a_window_still_answering_a_placement_at_the_placed_size() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (0, 0), false);
+        state.sync_panes();
+        let pane = state.panes.id_of(&window).expect("a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let floated = at(100, 100, 800, 500);
+        let now = state.clock.now();
+        let was = state.pane_outer_of(pane).expect("a mapped pane");
+        state.move_pane(
+            pane,
+            floated,
+            was,
+            AnimationSpec::default(),
+            now,
+            Standing::Free,
+        );
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_ne!(
+            window.geometry().size,
+            inner(floated, state.insets_of(pane)).size,
+            "the premise: its client has not drawn the placed size yet"
+        );
+        let row = state
+            .window_infos()
+            .into_iter()
+            .find(|row| row.id == pane.get())
+            .expect("the window is listed");
+        assert_eq!(
+            (row.rect.x, row.rect.y, row.rect.w, row.rect.h),
+            (100.0, 100.0, 800.0, 500.0),
+            "a script reads the rectangle it placed the window in"
+        );
+    }
+
     /// **Only a live gesture arms a bridge.**
     ///
     /// The keyboard `nudge` reaches `move_pane` through `Scripts::key` and

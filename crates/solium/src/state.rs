@@ -1721,6 +1721,26 @@ impl Solium {
     ///
     /// `Option` here is the *lookup* failing, not the geometry: an id whose
     /// pane has been retired has no rectangle because it has no pane.
+    /// [`Self::pane_outer`], at the size its client was last asked for while
+    /// it has not drawn it and nothing holds the pane ([`Self::asked_geometry`]):
+    /// where the window is going rather than the size it is leaving. What a
+    /// change of its frame keeps, and what scripts are told it is, so a
+    /// script that reads a window back after placing it reads the place it
+    /// gave rather than the one the client is still drawing (#431).
+    pub(crate) fn asked_outer(&self, pane: &Pane) -> Rectangle<i32, Logical> {
+        pane.client()
+            .filter(|window| {
+                pane.left().is_none()
+                    && !self.holding_resize(pane.id())
+                    && crate::resizing::unanswered(window).is_some()
+            })
+            .and_then(|window| self.asked_geometry(window))
+            .map_or_else(
+                || self.pane_outer(pane),
+                |asked| grown(asked, self.insets_of(pane.id())),
+            )
+    }
+
     pub(crate) fn pane_outer_of(&self, id: crate::pane::PaneId) -> Option<Rectangle<i32, Logical>> {
         Some(self.pane_outer(self.panes.get(id)?))
     }

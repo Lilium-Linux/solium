@@ -14,7 +14,7 @@ use crate::{
     json::Json,
     pane::{Pane, PaneId},
     qml::hosted::ScenePointer,
-    state::{Solium, grown, inner, placement::over_the_arrangement},
+    state::{Solium, inner, placement::over_the_arrangement},
 };
 
 impl Solium {
@@ -233,16 +233,7 @@ impl Solium {
         // folds its bar while its client is still drawing the size it had
         // floating, and a frame kept at that size put the window back to it
         // once the bar had folded (#431).
-        let outer = match pane
-            .client()
-            .filter(|window| {
-                !self.holding_resize(id) && crate::resizing::unanswered(window).is_some()
-            })
-            .and_then(|window| self.asked_geometry(window))
-        {
-            Some(asked) => grown(asked, self.insets_of(id)),
-            None => self.pane_outer(pane),
-        };
+        let outer = self.asked_outer(pane);
         let geometry = self.pane_geometry(pane);
         let slot = pane.slot();
         let held = Self::held_in_a_size(pane);
