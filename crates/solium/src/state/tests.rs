@@ -41081,6 +41081,60 @@ Item {
                 });
             }
 
+            /// **#438: a floating window whose frame grows while it glides
+            /// arrives at the size it has.** The frame makes it taller as it
+            /// grows; a glide still aimed at the rectangle it had drew it
+            /// landing there and then jumping to its real size as it let go.
+            #[test]
+            fn a_window_whose_frame_grows_while_it_glides_is_aimed_at_its_grown_size() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed_by(GROWS);
+                    let pane = opened.pane;
+                    let outer = desk.state.pane_outer_of(pane).expect("outer");
+                    let away =
+                        Rectangle::new((outer.loc.x + 200, outer.loc.y + 100).into(), outer.size);
+                    let now = desk.state.clock.now();
+                    desk.state.place(
+                        pane.get(),
+                        crate::state::snapshot::to_rect(away),
+                        crate::script::AnimationSpec {
+                            duration: Duration::from_millis(320),
+                            ..crate::script::AnimationSpec::default()
+                        },
+                        now,
+                        crate::state::placement::Standing::Free,
+                    );
+                    frame(&mut desk, 16);
+                    let aimed = |desk: &Desk| {
+                        desk.state
+                            .panes
+                            .get(pane)
+                            .and_then(crate::present::course)
+                            .map(|(_, to)| to)
+                    };
+                    assert!(aimed(&desk).is_some(), "the premise: it is gliding");
+
+                    grow_to(&mut desk, pane, 31);
+                    frame(&mut desk, 16);
+                    let grown = desk.state.pane_outer_of(pane).expect("outer");
+                    assert_eq!(
+                        grown.size.h,
+                        away.size.h + 31,
+                        "the premise: the frame grew it"
+                    );
+                    assert_eq!(
+                        aimed(&desk),
+                        Some(Rectangle::new(
+                            (f64::from(grown.loc.x), f64::from(grown.loc.y)).into(),
+                            (f64::from(grown.size.w), f64::from(grown.size.h)).into(),
+                        )),
+                        "the glide arrives where the window is, its frame grown"
+                    );
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
             /// **A frame is told its window and its state** (#417): its id
             /// and its process, and a maximise, a fullscreen and a minimize
             /// each as the compositor set it, and whether a layout holds it in
