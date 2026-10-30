@@ -13,8 +13,10 @@ publish = false
 # maps a window the way a Wine game does (#361). wl-probe is the Wayland twin.
 [dependencies]
 # Already in the dependency graph through smithay, at this version: the pure
-# Rust connection, and RandR to find a monitor's rectangle.
-x11rb = { version = "0.13", features = ["randr"] }
+# Rust connection, RandR to find a monitor's rectangle, and Render and XFixes
+# to build a cursor from a theme's pixels with no name, as Chromium does
+# (#442).
+x11rb = { version = "0.13", features = ["randr", "render", "xfixes"] }
 
 # Not the workspace lints, for wl-probe's reason: a probe run by hand may panic,
 # and a backtrace is what it should give when the answer is absurd.

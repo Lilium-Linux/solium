@@ -769,12 +769,12 @@ pub(crate) fn run() -> Result<()> {
                 synth::touch_frame(&mut state, region);
             }
         }
-        while drags.last().is_some_and(|(at, _, _)| now >= *at) {
-            if let Some((_, from, to)) = drags.pop() {
-                tracing::info!(?from, ?to, "scripted drag");
+        while drags.last().is_some_and(|(at, _, _, _)| now >= *at) {
+            if let Some((_, from, to, held)) = drags.pop() {
+                tracing::info!(?from, ?to, held, "scripted drag");
                 let region = crate::monitor::union(&state.space)
                     .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
-                synth::drag(&mut state, region, from.into(), to.into(), 12);
+                synth::drag_holding(&mut state, region, from.into(), to.into(), 12, &held);
             }
         }
         while keys.last().is_some_and(|(at, _)| now >= *at) {

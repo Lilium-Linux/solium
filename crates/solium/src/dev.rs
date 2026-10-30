@@ -124,31 +124,43 @@ pub(crate) fn clicks() -> Vec<(Duration, (f64, f64))> {
     })
 }
 
-/// A drag: when to start it, where from, and where to.
-pub(crate) type Drag = (Duration, (f64, f64), (f64, f64));
+/// A drag: when to start it, where from, where to, and the keys held down
+/// for it, as `SOLIUM_KEY_AT` names keys (`super`, `alt`), empty for none.
+pub(crate) type Drag = (Duration, (f64, f64), (f64, f64), String);
 
-/// Drags to perform, as `<ms>:<x1>,<y1>><x2>,<y2>` separated by semicolons.
+/// Drags to perform, as `<ms>:<x1>,<y1>><x2>,<y2>` separated by semicolons,
+/// each with the keys to hold for it before an `@` if any.
 ///
 /// ```sh
 /// SOLIUM_DRAG_AT="4000:300,200>1200,600"
+/// SOLIUM_DRAG_AT="4000:super@300,200>1200,600"
 /// ```
 ///
 /// A drag is the interaction that could not be tested without a hand on a
 /// mouse, and it is where the last two bugs in this compositor were — one of
 /// them a deadlock that froze the machine. It runs through the real grab and
-/// the real layout scripts; see `synth`.
+/// the real layout scripts; see `synth`. With `super` held it is the drag
+/// modifier's move, which works anywhere in a window (#427).
 pub(crate) fn drags() -> Vec<Drag> {
-    parse_list_with("SOLIUM_DRAG_AT", ';', |value| {
-        let (from, to) = value.split_once('>')?;
-        let point = |raw: &str| -> Option<(f64, f64)> {
-            let (x, y) = raw.split_once(',')?;
-            Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
-        };
-        Some((point(from)?, point(to)?))
-    })
-    .into_iter()
-    .map(|(at, (from, to))| (at, from, to))
-    .collect()
+    parse_list_with("SOLIUM_DRAG_AT", ';', parse_drag)
+        .into_iter()
+        .map(|(at, (from, to, held))| (at, from, to, held))
+        .collect()
+}
+
+/// A drag after its moment: where from, where to, and the keys held.
+type DragValue = ((f64, f64), (f64, f64), String);
+
+/// One drag's value, after its moment: `[<keys>@]<x1>,<y1>><x2>,<y2>`.
+/// `tests::a_drag_may_hold_keys`.
+fn parse_drag(value: &str) -> Option<DragValue> {
+    let (held, value) = value.split_once('@').unwrap_or(("", value));
+    let (from, to) = value.split_once('>')?;
+    let point = |raw: &str| -> Option<(f64, f64)> {
+        let (x, y) = raw.split_once(',')?;
+        Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+    };
+    Some((point(from)?, point(to)?, held.trim().to_owned()))
 }
 
 /// Scheduled touchscreen samples, in global logical coordinates.
@@ -556,6 +568,21 @@ pub(crate) fn debug_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// **A drag may hold keys**, before an `@`, as the drag modifier's move
+    /// needs `super` held (#427); without one it holds none.
+    #[test]
+    fn a_drag_may_hold_keys() {
+        assert_eq!(
+            super::parse_drag("super@300,200>1200,600"),
+            Some(((300.0, 200.0), (1200.0, 600.0), "super".to_owned()))
+        );
+        assert_eq!(
+            super::parse_drag("300,200>1200,600"),
+            Some(((300.0, 200.0), (1200.0, 600.0), String::new()))
+        );
+        assert_eq!(super::parse_drag("super@300,200"), None);
+    }
+
     #[test]
     fn motion_274_touch_replay_keeps_times_and_stable_sample_order() {
         let samples =

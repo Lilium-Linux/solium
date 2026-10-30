@@ -14,8 +14,9 @@
 //! it, to be maximised, and to be restored. `mapped` maps a window the way a
 //! Wine or Proton game started fullscreen does: no frame (Motif hints), at
 //! exactly the first monitor's rectangle, with `_NET_WM_STATE_FULLSCREEN`
-//! written into its own property before mapping; and then asks to leave, to
-//! be maximised, and to be restored.
+//! written into its own property before mapping, and is made fullscreen on
+//! the monitor under the pointer (#427); and then asks to leave, to be
+//! maximised, and to be restored.
 //!
 //!     DISPLAY=:1 cargo run -p x11-probe -- focus
 //!
@@ -26,6 +27,33 @@
 //! The second is Globally Active: it declines `WM_HINTS.input`, lists
 //! `WM_TAKE_FOCUS`, and sets the focus itself when the window manager sends
 //! it one, as the probe does.
+//!
+//!     DISPLAY=:1 cargo run -p x11-probe -- popup
+//!
+//! `popup` maps a window, asks to move itself as Steam does when it puts
+//! itself back where it was last session, and opens an override-redirect
+//! popup 50,60 inside where it believes it is, as a toolkit opens a menu
+//! (#441). It does so three times, `X11_PROBE_HOLD` apart, so a drag of the
+//! window between them shows whether the X server heard of the move. The
+//! window is blue and the popup red, so a capture shows whether the popup is
+//! where the window is drawn.
+//!
+//!     DISPLAY=:1 cargo run -p x11-probe -- grab
+//!
+//! `grab` maps a 960x540 window and takes the pointer and the keyboard the way
+//! a Proton game does (#427): `XGrabPointer` confined to its window with a
+//! blank cursor, `XGrabKeyboard`, and a warp to its middle every 16 ms, which
+//! XWayland turns into a locked pointer. It prints where the X pointer is, the
+//! window's rectangle and the focus it is told of, once a second, for
+//! `X11_PROBE_HOLD` times ten, and lets its grabs go on `FocusOut`, as Wine
+//! does.
+//!
+//!     DISPLAY=:1 cargo run -p x11-probe -- cursor <theme file>
+//!
+//! `cursor` maps a window whose cursor is built from the first image of an
+//! XCursor file, with Render and no name, the way Chromium builds Steam's
+//! cursors (#442), and holds it for `X11_PROBE_HOLD` times four. Solium's log
+//! at `debug` says which shape the X11 cursor stands for.
 //!
 //! Each step waits `X11_PROBE_HOLD` milliseconds (1500 by default) for the
 //! compositor to answer and to be captured, then prints the window's state
@@ -224,7 +252,24 @@ fn main() {
             let failed = focus(&conn, root, monitor, Duration::from_millis(hold));
             std::process::exit(i32::from(failed));
         }
-        other => panic!("no such mode {other:?}: `request`, `mapped` or `focus`"),
+        "popup" => {
+            let failed = popup(&conn, root, monitor, Duration::from_millis(hold));
+            std::process::exit(i32::from(failed));
+        }
+        "grab" => {
+            grab(&conn, root, monitor, Duration::from_millis(hold));
+            std::process::exit(0);
+        }
+        "cursor" => {
+            let file = std::env::args()
+                .nth(2)
+                .expect("an XCursor file to build the cursor from");
+            cursor(&conn, root, monitor, &file, Duration::from_millis(hold));
+            std::process::exit(0);
+        }
+        other => panic!(
+            "no such mode {other:?}: `request`, `mapped`, `focus`, `popup`, `grab` or `cursor`"
+        ),
     };
     let rect = if mapped {
         monitor
@@ -308,8 +353,10 @@ fn main() {
 
     let seen = probe.look();
     if mapped {
-        let ok = seen.fullscreen && seen.rect == monitor;
-        probe.check("mapped covering the monitor, fullscreen", &seen, ok);
+        // On the monitor under the pointer, which need not be the one it
+        // covered (#427): a monitor's size, fullscreen.
+        let ok = seen.fullscreen && (seen.rect.w, seen.rect.h) == (monitor.w, monitor.h);
+        probe.check("mapped covering a monitor, fullscreen", &seen, ok);
     } else {
         let ok = !seen.fullscreen && seen.rect != monitor;
         probe.check("mapped as a window", &seen, ok);
@@ -448,4 +495,361 @@ fn focus(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) -> 
         failed |= !ok;
     }
     failed
+}
+
+/// A plain window of `colour` at `rect`, named `x11-probe <name>`, mapped,
+/// or override-redirect when `popup` is set.
+fn window(
+    conn: &RustConnection,
+    root: Window,
+    rect: Rect,
+    colour: u32,
+    name: &str,
+    popup: bool,
+) -> Window {
+    let window = conn.generate_id().expect("a window id");
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        window,
+        root,
+        i16::try_from(rect.x).expect("x fits"),
+        i16::try_from(rect.y).expect("y fits"),
+        u16::try_from(rect.w).expect("width fits"),
+        u16::try_from(rect.h).expect("height fits"),
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &CreateWindowAux::new()
+            .background_pixel(colour)
+            .override_redirect(u32::from(popup))
+            .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::FOCUS_CHANGE),
+    )
+    .expect("creating a window");
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        format!("x11-probe {name}").as_bytes(),
+    )
+    .expect("naming the window");
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        b"x11-probe\0x11-probe\0",
+    )
+    .expect("classing the window");
+    conn.map_window(window).expect("mapping the window");
+    conn.flush().expect("flushing");
+    window
+}
+
+/// Where `window` is in root coordinates, as its client believes.
+fn believed(conn: &RustConnection, root: Window, window: Window) -> (i32, i32) {
+    let at = conn
+        .translate_coordinates(window, root, 0, 0)
+        .expect("asking the position")
+        .reply()
+        .expect("the position");
+    (i32::from(at.dst_x), i32::from(at.dst_y))
+}
+
+/// Read every event waiting, so the X server's answers are in.
+fn drain(conn: &RustConnection) {
+    while conn.poll_for_event().expect("reading events").is_some() {}
+}
+
+/// `popup`: see the module header. Returns whether a step failed.
+fn popup(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) -> bool {
+    let main = window(
+        conn,
+        root,
+        Rect {
+            x: monitor.x + 100,
+            y: monitor.y + 100,
+            w: 640,
+            h: 400,
+        },
+        0x0033_66cc,
+        "popup",
+        false,
+    );
+    std::thread::sleep(hold);
+    drain(conn);
+    let placed = believed(conn, root, main);
+    println!("     placed: believes it is at {},{}", placed.0, placed.1);
+    // Steam putting itself back where it was last session.
+    conn.configure_window(
+        main,
+        &x11rb::protocol::xproto::ConfigureWindowAux::new()
+            .x(placed.0 + 700)
+            .y(placed.1 + 300),
+    )
+    .expect("asking to move");
+    conn.flush().expect("flushing");
+    std::thread::sleep(hold);
+    drain(conn);
+    let after = believed(conn, root, main);
+    let ok = after == placed;
+    println!(
+        "{} asked to move itself by 700,300: believes it is at {},{}",
+        if ok { "ok  " } else { "FAIL" },
+        after.0,
+        after.1
+    );
+    for step in 0..3 {
+        drain(conn);
+        let at = believed(conn, root, main);
+        let menu = window(
+            conn,
+            root,
+            Rect {
+                x: at.0 + 50,
+                y: at.1 + 60,
+                w: 200,
+                h: 120,
+            },
+            0x00cc_3333,
+            "menu",
+            true,
+        );
+        println!(
+            "     menu {step}: window believed at {},{}, menu at {},{}",
+            at.0,
+            at.1,
+            at.0 + 50,
+            at.1 + 60
+        );
+        std::thread::sleep(hold);
+        conn.destroy_window(menu).expect("closing the menu");
+        conn.flush().expect("flushing");
+        std::thread::sleep(hold);
+    }
+    !ok
+}
+
+/// `grab`: see the module header.
+fn grab(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) {
+    use x11rb::protocol::xproto::{GrabMode, GrabStatus};
+    let game = window(
+        conn,
+        root,
+        Rect {
+            x: monitor.x + 200,
+            y: monitor.y + 150,
+            w: 960,
+            h: 540,
+        },
+        0x0033_66cc,
+        "grab",
+        false,
+    );
+    std::thread::sleep(hold);
+    // A blank cursor, as a game hides the pointer: a one-pixel pixmap with
+    // nothing in its mask.
+    let pixmap = conn.generate_id().expect("a pixmap id");
+    conn.create_pixmap(1, pixmap, game, 1, 1).expect("a pixmap");
+    let blank = conn.generate_id().expect("a cursor id");
+    conn.create_cursor(blank, pixmap, pixmap, 0, 0, 0, 0, 0, 0, 0, 0)
+        .expect("a blank cursor");
+    let mut grabbed = false;
+    let take = |grabbed: &mut bool| {
+        let pointer = conn
+            .grab_pointer(
+                false,
+                game,
+                EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                game,
+                blank,
+                x11rb::CURRENT_TIME,
+            )
+            .expect("grabbing the pointer")
+            .reply()
+            .expect("the pointer grab")
+            .status;
+        let keyboard = conn
+            .grab_keyboard(
+                false,
+                game,
+                x11rb::CURRENT_TIME,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )
+            .expect("grabbing the keyboard")
+            .reply()
+            .expect("the keyboard grab")
+            .status;
+        *grabbed = pointer == GrabStatus::SUCCESS;
+        println!("     grabbed: pointer {pointer:?}, keyboard {keyboard:?}");
+    };
+    take(&mut grabbed);
+    let ticks = hold.as_millis() * 10 / 16;
+    for tick in 0..ticks {
+        while let Some(event) = conn.poll_for_event().expect("reading events") {
+            match event {
+                // Not the focus events a grab itself makes (`NotifyGrab`,
+                // `NotifyUngrab`), which Wine ignores too.
+                x11rb::protocol::Event::FocusOut(out) if grabbed && !grab_made(out.mode) => {
+                    conn.ungrab_pointer(x11rb::CURRENT_TIME)
+                        .expect("letting go");
+                    conn.ungrab_keyboard(x11rb::CURRENT_TIME)
+                        .expect("letting go");
+                    grabbed = false;
+                    println!("     focus out: let go of the grabs");
+                }
+                x11rb::protocol::Event::FocusIn(into) if !grabbed && !grab_made(into.mode) => {
+                    println!("     focus in: taking the grabs again");
+                    take(&mut grabbed);
+                }
+                _ => {}
+            }
+        }
+        if grabbed {
+            conn.warp_pointer(x11rb::NONE, game, 0, 0, 0, 0, 480, 270)
+                .expect("warping");
+        }
+        conn.flush().expect("flushing");
+        if tick % 60 == 0 {
+            let pointer = conn
+                .query_pointer(root)
+                .expect("asking the pointer")
+                .reply()
+                .expect("the pointer");
+            let at = believed(conn, root, game);
+            let focus = conn
+                .get_input_focus()
+                .expect("asking the focus")
+                .reply()
+                .expect("the focus")
+                .focus;
+            println!(
+                "     pointer {},{} on screen {}, window at {},{}, grabbed {grabbed}, focus {}",
+                pointer.root_x,
+                pointer.root_y,
+                pointer.same_screen,
+                at.0,
+                at.1,
+                if focus == game {
+                    "the game"
+                } else {
+                    "elsewhere"
+                },
+            );
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+}
+
+/// Whether a focus event was made by a grab starting or ending rather than by
+/// the focus moving.
+fn grab_made(mode: x11rb::protocol::xproto::NotifyMode) -> bool {
+    use x11rb::protocol::xproto::NotifyMode;
+    mode == NotifyMode::GRAB || mode == NotifyMode::UNGRAB
+}
+
+/// `cursor`: see the module header.
+fn cursor(conn: &RustConnection, root: Window, monitor: Rect, file: &str, hold: Duration) {
+    use x11rb::protocol::render::{self, ConnectionExt as _, CreatePictureAux, PictType};
+    use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ImageFormat};
+    let bytes = std::fs::read(file).expect("reading the cursor file");
+    let (size, hotspot, pixels) = first_image(&bytes);
+    let target = window(
+        conn,
+        root,
+        Rect {
+            x: monitor.x + 100,
+            y: monitor.y + 100,
+            w: 640,
+            h: 400,
+        },
+        0x0033_66cc,
+        "cursor",
+        false,
+    );
+    conn.render_query_version(0, 11)
+        .expect("asking Render")
+        .reply()
+        .expect("Render");
+    let formats = conn
+        .render_query_pict_formats()
+        .expect("asking the formats")
+        .reply()
+        .expect("the formats");
+    let argb = formats
+        .formats
+        .iter()
+        .find(|format| {
+            format.type_ == PictType::DIRECT
+                && format.depth == 32
+                && format.direct.alpha_mask == 0xff
+        })
+        .expect("an ARGB32 format")
+        .id;
+    let pixmap = conn.generate_id().expect("a pixmap id");
+    conn.create_pixmap(32, pixmap, root, size.0, size.1)
+        .expect("a pixmap");
+    let gc = conn.generate_id().expect("a gc id");
+    conn.create_gc(gc, pixmap, &Default::default())
+        .expect("a gc");
+    let data: Vec<u8> = pixels
+        .iter()
+        .flat_map(|pixel| pixel.to_le_bytes())
+        .collect();
+    conn.put_image(
+        ImageFormat::Z_PIXMAP,
+        pixmap,
+        gc,
+        size.0,
+        size.1,
+        0,
+        0,
+        0,
+        32,
+        &data,
+    )
+    .expect("the pixels");
+    let picture = conn.generate_id().expect("a picture id");
+    conn.render_create_picture(picture, pixmap, argb, &CreatePictureAux::new())
+        .expect("a picture");
+    let cursor = conn.generate_id().expect("a cursor id");
+    render::create_cursor(conn, cursor, picture, hotspot.0, hotspot.1).expect("a cursor");
+    conn.change_window_attributes(target, &ChangeWindowAttributesAux::new().cursor(cursor))
+        .expect("setting the cursor");
+    // The pointer over the window, so the cursor is the one shown.
+    conn.warp_pointer(x11rb::NONE, target, 0, 0, 0, 0, 320, 200)
+        .expect("warping");
+    conn.flush().expect("flushing");
+    println!(
+        "     cursor {}x{} hot {},{} from {file}, no name",
+        size.0, size.1, hotspot.0, hotspot.1
+    );
+    std::thread::sleep(hold * 4);
+}
+
+/// The first image of an XCursor file: its size, hotspot and pixels, as the
+/// file keeps them (little-endian premultiplied ARGB words).
+fn first_image(bytes: &[u8]) -> ((u16, u16), (u16, u16), Vec<u32>) {
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+    assert_eq!(&bytes[0..4], b"Xcur", "an XCursor file");
+    let count = word(12) as usize;
+    let image = (0..count)
+        .map(|toc| 16 + toc * 12)
+        .find(|&entry| word(entry) == 0xfffd_0002)
+        .map(|entry| word(entry + 8) as usize)
+        .expect("an image in it");
+    let (width, height) = (word(image + 16), word(image + 20));
+    let (xhot, yhot) = (word(image + 24), word(image + 28));
+    let start = image + 36;
+    let pixels = (0..(width * height) as usize)
+        .map(|pixel| word(start + pixel * 4))
+        .collect();
+    (
+        (width as u16, height as u16),
+        (xhot as u16, yhot as u16),
+        pixels,
+    )
 }
