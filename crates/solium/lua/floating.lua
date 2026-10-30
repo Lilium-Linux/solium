@@ -213,11 +213,12 @@ local function restore()
     place(window.id, rect)
 end
 
--- `sol.windows()` has no field for "is this maximised": `sol.toggle_maximize`
--- is the only thing that asks for one, and asking twice undoes it. The
--- `maximize` event is the compositor's own word on it, true for a maximise
--- from any of its three doors -- this file's own key, `super+shift+m`, or the
--- frame's button -- so `restore` undoes whichever one actually happened.
+-- Which windows are maximised, as the `maximize` event tells it: the
+-- compositor's own word, true for a maximise from any of its three doors --
+-- this file's own key, `super+shift+m`, or the frame's button -- so `restore`
+-- undoes whichever one actually happened. Kept as the events arrive rather
+-- than read from `sol.windows()`'s `maximized`, because `snap` asks about the
+-- window it is handed before its own un-maximise has landed.
 sol.on("maximize", function(id, entering)
     maximized[id] = entering or nil
 end)

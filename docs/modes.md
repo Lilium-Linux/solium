@@ -74,10 +74,15 @@ a layout letting go, and `modes.use` sends it for every window whenever the
 layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
 window out of its tile on their own, and the way back puts it in again. A
-script cannot see that a window is maximised or fullscreen, so a layout that
-places every window on every pass (as `tiling.apply` does, and `dialogs.lua`
-for every floated window) places those too. The window itself stays where it
-is, over the arrangement. A tile placed is kept as the tile the window goes
+layout that places every window on every pass (as `tiling.apply` does, and
+`dialogs.lua` for every floated window) places those too, whatever
+`sol.windows()` says of their `maximized` and `fullscreen`. The window itself
+stays where it is, over the arrangement. A switch is different: when a layout
+takes over, `modes.use` lets every maximised window out of its maximise first,
+so the tile the new layout gives it is where it goes. Left maximised, a window
+maximised on the floating desktop went on covering the work area over the
+tiles, its own tile empty beside its neighbour, and no seam could size it
+(#443). A tile placed is kept as the tile the window goes
 back into; a placement with `tile = false` changes nothing, so a floated
 window goes back to where it floated. The one placement that moves such a
 window is a move by key onto another monitor: see
