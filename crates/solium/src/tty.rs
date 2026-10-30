@@ -1756,6 +1756,12 @@ impl State {
                 .map(|timer| timer.open(renderer, region));
             let frame = crate::qml::frame_in_flight();
             let gles = crate::pacing::span(crate::pacing::Phase::Gles);
+            // `SOLIUM_FULL_REDRAW`: every frame drawn whole, as a capture is,
+            // so a picture that differs between the screen and a capture can
+            // be pinned on damage or ruled out (#436).
+            if full_redraw() {
+                screen.compositor.reset_buffer_ages();
+            }
             let rendered = screen.compositor.render_frame(
                 renderer,
                 &elements,
@@ -2085,6 +2091,15 @@ impl State {
 }
 
 /// The time frame callbacks are stamped with.
+/// Whether `SOLIUM_FULL_REDRAW` is set: then every frame on a monitor is
+/// drawn whole, whatever the damage says, as a capture is (#436). Read once.
+fn full_redraw() -> bool {
+    static FULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FULL.get_or_init(|| {
+        std::env::var_os("SOLIUM_FULL_REDRAW").is_some_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
 fn wall_clock() -> Duration {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
