@@ -132,6 +132,14 @@ the keyboard ([its numbers](../crates/solium/qml/panes/README.md#glass)).
 `pane = "top"` is the opaque titlebar above the window that was the default
 before it. Reload and every open window is re-framed.
 
+`sol.pane("border")` changes it from a script while the session runs: a
+configuration can give floating windows titlebars and tiled ones a border
+only, by calling it whenever the layout changes. Open windows keep the frame
+they have while the new ones are built, a few of their scenes a frame, and
+then all change together, so the windows go on moving meanwhile; each keeps
+the frame it had, so switching back is immediate. `pane_build` is how many
+milliseconds a frame may spend building them, 2 unless you say.
+
 ### No frame at all
 
 ```lua

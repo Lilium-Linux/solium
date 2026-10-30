@@ -1255,6 +1255,7 @@ pub(crate) fn frame_tick(state: &mut Solium) {
     }
     crate::qml::tick(now);
     state.follow_growth(now);
+    state.build_frames(now);
 }
 
 /// The first desktop frame's gate (`warm::Warm`, spec C14), asked once a

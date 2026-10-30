@@ -16,6 +16,9 @@ sol.session(config.session)
 
 -- Settings the compositor itself holds, applied from the same file as
 -- everything else. All of them take effect immediately when reloaded.
+-- How long a frame may spend building frames for a new pane style, before
+-- the style is set. See config.lua's `pane_build`.
+sol.pane_build(config.pane_build)
 sol.pane(config.pane)
 -- How the compositor starts: the first frame waits for what it shows. Before
 -- the effects, which it waits for. See config.lua's `startup`.

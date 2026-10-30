@@ -1243,6 +1243,18 @@ local defaults = {
     -- name is still read -- see the bottom of this file.
     pane = "glass",
 
+    -- How long, in milliseconds, a frame may spend building the windows'
+    -- frames when the pane style changes -- from here, `sol.pane`, or a
+    -- configuration that frames tiled and floating windows differently.
+    -- Windows keep the frame they have until every new one is built, and then
+    -- change together, so the screen goes on moving meanwhile instead of
+    -- standing still while every frame is built at once. At least one of a
+    -- style's layers is built a frame however small this is; more is a
+    -- shorter switch, paid for in the frames it happens in. A window's frame
+    -- from the style before is kept, so switching back builds nothing.
+    -- `decoration::tests::a_budget_of_nothing_builds_one_scene_a_pass_and_more_builds_more`.
+    pane_build = 2,
+
     -- What a window does between being asked for and its application
     -- arriving. A window's life starts when you ask for it, not when the
     -- program gets around to connecting -- these decide what that looks like.

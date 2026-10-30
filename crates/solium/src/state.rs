@@ -2068,11 +2068,16 @@ impl Solium {
             } else {
                 String::new()
             },
-            style: style_fact(
-                held.is_some_and(|held| matches!(held.frame(), crate::pane::Frame::Styled(_))),
-                self.decorations.style(),
-            )
-            .to_owned(),
+            // The style of the frame drawn, which while a switch is still
+            // building the next one is the style before it (#226).
+            style: {
+                let frame = held.and_then(crate::pane::Pane::decoration);
+                style_fact(
+                    frame.is_some(),
+                    frame.and_then(crate::decoration::Decoration::built_style),
+                )
+                .to_owned()
+            },
         }
     }
 

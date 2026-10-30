@@ -816,14 +816,15 @@ impl Solium {
                     // The slots windows occupy are kept; what changes is how
                     // much of each slot the frame takes, so every client is
                     // resized to whatever the new decoration left it.
+                    //
+                    // Now when every window had a spare of the new style, and
+                    // otherwise in the pass its new frames are ready, from
+                    // `build_frames` (#226).
                     let slots = self.outers_before_restyle();
-                    if self.decorations.set_style(&mut self.panes, name) {
-                        self.keep_outers(slots, now);
-                        self.redraw = true;
-                        // Resizing each window in place keeps a floating
-                        // arrangement looking right, but a tiled one is the
-                        // layout's arithmetic and only the layout can redo it.
-                        self.trigger_relayout();
+                    match self.decorations.set_style(&mut self.panes, name) {
+                        crate::decoration::Restyle::Swapped => self.restyled(slots, now),
+                        crate::decoration::Restyle::Building => self.redraw = true,
+                        crate::decoration::Restyle::Unchanged => {}
                     }
                     // Changed or not: the configuration's first `sol.pane`
                     // may name the style already set, and its rules are
@@ -831,6 +832,7 @@ impl Solium {
                     // `tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`).
                     self.apply_style_rules();
                 }
+                Command::PaneBuild(budget) => self.decorations.set_budget(budget),
                 Command::PaneValues(fields) => {
                     if self.decorations.merge_values(fields) {
                         self.redraw = true;
@@ -1109,15 +1111,12 @@ impl Solium {
                     surface.forget_failures();
                 }
                 let style = self.decorations.style().map(ToOwned::to_owned);
-                // Twice, and to the same place it started, to defeat
-                // `set_style`'s "nothing changed" guard. What the second call
-                // does is *rebuild* every existing frame rather than drop it
-                // -- see the comment on it, and the reason: dropping leaves
-                // every open window bare until it is reopened -- so a window
-                // that is framed before a reload is framed after it, by a
-                // different `Decoration` built from the file as it now reads.
-                self.decorations.set_style(&mut self.panes, None);
-                self.decorations.set_style(&mut self.panes, style);
+                // Every existing frame *rebuilt* rather than dropped --
+                // dropping leaves every open window bare until it is reopened
+                // -- so a window that is framed before a reload is framed
+                // after it, by a different `Decoration` built from the file
+                // as it now reads.
+                self.decorations.reload(&mut self.panes, style);
                 // Held as one dispatch, so a `sol.monitors{}` at the top of
                 // the new configuration places no surface before the handlers
                 // below have said where it now is
@@ -1689,6 +1688,38 @@ impl Solium {
         let outcome = scripts.restored(snapshot);
         self.scripts = Some(scripts);
         self.apply(outcome);
+    }
+
+    /// Every window's frame has just changed style: each keeps the outer
+    /// rectangle it had, `slots`, its client resized to the room the new
+    /// frame leaves, and the layout runs again.
+    fn restyled(&mut self, slots: Vec<(Window, Rectangle<i32, Logical>)>, now: Duration) {
+        self.keep_outers(slots, now);
+        self.redraw = true;
+        // Resizing each window in place keeps a floating arrangement looking
+        // right, but a tiled one is the layout's arithmetic and only the
+        // layout can redo it.
+        self.trigger_relayout();
+    }
+
+    /// Build some of the frames a change of style is waiting for, within
+    /// `config.pane_build`, and once they are all ready put every window in
+    /// its new frame at once (#226). Once a pass, before anything is drawn:
+    /// the frames already there are drawn meanwhile, so a layout's glide goes
+    /// on moving rather than standing still while every frame is built.
+    pub(crate) fn build_frames(&mut self, now: Duration) {
+        if !self.decorations.building() {
+            return;
+        }
+        // Another pass, whatever happens here: one to build in, or one to
+        // draw the new frames in.
+        self.redraw = true;
+        if !self.decorations.build_some(self.decorations.budget()) {
+            return;
+        }
+        let slots = self.outers_before_restyle();
+        self.decorations.swap(&mut self.panes);
+        self.restyled(slots, now);
     }
 
     pub(crate) fn trigger_relayout(&mut self) {
