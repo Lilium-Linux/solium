@@ -138,6 +138,10 @@ pub(crate) struct WindowInfo {
     /// The window including its frame, which is what "the window" means to
     /// anything positioning it.
     pub(crate) rect: Rect,
+    /// What its frame takes of `rect` on each side right now, a titlebar the
+    /// frame has grown (#423) included; nothing for a window drawn bare
+    /// (#435).
+    pub(crate) insets: crate::decoration::Insets,
     /// Where it is being drawn right now, which in a mode is somewhere else --
     /// in the two terms the compositor's own hit test asks. See [`Drawn`].
     pub(crate) drawn: Drawn,
@@ -3942,6 +3946,12 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("y", window.rect.y)?;
                 entry.set("w", window.rect.w)?;
                 entry.set("h", window.rect.h)?;
+                let insets = lua.create_table()?;
+                insets.set("top", window.insets.top)?;
+                insets.set("right", window.insets.right)?;
+                insets.set("bottom", window.insets.bottom)?;
+                insets.set("left", window.insets.left)?;
+                entry.set("insets", insets)?;
                 entry.set("title", window.title.clone())?;
                 entry.set("focused", window.focused)?;
                 entry.set("monitor", window.monitor.clone())?;
@@ -8381,6 +8391,7 @@ mod tests {
             media: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 id: 7,
                 rect: Rect {
                     x: 0.0,
@@ -11355,6 +11366,7 @@ mod tests {
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let mut snapshot = empty_snapshot();
         let window = |id: u64, modal: bool, parent: Parentage| WindowInfo {
+            insets: crate::decoration::Insets::default(),
             id,
             rect: Rect::default(),
             drawn: Drawn::default(),
@@ -12065,6 +12077,7 @@ mod tests {
             windows: windows
                 .iter()
                 .map(|id| WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     id: *id,
                     rect: Rect {
                         x: 0.0,
@@ -16295,6 +16308,7 @@ mod dialogs {
     /// chose, in the corner a Wayland toplevel is mapped at.
     fn window(id: u64, w: f64, h: f64) -> WindowInfo {
         WindowInfo {
+            insets: crate::decoration::Insets::default(),
             id,
             rect: Rect {
                 x: 0.0,
@@ -16346,6 +16360,7 @@ mod dialogs {
 
     fn modal(id: u64, w: f64, h: f64, parent: Parentage) -> WindowInfo {
         WindowInfo {
+            insets: crate::decoration::Insets::default(),
             modal: true,
             parent,
             ..window(id, w, h)
@@ -16389,6 +16404,47 @@ mod dialogs {
             }
         }
         out
+    }
+
+    /// **`sol.windows()` says what a window's frame takes on each side**
+    /// (#435): what a configuration putting a window back needs to tell the
+    /// frame from the client.
+    #[test]
+    fn sol_windows_says_what_a_windows_frame_takes() {
+        let directory = std::env::temp_dir().join("solium-script-test-window-insets");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+I", function()
+                local w = sol.windows()[1]
+                sol.place(w.id, {
+                    x = w.insets.left, y = w.insets.top,
+                    w = w.insets.right, h = w.insets.bottom,
+                })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let framed = WindowInfo {
+            insets: crate::decoration::Insets {
+                top: 32,
+                right: 1,
+                bottom: 2,
+                left: 3,
+            },
+            ..window(7, 400.0, 300.0)
+        };
+        let outcome = scripts.key("super+i", snapshot(vec![framed]));
+        assert!(outcome.handled);
+        let rect = placed(&outcome.commands).get(&7).copied().expect("placed");
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (3.0, 32.0, 1.0, 2.0),
+            "left, top, right and bottom, as the compositor has them"
+        );
     }
 
     /// Rects out of Lua are `f64` through a divide or two, so they are compared
@@ -16923,6 +16979,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
                             leaving: leaving.contains(&id),
@@ -17397,6 +17454,7 @@ mod dialogs {
                 .iter()
                 .cloned()
                 .map(|window| WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     leaving: ids.contains(&window.id),
                     ..window
                 })
@@ -17533,6 +17591,7 @@ mod dialogs {
                         vec![second_monitor()],
                         (1..=3)
                             .map(|id| WindowInfo {
+                                insets: crate::decoration::Insets::default(),
                                 leaving: leaving && id == 3,
                                 ..on(&second_monitor(), window(id, 800.0, 600.0))
                             })
@@ -17653,6 +17712,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
                             leaving: leaving.contains(&id),
@@ -18336,6 +18396,7 @@ mod dialogs {
                 scripts.evaluate("return tostring(require(\"workspaces\").vacant(\"DP-1\"))")
             };
             let closing = |id| WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 leaving: true,
                 ..window(id, 800.0, 600.0)
             };
@@ -18573,6 +18634,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go under `min`.
         fn at_least(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 min: size(w, h),
                 ..plain(id)
             }
@@ -18581,6 +18643,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go over `max`.
         fn at_most(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 max: size(w, h),
                 ..plain(id)
             }
@@ -18588,6 +18651,7 @@ mod dialogs {
 
         fn with_app(app_id: &str, window: WindowInfo) -> WindowInfo {
             WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 app_id: app_id.to_owned(),
                 ..window
             }
@@ -18661,6 +18725,7 @@ mod dialogs {
             );
             let windows = vec![
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     max: size(1200, 0),
                     cramped: true,
                     ..with_app("firefox", at_least(1, 820, 0))
@@ -18948,6 +19013,7 @@ mod dialogs {
                 switched_on(&mut scripts, "super+t");
                 let _ = scripts.opened(1, desk(vec![plain(1)], (2000.0, 700.0)));
                 let launched = WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     shown: false,
                     ..plain(2)
                 };
@@ -18958,6 +19024,7 @@ mod dialogs {
                 assert_eq!(workspace(&scripts), "1", "the premise");
 
                 let arrived = WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     shown,
                     ..at_least(2, 2450, 1350)
                 };
@@ -18998,6 +19065,7 @@ mod dialogs {
                         "the launched window stayed in a tile that cannot hold it"
                     );
                     let again = WindowInfo {
+                        insets: crate::decoration::Insets::default(),
                         shown: false,
                         ..at_least(2, 2450, 1350)
                     };
@@ -19178,6 +19246,7 @@ mod dialogs {
         fn at_rest(rects: &HashMap<u64, Rect>, id: u64) -> WindowInfo {
             match rects.get(&id) {
                 Some(rect) => WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     rect: *rect,
                     ..window(id, rect.w, rect.h)
                 },
@@ -19636,6 +19705,7 @@ mod dialogs {
                                 on(&second_monitor(), each)
                             } else if id >= 3 {
                                 WindowInfo {
+                                    insets: crate::decoration::Insets::default(),
                                     monitor: "DP-2".to_owned(),
                                     ..each
                                 }
@@ -19871,6 +19941,7 @@ mod directions {
 
     fn window(id: u64, monitor: &str, rect: Rect) -> WindowInfo {
         WindowInfo {
+            insets: crate::decoration::Insets::default(),
             id,
             rect,
             drawn: Drawn::default(),
@@ -21604,6 +21675,7 @@ mod directions {
             windows: vec![
                 window(4, "DP-1", WIDE),
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)
                 },
@@ -21671,15 +21743,18 @@ mod directions {
         let desk = |focused: bool| Snapshot {
             windows: vec![
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(1, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     minimized: true,
                     above: false,
                     ..window(2, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     leaving: true,
                     ..window(3, "DP-1", WIDE)
                 },
@@ -21757,6 +21832,7 @@ mod directions {
             windows: vec![
                 window(4, "DP-1", WIDE),
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)
                 },

@@ -425,6 +425,7 @@ impl Solium {
                 Some(WindowInfo {
                     id: pane.id().get(),
                     rect: to_rect(outer),
+                    insets: self.insets_of(pane.id()),
                     drawn: Drawn {
                         slot: outer,
                         frame: self.drawn_at(pane, outer, now),

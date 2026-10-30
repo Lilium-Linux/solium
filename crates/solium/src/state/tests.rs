@@ -13163,11 +13163,12 @@ end)"#,
     }
 
     /// **`sol.windows()` carries every window match key**: `fullscreen` and
-    /// `style` beside `app_id`, `title`, `focused` and `monitor`.
+    /// `style` beside `app_id`, `title`, `focused` and `monitor`; and the
+    /// room its frame takes, `insets`.
     #[test]
     fn sol_windows_carries_every_window_match_key() {
         fx2_fixture!(fixture, "windows-keys");
-        let (_, window) = one_window(&mut fixture);
+        let (pane, window) = one_window(&mut fixture);
         let snapshot = fixture.state.snapshot();
         let row = snapshot.windows.first().expect("one window");
         assert!(!row.fullscreen);
@@ -13175,6 +13176,8 @@ end)"#,
             row.style,
             fixture.state.decorations.style().unwrap_or("none")
         );
+        // And what its frame takes, which the client is the rest of (#435).
+        assert_eq!(row.insets, fixture.state.insets_of(pane));
         ask_fullscreen(&mut fixture, &window);
         let snapshot = fixture.state.snapshot();
         assert!(snapshot.windows.first().expect("one window").fullscreen);
