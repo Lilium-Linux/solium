@@ -925,9 +925,29 @@ impl Hold {
         now: Duration,
         throttled: bool,
     ) -> Option<Rectangle<i32, Logical>> {
+        let client = client.into();
         self.note(client);
         self.listen(now);
         if wanted == self.asked {
+            return None;
+        }
+        // **One size in flight** while the pointer is down: a client that has
+        // not yet drawn the last size it was told -- its newest commit was
+        // acked from an older configure -- hears the next once it has, which
+        // is the newest the drag has reached by then. Told on every pass
+        // instead, kitty was sent a configure every 4 ms on a tiled seam,
+        // each of which costs it a buffer and a round trip, and it drew
+        // nothing at all until the drag stopped (nested, 2026-10-30, #428).
+        // A client that keeps up hears every frame anyway; one that has said
+        // nothing for [`SILENCE`] is told regardless, so a client that never
+        // answers is not left at its old size. An X11 window says nothing of
+        // which configure it answers, and is told every frame.
+        // `tests::a_client_drawing_the_last_size_is_told_the_next_when_it_has`.
+        if throttled
+            && self.released.is_none()
+            && client.to.is_some_and(|to| to != self.asked.size)
+            && now.saturating_sub(self.told) < SILENCE
+        {
             return None;
         }
         // **A motion after the release is still part of the gesture, and the
@@ -1787,6 +1807,59 @@ mod tests {
         for refused in [-1.0, 0.5, 1000.5, f64::NAN] {
             assert_eq!(tell_every(refused), None, "{refused} is not a rate");
         }
+    }
+
+    /// **One size in flight**: a client whose newest commit answers an older
+    /// configure than the last it was sent hears nothing new until it has
+    /// drawn that one, and then the newest the drag has reached; one silent
+    /// for [`super::SILENCE`] is told regardless, and the release always.
+    /// A client that says nothing of which configure it answers (X11) is told
+    /// every frame, as above. Kitty on a tiled seam, told every 4 ms, drew
+    /// nothing until the drag stopped (#428).
+    #[test]
+    fn a_client_drawing_the_last_size_is_told_the_next_when_it_has() {
+        use super::{Answer, SILENCE};
+        let answer = |w: i32, to: i32| Answer {
+            size: size(w, 300),
+            to: Some(size(to, 300)),
+        };
+        let mut hold = Hold::new(
+            ResizeEdge::Right,
+            size(400, 300),
+            want(400, 300),
+            ms(0),
+            None,
+            PATIENCE,
+            EVERY_FRAME,
+        );
+        assert_eq!(
+            hold.dragged(want(420, 300), answer(400, 400), ms(4)),
+            Some(want(420, 300)),
+            "a client that has drawn what it was told hears the next at once"
+        );
+        for (at, width) in [(8, 430), (12, 440), (16, 450)] {
+            assert_eq!(
+                hold.dragged(want(width, 300), answer(400, 400), ms(at)),
+                None,
+                "{width} waits while 420 is still being drawn"
+            );
+        }
+        assert_eq!(
+            hold.dragged(want(450, 300), answer(420, 420), ms(20)),
+            Some(want(450, 300)),
+            "and once 420 is drawn, the newest goes out"
+        );
+        assert_eq!(hold.dragged(want(470, 300), answer(420, 420), ms(24)), None);
+        assert_eq!(
+            hold.dragged(want(480, 300), answer(420, 420), ms(20) + SILENCE),
+            Some(want(480, 300)),
+            "a client silent for a tenth of a second is told regardless"
+        );
+        assert_eq!(
+            hold.release(want(490, 300), answer(420, 420), ms(30) + SILENCE),
+            want(490, 300),
+            "and the release is always told"
+        );
     }
 
     /// **Silence is a tenth of a second whatever the rate.**

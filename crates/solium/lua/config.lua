@@ -1397,11 +1397,12 @@ local defaults = {
         -- drag an edge, in times a second. 0, the default, tells it on every
         -- frame the drag moves -- as often as your monitor refreshes -- so
         -- its picture is never more than its own drawing time behind the
-        -- edge. A number caps it: 10 was the fixed rate before, and an
-        -- application that cannot keep up with every frame may like fewer,
-        -- though GTK, Qt, Chromium and Firefox all simply draw the newest
-        -- size and skip the rest. 1 to 1000; anything else is named in the
-        -- log and the default kept.
+        -- edge. Whatever this says, an application still drawing the last
+        -- size it was told hears the next once it has drawn it (or after a
+        -- tenth of a second of silence), so one slower than your monitor
+        -- draws the newest size each time rather than drowning in them. A
+        -- number caps it: 10 was the fixed rate before. 1 to 1000; anything
+        -- else is named in the log and the default kept.
         -- `a_drag_tells_its_client_on_every_frame_unless_capped`.
         tell_hz = 0,
 

@@ -2292,7 +2292,10 @@ glide did not move -- before the window is shown at the size the application
 has. `resize.tell_hz` is how often, at most, the application is told its new
 size while you drag an edge: 0, the default, on every frame the drag moves, so
 its picture is never more than its own drawing time behind the edge; a number
-caps it at that many times a second (10 was the fixed rate before).
+caps it at that many times a second (10 was the fixed rate before). Either way,
+an application still drawing the last size it was told hears the next once it
+has drawn it, so a slow one draws the newest size each time instead of falling
+behind a queue of them.
 `resize.follow` is what a floating window is drawn at while you drag its edge:
 `"app"`, the default, draws it at the size its application has drawn, against
 the edges you are not moving, so its frame always wraps its content and nothing
