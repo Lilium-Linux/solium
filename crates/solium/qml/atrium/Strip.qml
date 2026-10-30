@@ -7,6 +7,7 @@
 // is sent to the Lua as an action. While a stage window covers the strip and
 // the strip has slid away, only a thin band along the edge takes the pointer,
 // to bring it back; everywhere else the pointer goes to the window under it.
+// It also watches a window being dragged towards it, below.
 //
 // Coordinates are the scene's own: the Lua hands each card's box relative to
 // the column's top-left corner, which is the scene's.
@@ -47,9 +48,25 @@ Item {
         return 0
     }
 
+    // A window dragged towards the strip turns into a card as it comes, which
+    // the Lua draws; the compositor moves it and says nothing until it is let
+    // go, so while a button is held over this monitor the Lua is asked to look
+    // once a frame, on the compositor's clock, and told when it comes up.
+    FrameAnimation {
+        running: Solium.cursor.pressed && Solium.monitor.pointer && !column.pressed
+        onTriggered: Solium.send("tick")
+    }
+    Connections {
+        target: Solium.cursor
+        function onPressedChanged() {
+            if (!Solium.cursor.pressed)
+                Solium.send("released")
+        }
+    }
+
     // While hidden: the edge brings the strip back.
     MouseArea {
-        visible: root.hidden && !root.peeking
+        visible: root.cards.length > 0 && root.hidden && !root.peeking
         x: 0
         y: 0
         width: 3
@@ -61,7 +78,7 @@ Item {
     // While shown: the column is the strip's.
     MouseArea {
         id: column
-        visible: !root.hidden || root.peeking
+        visible: root.cards.length > 0 && (!root.hidden || root.peeking)
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton

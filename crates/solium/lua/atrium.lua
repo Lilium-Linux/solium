@@ -49,6 +49,7 @@ local atrium = {}
 --   aside      another overlay (the overview, Alt+Tab, the desk stack) is up
 --   drag       the card being dragged out: its desk, number and where on its
 --              front window it was picked up
+--   moving     the stage window being dragged towards the strip
 local kept = sol.keep("atrium", {
     desks = {},
     presented = {},
@@ -66,6 +67,7 @@ kept.hover = kept.hover or {}
 -- its press with the scene that held it.
 kept.aside = nil
 kept.drag = nil
+kept.moving = nil
 
 atrium.desks = kept.desks
 
@@ -206,11 +208,11 @@ local function reconcile(windows, by_id)
                     table.remove(group, at)
                 end
             end
-            if #group == 0 then
+            if #group == 0 and not (index == 1 and group.bare) then
                 table.remove(groups, index)
             end
         end
-        if #groups == 0 then
+        if #groups == 0 or (#groups == 1 and #groups[1] == 0) then
             kept.desks[key] = nil
         end
     end
@@ -234,6 +236,18 @@ local function reconcile(windows, by_id)
             end
         end
     end
+    -- A stage left bare on purpose stays bare only until something takes it;
+    -- anywhere but the stage, an empty group is nothing.
+    for _, groups in pairs(kept.desks) do
+        for index = #groups, 2, -1 do
+            if #groups[index] == 0 then
+                table.remove(groups, index)
+            end
+        end
+        if groups[1] and #groups[1] > 0 then
+            groups[1].bare = nil
+        end
+    end
 end
 
 -- Group `index` of desk `key` onto the stage, and window `id` to the front of
@@ -248,6 +262,10 @@ local function to_stage(key, index, id)
     local moved = false
     if index > 1 then
         groups[1], groups[index] = groups[index], groups[1]
+        -- A bare stage traded for a card leaves no empty card behind.
+        if #groups[index] == 0 then
+            table.remove(groups, index)
+        end
         moved = true
     end
     local group = groups[1]
@@ -395,7 +413,13 @@ local function arrange_desk(key, area, by_id, set, children)
     local strip = strip_of(area, set)
 
     for _, id in ipairs(groups[1] or {}) do
-        release(id)
+        if id == kept.moving then
+            -- Being dragged: the tick draws it, nearer a card the nearer the
+            -- strip it is.
+            touched[id] = true
+        else
+            release(id)
+        end
         for _, child in ipairs(children[id] or {}) do
             release(child)
         end
@@ -405,7 +429,7 @@ local function arrange_desk(key, area, by_id, set, children)
     if set.hide == "overlap" then
         for _, id in ipairs(groups[1] or {}) do
             local window = by_id[id]
-            if window and overlaps(window, strip) then
+            if window and id ~= kept.moving and overlaps(window, strip) then
                 covered = true
             end
         end
@@ -510,11 +534,12 @@ local function arrange_desk(key, area, by_id, set, children)
     return { cards = cards, hidden = hidden, peeking = peeking, hovered = hovered or 0 }
 end
 
--- The strip's scene on one monitor: up while it has cards to pick, and
--- gone otherwise, so an empty strip takes no clicks from the window under it.
+-- The strip's scene on one monitor: up while atrium is, on the desk in view.
+-- With no cards it takes no clicks, and only ticks while a window is dragged,
+-- so a window can be dropped into an empty strip.
 local function declare_strip(monitor, area, set, drawn)
     local name = "atrium@" .. monitor
-    if not drawn or #drawn.cards == 0 then
+    if not drawn then
         if kept.surfaces[name] then
             sol.surface(name, false)
             kept.surfaces[name] = nil
@@ -755,6 +780,119 @@ local function drop(monitor, card, x, y)
     sol.focus(it.group[1])
 end
 
+-- ## Dragging a window in
+
+-- A window dragged off the stage towards the strip turns into a card as it
+-- comes, by the same measure (`atrium.closeness`) a card pulled out turns into
+-- its windows, so the two are one movement in two directions.
+--
+-- The compositor moves the window -- by its titlebar, by its application's
+-- own, by `super` and a drag -- and tells Lua only where it was let go. So the
+-- strip's scene ticks once a frame, on the compositor's clock, while a button
+-- is held over its monitor, and each tick looks: the window the press began
+-- on, if it is on the stage and its rectangle has moved exactly as far as the
+-- pointer has, is being dragged, and is drawn where it is, scaled and turned
+-- about the point the pointer holds it by.
+local press = nil
+
+local function row(id)
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then
+            return window
+        end
+    end
+    return nil
+end
+
+local function tick()
+    if not atrium.running() then
+        return
+    end
+    local pointer = sol.cursor()
+    if not press then
+        press = { id = false }
+        local id = sol.window_at(pointer.x, pointer.y)
+        local key, index = nil, nil
+        if id then
+            key, index = find(id)
+        end
+        local window = key and index == 1 and row(id)
+        if window and window.w > 0 and window.h > 0 then
+            press = {
+                id = id, key = key, x = pointer.x, y = pointer.y, wx = window.x, wy = window.y,
+                fx = (pointer.x - window.x) / window.w, fy = (pointer.y - window.y) / window.h,
+                misses = 0,
+            }
+        end
+        return
+    end
+    if not press.id then
+        return
+    end
+    local window = row(press.id)
+    local area = window and monitors.named(window.monitor)
+    if not area then
+        return
+    end
+    local dx, dy = pointer.x - press.x, pointer.y - press.y
+    if kept.moving ~= press.id then
+        if math.abs(dx) + math.abs(dy) < 3 then
+            return
+        end
+        -- Moved with the pointer, or not: a drag, or a press that selects
+        -- text, resizes, or scrolls. The compositor may be a frame behind.
+        if math.abs(window.x - press.wx - dx) > 2 or math.abs(window.y - press.wy - dy) > 2 then
+            press.misses = press.misses + 1
+            if press.misses > 4 then
+                press.id = false
+            end
+            return
+        end
+        kept.moving = press.id
+    end
+    local set = settings()
+    local t = atrium.closeness(area, pointer.x)
+    if t <= 0 then
+        if kept.presented[tostring(press.id)] then
+            sol.animate({ duration = 0 })
+            release(press.id)
+        end
+        return
+    end
+    -- Over the strip's reach: the strip comes back to be dropped onto.
+    local monitor = window.monitor
+    if not kept.peek[monitor] then
+        kept.peek[monitor] = true
+        atrium.arrange()
+    end
+    local groups = kept.desks[press.key] or {}
+    local box = slots(area, set, math.max(1, #groups - 1))[1]
+    local card = box and math.min(box.w / window.w, box.h / window.h, 1) or 1
+    local scale = 1 + (card - 1) * t
+    local w, h = window.w * scale, window.h * scale
+    sol.animate({ easing = { spring = set.drag_motion } })
+    present(press.id, {
+        x = pointer.x - press.fx * w, y = pointer.y - press.fy * h, w = w, h = h,
+        rotate_y = set.tilt * t, pivot_x = 0, perspective = set.perspective, z = 300,
+    })
+end
+
+-- The button is up: whatever was dragged has been let go. The compositor's
+-- `drop` has said where, or is about to; either way the arrangement is laid
+-- out again with nothing held.
+local function released()
+    local moving = kept.moving
+    press = nil
+    if moving == nil then
+        return
+    end
+    kept.moving = nil
+    for monitor in pairs(kept.peek) do
+        kept.peek[monitor] = nil
+    end
+    atrium.arrange()
+end
+
 -- ## What atrium is told
 
 sol.on("open", function(id)
@@ -815,7 +953,7 @@ sol.on("drop", function(id, x, y)
     local set = settings()
     local area = monitors.named(key and key:match("@(.*)$") or "")
     local strip = area and strip_of(area, set)
-    if key and index == 1 and strip and #kept.desks[key][1] > 1
+    if key and index == 1 and strip
         and x >= strip.x and x < strip.x + strip.w and y >= strip.y and y < strip.y + strip.h
     then
         local groups = kept.desks[key]
@@ -824,6 +962,11 @@ sol.on("drop", function(id, x, y)
                 table.remove(groups[1], at)
                 break
             end
+        end
+        -- The only window on the stage leaves it bare, the desktop showing,
+        -- until a card or a new window takes it.
+        if #groups[1] == 0 then
+            groups[1].bare = true
         end
         table.insert(groups, 2, { id })
         for _, window in ipairs(sol.windows()) do
@@ -843,7 +986,11 @@ sol.on("surface", function(surface, action, data)
         return
     end
     data = type(data) == "table" and data or {}
-    if action == "pick" then
+    if action == "tick" then
+        tick()
+    elseif action == "released" then
+        released()
+    elseif action == "pick" then
         pick(monitor, data.card, data.join == true)
     elseif action == "drag" then
         drag(monitor, data.card, data.x, data.y, data.px, data.py)
