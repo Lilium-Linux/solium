@@ -934,15 +934,30 @@ impl Hold {
         // **One size in flight** while the pointer is down: a client that has
         // not yet drawn the last size it was told -- its newest commit was
         // acked from an older configure -- hears the next once it has, which
-        // is the newest the drag has reached by then. Told on every pass
-        // instead, kitty was sent a configure every 4 ms on a tiled seam,
-        // each of which costs it a buffer and a round trip, and it drew
-        // nothing at all until the drag stopped (nested, 2026-10-30, #428).
-        // A client that keeps up hears every frame anyway; one that has said
-        // nothing for [`SILENCE`] is told regardless, so a client that never
-        // answers is not left at its old size. An X11 window says nothing of
-        // which configure it answers, and is told every frame.
-        // `tests::a_client_drawing_the_last_size_is_told_the_next_when_it_has`.
+        // is the newest the drag has reached by then. A client that keeps up
+        // hears every frame anyway; one that has said nothing for [`SILENCE`]
+        // is told regardless, so a client that never answers is not left at
+        // its old size. An X11 window says nothing of which configure it
+        // answers, and is told every frame.
+        //
+        // **Why not KWin's way, the newest size on every pass whatever the
+        // client has answered.** kitty answers each configure with a round
+        // trip: Mesa reallocates its buffers and waits on `wl_display.sync`
+        // before kitty can draw. The compositor reads that request only once
+        // the pass it arrived during has been drawn, and that pass decides the
+        // drag and flushes both together, so every answer reaches kitty with
+        // the next configure behind it and kitty starts over without drawing:
+        // 0.6 sizes a second on a tiled seam, nested, 2026-10-30. KWin's loop
+        // is short enough that the answer mostly goes out alone; ours is a
+        // whole pass, 4 to 7 ms on the hardware, and the pointer has always
+        // moved by its end. Measured nested the same day with Firefox,
+        // Electron and kitty, telling on every pass was never closer to the
+        // pointer than this and was further for Electron and kitty; telling
+        // the newest size at the answering commit itself, rather than at the
+        // pass after it, gained nothing either, because a client draws when
+        // its frame callback comes, which is that pass's frame start (#428).
+        // `tests::a_client_drawing_the_last_size_is_told_the_next_when_it_has`,
+        // `tests::a_client_that_answers_each_configure_with_a_round_trip_still_draws`.
         if throttled
             && self.released.is_none()
             && client.to.is_some_and(|to| to != self.asked.size)
@@ -1860,6 +1875,81 @@ mod tests {
             want(490, 300),
             "and the release is always told"
         );
+    }
+
+    /// **Why one size is in flight: kitty, modelled.** A pass is one turn of
+    /// the event loop: the compositor answers what the client sent while the
+    /// last pass was drawn, decides the drag, and flushes both together. The
+    /// client answers each configure with a round trip (Mesa reallocating its
+    /// buffers) and draws only once that answer arrives with no newer
+    /// configure behind it. Told the newest size on every pass, as KWin tells
+    /// it, every answer comes with the next configure and it never draws;
+    /// told through a hold, it draws every other pass (#428).
+    #[test]
+    fn a_client_that_answers_each_configure_with_a_round_trip_still_draws() {
+        use super::Answer;
+        /// Passes on which the client drew, of 50, the drag moving 10 px a
+        /// pass, under `tell`: whether this pass tells it, given what it has
+        /// committed (its size, and the size of the configure it answers).
+        fn draws(
+            mut tell: impl FnMut(
+                Rectangle<i32, Logical>,
+                Answer,
+                std::time::Duration,
+            ) -> Option<Size<i32, Logical>>,
+        ) -> u32 {
+            let mut committed = size(400, 300);
+            let mut acked = committed;
+            let mut waiting = false;
+            let mut drew = 0;
+            for pass in 1..=50 {
+                let answered = waiting;
+                let told = tell(
+                    want(400 + 10 * pass, 300),
+                    Answer {
+                        size: committed,
+                        to: Some(committed),
+                    },
+                    ms(4 * u64::try_from(pass).unwrap_or(0)),
+                );
+                match (told, answered) {
+                    // A configure, alone or behind the answer: ack it and
+                    // start the round trip over.
+                    (Some(size), _) => {
+                        acked = size;
+                        waiting = true;
+                    }
+                    // The answer alone: draw what was acked.
+                    (None, true) => {
+                        committed = acked;
+                        waiting = false;
+                        drew += 1;
+                    }
+                    (None, false) => {}
+                }
+            }
+            drew
+        }
+        let mut last = want(400, 300);
+        let every_pass = draws(|wanted, _, _| {
+            (wanted != last).then(|| {
+                last = wanted;
+                wanted.size
+            })
+        });
+        assert_eq!(every_pass, 0, "told on every pass, it never draws");
+        let mut hold = Hold::new(
+            ResizeEdge::Right,
+            size(400, 300),
+            want(400, 300),
+            ms(0),
+            None,
+            PATIENCE,
+            EVERY_FRAME,
+        );
+        let held =
+            draws(|wanted, answer, now| hold.dragged(wanted, answer, now).map(|told| told.size));
+        assert_eq!(held, 25, "through a hold it draws every other pass");
     }
 
     /// **Silence is a tenth of a second whatever the rate.**
