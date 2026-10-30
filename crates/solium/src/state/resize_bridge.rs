@@ -1165,10 +1165,9 @@ impl Solium {
                         .panes
                         .get(pane)
                         .map(|held| grown(held.slot(), self.insets_of(pane))),
-                    None => self.real_geometry(window).map(|real| {
-                        let size = crate::resizing::unanswered(window).unwrap_or(real.size);
-                        grown(Rectangle::new(real.loc, size), self.frame_insets(window))
-                    }),
+                    None => self
+                        .asked_geometry(window)
+                        .map(|asked| grown(asked, self.frame_insets(window))),
                 };
                 outer.map(|outer| (window.clone(), outer))
             })

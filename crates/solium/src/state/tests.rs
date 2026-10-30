@@ -41119,6 +41119,70 @@ Item {
                 });
             }
 
+            /// **#431: a frame that grows while its window is still answering a
+            /// new tile keeps the new tile.** A window tiled a moment ago folds
+            /// or unfolds its bar while its client is still drawing the size it
+            /// had; the frame was kept at that size, so once it stood still the
+            /// client was told it again and the window left its tile.
+            #[test]
+            fn a_frame_grown_while_its_window_answers_a_new_tile_keeps_the_new_tile() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = tiled_by(EASES);
+                    let tile = desk.placed(opened.pane);
+                    let client = client_rect(&desk, opened.pane);
+                    // Drawing a size of its own, smaller than the tile, as a
+                    // window that was floating a moment ago is.
+                    commit_buffer(
+                        &desk.client,
+                        &desk.qh,
+                        &opened.surface,
+                        client.size.w - 120,
+                        client.size.h - 80,
+                    );
+                    desk.pump();
+                    // And placed in a tile of its own again, larger than that,
+                    // as a layout switched on does, its client yet to answer.
+                    let moved =
+                        Rectangle::new(tile.loc, (tile.size.w - 20, tile.size.h - 20).into());
+                    let now = desk.state.clock.now();
+                    desk.state.place(
+                        opened.pane.get(),
+                        crate::state::snapshot::to_rect(moved),
+                        crate::script::AnimationSpec {
+                            duration: Duration::ZERO,
+                            ..crate::script::AnimationSpec::default()
+                        },
+                        now,
+                        crate::state::placement::Standing::Tile,
+                    );
+                    desk.pump();
+                    assert_ne!(
+                        client_rect(&desk, opened.pane).size,
+                        crate::state::inner(moved, desk.state.insets_of(opened.pane)).size,
+                        "the premise: the client has not drawn its tile"
+                    );
+
+                    grow_to(&mut desk, opened.pane, 40);
+                    for _ in 0..30 {
+                        frame(&mut desk, 16);
+                        if desk.state.insets_of(opened.pane).top == 72 {
+                            break;
+                        }
+                    }
+                    frame(&mut desk, 16);
+                    let room = crate::state::inner(moved, desk.state.insets_of(opened.pane));
+                    assert_eq!(
+                        last_configured(&desk.client, &opened.toplevel),
+                        Some((room.size.w, room.size.h)),
+                        "the client is told the room under the grown frame in its new \
+                         tile, not in the one it was leaving"
+                    );
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(moved));
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
             /// **A `growTop` of 0 is no change at all** (#423): a layer that
             /// declares it and never moves it leaves a held window and a
             /// floating one where they were, their clients configured with

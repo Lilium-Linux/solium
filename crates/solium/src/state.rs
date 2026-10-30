@@ -1538,6 +1538,20 @@ impl Solium {
         Some(Rectangle::new(location, window.geometry().size))
     }
 
+    /// Where a window is, at the size it was last asked for while its client
+    /// has not drawn that yet ([`crate::resizing::unanswered`]), and at the
+    /// size it drew otherwise: the rectangle a change of its frame keeps.
+    /// [`Self::real_geometry`] is the size it is leaving while a placement
+    /// is on its way, and a frame change sized from that asked the client for
+    /// it again (#431).
+    pub(crate) fn asked_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        let real = self.real_geometry(window)?;
+        Some(Rectangle::new(
+            real.loc,
+            crate::resizing::unanswered(window).unwrap_or(real.size),
+        ))
+    }
+
     /// A window as drawn, frame included.
     ///
     /// The client rect grown upward by the titlebar, when the window has one.
