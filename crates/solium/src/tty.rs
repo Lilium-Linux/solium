@@ -1782,6 +1782,19 @@ impl State {
             let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
             let queued = match rendered {
                 Ok(result) if !result.is_empty => {
+                    // `SOLIUM_SCANOUT_DUMP`: this frame as the display gets
+                    // it, beside the same frame drawn as a capture (#436).
+                    if let Some((dir, shot)) = crate::scanout::due(&output.name())
+                        && let Err(err) = crate::scanout::write(
+                            renderer,
+                            &result,
+                            &elements,
+                            &output,
+                            (&dir, shot),
+                        )
+                    {
+                        tracing::warn!(?err, monitor = output.name(), "SOLIUM_SCANOUT_DUMP failed");
+                    }
                     match screen.compositor.queue_frame(built_under) {
                         Ok(()) => {
                             screen.pending = true;
@@ -2090,7 +2103,6 @@ impl State {
     }
 }
 
-/// The time frame callbacks are stamped with.
 /// Whether `SOLIUM_FULL_REDRAW` is set: then every frame on a monitor is
 /// drawn whole, whatever the damage says, as a capture is (#436). Read once.
 fn full_redraw() -> bool {
@@ -2100,6 +2112,7 @@ fn full_redraw() -> bool {
     })
 }
 
+/// The time frame callbacks are stamped with.
 fn wall_clock() -> Duration {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
