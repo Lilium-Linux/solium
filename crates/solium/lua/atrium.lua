@@ -105,6 +105,7 @@ local function settings()
         threshold = number(drag.threshold, 8),
         reach = number(drag.reach, 320, 1),
         bar = number(drag.bar, 32),
+        smooth = number(drag.smooth, 70) / 1000,
         motion = {
             stiffness = number(motion.stiffness, 300, 1),
             damping = number(motion.damping, 32, 1),
@@ -767,6 +768,40 @@ local function dragged_group(monitor, card)
     }
 end
 
+-- The point a held card or window is drawn following, kept in `state`: the
+-- pointer itself while the window is flat, easing after it the further it is
+-- turned (`turned`, 0 to 1, at the eased point or the pointer, whichever is
+-- further: easing into the turn as much as out of it), as a time constant of
+-- `drag.smooth` at a full card. Eased here, a frame of `dt` seconds at a time,
+-- rather than by a spring: a present's spring starts again from rest at every
+-- new target. At 0 it is the pointer exactly, so the change from following to
+-- easing has no edge.
+local function follow(state, pointer, dt, turned, smooth)
+    local eased = state.eased
+    if not eased then
+        eased = { x = pointer.x, y = pointer.y }
+        state.eased = eased
+        return eased
+    end
+    local tau = smooth * math.max(turned(eased.x), turned(pointer.x))
+    local share = 1
+    if tau > 0.0005 then
+        share = 1 - math.exp(-dt / tau)
+    end
+    eased.x = eased.x + (pointer.x - eased.x) * share
+    eased.y = eased.y + (pointer.y - eased.y) * share
+    return eased
+end
+
+-- How long the frame a tick draws is, in seconds, as the scene measured it.
+local function frame_time(data)
+    local dt = type(data) == "table" and tonumber(data.dt) or nil
+    if not dt or dt ~= dt then
+        return 1 / 120
+    end
+    return math.max(0.0005, math.min(0.05, dt))
+end
+
 -- A card being dragged: the group follows the pointer, held by the point it
 -- was picked up at, turning from card into windows as it leaves the strip and
 -- back as it returns.
@@ -774,14 +809,16 @@ end
 -- The card in the hand, drawn where the pointer is now: once a frame, from
 -- the strip's tick, and never from the scene's own pointer events, which
 -- arrive unevenly between frames. Only letting go springs.
-local function draw_held()
+local function draw_held(dt)
     local held = kept.drag
     local it = held and dragged_group(held.monitor, held.card)
     if not it then
         return
     end
     local set = it.set
-    local pointer = sol.cursor()
+    local pointer = follow(held, sol.cursor(), dt or 1 / 120, function(x)
+        return atrium.closeness(it.area, x)
+    end, set.smooth)
     local t = atrium.closeness(it.area, pointer.x)
     sol.animate({ duration = 0 })
     local rects = lifted(it.rects, held.lift, held.shift)
@@ -884,12 +921,12 @@ local function row(id)
     return nil
 end
 
-local function tick()
+local function tick(dt)
     if not atrium.running() then
         return
     end
     if kept.drag then
-        draw_held()
+        draw_held(dt)
         return
     end
     local pointer = sol.cursor()
@@ -940,10 +977,14 @@ local function tick()
         kept.moving = press.id
     end
     local set = settings()
-    local t = 0
-    if press.from < 1 then
-        t = math.max(0, (atrium.closeness(area, pointer.x) - press.from) / (1 - press.from))
+    local function turned(x)
+        if press.from >= 1 then
+            return 0
+        end
+        return math.max(0, (atrium.closeness(area, x) - press.from) / (1 - press.from))
     end
+    pointer = follow(press, pointer, dt, turned, set.smooth)
+    local t = turned(pointer.x)
     if t <= 0 then
         if kept.presented[tostring(press.id)] then
             sol.animate({ duration = 0 })
@@ -962,7 +1003,7 @@ local function tick()
     local card = box and math.min(box.w / window.w, box.h / window.h, 1) or 1
     local scale = 1 + (card - 1) * t
     local w, h = window.w * scale, window.h * scale
-    -- Under the pointer as the compositor has it this frame, not chasing it.
+    -- At the eased point, drawn there this frame: no spring on top of it.
     sol.animate({ duration = 0 })
     present(press.id, {
         x = pointer.x - press.fx * w, y = pointer.y - press.fy * h, w = w, h = h,
@@ -1121,7 +1162,7 @@ sol.on("surface", function(surface, action, data)
     end
     data = type(data) == "table" and data or {}
     if action == "tick" then
-        tick()
+        tick(frame_time(data))
     elseif action == "released" then
         released()
     elseif action == "pick" then

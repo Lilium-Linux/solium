@@ -23155,13 +23155,28 @@ mod directions {
             assert_eq!(presented(&outcome.commands, 1), None, "nothing changed for the strip");
         }
 
-        /// **A card dragged out of the strip is drawn where the pointer is,
-        /// once a frame** -- no spring chasing it, which trailed the pointer by
-        /// tens of milliseconds both ways across, and from the strip's tick
-        /// rather than from the scene's pointer events, which arrive unevenly
-        /// between frames. The scene's later `drag` messages draw nothing.
+        /// Ticks of the strip's frame clock, each `dt` seconds, with the
+        /// pointer at `x`, 720; the held card's front window as last drawn.
+        fn ticks(desk: &mut Desk, x: f64, dt: f64, count: usize) -> (Rect, Duration, bool) {
+            desk.cursor = (x, 720.0);
+            let mut last = None;
+            for _ in 0..count {
+                let snapshot = desk.snapshot();
+                let outcome = act(desk, "tick", &format!(r#"{{"dt":{dt}}}"#), snapshot);
+                last = presented(&outcome.commands, 1).or(last);
+            }
+            let (rect, _, duration, channels) = last.expect("the held card is drawn each frame");
+            (rect.expect("a rect"), duration, channels)
+        }
+
+        /// **A card dragged out of the strip is drawn once a frame, on the
+        /// pointer while it is flat and easing after it while it is turned**,
+        /// as macOS has it: the strip's tick draws it, not the scene's
+        /// pointer events, which arrive unevenly between frames, and no
+        /// spring is put on top -- a present's spring starts again from rest
+        /// at each new target, and trailed the pointer.
         #[test]
-        fn a_dragged_card_is_drawn_where_the_pointer_is_once_a_frame() {
+        fn a_dragged_card_follows_the_pointer_flat_and_eases_after_it_turned() {
             let mut desk = desk();
             desk.cursor = (100.0, 720.0);
             let snapshot = desk.snapshot();
@@ -23169,20 +23184,23 @@ mod directions {
             let snapshot = desk.snapshot();
             let again = act(&mut desk, "drag", r#"{"card":1,"x":300,"y":720,"px":100,"py":712}"#, snapshot);
             assert_eq!(presented(&again.commands, 1), None, "a pointer event draws nothing");
-            let mut last = None;
-            for x in [300.0, 450.0, 900.0] {
-                desk.cursor = (x, 720.0);
-                let snapshot = desk.snapshot();
-                let outcome = act(&mut desk, "tick", "{}", snapshot);
-                let card = presented(&outcome.commands, 1).expect("the held card is drawn each frame");
-                assert_eq!((card.2, card.3), (Duration::ZERO, false), "at x {x}: {card:?}");
-                last = card.0;
-            }
-            // Past the strip's reach: a window at its own size, hanging from
-            // the middle of its 32-pixel titlebar.
-            let window = last.expect("a rect");
+
+            // Pulled well past the strip: a window at its own size, hanging
+            // from the middle of its 32-pixel titlebar, under the pointer.
+            let (window, duration, channels) = ticks(&mut desk, 900.0, 0.05, 20);
+            assert_eq!((duration, channels), (Duration::ZERO, false), "drawn, not animated");
             assert_eq!((window.w, window.h), (800.0, 600.0));
             assert!((window.y + 16.0 - 720.0).abs() < 0.5, "held by its titlebar: {window:?}");
+            // Flat, it is on the pointer at once.
+            let (moved, ..) = ticks(&mut desk, 960.0, 0.004, 1);
+            assert!((moved.x - window.x - 60.0).abs() < 0.5, "{window:?} then {moved:?}");
+
+            // Back towards the strip, turning: one frame later it is still
+            // nearly where it was, and it gets there over the frames after.
+            let (eased, ..) = ticks(&mut desk, 400.0, 0.004, 1);
+            assert!(eased.w > 790.0 && eased.x > moved.x - 200.0, "eased after the pointer: {eased:?}");
+            let (arrived, ..) = ticks(&mut desk, 400.0, 0.05, 40);
+            assert!(arrived.w < 700.0, "turned the way the pointer's place says: {arrived:?}");
         }
 
         /// **A hovered card picked up does not move at all**: lifted, out

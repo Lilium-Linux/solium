@@ -54,10 +54,11 @@ Item {
     // let go, and this scene's own pointer events arrive unevenly between
     // frames, so while a button is held over this monitor, or a card is held
     // anywhere, the Lua is asked to draw once a frame, on the compositor's
-    // clock, and told when the button comes up.
+    // clock, with how long the frame was, which a turned window's easing
+    // after the pointer is measured in, and told when the button comes up.
     FrameAnimation {
         running: Solium.cursor.pressed && (Solium.monitor.pointer || column.dragging)
-        onTriggered: Solium.send("tick")
+        onTriggered: Solium.send("tick", { dt: frameTime })
     }
     Connections {
         target: Solium.cursor

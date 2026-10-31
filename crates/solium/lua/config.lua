@@ -1593,12 +1593,14 @@ local defaults = {
             -- size; and how tall a window's titlebar is, the point the
             -- pointer holds sliding there as it turns, so a window pulled out
             -- hangs from its titlebar. A card or window in the hand is drawn
-            -- where the pointer is, once a frame, with no spring; only
-            -- letting go rides `motion`.
+            -- once a frame: on the pointer while it is flat, easing after it
+            -- the more it has turned, with a time constant of `smooth`
+            -- milliseconds as a full card. Letting go rides `motion`.
             drag = {
                 threshold = 8,
                 reach = 320,
                 bar = 32,
+                smooth = 70,
             },
             -- "overlap": the strip slides off the edge while a stage window
             -- covers it, and comes back when the pointer touches the edge.
