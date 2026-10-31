@@ -7390,6 +7390,104 @@ end)"#,
             }
         }
 
+        /// **#452: a maximised window dragged off glides out of its
+        /// maximise into the rectangle under the pointer, as the key's
+        /// restore glides, and the glide goes with the pointer**: a motion
+        /// part of the way through moves the picture as far as the pointer
+        /// went, and it lands where the window is, not where the drag first
+        /// put it.
+        #[test]
+        fn a_window_dragged_off_its_maximise_glides_under_the_pointer() {
+            use smithay::backend::input::ButtonState;
+            use smithay::input::pointer::GrabStartData;
+            let mut desk = Desk::new("dragged-off", SCRIPT);
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+
+            let region = Rectangle::new((0, 0).into(), (1920, 1080).into());
+            let pointer = desk
+                .state
+                .seat
+                .get_pointer()
+                .expect("the seat has a pointer");
+            let mut time = 1_000_u64;
+            let mut motion = |state: &mut Solium, by: (f64, f64)| {
+                time += 8_000;
+                crate::synth::send_motion(state, region, by.into(), time);
+            };
+            let at = pointer.current_location();
+            motion(&mut desk.state, (960.0 - at.x, 10.0 - at.y));
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                ButtonState::Pressed,
+                100_000,
+            );
+            let start = GrabStartData {
+                focus: None,
+                button: 0x110,
+                location: pointer.current_location(),
+            };
+            crate::input::grab::MoveGrab::start(
+                &mut desk.state,
+                &pointer,
+                start,
+                desk.window.clone(),
+                (0, 0).into(),
+                SERIAL_COUNTER.next_serial(),
+            );
+            // Half way along and 10 down, so 200 left of the pointer and 10
+            // above it at 400 by 300.
+            motion(&mut desk.state, (40.0, 100.0));
+            let under = Rectangle::new((800, 100).into(), (400, 300).into()).to_f64();
+            let first = desk.drawn(desk.state.clock.now());
+            assert!(
+                (first.loc.x - 0.0).abs() < 1.0
+                    && (first.loc.y - 0.0).abs() < 1.0
+                    && (first.size.w - 1920.0).abs() < 1.0
+                    && (first.size.h - 1080.0).abs() < 1.0,
+                "the glide starts from the maximised rectangle: {first:?}"
+            );
+            desk.frame_after(Duration::from_millis(45));
+            let then = desk.state.clock.now();
+            let part = desk.drawn(then);
+            assert!(
+                between(part, screen(), under),
+                "part of the way out at 45 ms: {part:?}"
+            );
+            motion(&mut desk.state, (100.0, 0.0));
+            let carried = desk.drawn(then);
+            assert_eq!(
+                (
+                    carried.loc.x - part.loc.x,
+                    carried.loc.y - part.loc.y,
+                    carried.size
+                ),
+                (100.0, 0.0, part.size),
+                "the glide did not go with the pointer"
+            );
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                ButtonState::Released,
+                200_000,
+            );
+            desk.answer(400, 300);
+            desk.land();
+            let moved = Rectangle::new((900, 100).into(), (400, 300).into()).to_f64();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                moved,
+                "it landed somewhere other than under the pointer"
+            );
+            assert!(!desk.transformed(), "and holds no transform at rest");
+        }
+
         /// **And one that never answers is held only so long**:
         /// `resizing::PATIENCE` past the landing, as a drag's hold is, and
         /// then drawn at the size it has, where it lives.
@@ -10125,6 +10223,281 @@ end)"#,
                 desk.tile(&window),
                 Some(tile),
                 "the restore did not go back into the tile"
+            );
+        }
+
+        /// The modifier's move drag (#452): the pointer to `at`, and super
+        /// and the left button down there, as a hand does it. Returns the
+        /// time the next event is at.
+        fn take_by_the_modifier(desk: &mut Desk, at: (f64, f64)) -> u64 {
+            move_pointer(&mut desk.state, at, 10_000);
+            crate::input::key(
+                &mut desk.state,
+                133_u32.into(),
+                smithay::backend::input::KeyState::Pressed,
+                11,
+            );
+            let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                smithay::backend::input::ButtonState::Pressed,
+                12_000,
+            );
+            assert!(
+                desk.state
+                    .seat
+                    .get_pointer()
+                    .is_some_and(|pointer| pointer.is_grabbed()),
+                "the premise: the press started a drag"
+            );
+            13_000
+        }
+
+        /// And the button and super up again.
+        fn let_go(desk: &mut Desk, time: u64) {
+            let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                smithay::backend::input::ButtonState::Released,
+                time,
+            );
+            crate::input::key(
+                &mut desk.state,
+                133_u32.into(),
+                smithay::backend::input::KeyState::Released,
+                u32::try_from(time / 1000).unwrap_or(u32::MAX),
+            );
+        }
+
+        /// A floating window, shown, maximised by the user and answered:
+        /// the window, its client's handles, and where it stood before.
+        fn maximised_floating(
+            desk: &mut Desk,
+        ) -> (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            Rectangle<i32, Logical>,
+        ) {
+            let (window, toplevel, surface) = desk.open();
+            desk.answer(&toplevel, &surface);
+            let before = desk.state.real_geometry(&window).expect("mapped");
+            desk.state.toggle_maximize(&window);
+            desk.round_trip();
+            desk.answer(&toplevel, &surface);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(desk.area),
+                "the premise: maximised over the work area"
+            );
+            (window, toplevel, surface, before)
+        }
+
+        /// **#452: a maximised window does not move under the threshold**,
+        /// `maximize.restore_after` from where the drag was taken, and comes
+        /// off past it: so a click on its titlebar is a click, and the
+        /// setting is the distance. It was dragged at its maximised size
+        /// while it stayed maximised, half off its monitor.
+        #[test]
+        fn a_maximised_window_stays_put_until_the_drag_passes_the_threshold() {
+            for (restore_after, short, long) in [(6.0, 4.0, 8.0), (50.0, 40.0, 60.0)] {
+                let mut desk = Desk::new("drag-unmaximise-threshold");
+                desk.state.maximize.restore_after = restore_after;
+                let (window, _toplevel, _surface, _before) = maximised_floating(&mut desk);
+                let from = (
+                    f64::from(desk.area.loc.x) + 480.0,
+                    f64::from(desk.area.loc.y) + 20.0,
+                );
+                let time = take_by_the_modifier(&mut desk, from);
+                move_pointer(&mut desk.state, (from.0 + short, from.1), time);
+                assert!(
+                    in_state(&window, State::Maximized),
+                    "{restore_after}: a drag of {short} restored it"
+                );
+                assert_eq!(
+                    desk.state.real_geometry(&window),
+                    Some(desk.area),
+                    "{restore_after}: a drag of {short} moved it"
+                );
+                move_pointer(&mut desk.state, (from.0 + long, from.1), time + 1_000);
+                assert!(
+                    !in_state(&window, State::Maximized),
+                    "{restore_after}: a drag of {long} left it maximised"
+                );
+                let_go(&mut desk, time + 2_000);
+            }
+        }
+
+        /// **#452: let go under the threshold, the window stays maximised
+        /// where it is**, and no layout is told it was dropped: a click on a
+        /// maximised window's titlebar is a click.
+        #[test]
+        fn a_maximised_window_let_go_under_the_threshold_stays_maximised() {
+            let mut desk = Desk::new("drag-unmaximise-click");
+            let (window, _toplevel, _surface, _before) = maximised_floating(&mut desk);
+            let from = (
+                f64::from(desk.area.loc.x) + 480.0,
+                f64::from(desk.area.loc.y) + 20.0,
+            );
+            let time = take_by_the_modifier(&mut desk, from);
+            move_pointer(&mut desk.state, (from.0 + 3.0, from.1 + 2.0), time);
+            let_go(&mut desk, time + 1_000);
+            desk.rest();
+            assert!(
+                in_state(&window, State::Maximized),
+                "the click restored the window"
+            );
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(desk.area),
+                "the click moved the window"
+            );
+            assert!(
+                desk.state.pending_drop.is_none() && desk.state.pending_unmaximize.is_none(),
+                "something is left over from the click"
+            );
+        }
+
+        /// **#452: dragged past the threshold, a maximised window comes off
+        /// at the size it had before, under the pointer, and follows it.**
+        /// Taken a quarter of the way along it, it is a quarter of the way
+        /// along under the pointer, as far down as it was taken; the next
+        /// motion moves it as far as the pointer goes, and it is left where
+        /// it was let go, floating and not maximised.
+        #[test]
+        fn a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer() {
+            let mut desk = Desk::new("drag-unmaximise-floating");
+            let (window, toplevel, surface, before) = maximised_floating(&mut desk);
+            let from = desk.area.loc + Point::from((desk.area.size.w / 4, 20));
+            let time = take_by_the_modifier(&mut desk, (f64::from(from.x), f64::from(from.y)));
+            let at = from + Point::from((30, 40));
+            move_pointer(&mut desk.state, (f64::from(at.x), f64::from(at.y)), time);
+            desk.round_trip();
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the drag did not restore the window"
+            );
+            assert_eq!(
+                maximized_sent(&desk.client, &toplevel).last(),
+                Some(&false),
+                "the client was not told it is restored"
+            );
+            // A quarter of the way along, and 20 down: no frame here, so the
+            // window's own height is the band it is held in.
+            assert_eq!(before.size.w % 4, 0, "the premise: a quarter is whole");
+            let under = Rectangle::new(at - Point::from((before.size.w / 4, 20)), before.size);
+            assert_eq!(
+                desk.state.real_geometry(&window).map(|real| real.loc),
+                Some(under.loc),
+                "the window did not come off under the pointer"
+            );
+            desk.answer(&toplevel, &surface);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(under),
+                "the window did not come off at the size it had"
+            );
+
+            move_pointer(
+                &mut desk.state,
+                (f64::from(at.x) + 100.0, f64::from(at.y) + 50.0),
+                time + 1_000,
+            );
+            let followed = Rectangle::new(under.loc + Point::from((100, 50)), under.size);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(followed),
+                "the window did not follow the pointer once off"
+            );
+            let_go(&mut desk, time + 2_000);
+            desk.rest();
+            assert!(!in_state(&window, State::Maximized), "maximised again");
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(followed),
+                "the window is not where it was let go"
+            );
+        }
+
+        /// **#452: a window maximised out of its tile comes off at its
+        /// tile's size, back in its tile, and is dragged as any tiled window
+        /// is**: under the pointer while it is held, and let go over its
+        /// neighbour, the layout puts it in the tile it was let go over.
+        #[test]
+        fn a_window_maximised_out_of_its_tile_comes_off_at_its_tiles_size() {
+            let mut desk = Desk::new("drag-unmaximise-tiled");
+            let (window, toplevel, surface) = desk.open();
+            let (other, other_toplevel, other_surface) = desk.open();
+            desk.press("super+t");
+            desk.answer(&toplevel, &surface);
+            desk.answer(&other_toplevel, &other_surface);
+            let tile = desk.tile(&window).expect("the window is in a tile");
+            let beside = desk.tile(&other).expect("the neighbour is in a tile");
+            desk.state.focus_window(
+                &window,
+                SERIAL_COUNTER.next_serial(),
+                crate::script::FocusSource::Script,
+            );
+            desk.press("super+shift+m");
+            desk.answer(&toplevel, &surface);
+            assert!(
+                in_state(&window, State::Maximized) && desk.tile(&window).is_none(),
+                "the premise: maximised out of its tile"
+            );
+
+            let from = desk.area.loc + Point::from((desk.area.size.w / 2, 10));
+            let time = take_by_the_modifier(&mut desk, (f64::from(from.x), f64::from(from.y)));
+            let at = from + Point::from((40, 200));
+            move_pointer(&mut desk.state, (f64::from(at.x), f64::from(at.y)), time);
+            desk.round_trip();
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the drag did not restore the window"
+            );
+            assert_eq!(
+                desk.tile(&window),
+                Some(tile),
+                "the window did not go back into its tile"
+            );
+            assert_eq!(
+                (
+                    last_configured(&desk.client, &toplevel),
+                    tiled_sent(&desk.client, &toplevel).last()
+                ),
+                (Some((tile.size.w, tile.size.h)), Some(&true)),
+                "the client was not told its tile"
+            );
+            assert_eq!(tile.size.w % 2, 0, "the premise: a half is whole");
+            let under = at - Point::from((tile.size.w / 2, 10));
+            assert_eq!(
+                desk.state.real_geometry(&window).map(|real| real.loc),
+                Some(under),
+                "the window is not under the pointer"
+            );
+
+            let over = beside.loc + Point::from((beside.size.w / 2, beside.size.h / 2));
+            move_pointer(
+                &mut desk.state,
+                (f64::from(over.x), f64::from(over.y)),
+                time + 1_000,
+            );
+            assert_eq!(
+                desk.state.real_geometry(&window).map(|real| real.loc),
+                Some(under + (over - at)),
+                "the window did not follow the pointer"
+            );
+            let_go(&mut desk, time + 2_000);
+            desk.answer(&toplevel, &surface);
+            desk.answer(&other_toplevel, &other_surface);
+            assert!(!in_state(&window, State::Maximized), "maximised again");
+            let landed = desk.tile(&window).expect("the window is in a tile");
+            assert!(
+                landed.contains(over),
+                "the window is not in the tile it was let go over: {landed:?}"
             );
         }
     }
@@ -37464,6 +37837,76 @@ end)
                 });
             }
 
+            /// **#452: a finger on a maximised window's titlebar holds it
+            /// as the pointer does**: a few pixels leave it maximised where
+            /// it is, and past `maximize.restore_after` it comes off at its
+            /// old size under the finger and follows it.
+            #[test]
+            fn a_finger_drags_a_maximised_window_off_its_maximise() {
+                with_touch_window(true, |desk, opened, window, before| {
+                    let region = region(desk);
+                    desk.state.toggle_maximize(&window);
+                    desk.pump();
+                    let (w, h) = last_configured(&desk.client, &opened.toplevel)
+                        .expect("the window was told the work area");
+                    let _buffer =
+                        super::super::commit_buffer(&desk.client, &desk.qh, &opened.surface, w, h);
+                    desk.pump();
+                    let maximised = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    // A twentieth of the way along: clear of the title, which
+                    // is a control a finger does not drag by.
+                    let at = maximised.loc + Point::from((maximised.size.w / 20, 16));
+                    let at = (f64::from(at.x), f64::from(at.y));
+                    crate::synth::touch_down(&mut desk.state, region, 0, at, 20_000);
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (at.0 + 3.0, at.1),
+                        30_000,
+                    );
+                    assert_eq!(
+                        (
+                            crate::state::window_states(&window).maximized,
+                            desk.state.pane_outer_of(opened.pane)
+                        ),
+                        (true, Some(maximised)),
+                        "three pixels moved or restored it"
+                    );
+                    let to = (at.0 + 50.0, at.1 + 80.0);
+                    crate::synth::touch_motion(&mut desk.state, region, 0, to, 40_000);
+                    assert!(
+                        !crate::state::window_states(&window).maximized,
+                        "the finger did not take it off"
+                    );
+                    let off = desk.state.real_geometry(&window).expect("mapped");
+                    let outer = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    // Placed for its old width, which its client has not
+                    // drawn yet.
+                    assert_eq!(
+                        (f64::from(outer.loc.x), f64::from(outer.loc.y)),
+                        (
+                            (to.0 - f64::from(before.size.w) / 20.0).round(),
+                            to.1 - 16.0
+                        ),
+                        "it did not come off under the finger"
+                    );
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (to.0 + 100.0, to.1 + 50.0),
+                        50_000,
+                    );
+                    crate::synth::touch_up(&mut desk.state, region, 0, 60_000);
+                    assert_eq!(
+                        desk.state.real_geometry(&window).map(|real| real.loc),
+                        Some(off.loc + Point::from((100, 50))),
+                        "it did not follow the finger"
+                    );
+                });
+            }
+
             /// Whether the pointer shows the closed hand a move holds.
             fn closed_hand(desk: &mut Desk) -> bool {
                 use smithay::input::pointer::{CursorIcon, CursorImageStatus};
@@ -43046,6 +43489,196 @@ Item {
         /// client: the state, what is drawn, what a press and the keyboard
         /// reach, the client's own request, focusing, the shipped layouts,
         /// `super+m`, the overview and `config.minimize`.
+        /// A maximised window's titlebar (#452): a double click on it
+        /// still restores it, a click leaves it, and a drag takes it off.
+        mod drag_off {
+            use super::*;
+            use smithay::backend::input::ButtonState;
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+            /// A frame style with a 32-pixel titlebar that a double tap
+            /// maximises or restores, as Illia's `rounded-violet` does it.
+            fn style() -> std::path::PathBuf {
+                let style = std::env::temp_dir()
+                    .join(format!("solium-frame-drag-off-{}", std::process::id()));
+                std::fs::create_dir_all(&style).expect("a style folder");
+                std::fs::write(
+                    style.join("Pane.qml"),
+                    "import Solium\nPaneStyle {\n    insets.top: 32\n    \
+                     Layer { depth: \"frame\"; name: \"bar\"; source: \"Frame.qml\" }\n}\n",
+                )
+                .expect("writing the manifest");
+                std::fs::write(
+                    style.join("Frame.qml"),
+                    "import QtQuick\nItem {\n    id: frame\n    \
+                     property string action: \"\"\n    \
+                     TapHandler { onDoubleTapped: frame.action = \"maximize\" }\n}\n",
+                )
+                .expect("writing the layer");
+                style
+            }
+
+            fn button(desk: &mut Desk, state: ButtonState, time: u64) {
+                let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+                crate::synth::send_button(&mut desk.state, region, 0x110, state, time);
+            }
+
+            /// The client draws the size it was last told, and a second
+            /// goes by.
+            fn answer(desk: &mut Desk, opened: &Opened) {
+                desk.pump();
+                let (w, h) = last_configured(&desk.client, &opened.toplevel)
+                    .filter(|&(w, h)| w > 0 && h > 0)
+                    .expect("the window was told a size");
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, w, h);
+                desk.pump();
+                desk.state.clock.advance(Duration::from_secs(2));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+            }
+
+            /// **#452, on the titlebar a frame draws**: a double click on a
+            /// maximised window's titlebar restores it; a click with a
+            /// hand's few pixels of motion in it leaves it maximised where
+            /// it is; and a drag past `maximize.restore_after` brings it off
+            /// at its old size with the pointer on its titlebar, as far
+            /// along it as it was taken, and moves it on with the pointer.
+            #[test]
+            fn a_maximised_windows_titlebar_takes_a_double_click_a_click_and_a_drag() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let style = style();
+                    let mut desk = Desk::new();
+                    let opened = desk.open_surface();
+                    let pane = opened.pane;
+                    let window = desk
+                        .state
+                        .panes
+                        .get(pane)
+                        .and_then(Pane::client)
+                        .cloned()
+                        .expect("a client");
+                    desk.state
+                        .decorations
+                        .set_style(&mut desk.state.panes, Some(style.display().to_string()));
+                    desk.state
+                        .decorations
+                        .insert(&mut desk.state.panes, pane, 400, 300);
+                    commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                    desk.pump();
+                    desk.state
+                        .space
+                        .map_element(window.clone(), (200, 200), false);
+                    desk.state.space.refresh();
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    let before = desk.state.real_geometry(&window).expect("mapped");
+                    assert_eq!(
+                        desk.state.insets_of(pane).top,
+                        32,
+                        "the premise: a titlebar"
+                    );
+
+                    desk.state.toggle_maximize(&window);
+                    desk.pump();
+                    answer(&mut desk, &opened);
+                    let maximised = desk.state.pane_outer_of(pane).expect("outer");
+                    let at = maximised.loc + Point::from((maximised.size.w / 5, 16));
+                    let at = (f64::from(at.x), f64::from(at.y));
+                    assert!(
+                        matches!(
+                            desk.state.chrome_under(at.into()),
+                            Some(under) if matches!(under.chrome, crate::state::Chrome::Frame)
+                        ),
+                        "the premise: the point is on the maximised window's titlebar"
+                    );
+
+                    // A double click.
+                    move_pointer(&mut desk.state, at, 10_000);
+                    button(&mut desk, ButtonState::Pressed, 11_000);
+                    button(&mut desk, ButtonState::Released, 12_000);
+                    button(&mut desk, ButtonState::Pressed, 13_000);
+                    button(&mut desk, ButtonState::Released, 14_000);
+                    assert!(
+                        !in_state(&window, State::Maximized),
+                        "the double click did not restore the window"
+                    );
+                    answer(&mut desk, &opened);
+                    assert_eq!(
+                        desk.state.real_geometry(&window),
+                        Some(before),
+                        "the double click did not put it back where it was"
+                    );
+
+                    // A click, with two or three pixels in it.
+                    desk.state.toggle_maximize(&window);
+                    desk.pump();
+                    answer(&mut desk, &opened);
+                    move_pointer(&mut desk.state, at, 20_000);
+                    button(&mut desk, ButtonState::Pressed, 21_000);
+                    move_pointer(&mut desk.state, (at.0 + 3.0, at.1 + 2.0), 22_000);
+                    button(&mut desk, ButtonState::Released, 23_000);
+                    answer(&mut desk, &opened);
+                    assert!(
+                        in_state(&window, State::Maximized),
+                        "the click restored the window"
+                    );
+                    assert_eq!(
+                        desk.state.pane_outer_of(pane),
+                        Some(maximised),
+                        "the click moved the window"
+                    );
+
+                    // A drag.
+                    move_pointer(&mut desk.state, at, 30_000);
+                    button(&mut desk, ButtonState::Pressed, 31_000);
+                    move_pointer(&mut desk.state, (at.0 + 2.0, at.1), 32_000);
+                    assert!(
+                        in_state(&window, State::Maximized),
+                        "the first two pixels restored it"
+                    );
+                    let to = (at.0 + 50.0, at.1 + 80.0);
+                    move_pointer(&mut desk.state, to, 33_000);
+                    assert!(
+                        !in_state(&window, State::Maximized),
+                        "the drag did not restore the window"
+                    );
+                    answer(&mut desk, &opened);
+                    let off = desk.state.pane_outer_of(pane).expect("outer");
+                    assert_eq!(
+                        (off.size.w, off.size.h),
+                        (before.size.w, before.size.h + 32),
+                        "it did not come off at the size it had"
+                    );
+                    assert_eq!(
+                        (f64::from(off.loc.x), f64::from(off.loc.y)),
+                        ((to.0 - f64::from(off.size.w) / 5.0).round(), to.1 - 16.0),
+                        "it did not come off a fifth of the way along under the \
+                         pointer, 16 down its titlebar"
+                    );
+                    assert!(
+                        matches!(
+                            desk.state.chrome_under(to.into()),
+                            Some(under) if matches!(under.chrome, crate::state::Chrome::Frame)
+                        ),
+                        "the pointer is not on its titlebar"
+                    );
+                    move_pointer(&mut desk.state, (to.0 + 100.0, to.1 + 50.0), 34_000);
+                    button(&mut desk, ButtonState::Released, 35_000);
+                    answer(&mut desk, &opened);
+                    assert_eq!(
+                        desk.state.pane_outer_of(pane),
+                        Some(Rectangle::new(off.loc + Point::from((100, 50)), off.size)),
+                        "it did not follow the pointer once off"
+                    );
+                    assert!(!in_state(&window, State::Maximized), "maximised again");
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+        }
+
         mod minimize {
             use super::*;
             use crate::render::Stacked;

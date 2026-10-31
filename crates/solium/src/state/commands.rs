@@ -776,6 +776,10 @@ impl Solium {
                         self.resizing = resizing;
                     }
                 }
+                Command::Maximize { restore_after } => {
+                    tracing::debug!(restore_after, "how far a maximised window is dragged set");
+                    self.maximize.restore_after = restore_after;
+                }
                 Command::Fullscreen(covers) => {
                     if self.fullscreen_covers != covers {
                         tracing::debug!(?covers, "what a fullscreen window covers set");

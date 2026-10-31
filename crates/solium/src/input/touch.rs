@@ -360,6 +360,19 @@ pub(crate) fn motion(
     contact.tracker.push(time_us, location.x, location.y);
     let contact = contact.clone();
     match &contact.target {
+        // A drag keeps what it learns as it goes -- whether a maximised
+        // window has come off yet (#452) -- so the contact is given it back.
+        TouchTarget::Move(drag) => {
+            let mut drag = drag.clone();
+            drag.to(state, location);
+            if let Some(held) = state.touches.get_mut(&slot.into())
+                && matches!(held.target, TouchTarget::Move(_))
+            {
+                held.target = TouchTarget::Move(drag);
+            }
+            super::grab::settle(state);
+            state.redraw = true;
+        }
         TouchTarget::Client | TouchTarget::Lock => {
             let under = state.touch_under(location);
             if let Some(touch) = state.seat.get_touch() {
@@ -572,8 +585,10 @@ fn deliver(
             }
         }
         TouchTarget::Move(drag) => match kind {
-            TouchKind::Motion => drag.to(state, location),
+            // `motion`'s, which keeps what the drag learns.
+            TouchKind::Motion => {}
             TouchKind::Up => {
+                super::grab::settle(state);
                 drag.finish(state, location);
                 if let Some((window, x, y)) = state.pending_drop.take() {
                     state.trigger_drop(&window, x, y);

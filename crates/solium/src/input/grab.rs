@@ -21,6 +21,15 @@
 //! window made fullscreen or maximised mid-drag is the compositor's again, and
 //! [`let_go_of`] ends the drag there: a fullscreen window kept following the
 //! pointer and covered its monitor at an offset (#404).
+//!
+//! **A maximised window does not move** (#452). A drag taken of one holds it
+//! where it is until the pointer has gone `maximize.restore_after` pixels,
+//! so a click or a double click on its titlebar is still one; past that, it
+//! is restored to the size it had before the maximise, put so the point it
+//! was taken by is under the pointer, and the drag goes on moving it. It was
+//! moved at its maximised size while it stayed maximised, half off its
+//! monitor, and jumped back when it was restored. The restore is made after
+//! the grab's callback has returned, as a drop is ([`Unmaximize`]).
 
 use smithay::{
     desktop::Window,
@@ -33,7 +42,7 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER, Serial},
 };
 
-use crate::state::Solium;
+use crate::state::{Solium, States, window_states};
 
 /// What the pointer shows for as long as a window is being moved (#374):
 /// the closed hand, `grabbing`, because the window is held. `move`, the
@@ -88,6 +97,49 @@ pub(crate) struct MoveDrag {
     /// Without it the window jumps so its corner meets the cursor on the first
     /// motion event, which reads as the compositor dropping the window.
     offset: Point<f64, Logical>,
+    /// Where the drag was taken, which is the point on a maximised window
+    /// that stays under the pointer when it is restored.
+    from: Point<f64, Logical>,
+    held: Held,
+}
+
+/// Whether a drag moves its window yet (#452).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Held {
+    /// It does: the window follows the pointer by `MoveDrag::offset`.
+    Moving,
+    /// The window is maximised, and stays where it is until the pointer has
+    /// gone `maximize.restore_after` from where the drag was taken.
+    Maximized,
+    /// The pointer has gone that far at this point, and the restore is
+    /// recorded ([`Unmaximize`]) and not made yet.
+    Restoring(Point<f64, Logical>),
+}
+
+/// A maximised window a drag has pulled far enough to come off (#452):
+/// restored, with the point the drag was taken by, `from`, under the pointer
+/// at `at`.
+///
+/// **Recorded inside the grab and made after it**, as `Solium::pending_drop`
+/// is and for its reason: a restore tells the scripts, and a script asking
+/// where the pointer is from inside the pointer's own grab waits on a lock the
+/// grab holds. [`settle`] makes it, once the motion has gone through.
+#[derive(Clone, Debug)]
+pub(crate) struct Unmaximize {
+    window: Window,
+    from: Point<f64, Logical>,
+    at: Point<f64, Logical>,
+}
+
+/// Make the restore a drag recorded ([`Unmaximize`]), if there is one: after
+/// each pointer motion and finger motion, outside the grab, and before a
+/// release reports its drop. The drag holding the window reads where it was
+/// put on its next motion, and moves it on from there.
+/// `state::tests::real_client::client_maximize::a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer`.
+pub(crate) fn settle(state: &mut Solium) {
+    if let Some(Unmaximize { window, from, at }) = state.pending_unmaximize.take() {
+        state.restore_under(&window, from, at);
+    }
 }
 
 impl MoveGrab {
@@ -134,26 +186,107 @@ impl MoveDrag {
         &self.window
     }
 
+    /// A drag of `window`, standing at `window_location`, taken at `from`.
+    /// A maximised window is held where it is to begin with (#452); a
+    /// fullscreen one moves as it always has.
     pub(crate) fn new(
         window: Window,
         window_location: Point<i32, Logical>,
         from: Point<f64, Logical>,
     ) -> Self {
+        let States {
+            fullscreen,
+            maximized,
+        } = window_states(&window);
         Self {
             window,
             offset: window_location.to_f64() - from,
+            from,
+            held: if maximized && !fullscreen {
+                Held::Maximized
+            } else {
+                Held::Moving
+            },
         }
     }
 
-    pub(crate) fn to(&self, state: &mut Solium, at: Point<f64, Logical>) {
+    /// The pointer, or the finger, is at `at`: the window follows it, once
+    /// it may (#452).
+    ///
+    /// A maximised window stays where it is until `at` is
+    /// `maximize.restore_after` from where the drag was taken, and is then
+    /// recorded to be restored there ([`Unmaximize`]); the motion after
+    /// [`settle`] has restored it moves it on from where it was put. One
+    /// restored by something else while it was held -- the double click on
+    /// its titlebar that started this drag -- moves on from where it is.
+    pub(crate) fn to(&mut self, state: &mut Solium, at: Point<f64, Logical>) {
+        match self.held {
+            Held::Moving => {}
+            Held::Maximized => {
+                let States {
+                    fullscreen,
+                    maximized,
+                } = window_states(&self.window);
+                if maximized && !fullscreen {
+                    let gone = at - self.from;
+                    if gone.x.hypot(gone.y) < state.maximize.restore_after {
+                        return;
+                    }
+                    state.pending_unmaximize = Some(Unmaximize {
+                        window: self.window.clone(),
+                        from: self.from,
+                        at,
+                    });
+                    self.held = Held::Restoring(at);
+                    return;
+                }
+                self.moving_from(state, at);
+            }
+            Held::Restoring(asked) => {
+                if state
+                    .pending_unmaximize
+                    .as_ref()
+                    .is_some_and(|pending| pending.window == self.window)
+                {
+                    return;
+                }
+                self.moving_from(state, asked);
+            }
+        }
         let location = (at + self.offset).to_i32_round();
+        let was = state.space.element_location(&self.window);
         // Keep the stacking order alone: dragging does not restack.
         state
             .space
             .map_element(self.window.clone(), location, false);
+        // A glide the window is part of the way through goes with it, so
+        // it is drawn under the pointer while it lands: the restore's
+        // shrink, or a layout's or an opening's glide (#452).
+        if let Some(was) = was
+            && was != location
+            && let Some(pane) = state.panes.of(&self.window)
+        {
+            crate::present::carry(pane, (location - was).to_f64());
+        }
     }
 
+    /// Move the window on from where it stands now, with `at` the pointer
+    /// it stands under.
+    fn moving_from(&mut self, state: &Solium, at: Point<f64, Logical>) {
+        if let Some(location) = state.space.element_location(&self.window) {
+            self.offset = location.to_f64() - at;
+        }
+        self.held = Held::Moving;
+    }
+
+    /// Let go at `at`: the drop is reported once the grab has returned. Not
+    /// for a maximised window that never came off, which has not moved: a
+    /// click on its titlebar is a click, and a layout asked where it was
+    /// dropped would move it in its tree while it covers the work area.
     pub(crate) fn finish(&self, state: &mut Solium, at: Point<f64, Logical>) {
+        if self.held == Held::Maximized {
+            return;
+        }
         state.pending_drop = Some((self.window.clone(), at.x, at.y));
     }
 }

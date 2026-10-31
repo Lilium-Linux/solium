@@ -1545,6 +1545,21 @@ local defaults = {
         -- Applications that are maximised and restored at once whatever
         -- `animate` says, by app id, as `fullscreen.instant` lists them.
         instant = { app_id = {} },
+
+        -- A maximised window does not move. Drag it by its titlebar -- or
+        -- with the drag modifier, or a finger -- and it stays where it is
+        -- until the pointer has gone this many pixels from where you took
+        -- hold of it; then it is restored to the size it had before, under
+        -- the pointer, held where you took it along its titlebar, and the
+        -- drag goes on moving it. It shrinks there with the motion
+        -- `animate` above gives a restore. A window maximised out of a
+        -- layout's tile comes off at its tile's size, and is let go into a
+        -- tile as any tiled window you drag is.
+        --
+        -- A few pixels, so a click or a double click on the titlebar, which
+        -- a hand moves a pixel or two, stays a click. 0 restores it on the
+        -- first motion; at most 200.
+        restore_after = 6,
     },
 
     floating = {

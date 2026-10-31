@@ -833,6 +833,11 @@ pub(crate) enum Command {
     /// What a fullscreen window covers: `fullscreen.covers`. See
     /// `crate::stack::Covers`.
     Fullscreen(crate::stack::Covers),
+    /// How far a maximised window is dragged before it comes off:
+    /// `maximize.restore_after` (#452). See `crate::state::Solium::maximize`.
+    Maximize {
+        restore_after: f64,
+    },
     /// The idle blank, and what a window on a screen that is off is told.
     /// See `crate::idle::Settings`.
     Idle(crate::idle::Settings),
@@ -1000,6 +1005,7 @@ impl Command {
             | Self::ClientSizes(_)
             | Self::Resize(_)
             | Self::Fullscreen(_)
+            | Self::Maximize { .. }
             | Self::Idle(_)
             | Self::AutoReload(_)
             | Self::Input(_)
@@ -5847,6 +5853,38 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Fullscreen(covers));
+            })
+        })?,
+    )?;
+
+    // How far a maximised window is dragged before it comes off:
+    // `{ restore_after = 6 }`, from `init.lua` with `config.maximize` (#452).
+    // Pixels from 0 to `RESTORE_AFTER_MAX`; anything else is named in the
+    // log and the default kept, as `resize.patience` is, and an absent table
+    // or key is the default, for `sol.resize`'s reason.
+    // `the_shipped_maximize_setting_reaches_the_compositor`.
+    sol.set(
+        "maximize",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut restore_after = crate::state::RESTORE_AFTER;
+            if let Some(options) = options {
+                match options.get::<Value>("restore_after") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value)
+                        .filter(|pixels| (0.0..=crate::state::RESTORE_AFTER_MAX).contains(pixels))
+                    {
+                        Some(pixels) => restore_after = pixels,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            most = crate::state::RESTORE_AFTER_MAX,
+                            "maximize.restore_after is a number of pixels from 0 to most; \
+                             keeping the default"
+                        ),
+                    },
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Maximize { restore_after });
             })
         })?,
     )?;
@@ -12804,6 +12842,43 @@ mod tests {
                 .into_iter()
                 .filter_map(|command| match command {
                     Command::Fullscreen(covers) => Some(covers),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(handed, vec![wanted], "{user}");
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
+    /// **#452: the shipped `maximize.restore_after` reaches the compositor**:
+    /// 6 pixels as shipped, a user's number in its place, and a number out of
+    /// range, or not a number, keeping the 6.
+    #[test]
+    fn the_shipped_maximize_setting_reaches_the_compositor() {
+        for (user, wanted) in [
+            ("return {}", crate::state::RESTORE_AFTER),
+            ("return { maximize = { restore_after = 20 } }", 20.0),
+            ("return { maximize = { restore_after = 0 } }", 0.0),
+            (
+                "return { maximize = { restore_after = -3 } }",
+                crate::state::RESTORE_AFTER,
+            ),
+            (
+                "return { maximize = { restore_after = \"far\" } }",
+                crate::state::RESTORE_AFTER,
+            ),
+        ] {
+            let Some((directory, mut scripts)) =
+                shipped_init_with_user("solium-script-test-maximize", user)
+            else {
+                return;
+            };
+            let handed: Vec<f64> = scripts
+                .startup()
+                .commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Maximize { restore_after } => Some(restore_after),
                     _ => None,
                 })
                 .collect();

@@ -1299,6 +1299,17 @@ function sol.resize(options) end
 ---@return nil
 function sol.fullscreen(options) end
 
+---Set how a maximised window is dragged (#452).
+---
+---`restore_after`: how far, in logical pixels from 0 to 200, the pointer goes
+---from where a drag of a maximised window was taken before the window is
+---restored under it (default 6). Until then the window does not move, so a
+---click or a double click on its titlebar stays one. Another value is logged
+---and the default kept. `init.lua` calls this with `config.maximize`.
+---@param options? { restore_after?: number }
+---@return nil
+function sol.maximize(options) end
+
 ---Set the pointer's XCursor theme, size and scene. Applied at once, so a reload
 ---is how a theme or a scene is tried, and a scene whose files changed is built
 ---again. Not `sol.cursor`, which says where the pointer is.

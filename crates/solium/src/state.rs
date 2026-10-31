@@ -140,7 +140,7 @@ use placement::{Change, outer_of};
 #[cfg(test)]
 use snapshot::to_rect;
 pub(crate) use snapshot::{Limits, limits_of};
-pub(crate) use window_state::{States, states as window_states};
+pub(crate) use window_state::{RESTORE_AFTER, RESTORE_AFTER_MAX, States, states as window_states};
 use workspaces::nothing_on_stage;
 #[cfg(test)]
 use workspaces::{SETTLED, put_away, staged};
@@ -1092,6 +1092,15 @@ pub(crate) struct Solium {
     /// [`crate::stack::Covers`].
     pub(crate) fullscreen_covers: crate::stack::Covers,
 
+    /// What `config.lua` said about maximised windows: how far one is
+    /// dragged before it comes off (#452). See [`window_state::Maximize`].
+    pub(crate) maximize: window_state::Maximize,
+
+    /// A maximised window a drag has pulled far enough to be restored, and
+    /// not restored yet: recorded inside the pointer grab and made after it,
+    /// for `pending_drop`'s reason below. See `crate::input::grab::settle`.
+    pub(crate) pending_unmaximize: Option<crate::input::grab::Unmaximize>,
+
     /// A drag that has finished and not yet been reported to scripts.
     ///
     /// Recorded inside the pointer grab and acted on after it, for exactly the
@@ -1548,6 +1557,8 @@ impl Solium {
             resizing_marked: Vec::new(),
             resizing: crate::resizing::Settings::default(),
             fullscreen_covers: crate::stack::Covers::default(),
+            maximize: window_state::Maximize::default(),
+            pending_unmaximize: None,
             redraw: true,
             animating: false,
             explicit_sync: crate::explicit_sync::State::default(),
