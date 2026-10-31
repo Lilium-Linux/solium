@@ -78,7 +78,7 @@
 ---@field cramped boolean Whether the layout last placed it with `cramped = true`.
 ---@field shown boolean Whether its application has shown its first frame yet.
 ---@field fullscreen boolean Whether the compositor last told it to be fullscreen.
----@field maximized boolean Whether the compositor last told it to be maximised: `sol.toggle_maximize`, `super+shift+m`, the frame's button, or an X11 client's own request. A layout taking over lets such a window out of it first (`modes.lua`), so it goes into its tile.
+---@field maximized boolean Whether the compositor last told it to be maximised: `sol.toggle_maximize`, `super+shift+m`, the frame's button, or its client's own request, xdg or X11. A layout taking over lets such a window out of it first (`modes.lua`), so it goes into its tile; a client's own maximise never lifts a window out of a tile, and a tile given to a window its client maximised takes it out of the maximise.
 ---@field style string The pane style it is framed in, or `"none"` when it is drawn bare: fullscreen, drawing its own decorations, or under the style `"none"`.
 ---@field insets {top: integer, right: integer, bottom: integer, left: integer} What its frame takes of `x`, `y`, `w` and `h` on each side right now, a titlebar the frame has grown (`growTop`) included: the client is that rectangle less these. All 0 for a window drawn bare.
 ---@field x11_type? string Its X11 `_NET_WM_WINDOW_TYPE`, lower case (`"normal"`, `"dialog"`, `"utility"`, `"toolbar"`, `"menu"`, `"dropdown-menu"`, `"popup-menu"`, `"tooltip"`, `"notification"`, `"splash"`); `"normal"` for an X11 window with no type of its own, same as EWMH's own default, and absent for a Wayland window, which has no such property to ask.

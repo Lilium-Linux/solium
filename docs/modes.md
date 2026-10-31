@@ -82,7 +82,15 @@ takes over, `modes.use` lets every maximised window out of its maximise first,
 so the tile the new layout gives it is where it goes. Left maximised, a window
 maximised on the floating desktop went on covering the work area over the
 tiles, its own tile empty beside its neighbour, and no seam could size it
-(#443). A tile placed is kept as the tile the window goes
+(#443). A maximise the application asks for itself is not the user's, and a
+tile outranks it (#450): an xdg `set_maximized` or an X11 `_NET_WM_STATE`
+request from a window a layout holds in a tile is answered with the tile and
+"not maximised", and a window that opens maximised -- an application restoring
+the state it had last time, as Steam and Electron applications do -- is let out
+of the maximise when the layout gives it its tile, so it opens tiled and can be
+resized. On the floating desktop the application's maximise is carried out.
+`super+shift+m` and the frame's button still lift a tiled window out of its
+tile. A tile placed is kept as the tile the window goes
 back into; a placement with `tile = false` changes nothing, so a floated
 window goes back to where it floated. The one placement that moves such a
 window is a move by key onto another monitor: see
@@ -1062,7 +1070,10 @@ size it had, until the key puts it back. It stays floated through a reload.
 `super+shift+m` on a fullscreen window leaves fullscreen for maximised, or,
 for one that was maximised before it went fullscreen, for where it was before
 either. Both keys act on an X11 window under XWayland as on a Wayland one,
-and so does the X11 window's own request: a game asking for
+and an application's own request to be maximised or restored is carried out
+for either kind (#445), as its own maximise button or a double click on a
+titlebar it draws itself sends it; under a layout a tiled window stays in its
+tile (above). So does the X11 window's own fullscreen request: a game asking for
 `_NET_WM_STATE_FULLSCREEN` covers its monitor, and one that opens with no
 frame at exactly its monitor's size and position, as Wine and Proton games
 do, opens fullscreen.

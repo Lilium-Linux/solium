@@ -571,6 +571,37 @@ impl XdgShellHandler for Solium {
         }
     }
 
+    /// A client asking to be maximised, by its own button, a double click on
+    /// a titlebar it draws itself, or restoring the state it had last time:
+    /// `Solium::client_maximize`, as an X11 window's request takes it (#445).
+    /// smithay's default answered with a configure and no maximised state,
+    /// so an Electron window emitted `maximize` and `unmaximize` together and
+    /// stayed as it was. Under a layout a window in its tile stays there
+    /// (#450).
+    /// `real_client::client_maximize`.
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        match self.window_for(surface.wl_surface()) {
+            Some(window) => self.client_maximize(&window, true),
+            None => {
+                if surface.is_initial_configure_sent() {
+                    surface.send_configure();
+                }
+            }
+        }
+    }
+
+    /// And asking to be restored.
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        match self.window_for(surface.wl_surface()) {
+            Some(window) => self.client_maximize(&window, false),
+            None => {
+                if surface.is_initial_configure_sent() {
+                    surface.send_configure();
+                }
+            }
+        }
+    }
+
     /// And asking for it back: `Solium::unfullscreen`.
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for(surface.wl_surface()) {
@@ -912,6 +943,10 @@ impl Solium {
             // coming. For a client drawing its own, none is.
             self.decorations.remove(&mut self.panes, id);
             self.decorations.set_bare(&mut self.panes, id);
+        }
+        // A maximised window fills the work area with the frame it has now.
+        if let Some(window) = window.as_ref() {
+            self.refit_maximised(window);
         }
         if let Some(outer) = arriving
             && let Some(window) = window.as_ref()
