@@ -274,7 +274,7 @@ reads one that file does not list.
 | `SOLIUM_TRIGGER_AT=<ms>:<combo>,...` | Run what these combinations are bound to, at these moments: `5200:super+space,6200:super+space`. Not a keypress: the binding is looked up by the name written, so it fires while the screen is locked, cannot press Ctrl+Alt+Backspace, and cannot show whether a binding works under another keyboard layout. | yes |
 | `SOLIUM_KEY_AT=<ms>:<key>,...` | Press real keys, by keysym name, through the real input path: `1500:caps_lock,3000:shift+alt_l`. Caps Lock locks, an xkb layout switch switches, and a bound combination runs its binding. See *Keys by name*. | yes |
 | `SOLIUM_TOUCH_AT=<ms>:<kind>:<slot>:<x>,<y>;…` | Replay down/motion/up/cancel samples through real touch routing at scheduled backend times. Coordinates are global logical pixels; use `0,0` placeholders for up/cancel. Invalid streams are rejected. Scripted input does not validate hardware. | yes |
-| `SOLIUM_DRAG_AT=<ms>:<x1>,<y1>><x2>,<y2>;...` | Drag the pointer through the real input path: the real grab, hit-testing and layout scripts. A drag from a point to itself is a click. | yes |
+| `SOLIUM_DRAG_AT=<ms>:[<keys>@]<x1>,<y1>><x2>,<y2>;...` | Drag the pointer through the real input path: the real grab, hit-testing and layout scripts. A drag from a point to itself is a click. Keys before an `@` are held for it: `super@` is the drag modifier's move. | yes |
 | `SOLIUM_CLICK_AT=<ms>:<x>,<y>;...` | Hand a press to the mode holding the pointer, such as overview. It never touches the input path; see *Driving it without a keyboard*. | yes |
 | `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, 1 to 4, side by side in its one window. See *Two monitors, without a second monitor*. | yes |
 | `SOLIUM_OUTPUTS_AT=<ms>:<n>,...` | Change how many nested monitors there are at these moments: hotplug without a cable. | yes |
@@ -928,6 +928,9 @@ game does (#361). Its window is one flat blue, so a capture shows where it is.
     DISPLAY=:1 ./target/debug/x11-probe request
     DISPLAY=:1 ./target/debug/x11-probe mapped
     DISPLAY=:1 ./target/debug/x11-probe focus
+    DISPLAY=:1 ./target/debug/x11-probe popup
+    DISPLAY=:1 ./target/debug/x11-probe grab
+    DISPLAY=:1 ./target/debug/x11-probe cursor /usr/share/icons/Adwaita/cursors/xterm
 
 `request` maps a 640x480 window and asks, through the `_NET_WM_STATE` client
 message, for fullscreen, to leave it, to be maximised and to be restored.
@@ -939,7 +942,18 @@ checks that each, given the keyboard as it opens, also holds the X server's own
 input focus, which is what tells an X11 application it has the keyboard and
 what SDL's relative mouse mode waits for (#399): a Passive one, which the window
 manager focuses, and a Globally Active one, which declines `WM_HINTS.input` and
-focuses itself when sent `WM_TAKE_FOCUS`. Each step waits `X11_PROBE_HOLD` milliseconds,
+focuses itself when sent `WM_TAKE_FOCUS`. `popup` (#441) asks to move its
+window as Steam does and then opens three override-redirect menus, red, 50,60
+inside where it believes its window is, a hold apart: a capture shows each
+menu over the blue window, and a drag of the window between them shows whether
+the X server heard of the move. `grab` (#427) takes the pointer and the
+keyboard as a Proton game does (`XGrabPointer` confined to its window, a blank
+cursor, a warp to its middle every 16 ms, which XWayland makes a locked
+pointer) and prints the X pointer, its window and its focus once a second; it
+lets its grabs go on `FocusOut`, as Wine does. `cursor` (#442) builds its
+cursor from an XCursor file with Render and no name, as Chromium builds
+Steam's, and Solium's log at `debug` (`solium::cursor=debug`) says which shape
+it stood for. Each step waits `X11_PROBE_HOLD` milliseconds,
 1500 by default, and prints the window's rectangle and state; the exit status
 is non-zero if any answer was not the one asked for. The display number is in
 Solium's log, on the line `XWayland is up`. A burst of captures beside it shows

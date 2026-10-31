@@ -915,8 +915,18 @@ fn held(
         .and_then(|window| state.real_geometry(&window))
         .map(|real| real.loc.to_f64());
 
+    // Only the window with the keyboard, and not one `sol.release_pointer`
+    // took it back from (#427): see `state::pointer_hold`. One that holds it
+    // and may no longer is let go of here too, whatever moved the keyboard.
+    let may = state.may_hold_pointer(&surface);
     let holding = with_pointer_constraint(&surface, pointer, |constraint| {
         let constraint = constraint?;
+        if !may {
+            if constraint.is_active() {
+                constraint.deactivate();
+            }
+            return None;
+        }
         // Granted here rather than when it was asked for. A constraint exists
         // from the moment a client requests it; agreeing to it is the
         // compositor's decision, and the honest test is that the pointer is
@@ -1246,6 +1256,11 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     // `state::tests::real_client::follow::a_press_mid_flight_lands_it`.
     if pressed {
         warp::land(state);
+    }
+    // A press on a window the pointer was taken back from is asking for it
+    // to hold the pointer again (#427): `state::pointer_hold`.
+    if pressed && let Some((surface, _)) = state.surface_under(location) {
+        state.pressed_on(&surface);
     }
     let qt = crate::qml::keys::qt_button(button);
     if let Some(bit) = qt {

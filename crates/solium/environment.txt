@@ -225,9 +225,11 @@ SOLIUM_TOUCH_AT=<ms>:<kind>:<slot>:<x>,<y>;...
     Up and cancel still require placeholder coordinates, for example
     `1000:up:0:0,0` or `1000:cancel:0:0,0`; those coordinates are ignored.
 
-SOLIUM_DRAG_AT=<ms>:<x1>,<y1>><x2>,<y2>;...
+SOLIUM_DRAG_AT=<ms>:[<keys>@]<x1>,<y1>><x2>,<y2>;...
     **Nested only.** Drag the pointer from one place to another, through the
-    real input path, the real grab and the real layout scripts.
+    real input path, the real grab and the real layout scripts. Keys named
+    before an `@`, as `SOLIUM_KEY_AT` names them, are held down for the drag:
+    `4000:super@300,200>1200,600` is the drag modifier's move.
 
 SOLIUM_LOADING_AT=<ms>:<program>,...
     **Nested only.** Open a window for an application that will never arrive,

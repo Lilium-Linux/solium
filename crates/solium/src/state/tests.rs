@@ -47039,6 +47039,112 @@ sol.bind("super+y", function() sol.unminimize(last) end)
             );
         }
 
+        /// Two floated windows, `left` at 100,100 and `right` at 600,100,
+        /// the keyboard on `left` and the pointer in its middle, locked there
+        /// by its client (#427). Returns both, and the lock, kept alive.
+        fn a_game_holding_the_pointer(
+            desk: &mut Desk,
+        ) -> (Opened, Opened, zwp_locked_pointer_v1::ZwpLockedPointerV1) {
+            use zwp_pointer_constraints_v1::Lifetime;
+            desk.install("");
+            let left = desk.open();
+            let right = desk.open();
+            let (l, r) = (desk.id(&left), desk.id(&right));
+            desk.apply(vec![
+                floated(l, 100.0, 100.0, 0),
+                floated(r, 600.0, 100.0, 0),
+            ]);
+            desk.rest();
+            desk.state.focus_window(
+                &left.window,
+                SERIAL_COUNTER.next_serial(),
+                FocusSource::Click,
+            );
+            desk.mouse_to((132.0, 132.0).into());
+            let pointer = desk.client.seat_pointer(&desk.qh);
+            let locked = desk
+                .client
+                .pointer_constraints
+                .clone()
+                .expect("zwp_pointer_constraints_v1 bound")
+                .lock_pointer(
+                    &left.surface,
+                    &pointer,
+                    None,
+                    Lifetime::Persistent,
+                    &desk.qh,
+                    (),
+                );
+            desk.pump();
+            desk.nudge((1.0, 0.0));
+            desk.nudge((40.0, 0.0));
+            (left, right, locked)
+        }
+
+        /// **#427: a key that focuses another window lets go of the pointer
+        /// the window it leaves had locked**: only the window with the
+        /// keyboard holds the pointer, so a game cannot keep it once a
+        /// binding has moved the keyboard elsewhere, and it is not granted
+        /// again over the game while the keyboard is on the other window.
+        #[test]
+        fn a_key_focusing_another_window_lets_go_of_the_pointer_a_game_locked() {
+            let mut desk = Desk::new(1);
+            let (left, right, _locked) = a_game_holding_the_pointer(&mut desk);
+            let locked_at = desk.at();
+            assert_eq!(
+                locked_at,
+                (132.0, 132.0).into(),
+                "the premise: the lock holds the pointer still"
+            );
+            desk.state.focus_window(
+                &right.window,
+                SERIAL_COUNTER.next_serial(),
+                FocusSource::Binding,
+            );
+            desk.pump();
+            desk.nudge((10.0, 0.0));
+            desk.nudge((10.0, 0.0));
+            assert_eq!(
+                (desk.focused().as_ref() == Some(&right.window), desk.at()),
+                (true, (152.0, 132.0).into()),
+                "(the keyboard on the other window, the pointer moving over the game)"
+            );
+            let _ = left;
+        }
+
+        /// **#427: `sol.release_pointer` takes the pointer back from the
+        /// window holding it, until that window is pressed on**: the pointer
+        /// moves with the keyboard still on the game, and a click on the game
+        /// gives it the pointer to lock again.
+        #[test]
+        fn release_pointer_lets_go_until_the_window_is_pressed_on() {
+            let mut desk = Desk::new(1);
+            let (left, _right, _locked) = a_game_holding_the_pointer(&mut desk);
+            assert_eq!(desk.at(), (132.0, 132.0).into(), "the premise: locked");
+            desk.state.release_pointer();
+            desk.pump();
+            desk.nudge((10.0, 0.0));
+            desk.nudge((10.0, 0.0));
+            let released = desk.at();
+            assert_eq!(
+                desk.focused().as_ref(),
+                Some(&left.window),
+                "a Wayland window keeps the keyboard; only an X11 one is \
+                 taken off it"
+            );
+            desk.button(true);
+            desk.button(false);
+            desk.nudge((1.0, 0.0));
+            desk.nudge((10.0, 0.0));
+            let pressed = desk.at();
+            assert_eq!(
+                (released, pressed),
+                ((152.0, 132.0).into(), (152.0, 132.0).into()),
+                "(where the pointer went once taken back, and where a press \
+                 on the game left it locked again)"
+            );
+        }
+
         /// **A warp to nothing goes nowhere, and one off every screen is kept
         /// on one**: a window that is not there moves the pointer nowhere,
         /// and a point past the monitor's corner is its last pixel.

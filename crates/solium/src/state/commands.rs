@@ -864,6 +864,7 @@ impl Solium {
                 }
                 Command::Reload => self.request = Some(Request::Reload),
                 Command::TakeShortcutsBack => self.take_shortcuts_back(),
+                Command::ReleasePointer => self.release_pointer(),
                 Command::LockNow => {
                     self.lock_now();
                 }

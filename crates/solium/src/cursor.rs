@@ -816,6 +816,12 @@ impl Pointer {
         true
     }
 
+    /// The cursor theme the pointer is drawn from, if it is drawn from one:
+    /// the first theme `cursor::x11` knows X cursors' pictures by (#442).
+    pub(crate) fn theme_name(&self) -> Option<String> {
+        self.settings.theme.clone()
+    }
+
     /// XWayland is up, as `client`: its cursor surfaces are the ones the X
     /// cursor's name may stand for. See [`x11`].
     pub(crate) fn xwayland(&mut self, client: ClientId) {

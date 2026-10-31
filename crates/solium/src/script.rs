@@ -732,6 +732,9 @@ pub(crate) enum Command {
     Reload,
     /// Take back the compositor's shortcuts from the window holding them.
     TakeShortcutsBack,
+    /// Take the pointer back from the window holding it: `sol.release_pointer`
+    /// (#427). See `state::pointer_hold`.
+    ReleasePointer,
     /// Lock the session, as `lock.*` says: `sol.lock_now`. Only ever locks.
     LockNow,
     /// Pull Solium's own lock scenes this far down over the unlocked
@@ -980,6 +983,8 @@ impl Command {
             // No window holds the shortcuts at the lock, and taking them back
             // gives a window nothing.
             | Self::TakeShortcutsBack
+            // Nor the pointer: nothing holds it at the lock.
+            | Self::ReleasePointer
             // Over a lock, it changes nothing.
             | Self::LockNow
             // Nor does a peek, which is nothing over a lock.
@@ -5469,6 +5474,17 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::TakeShortcutsBack);
+            })
+        })?,
+    )?;
+
+    // The pointer a window holds, taken back until it is pressed on (#427).
+    // See `state::pointer_hold`.
+    sol.set(
+        "release_pointer",
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ReleasePointer);
             })
         })?,
     )?;
