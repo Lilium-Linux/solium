@@ -17115,6 +17115,140 @@ end)"#,
         assert_eq!(outer(&state), tile, "and it stays in the rectangle it had");
     }
 
+    /// **#226: a window still answering a placement keeps the placed size
+    /// across a style change.** Tiling turned off, a configuration glides
+    /// every window back where it floated and changes the frame style in the
+    /// same breath. The client had not drawn its floating size yet, so the
+    /// space still had its tile's size; the restyle read that and asked the
+    /// client for it again, and the window went back to the size of its tile
+    /// a moment after it had left it.
+    #[test]
+    fn a_window_still_answering_a_placement_keeps_the_placed_size_when_its_frame_changes() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (0, 0), false);
+        state.sync_panes();
+        let pane = state.panes.id_of(&window).expect("a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let floated = at(100, 100, 800, 500);
+        let now = state.clock.now();
+        let was = state.pane_outer_of(pane).expect("a mapped pane");
+        state.move_pane(
+            pane,
+            floated,
+            was,
+            AnimationSpec::default(),
+            now,
+            Standing::Free,
+        );
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_ne!(
+            window.geometry().size,
+            floated.size,
+            "the premise: its client has not drawn the placed size yet"
+        );
+
+        // The restyle's own two steps around a frame change. No Qt here to
+        // build a frame, so the room it leaves is the same on both sides, and
+        // what is checked is the size: the newest ask must still be the
+        // placed one, whatever the client last drew.
+        let outers = state.outers_before_restyle();
+        state.keep_outers(outers, now);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let id = wayland_client::Proxy::id(&toplevel);
+        assert_eq!(
+            client
+                .configures
+                .iter()
+                .filter(|(to, ..)| to == &id)
+                .map(|(_, w, h)| (*w, *h))
+                .next_back(),
+            Some((800, 500)),
+            "its client is last asked for the placed size, not the size it is \
+             leaving"
+        );
+    }
+
+    /// **#431: a script reads a window back where it put it.** A layout or
+    /// a configuration that places a window and reads `sol.windows()` before
+    /// the client has answered read the size the client was still drawing:
+    /// toggling tiling and floating quickly, a configuration that remembers
+    /// where each window floated remembered a size it was leaving, and the
+    /// windows drifted a little each time.
+    #[test]
+    fn a_script_reads_a_window_still_answering_a_placement_at_the_placed_size() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (0, 0), false);
+        state.sync_panes();
+        let pane = state.panes.id_of(&window).expect("a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let floated = at(100, 100, 800, 500);
+        let now = state.clock.now();
+        let was = state.pane_outer_of(pane).expect("a mapped pane");
+        state.move_pane(
+            pane,
+            floated,
+            was,
+            AnimationSpec::default(),
+            now,
+            Standing::Free,
+        );
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_ne!(
+            window.geometry().size,
+            inner(floated, state.insets_of(pane)).size,
+            "the premise: its client has not drawn the placed size yet"
+        );
+        let row = state
+            .window_infos()
+            .into_iter()
+            .find(|row| row.id == pane.get())
+            .expect("the window is listed");
+        assert_eq!(
+            (row.rect.x, row.rect.y, row.rect.w, row.rect.h),
+            (100.0, 100.0, 800.0, 500.0),
+            "a script reads the rectangle it placed the window in"
+        );
+    }
+
     /// **Only a live gesture arms a bridge.**
     ///
     /// The keyboard `nudge` reaches `move_pane` through `Scripts::key` and
@@ -41803,6 +41937,70 @@ Item {
                     frame(&mut desk, 16);
                     assert_eq!(client_rect(&desk, opened.pane), client);
                     assert_eq!(desk.state.pane_outer_of(opened.pane), Some(outer));
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
+            /// **#431: a frame that grows while its window is still answering a
+            /// new tile keeps the new tile.** A window tiled a moment ago folds
+            /// or unfolds its bar while its client is still drawing the size it
+            /// had; the frame was kept at that size, so once it stood still the
+            /// client was told it again and the window left its tile.
+            #[test]
+            fn a_frame_grown_while_its_window_answers_a_new_tile_keeps_the_new_tile() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = tiled_by(EASES);
+                    let tile = desk.placed(opened.pane);
+                    let client = client_rect(&desk, opened.pane);
+                    // Drawing a size of its own, smaller than the tile, as a
+                    // window that was floating a moment ago is.
+                    commit_buffer(
+                        &desk.client,
+                        &desk.qh,
+                        &opened.surface,
+                        client.size.w - 120,
+                        client.size.h - 80,
+                    );
+                    desk.pump();
+                    // And placed in a tile of its own again, larger than that,
+                    // as a layout switched on does, its client yet to answer.
+                    let moved =
+                        Rectangle::new(tile.loc, (tile.size.w - 20, tile.size.h - 20).into());
+                    let now = desk.state.clock.now();
+                    desk.state.place(
+                        opened.pane.get(),
+                        crate::state::snapshot::to_rect(moved),
+                        crate::script::AnimationSpec {
+                            duration: Duration::ZERO,
+                            ..crate::script::AnimationSpec::default()
+                        },
+                        now,
+                        crate::state::placement::Standing::Tile,
+                    );
+                    desk.pump();
+                    assert_ne!(
+                        client_rect(&desk, opened.pane).size,
+                        crate::state::inner(moved, desk.state.insets_of(opened.pane)).size,
+                        "the premise: the client has not drawn its tile"
+                    );
+
+                    grow_to(&mut desk, opened.pane, 40);
+                    for _ in 0..30 {
+                        frame(&mut desk, 16);
+                        if desk.state.insets_of(opened.pane).top == 72 {
+                            break;
+                        }
+                    }
+                    frame(&mut desk, 16);
+                    let room = crate::state::inner(moved, desk.state.insets_of(opened.pane));
+                    assert_eq!(
+                        last_configured(&desk.client, &opened.toplevel),
+                        Some((room.size.w, room.size.h)),
+                        "the client is told the room under the grown frame in its new \
+                         tile, not in the one it was leaving"
+                    );
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(moved));
                     let _ = std::fs::remove_dir_all(&style);
                 });
             }

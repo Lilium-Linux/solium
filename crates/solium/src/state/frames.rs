@@ -223,13 +223,17 @@ impl Solium {
 
     /// Make one pane's frame reserve `wanted` more at the top, its window's
     /// top edge where it was. See [`Self::follow_growth`].
-    fn grow_frame(&mut self, id: PaneId, wanted: i32, now: Duration) {
+    pub(super) fn grow_frame(&mut self, id: PaneId, wanted: i32, now: Duration) {
         let Some(pane) = self.panes.get(id) else {
             return;
         };
         // Before the grow moves: where the window's frame is now, and so
-        // where it stays.
-        let outer = self.pane_outer(pane);
+        // where it stays. At the size its client was last asked for while it
+        // has not drawn it and nothing holds it: a window tiled a moment ago
+        // folds its bar while its client is still drawing the size it had
+        // floating, and a frame kept at that size put the window back to it
+        // once the bar had folded (#431).
+        let outer = self.asked_outer(pane);
         let geometry = self.pane_geometry(pane);
         let slot = pane.slot();
         let held = Self::held_in_a_size(pane);
@@ -291,7 +295,7 @@ impl Solium {
     /// A window held in a size whose frame has stopped growing: its client
     /// is configured, once, to what the frame leaves it, and held there
     /// until it answers, or `resize.patience` runs out.
-    fn configure_grown(&mut self, id: PaneId, now: Duration) {
+    pub(super) fn configure_grown(&mut self, id: PaneId, now: Duration) {
         let Some(pane) = self.panes.get(id).filter(|pane| Self::held_in_a_size(pane)) else {
             return;
         };
