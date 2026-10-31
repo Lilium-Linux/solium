@@ -23155,37 +23155,49 @@ mod directions {
             assert_eq!(presented(&outcome.commands, 1), None, "nothing changed for the strip");
         }
 
-        /// **A card dragged out of the strip is where the pointer is, every
-        /// time it moves** -- no spring chasing it, which trailed the
-        /// pointer by tens of milliseconds both ways across.
+        /// **A card dragged out of the strip is drawn where the pointer is,
+        /// once a frame** -- no spring chasing it, which trailed the pointer by
+        /// tens of milliseconds both ways across, and from the strip's tick
+        /// rather than from the scene's pointer events, which arrive unevenly
+        /// between frames. The scene's later `drag` messages draw nothing.
         #[test]
-        fn a_dragged_card_is_drawn_where_the_pointer_is_at_once() {
+        fn a_dragged_card_is_drawn_where_the_pointer_is_once_a_frame() {
             let mut desk = desk();
+            desk.cursor = (100.0, 720.0);
+            let snapshot = desk.snapshot();
+            act(&mut desk, "drag", r#"{"card":1,"x":100,"y":720,"px":100,"py":712}"#, snapshot);
+            let snapshot = desk.snapshot();
+            let again = act(&mut desk, "drag", r#"{"card":1,"x":300,"y":720,"px":100,"py":712}"#, snapshot);
+            assert_eq!(presented(&again.commands, 1), None, "a pointer event draws nothing");
+            let mut last = None;
             for x in [300.0, 450.0, 900.0] {
+                desk.cursor = (x, 720.0);
                 let snapshot = desk.snapshot();
-                let outcome = act(
-                    &mut desk,
-                    "drag",
-                    &format!(r#"{{"card":1,"x":{x},"y":720,"px":100,"py":720}}"#),
-                    snapshot,
-                );
-                let card = presented(&outcome.commands, 1).expect("the dragged card is drawn");
+                let outcome = act(&mut desk, "tick", "{}", snapshot);
+                let card = presented(&outcome.commands, 1).expect("the held card is drawn each frame");
                 assert_eq!((card.2, card.3), (Duration::ZERO, false), "at x {x}: {card:?}");
+                last = card.0;
             }
+            // Past the strip's reach: a window at its own size, hanging from
+            // the middle of its 32-pixel titlebar.
+            let window = last.expect("a rect");
+            assert_eq!((window.w, window.h), (800.0, 600.0));
+            assert!((window.y + 16.0 - 720.0).abs() < 0.5, "held by its titlebar: {window:?}");
         }
 
-        /// **A hovered card picked up stays as it is drawn**: lifted, out
-        /// towards the stage and flat, under the same point of the pointer
-        /// -- not snapped back to its slot's size in the first frame of the
-        /// drag.
+        /// **A hovered card picked up does not move at all**: lifted, out
+        /// towards the stage and flat, held by the point the pointer is on
+        /// as the drag begins -- not snapped back to its slot's size, nor
+        /// hopping by the drag threshold to where the press began.
         #[test]
         fn a_hovered_card_picked_up_does_not_jump() {
             let mut desk = desk();
             let snapshot = desk.snapshot();
             let hovered = act(&mut desk, "hover", r#"{"card":1}"#, snapshot);
             let lifted = presented(&hovered.commands, 1).expect("the hovered card is drawn").0.expect("a rect");
+            desk.cursor = (108.0, 720.0);
             let snapshot = desk.snapshot();
-            let picked = act(&mut desk, "drag", r#"{"card":1,"x":100,"y":720,"px":100,"py":720}"#, snapshot);
+            let picked = act(&mut desk, "drag", r#"{"card":1,"x":108,"y":720,"px":100,"py":720}"#, snapshot);
             let held = presented(&picked.commands, 1).expect("the picked card is drawn").0.expect("a rect");
             for (was, is) in [(lifted.x, held.x), (lifted.y, held.y), (lifted.w, held.w), (lifted.h, held.h)] {
                 assert!((was - is).abs() < 0.5, "lifted {lifted:?}, held {held:?}");

@@ -104,6 +104,7 @@ local function settings()
         part = number(hover.part, 20, -1000),
         threshold = number(drag.threshold, 8),
         reach = number(drag.reach, 320, 1),
+        bar = number(drag.bar, 32),
         motion = {
             stiffness = number(motion.stiffness, 300, 1),
             damping = number(motion.damping, 32, 1),
@@ -688,8 +689,11 @@ end
 -- Where a group is drawn while it is dragged with its front window's point
 -- (`fx`, `fy`, shares of the window) under the pointer at `x`, `y`: the card,
 -- at `t` 1, the windows at their own size and as they stand to one another,
--- at `t` 0, and in between, everything between.
-local function morph(group, by_id, card_rects, x, y, fx, fy, t)
+-- at `t` 0, and in between, everything between. The point held slides with
+-- `t` from where the card was pressed to the middle of the front window's
+-- titlebar (`bar` pixels tall), so a window pulled out hangs from its
+-- titlebar as any window being moved does, and never jumps there.
+local function morph(group, by_id, card_rects, x, y, fx, fy, t, bar)
     local front = by_id[group[1]]
     local card = card_rects[1]
     if not front or not card then
@@ -697,6 +701,8 @@ local function morph(group, by_id, card_rects, x, y, fx, fy, t)
     end
     local scale = (card.w / front.w) * t + (1 - t)
     local fw, fh = front.w * scale, front.h * scale
+    local titled = math.min(0.5, (bar or 0) / 2 / math.max(1, front.h))
+    fy = fy * t + titled * (1 - t)
     local fx0, fy0 = x - fx * fw, y - fy * fh
     local out = {}
     for at, id in ipairs(group) do
@@ -761,49 +767,66 @@ local function dragged_group(monitor, card)
     }
 end
 
--- A card being dragged: `x`, `y` is the pointer and `px`, `py` where the press
--- was, both the strip scene's. The group follows the pointer, held by the
--- point it was picked up at, turning from card into windows as it leaves the
--- strip and back as it returns.
-local function drag(monitor, card, x, y, px, py)
-    local it = dragged_group(monitor, card)
+-- A card being dragged: the group follows the pointer, held by the point it
+-- was picked up at, turning from card into windows as it leaves the strip and
+-- back as it returns.
+--
+-- The card in the hand, drawn where the pointer is now: once a frame, from
+-- the strip's tick, and never from the scene's own pointer events, which
+-- arrive unevenly between frames. Only letting go springs.
+local function draw_held()
+    local held = kept.drag
+    local it = held and dragged_group(held.monitor, held.card)
     if not it then
         return
     end
     local set = it.set
-    local gx, gy = it.area.x + (tonumber(x) or 0), it.area.y + (tonumber(y) or 0)
-    local held = kept.drag
-    if not held or held.key ~= it.key or held.card ~= it.index - 1 then
-        -- Picked up as it is drawn: a hovered card lifted, out towards the
-        -- stage and flat, and held by where on its front window it was
-        -- pressed, as shares of it.
-        local hovered = kept.hover[monitor] == it.index - 1
-        held = {
-            key = it.key, card = it.index - 1, monitor = monitor,
-            lift = hovered and set.lift or 1,
-            shift = hovered and set.shift or 0,
-            tilt = hovered and set.tilt * set.hover_tilt or set.tilt,
-        }
-        local front = lifted(it.rects, held.lift, held.shift)[1]
-        local ax, ay = it.area.x + (tonumber(px) or 0), it.area.y + (tonumber(py) or 0)
-        held.fx = math.max(0, math.min(1, (ax - front.x) / front.w))
-        held.fy = math.max(0, math.min(1, (ay - front.y) / front.h))
-        kept.drag = held
-        kept.hover[monitor] = nil
-        atrium.arrange()
-    end
-    local t = atrium.closeness(it.area, gx)
-    -- In the hand: where the pointer is, every time it moves. Only letting go
-    -- springs.
+    local pointer = sol.cursor()
+    local t = atrium.closeness(it.area, pointer.x)
     sol.animate({ duration = 0 })
     local rects = lifted(it.rects, held.lift, held.shift)
-    for at, each in ipairs(morph(it.group, it.by_id, rects, gx, gy, held.fx, held.fy, t)) do
+    for at, each in ipairs(morph(it.group, it.by_id, rects, pointer.x, pointer.y, held.fx, held.fy, t, set.bar)) do
         present(each.id, {
             x = each.x, y = each.y, w = each.w, h = each.h,
             rotate_y = held.tilt * t, pivot_x = 0, perspective = set.perspective,
             opacity = at == 1 and 1 or (1 - t) + set.behind * t, z = 200 - at * 0.1,
         })
     end
+end
+
+-- A card the scene says is being dragged: picked up the first time, and
+-- drawn from then on by the tick.
+local function drag(monitor, card)
+    local held = kept.drag
+    if held and held.monitor == monitor and held.card == tonumber(card) then
+        return
+    end
+    local it = dragged_group(monitor, card)
+    if not it then
+        return
+    end
+    local set = it.set
+    -- Picked up as it is drawn: a hovered card lifted, out towards the
+    -- stage and flat, and held by the point of its front window the pointer
+    -- is on now, as shares of it -- not where the press began, which the
+    -- pointer has left by the drag threshold, so the card does not hop to
+    -- catch up.
+    local hovered = kept.hover[monitor] == it.index - 1
+    held = {
+        key = it.key, card = it.index - 1, monitor = monitor,
+        lift = hovered and set.lift or 1,
+        shift = hovered and set.shift or 0,
+        tilt = hovered and set.tilt * set.hover_tilt or set.tilt,
+    }
+    local front = lifted(it.rects, held.lift, held.shift)[1]
+    local pointer = sol.cursor()
+    local ax, ay = pointer.x, pointer.y
+    held.fx = math.max(0, math.min(1, (ax - front.x) / front.w))
+    held.fy = math.max(0, math.min(1, (ay - front.y) / front.h))
+    kept.drag = held
+    kept.hover[monitor] = nil
+    atrium.arrange()
+    draw_held()
 end
 
 -- A dragged card let go at `x`, `y`. Over the strip it goes back into its
@@ -824,7 +847,7 @@ local function drop(monitor, card, x, y)
         return
     end
     local rects = lifted(it.rects, held.lift or 1, held.shift or 0)
-    for _, each in ipairs(morph(it.group, it.by_id, rects, gx, gy, held.fx, held.fy, 0)) do
+    for _, each in ipairs(morph(it.group, it.by_id, rects, gx, gy, held.fx, held.fy, 0, it.set.bar)) do
         sol.place(each.id, { x = math.floor(each.x), y = math.floor(each.y),
             w = math.floor(each.w), h = math.floor(each.h), tile = false })
     end
@@ -865,6 +888,10 @@ local function tick()
     if not atrium.running() then
         return
     end
+    if kept.drag then
+        draw_held()
+        return
+    end
     local pointer = sol.cursor()
     if not press then
         press = { id = false }
@@ -875,8 +902,13 @@ local function tick()
         end
         local window = key and index == 1 and row(id)
         if window and window.w > 0 and window.h > 0 then
+            local area = monitors.named(window.monitor)
             press = {
                 id = id, key = key, x = pointer.x, y = pointer.y, wx = window.x, wy = window.y,
+                -- How near the strip it was picked up: it turns from there,
+                -- so one picked up close to the strip does not jump smaller
+                -- at its first move.
+                from = area and atrium.closeness(area, pointer.x) or 0,
                 fx = (pointer.x - window.x) / window.w, fy = (pointer.y - window.y) / window.h,
                 misses = 0,
             }
@@ -908,7 +940,10 @@ local function tick()
         kept.moving = press.id
     end
     local set = settings()
-    local t = atrium.closeness(area, pointer.x)
+    local t = 0
+    if press.from < 1 then
+        t = math.max(0, (atrium.closeness(area, pointer.x) - press.from) / (1 - press.from))
+    end
     if t <= 0 then
         if kept.presented[tostring(press.id)] then
             sol.animate({ duration = 0 })
@@ -1092,7 +1127,7 @@ sol.on("surface", function(surface, action, data)
     elseif action == "pick" then
         pick(monitor, data.card, data.join == true)
     elseif action == "drag" then
-        drag(monitor, data.card, data.x, data.y, data.px, data.py)
+        drag(monitor, data.card)
     elseif action == "drop" then
         drop(monitor, data.card, data.x, data.y)
     elseif action == "hover" then

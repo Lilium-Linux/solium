@@ -48,12 +48,15 @@ Item {
         return 0
     }
 
-    // A window dragged towards the strip turns into a card as it comes, which
-    // the Lua draws; the compositor moves it and says nothing until it is let
-    // go, so while a button is held over this monitor the Lua is asked to look
-    // once a frame, on the compositor's clock, and told when it comes up.
+    // A window dragged towards the strip turns into a card as it comes, and a
+    // card dragged out into its windows, both drawn by the Lua where the
+    // pointer is. The compositor moves a window and says nothing until it is
+    // let go, and this scene's own pointer events arrive unevenly between
+    // frames, so while a button is held over this monitor, or a card is held
+    // anywhere, the Lua is asked to draw once a frame, on the compositor's
+    // clock, and told when the button comes up.
     FrameAnimation {
-        running: Solium.cursor.pressed && Solium.monitor.pointer && !column.pressed
+        running: Solium.cursor.pressed && (Solium.monitor.pointer || column.dragging)
         onTriggered: Solium.send("tick")
     }
     Connections {
