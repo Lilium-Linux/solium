@@ -705,6 +705,9 @@ pub(crate) enum Command {
     Decoration {
         name: Option<String>,
     },
+    /// How long a pass may spend building the frames of a new pane style:
+    /// `config.pane_build` (#226).
+    PaneBuild(Duration),
     /// Hand every pane's layers these values, merged into what they have.
     /// `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
     PaneValues(std::collections::BTreeMap<String, crate::json::Json>),
@@ -960,6 +963,7 @@ impl Command {
                     || action == "notifications.invoke"
             }
             Self::Decoration { .. }
+            | Self::PaneBuild(_)
             | Self::PaneValues(_)
             // What a frame shows, which is nothing over a lock.
             | Self::FrameValues { .. }
@@ -5461,6 +5465,34 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // How long a pass may spend building the frames of a new pane style, in
+    // milliseconds (#226): `config.pane_build`, handed over by `init.lua`.
+    // Nil says nothing; anything but a number of 0 or more is named in the
+    // log and changes nothing. `tests::sol_pane_build_hands_the_budget_over`.
+    sol.set(
+        "pane_build",
+        lua.create_function(|lua, millis: Value| {
+            let budget = match millis {
+                Value::Nil => return Ok(()),
+                Value::Integer(whole) => u64::try_from(whole).ok().map(Duration::from_millis),
+                Value::Number(part) if part.is_finite() && part >= 0.0 => {
+                    Some(Duration::from_secs_f64(part / 1000.0))
+                }
+                _ => None,
+            };
+            let Some(budget) = budget else {
+                tracing::warn!(
+                    ?millis,
+                    "pane_build is a number of milliseconds, 0 or more; keeping what it was"
+                );
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::PaneBuild(budget));
+            })
+        })?,
+    )?;
+
     // Values for every pane's layers, read there as one object, `values`: the
     // configuration's way to hand its own settings to the QML that draws by
     // them, whatever they are. Merged by key.
@@ -8560,6 +8592,41 @@ mod tests {
             }
             other => panic!("expected a present command, got {other:?}"),
         }
+    }
+
+    /// `sol.pane_build` hands `config.pane_build` over as a duration, whole
+    /// or fractional milliseconds, and a value that is no time at all changes
+    /// nothing (#226).
+    #[test]
+    fn sol_pane_build_hands_the_budget_over() {
+        let directory = std::env::temp_dir().join("solium-script-test-pane-build");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+A", function() sol.pane_build(5) end)
+            sol.bind("Super+B", function() sol.pane_build(0.5) end)
+            sol.bind("Super+C", function() sol.pane_build(-1) end)
+            sol.bind("Super+D", function() sol.pane_build("soon") end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let mut budget = |combo: &str| {
+            let outcome = scripts.key(combo, empty_snapshot());
+            assert!(outcome.handled, "{combo} was not handled");
+            match outcome.commands.as_slice() {
+                [Command::PaneBuild(budget)] => Some(*budget),
+                [] => None,
+                other => panic!("expected at most a budget from {combo}, got {other:?}"),
+            }
+        };
+        assert_eq!(budget("super+a"), Some(Duration::from_millis(5)));
+        assert_eq!(budget("super+b"), Some(Duration::from_micros(500)));
+        assert_eq!(budget("super+c"), None, "a time before now is no budget");
+        assert_eq!(budget("super+d"), None, "nor is a word");
     }
 
     /// **`sol.decoration` is still `sol.pane`.**

@@ -616,6 +616,20 @@ pub(crate) struct Decoration {
     /// is being swapped and the answer must not depend on which path this is.
     buffer_size: (i32, i32),
     shown: Shown,
+    /// The style this frame was built from, and the reload it was built in:
+    /// what tells a frame of the style in charge from one a switch has left
+    /// behind (#226). Written by `Decorations`, which is what builds frames.
+    built: Built,
+}
+
+/// What a frame was built from: the style as a script named it (`None` for
+/// the default) and `Decorations`' reload count when it was built. A frame is
+/// current while both match `Decorations`; one that does not is rebuilt, or
+/// swapped for the spare that does (#226).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Built {
+    style: Option<String>,
+    generation: u64,
 }
 
 impl Decoration {
@@ -726,6 +740,7 @@ impl Decoration {
             rules_generation: 0,
             buffer_size: (0, 0),
             shown: Shown::default(),
+            built: Built::default(),
         })
     }
 
@@ -740,22 +755,20 @@ impl Decoration {
     /// this instance is drawing, through `layerIndex`. The alternative — one
     /// scene with the others hidden inside it — cannot be spelled from a
     /// `Layer`: see `PaneStyle.showOneLayer`.
+    #[cfg(test)]
     pub(crate) fn from_style(style: &Style, width: i32, height: i32) -> Result<Self> {
         qml::start()?;
         let mut layers = Vec::with_capacity(style.layers.len());
         for spec in &style.layers {
-            layers.push(
-                LayerScene::build(spec, style, width, height).with_context(|| {
-                    format!(
-                        "building layer {} (`{}`) of {}",
-                        spec.index,
-                        spec.name,
-                        style.dir.display()
-                    )
-                })?,
-            );
+            layers.push(LayerScene::build_named(spec, style, width, height)?);
         }
-        Ok(Self {
+        Ok(Self::of_layers(style, layers))
+    }
+
+    /// A frame of `style` from its layers, built: the end of
+    /// `from_style`, and of a frame built a layer a pass (#226).
+    fn of_layers(style: &Style, layers: Vec<LayerScene>) -> Self {
+        Self {
             layers,
             // From the style and not from a scene. `insets` is declared on
             // `PaneStyle` once for the whole bundle, which is the ruling this
@@ -772,7 +785,15 @@ impl Decoration {
             rules_generation: style.rules_generation,
             buffer_size: (0, 0),
             shown: Shown::default(),
-        })
+            built: Built::default(),
+        }
+    }
+
+    /// The style this frame was built from, as a script named it: `None` for
+    /// the default. What a rule's `style` matches, so a rule follows the frame
+    /// that is drawn while a switch is still building the next (#226).
+    pub(crate) fn built_style(&self) -> Option<&str> {
+        self.built.style.as_deref()
     }
 
     /// The client's size, inside whatever this frame reserves.
@@ -1550,6 +1571,18 @@ fn whole(radius: f64) -> i32 {
 }
 
 impl LayerScene {
+    /// [`Self::build`], with the layer and the style named in its error.
+    fn build_named(spec: &LayerSpec, style: &Style, width: i32, height: i32) -> Result<Self> {
+        Self::build(spec, style, width, height).with_context(|| {
+            format!(
+                "building layer {} (`{}`) of {}",
+                spec.index,
+                spec.name,
+                style.dir.display()
+            )
+        })
+    }
+
     /// One declared layer, brought up as a scene of its own.
     fn build(spec: &LayerSpec, style: &Style, width: i32, height: i32) -> Result<Self> {
         // The insets are the style's and are known before anything is built,
@@ -2042,6 +2075,125 @@ pub(crate) struct Decorations {
     /// The frame a press was given to, which is given its release wherever
     /// the pointer is let go, as a shell's scene is (#417).
     pub(crate) pressed: Option<PaneId>,
+    /// Each style folder's `Pane.qml` as read, by folder. Reading one builds
+    /// a scene of its own, and what it declares is the same for every window
+    /// of the style, so it is read once per style rather than once per window
+    /// (#226); a reload reads them afresh.
+    loaded: std::collections::HashMap<PathBuf, Style>,
+    /// How many reloads the frames have been built through: a frame built
+    /// before the last one is of files that may have changed since.
+    generation: u64,
+    /// The frames being built for the style in charge, a layer a pass (#226).
+    building: Vec<Building>,
+    /// How long a pass may spend building them, `config.pane_build`; the
+    /// default until the configuration says.
+    budget: Option<std::time::Duration>,
+}
+
+/// How long a pass spends building frames for a new style when the
+/// configuration says nothing: `config.lua`'s own default for `pane_build`.
+const BUILD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// What a change of style did, for the caller holding the windows (#226).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Restyle {
+    /// Nothing: the style was the one in charge already.
+    Unchanged,
+    /// Every frame is of the new style now, so the clients are resized to
+    /// the room it leaves.
+    Swapped,
+    /// New frames are being built: [`Decorations::build_some`] each pass,
+    /// and [`Decorations::swap`] once it says they are ready.
+    Building,
+}
+
+#[cfg(test)]
+impl Restyle {
+    /// Whether anything is, or is going to be, different.
+    pub(crate) fn changed(self) -> bool {
+        self != Self::Unchanged
+    }
+}
+
+/// A frame on its way for one pane (#226).
+#[derive(Debug)]
+struct Building {
+    pane: PaneId,
+    work: Work,
+}
+
+/// What is left of building one frame.
+#[derive(Debug)]
+enum Work {
+    /// A style folder's layers, built one at a time.
+    Layers {
+        style: Style,
+        dir: PathBuf,
+        size: (i32, i32),
+        layers: Vec<LayerScene>,
+    },
+    /// A single-file decoration: one scene, built in one go.
+    File { path: PathBuf, size: (i32, i32) },
+    /// Built, or refused.
+    Done(Result<Decoration>),
+}
+
+impl Work {
+    const fn finished(&self) -> bool {
+        matches!(self, Self::Done(_))
+    }
+
+    /// Build the next scene, or the whole frame for a single file.
+    fn advance(&mut self) {
+        let work = std::mem::replace(self, Self::Done(Err(anyhow!("a frame mid-build"))));
+        *self = match work {
+            Self::Layers {
+                style,
+                dir,
+                size,
+                mut layers,
+            } => match style.layers.get(layers.len()) {
+                Some(spec) => match LayerScene::build_named(spec, &style, size.0, size.1) {
+                    Ok(layer) => {
+                        layers.push(layer);
+                        if layers.len() < style.layers.len() {
+                            Self::Layers {
+                                style,
+                                dir,
+                                size,
+                                layers,
+                            }
+                        } else {
+                            let decoration = Decoration::of_layers(&style, layers);
+                            say_what_was_built(&dir, &decoration);
+                            Self::Done(Ok(decoration))
+                        }
+                    }
+                    Err(err) => Self::Done(Err(err)),
+                },
+                None => Self::Done(Err(anyhow!("{} declares no layers", dir.display()))),
+            },
+            Self::File { path, size } => Self::Done(Decoration::new(&path, size.0, size.1)),
+            done @ Self::Done(_) => done,
+        };
+    }
+
+    /// All of it, now: a frame for a window that has none, or a reload.
+    fn run(mut self) -> Result<Decoration> {
+        while !self.finished() {
+            self.advance();
+        }
+        match self {
+            Self::Done(done) => done,
+            Self::Layers { .. } | Self::File { .. } => Err(anyhow!("a frame left unbuilt")),
+        }
+    }
+}
+
+impl Building {
+    const fn finished(&self) -> bool {
+        self.work.finished()
+    }
 }
 
 /// Values the configuration hands every layer of every pane, as one object,
@@ -2158,11 +2310,26 @@ impl Decorations {
     ///
     /// The exception is `none`, which is asking for exactly that: every frame
     /// is dropped and its pane left bare, reserving no room.
-    pub(crate) fn set_style(&mut self, panes: &mut Panes, style: Option<String>) -> bool {
+    ///
+    /// **Not all in this call** (#226). Building every window's frame at once
+    /// held the screen still for 0.4 s on a laptop and a layout's glide fell
+    /// inside it, so what has to be built is built a layer a pass, by
+    /// [`Self::build_some`], while the frames there are go on being drawn,
+    /// and every pane takes its new frame in the pass the last one is ready,
+    /// [`Self::swap`]. A pane whose spare is of this style needs nothing
+    /// built, and a switch where every pane has one swaps here.
+    pub(crate) fn set_style(&mut self, panes: &mut Panes, style: Option<String>) -> Restyle {
         if self.style == style {
-            return false;
+            return Restyle::Unchanged;
         }
         self.style = style;
+        self.restyle(panes)
+    }
+
+    /// Put every frame in the style now in charge: unframed for `none`,
+    /// otherwise what [`Self::begin`] says.
+    fn restyle(&mut self, panes: &mut Panes) -> Restyle {
+        self.building.clear();
         if bare(self.style.as_deref()) {
             // Every frame goes, and the clients are resized to the room they
             // now have -- which the caller does, because it is the one holding
@@ -2197,8 +2364,16 @@ impl Decorations {
                     pane.set_frame(Frame::None);
                 }
             }
-            return true;
+            return Restyle::Swapped;
         }
+        self.begin(panes)
+    }
+
+    /// Start building a frame of the style in charge for every pane whose
+    /// frame is not one, unless its spare is; swap at once if nothing has to
+    /// be built. What [`Self::set_style`] and [`Self::reload`] share.
+    fn begin(&mut self, panes: &mut Panes) -> Restyle {
+        let target = self.target();
         // Measured first and rebuilt after, because each new frame is sized
         // from the one it replaces. Collected for the same reason the
         // `frames.iter()` this replaces was: the walk cannot be holding the
@@ -2209,36 +2384,27 @@ impl Decorations {
         // its own layers say otherwise, and a frame that grows no more gives
         // the room back the way any shrink does, rather than by its window's
         // top edge jumping.
-        let existing: Vec<(PaneId, (i32, i32), i32)> = panes
-            .iter()
-            .filter_map(|pane| {
-                let decoration = pane.decoration()?;
-                Some((pane.id(), decoration.client_size(), decoration.grow()))
-            })
-            .collect();
-        for (id, (width, height), grow) in existing {
-            match build(self.style.as_deref(), width, height) {
-                Ok(mut fresh) => {
-                    fresh.set_grow(grow);
-                    if let Some(pane) = panes.get_mut(id) {
-                        pane.set_frame(Frame::Styled(Box::new(fresh)));
-                    }
-                }
-                Err(err) => {
-                    // Bare, as the log line says, and not `Pending`: nothing
-                    // rebuilds it on its own -- this walk, and so the next
-                    // `set_style` and the next reload, visits only `Styled`
-                    // panes -- so `Pending` here reserved a titlebar above the
-                    // window with nothing ever drawn in it (#90). Pinned by
-                    // `a_frame_that_will_not_rebuild_reserves_nothing`.
-                    tracing::error!(?err, "could not load the new decoration, leaving it bare");
-                    if let Some(pane) = panes.get_mut(id) {
-                        pane.set_frame(Frame::None);
-                    }
-                }
+        let mut to_build = Vec::new();
+        for pane in panes.iter() {
+            let Some(decoration) = pane.decoration() else {
+                continue;
+            };
+            if decoration.built == target {
+                continue;
+            }
+            if pane.spare().is_none_or(|spare| spare.built != target) {
+                to_build.push((pane.id(), decoration.client_size()));
             }
         }
-        true
+        for (pane, (width, height)) in to_build {
+            let work = self.plan(width, height);
+            self.building.push(Building { pane, work });
+        }
+        if self.building.iter().all(Building::finished) {
+            self.swap(panes);
+            return Restyle::Swapped;
+        }
+        Restyle::Building
     }
 
     /// Build this pane's frame, unless it has one or the style says not to.
@@ -2263,7 +2429,7 @@ impl Decorations {
         // written here first, where `self.bare.remove(&id)` had stood, and the
         // failure arm wrote nothing, so that `Pending` was where a pane whose
         // frame would not build was left.
-        match build(self.style.as_deref(), width, height) {
+        match self.build(width, height) {
             Ok(decoration) => pane.set_frame(Frame::Styled(Box::new(decoration))),
             Err(err) => {
                 // An undecorated window is worse than a decorated one and much
@@ -2294,6 +2460,8 @@ impl Decorations {
     pub(crate) fn set_bare(&mut self, panes: &mut Panes, id: PaneId) {
         if let Some(pane) = panes.get_mut(id) {
             pane.set_frame(Frame::None);
+            // Nor a frame to swap back to: it would only take up memory.
+            pane.set_spare(None);
         }
     }
 
@@ -2323,6 +2491,7 @@ impl Decorations {
             && matches!(pane.frame(), Frame::Styled(_))
         {
             pane.set_frame(Frame::Pending);
+            pane.set_spare(None);
             tracing::debug!("dropped a window frame");
         }
     }
@@ -2344,65 +2513,216 @@ impl Decorations {
 ///
 /// The two are the same thing at different sizes, which is why there is one
 /// entry point and not two: a decoration is a style with one `frame` layer.
-fn build(style: Option<&str>, width: i32, height: i32) -> Result<Decoration> {
-    // Nothing named at all — no script has run, or one set the style back to
-    // nothing — draws the default rather than failing. It is named here rather
-    // than left to `qml_path`, which used to answer this with
-    // `shipped_decoration("top")`: that file is a folder now, so the default has
-    // to be a *name* looked up where bundles are, or a session whose scripts did
-    // not load would put a missing-file error against every window it opened,
-    // naming a path that no longer exists.
-    let style = Some(style.unwrap_or(DEFAULT_STYLE));
-    let Some(dir) = bundle(style) else {
-        // Not a bundle, so a single QML file -- and if it is not one of those
-        // either, say so **here**, naming the name that was typed and every
-        // place both halves of the lookup went.
-        //
-        // `qml_path` used to answer this by fabricating
-        // `<shipped>/decorations/<name>.qml` and letting Qt fail on it, which
-        // now names a file in a directory that is not in the tree and
-        // says nothing about `panes/`. `style::resolve` answers the same
-        // question the other way -- "a name in no place at all is `None`, which
-        // names the name that was typed" -- and two answers to one question is
-        // what the rest of this commit is organised against. This is the
-        // `resolve` answer, because it is the one that can name the *name*: a
-        // fabricated path names a guess, and the guess was wrong in both
-        // directories at once.
-        let Some(path) = qml_path(style) else {
-            let name = chosen(style).unwrap_or_default();
-            return Err(anyhow!(
-                "no pane style called `{name}`. A style is a folder with a Pane.qml in it; \
-                 this looked for one in [{}], and for a single-file decoration `{name}.qml` \
-                 in [{}]",
-                display_all(&crate::style::directories()),
-                display_all(&decoration_directories()),
-            ));
+impl Decorations {
+    /// What a frame of the style in charge is built from.
+    fn target(&self) -> Built {
+        Built {
+            style: self.style.clone(),
+            generation: self.generation,
+        }
+    }
+
+    /// How a frame of the style in charge is built, at a client of `width`
+    /// by `height`: a folder's layers, a single file, or why neither.
+    ///
+    /// Nothing named at all -- no script has run, or one set the style back
+    /// to nothing -- draws the default rather than failing. It is named here
+    /// rather than left to `qml_path`, which used to answer this with
+    /// `shipped_decoration("top")`: that file is a folder now, so the default
+    /// has to be a *name* looked up where bundles are.
+    fn plan(&mut self, width: i32, height: i32) -> Work {
+        let style = Some(self.style.as_deref().unwrap_or(DEFAULT_STYLE));
+        let Some(dir) = bundle(style) else {
+            // Not a bundle, so a single QML file -- and if it is not one of
+            // those either, say so here, naming the name that was typed and
+            // every place both halves of the lookup went.
+            let Some(path) = qml_path(style) else {
+                let name = chosen(style).unwrap_or_default();
+                return Work::Done(Err(anyhow!(
+                    "no pane style called `{name}`. A style is a folder with a Pane.qml in it; \
+                     this looked for one in [{}], and for a single-file decoration `{name}.qml` \
+                     in [{}]",
+                    display_all(&crate::style::directories()),
+                    display_all(&decoration_directories()),
+                )));
+            };
+            return Work::File {
+                path,
+                size: (width, height),
+            };
         };
-        return Decoration::new(&path, width, height);
-    };
-    // Through `style::load`, which is the only door: it is what checks
-    // `requires` against this process's scene graph, and a second way to
-    // produce a `Style` would be a style drawn on a path that has already said
-    // it cannot draw it. See `style::requirements`.
-    let declared = crate::style::load(&dir)
-        .with_context(|| format!("loading the style bundle {}", dir.display()))?;
-    let decoration = Decoration::from_style(&declared, width, height)?;
-    say_what_was_built(&dir, &decoration);
-    Ok(decoration)
+        let declared = match self.loaded(&dir) {
+            Ok(declared) => declared,
+            Err(err) => return Work::Done(Err(err)),
+        };
+        if let Err(err) = qml::start() {
+            return Work::Done(Err(err));
+        }
+        Work::Layers {
+            layers: Vec::with_capacity(declared.layers.len()),
+            style: declared,
+            dir,
+            size: (width, height),
+        }
+    }
+
+    /// The style folder `dir` as declared, read once until the next reload.
+    fn loaded(&mut self, dir: &Path) -> Result<Style> {
+        if let Some(declared) = self.loaded.get(dir) {
+            return Ok(declared.clone());
+        }
+        let declared = crate::style::load(dir)
+            .with_context(|| format!("loading the style bundle {}", dir.display()))?;
+        self.loaded.insert(dir.to_path_buf(), declared.clone());
+        Ok(declared)
+    }
+
+    /// A frame of the style in charge, built now.
+    fn build(&mut self, width: i32, height: i32) -> Result<Decoration> {
+        let mut decoration = self.plan(width, height).run()?;
+        decoration.built = self.target();
+        Ok(decoration)
+    }
+
+    /// Whether frames for a new style are on their way.
+    pub(crate) fn building(&self) -> bool {
+        !self.building.is_empty()
+    }
+
+    /// How long a pass may spend building them: `config.pane_build`.
+    pub(crate) fn set_budget(&mut self, budget: std::time::Duration) {
+        self.budget = Some(budget);
+    }
+
+    /// How long this pass may spend building frames for a new style.
+    pub(crate) fn budget(&self) -> std::time::Duration {
+        self.budget.unwrap_or(BUILD_BUDGET)
+    }
+
+    /// Build scenes of the frames on their way until `budget` is spent, and
+    /// at least one, so a switch always finishes; whether they are all ready.
+    ///
+    /// A scene at a time is as fine as it divides: one is a Qt scene graph,
+    /// its own render setup and its QML, and none of that can be stopped
+    /// half way. So a pass that builds goes over by up to one scene, which on
+    /// the hardware measured is a few milliseconds, rather than the whole
+    /// switch at once (#226).
+    pub(crate) fn build_some(&mut self, budget: std::time::Duration) -> bool {
+        let started = std::time::Instant::now();
+        while let Some(next) = self.building.iter_mut().find(|each| !each.finished()) {
+            next.work.advance();
+            if started.elapsed() >= budget {
+                break;
+            }
+        }
+        self.building.iter().all(Building::finished)
+    }
+
+    /// Every pane takes the frame of the style in charge: the one built for
+    /// it, or its spare, and the one it had becomes its spare (#226). In one
+    /// pass for every pane, so the desktop changes style at once rather than
+    /// a window at a time; the caller resizes the clients to the room the new
+    /// frames leave.
+    ///
+    /// **The grow comes across** (#423): the client sits where the old
+    /// frame's grow put it, so the new frame reserves the same until its own
+    /// layers say otherwise, and a frame that grows no more gives the room
+    /// back the way any shrink does, rather than by its window's top edge
+    /// jumping.
+    ///
+    /// **What the old frame was in the middle of ends.** A grab it held, a
+    /// press it was given, the pointer over it: each is that scene's, and a
+    /// spare that kept one would be holding the keyboard or waiting for a
+    /// release from behind the frame that is drawn.
+    pub(crate) fn swap(&mut self, panes: &mut Panes) {
+        let target = self.target();
+        let mut built: std::collections::HashMap<PaneId, Result<Decoration>> = self
+            .building
+            .drain(..)
+            .filter_map(|each| match each.work {
+                Work::Done(done) => Some((each.pane, done)),
+                Work::Layers { .. } | Work::File { .. } => None,
+            })
+            .collect();
+        for pane in panes.iter_mut() {
+            let id = pane.id();
+            let Some(grow) = pane
+                .decoration()
+                .filter(|current| current.built != target)
+                .map(Decoration::grow)
+            else {
+                continue;
+            };
+            let mut incoming = match built.remove(&id) {
+                Some(Ok(mut fresh)) => {
+                    fresh.built = target.clone();
+                    Box::new(fresh)
+                }
+                Some(Err(err)) => {
+                    // Bare, as the log line says, and not `Pending`: nothing
+                    // rebuilds it on its own -- the next switch and the next
+                    // reload visit only `Styled` panes -- so `Pending` here
+                    // reserved a titlebar above the window with nothing ever
+                    // drawn in it (#90). Pinned by
+                    // `a_frame_that_will_not_rebuild_reserves_nothing`.
+                    tracing::error!(?err, "could not load the new decoration, leaving it bare");
+                    pane.set_frame(Frame::None);
+                    pane.set_spare(None);
+                    self.let_go_of(id);
+                    continue;
+                }
+                None => match pane.take_spare() {
+                    Some(spare) if spare.built == target => spare,
+                    other => {
+                        pane.set_spare(other);
+                        continue;
+                    }
+                },
+            };
+            incoming.set_grow(grow);
+            if let Frame::Styled(mut gone) = pane.replace_frame(Frame::Styled(incoming)) {
+                gone.dismiss_grabs();
+                gone.pointer_left();
+                if gone.built.generation == self.generation {
+                    pane.set_spare(Some(gone));
+                }
+            }
+            self.let_go_of(id);
+        }
+    }
+
+    /// Forget that pane `id`'s frame holds a grab or was pressed: that frame
+    /// is not the one drawn any more.
+    fn let_go_of(&mut self, id: PaneId) {
+        if self.holding == Some(id) {
+            self.holding = None;
+        }
+        if self.pressed == Some(id) {
+            self.pressed = None;
+        }
+    }
+
+    /// Every frame built again from its files, for a reload, and now: the
+    /// QML cache has just been cleared so edited files are read, a spare of
+    /// the files before is no use, and a reload is a pause the user asked
+    /// for. One rebuild, where setting the style to nothing and back built
+    /// every frame twice.
+    /// `tests::a_reload_rebuilds_a_frame_rather_than_dropping_it`.
+    pub(crate) fn reload(&mut self, panes: &mut Panes, style: Option<String>) {
+        self.generation += 1;
+        self.loaded.clear();
+        self.building.clear();
+        for pane in panes.iter_mut() {
+            pane.set_spare(None);
+        }
+        self.style = style;
+        if self.restyle(panes) == Restyle::Building {
+            self.build_some(std::time::Duration::MAX);
+            self.swap(panes);
+        }
+    }
 }
 
-/// Say what a bundle built, in the order it will be drawn and how far past the
-/// window it may draw.
-///
-/// At `debug`, once per window, and it earns the line because what this feature
-/// adds is an *order* and a *reach*: "the spikes are behind the window" is
-/// otherwise diagnosed by looking at the screen and guessing which of the depth
-/// string, the declaration order and the element list was wrong.
-///
-/// Built through the same [`crate::render::PANE_ORDER`] the frame is, so it
-/// cannot report an order the compositor does not draw — which is the whole
-/// value of a diagnostic like this and the usual way one stops being worth
-/// reading.
 fn say_what_was_built(dir: &Path, decoration: &Decoration) {
     let mut order: Vec<&str> = Vec::new();
     crate::render::pane_pieces(&mut order, |into, piece| match piece {
@@ -2433,7 +2753,7 @@ pub(crate) fn style_file(style: Option<&str>) -> Option<PathBuf> {
     }
 }
 
-/// The style folder a window's frame is built from, by the lookup [`build`]
+/// The style folder a window's frame is built from, by the lookup `Decorations::build`
 /// takes (the default style when none is named), or `None` for `none`, a
 /// single-file decoration or a name that is nowhere: where
 /// `Solium::apply_style_rules` reads `effects.lua` from.
@@ -2465,7 +2785,7 @@ fn bundle(style: Option<&str>) -> Option<PathBuf> {
 
 /// What a `decoration =` name can turn out to be.
 ///
-/// The variant order is [`build`]'s order, and both the sort below and
+/// The variant order is `Decorations::build`'s order, and both the sort below and
 /// [`catalogue`]'s shadowing rely on it: a bundle is tried first, so a bundle
 /// wins. Pinned by `bundles_come_before_files_and_each_group_is_sorted`,
 /// because a derived `Ord` over a reordered enum is a silent change.
@@ -2510,7 +2830,7 @@ struct Place {
     kind: StyleKind,
 }
 
-/// Everywhere a bare name is looked for, in the order [`build`] looks.
+/// Everywhere a bare name is looked for, in the order `Decorations::build` looks.
 ///
 /// Both halves come from the function that does the looking —
 /// [`crate::style::directories`] and [`decoration_directories`] — rather than
@@ -2531,7 +2851,7 @@ fn places() -> Vec<Place> {
 /// Everything `places` can offer: one entry per name, nearest place winning.
 ///
 /// A name found in an earlier place hides the same name in a later one, which
-/// is [`build`]'s own order said once more — a bundle called `top` shadows
+/// is `Decorations::build`'s own order said once more — a bundle called `top` shadows
 /// the user's `decorations/top.qml`, and the user's `top` shadows the shipped
 /// one. So the
 /// list cannot offer a name whose press lands on something else, which is the
@@ -5070,6 +5390,15 @@ mod tests {
         (panes, id)
     }
 
+    /// A frame of `style` built now, as a window that has none gets one.
+    fn build(style: Option<&str>, width: i32, height: i32) -> Result<Decoration> {
+        let mut decorations = Decorations {
+            style: style.map(ToOwned::to_owned),
+            ..Decorations::default()
+        };
+        decorations.build(width, height)
+    }
+
     /// Whether this session has already decided which decoration to use.
     ///
     /// `SOLIUM_QML_TITLEBAR` replaces the path outright and `SOLIUM_PANE` — or
@@ -5134,7 +5463,11 @@ mod tests {
         }
         let (mut panes, id) = one_pane();
         let mut decorations = Decorations::default();
-        assert!(decorations.set_style(&mut panes, Some("none".to_owned())));
+        assert!(
+            decorations
+                .set_style(&mut panes, Some("none".to_owned()))
+                .changed()
+        );
         decorations.insert(&mut panes, id, 300, 200);
         assert!(matches!(panes.get(id).map(Pane::frame), Some(Frame::None)));
     }
@@ -5160,7 +5493,11 @@ mod tests {
         }
         let (mut panes, id) = one_pane();
         let mut decorations = Decorations::default();
-        assert!(decorations.set_style(&mut panes, Some("no-such-style-ships-here".to_owned())));
+        assert!(
+            decorations
+                .set_style(&mut panes, Some("no-such-style-ships-here".to_owned()))
+                .changed()
+        );
         decorations.insert(&mut panes, id, 300, 200);
         assert!(
             matches!(panes.get(id).map(Pane::frame), Some(Frame::None)),
@@ -5189,7 +5526,11 @@ mod tests {
                  did not come up, not the thing under test"
             );
 
-            assert!(decorations.set_style(&mut panes, Some("no-such-style-ships-here".to_owned())));
+            assert!(
+                decorations
+                    .set_style(&mut panes, Some("no-such-style-ships-here".to_owned()))
+                    .changed()
+            );
 
             assert!(
                 matches!(panes.get(id).map(Pane::frame), Some(Frame::None)),
@@ -5218,7 +5559,11 @@ mod tests {
                  did not come up, not the thing under test"
             );
 
-            assert!(decorations.set_style(&mut panes, Some("none".to_owned())));
+            assert!(
+                decorations
+                    .set_style(&mut panes, Some("none".to_owned()))
+                    .changed()
+            );
 
             assert!(
                 matches!(panes.get(id).map(Pane::frame), Some(Frame::None)),
@@ -5231,14 +5576,21 @@ mod tests {
     #[test]
     fn a_style_that_has_not_changed_rebuilds_nothing() {
         // The early return, which is load-bearing rather than an
-        // optimisation: `reload` calls `set_style(None)` and then
-        // `set_style(style)` precisely to defeat it, and every other caller
+        // optimisation: `reload` goes round it on purpose, and every other caller
         // relies on it to leave live Qt scenes alone.
         let (mut panes, _) = one_pane();
         let mut decorations = Decorations::default();
-        assert!(!decorations.set_style(&mut panes, None));
-        assert!(decorations.set_style(&mut panes, Some("top".to_owned())));
-        assert!(!decorations.set_style(&mut panes, Some("top".to_owned())));
+        assert!(!decorations.set_style(&mut panes, None).changed());
+        assert!(
+            decorations
+                .set_style(&mut panes, Some("top".to_owned()))
+                .changed()
+        );
+        assert!(
+            !decorations
+                .set_style(&mut panes, Some("top".to_owned()))
+                .changed()
+        );
     }
 
     #[test]
@@ -5286,6 +5638,264 @@ mod tests {
         });
     }
 
+    /// Two panes framed in `top`, for the switches below.
+    fn two_framed_in_top(decorations: &mut Decorations) -> (Panes, PaneId, PaneId) {
+        let (mut panes, first) = one_pane();
+        let second = panes.open(Pane::loading(
+            "foot",
+            None,
+            Rectangle::new((0, 0).into(), (300, 200).into()),
+            PathBuf::new(),
+            None,
+            std::time::Duration::ZERO,
+        ));
+        decorations.set_style(&mut panes, Some("top".to_owned()));
+        decorations.insert(&mut panes, first, 300, 200);
+        decorations.insert(&mut panes, second, 300, 200);
+        (panes, first, second)
+    }
+
+    /// The style each pane's drawn frame was built from.
+    fn styles_drawn(panes: &Panes, ids: &[PaneId]) -> Vec<Option<String>> {
+        ids.iter()
+            .map(|id| {
+                panes
+                    .get(*id)
+                    .and_then(Pane::decoration)
+                    .and_then(Decoration::built_style)
+                    .map(ToOwned::to_owned)
+            })
+            .collect()
+    }
+
+    /// **#226: a switch builds the new frames over passes and every window
+    /// takes its new frame at once.** Building every frame in the call that
+    /// switched held the screen still for 0.4 s on a laptop, with a layout's
+    /// glide inside the stall. Now the call builds nothing, the frames drawn
+    /// stay up while a scene a pass is built, and the swap is one step for
+    /// every pane.
+    #[test]
+    fn a_switch_builds_the_new_frames_over_passes_and_swaps_them_at_once() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let mut decorations = Decorations::default();
+            let (mut panes, first, second) = two_framed_in_top(&mut decorations);
+            let both = [first, second];
+            let top = Some("top".to_owned());
+            assert_eq!(styles_drawn(&panes, &both), vec![top.clone(), top.clone()]);
+
+            assert_eq!(
+                decorations.set_style(&mut panes, Some("rounded".to_owned())),
+                Restyle::Building,
+                "nothing is built in the call that switched"
+            );
+            assert_eq!(
+                styles_drawn(&panes, &both),
+                vec![top.clone(), top.clone()],
+                "and the frames there are stay up while the new ones are built"
+            );
+            let mut passes = 0;
+            while !decorations.build_some(std::time::Duration::ZERO) {
+                passes += 1;
+                assert_eq!(
+                    styles_drawn(&panes, &both),
+                    vec![top.clone(), top.clone()],
+                    "no window changes before every new frame is ready"
+                );
+            }
+            assert!(passes > 0, "the premise: building took more than one pass");
+            decorations.swap(&mut panes);
+            let rounded = Some("rounded".to_owned());
+            assert_eq!(
+                styles_drawn(&panes, &both),
+                vec![rounded.clone(), rounded],
+                "and then every window has its new frame, in one step"
+            );
+            assert!(!decorations.building());
+            for id in both {
+                assert_eq!(
+                    panes
+                        .get(id)
+                        .and_then(Pane::spare)
+                        .and_then(Decoration::built_style),
+                    Some("top"),
+                    "the frame each had is kept, to switch back to"
+                );
+            }
+        });
+    }
+
+    /// **#226: switching back swaps the frames kept, building nothing.** The
+    /// switch a configuration that frames tiled and floating windows
+    /// differently makes on every `super+t`.
+    #[test]
+    fn a_switch_back_puts_the_kept_frames_up_at_once() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let mut decorations = Decorations::default();
+            let (mut panes, first, second) = two_framed_in_top(&mut decorations);
+            // Something only this `Decoration` knows, to tell "a frame of
+            // `top`" from "the frame of `top` it had".
+            if let Some(frame) = panes.get_mut(first).and_then(Pane::decoration_mut) {
+                frame.shown.title = "kept".to_owned();
+            }
+            decorations.set_style(&mut panes, Some("rounded".to_owned()));
+            decorations.build_some(std::time::Duration::MAX);
+            decorations.swap(&mut panes);
+
+            assert_eq!(
+                decorations.set_style(&mut panes, Some("top".to_owned())),
+                Restyle::Swapped,
+                "every window has a frame of `top` kept, so nothing is built"
+            );
+            assert!(!decorations.building());
+            let top = Some("top".to_owned());
+            assert_eq!(
+                styles_drawn(&panes, &[first, second]),
+                vec![top.clone(), top]
+            );
+            assert_eq!(
+                panes
+                    .get(first)
+                    .and_then(Pane::decoration)
+                    .map(|frame| frame.shown.title.as_str()),
+                Some("kept"),
+                "and it is the very frame it had"
+            );
+            assert_eq!(
+                panes
+                    .get(first)
+                    .and_then(Pane::spare)
+                    .and_then(Decoration::built_style),
+                Some("rounded"),
+                "with the other kept in turn"
+            );
+        });
+    }
+
+    /// **`config.pane_build` is how much is built a pass.** Nothing still
+    /// builds a scene a pass, so a switch always finishes; all the time there
+    /// is builds everything in one.
+    #[test]
+    fn a_budget_of_nothing_builds_one_scene_a_pass_and_more_builds_more() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let passes = |budget: std::time::Duration| {
+                let mut decorations = Decorations::default();
+                let (mut panes, _, _) = two_framed_in_top(&mut decorations);
+                decorations.set_style(&mut panes, Some("rounded".to_owned()));
+                let scenes: usize = decorations
+                    .building
+                    .iter()
+                    .map(|each| match &each.work {
+                        Work::Layers { style, .. } => style.layers.len(),
+                        Work::File { .. } | Work::Done(_) => 1,
+                    })
+                    .sum();
+                let mut passes = 1;
+                while !decorations.build_some(budget) {
+                    passes += 1;
+                }
+                (passes, scenes)
+            };
+            let (one_a_pass, scenes) = passes(std::time::Duration::ZERO);
+            assert!(
+                scenes >= 2,
+                "the premise: there is more than one scene to build"
+            );
+            assert_eq!(
+                one_a_pass, scenes,
+                "a budget of nothing builds one scene of the two windows' frames a pass"
+            );
+            let (all_at_once, _) = passes(std::time::Duration::MAX);
+            assert_eq!(
+                all_at_once, 1,
+                "and a budget of all the time there is, all of them in one"
+            );
+        });
+    }
+
+    /// **A style's `Pane.qml` is read once, not once a window** (#226): reading
+    /// it builds a scene of its own, for a declaration that is the same for
+    /// every window of the style. A reload reads it again.
+    #[test]
+    fn a_style_is_read_once_for_every_window_and_again_on_a_reload() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let mut decorations = Decorations::default();
+            let (mut panes, _, _) = two_framed_in_top(&mut decorations);
+            assert_eq!(decorations.loaded.len(), 1, "two windows, one read");
+            decorations.set_style(&mut panes, Some("rounded".to_owned()));
+            assert_eq!(decorations.loaded.len(), 2);
+            decorations.reload(&mut panes, Some("rounded".to_owned()));
+            assert_eq!(
+                decorations.loaded.len(),
+                1,
+                "a reload forgets what it read, and reads what it builds again"
+            );
+        });
+    }
+
+    /// **A reload keeps no frame from before it** (#226): it rebuilds every
+    /// frame from files that may have changed, so a frame kept from before
+    /// is of the old files, and switching back to it would undo the edit.
+    #[test]
+    fn a_reload_forgets_the_frames_kept_to_switch_back_to() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let mut decorations = Decorations::default();
+            let (mut panes, first, second) = two_framed_in_top(&mut decorations);
+            decorations.set_style(&mut panes, Some("rounded".to_owned()));
+            decorations.build_some(std::time::Duration::MAX);
+            decorations.swap(&mut panes);
+            assert!(
+                panes.get(first).and_then(Pane::spare).is_some(),
+                "the premise"
+            );
+
+            decorations.reload(&mut panes, Some("rounded".to_owned()));
+            for id in [first, second] {
+                assert!(panes.get(id).and_then(Pane::spare).is_none());
+            }
+            assert_eq!(
+                decorations.set_style(&mut panes, Some("top".to_owned())),
+                Restyle::Building,
+                "so a switch back builds"
+            );
+        });
+    }
+
+    /// **A frame put away lets go of what it held** (#226): a grab or a
+    /// press is that scene's, and a frame kept behind the one drawn that
+    /// still held the grab would take the keys from behind it.
+    #[test]
+    fn a_frame_put_away_lets_go_of_its_grab_and_its_press() {
+        if the_environment_has_already_chosen() {
+            return;
+        }
+        on_the_qt_thread(|| {
+            let mut decorations = Decorations::default();
+            let (mut panes, first, second) = two_framed_in_top(&mut decorations);
+            decorations.holding = Some(first);
+            decorations.pressed = Some(second);
+            decorations.set_style(&mut panes, Some("rounded".to_owned()));
+            decorations.build_some(std::time::Duration::MAX);
+            decorations.swap(&mut panes);
+            assert_eq!(decorations.holding, None);
+            assert_eq!(decorations.pressed, None);
+        });
+    }
+
     #[test]
     fn a_reload_rebuilds_a_frame_rather_than_dropping_it() {
         // What `Solium::reload` does to every window that is open while it runs
@@ -5327,7 +5937,11 @@ mod tests {
             ));
 
             let mut decorations = Decorations::default();
-            assert!(decorations.set_style(&mut panes, Some("top".to_owned())));
+            assert!(
+                decorations
+                    .set_style(&mut panes, Some("top".to_owned()))
+                    .changed()
+            );
             decorations.insert(&mut panes, framed, 300, 200);
             // A client drawing its own decorations, or an override-redirect menu.
             decorations.set_bare(&mut panes, bare_pane);
@@ -5374,20 +5988,7 @@ mod tests {
             crate::qml::clear_cache();
             let style = decorations.style().map(ToOwned::to_owned);
 
-            assert!(
-                decorations.set_style(&mut panes, None),
-                "the first of the two"
-            );
-            assert!(
-                panes.get(framed).and_then(Pane::decoration).is_some(),
-                "and the first of the two must not be the call that drops it. \
-                 `None` names the *default* decoration, not the absence of one, so \
-                 this half is a rebuild as well -- if it cleared instead, the call \
-                 below would walk the panes and find nothing left to rebuild, and \
-                 every open window would be bare until it was reopened"
-            );
-
-            assert!(decorations.set_style(&mut panes, style), "and the second");
+            decorations.reload(&mut panes, style);
 
             assert!(
                 panes.get(framed).and_then(Pane::decoration).is_some(),
@@ -5471,7 +6072,7 @@ mod tests {
         .expect("writing a decoration");
     }
 
-    /// The two places a shelf holds, in the order [`build`] tries them.
+    /// The two places a shelf holds, in the order `build` tries them.
     fn places_on(shelf: &Path) -> Vec<Place> {
         vec![
             Place {

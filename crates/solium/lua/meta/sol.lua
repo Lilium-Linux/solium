@@ -1173,9 +1173,22 @@ function sol.take_shortcuts_back() end
 ---A style folder's `effects.lua`, if it has one, is read here, every time, and
 ---its effect rules bound for the windows it frames; what is wrong with it is
 ---listed by `sol.problems()` under `style:<folder>`.
+---
+---Already open windows keep the frame they have until the new one is built:
+---a few of its scenes a frame, within `sol.pane_build`, and then every window
+---changes at once. A window's frame from the style before is kept, so a switch
+---back to it changes at once with nothing built.
 ---@param name? string
 ---@return nil
 function sol.pane(name) end
+
+---How long a frame may spend building the windows' frames when the pane style
+---changes, in milliseconds: `config.pane_build`. At least one scene is built a
+---frame, however small this is, so a switch always finishes; more time is a
+---shorter switch at the cost of the frames it is built in.
+---@param milliseconds number
+---@return nil
+function sol.pane_build(milliseconds) end
 
 ---The old name for `sol.pane`, from when a style was a single QML file. The
 ---same function.

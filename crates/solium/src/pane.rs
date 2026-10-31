@@ -462,6 +462,10 @@ pub(crate) struct Pane {
     /// layers' `windowValues`: `sol.frame(id, { ... })` (#417). Kept across a
     /// change of style, and gone with the window.
     frame_values: crate::decoration::Values,
+    /// The frame this pane had in the style before this one, kept so a switch
+    /// back is a swap rather than a build (#226). Only `Decorations` writes
+    /// it, and it leaves with the pane as `frame` does.
+    spare: Option<Box<crate::decoration::Decoration>>,
     /// When this pane's close request goes out, once it has finished leaving.
     ///
     /// A *deadline*, not a start: `Solium::close_pane` animates the window
@@ -669,6 +673,7 @@ impl Pane {
             },
             frame: Frame::Pending,
             frame_values: crate::decoration::Values::default(),
+            spare: None,
             closing_at: None,
             asked_at: None,
             answered: false,
@@ -710,6 +715,7 @@ impl Pane {
             },
             frame: Frame::Pending,
             frame_values: crate::decoration::Values::default(),
+            spare: None,
             closing_at: None,
             asked_at: None,
             answered: false,
@@ -1089,6 +1095,28 @@ impl Pane {
     /// held, which is what makes "the frame leaves with its pane" true.
     pub(crate) fn set_frame(&mut self, frame: Frame) {
         self.frame = frame;
+    }
+
+    /// The frame kept from the style before this one, if any. See the field.
+    pub(crate) fn spare(&self) -> Option<&crate::decoration::Decoration> {
+        self.spare.as_deref()
+    }
+
+    /// Keep `spare` as the frame to swap back to, or forget the one kept.
+    /// Written by `Decorations` alone, as `set_frame` is.
+    pub(crate) fn set_spare(&mut self, spare: Option<Box<crate::decoration::Decoration>>) {
+        self.spare = spare;
+    }
+
+    /// Take the kept frame, to put it up. See the field.
+    pub(crate) const fn take_spare(&mut self) -> Option<Box<crate::decoration::Decoration>> {
+        self.spare.take()
+    }
+
+    /// Say what is drawn around this pane's client, and hand back what was:
+    /// [`Self::set_frame`] for a caller that keeps the frame it replaces.
+    pub(crate) fn replace_frame(&mut self, frame: Frame) -> Frame {
+        std::mem::replace(&mut self.frame, frame)
     }
 
     /// When this pane's close request goes out. See the field.
