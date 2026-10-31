@@ -2280,6 +2280,17 @@ with nothing in between, so a fullscreen game or video can be shown directly.
 An instant change is just that: nothing is moved, and the window is drawn as it
 is on the next frame. An app id is what `sol.windows()` calls `app_id`.
 
+A maximised window does not move when you drag it until the pointer has gone
+`maximize.restore_after` pixels, 6 by default; then it comes off at its old
+size under the pointer and follows it. Raise it if a click on a titlebar
+restores windows you meant to leave, or set 0 to have it come off at once:
+
+```lua
+return {
+    maximize = { restore_after = 12 },
+}
+```
+
 While any window changes size — an edge or a seam you drag, a layout gliding
 it to a new tile, a fullscreen or maximise glide — its application is a frame
 or more behind the rectangle on screen. `resize.fill` decides what its picture

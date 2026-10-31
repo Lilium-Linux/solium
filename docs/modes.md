@@ -1088,6 +1088,17 @@ had on the old one. A window floated with `super+shift+space` and then made
 fullscreen stays fullscreen through every layout pass, and leaving goes back to
 where it floated.
 
+Dragged, a maximised window does not move (#452). Taken by its titlebar, by
+the drag modifier or by a finger, it stays where it is until the pointer has
+gone `maximize.restore_after` pixels (6 as shipped), so a click or a double
+click on the titlebar is still one. Past that it is restored as `super+shift+m`
+restores it, with the same glide, but under the pointer: held as far along its
+titlebar as it was taken along the maximised one, and never lower than its
+titlebar. The drag goes on moving it from there. A window maximised out of a
+layout's tile comes off at its tile's size, back in its tile, and is dragged as
+any tiled window is: let go, the layout puts it in the tile it was let go over.
+A fullscreen window is moved as it always was.
+
 ### Going fullscreen or maximised, and back
 
 The compositor makes the change and the scripts choose how it looks. On the

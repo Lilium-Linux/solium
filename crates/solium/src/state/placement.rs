@@ -121,6 +121,17 @@ pub(super) fn outer_of(rect: Rect) -> Rectangle<i32, Logical> {
     )
 }
 
+/// Where a drag holds a maximised window it is pulling off (#452): the
+/// pointer, `at`, and the point the drag was taken by on the maximised
+/// window's frame, as a share of its width (`along`) and in pixels below its
+/// top edge (`down`). See `Solium::restore_under`.
+#[derive(Clone, Copy, Debug)]
+struct Grip {
+    at: Point<f64, Logical>,
+    along: f64,
+    down: f64,
+}
+
 impl Solium {
     /// Put a window in the stack, and keep whatever is waiting on it above it.
     ///
@@ -1259,6 +1270,86 @@ impl Solium {
     /// asked for is marked so on the pane, and a layout's tile takes the
     /// window out of it (`Pane::maximized_by_client`, #450).
     pub(super) fn maximize_toggled(&mut self, window: &Window, asker: window_state::Asker) {
+        self.maximize_changed(window, asker, None);
+    }
+
+    /// A maximised window a drag has pulled `maximize.restore_after` from
+    /// where it was taken (#452): restored as the user's maximise restores
+    /// it, with the same glide, and put so the point it was taken by, `from`,
+    /// is under the pointer at `at`. `crate::input::grab::settle` makes it,
+    /// outside the pointer's grab, and the drag moves it on from there.
+    ///
+    /// **Across its frame as it was across the maximised one**: taken a third
+    /// of the way along the titlebar, it is a third of the way along it
+    /// restored. And as far down, but never below its titlebar, so a drag
+    /// taken low on the window by the modifier still holds it by the
+    /// titlebar; a window with no frame of the compositor's is held as far
+    /// down as it is tall.
+    ///
+    /// **Out of a tile, into its tile again**, as the key restores it, and
+    /// then dragged the way any tiled window is: it follows the pointer at
+    /// its tile's size, and let go, the layout puts it in the tile it was let
+    /// go over (`tiling.lua`'s `drop`). It is not floated: no drag out of a
+    /// tile floats a window.
+    ///
+    /// Not a window that is no longer maximised, or has gone fullscreen
+    /// since: the drag moves that on from where it is.
+    /// `real_client::client_maximize::a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer`,
+    /// `real_client::client_maximize::a_window_maximised_out_of_its_tile_comes_off_at_its_tiles_size`.
+    pub(crate) fn restore_under(
+        &mut self,
+        window: &Window,
+        from: Point<f64, Logical>,
+        at: Point<f64, Logical>,
+    ) {
+        let States {
+            fullscreen,
+            maximized,
+        } = window_states(window);
+        if fullscreen || !maximized {
+            return;
+        }
+        let Some(outer) = self.panes.of(window).map(|pane| self.pane_outer(pane)) else {
+            return;
+        };
+        if outer.is_empty() {
+            return;
+        }
+        let along = ((from.x - f64::from(outer.loc.x)) / f64::from(outer.size.w)).clamp(0.0, 1.0);
+        let down = (from.y - f64::from(outer.loc.y)).max(0.0);
+        self.maximize_changed(
+            window,
+            window_state::Asker::User,
+            Some(Grip { at, along, down }),
+        );
+    }
+
+    /// Where a client of `size` goes so that `grip` is under the pointer:
+    /// see [`Self::restore_under`].
+    fn gripped(
+        &self,
+        pane: crate::pane::PaneId,
+        grip: Grip,
+        size: Size<i32, Logical>,
+    ) -> Point<i32, Logical> {
+        let insets = self.insets_of(pane);
+        let width = f64::from(size.w + insets.left + insets.right);
+        let height = size.h + insets.top + insets.bottom;
+        let band = if insets.top > 0 { insets.top } else { height };
+        let down = grip.down.min(f64::from((band - 1).max(0)));
+        let x = grip.at.x - grip.along * width + f64::from(insets.left);
+        let y = grip.at.y - down + f64::from(insets.top);
+        Point::<f64, Logical>::from((x, y)).to_i32_round()
+    }
+
+    /// [`Self::maximize_toggled`], and with a `grip`, a restore under the
+    /// pointer: [`Self::restore_under`].
+    fn maximize_changed(
+        &mut self,
+        window: &Window,
+        asker: window_state::Asker,
+        grip: Option<Grip>,
+    ) {
         let Some(id) = self.panes.id_of(window) else {
             return;
         };
@@ -1331,7 +1422,14 @@ impl Solium {
             // Restoring: back to exactly where it was, because that rect was
             // stored rather than recomputed -- unless the monitor it was on
             // has gone since, see `back_on_a_screen`.
-            Some(previous) => (Some(self.back_on_a_screen(window, previous)), false),
+            Some(previous) => {
+                let back = self.back_on_a_screen(window, previous);
+                // Dragged off, under the pointer instead (#452).
+                let back = grip.map_or(back, |grip| {
+                    Rectangle::new(self.gripped(id, grip, back.size), back.size)
+                });
+                (Some(back), false)
+            }
             // Maximised with no way back kept: a window that went fullscreen
             // before it had drawn, so `fullscreen` kept no rect, and
             // was maximised from there. Restored as leaving fullscreen restores
@@ -1384,6 +1482,15 @@ impl Solium {
         if tiled {
             self.trigger_relayout();
         }
+        // Dragged off into its tile, it is under the pointer and not in the
+        // tile the layout has just given it, as any tiled window being
+        // dragged is: the tile stays its slot, for the drop (#452).
+        let dragged = grip.filter(|_| tiled).and_then(|grip| {
+            let size = self.panes.get(id)?.slot().size;
+            let at = self.gripped(id, grip, size);
+            self.space.map_element(window.clone(), at, false);
+            Some(Rectangle::new(at, size))
+        });
         // Moved there on screen, from where it was drawn. Not when it is
         // restored with no size, which its client picks: there is no
         // rectangle yet to move it to.
@@ -1394,6 +1501,12 @@ impl Solium {
             maximized,
             start.filter(|_| back.is_some() || tiled),
         );
+        // And to where it is under the pointer, not to its tile.
+        if let Some(dragged) = dragged
+            && let Some(held) = self.panes.get(id)
+        {
+            present::reaim(held, grown(dragged, self.insets_of(id)), self.clock.now());
+        }
         tracing::debug!(maximized, "window maximise toggled");
     }
 

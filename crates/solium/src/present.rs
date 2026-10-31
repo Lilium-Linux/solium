@@ -1068,6 +1068,31 @@ pub(crate) fn reaim(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
     });
 }
 
+/// Carry a window's glide `by` as far as a drag has just moved the window
+/// (#452): both its ends, so it is drawn as far along as it was, that much
+/// further over. A window restored by a drag shrinks from its maximised
+/// rectangle into the one under the pointer, and the pointer goes on moving:
+/// a glide aimed where the drag first put it drew the window there, behind
+/// the pointer, and let go onto where the window had got to, a jump at the
+/// end. The same for a layout's or an opening's glide a drag takes the
+/// window in the middle of.
+///
+/// Only a glide that lets go on arrival, with one timing for every channel,
+/// as [`reaim`]'s: a mode's transform is aimed at something other than where
+/// the window is.
+/// `state::tests::real_client::client_maximize::a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer`.
+pub(crate) fn carry(pane: &Pane, by: Point<f64, Logical>) {
+    with_slot(pane, |slot| {
+        if let Some(transform) = slot
+            .as_mut()
+            .filter(|transform| transform.release && transform.channels.is_none())
+        {
+            transform.from = transform.from.shifted(by.x, by.y);
+            transform.to = transform.to.shifted(by.x, by.y);
+        }
+    });
+}
+
 /// The frame to draw this window in. Real geometry when nothing is animating.
 pub(crate) fn frame(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -> Frame {
     with_slot(pane, |slot| {

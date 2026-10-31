@@ -36,6 +36,9 @@ sol.auto_reload(config.reload)
 sol.resize(config.resize)
 -- What a fullscreen window covers: the bars, or nothing. See `config.lua`.
 sol.fullscreen(config.fullscreen)
+-- How far a maximised window is dragged before it comes off. See
+-- `config.lua`.
+sol.maximize(config.maximize)
 -- Where the monitors go. Applied on reload too, so moving a screen in the
 -- configuration is `super+shift+r` rather than logging out.
 sol.keyboard(config.keyboard)

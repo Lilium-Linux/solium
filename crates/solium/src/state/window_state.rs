@@ -29,6 +29,35 @@ pub(crate) struct States {
     pub(crate) maximized: bool,
 }
 
+/// How far, in logical pixels, a maximised window's drag goes before the
+/// window comes off: `maximize.restore_after`'s default (#452). A few pixels,
+/// so a click and a double click on its titlebar, which a hand moves by a
+/// pixel or two, stay clicks.
+pub(crate) const RESTORE_AFTER: f64 = 6.0;
+
+/// The most `maximize.restore_after` may be: past this a maximised window is
+/// as good as fixed in place.
+pub(crate) const RESTORE_AFTER_MAX: f64 = 200.0;
+
+/// What `config.lua`'s `maximize` section says to the compositor
+/// (`sol.maximize`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Maximize {
+    /// How far a drag of a maximised window goes, from where it was taken,
+    /// before the window is restored under the pointer (#452). Until then it
+    /// does not move.
+    /// `crate::input::grab::MoveDrag::to`.
+    pub(crate) restore_after: f64,
+}
+
+impl Default for Maximize {
+    fn default() -> Self {
+        Self {
+            restore_after: RESTORE_AFTER,
+        }
+    }
+}
+
 /// A window's [`States`], whichever kind it is: for an xdg toplevel the state
 /// its next configure carries, so nothing waits for the client, and for an X11
 /// window its `_NET_WM_STATE`. The one answer for everything that asks: the
