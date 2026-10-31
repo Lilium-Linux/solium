@@ -23258,6 +23258,36 @@ mod directions {
             assert!(z.is_some_and(|z| z > 0.0), "over the stage's windows: {z:?}");
         }
 
+        /// **A card dropped onto another card joins its group**, at the
+        /// back, and the stage is left as it is. Two cards, so their places
+        /// are 562 and 752 down, 176 by 126 at 22 across.
+        #[test]
+        fn a_card_dropped_onto_another_card_joins_its_group() {
+            let at = |x: f64| Rect { x, y: 100.0, w: 800.0, h: 600.0 };
+            let mut desk = Desk::floating(
+                one_screen(),
+                &[(3, "DP-1", at(600.0)), (2, "DP-1", at(700.0)), (1, "DP-1", at(800.0))],
+            );
+            let snapshot = desk.snapshot();
+            act(&mut desk, "leave", "{}", snapshot);
+            assert_eq!(groups(&desk), "3|2|1");
+
+            desk.cursor = (100.0, 620.0);
+            let snapshot = desk.snapshot();
+            act(&mut desk, "drag", r#"{"card":1}"#, snapshot);
+            desk.cursor = (100.0, 800.0);
+            let snapshot = desk.snapshot();
+            let over = act(&mut desk, "tick", r#"{"dt":0.004}"#, snapshot);
+            assert!(
+                presented(&over.commands, 1).is_some(),
+                "the card it would join comes forward: {:?}",
+                over.commands
+            );
+            let snapshot = desk.snapshot();
+            act(&mut desk, "drop", r#"{"card":1,"x":100,"y":800}"#, snapshot);
+            assert_eq!(groups(&desk), "3|1,2", "one group, the stage as it was");
+        }
+
         /// The stage's group and the cards behind it, as `"3,2|1"`: each
         /// group's windows front first, the stage first.
         fn groups(desk: &Desk) -> String {

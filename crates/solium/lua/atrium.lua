@@ -325,6 +325,19 @@ local function slots(area, set, count)
     return out
 end
 
+-- The card of a strip holding `count` cards whose place is under `x`, `y`,
+-- its icons' room under it included, other than `except`; nil for none.
+local function card_at(area, set, count, x, y, except)
+    for k, box in ipairs(slots(area, set, count)) do
+        if k ~= except and x >= box.x - 12 and x < box.x + box.w + 12
+            and y >= box.y - 12 and y < box.y + box.h + set.icon / 2
+        then
+            return k
+        end
+    end
+    return nil
+end
+
 -- Where each window of a group is drawn inside its card box. One scale for the
 -- whole group, so a large window stays larger than a small one beside it, as
 -- they are on the stage; the most recent in front, the rest fanned up and to
@@ -824,7 +837,16 @@ local function draw_held(dt)
         return
     end
     local set = it.set
-    local pointer = follow(held, sol.cursor(), dt or 1 / 120, function(x)
+    -- Over another card, that card comes forward: let go there and the two
+    -- are one group.
+    local real = sol.cursor()
+    local groups = kept.desks[it.key] or {}
+    local onto = card_at(it.area, set, #groups - 1, real.x, real.y, held.card)
+    if onto ~= kept.hover[held.monitor] then
+        kept.hover[held.monitor] = onto
+        atrium.arrange()
+    end
+    local pointer = follow(held, real, dt or 1 / 120, function(x)
         return atrium.closeness(it.area, x)
     end, set.smooth)
     local t = atrium.closeness(it.area, pointer.x)
@@ -887,7 +909,20 @@ local function drop(monitor, card, x, y)
         return
     end
     local gx, gy = it.area.x + (tonumber(x) or 0), it.area.y + (tonumber(y) or 0)
+    kept.hover[monitor] = nil
     if gx < it.area.x + it.set.strip then
+        -- Onto another card: its group takes the dragged one's windows, at
+        -- the back, and the stage is left as it is. Anywhere else in the
+        -- strip, it goes back to its place.
+        local groups = kept.desks[it.key]
+        local onto = card_at(it.area, it.set, #groups - 1, gx, gy, it.index - 1)
+        if onto and groups[onto + 1] then
+            local into = groups[onto + 1]
+            for _, id in ipairs(it.group) do
+                into[#into + 1] = id
+            end
+            table.remove(groups, it.index)
+        end
         atrium.arrange()
         return
     end
