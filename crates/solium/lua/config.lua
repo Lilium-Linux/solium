@@ -1586,28 +1586,30 @@ local defaults = {
             -- keeping `tilt` of its tilt (0, flat), `shift` pixels out
             -- towards the stage, and the cards above and below it `part`
             -- pixels further away.
-            hover = { lift = 1.12, tilt = 0, shift = 28, part = 20 },
+            hover = { lift = 1.2, tilt = 0, shift = 28, part = 20 },
             -- A card dragged out of the strip: how far, in pixels, a press
-            -- moves before it is a drag; over how many pixels past the strip
-            -- it turns from a card into its windows, flat and at their own
-            -- size; and how tall a window's titlebar is, the point the
-            -- pointer holds sliding there as it turns, so a window pulled out
-            -- hangs from its titlebar. A card or window in the hand is drawn
+            -- moves before it is a drag, and over how many pixels past the
+            -- strip it turns from a card into its windows, flat and at their
+            -- own size, the point the pointer holds sliding to the front
+            -- window's centre as it turns. A card or window in the hand is drawn
             -- once a frame: on the pointer while it is flat, easing after it
             -- the more it has turned, with a time constant of `smooth`
             -- milliseconds as a full card. Letting go rides `motion`.
             drag = {
                 threshold = 8,
                 reach = 320,
-                bar = 32,
                 smooth = 70,
             },
-            -- "overlap": the strip slides off the edge while a stage window
-            -- covers it, and comes back when the pointer touches the edge.
-            -- "never": it stays, under the window.
-            hide = "overlap",
-            -- The spring every move of atrium's rides on.
+            -- "stage": the strip slides off the edge while the stage holds a
+            -- window, and comes back while the pointer is at the edge, going
+            -- again half a second after it leaves the strip. "overlap": only
+            -- while a stage window covers the strip. "never": it stays,
+            -- under the windows.
+            hide = "stage",
+            -- The spring every move of atrium's rides on, and the softer one
+            -- the strip slides away on.
             motion = { stiffness = 300, damping = 32 },
+            hide_motion = { stiffness = 120, damping = 22 },
         },
     },
 

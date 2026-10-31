@@ -83,6 +83,7 @@ local function settings()
         return value
     end
     local motion = type(given.motion) == "table" and given.motion or {}
+    local away = type(given.hide_motion) == "table" and given.hide_motion or {}
     local hover = type(given.hover) == "table" and given.hover or {}
     local card = type(given.card) == "table" and given.card or {}
     local drag = type(given.drag) == "table" and given.drag or {}
@@ -93,22 +94,25 @@ local function settings()
         tilt = number(given.tilt, 26, -89),
         perspective = number(given.perspective, 1100, 100),
         fan = number(given.fan, 14),
-        hide = given.hide == "never" and "never" or "overlap",
+        hide = (given.hide == "never" or given.hide == "overlap") and given.hide or "stage",
         aspect = number(card.aspect, 0.72, 0.1),
         spacing = number(card.spacing, 64),
         behind = math.min(1, number(card.behind, 0.92)),
         icon = math.floor(number(card.icon, 44, 8)),
-        lift = number(hover.lift, 1.12, 0.1),
+        lift = number(hover.lift, 1.2, 0.1),
         hover_tilt = number(hover.tilt, 0),
         shift = number(hover.shift, 28, -1000),
         part = number(hover.part, 20, -1000),
         threshold = number(drag.threshold, 8),
         reach = number(drag.reach, 320, 1),
-        bar = number(drag.bar, 32),
         smooth = number(drag.smooth, 70) / 1000,
         motion = {
             stiffness = number(motion.stiffness, 300, 1),
             damping = number(motion.damping, 32, 1),
+        },
+        hide_motion = {
+            stiffness = number(away.stiffness, 120, 1),
+            damping = number(away.damping, 22, 1),
         },
     }
 end
@@ -361,7 +365,7 @@ local quiet = nil
 local function present(id, options)
     touched[id] = true
     kept.presented[tostring(id)] = true
-    if quiet then
+    if quiet and not options.motion then
         local spring = { easing = { spring = quiet } }
         options.motion = { x = spring, y = spring, size = spring, opacity = spring }
     end
@@ -418,16 +422,17 @@ local function icon_of(app)
     return icons[lower] or icons[(lower:match("([^.]+)$") or lower)] or app
 end
 
--- Whether a stage window covers the strip, so it slides away. The strip's icons
+-- Whether the strip slides away: while the stage holds a window (`hide`
+-- "stage"), or only while one covers it ("overlap"); never with "never". The strip's icons
 -- are drawn over every window, its cards under the stage, so a strip left out
 -- under a stage window would show its icons on top of it.
 local function covering(groups, by_id, strip, set)
-    if set.hide ~= "overlap" then
+    if set.hide == "never" then
         return false
     end
     for _, id in ipairs(groups[1] or {}) do
         local window = by_id[id]
-        if window and id ~= kept.moving and overlaps(window, strip) then
+        if window and id ~= kept.moving and (set.hide == "stage" or overlaps(window, strip)) then
             return true
         end
     end
@@ -499,9 +504,13 @@ local function arrange_desk(key, area, by_id, set, children)
                     touched[child] = true
                 end
             else
+                local away = nil
                 if hidden or waiting then
                     x = x - set.strip
                     opacity = 0
+                    -- Out of the way unhurried, on a softer spring.
+                    local soft = { easing = { spring = set.hide_motion } }
+                    away = { x = soft, y = soft, size = soft, opacity = soft }
                 end
                 -- Behind the stage, unless the strip has been brought back
                 -- over it.
@@ -509,7 +518,7 @@ local function arrange_desk(key, area, by_id, set, children)
                 present(card.id, {
                     x = x, y = y, w = w, h = h,
                     rotate_y = tilt, pivot_x = 0, perspective = set.perspective,
-                    opacity = opacity, z = z,
+                    opacity = opacity, z = z, motion = away,
                 })
                 -- A dialog goes into its window's card, out of sight.
                 for _, child in ipairs(children[card.id] or {}) do
@@ -691,10 +700,9 @@ end
 -- (`fx`, `fy`, shares of the window) under the pointer at `x`, `y`: the card,
 -- at `t` 1, the windows at their own size and as they stand to one another,
 -- at `t` 0, and in between, everything between. The point held slides with
--- `t` from where the card was pressed to the middle of the front window's
--- titlebar (`bar` pixels tall), so a window pulled out hangs from its
--- titlebar as any window being moved does, and never jumps there.
-local function morph(group, by_id, card_rects, x, y, fx, fy, t, bar)
+-- `t` from where the card was pressed to the front window's centre, so a
+-- window pulled out is carried by its middle, and never jumps there.
+local function morph(group, by_id, card_rects, x, y, fx, fy, t)
     local front = by_id[group[1]]
     local card = card_rects[1]
     if not front or not card then
@@ -702,8 +710,8 @@ local function morph(group, by_id, card_rects, x, y, fx, fy, t, bar)
     end
     local scale = (card.w / front.w) * t + (1 - t)
     local fw, fh = front.w * scale, front.h * scale
-    local titled = math.min(0.5, (bar or 0) / 2 / math.max(1, front.h))
-    fy = fy * t + titled * (1 - t)
+    fx = fx * t + 0.5 * (1 - t)
+    fy = fy * t + 0.5 * (1 - t)
     local fx0, fy0 = x - fx * fw, y - fy * fh
     local out = {}
     for at, id in ipairs(group) do
@@ -822,7 +830,7 @@ local function draw_held(dt)
     local t = atrium.closeness(it.area, pointer.x)
     sol.animate({ duration = 0 })
     local rects = lifted(it.rects, held.lift, held.shift)
-    for at, each in ipairs(morph(it.group, it.by_id, rects, pointer.x, pointer.y, held.fx, held.fy, t, set.bar)) do
+    for at, each in ipairs(morph(it.group, it.by_id, rects, pointer.x, pointer.y, held.fx, held.fy, t)) do
         present(each.id, {
             x = each.x, y = each.y, w = each.w, h = each.h,
             rotate_y = held.tilt * t, pivot_x = 0, perspective = set.perspective,
@@ -884,7 +892,7 @@ local function drop(monitor, card, x, y)
         return
     end
     local rects = lifted(it.rects, held.lift or 1, held.shift or 0)
-    for _, each in ipairs(morph(it.group, it.by_id, rects, gx, gy, held.fx, held.fy, 0, it.set.bar)) do
+    for _, each in ipairs(morph(it.group, it.by_id, rects, gx, gy, held.fx, held.fy, 0)) do
         sol.place(each.id, { x = math.floor(each.x), y = math.floor(each.y),
             w = math.floor(each.w), h = math.floor(each.h), tile = false })
     end

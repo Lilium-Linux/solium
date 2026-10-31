@@ -68,24 +68,53 @@ Item {
         }
     }
 
-    // While hidden: the edge brings the strip back.
-    MouseArea {
-        visible: root.cards.length > 0 && root.hidden && !root.peeking
+    // While hidden: the edge brings the strip back. Motion only, so a press
+    // there still reaches what is under it.
+    Item {
+        id: edge
+        visible: root.cards.length > 0 && root.hidden
         x: 0
         y: 0
         width: 3
         height: root.height
-        hoverEnabled: true
-        onEntered: Solium.send("edge")
+        HoverHandler {
+            id: edgeHover
+            onHoveredChanged: {
+                if (hovered && !root.peeking)
+                    Solium.send("edge")
+            }
+        }
     }
 
-    // While shown: the column is the strip's.
+    // The strip goes away again once the pointer has been off it, its edge
+    // and its cards, for `leaveDelay` ms: passing between two cards, or from
+    // the edge out to them, does not send it away.
+    property int leaveDelay: 500
+    readonly property bool over: edgeHover.hovered || column.containsMouse || column.pressed
+    onOverChanged: over ? leaving.stop() : leaving.restart()
+    Timer {
+        id: leaving
+        interval: root.leaveDelay
+        onTriggered: {
+            if (!root.over)
+                Solium.send("leave")
+        }
+    }
+
+    // While shown: the cards are the strip's, and only the cards. Everywhere
+    // else in the column -- between the cards, around them -- a click goes to
+    // what is under it: the desktop, a window.
     MouseArea {
         id: column
         visible: root.cards.length > 0 && (!root.hidden || root.peeking)
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
+        containmentMask: QtObject {
+            function contains(point: point): bool {
+                return column.pressed || root.cardAt(point.x, point.y) > 0
+            }
+        }
 
         property int pressedCard: 0
         property point pressedAt: Qt.point(0, 0)
@@ -131,7 +160,7 @@ Item {
             if (pressed)
                 return
             lastHover = 0
-            Solium.send("leave")
+            Solium.send("hover", { card: 0 })
         }
     }
 

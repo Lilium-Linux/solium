@@ -23069,6 +23069,17 @@ mod directions {
         use super::{Command, Desk, FocusSource, Rect, Snapshot, one_screen};
         use std::time::Duration;
 
+        /// [`desk`], with the strip hiding as `hide` says.
+        fn desk_hiding(hide: &str) -> Desk {
+            let mut desk = desk();
+            desk.scripts.evaluate(&format!(
+                "require(\"config\").floating.atrium.hide = \"{hide}\"\nreturn \"\""
+            ));
+            let snapshot = desk.snapshot();
+            act(&mut desk, "leave", "{}", snapshot);
+            desk
+        }
+
         /// Window 2 on the stage clear of the strip, window 1 the card.
         fn desk() -> Desk {
             let at = |x: f64| Rect {
@@ -23118,7 +23129,7 @@ mod directions {
         /// `maximize` listener would time the maximise itself.
         #[test]
         fn a_stage_window_maximised_over_the_strip_sends_the_strip_away() {
-            let mut desk = desk();
+            let mut desk = desk_hiding("overlap");
             let restored = desk.rect(2);
             set_rect(&mut desk, 2, super::WIDE);
             let outcome = desk.scripts.maximize(2, true, desk.snapshot());
@@ -23138,7 +23149,7 @@ mod directions {
         /// dragged on while it is away draws nothing again.
         #[test]
         fn a_stage_window_resized_over_the_strip_sends_the_strip_away() {
-            let mut desk = desk();
+            let mut desk = desk_hiding("overlap");
             let wider = Rect {
                 x: 100.0,
                 y: 100.0,
@@ -23185,12 +23196,15 @@ mod directions {
             let again = act(&mut desk, "drag", r#"{"card":1,"x":300,"y":720,"px":100,"py":712}"#, snapshot);
             assert_eq!(presented(&again.commands, 1), None, "a pointer event draws nothing");
 
-            // Pulled well past the strip: a window at its own size, hanging
-            // from the middle of its 32-pixel titlebar, under the pointer.
+            // Pulled well past the strip: a window at its own size, carried
+            // by its centre, under the pointer.
             let (window, duration, channels) = ticks(&mut desk, 900.0, 0.05, 20);
             assert_eq!((duration, channels), (Duration::ZERO, false), "drawn, not animated");
             assert_eq!((window.w, window.h), (800.0, 600.0));
-            assert!((window.y + 16.0 - 720.0).abs() < 0.5, "held by its titlebar: {window:?}");
+            assert!(
+                (window.x + 400.0 - 900.0).abs() < 0.5 && (window.y + 300.0 - 720.0).abs() < 0.5,
+                "carried by its centre: {window:?}"
+            );
             // Flat, it is on the pointer at once.
             let (moved, ..) = ticks(&mut desk, 960.0, 0.004, 1);
             assert!((moved.x - window.x - 60.0).abs() < 0.5, "{window:?} then {moved:?}");
@@ -23220,6 +23234,28 @@ mod directions {
             for (was, is) in [(lifted.x, held.x), (lifted.y, held.y), (lifted.w, held.w), (lifted.h, held.h)] {
                 assert!((was - is).abs() < 0.5, "lifted {lifted:?}, held {held:?}");
             }
+        }
+
+        /// **While the stage holds a window the strip waits off the edge**,
+        /// comes out over the windows while the pointer is at the edge, and
+        /// slides away again on its softer spring once the pointer has left
+        /// it (the scene sends `leave` half a second after).
+        #[test]
+        fn the_strip_waits_at_the_edge_while_the_stage_holds_a_window() {
+            let mut desk = desk();
+            let snapshot = desk.snapshot();
+            let away = act(&mut desk, "leave", "{}", snapshot);
+            let card = presented(&away.commands, 1).expect("the card is drawn");
+            assert_eq!((card.1, card.3), (Some(0.0), true), "off the edge, on its own spring: {card:?}");
+            let snapshot = desk.snapshot();
+            let out = act(&mut desk, "edge", "{}", snapshot);
+            let card = presented(&out.commands, 1).expect("the card is drawn");
+            assert_eq!(card.1, Some(1.0), "out at the edge: {card:?}");
+            let z = out.commands.iter().rev().find_map(|command| match command {
+                Command::Present { id: 1, z, .. } => Some(*z),
+                _ => None,
+            });
+            assert!(z.is_some_and(|z| z > 0.0), "over the stage's windows: {z:?}");
         }
 
         /// The stage's group and the cards behind it, as `"3,2|1"`: each
