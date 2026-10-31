@@ -282,6 +282,23 @@ SOLIUM_FENCE_WAIT=<on|off>
     since #392: the GPU orders the read after the draw on the one context.
     Each session's log says which it ran with.
 
+SOLIUM_FULL_REDRAW=1
+    On the hardware, every frame on a monitor is drawn whole, as a capture
+    is, instead of only what is damaged: the buffer ages are reset before
+    each frame. For a picture the screen shows and a capture does not: if it
+    goes away with this set, the damage is wrong (#436). Costs the whole
+    frame's GPU work on every frame.
+
+SOLIUM_SCANOUT_DUMP=<dir>
+    On the hardware, `touch <dir>/now` writes the next frame of each monitor
+    twice, as PPM: `<n>-<monitor>-scanout.ppm`, the buffer handed to the
+    display (read back from its swapchain slot, the cursor and overlay
+    planes drawn over it), and `<n>-<monitor>-capture.ppm`, the same
+    elements drawn as a capture draws them. The log says how far apart they
+    are and where, how many scanout pixels are not opaque, and what went on
+    a plane of its own (#436). `now` is removed as it is seen: each touch is
+    one shot.
+
 SOLIUM_RECAPTURE=always
     Draw every window capture (a warp's, a rounded client's) on every pass,
     as before captures were kept until what they show changes. For measuring

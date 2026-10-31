@@ -1774,6 +1774,12 @@ impl State {
                 .map(|timer| timer.open(renderer, region));
             let frame = crate::qml::frame_in_flight();
             let gles = crate::pacing::span(crate::pacing::Phase::Gles);
+            // `SOLIUM_FULL_REDRAW`: every frame drawn whole, as a capture is,
+            // so a picture that differs between the screen and a capture can
+            // be pinned on damage or ruled out (#436).
+            if full_redraw() {
+                screen.compositor.reset_buffer_ages();
+            }
             let rendered = screen.compositor.render_frame(
                 renderer,
                 &elements,
@@ -1794,6 +1800,19 @@ impl State {
             let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
             let queued = match rendered {
                 Ok(result) if !result.is_empty => {
+                    // `SOLIUM_SCANOUT_DUMP`: this frame as the display gets
+                    // it, beside the same frame drawn as a capture (#436).
+                    if let Some((dir, shot)) = crate::scanout::due(&output.name())
+                        && let Err(err) = crate::scanout::write(
+                            renderer,
+                            &result,
+                            &elements,
+                            &output,
+                            (&dir, shot),
+                        )
+                    {
+                        tracing::warn!(?err, monitor = output.name(), "SOLIUM_SCANOUT_DUMP failed");
+                    }
                     match screen.compositor.queue_frame(built_under) {
                         Ok(()) => {
                             screen.pending = true;
@@ -2100,6 +2119,15 @@ impl State {
             .send_frames_on(&screen.output, now, frame_interval(&screen.output));
         screen.told = Some(now);
     }
+}
+
+/// Whether `SOLIUM_FULL_REDRAW` is set: then every frame on a monitor is
+/// drawn whole, whatever the damage says, as a capture is (#436). Read once.
+fn full_redraw() -> bool {
+    static FULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FULL.get_or_init(|| {
+        std::env::var_os("SOLIUM_FULL_REDRAW").is_some_and(|v| !v.is_empty() && v != "0")
+    })
 }
 
 /// The time frame callbacks are stamped with.

@@ -62,6 +62,7 @@ mod qml;
 mod remains;
 mod render;
 mod resizing;
+mod scanout;
 #[cfg(test)]
 mod scenario;
 mod screencopy;
