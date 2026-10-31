@@ -1146,6 +1146,19 @@ sol.on("resizing", function(id, phase)
 end)
 ```
 
+Snapping a floating window by dragging it to an edge (#455) is configuration
+over the same verbs: `lua/snap.lua`, which `lua/floating.lua` requires. It
+reads the `drag` events for the zone the pointer is in and hands a scene
+(`qml/snap/snap.qml`, declared with `sol.surface` over the windows) the zone to
+preview; on the `drop` it places the window in its zone with `sol.place` and
+marks it with `sol.frame(id, { snapped = <zone> })`; it holds a snapped window
+taken again with `sol.drag_hold` and lets it off at its old size with
+`sol.place` and `sol.drag_grip`, as a maximised one is let off. Two snapped
+windows' shared edge is its `resize` listener's: it moves every window on the
+seam with `sol.place`, which claims the drag the way a layout claims a tiled
+seam, so the seam moves through the same configure path, every frame. The
+compositor knows nothing of zones, halves or holders.
+
 ### Going fullscreen or maximised, and back
 
 The compositor makes the change and the scripts choose how it looks. On the

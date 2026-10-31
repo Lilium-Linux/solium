@@ -1603,6 +1603,84 @@ local defaults = {
             -- apart so the two can be tuned differently, as `fullscreen` and
             -- `maximize` above are kept apart from each other.
             motion = { duration = 220, easing = "outCubic" },
+
+            -- Snapping by dragging, as Windows and macOS do (#455):
+            -- `lua/snap.lua`. Drag a window -- by its titlebar, with the drag
+            -- modifier, or by a finger -- to an edge of a screen, and a
+            -- preview shows where it will go: the left or right edge, that
+            -- half of the work area; a corner, that quarter; the top edge,
+            -- the whole of it. Let go there and it glides into place; let go
+            -- elsewhere and it stays where it is. A snapped window's frame is
+            -- told `snapped` (the zone's name, or false), for a pane style to
+            -- square its corners by. The keys above mark their snaps the same.
+            --
+            -- Taken again, a snapped window stays put for
+            -- `maximize.restore_after` pixels, as a maximised one does, and
+            -- then comes off at the size it had before, under the pointer.
+            -- Windows snapped beside each other share a seam with a holder
+            -- drawn on it: drag either window's edge there and both resize
+            -- together, as a tiled seam does. Only while floating is in
+            -- charge: a layout's own drag moves a window between its tiles.
+            drag = {
+                -- false turns dragging into zones off; the keys above stay.
+                enabled = true,
+                -- How near an edge of the screen, in logical pixels, the
+                -- pointer has to be for its zone: a number of 1 or more,
+                -- anything else 8. Only an outer edge has a zone: where two
+                -- screens touch, a window dragged across goes on to the
+                -- other screen rather than snapping.
+                edge = 8,
+                -- How far along an edge from a corner, in logical pixels,
+                -- that corner's quarter reaches; the rest of the edge is its
+                -- half. 0 or more, anything else 120; 0 turns quarters off.
+                corner = 120,
+                -- Whether the top edge maximises; false leaves only its
+                -- corners.
+                top = true,
+                -- How a window glides into its zone and back off it: as a
+                -- tiled window glides into its tile after a drag,
+                -- `tiling.snap`, unless it is set here, as `motion` above is.
+                --
+                --     motion = { duration = 120, easing = "outCubic" },
+
+                -- The scene that draws the preview and the holders, on every
+                -- screen over the windows: a name under
+                -- `~/.config/solium/qml` or the shipped `qml/`, or a path.
+                -- It is handed `zone` (where a window let go now goes:
+                -- `monitor`, `kind`, and `x`, `y`, `w`, `h` in that screen's
+                -- own pixels; false when none), `seams` (each holder's
+                -- `monitor`, `vertical`, `x`, `y`, `w`, `h` and `dragging`),
+                -- and the two tables below as `preview` and `divider`.
+                scene = "snap/snap.qml",
+                -- How the shipped scene draws the preview: its fill, its
+                -- border (each "#rrggbb" or "#rrggbbaa") and that border's width, the rounding of its
+                -- corners, how far inside the zone it is drawn, and how long,
+                -- in milliseconds, it takes to appear, to go and to move from
+                -- one zone to the next.
+                preview = {
+                    fill = "#ffffff24",
+                    border = "#ffffff80",
+                    border_width = 2,
+                    radius = 12,
+                    inset = 6,
+                    duration = 160,
+                },
+                -- The holder between snapped windows. `enabled = false`
+                -- draws none; the seam still moves both windows. `minimum` is
+                -- the narrowest, in logical pixels, a seam leaves a window
+                -- whose application names no minimum of its own -- one that
+                -- does is held to that, unless `client_limits` above is
+                -- "ignore": 1 or more, anything else 120. The rest is how
+                -- the shipped scene draws it.
+                divider = {
+                    enabled = true,
+                    minimum = 120,
+                    color = "#d4d4d4",
+                    thickness = 6,
+                    length = 56,
+                    opacity = 0.75,
+                },
+            },
         },
 
         -- Where a new window goes, and how big, while floating is in charge.
@@ -2103,6 +2181,13 @@ local open_sections = {
     ["resize.modes"] = true,
     -- `true` rather than a set of names: everything is accepted.
     bindings = true,
+    -- A drag's snap glides with `tiling.snap` unless `motion` says otherwise,
+    -- so `motion` is left out above and named here. And the preview's and
+    -- the holder's look is the scene's own: a scene of yours may read keys
+    -- the shipped one does not.
+    ["floating.snap.drag"] = { motion = true },
+    ["floating.snap.drag.preview"] = true,
+    ["floating.snap.drag.divider"] = true,
 }
 
 -- The one key a user may write that these defaults deliberately do not define.

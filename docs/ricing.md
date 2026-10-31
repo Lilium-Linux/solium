@@ -2402,6 +2402,51 @@ instant switch for it the way `fullscreen.animate` and `maximize.animate` have
 one above: a snap is always a glide, since nothing is waiting on an
 application to draw a new size first.
 
+Dragging a window to an edge snaps it too, as Windows and macOS do (#455):
+while no layout is in charge, drag a window by its titlebar, with the drag
+modifier or with a finger to a screen's left or right edge, and a preview shows
+the half it would fill; to a corner, the quarter; to the top edge, the whole
+work area, as a maximise. Let go there and it glides into place with
+`tiling.snap`'s motion, the one a tiled window settles into its tile with.
+Taken again, a snapped window stays put for `maximize.restore_after` pixels and
+then comes off at its old size under the pointer. Two windows snapped beside
+each other share a seam with a holder drawn on it: drag either window's edge
+there and both resize together, as a tiled seam does. Only a screen's outer
+edges snap: where two screens touch, a window dragged across goes on to the
+other one.
+
+```lua
+return {
+    floating = {
+        snap = {
+            drag = {
+                edge = 8,          -- how near an edge the pointer must be
+                corner = 120,      -- how far along an edge a corner's quarter reaches; 0 for none
+                top = true,        -- false: the top edge does not maximise
+                motion = { duration = 120, easing = "outCubic" },  -- tiling.snap's when left out
+                preview = { fill = "#ffffff24", border = "#ffffff80", radius = 12 },
+                divider = { minimum = 120, thickness = 6, length = 56 },
+                -- enabled = false turns it off; the keys still snap.
+            },
+        },
+    },
+}
+```
+
+The preview and the holders are one QML scene over the windows,
+`qml/snap/snap.qml`, which `drag.scene` replaces with your own; it is handed
+the zone (`monitor`, `kind`, `x`, `y`, `w`, `h` in that screen's pixels, or
+false), the seams, and the two tables above. A snapped window's frame is told
+which zone it fills as `windowValues.snapped` -- `"left"`, `"right"`,
+`"top_left"`, `"top_right"`, `"bottom_left"` or `"bottom_right"`, and `false`
+once it is not -- so a pane style squares its corners by it, as "Corners that
+change with the window" above shows:
+
+```qml
+// Pane.qml
+client.radius: (maximized || windowValues.snapped) ? 0 : 12
+```
+
 ### Your own bindings
 
 A `bindings` section in `user.lua`, merged like every other section:
