@@ -282,6 +282,10 @@ impl Solium {
                 ));
             }
             self.relocate(&window, to);
+            // A glide it is on was aimed at the rectangle it had (#438).
+            if let Some(pane) = self.panes.get(id) {
+                crate::present::reaim(pane, self.pane_outer(pane), now);
+            }
             // An X11 client is told where it is; a Wayland one never is.
             if let Some(x11) = window.x11_surface()
                 && !x11.is_override_redirect()
