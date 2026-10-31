@@ -629,6 +629,8 @@ impl XdgShellHandler for Solium {
         };
 
         MoveGrab::start(self, &pointer, start_data, window, location, serial);
+        // Its `begin`, told before the client's next motion can move it.
+        crate::input::grab::settle_drags(self, true);
     }
 
     /// A popup asking to be moved — a submenu re-anchoring as the pointer

@@ -507,6 +507,7 @@
 ---| "media" # Something changed in media: `(event)`, a `sol.MediaEvent`.
 ---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
+---| "drag" # A window is being moved by the pointer, a finger, or its own client's move request: `(id, phase, x, y)`, `phase` being `"begin"`, `"move"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion can move the window, so a listener can hold it (`sol.drag_hold`); `"move"` once a frame at most, wherever the pointer got to; `"end"` before the `"drop"`, and also when a drag ends with no drop (the window went fullscreen, a finger was cancelled).
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
 ---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
@@ -1299,17 +1300,6 @@ function sol.resize(options) end
 ---@return nil
 function sol.fullscreen(options) end
 
----Set how a maximised window is dragged (#452).
----
----`restore_after`: how far, in logical pixels from 0 to 200, the pointer goes
----from where a drag of a maximised window was taken before the window is
----restored under it (default 6). Until then the window does not move, so a
----click or a double click on its titlebar stays one. Another value is logged
----and the default kept. `init.lua` calls this with `config.maximize`.
----@param options? { restore_after?: number }
----@return nil
-function sol.maximize(options) end
-
 ---Set the pointer's XCursor theme, size and scene. Applied at once, so a reload
 ---is how a theme or a scene is tried, and a scene whose files changed is built
 ---again. Not `sol.cursor`, which says where the pointer is.
@@ -1474,6 +1464,33 @@ function sol.toggle_fullscreen(id) end
 ---@param id? integer
 ---@return nil
 function sol.toggle_maximize(id) end
+
+---Hold a window that is being dragged where it is, or let it go on (#452).
+---While it is held the pointer, or the finger, goes on, and the `"drag"`
+---listeners go on hearing it; let go, the window moves on from where it
+---stands, so nothing jumps. A window let go of while it is held has not been
+---moved by the drag, and no `"drop"` is told. Nothing for a window no drag
+---has. `lua/floating.lua` holds a maximised window this way until the pointer
+---has gone `maximize.restore_after`.
+---@param id integer
+---@param held boolean
+---@return nil
+function sol.drag_hold(id, held) end
+
+---Say where the pointer holds a window that is being dragged (#452): `x` and
+---`y` are shares of its frame's width and height, and `dx` and `dy` pixels
+---further, each 0 when left out, from the frame's top-left corner. The point
+---is kept inside the frame. The window is put so that point is under the
+---pointer at once, a glide it is part of the way through is aimed there, and
+---the drag goes on from there. The frame's size is the one the window was
+---last asked for, so a window restored a moment ago is gripped at its
+---restored size. Nothing for a window no drag has.
+---
+---    sol.drag_grip(id, { x = 0.25, dy = 16 }) -- a quarter along, 16 down
+---@param id integer
+---@param grip { x?: number, y?: number, dx?: number, dy?: number }
+---@return nil
+function sol.drag_grip(id, grip) end
 
 ---Move the keyboard to the window beside the focused one. Every `direction`
 ---listener is told `("focus", dir)`, and the layout in charge answers

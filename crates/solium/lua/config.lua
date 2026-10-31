@@ -1558,7 +1558,9 @@ local defaults = {
         --
         -- A few pixels, so a click or a double click on the titlebar, which
         -- a hand moves a pixel or two, stays a click. 0 restores it on the
-        -- first motion; at most 200.
+        -- first motion; anything that is not a number of 0 or more is 6.
+        -- `lua/floating.lua` does all of this, with `sol.drag_hold` and
+        -- `sol.drag_grip`.
         restore_after = 6,
     },
 

@@ -118,6 +118,8 @@ pub(crate) fn handle<B: InputBackend>(
     // delivered it (Ruling 11):
     // `state::tests::real_client::reflow_on_close::hosted::a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant`.
     touch::flush(state);
+    // A drag the event began or ended, told now the grab has returned.
+    grab::settle_drags(state, true);
     state.settle_scenes();
 }
 
@@ -760,9 +762,6 @@ fn pointer_motion<B: InputBackend>(
         },
     );
     pointer.frame(state);
-    // Outside the grab now: a maximised window the motion pulled far enough
-    // is restored under the pointer (#452).
-    grab::settle(state);
     // The compositor draws the cursor, so the cursor moving is the screen
     // changing. Without this the pointer only moved when something else
     // happened to want a frame -- which on a still screen is never.
@@ -877,8 +876,6 @@ fn pointer_relative<B: InputBackend>(state: &mut Solium, event: impl PointerMoti
         },
     );
     pointer.frame(state);
-    // As in `pointer_motion`, on the path a real mouse takes.
-    grab::settle(state);
     // The compositor draws the cursor, so the cursor moving is the screen
     // changing. Without this the pointer only moved when something else
     // happened to want a frame -- which on a still screen is never.
@@ -1650,9 +1647,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     forward_button(state, &pointer, &forward);
 
     // Outside the grab now: the pointer's lock is released, so a script may
-    // ask where the pointer is without stopping the compositor. A restore
-    // the last motion recorded is made before the drop it was part of.
-    grab::settle(state);
+    // ask where the pointer is without stopping the compositor. The drag's
+    // `end` first, and then its drop.
+    grab::settle_drags(state, true);
     if let Some((window, x, y)) = state.pending_drop.take() {
         state.trigger_drop(&window, x, y);
     }

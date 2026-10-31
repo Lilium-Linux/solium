@@ -7400,7 +7400,12 @@ end)"#,
         fn a_window_dragged_off_its_maximise_glides_under_the_pointer() {
             use smithay::backend::input::ButtonState;
             use smithay::input::pointer::GrabStartData;
-            let mut desk = Desk::new("dragged-off", SCRIPT);
+            // `lua/floating.lua` is what pulls a maximised window off.
+            let script = format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\nrequire(\"floating\")\n{SCRIPT}",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            );
+            let mut desk = Desk::new("dragged-off", &script);
             assert!(desk.state.trigger("super+shift+m"));
             desk.pump();
             desk.answer(1920, 1080);
@@ -7440,9 +7445,11 @@ end)"#,
                 (0, 0).into(),
                 SERIAL_COUNTER.next_serial(),
             );
+            crate::input::grab::settle_drags(&mut desk.state, true);
             // Half way along and 10 down, so 200 left of the pointer and 10
             // above it at 400 by 300.
             motion(&mut desk.state, (40.0, 100.0));
+            crate::input::grab::settle_drags(&mut desk.state, false);
             let under = Rectangle::new((800, 100).into(), (400, 300).into()).to_f64();
             let first = desk.drawn(desk.state.clock.now());
             assert!(
@@ -7460,14 +7467,15 @@ end)"#,
                 "part of the way out at 45 ms: {part:?}"
             );
             motion(&mut desk.state, (100.0, 0.0));
+            crate::input::grab::settle_drags(&mut desk.state, false);
             let carried = desk.drawn(then);
             assert_eq!(
                 (
-                    carried.loc.x - part.loc.x,
-                    carried.loc.y - part.loc.y,
+                    (carried.loc.x - part.loc.x - 100.0).abs() < 1e-6,
+                    (carried.loc.y - part.loc.y).abs() < 1e-6,
                     carried.size
                 ),
-                (100.0, 0.0, part.size),
+                (true, true, part.size),
                 "the glide did not go with the pointer"
             );
             crate::synth::send_button(
@@ -9628,7 +9636,16 @@ end)"#,
 
     /// The shipped modes and tiling, loaded into a fixture of two real
     /// windows, for the two #443 tests below.
+    /// [`shipped_modes_and_tiling`], and `lua/floating.lua`.
+    fn shipped_modes_tiling_and_floating(state: &mut Solium, name: &str) {
+        shipped_with(state, name, "require(\"floating\")\n");
+    }
+
     fn shipped_modes_and_tiling(state: &mut Solium, name: &str) {
+        shipped_with(state, name, "");
+    }
+
+    fn shipped_with(state: &mut Solium, name: &str, more: &str) {
         let directory = std::env::temp_dir().join(format!("solium-{name}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&directory);
         let entry = directory.join("init.lua");
@@ -9639,7 +9656,7 @@ end)"#,
                  require(\"modes\")\n\
                  require(\"workspaces\")\n\
                  require(\"tiling\")\n\
-                 require(\"direction\")\n",
+                 require(\"direction\")\n{more}",
                 shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
             ),
         )
@@ -9875,6 +9892,16 @@ end)"#,
 
         impl Desk {
             fn new(name: &str) -> Self {
+                Self::loading(name, shipped_modes_and_tiling)
+            }
+
+            /// [`Self::new`], with `lua/floating.lua` loaded too: what a
+            /// maximised window's drag does is its (#452).
+            fn with_floating(name: &str) -> Self {
+                Self::loading(name, shipped_modes_tiling_and_floating)
+            }
+
+            fn loading(name: &str, scripts: fn(&mut Solium, &str)) -> Self {
                 tiled_fixture!(display, state, conn, queue, client, qh);
                 let _output = one_screen(&mut state);
                 let bar = bar(&mut display, &mut state, &conn, &client, &qh, 40);
@@ -9886,7 +9913,7 @@ end)"#,
                     &mut queue,
                     &mut client,
                 );
-                shipped_modes_and_tiling(&mut state, name);
+                scripts(&mut state, name);
                 let area = state.work_area().expect("the monitor has a work area");
                 let desk = Self {
                     display,
@@ -10255,6 +10282,13 @@ end)"#,
             13_000
         }
 
+        /// The pointer to `at`, and a pass: the `drag` listeners hear where
+        /// it got to once a frame (#452).
+        fn drag_to(desk: &mut Desk, at: (f64, f64), time: u64) {
+            move_pointer(&mut desk.state, at, time);
+            crate::input::grab::settle_drags(&mut desk.state, false);
+        }
+
         /// And the button and super up again.
         fn let_go(desk: &mut Desk, time: u64) {
             let region = crate::monitor::union(&desk.state.space).expect("a monitor");
@@ -10305,15 +10339,20 @@ end)"#,
         #[test]
         fn a_maximised_window_stays_put_until_the_drag_passes_the_threshold() {
             for (restore_after, short, long) in [(6.0, 4.0, 8.0), (50.0, 40.0, 60.0)] {
-                let mut desk = Desk::new("drag-unmaximise-threshold");
-                desk.state.maximize.restore_after = restore_after;
+                let mut desk = Desk::with_floating("drag-unmaximise-threshold");
+                let set = desk.state.scripts.as_ref().map(|scripts| {
+                    scripts.evaluate(&format!(
+                        "require(\"config\").maximize.restore_after = {restore_after}; return \"\""
+                    ))
+                });
+                assert_eq!(set.as_deref(), Some(""), "setting maximize.restore_after");
                 let (window, _toplevel, _surface, _before) = maximised_floating(&mut desk);
                 let from = (
                     f64::from(desk.area.loc.x) + 480.0,
                     f64::from(desk.area.loc.y) + 20.0,
                 );
                 let time = take_by_the_modifier(&mut desk, from);
-                move_pointer(&mut desk.state, (from.0 + short, from.1), time);
+                drag_to(&mut desk, (from.0 + short, from.1), time);
                 assert!(
                     in_state(&window, State::Maximized),
                     "{restore_after}: a drag of {short} restored it"
@@ -10323,7 +10362,7 @@ end)"#,
                     Some(desk.area),
                     "{restore_after}: a drag of {short} moved it"
                 );
-                move_pointer(&mut desk.state, (from.0 + long, from.1), time + 1_000);
+                drag_to(&mut desk, (from.0 + long, from.1), time + 1_000);
                 assert!(
                     !in_state(&window, State::Maximized),
                     "{restore_after}: a drag of {long} left it maximised"
@@ -10337,14 +10376,14 @@ end)"#,
         /// maximised window's titlebar is a click.
         #[test]
         fn a_maximised_window_let_go_under_the_threshold_stays_maximised() {
-            let mut desk = Desk::new("drag-unmaximise-click");
+            let mut desk = Desk::with_floating("drag-unmaximise-click");
             let (window, _toplevel, _surface, _before) = maximised_floating(&mut desk);
             let from = (
                 f64::from(desk.area.loc.x) + 480.0,
                 f64::from(desk.area.loc.y) + 20.0,
             );
             let time = take_by_the_modifier(&mut desk, from);
-            move_pointer(&mut desk.state, (from.0 + 3.0, from.1 + 2.0), time);
+            drag_to(&mut desk, (from.0 + 3.0, from.1 + 2.0), time);
             let_go(&mut desk, time + 1_000);
             desk.rest();
             assert!(
@@ -10357,7 +10396,9 @@ end)"#,
                 "the click moved the window"
             );
             assert!(
-                desk.state.pending_drop.is_none() && desk.state.pending_unmaximize.is_none(),
+                desk.state.pending_drop.is_none()
+                    && desk.state.moves.is_empty()
+                    && desk.state.drags_told.is_empty(),
                 "something is left over from the click"
             );
         }
@@ -10370,12 +10411,12 @@ end)"#,
         /// it was let go, floating and not maximised.
         #[test]
         fn a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer() {
-            let mut desk = Desk::new("drag-unmaximise-floating");
+            let mut desk = Desk::with_floating("drag-unmaximise-floating");
             let (window, toplevel, surface, before) = maximised_floating(&mut desk);
             let from = desk.area.loc + Point::from((desk.area.size.w / 4, 20));
             let time = take_by_the_modifier(&mut desk, (f64::from(from.x), f64::from(from.y)));
             let at = from + Point::from((30, 40));
-            move_pointer(&mut desk.state, (f64::from(at.x), f64::from(at.y)), time);
+            drag_to(&mut desk, (f64::from(at.x), f64::from(at.y)), time);
             desk.round_trip();
             assert!(
                 !in_state(&window, State::Maximized),
@@ -10402,8 +10443,8 @@ end)"#,
                 "the window did not come off at the size it had"
             );
 
-            move_pointer(
-                &mut desk.state,
+            drag_to(
+                &mut desk,
                 (f64::from(at.x) + 100.0, f64::from(at.y) + 50.0),
                 time + 1_000,
             );
@@ -10429,7 +10470,7 @@ end)"#,
         /// neighbour, the layout puts it in the tile it was let go over.
         #[test]
         fn a_window_maximised_out_of_its_tile_comes_off_at_its_tiles_size() {
-            let mut desk = Desk::new("drag-unmaximise-tiled");
+            let mut desk = Desk::with_floating("drag-unmaximise-tiled");
             let (window, toplevel, surface) = desk.open();
             let (other, other_toplevel, other_surface) = desk.open();
             desk.press("super+t");
@@ -10452,7 +10493,7 @@ end)"#,
             let from = desk.area.loc + Point::from((desk.area.size.w / 2, 10));
             let time = take_by_the_modifier(&mut desk, (f64::from(from.x), f64::from(from.y)));
             let at = from + Point::from((40, 200));
-            move_pointer(&mut desk.state, (f64::from(at.x), f64::from(at.y)), time);
+            drag_to(&mut desk, (f64::from(at.x), f64::from(at.y)), time);
             desk.round_trip();
             assert!(
                 !in_state(&window, State::Maximized),
@@ -10480,8 +10521,8 @@ end)"#,
             );
 
             let over = beside.loc + Point::from((beside.size.w / 2, beside.size.h / 2));
-            move_pointer(
-                &mut desk.state,
+            drag_to(
+                &mut desk,
                 (f64::from(over.x), f64::from(over.y)),
                 time + 1_000,
             );
@@ -37845,6 +37886,7 @@ end)
             fn a_finger_drags_a_maximised_window_off_its_maximise() {
                 with_touch_window(true, |desk, opened, window, before| {
                     let region = region(desk);
+                    desk.install("require(\"touch\")\nrequire(\"floating\")");
                     desk.state.toggle_maximize(&window);
                     desk.pump();
                     let (w, h) = last_configured(&desk.client, &opened.toplevel)
@@ -37865,6 +37907,7 @@ end)
                         (at.0 + 3.0, at.1),
                         30_000,
                     );
+                    crate::input::grab::settle_drags(&mut desk.state, false);
                     assert_eq!(
                         (
                             crate::state::window_states(&window).maximized,
@@ -37875,6 +37918,7 @@ end)
                     );
                     let to = (at.0 + 50.0, at.1 + 80.0);
                     crate::synth::touch_motion(&mut desk.state, region, 0, to, 40_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
                     assert!(
                         !crate::state::window_states(&window).maximized,
                         "the finger did not take it off"
@@ -37898,6 +37942,7 @@ end)
                         (to.0 + 100.0, to.1 + 50.0),
                         50_000,
                     );
+                    crate::input::grab::settle_drags(&mut desk.state, false);
                     crate::synth::touch_up(&mut desk.state, region, 0, 60_000);
                     assert_eq!(
                         desk.state.real_geometry(&window).map(|real| real.loc),
@@ -43489,6 +43534,252 @@ Item {
         /// client: the state, what is drawn, what a press and the keyboard
         /// reach, the client's own request, focusing, the shipped layouts,
         /// `super+m`, the overview and `config.minimize`.
+        /// What the compositor gives a configuration over a move drag
+        /// (#452), each on its own and with no maximise in sight: the
+        /// `drag` event, `sol.drag_hold` and `sol.drag_grip`.
+        mod drag_primitives {
+            use super::*;
+            use smithay::backend::input::{ButtonState, KeyState};
+
+            /// Writes down every `drag` and `drop` as `"phase id x,y"`, and
+            /// does to the drag what `on_begin` and `on_move` say, `id`,
+            /// `x` and `y` in scope.
+            fn script(on_begin: &str, on_move: &str) -> String {
+                format!(
+                    r#"
+told = {{}}
+sol.on("drag", function(id, phase, x, y)
+    told[#told + 1] = phase .. " " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+    if phase == "begin" then {on_begin} end
+    if phase == "move" then {on_move} end
+end)
+sol.on("drop", function(id, x, y)
+    told[#told + 1] = "drop " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+end)
+"#
+                )
+            }
+
+            /// A 400 by 300 window at 200,200 with no frame, and `script`.
+            fn desk(script: &str) -> (Desk, Window, u64) {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                desk.pump();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(window.clone(), (200, 200), false);
+                desk.state.space.refresh();
+                // Past its opening, so it is under the pointer where it lives.
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.install(script);
+                (desk, window, opened.pane.get())
+            }
+
+            fn told(desk: &Desk) -> String {
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return table.concat(told, \";\")"))
+                    .unwrap_or_default()
+            }
+
+            fn region(desk: &Desk) -> Rectangle<i32, Logical> {
+                crate::monitor::union(&desk.state.space).expect("a monitor")
+            }
+
+            /// Super and the left button down at `at`: the modifier's move.
+            fn take(desk: &mut Desk, at: (f64, f64)) {
+                move_pointer(&mut desk.state, at, 10_000);
+                crate::input::key(&mut desk.state, 133_u32.into(), KeyState::Pressed, 11);
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Pressed,
+                    12_000,
+                );
+            }
+
+            fn release(desk: &mut Desk, time: u64) {
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    time,
+                );
+                crate::input::key(&mut desk.state, 133_u32.into(), KeyState::Released, 99);
+            }
+
+            fn pass(desk: &mut Desk) {
+                crate::input::grab::settle_drags(&mut desk.state, false);
+            }
+
+            fn at(desk: &Desk, window: &Window) -> Option<Point<i32, Logical>> {
+                desk.state.space.element_location(window)
+            }
+
+            /// **`begin` as the drag starts, one `move` a pass wherever the
+            /// pointer got to, and `end` before the `drop`**, and none of it
+            /// inside the grab: three motions between two passes are one
+            /// `move`, and the window follows every one of them.
+            #[test]
+            fn a_drag_is_told_as_it_begins_moves_once_a_pass_and_ends() {
+                let (mut desk, window, id) = desk(&script("", ""));
+                take(&mut desk, (250.0, 250.0));
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 250,250"),
+                    "told at the press"
+                );
+                for (step, x) in [(1_u64, 260.0), (2, 270.0), (3, 280.0)] {
+                    move_pointer(&mut desk.state, (x, 250.0), 12_000 + step * 1_000);
+                }
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 250,250"),
+                    "a move was told before the pass"
+                );
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((230, 200).into()),
+                    "the window follows"
+                );
+                pass(&mut desk);
+                pass(&mut desk);
+                move_pointer(&mut desk.state, (300.0, 260.0), 20_000);
+                release(&mut desk, 21_000);
+                assert_eq!(
+                    told(&desk),
+                    format!(
+                        "begin {id} 250,250;move {id} 280,250;move {id} 300,260;\
+                         end {id} 300,260;drop {id} 300,260"
+                    )
+                );
+                assert!(desk.state.moves.is_empty(), "the drag is over");
+            }
+
+            /// **A held window stays where it is while the pointer goes on,
+            /// and let go it moves on from where it stands**, with no jump;
+            /// a window let go of while it is held is dropped nowhere.
+            #[test]
+            fn a_held_window_stays_while_the_pointer_moves_and_goes_on_from_where_it_is() {
+                let (mut desk, window, id) = desk(&script(
+                    "sol.drag_hold(id, true)",
+                    "if x >= 400 then sol.drag_hold(id, false) end",
+                ));
+                take(&mut desk, (250.0, 250.0));
+                move_pointer(&mut desk.state, (350.0, 300.0), 13_000);
+                pass(&mut desk);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((200, 200).into()),
+                    "held, it moved"
+                );
+                move_pointer(&mut desk.state, (420.0, 300.0), 14_000);
+                pass(&mut desk);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((200, 200).into()),
+                    "let go, it jumped to the pointer"
+                );
+                move_pointer(&mut desk.state, (450.0, 320.0), 15_000);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((230, 220).into()),
+                    "let go, it did not move on with the pointer"
+                );
+                release(&mut desk, 16_000);
+                assert!(told(&desk).ends_with(&format!("drop {id} 450,320")));
+
+                // Held to the end: no drop.
+                let (mut desk, window, id) = desk_held();
+                take(&mut desk, (250.0, 250.0));
+                move_pointer(&mut desk.state, (300.0, 250.0), 13_000);
+                release(&mut desk, 14_000);
+                assert_eq!(at(&desk, &window), Some((200, 200).into()));
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 250,250;move {id} 300,250;end {id} 300,250"),
+                    "a window held to the end was dropped"
+                );
+            }
+
+            fn desk_held() -> (Desk, Window, u64) {
+                desk(&script("sol.drag_hold(id, true)", ""))
+            }
+
+            /// **A grip puts the window so the point it names is under the
+            /// pointer, and the drag goes on from there**: half along and 10
+            /// down puts the 400-wide window 200 left of the pointer and 10
+            /// above it; a share past the frame is held inside it.
+            #[test]
+            fn a_grip_puts_the_window_under_the_pointer_and_the_drag_goes_on_from_it() {
+                for (grip, gripped) in [
+                    ("{ x = 0.5, dy = 10 }", (500 - 200, 400 - 10)),
+                    ("{ x = 2, y = 2 }", (500 - 400, 400 - 299)),
+                ] {
+                    let (mut desk, window, _) = desk(&script(
+                        "",
+                        &format!(
+                            "if not gripped then gripped = true; sol.drag_grip(id, {grip}) end"
+                        ),
+                    ));
+                    take(&mut desk, (210.0, 210.0));
+                    move_pointer(&mut desk.state, (500.0, 400.0), 13_000);
+                    pass(&mut desk);
+                    assert_eq!(
+                        at(&desk, &window),
+                        Some(gripped.into()),
+                        "{grip}: not under the pointer"
+                    );
+                    move_pointer(&mut desk.state, (540.0, 420.0), 14_000);
+                    assert_eq!(
+                        at(&desk, &window),
+                        Some((gripped.0 + 40, gripped.1 + 20).into()),
+                        "{grip}: the drag did not go on from the grip"
+                    );
+                    release(&mut desk, 15_000);
+                }
+
+                // Let go within the pass of its last motion, as a quick flick
+                // is: the motion is told before the `end`, and the grip still
+                // holds the window where it was let go, and drops it there.
+                let (mut desk, window, id) = desk(&script(
+                    "",
+                    "if not gripped then gripped = true; sol.drag_grip(id, { x = 0.5, dy = 10 }) end",
+                ));
+                take(&mut desk, (210.0, 210.0));
+                move_pointer(&mut desk.state, (500.0, 400.0), 13_000);
+                release(&mut desk, 14_000);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((300, 390).into()),
+                    "a flick was not gripped"
+                );
+                assert!(
+                    told(&desk).ends_with(&format!(
+                        "move {id} 500,400;end {id} 500,400;drop {id} 500,400"
+                    )),
+                    "{}",
+                    told(&desk)
+                );
+                assert!(desk.state.moves.is_empty(), "the drag is over");
+            }
+        }
+
         /// A maximised window's titlebar (#452): a double click on it
         /// still restores it, a click leaves it, and a drag takes it off.
         mod drag_off {
@@ -43558,6 +43849,7 @@ Item {
                         .and_then(Pane::client)
                         .cloned()
                         .expect("a client");
+                    desk.install("require(\"floating\")");
                     desk.state
                         .decorations
                         .set_style(&mut desk.state.panes, Some(style.display().to_string()));
@@ -43618,6 +43910,7 @@ Item {
                     move_pointer(&mut desk.state, at, 20_000);
                     button(&mut desk, ButtonState::Pressed, 21_000);
                     move_pointer(&mut desk.state, (at.0 + 3.0, at.1 + 2.0), 22_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
                     button(&mut desk, ButtonState::Released, 23_000);
                     answer(&mut desk, &opened);
                     assert!(
@@ -43634,12 +43927,14 @@ Item {
                     move_pointer(&mut desk.state, at, 30_000);
                     button(&mut desk, ButtonState::Pressed, 31_000);
                     move_pointer(&mut desk.state, (at.0 + 2.0, at.1), 32_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
                     assert!(
                         in_state(&window, State::Maximized),
                         "the first two pixels restored it"
                     );
                     let to = (at.0 + 50.0, at.1 + 80.0);
                     move_pointer(&mut desk.state, to, 33_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
                     assert!(
                         !in_state(&window, State::Maximized),
                         "the drag did not restore the window"
@@ -43665,6 +43960,7 @@ Item {
                         "the pointer is not on its titlebar"
                     );
                     move_pointer(&mut desk.state, (to.0 + 100.0, to.1 + 50.0), 34_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
                     button(&mut desk, ButtonState::Released, 35_000);
                     answer(&mut desk, &opened);
                     assert_eq!(

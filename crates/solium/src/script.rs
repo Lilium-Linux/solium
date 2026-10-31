@@ -679,6 +679,20 @@ pub(crate) enum Command {
     ToggleMaximize {
         id: u64,
     },
+    /// Hold a window a move drag has where it is while the pointer goes on,
+    /// or let it go on from where it stands: `sol.drag_hold` (#452).
+    DragHold {
+        id: u64,
+        held: bool,
+    },
+    /// Where the pointer holds a window a move drag has: `along` of its
+    /// frame's width and height, `by` pixels further. `sol.drag_grip`
+    /// (#452).
+    DragGrip {
+        id: u64,
+        along: (f64, f64),
+        by: (f64, f64),
+    },
     /// Minimize a window (#30): `sol.minimize`, and `super+m`. Nothing for
     /// a window already minimized. See `WindowInfo::minimized`.
     Minimize {
@@ -833,11 +847,6 @@ pub(crate) enum Command {
     /// What a fullscreen window covers: `fullscreen.covers`. See
     /// `crate::stack::Covers`.
     Fullscreen(crate::stack::Covers),
-    /// How far a maximised window is dragged before it comes off:
-    /// `maximize.restore_after` (#452). See `crate::state::Solium::maximize`.
-    Maximize {
-        restore_after: f64,
-    },
     /// The idle blank, and what a window on a screen that is off is told.
     /// See `crate::idle::Settings`.
     Idle(crate::idle::Settings),
@@ -959,6 +968,8 @@ impl Command {
             | Self::Warp(_)
             | Self::ToggleFullscreen { .. }
             | Self::ToggleMaximize { .. }
+            | Self::DragHold { .. }
+            | Self::DragGrip { .. }
             | Self::Minimize { .. }
             | Self::Unminimize { .. }
             | Self::ShowMinimized { .. }
@@ -1005,7 +1016,6 @@ impl Command {
             | Self::ClientSizes(_)
             | Self::Resize(_)
             | Self::Fullscreen(_)
-            | Self::Maximize { .. }
             | Self::Idle(_)
             | Self::AutoReload(_)
             | Self::Input(_)
@@ -3074,6 +3084,21 @@ impl Scripts {
 
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "layout", ()))
+    }
+
+    /// A move drag of a window began, moved or ended (#452): `(id, phase,
+    /// x, y)`, told by `crate::input::grab::settle_drags`.
+    pub(crate) fn dragged(
+        &mut self,
+        id: u64,
+        phase: &'static str,
+        x: f64,
+        y: f64,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.dispatch_as(FocusSource::Drop, snapshot, move |lua, _| {
+            call_listeners(lua, "drag", (id, phase, x, y))
+        })
     }
 
     /// A window was dragged and let go.
@@ -5857,38 +5882,6 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // How far a maximised window is dragged before it comes off:
-    // `{ restore_after = 6 }`, from `init.lua` with `config.maximize` (#452).
-    // Pixels from 0 to `RESTORE_AFTER_MAX`; anything else is named in the
-    // log and the default kept, as `resize.patience` is, and an absent table
-    // or key is the default, for `sol.resize`'s reason.
-    // `the_shipped_maximize_setting_reaches_the_compositor`.
-    sol.set(
-        "maximize",
-        lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut restore_after = crate::state::RESTORE_AFTER;
-            if let Some(options) = options {
-                match options.get::<Value>("restore_after") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value)
-                        .filter(|pixels| (0.0..=crate::state::RESTORE_AFTER_MAX).contains(pixels))
-                    {
-                        Some(pixels) => restore_after = pixels,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            most = crate::state::RESTORE_AFTER_MAX,
-                            "maximize.restore_after is a number of pixels from 0 to most; \
-                             keeping the default"
-                        ),
-                    },
-                }
-            }
-            with_pending(lua, |pending| {
-                pending.commands.push(Command::Maximize { restore_after });
-            })
-        })?,
-    )?;
-
     // The pointer's XCursor theme and its size, in logical pixels.
     //
     // An optional table, the same shape as `sol.loading` above and for the
@@ -6521,6 +6514,47 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             with_pending(lua, |pending| {
                 pending.commands.push(Command::ToggleMaximize { id });
+            })
+        })?,
+    )?;
+
+    // Hold a window a move drag has where it is, or let it go on (#452).
+    // While held, the pointer goes on and the `drag` listeners go on hearing
+    // it; let go, the window moves on from where it stands. A window no drag
+    // has is left alone.
+    // `real_client::reflow_on_close::drag_primitives::a_held_window_stays_while_the_pointer_moves_and_goes_on_from_where_it_is`.
+    sol.set(
+        "drag_hold",
+        lua.create_function(|lua, (id, held): (u64, bool)| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::DragHold { id, held });
+            })
+        })?,
+    )?;
+
+    // Where the pointer holds a window a move drag has (#452): `{ x, y }`
+    // as shares of its frame's width and height, and `{ dx, dy }` pixels
+    // further, each 0 when left out, from the frame's top-left. The window
+    // goes there at once and the drag goes on from there.
+    // `real_client::reflow_on_close::drag_primitives::a_grip_puts_the_window_under_the_pointer_and_the_drag_goes_on_from_it`.
+    sol.set(
+        "drag_grip",
+        lua.create_function(|lua, (id, grip): (u64, mlua::Table)| {
+            let get = |key: &str| -> mlua::Result<f64> {
+                Ok(grip.get::<Option<f64>>(key)?.unwrap_or(0.0))
+            };
+            let along = (get("x")?, get("y")?);
+            let by = (get("dx")?, get("dy")?);
+            if ![along.0, along.1, by.0, by.1]
+                .iter()
+                .all(|value| value.is_finite())
+            {
+                return Err(mlua::Error::RuntimeError(
+                    "sol.drag_grip: x, y, dx and dy are numbers".to_owned(),
+                ));
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::DragGrip { id, along, by });
             })
         })?,
     )?;
@@ -12842,43 +12876,6 @@ mod tests {
                 .into_iter()
                 .filter_map(|command| match command {
                     Command::Fullscreen(covers) => Some(covers),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(handed, vec![wanted], "{user}");
-            let _ = std::fs::remove_dir_all(&directory);
-        }
-    }
-
-    /// **#452: the shipped `maximize.restore_after` reaches the compositor**:
-    /// 6 pixels as shipped, a user's number in its place, and a number out of
-    /// range, or not a number, keeping the 6.
-    #[test]
-    fn the_shipped_maximize_setting_reaches_the_compositor() {
-        for (user, wanted) in [
-            ("return {}", crate::state::RESTORE_AFTER),
-            ("return { maximize = { restore_after = 20 } }", 20.0),
-            ("return { maximize = { restore_after = 0 } }", 0.0),
-            (
-                "return { maximize = { restore_after = -3 } }",
-                crate::state::RESTORE_AFTER,
-            ),
-            (
-                "return { maximize = { restore_after = \"far\" } }",
-                crate::state::RESTORE_AFTER,
-            ),
-        ] {
-            let Some((directory, mut scripts)) =
-                shipped_init_with_user("solium-script-test-maximize", user)
-            else {
-                return;
-            };
-            let handed: Vec<f64> = scripts
-                .startup()
-                .commands
-                .into_iter()
-                .filter_map(|command| match command {
-                    Command::Maximize { restore_after } => Some(restore_after),
                     _ => None,
                 })
                 .collect();
