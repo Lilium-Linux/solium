@@ -68,6 +68,7 @@ kept.hover = kept.hover or {}
 kept.aside = nil
 kept.drag = nil
 kept.moving = nil
+kept.covered = kept.covered or {}
 
 atrium.desks = kept.desks
 
@@ -85,7 +86,6 @@ local function settings()
     local hover = type(given.hover) == "table" and given.hover or {}
     local card = type(given.card) == "table" and given.card or {}
     local drag = type(given.drag) == "table" and given.drag or {}
-    local dragging = type(drag.motion) == "table" and drag.motion or {}
     return {
         enabled = given.enabled ~= false,
         strip = number(given.strip, 220, 80),
@@ -104,10 +104,6 @@ local function settings()
         part = number(hover.part, 20, -1000),
         threshold = number(drag.threshold, 8),
         reach = number(drag.reach, 320, 1),
-        drag_motion = {
-            stiffness = number(dragging.stiffness, 1400, 1),
-            damping = number(dragging.damping, 75, 1),
-        },
         motion = {
             stiffness = number(motion.stiffness, 300, 1),
             damping = number(motion.damping, 32, 1),
@@ -205,6 +201,13 @@ local function reconcile(windows, by_id)
             local group = groups[index]
             for at = #group, 1, -1 do
                 if where[group[at]] ~= key then
+                    -- Closed, or closing: the stage stays where it is, bare
+                    -- once its last window has gone, rather than the next
+                    -- card coming forward in its place (Illia, 2026-11-01).
+                    local window = by_id[group[at]]
+                    if index == 1 and (window == nil or window.leaving) then
+                        group.bare = true
+                    end
                     table.remove(group, at)
                 end
             end
@@ -348,9 +351,18 @@ end
 -- can be let go of after it.
 local touched = {}
 
+-- Set while an arrangement answers a `maximize` or `fullscreen`, where
+-- `sol.animate` would also time the window's own change: each present then
+-- names its own spring instead, and the batch's timing is left alone.
+local quiet = nil
+
 local function present(id, options)
     touched[id] = true
     kept.presented[tostring(id)] = true
+    if quiet then
+        local spring = { easing = { spring = quiet } }
+        options.motion = { x = spring, y = spring, size = spring, opacity = spring }
+    end
     sol.present(id, options)
 end
 
@@ -404,6 +416,22 @@ local function icon_of(app)
     return icons[lower] or icons[(lower:match("([^.]+)$") or lower)] or app
 end
 
+-- Whether a stage window covers the strip, so it slides away. The strip's icons
+-- are drawn over every window, its cards under the stage, so a strip left out
+-- under a stage window would show its icons on top of it.
+local function covering(groups, by_id, strip, set)
+    if set.hide ~= "overlap" then
+        return false
+    end
+    for _, id in ipairs(groups[1] or {}) do
+        local window = by_id[id]
+        if window and id ~= kept.moving and overlaps(window, strip) then
+            return true
+        end
+    end
+    return false
+end
+
 -- One desk's strip: every group but the stage as a card, the groups past
 -- `cards` waiting off the edge, all of them slid away while a stage window
 -- covers the strip. Returns what the strip scene draws, for a desk in view.
@@ -425,15 +453,8 @@ local function arrange_desk(key, area, by_id, set, children)
         end
     end
 
-    local covered = false
-    if set.hide == "overlap" then
-        for _, id in ipairs(groups[1] or {}) do
-            local window = by_id[id]
-            if window and id ~= kept.moving and overlaps(window, strip) then
-                covered = true
-            end
-        end
-    end
+    local covered = covering(groups, by_id, strip, set)
+    kept.covered[key] = covered
     local in_view = showing(monitor) == key
     local peeking = covered and in_view and kept.peek[monitor] == true
     local hidden = covered and not peeking
@@ -565,11 +586,14 @@ local function declare_strip(monitor, area, set, drawn)
 end
 
 -- Lay out every desk: the stage released, the strip drawn, the scenes told.
-function atrium.arrange()
+-- `own_timing`: each present names its spring rather than `sol.animate`
+-- setting the batch's, for a listener whose batch timing means something else.
+function atrium.arrange(own_timing)
     if not atrium.running() then
         return
     end
     local set = settings()
+    quiet = own_timing and set.motion or nil
     local windows = sol.windows()
     local by_id = {}
     local children = {}
@@ -582,7 +606,9 @@ function atrium.arrange()
         end
     end
     reconcile(windows, by_id)
-    sol.animate({ easing = { spring = set.motion } })
+    if not quiet then
+        sol.animate({ easing = { spring = set.motion } })
+    end
     touched = {}
     for _, monitor in ipairs(sol.monitors()) do
         local drawn = nil
@@ -608,6 +634,7 @@ function atrium.arrange()
             end
         end
     end
+    quiet = nil
 end
 
 -- Atrium on or off within floating: `super+a` (`floating.atrium.key`).
@@ -691,6 +718,26 @@ local function morph(group, by_id, card_rects, x, y, fx, fy, t)
     return out
 end
 
+-- A card's rects as a hovered card is drawn: `lift` times larger about its
+-- front window's left edge and middle, `shift` out towards the stage.
+local function lifted(rects, lift, shift)
+    local front = rects[1]
+    if not front or (lift == 1 and shift == 0) then
+        return rects
+    end
+    local out = {}
+    for at, each in ipairs(rects) do
+        out[at] = {
+            id = each.id,
+            x = front.x + (each.x - front.x) * lift + shift,
+            y = front.y + front.h / 2 + (each.y - front.y - front.h / 2) * lift,
+            w = each.w * lift,
+            h = each.h * lift,
+        }
+    end
+    return out
+end
+
 -- The group of card `card` on the desk `monitor` shows, with what dragging it
 -- needs: the desk, the work area, the windows by id and its card's rects.
 local function dragged_group(monitor, card)
@@ -723,28 +770,37 @@ local function drag(monitor, card, x, y, px, py)
     if not it then
         return
     end
+    local set = it.set
     local gx, gy = it.area.x + (tonumber(x) or 0), it.area.y + (tonumber(y) or 0)
     local held = kept.drag
     if not held or held.key ~= it.key or held.card ~= it.index - 1 then
-        -- Picked up: where on the front window, as shares of it.
-        local front = it.rects[1]
-        local ax, ay = it.area.x + (tonumber(px) or 0), it.area.y + (tonumber(py) or 0)
+        -- Picked up as it is drawn: a hovered card lifted, out towards the
+        -- stage and flat, and held by where on its front window it was
+        -- pressed, as shares of it.
+        local hovered = kept.hover[monitor] == it.index - 1
         held = {
             key = it.key, card = it.index - 1, monitor = monitor,
-            fx = math.max(0, math.min(1, (ax - front.x) / front.w)),
-            fy = math.max(0, math.min(1, (ay - front.y) / front.h)),
+            lift = hovered and set.lift or 1,
+            shift = hovered and set.shift or 0,
+            tilt = hovered and set.tilt * set.hover_tilt or set.tilt,
         }
+        local front = lifted(it.rects, held.lift, held.shift)[1]
+        local ax, ay = it.area.x + (tonumber(px) or 0), it.area.y + (tonumber(py) or 0)
+        held.fx = math.max(0, math.min(1, (ax - front.x) / front.w))
+        held.fy = math.max(0, math.min(1, (ay - front.y) / front.h))
         kept.drag = held
         kept.hover[monitor] = nil
         atrium.arrange()
     end
     local t = atrium.closeness(it.area, gx)
-    local set = it.set
-    sol.animate({ easing = { spring = set.drag_motion } })
-    for at, each in ipairs(morph(it.group, it.by_id, it.rects, gx, gy, held.fx, held.fy, t)) do
+    -- In the hand: where the pointer is, every time it moves. Only letting go
+    -- springs.
+    sol.animate({ duration = 0 })
+    local rects = lifted(it.rects, held.lift, held.shift)
+    for at, each in ipairs(morph(it.group, it.by_id, rects, gx, gy, held.fx, held.fy, t)) do
         present(each.id, {
             x = each.x, y = each.y, w = each.w, h = each.h,
-            rotate_y = set.tilt * t, pivot_x = 0, perspective = set.perspective,
+            rotate_y = held.tilt * t, pivot_x = 0, perspective = set.perspective,
             opacity = at == 1 and 1 or (1 - t) + set.behind * t, z = 200 - at * 0.1,
         })
     end
@@ -767,7 +823,8 @@ local function drop(monitor, card, x, y)
         atrium.arrange()
         return
     end
-    for _, each in ipairs(morph(it.group, it.by_id, it.rects, gx, gy, held.fx, held.fy, 0)) do
+    local rects = lifted(it.rects, held.lift or 1, held.shift or 0)
+    for _, each in ipairs(morph(it.group, it.by_id, rects, gx, gy, held.fx, held.fy, 0)) do
         sol.place(each.id, { x = math.floor(each.x), y = math.floor(each.y),
             w = math.floor(each.w), h = math.floor(each.h), tile = false })
     end
@@ -870,7 +927,8 @@ local function tick()
     local card = box and math.min(box.w / window.w, box.h / window.h, 1) or 1
     local scale = 1 + (card - 1) * t
     local w, h = window.w * scale, window.h * scale
-    sol.animate({ easing = { spring = set.drag_motion } })
+    -- Under the pointer as the compositor has it this frame, not chasing it.
+    sol.animate({ duration = 0 })
     present(press.id, {
         x = pointer.x - press.fx * w, y = pointer.y - press.fy * h, w = w, h = h,
         rotate_y = set.tilt * t, pivot_x = 0, perspective = set.perspective, z = 300,
@@ -919,11 +977,21 @@ sol.on("open", function(id)
     atrium.arrange()
 end)
 
-sol.on("focus", function(id)
+sol.on("focus", function(id, source)
     if not atrium.running() or not id then
         return
     end
     local key, index = find(id)
+    -- A close handing the keyboard on (`focus.after_close`) changes no stage:
+    -- the stage's own next window takes it, and with none left the stage
+    -- stays bare.
+    if source == "settle" and key and index > 1 then
+        local stage = kept.desks[key][1]
+        if stage and stage[1] then
+            sol.focus(stage[1])
+        end
+        return
+    end
     if not key then
         -- Shown again, or refused a close: a newcomer, which the groups take
         -- in before it is brought forward.
@@ -940,6 +1008,37 @@ for _, event in ipairs({ "closing", "refused", "close", "minimize", "unminimize"
         atrium.arrange()
     end)
 end
+
+-- A stage window maximised, made fullscreen or put back may cover the strip
+-- or uncover it. The change is told with the window already at its new rect,
+-- and timed by whatever listener calls `sol.animate`, so the cards move on
+-- their own springs.
+for _, event in ipairs({ "maximize", "fullscreen" }) do
+    sol.on(event, function()
+        atrium.arrange(true)
+    end)
+end
+
+-- An edge dragged may take a stage window over the strip, or off it. Told
+-- as the edge moves, so only a change in that is laid out.
+sol.on("resize", function(id)
+    if not atrium.running() then
+        return
+    end
+    local key, index = find(id)
+    local area = key and index == 1 and monitors.named(key:match("@(.*)$"))
+    if not area then
+        return
+    end
+    local by_id = {}
+    for _, window in ipairs(sol.windows()) do
+        by_id[window.id] = window
+    end
+    local set = settings()
+    if covering(kept.desks[key], by_id, strip_of(area, set), set) ~= (kept.covered[key] == true) then
+        atrium.arrange(true)
+    end
+end)
 
 -- A stage window let go over the strip leaves its group, as a card of its own
 -- just under the stage, and is moved out of the strip's way for when it is

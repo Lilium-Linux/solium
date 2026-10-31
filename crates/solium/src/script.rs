@@ -23062,6 +23062,199 @@ mod directions {
             "every bad call is an error, and none asks for a warp"
         );
     }
+
+    /// Atrium's stage and strip (#449), on `WIDE`, whose strip is the left
+    /// 220 pixels with its one card's slot at (22, 657), 176 by 126.
+    mod atrium {
+        use super::{Command, Desk, FocusSource, Rect, Snapshot, one_screen};
+        use std::time::Duration;
+
+        /// Window 2 on the stage clear of the strip, window 1 the card.
+        fn desk() -> Desk {
+            let at = |x: f64| Rect {
+                x,
+                y: 100.0,
+                w: 800.0,
+                h: 600.0,
+            };
+            let mut desk = Desk::floating(one_screen(), &[(2, "DP-1", at(600.0)), (1, "DP-1", at(700.0))]);
+            let snapshot = desk.snapshot();
+            act(&mut desk, "leave", "{}", snapshot);
+            desk
+        }
+
+        fn act(desk: &mut Desk, action: &str, data: &str, snapshot: Snapshot) -> super::super::Outcome {
+            let data = crate::json::Json::parse(data).expect("valid JSON");
+            desk.scripts.surface_action("atrium@DP-1", action, &data, snapshot)
+        }
+
+        fn set_rect(desk: &mut Desk, id: u64, rect: Rect) {
+            if let Some(window) = desk.windows.iter_mut().find(|window| window.id == id) {
+                window.rect = rect;
+            }
+        }
+
+        /// Window `id`'s last present in `commands`: its rect, opacity, how
+        /// long it moves and whether it named a timing per property.
+        fn presented(commands: &[Command], id: u64) -> Option<(Option<Rect>, Option<f32>, Duration, bool)> {
+            commands.iter().rev().find_map(|command| match command {
+                Command::Present {
+                    id: each,
+                    rect,
+                    opacity,
+                    animation,
+                    channels,
+                    ..
+                } if *each == id => Some((*rect, *opacity, animation.duration, channels.is_some())),
+                _ => None,
+            })
+        }
+
+        /// **A stage window maximised over the strip sends the strip away,
+        /// and its restore brings it back** -- the cards with their icons:
+        /// the cards are drawn under the stage but the icons over every
+        /// window, so a strip left out under a maximised window showed its
+        /// icons on top of it. Answered without `sol.animate`, which in a
+        /// `maximize` listener would time the maximise itself.
+        #[test]
+        fn a_stage_window_maximised_over_the_strip_sends_the_strip_away() {
+            let mut desk = desk();
+            let restored = desk.rect(2);
+            set_rect(&mut desk, 2, super::WIDE);
+            let outcome = desk.scripts.maximize(2, true, desk.snapshot());
+            let card = presented(&outcome.commands, 1).expect("the card is drawn again");
+            assert_eq!(card.1, Some(0.0), "the strip slid away: {card:?}");
+            assert!(card.3, "the card names its own timing");
+            assert!(outcome.motion.is_none(), "the maximise keeps its own timing: {:?}", outcome.motion);
+
+            set_rect(&mut desk, 2, restored);
+            let outcome = desk.scripts.maximize(2, false, desk.snapshot());
+            let card = presented(&outcome.commands, 1).expect("the card is drawn again");
+            assert_eq!(card.1, Some(1.0), "the strip is back: {card:?}");
+            assert!(outcome.motion.is_none());
+        }
+
+        /// **An edge dragged over the strip sends it away**, and an edge
+        /// dragged on while it is away draws nothing again.
+        #[test]
+        fn a_stage_window_resized_over_the_strip_sends_the_strip_away() {
+            let mut desk = desk();
+            let wider = Rect {
+                x: 100.0,
+                y: 100.0,
+                w: 1300.0,
+                h: 600.0,
+            };
+            set_rect(&mut desk, 2, wider);
+            let outcome = desk.scripts.resized(2, (100.0, 400.0), (Some("left"), None), desk.snapshot());
+            let card = presented(&outcome.commands, 1).expect("the card is drawn again");
+            assert_eq!(card.1, Some(0.0), "the strip slid away: {card:?}");
+
+            set_rect(&mut desk, 2, Rect { x: 90.0, w: 1310.0, ..wider });
+            let outcome = desk.scripts.resized(2, (90.0, 400.0), (Some("left"), None), desk.snapshot());
+            assert_eq!(presented(&outcome.commands, 1), None, "nothing changed for the strip");
+        }
+
+        /// **A card dragged out of the strip is where the pointer is, every
+        /// time it moves** -- no spring chasing it, which trailed the
+        /// pointer by tens of milliseconds both ways across.
+        #[test]
+        fn a_dragged_card_is_drawn_where_the_pointer_is_at_once() {
+            let mut desk = desk();
+            for x in [300.0, 450.0, 900.0] {
+                let snapshot = desk.snapshot();
+                let outcome = act(
+                    &mut desk,
+                    "drag",
+                    &format!(r#"{{"card":1,"x":{x},"y":720,"px":100,"py":720}}"#),
+                    snapshot,
+                );
+                let card = presented(&outcome.commands, 1).expect("the dragged card is drawn");
+                assert_eq!((card.2, card.3), (Duration::ZERO, false), "at x {x}: {card:?}");
+            }
+        }
+
+        /// **A hovered card picked up stays as it is drawn**: lifted, out
+        /// towards the stage and flat, under the same point of the pointer
+        /// -- not snapped back to its slot's size in the first frame of the
+        /// drag.
+        #[test]
+        fn a_hovered_card_picked_up_does_not_jump() {
+            let mut desk = desk();
+            let snapshot = desk.snapshot();
+            let hovered = act(&mut desk, "hover", r#"{"card":1}"#, snapshot);
+            let lifted = presented(&hovered.commands, 1).expect("the hovered card is drawn").0.expect("a rect");
+            let snapshot = desk.snapshot();
+            let picked = act(&mut desk, "drag", r#"{"card":1,"x":100,"y":720,"px":100,"py":720}"#, snapshot);
+            let held = presented(&picked.commands, 1).expect("the picked card is drawn").0.expect("a rect");
+            for (was, is) in [(lifted.x, held.x), (lifted.y, held.y), (lifted.w, held.w), (lifted.h, held.h)] {
+                assert!((was - is).abs() < 0.5, "lifted {lifted:?}, held {held:?}");
+            }
+        }
+
+        /// The stage's group and the cards behind it, as `"3,2|1"`: each
+        /// group's windows front first, the stage first.
+        fn groups(desk: &Desk) -> String {
+            desk.scripts.evaluate(
+                "local out = {}\n\
+                 for _, groups in pairs(sol.keep(\"atrium\", {}).desks) do\n\
+                     for _, group in ipairs(groups) do out[#out + 1] = table.concat(group, \",\") end\n\
+                 end\n\
+                 return table.concat(out, \"|\")",
+            )
+        }
+
+        fn closing(desk: &mut Desk, id: u64) {
+            if let Some(window) = desk.windows.iter_mut().find(|window| window.id == id) {
+                window.leaving = true;
+            }
+            let snapshot = desk.snapshot();
+            let outcome = desk.scripts.closing(id, snapshot);
+            desk.apply(&outcome.commands);
+        }
+
+        /// **A window closed on the stage leaves the stage as it was**: the
+        /// keyboard the close hands to a card's window (floating's
+        /// `after_close` is the window used before, most often a card's)
+        /// goes to the stage's next window instead, and no card comes
+        /// forward.
+        #[test]
+        fn a_window_closed_on_the_stage_keeps_the_stage() {
+            let mut desk = desk();
+            desk.windows.insert(0, super::window(3, "DP-1", Rect { x: 640.0, y: 140.0, w: 800.0, h: 600.0 }));
+            for window in &mut desk.windows {
+                if window.id != 1 {
+                    window.app_id = "editor".to_owned();
+                }
+            }
+            let snapshot = desk.snapshot();
+            act(&mut desk, "leave", "{}", snapshot);
+            assert_eq!(groups(&desk), "2,3|1", "the editor's two windows on the stage");
+
+            closing(&mut desk, 2);
+            let snapshot = desk.snapshot();
+            let outcome = desk.scripts.focused(1, FocusSource::Settle, true, snapshot);
+            assert!(
+                outcome.commands.iter().any(|command| matches!(command, Command::Focus { id: 3, .. })),
+                "the keyboard goes to the stage's next window: {:?}",
+                outcome.commands
+            );
+            assert_eq!(groups(&desk), "3|1", "the card stays a card");
+        }
+
+        /// **The stage's last window closed leaves the stage bare**, the
+        /// desktop showing, until a card is picked or a window opens -- not
+        /// the next card brought forward in its place.
+        #[test]
+        fn the_stages_last_window_closed_leaves_it_bare() {
+            let mut desk = desk();
+            closing(&mut desk, 2);
+            assert_eq!(groups(&desk), "|1", "a bare stage and the card behind it");
+            let snapshot = desk.snapshot();
+            desk.scripts.focused(1, FocusSource::Settle, true, snapshot);
+            assert_eq!(groups(&desk), "|1", "the keyboard handed over brings nothing forward");
+        }
+    }
 }
 
 /// `sol.bind`'s options (#224): the third argument is a note, or a table that

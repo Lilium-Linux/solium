@@ -1588,13 +1588,13 @@ local defaults = {
             -- pixels further away.
             hover = { lift = 1.12, tilt = 0, shift = 28, part = 20 },
             -- A card dragged out of the strip: how far, in pixels, a press
-            -- moves before it is a drag; over how many pixels past the strip
-            -- it turns from a card into its windows, flat and at their own
-            -- size; and the spring it follows the pointer on.
+            -- moves before it is a drag, and over how many pixels past the
+            -- strip it turns from a card into its windows, flat and at their
+            -- own size. A card or window in the hand is drawn where the
+            -- pointer is, with no spring; only letting go rides `motion`.
             drag = {
                 threshold = 8,
                 reach = 320,
-                motion = { stiffness = 1400, damping = 75 },
             },
             -- "overlap": the strip slides off the edge while a stage window
             -- covers it, and comes back when the pointer touches the edge.
