@@ -516,6 +516,8 @@ impl Solium {
                     // reserved slot has no client to have said anything.
                     content_type: pane.client().map_or("none", content_type_of),
                     pid: pane.client().and_then(|window| self.window_pid(window)),
+                    // What its frame takes of `rect` right now (#435).
+                    insets: self.insets_of(pane.id()),
                 })
             })
             .collect()
