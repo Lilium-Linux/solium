@@ -1163,6 +1163,18 @@ function sol.reload() end
 ---@return nil
 function sol.take_shortcuts_back() end
 
+---
+---Take the pointer back from the window holding it: a game that locked it
+---still or confined it to its window. Only the window with the keyboard ever
+---holds the pointer, so moving the keyboard elsewhere lets go of it too; this
+---is for when the keyboard is still on the game. The window holds the pointer
+---again once it is pressed on. An X11 window (a Proton game) also loses the
+---keyboard, because an X client lets go of its own grabs only when it loses
+---the focus. The shipped `super+Escape` calls it. Nothing happens when no
+---window holds the pointer.
+---@return nil
+function sol.release_pointer() end
+
 ---Choose how every window is framed, at once.
 ---
 ---A name is a folder under `~/.config/solium/qml/panes` or the shipped

@@ -1181,6 +1181,24 @@ impl Solium {
     }
 
     fn initial_placement(&self, window: &Window, size: Size<i32, Logical>) -> Point<i32, Logical> {
+        // The monitor under the pointer, or, for an X11 window the person
+        // running it placed (`USPosition`), the one it was placed on (#427).
+        // There, at the place asked for, kept whole on it.
+        let user = crate::xwayland::user_placed_at(window);
+        let asked = user
+            .and_then(|at| crate::monitor::at(&self.space, at.to_f64()))
+            .and_then(|output| self.work_area_on(&output));
+        if let (Some(at), Some(area)) = (user, asked) {
+            let top = area.loc.y + self.frame_insets(window).top;
+            return (
+                at.x.clamp(
+                    area.loc.x,
+                    (area.loc.x + area.size.w - size.w).max(area.loc.x),
+                ),
+                at.y.clamp(top, (area.loc.y + area.size.h - size.h).max(top)),
+            )
+                .into();
+        }
         let Some(output) = self.work_area() else {
             return (0, 0).into();
         };

@@ -23,7 +23,7 @@ use smithay::{
         },
         wayland_server::{DisplayHandle, protocol::wl_surface::WlSurface},
     },
-    utils::{Logical, Rectangle, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
         seat::WaylandFocus,
         selection::SelectionTarget,
@@ -215,6 +215,108 @@ pub(crate) fn maps_fullscreen(
         return None;
     }
     monitors.into_iter().find(|monitor| *monitor == at)
+}
+
+/// Where a new X11 window was put by the person running it, if it was: its
+/// own position, when its `WM_NORMAL_HINTS` mark it `USPosition`, as
+/// `xterm -geometry +0+0` does (#427).
+///
+/// **`USPosition` and not `PPosition`**, which says the *program* chose the
+/// spot. Toolkits set that on nearly every window whether or not anything
+/// chose it -- Wine writes it for every window it maps, from the rectangle
+/// Windows gave the game -- so honouring it would put every Proton game where
+/// Wine's first monitor is, which is the bug. A window that only says
+/// `PPosition` opens on the monitor under the pointer, as a Wayland window
+/// does.
+pub(crate) fn user_placed(
+    hints: Option<&x11rb::properties::WmSizeHints>,
+    at: Point<i32, Logical>,
+) -> Option<Point<i32, Logical>> {
+    hints
+        .and_then(|hints| hints.position)
+        .filter(|(by, _, _)| {
+            matches!(
+                by,
+                x11rb::properties::WmSizeHintsSpecification::UserSpecified
+            )
+        })
+        .map(|_| at)
+}
+
+/// The monitor an X11 window that maps covering `asked` goes fullscreen on
+/// (#427): the one under the pointer, `under_pointer`, unless the person
+/// running it placed it (`by_user`).
+///
+/// Wine puts a game started fullscreen over the monitor Windows calls
+/// primary, which is the X server's first, the top one on Illia's desk,
+/// wherever the game was started from; The Finals opened there with Steam
+/// and the pointer on the other monitor. Fullscreen on another monitor is
+/// told that monitor's size, as a key moving a fullscreen window across
+/// already tells it.
+pub(crate) fn fullscreen_on(
+    asked: Rectangle<i32, Logical>,
+    by_user: bool,
+    under_pointer: Option<Rectangle<i32, Logical>>,
+) -> Rectangle<i32, Logical> {
+    match under_pointer {
+        Some(screen) if !by_user => screen,
+        _ => asked,
+    }
+}
+
+/// Where the person running an X11 window asked it to open
+/// ([`user_placed`]), kept on the surface at map time for
+/// `Solium::initial_placement`, which runs once it has drawn.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UserPlaced(pub(crate) Option<Point<i32, Logical>>);
+
+/// [`UserPlaced`]'s answer for a window, `None` for one that asked nothing
+/// or is not an X11 window.
+pub(crate) fn user_placed_at(window: &Window) -> Option<Point<i32, Logical>> {
+    window
+        .x11_surface()
+        .and_then(|x11| x11.user_data().get::<UserPlaced>().copied())
+        .and_then(|placed| placed.0)
+}
+
+/// The rectangle an X11 window drawn at `drawn_at` must be told, if what it
+/// was last told (`told`, smithay's `X11Surface::geometry`) puts it anywhere
+/// else: the same size, at `drawn_at`. `None` when it already knows (#441;
+/// see `Solium::tell_x11_where_they_are`).
+pub(crate) fn told_again(
+    drawn_at: Point<i32, Logical>,
+    told: Rectangle<i32, Logical>,
+) -> Option<Rectangle<i32, Logical>> {
+    (told.loc != drawn_at).then(|| Rectangle::new(drawn_at, told.size))
+}
+
+/// What an X11 window's `ConfigureRequest` is granted: the size it asked for,
+/// or the one it has, and the position it asked for unless the compositor
+/// already holds the window somewhere (`kept_at`), where it stays (#441).
+///
+/// A managed window's place is the space's: a client asking to move one is
+/// answered with where it is, the way ICCCM 4.1.5 lets a window manager
+/// answer, so the X server and the screen never disagree. Granting the move
+/// on the X side alone, as this did, left the window drawn where the layout
+/// put it and believed where the client asked, and every menu the client then
+/// opened was placed from the belief. A window not yet in the space (it moves
+/// itself before it maps, which is how a menu and a game say where they go)
+/// and an unmanaged one are granted what they ask.
+pub(crate) fn granted(
+    current: Rectangle<i32, Logical>,
+    asked: (Option<i32>, Option<i32>, Option<u32>, Option<u32>),
+    kept_at: Option<Point<i32, Logical>>,
+) -> Rectangle<i32, Logical> {
+    let (x, y, w, h) = asked;
+    let size = (
+        w.and_then(|w| i32::try_from(w).ok())
+            .unwrap_or(current.size.w),
+        h.and_then(|h| i32::try_from(h).ok())
+            .unwrap_or(current.size.h),
+    );
+    let at =
+        kept_at.unwrap_or_else(|| (x.unwrap_or(current.loc.x), y.unwrap_or(current.loc.y)).into());
+    Rectangle::new(at, (size.0.max(1), size.1.max(1)).into())
 }
 
 /// `config.x11.hidden`, handed over by the shipped `init.lua`'s
@@ -418,7 +520,10 @@ where
                 // Its cursor surfaces are drawn as the shapes their X names
                 // stand for, which a connection of our own hears (#364).
                 solium.pointer.xwayland(client.id());
-                crate::cursor::x11::watch(&loop_handle, display_number);
+                // And known by their pictures, in the themes an X client may
+                // have read, Solium's own first (#442).
+                let theme = solium.pointer.theme_name();
+                crate::cursor::x11::watch(&loop_handle, display_number, theme);
             }
             Err(err) => {
                 tracing::warn!(?err, "could not manage XWayland's windows");
@@ -547,13 +652,24 @@ impl XwmHandler for Solium {
         let asked_for = window.geometry().loc;
         // And whether it is asking, by how it maps, to cover a monitor: read
         // here for the same reason, and acted on below, once it has a pane.
+        //
+        // On the monitor under the pointer unless the person running it put
+        // it somewhere (#427): see `fullscreen_on` and `user_placed`.
+        let by_user = user_placed(window.size_hints().as_ref(), window.geometry().loc);
+        window
+            .user_data()
+            .insert_if_missing_threadsafe(|| UserPlaced(by_user));
+        let under_pointer = self
+            .active_output()
+            .and_then(|output| self.space.output_geometry(&output));
         let covers = maps_fullscreen(
             window.is_decorated(),
             window.geometry(),
             self.space
                 .outputs()
                 .filter_map(|output| self.space.output_geometry(output)),
-        );
+        )
+        .map(|asked| fullscreen_on(asked, by_user.is_some(), under_pointer));
         // Which process it is, read before the surface is moved into the
         // element, for `Windows`' `pid` and so a hidden window's close can
         // reach it too (#221's `close.rs`): `remember_client_pid` only ever
@@ -780,9 +896,8 @@ impl XwmHandler for Solium {
 
     /// An X11 window asking to move or resize itself.
     ///
-    /// Granted only for windows nothing else owns the geometry of. A tiled
-    /// window's size is the layout's decision, and letting the client win
-    /// there is how an X11 app ends up fighting the tiler forever.
+    /// The size is granted; the position only to a window the compositor
+    /// does not hold somewhere already. See [`granted`] (#441).
     fn configure_request(
         &mut self,
         _xwm: XwmId,
@@ -793,17 +908,11 @@ impl XwmHandler for Solium {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        let current = window.geometry();
-        let size = (
-            w.and_then(|w| i32::try_from(w).ok())
-                .unwrap_or(current.size.w),
-            h.and_then(|h| i32::try_from(h).ok())
-                .unwrap_or(current.size.h),
-        );
-        let wanted = Rectangle::new(
-            (x.unwrap_or(current.loc.x), y.unwrap_or(current.loc.y)).into(),
-            (size.0.max(1), size.1.max(1)).into(),
-        );
+        let kept_at = self
+            .x11_window(&window)
+            .filter(|element| self.panes.of(element).is_none_or(Pane::managed))
+            .and_then(|element| self.space.element_location(&element));
+        let wanted = granted(window.geometry(), (x, y, w, h), kept_at);
         if let Err(err) = window.configure(Some(wanted)) {
             tracing::warn!(?err, "could not configure an X11 window");
         }
@@ -1261,8 +1370,8 @@ impl XwmHandler for crate::tty::State {
 #[cfg(test)]
 mod tests {
     use super::{
-        Settings, asks_not_to_be_shown, floats_over_its_parent, is_hidden, kill_client,
-        maps_fullscreen, places_itself, window_type_name,
+        Settings, asks_not_to_be_shown, floats_over_its_parent, fullscreen_on, granted, is_hidden,
+        kill_client, maps_fullscreen, places_itself, told_again, user_placed, window_type_name,
     };
     use smithay::{
         utils::{Logical, Rectangle},
@@ -1648,5 +1757,118 @@ mod tests {
                 "{kind:?} is listed twice, so some other type is not listed at all"
             );
         }
+    }
+
+    /// **#441: an X11 window is told again only where it is not where it is
+    /// drawn**: at the place it is drawn, at the size it was last told, so a
+    /// resize the client has not answered yet is not undone by a move.
+    #[test]
+    fn an_x11_window_is_told_again_only_where_it_is_not_where_it_is_drawn() {
+        let rect = |x, y, w, h| Rectangle::<i32, Logical>::new((x, y).into(), (w, h).into());
+        assert_eq!(
+            told_again((100, 1500).into(), rect(100, 1500, 800, 600)),
+            None,
+            "a window that knows where it is is told nothing"
+        );
+        assert_eq!(
+            told_again((100, 1500).into(), rect(1300, 2100, 800, 600)),
+            Some(rect(100, 1500, 800, 600)),
+            "a window that believes itself 1200 right and 600 down is told \
+             where it is drawn, as Steam was not"
+        );
+        assert_eq!(
+            told_again((40, 1480).into(), rect(0, 1440, 1024, 768)),
+            Some(rect(40, 1480, 1024, 768)),
+            "the size is what it was last told, not what it has drawn"
+        );
+    }
+
+    /// **#441: a window the compositor holds keeps its place when its client
+    /// asks to move it**, and gets the size it asks for; a window not yet in
+    /// the space, or one that places itself, gets the place too.
+    #[test]
+    fn a_held_x11_window_asking_to_move_is_answered_with_where_it_is() {
+        let rect = |x, y, w, h| Rectangle::<i32, Logical>::new((x, y).into(), (w, h).into());
+        let current = rect(200, 1600, 800, 600);
+        assert_eq!(
+            granted(
+                current,
+                (Some(1400), Some(2200), None, None),
+                Some((200, 1600).into())
+            ),
+            current,
+            "Steam putting itself back where it was last session stays where \
+             the layout has it"
+        );
+        assert_eq!(
+            granted(
+                current,
+                (Some(1400), Some(2200), Some(1024), Some(700)),
+                Some((200, 1600).into())
+            ),
+            rect(200, 1600, 1024, 700),
+            "and its size is granted"
+        );
+        assert_eq!(
+            granted(current, (Some(1400), Some(2200), None, None), None),
+            rect(1400, 2200, 800, 600),
+            "a window not yet held, or a menu, goes where it asks"
+        );
+        assert_eq!(
+            granted(current, (None, Some(10), Some(0), None), None),
+            rect(200, 10, 1, 600),
+            "an axis not asked for keeps its value, and nothing is smaller \
+             than a pixel"
+        );
+    }
+
+    /// **#427: only a position the person running a window chose is
+    /// honoured**: `USPosition`, as `xterm -geometry` sets it, and not
+    /// `PPosition`, which Wine sets on every window it maps.
+    #[test]
+    fn only_a_user_specified_position_places_an_x11_window() {
+        use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
+        let at = (40, 1480).into();
+        let hints = |by| {
+            let mut hints = WmSizeHints::new();
+            hints.position = Some((by, 40, 1480));
+            hints
+        };
+        assert_eq!(
+            user_placed(Some(&hints(WmSizeHintsSpecification::UserSpecified)), at),
+            Some(at),
+            "xterm -geometry"
+        );
+        assert_eq!(
+            user_placed(Some(&hints(WmSizeHintsSpecification::ProgramSpecified)), at),
+            None,
+            "a Proton game, placed by Wine"
+        );
+        assert_eq!(
+            user_placed(Some(&WmSizeHints::new()), at),
+            None,
+            "no position"
+        );
+        assert_eq!(user_placed(None, at), None, "no WM_NORMAL_HINTS at all");
+    }
+
+    /// **#427: a game that maps covering a monitor goes fullscreen on the
+    /// one under the pointer**, not on the one Wine calls primary, unless
+    /// the person running it put it there.
+    #[test]
+    fn a_game_mapping_over_a_monitor_goes_fullscreen_under_the_pointer() {
+        let rect = |x, y, w, h| Rectangle::<i32, Logical>::new((x, y).into(), (w, h).into());
+        let (top, bottom) = (rect(0, 0, 2560, 1440), rect(0, 1440, 2560, 1440));
+        assert_eq!(
+            fullscreen_on(top, false, Some(bottom)),
+            bottom,
+            "The Finals over DP-2, the pointer on DP-1"
+        );
+        assert_eq!(
+            fullscreen_on(top, true, Some(bottom)),
+            top,
+            "placed by hand"
+        );
+        assert_eq!(fullscreen_on(top, false, None), top, "no pointer yet");
     }
 }

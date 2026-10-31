@@ -111,6 +111,7 @@ mod minimize;
 mod monitors;
 mod open;
 mod placement;
+mod pointer_hold;
 mod press;
 mod resize_bridge;
 mod snapshot;
@@ -660,6 +661,10 @@ pub(crate) struct Solium {
     /// Where a locked pointer's client would like the cursor left when the
     /// lock ends. Advice, taken at unlock. See `cursor_position_hint`.
     pub(crate) constraint_hint: Option<Point<f64, Logical>>,
+    /// The root surface `sol.release_pointer` took the pointer back from:
+    /// none of its constraints is granted again until it is pressed on
+    /// (#427). See `state::pointer_hold`.
+    pub(crate) pointer_released: Option<WlSurface>,
 
     /// Letting a client *name* the cursor it wants instead of drawing one.
     ///
@@ -1398,6 +1403,7 @@ impl Solium {
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
+            pointer_released: None,
             // Version 2, which smithay's `new` asks for unconditionally: it
             // adds `dnd-ask` and `all-resize` to the shape enum, and a client
             // bound at version 1 simply never sends them. `cursor::shape` maps
@@ -2104,6 +2110,10 @@ impl Solium {
     /// also the moment Smithay drops elements whose client has died — the only
     /// notice we get for a window that went away without telling anyone.
     pub(crate) fn sync_panes(&mut self) -> bool {
+        // An X11 window is told where the space has it, once a pass (#441).
+        self.tell_x11_where_they_are();
+        // And a window the keyboard has left lets go of the pointer (#427).
+        self.settle_pointer_hold();
         // A scene whose application has painted has been replaced, and can go.
         //
         // Here rather than where a client is first shown, because that is not
