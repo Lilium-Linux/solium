@@ -14,6 +14,8 @@
 //! through the same show path, so the layout scripts, the presentation
 //! transform, and the deforms apply to them without knowing what they are.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use smithay::{
     desktop::Window,
     reexports::{
@@ -317,6 +319,20 @@ pub(crate) fn granted(
     let at =
         kept_at.unwrap_or_else(|| (x.unwrap_or(current.loc.x), y.unwrap_or(current.loc.y)).into());
     Rectangle::new(at, (size.0.max(1), size.1.max(1)).into())
+}
+
+/// Whether an X11 window asked to be maximised before it mapped, and has
+/// not asked to be restored since: kept on the surface until
+/// `map_window_request` carries it out.
+fn asks_maximized(window: &X11Surface) -> Option<&AtomicBool> {
+    struct AsksMaximized(AtomicBool);
+    window
+        .user_data()
+        .insert_if_missing_threadsafe(|| AsksMaximized(AtomicBool::new(false)));
+    window
+        .user_data()
+        .get::<AsksMaximized>()
+        .map(|asked| &asked.0)
 }
 
 /// `config.x11.hidden`, handed over by the shipped `init.lua`'s
@@ -707,8 +723,15 @@ impl XwmHandler for Solium {
         self.take_pane(element.clone());
         // Fullscreen from the start, before anything has placed or framed it,
         // so the game is never told a tile's size on its way to the monitor.
+        // Or maximised, if it asked before it mapped (`maximize_request`).
         if let Some(screen) = covers {
             self.fullscreen_from_the_start(&element, screen);
+        } else if element
+            .x11_surface()
+            .and_then(asks_maximized)
+            .is_some_and(|asked| asked.swap(false, Ordering::Relaxed))
+        {
+            self.client_maximize(&element, true);
         }
         // **X11's half of `refused_with_a_dialog`, and the place nearly every
         // one of them arrives.** An application answering `WM_DELETE_WINDOW`
@@ -1030,15 +1053,32 @@ impl XwmHandler for Solium {
     /// And to be maximised, or not (`_NET_WM_STATE_MAXIMIZED_HORZ` and
     /// `_VERT`): `Solium::client_maximize`, which says what that does to a
     /// window that is fullscreen.
+    ///
+    /// **Remembered when the window is not mapped yet**, and carried out as
+    /// it maps (`map_window_request`): a client restoring the maximise it
+    /// had last time may ask before it maps, and the request was dropped,
+    /// there being no window to maximise. What a client writes into its own
+    /// `_NET_WM_STATE` before mapping is not seen at all: smithay never reads
+    /// it (`floats_over_its_parent` says why).
     fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        if let Some(window) = self.x11_window(&window) {
-            self.client_maximize(&window, true);
+        match self.x11_window(&window) {
+            Some(window) => self.client_maximize(&window, true),
+            None => {
+                if let Some(asked) = asks_maximized(&window) {
+                    asked.store(true, Ordering::Relaxed);
+                }
+            }
         }
     }
 
     fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        if let Some(window) = self.x11_window(&window) {
-            self.client_maximize(&window, false);
+        match self.x11_window(&window) {
+            Some(window) => self.client_maximize(&window, false),
+            None => {
+                if let Some(asked) = asks_maximized(&window) {
+                    asked.store(false, Ordering::Relaxed);
+                }
+            }
         }
     }
 

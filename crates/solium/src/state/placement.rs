@@ -375,6 +375,15 @@ impl Solium {
         // The one placement that moves such a window is a move by key onto
         // another monitor, and `carry_across` has made that one by now.
         // `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`.
+        //
+        // **Except a maximise its client asked for** (#450): an application
+        // that restored its maximise before the layout had placed it -- Steam
+        // mapping maximised, an Electron window's `maximize()` at startup --
+        // is let out of the maximise and into the tile, where it is placed
+        // and sized as any tile is. See `Solium::client_maximize`.
+        if matches!(standing, Standing::Tile | Standing::Within(_)) {
+            self.leave_client_maximize(pane);
+        }
         if standing != Standing::Kept
             && self
                 .panes
@@ -1121,6 +1130,48 @@ impl Solium {
         self.redraw = true;
     }
 
+    /// A window maximised by its own client and given a tile by a layout:
+    /// out of the maximise, its way back forgotten, and the scripts told as
+    /// for any restore (#450). The placement that gave the tile then places
+    /// it there, glides it from where it is drawn and tells the client its
+    /// size, its tile and its state in one configure.
+    ///
+    /// Not a fullscreen window, which leaves fullscreen on its own terms, nor
+    /// one the user maximised, which keeps the tile to come back to (#150).
+    fn leave_client_maximize(&mut self, pane: crate::pane::PaneId) {
+        let Some(window) = self
+            .panes
+            .get(pane)
+            .filter(|held| held.maximized_by_client())
+            .and_then(Pane::client)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_maximized_by_client(false);
+        }
+        let States {
+            fullscreen,
+            maximized,
+        } = window_states(&window);
+        if fullscreen || !maximized {
+            return;
+        }
+        window_state::write_maximized(&window, false);
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_restore(None);
+        }
+        // The `maximize` event, so a script keeping its own account of which
+        // windows are maximised (floating.lua's `restore`) is not left
+        // believing this one still is. Its motion is not this placement's:
+        // the layout's glide moves it.
+        if !self.telling_change {
+            let _ = self.tell_change(pane, Change::Maximize, false);
+        }
+        tracing::debug!("a window its client maximised was given a tile");
+    }
+
     /// Where a window stands, as the way back a fullscreen or a maximise
     /// keeps: the slot a hold is keeping -- the rectangle its client was told
     /// and has not drawn at yet, part of the way out of either -- and where
@@ -1156,8 +1207,16 @@ impl Solium {
         motion
     }
 
-    /// Fill the work area, or go back to where the window was.
+    /// Fill the work area, or go back to where the window was: the user's
+    /// maximise, by key, by `sol.toggle_maximize` or by the frame's button.
     pub(super) fn toggle_maximize(&mut self, window: &Window) {
+        self.maximize_toggled(window, window_state::Asker::User);
+    }
+
+    /// [`Self::toggle_maximize`], saying who asked: a maximise the client
+    /// asked for is marked so on the pane, and a layout's tile takes the
+    /// window out of it (`Pane::maximized_by_client`, #450).
+    pub(super) fn maximize_toggled(&mut self, window: &Window, asker: window_state::Asker) {
         let Some(id) = self.panes.id_of(window) else {
             return;
         };
@@ -1193,10 +1252,29 @@ impl Solium {
         let Some(current) = self.standing(window) else {
             return;
         };
-        let Some(filled) = self.maximised(window, current) else {
+        let start = self.drawn_before(id);
+        // **The way back, for a window that has not been shown yet**: a
+        // client asking to be maximised before its first frame -- an
+        // application restoring the maximise it had last time (#445, #450).
+        // It stands where `new_toplevel` or `map_window_request` put it, at
+        // the monitor's corner, so the way back is where it would have
+        // opened: its own size fitted into the work area, placed as
+        // `show_if_new` places it, and it fills the monitor that is on, the
+        // active one. One with no size yet, an xdg client that has drawn
+        // nothing, keeps none, as `fullscreen` keeps none, and restored it
+        // picks its own size.
+        // `real_client::client_maximize::a_window_that_opens_maximised_while_floating_is_maximised_and_restored`.
+        let shown = self.panes.get(id).is_some_and(present::was_shown);
+        let opening = if shown {
+            current
+        } else {
+            let size = self.fitted_size(window);
+            Rectangle::new(self.initial_placement(window, size), size)
+        };
+        let way_back = Some(opening).filter(|rect| !rect.is_empty());
+        let Some(filled) = self.maximised(window, opening) else {
             return;
         };
-        let start = self.drawn_before(id);
 
         // On the pane and not on its frame, which is where it was until #92.
         // For this toggle a window with no frame to keep it on was latent, not
@@ -1230,8 +1308,9 @@ impl Solium {
         // the next sweep -- which is what a tiled edge drag started from it
         // reads (#124).
         let tiled = self.panes.get_mut(id).is_some_and(|pane| {
+            pane.set_maximized_by_client(maximized && asker == window_state::Asker::Client);
             if maximized {
-                pane.set_restore(Some(current));
+                pane.set_restore(way_back);
                 pane.leave_tile();
                 false
             } else {
@@ -1288,12 +1367,24 @@ impl Solium {
     /// the work area exactly. Asked by [`Self::toggle_maximize`], and by
     /// `unfullscreen` for a window that was maximised when it went
     /// fullscreen and so goes back to being maximised.
+    ///
+    /// **The room a frame on its way reserves, too** (`insets_of`, where
+    /// `frame_insets` answers none for a frame not built yet): a window
+    /// maximised before its first frame -- an X11 application restoring its
+    /// maximise as it maps -- is framed only when it is shown, and a client
+    /// given the whole work area then had its titlebar put above the work
+    /// area's top edge. `Solium::refit_maximised` fits it again to the frame
+    /// that is built.
     pub(super) fn maximised(
         &self,
         window: &Window,
         on: Rectangle<i32, Logical>,
     ) -> Option<Rectangle<i32, Logical>> {
-        Some(inner(self.work_area_of(on)?, self.frame_insets(window)))
+        let insets = self
+            .panes
+            .id_of(window)
+            .map_or(Insets::NONE, |id| self.insets_of(id));
+        Some(inner(self.work_area_of(on)?, insets))
     }
 
     /// A kept rect this window is being put back at, moved onto a screen if

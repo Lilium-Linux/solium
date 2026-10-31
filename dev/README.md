@@ -929,6 +929,7 @@ game does (#361). Its window is one flat blue, so a capture shows where it is.
     DISPLAY=:1 ./target/debug/x11-probe popup
     DISPLAY=:1 ./target/debug/x11-probe grab
     DISPLAY=:1 ./target/debug/x11-probe cursor /usr/share/icons/Adwaita/cursors/xterm
+    DISPLAY=:1 ./target/debug/x11-probe maximized-at-map
 
 `request` maps a 640x480 window and asks, through the `_NET_WM_STATE` client
 message, for fullscreen, to leave it, to be maximised and to be restored.
@@ -951,7 +952,12 @@ pointer) and prints the X pointer, its window and its focus once a second; it
 lets its grabs go on `FocusOut`, as Wine does. `cursor` (#442) builds its
 cursor from an XCursor file with Render and no name, as Chromium builds
 Steam's, and Solium's log at `debug` (`solium::cursor=debug`) says which shape
-it stood for. Each step waits `X11_PROBE_HOLD` milliseconds,
+it stood for. `maximized-before-map`, `maximized-at-map` and `ask-maximized`
+ask to be maximised the three ways an application does it by itself (#450):
+before mapping, at once after mapping, as Steam restoring its last state does,
+and once shown. With `X11_PROBE_TILED=1` a tiling layout is in charge and the
+window must stay in its tile, not maximised; without it, it must be maximised
+and restored. Each step waits `X11_PROBE_HOLD` milliseconds,
 1500 by default, and prints the window's rectangle and state; the exit status
 is non-zero if any answer was not the one asked for. The display number is in
 Solium's log, on the line `XWayland is up`. A burst of captures beside it shows

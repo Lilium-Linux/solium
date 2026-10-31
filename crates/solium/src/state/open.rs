@@ -980,6 +980,9 @@ impl Solium {
             let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
             self.decorations
                 .insert(&mut self.panes, pane, width, height);
+            // A window maximised before its first frame was fitted to the
+            // room a frame on its way reserves; fitted again to this one.
+            self.refit_maximised(window);
         }
 
         // A client that mapped into a window which was already open takes
@@ -1160,7 +1163,7 @@ impl Solium {
     ///
     /// A layout that claims the window overrides this a moment later. This is
     /// for the floating case, where nothing else has an opinion.
-    fn fitted_size(&self, window: &Window) -> Size<i32, Logical> {
+    pub(super) fn fitted_size(&self, window: &Window) -> Size<i32, Logical> {
         let size = window.geometry().size;
         // A window that already has a place is measured against its own
         // monitor; a brand new one against the active one, which is where it
@@ -1180,7 +1183,11 @@ impl Solium {
             .into()
     }
 
-    fn initial_placement(&self, window: &Window, size: Size<i32, Logical>) -> Point<i32, Logical> {
+    pub(super) fn initial_placement(
+        &self,
+        window: &Window,
+        size: Size<i32, Logical>,
+    ) -> Point<i32, Logical> {
         // The monitor under the pointer, or, for an X11 window the person
         // running it placed (`USPosition`), the one it was placed on (#427).
         // There, at the place asked for, kept whole on it.
