@@ -89,7 +89,7 @@ fn the_shipped_shade_is_a_dark_edge_round_the_outline(renderer: &mut GlesRendere
             &mut held,
             &inputs,
         )?;
-        let run::Outcome::Done(texture, _) = outcome else {
+        let run::Outcome::Done(texture, _, _) = outcome else {
             return Err(anyhow!("the shade did not run: {outcome:?}"));
         };
         let bytes = fx2::read_rgba(renderer, &texture)?;
@@ -227,7 +227,7 @@ fn the_memo_matches_a_whole_monitor_blur(renderer: &mut GlesRenderer) -> Result<
         &mut held,
         &fx2::whole(MONITOR, &textures),
     )?;
-    let run::Outcome::Done(texture, _) = outcome else {
+    let run::Outcome::Done(texture, _, _) = outcome else {
         return Err(anyhow!("the memo's run came to {outcome:?}"));
     };
     if texture.size() != (640, 360).into() {
@@ -312,7 +312,7 @@ fn per_part_run(
         &mut held,
         &fx2::whole(padded, &textures),
     )?;
-    let run::Outcome::Done(result, _) = outcome else {
+    let run::Outcome::Done(result, _, _) = outcome else {
         return Err(anyhow!("the per-part run came to {outcome:?}"));
     };
     let bytes = fx2::read_rgba(renderer, &result)?;

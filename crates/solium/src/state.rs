@@ -113,6 +113,7 @@ mod open;
 mod placement;
 mod press;
 mod resize_bridge;
+mod round;
 mod snapshot;
 mod window_state;
 mod workspaces;
@@ -1006,6 +1007,18 @@ pub(crate) struct Solium {
     /// the pointer grab is the only thing that calls it.
     resize_bridge: Option<Bridged>,
 
+    /// The round the bridge's panes are moving in, under `resize.sync`: the
+    /// sizes they were all told together, and which clients have answered.
+    /// See `Self::settle_round`. Beside the bridge rather than inside it so
+    /// that dropping a bridge cannot drop a round whose answers are still held
+    /// back: only `Self::end_round` lets those go.
+    seam_round: Option<round::Round>,
+
+    /// Where each pane the bridge holds is drawn while rounds pace it: the
+    /// rectangle of the last round it was moved in, or where it was when the
+    /// gesture first moved it. See `Self::settle_round`.
+    seam_shown: Vec<(crate::pane::PaneId, Rectangle<i32, Logical>)>,
+
     /// The windows a fullscreen or maximise change has told a new size, each
     /// held at the rectangle the change gave it until its client answers
     /// (#49): the hold [`Self::resize_hold`] keeps for a drag, made by the
@@ -1060,6 +1073,12 @@ pub(crate) struct Solium {
     /// that leaves no hold behind: nothing else can consume it by then, and a
     /// `Window` kept here is a client kept alive.
     resize_ended: Option<(Window, Duration)>,
+
+    /// Every window a live edge drag has told it is being resized: the
+    /// xdg-shell `resizing` state, set on the dragged window when the drag
+    /// begins and on each pane a tiled drag moves, and taken off them all at
+    /// the release (`Solium::mark_resizing`, `Solium::unmark_resizing`).
+    resizing_marked: Vec<Window>,
 
     /// What `config.lua` said about resizing. See [`crate::resizing::Fill`].
     pub(crate) resizing: crate::resizing::Settings,
@@ -1260,21 +1279,24 @@ fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logic
 /// caller of `size_window` funnels through here, so "never size an OR
 /// window" is enforced once, for all four call sites and whatever is added
 /// later, instead of each of them having to remember to ask first.
-fn size_window(window: &Window, client: Rectangle<i32, Logical>) {
+///
+/// Returns the configure that told a Wayland client, when one went out: a
+/// round waits for its acknowledgement (`state::round`). Nothing for a size
+/// the client already had, and nothing for an X11 window, whose configure has
+/// no acknowledgement to wait for.
+fn size_window(window: &Window, client: Rectangle<i32, Logical>) -> Option<Serial> {
     if let Some(toplevel) = window.toplevel() {
         toplevel.with_pending_state(|state| state.size = Some(client.size));
-        toplevel.send_pending_configure();
-        return;
+        return toplevel.send_pending_configure();
     }
-    let Some(x11) = window.x11_surface() else {
-        return;
-    };
+    let x11 = window.x11_surface()?;
     if x11.is_override_redirect() {
-        return;
+        return None;
     }
     if let Err(err) = x11.configure(Some(client)) {
         tracing::warn!(?err, "could not size an X11 window");
     }
+    None
 }
 
 /// What rules match a window against, gathered only for the keys some rule
@@ -1513,8 +1535,11 @@ impl Solium {
             resize_hold: None,
             answering: Vec::new(),
             resize_bridge: None,
+            seam_round: None,
+            seam_shown: Vec::new(),
             resize_gesture: None,
             resize_ended: None,
+            resizing_marked: Vec::new(),
             resizing: crate::resizing::Settings::default(),
             fullscreen_covers: crate::stack::Covers::default(),
             redraw: true,
@@ -1591,8 +1616,26 @@ impl Solium {
         // ends this the moment the client answers -- with what it was asked for
         // or with anything else -- and on a deadline if it answers nothing.
         // See `crate::resizing`.
+        //
+        // **Unless the window follows its application** (`resize.follow`, the
+        // default): then a floating drag draws it at the size its client last
+        // drew, against the edges the drag is not moving, so the rectangle and
+        // the picture agree on every frame and the edge trails the pointer
+        // instead. The same pinning the end of a drag lands on (`land_on`), so
+        // the #113 shake cannot come back: the edges nobody is dragging stay
+        // where they are. See `crate::resizing::Follow`.
+        //
+        // **And the panes a layout's drag moves move in rounds** under
+        // `resize.sync`: each is drawn where its last round put it, which is
+        // where the picture its client last committed was drawn for, until
+        // every pane's client has drawn the next. See `state::round`.
         if self.holding_resize(pane.id()) {
-            return pane.slot();
+            if let Some(shown) = self.seam_shown_of(pane) {
+                return shown;
+            }
+            return self
+                .followed_drag(pane, window)
+                .unwrap_or_else(|| pane.slot());
         }
         // A client that has mapped and not yet answered the size it was asked
         // for has a window of no size at all. Taking the space's word for that

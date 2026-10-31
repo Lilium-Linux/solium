@@ -305,6 +305,11 @@ struct Counters {
     /// Present geometries whose mesh was refused in this pass, each drawn by
     /// its `failed`. `tests::refused_meshes_are_counted_and_written`.
     meshes_refused: Cell<u32>,
+    /// Render targets the pool made in this pass rather than handed out
+    /// again: a capture or an effect step at a size it had none of, as on
+    /// every frame of a drag on a window's edge (#428).
+    /// `tests::targets_made_are_counted_and_written`.
+    targets_made: Cell<u32>,
     /// This pass's GPU time, when it came before the pass ended, as a timer
     /// with no extension answers.
     /// `tests::a_gpu_time_in_before_its_pass_ends_goes_out_with_it`.
@@ -374,6 +379,7 @@ thread_local! {
             xray_builds: Cell::new(0),
             memo_runs: Cell::new(0),
             meshes_refused: Cell::new(0),
+            targets_made: Cell::new(0),
             early: Cell::new(None),
             clocks: Cell::new(None),
             labels: RefCell::new(Vec::new()),
@@ -686,6 +692,15 @@ impl Counters {
         }
     }
 
+    /// `made` render targets were made, inside a measured pass only, as a
+    /// capture is counted. `tests::targets_made_are_counted_and_written`.
+    fn targets_made(&self, made: u32) {
+        if self.live.get() {
+            self.targets_made
+                .set(self.targets_made.get().saturating_add(made));
+        }
+    }
+
     /// Hold a due report until its pass's GPU time is in.
     fn park(&self, line: Line, pass: u64) {
         if let Ok(mut held) = self.parked.try_borrow_mut() {
@@ -942,7 +957,7 @@ impl Counters {
                 r#""tick_us":{},"prep_us":{},"census_us":{},"qml_us":{},"elements_us":{},"gles_us":{},"#,
                 r#""commit_us":{},"settle_us":{},"loose_us":{},"captures":{},"effect_runs":{},"#,
                 r#""xray_builds":{},"memo_runs":{},"#,
-                r#""meshes_refused":{},"#,
+                r#""meshes_refused":{},"targets_made":{},"#,
                 r#""panes":{},"drew":{},"#,
                 r#""scenes":{},"animating":{},"moving":{},"rendered":{},"built":{},"rebound":{},"qml":{},"#,
                 r#""clocks":"{}","gpu_mhz":{},"mem_mhz":{},"pstate":{}"#
@@ -967,6 +982,7 @@ impl Counters {
             self.xray_builds.get(),
             self.memo_runs.get(),
             self.meshes_refused.get(),
+            self.targets_made.get(),
             self.panes_seen.get(),
             self.drew.get(),
             self.scenes.get(),
@@ -1023,6 +1039,7 @@ pub(crate) fn frame() -> Frame {
         counters.xray_builds.set(0);
         counters.memo_runs.set(0);
         counters.meshes_refused.set(0);
+        counters.targets_made.set(0);
         for slot in &counters.scene_spent {
             slot.set((0, 0));
         }
@@ -1438,6 +1455,12 @@ pub(crate) fn memo_ran() {
 /// `tests::refused_meshes_are_counted_and_written`.
 pub(crate) fn mesh_refused() {
     COUNTERS.with(Counters::mesh_refused);
+}
+
+/// The pool made `made` render targets in this pass (`render::prepare`).
+/// `tests::targets_made_are_counted_and_written`.
+pub(crate) fn targets_made(made: u32) {
+    COUNTERS.with(|counters| counters.targets_made(made));
 }
 
 /// A pass's GPU time, from the backend's timer.
@@ -2557,6 +2580,25 @@ mod tests {
         );
     }
 
+    /// **Targets the pool made are counted in the pass record**, inside a
+    /// measured pass only, as a run is: the number a drag on a window's edge
+    /// raises when a capture or an effect step is made again at every size
+    /// (#428).
+    #[test]
+    fn targets_made_are_counted_and_written() {
+        let counters = counters();
+        counters.live.set(false);
+        counters.targets_made(5);
+        counters.live.set(true);
+        counters.targets_made(2);
+        counters.targets_made(1);
+        let record = counters.pass_record(1, ms(5), false);
+        assert!(
+            record.contains(r#""targets_made":3,"#),
+            "three targets made are not in {record}"
+        );
+    }
+
     /// **Phases are exclusive: a nested one does not also count in its
     /// parent.**
     ///
@@ -2893,6 +2935,8 @@ mod tests {
         "effect_runs",
         "xray_builds",
         "memo_runs",
+        "meshes_refused",
+        "targets_made",
         "panes",
         "drew",
         "scenes",
@@ -3183,6 +3227,7 @@ mod tests {
             xray_builds: std::cell::Cell::new(0),
             memo_runs: std::cell::Cell::new(0),
             meshes_refused: std::cell::Cell::new(0),
+            targets_made: std::cell::Cell::new(0),
             early: std::cell::Cell::new(None),
             clocks: std::cell::Cell::new(None),
             labels: std::cell::RefCell::new(Vec::new()),

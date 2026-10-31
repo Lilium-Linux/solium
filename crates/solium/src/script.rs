@@ -5663,7 +5663,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     Some(background) => resize.background = background,
                     None => tracing::warn!(
                         background = %name,
-                        "resize.background is \"#rrggbb\", \"#rrggbbaa\" or \"none\"; \
+                        "resize.background is \"edge\", \"#rrggbb\", \"#rrggbbaa\" or \"none\"; \
                          keeping the default"
                     ),
                 }
@@ -5689,6 +5689,69 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         ),
                     }
                 }
+            }
+            // And how long the windows a layout's drag moves wait for one
+            // another's applications: milliseconds, 0 to `resizing::SYNC_MAX`,
+            // under the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            match options.get::<Value>("sync") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => {
+                    let most = crate::resizing::SYNC_MAX.as_secs_f64() * 1000.0;
+                    match number(&value)
+                        .filter(|millis| (0.0..=most).contains(millis))
+                        .and_then(|millis| {
+                            std::time::Duration::try_from_secs_f64(millis / 1000.0).ok()
+                        }) {
+                        Some(sync) => resize.sync = sync,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            most_ms = most,
+                            "resize.sync is a number of milliseconds from 0 to most_ms; \
+                             keeping the default"
+                        ),
+                    }
+                }
+            }
+            // And whether a window being resized is told to draw its next
+            // size while its last is still being drawn: true or false, under
+            // the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            match options.get::<Value>("overlap") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::Boolean(overlap)) => resize.overlap = overlap,
+                Ok(value) => tracing::warn!(
+                    value = describe(&value),
+                    "resize.overlap is true or false; keeping the default"
+                ),
+            }
+            // What a window being dragged is drawn at: the size its
+            // application has drawn, or the pointer's rectangle. Under the same
+            // contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            if let Ok(Value::String(name)) = options.get::<Value>("follow")
+                && let Ok(name) = name.to_str()
+            {
+                match crate::resizing::Follow::named(&name) {
+                    Some(follow) => resize.follow = follow,
+                    None => tracing::warn!(
+                        follow = %name,
+                        "resize.follow is \"app\" or \"pointer\"; keeping the default"
+                    ),
+                }
+            }
+            // And how often a window being dragged is told its new size: 0 on
+            // every frame, or at most that many times a second. Under the
+            // same contract. `the_shipped_resize_setting_reaches_the_compositor`,
+            // `resize_tell_hz_is_every_frame_or_a_rate`.
+            match options.get::<Value>("tell_hz") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match number(&value).and_then(crate::resizing::tell_every) {
+                    Some(tell) => resize.tell = tell,
+                    None => tracing::warn!(
+                        value = describe(&value),
+                        most = crate::resizing::TELL_HZ_MAX,
+                        "resize.tell_hz is 0 (every frame) or a number of times a second \
+                         from 1 to most; keeping the default"
+                    ),
+                },
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Resize(resize));
@@ -5864,6 +5927,38 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                          keeping the default"
                     ),
                 },
+            }
+            // How a GPU scene's buffer is sized (`qml::buffers`): a key left
+            // out keeps its default, and a table out of bounds, or with a key
+            // that is not a whole number, keeps both.
+            // `tests::a_configured_qml_renderer_is_read_before_qt_starts`.
+            match options.get::<Value>("buffers") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::Table(buffers)) => {
+                    let whole = |key: &str, default: i32| match buffers.get::<Value>(key) {
+                        Ok(Value::Nil) | Err(_) => Some(default),
+                        Ok(value) => value.as_i32(),
+                    };
+                    let step = whole("step", crate::qml::buffers::STEP);
+                    let shrink = whole("shrink", crate::qml::buffers::SHRINK);
+                    match step
+                        .zip(shrink)
+                        .and_then(|(step, shrink)| crate::qml::buffers::Buffers::new(step, shrink))
+                    {
+                        Some(policy) => configured.buffers = Some(policy),
+                        None => tracing::warn!(
+                            ?step,
+                            ?shrink,
+                            "qml.buffers.step is a whole number of pixels from 0 to 1024 and \
+                             qml.buffers.shrink a whole number of steps from 2 to 64; keeping \
+                             the defaults"
+                        ),
+                    }
+                }
+                Ok(other) => tracing::warn!(
+                    buffers = ?other,
+                    "qml.buffers is a table, {{ step = , shrink = }}; keeping the defaults"
+                ),
             }
             lua.set_app_data(configured);
             Ok(())
@@ -10360,8 +10455,33 @@ mod tests {
             crate::qml::renderer::Configured {
                 renderer: Some("software".to_owned()),
                 probe_timeout: Some(Duration::from_millis(1500)),
+                buffers: None,
             }
         );
+        // `qml.buffers`, each key on its own, the other left at its default.
+        let buffers = |step, shrink| crate::qml::buffers::Buffers::new(step, shrink);
+        for (source, wanted) in [
+            (
+                "sol.qml({ buffers = { step = 256, shrink = 3 } })",
+                buffers(256, 3),
+            ),
+            (
+                "sol.qml({ buffers = { step = 0 } })",
+                buffers(0, crate::qml::buffers::SHRINK),
+            ),
+            (
+                "sol.qml({ buffers = { shrink = 5 } })",
+                buffers(crate::qml::buffers::STEP, 5),
+            ),
+            // Out of bounds, or not whole numbers: warned about, and the
+            // defaults kept.
+            ("sol.qml({ buffers = { step = 2000 } })", None),
+            ("sol.qml({ buffers = { shrink = 1 } })", None),
+            ("sol.qml({ buffers = { step = 64.5 } })", None),
+            ("sol.qml({ buffers = 128 })", None),
+        ] {
+            assert_eq!(configured(source).buffers, wanted, "{source}");
+        }
         // Said nothing, three ways.
         for source in ["", "sol.qml(nil)", "sol.qml({})"] {
             assert_eq!(
@@ -10999,6 +11119,33 @@ mod tests {
         );
     }
 
+    /// **The shipped configuration runs a moving window's effects on every
+    /// pass** (`effects.motion_hz = 0`, 2026-10-16), and that is the Rust
+    /// default too: the glass is read where the window is on every frame of
+    /// a glide, a drag or a resize, and a lower rate is a choice made in
+    /// `config.lua` for a weak GPU. The same parity
+    /// `the_shipped_configuration_s_lock_table_matches_the_rust_default`
+    /// holds for `lock`.
+    #[test]
+    fn the_shipped_configuration_runs_a_moving_windows_effects_on_every_pass() {
+        let Some((directory, scripts)) =
+            shipped_init_with_user("solium-script-test-motion-hz-default", "return {}")
+        else {
+            return;
+        };
+        let settings = scripts.effect_settings_at_load();
+        let _ = std::fs::remove_dir_all(&directory);
+        let Some(Ok(settings)) = settings else {
+            panic!("the shipped init.lua handed over no effects settings: {settings:?}");
+        };
+        let default = crate::effect::settings::Settings::default().motion_hz;
+        assert!(
+            settings.motion_hz.abs() < f64::EPSILON && default.abs() < f64::EPSILON,
+            "the shipped effects.motion_hz is {} and the Rust default {default}, not both 0",
+            settings.motion_hz
+        );
+    }
+
     /// The shipped `config.lua` and `init.lua` tell the session and start
     /// autostart, and `--check` knows both keys. Shipped files only: the
     /// entry points `package.path` at them, past the developer's own
@@ -11077,6 +11224,7 @@ mod tests {
             crate::qml::renderer::Configured {
                 renderer: Some("auto".to_owned()),
                 probe_timeout: Some(crate::qml::renderer::PROBE_TIMEOUT),
+                buffers: Some(crate::qml::buffers::Buffers::default()),
             }
         );
         let shipped = std::fs::read_to_string(crate::assets::lua().join("init.lua"))
@@ -12565,18 +12713,30 @@ mod tests {
     /// `resizing::PATIENCE_MAX`, anything else keeping the quarter second.
     #[test]
     fn the_shipped_resize_setting_reaches_the_compositor() {
-        use crate::resizing::{BACKGROUND, Fill, PATIENCE, Settings};
+        use crate::resizing::{BACKGROUND, EVERY_FRAME, Fill, Follow, PATIENCE, SYNC, Settings};
         let waits = |millis| Settings {
             patience: std::time::Duration::from_millis(millis),
+            ..Settings::default()
+        };
+        let syncs = |millis| Settings {
+            sync: std::time::Duration::from_millis(millis),
+            ..Settings::default()
+        };
+        let tells = |hz: f64| Settings {
+            tell: std::time::Duration::from_secs_f64(1.0 / hz),
             ..Settings::default()
         };
         for (user, wanted) in [
             (
                 "return {}",
                 Settings {
-                    fill: Fill::Anchor,
+                    fill: Fill::Crop,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
@@ -12585,31 +12745,58 @@ mod tests {
                     fill: Fill::Stretch,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
                 "return { resize = { fill = \"crop\", background = \"#10203080\" } }",
                 Settings {
                     fill: Fill::Crop,
-                    background: Some([0x10, 0x20, 0x30, 0x80]),
+                    background: crate::resizing::Background::Colour([0x10, 0x20, 0x30, 0x80]),
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
                 "return { resize = { background = \"none\" } }",
                 Settings {
-                    fill: Fill::Anchor,
-                    background: None,
+                    fill: Fill::Crop,
+                    background: crate::resizing::Background::None,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
                 "return { resize = { fill = \"hold\", background = \"dark\" } }",
                 Settings {
-                    fill: Fill::Anchor,
+                    fill: Fill::Crop,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
+            ),
+            (
+                "return { resize = { background = \"#1c1c1c\" } }",
+                Settings {
+                    background: crate::resizing::Background::Colour([0x1c, 0x1c, 0x1c, 0xff]),
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { background = \"edge\" } }",
+                Settings::default(),
             ),
             ("return { resize = { patience = 600 } }", waits(600)),
             ("return { resize = { patience = 0 } }", waits(0)),
@@ -12617,6 +12804,52 @@ mod tests {
             ("return { resize = { patience = 5001 } }", waits(250)),
             ("return { resize = { patience = -1 } }", waits(250)),
             ("return { resize = { patience = \"long\" } }", waits(250)),
+            ("return { resize = { sync = 0 } }", syncs(0)),
+            ("return { resize = { sync = 50 } }", syncs(50)),
+            ("return { resize = { sync = 200 } }", syncs(200)),
+            ("return { resize = { sync = 5000 } }", syncs(5000)),
+            ("return { resize = { sync = 5001 } }", syncs(0)),
+            ("return { resize = { sync = -1 } }", syncs(0)),
+            ("return { resize = { sync = \"long\" } }", syncs(0)),
+            (
+                "return { resize = { overlap = false } }",
+                Settings {
+                    overlap: false,
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { overlap = \"no\" } }",
+                Settings::default(),
+            ),
+            ("return { resize = { tell_hz = 30 } }", tells(30.0)),
+            ("return { resize = { tell_hz = 1000 } }", tells(1000.0)),
+            ("return { resize = { tell_hz = 0 } }", Settings::default()),
+            (
+                "return { resize = { tell_hz = 1001 } }",
+                Settings::default(),
+            ),
+            ("return { resize = { tell_hz = 0.5 } }", Settings::default()),
+            ("return { resize = { tell_hz = -1 } }", Settings::default()),
+            (
+                "return { resize = { tell_hz = \"fast\" } }",
+                Settings::default(),
+            ),
+            (
+                "return { resize = { follow = \"pointer\" } }",
+                Settings {
+                    follow: Follow::Pointer,
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { follow = \"app\" } }",
+                Settings::default(),
+            ),
+            (
+                "return { resize = { follow = \"edge\" } }",
+                Settings::default(),
+            ),
         ] {
             let Some((directory, mut scripts)) =
                 shipped_init_with_user("solium-script-test-resize", user)
@@ -12670,32 +12903,39 @@ mod tests {
                 ..Settings::default()
             })
         };
+        let capped = |fill: Fill| {
+            Some(Settings {
+                fill,
+                tell: std::time::Duration::from_secs_f64(1.0 / 30.0),
+                ..Settings::default()
+            })
+        };
         // At load (floating), then tiling, then scrolling.
         for (resize, expected) in [
             (
-                r#"{ fill = "crop", modes = { tiling = "stretch" } }"#,
-                [fill(Fill::Crop), fill(Fill::Stretch), fill(Fill::Crop)],
+                r#"{ fill = "anchor", modes = { tiling = "stretch" } }"#,
+                [fill(Fill::Anchor), fill(Fill::Stretch), fill(Fill::Anchor)],
             ),
             (
-                r#"{ modes = { floating = "stretch", scrolling = "crop" } }"#,
-                [fill(Fill::Stretch), fill(Fill::Anchor), fill(Fill::Crop)],
+                r#"{ modes = { floating = "stretch", scrolling = "anchor" } }"#,
+                [fill(Fill::Stretch), fill(Fill::Crop), fill(Fill::Anchor)],
             ),
             (
                 r#"{ background = "none", modes = { scrolling = "stretch" } }"#,
                 [
                     Some(Settings {
-                        fill: Fill::Anchor,
-                        background: None,
+                        fill: Fill::Crop,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                     Some(Settings {
-                        fill: Fill::Anchor,
-                        background: None,
+                        fill: Fill::Crop,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                     Some(Settings {
                         fill: Fill::Stretch,
-                        background: None,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                 ],
@@ -12703,12 +12943,22 @@ mod tests {
             (
                 r#"{ patience = 600, modes = { tiling = "stretch" } }"#,
                 [
-                    patient(Fill::Anchor),
+                    patient(Fill::Crop),
                     patient(Fill::Stretch),
-                    patient(Fill::Anchor),
+                    patient(Fill::Crop),
                 ],
             ),
-            ("{}", [fill(Fill::Anchor), None, None]),
+            // `tell_hz` goes over with every switch, as the patience does: a
+            // switch that dropped it would put the drag back to every frame.
+            (
+                r#"{ tell_hz = 30, modes = { tiling = "stretch" } }"#,
+                [
+                    capped(Fill::Crop),
+                    capped(Fill::Stretch),
+                    capped(Fill::Crop),
+                ],
+            ),
+            ("{}", [fill(Fill::Crop), None, None]),
         ] {
             let Some((directory, mut scripts)) = shipped_init_with_user(
                 "solium-script-test-resize-modes",

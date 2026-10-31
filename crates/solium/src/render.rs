@@ -101,6 +101,9 @@ render_elements! {
     /// rectangle, so it stops where the client's corners do (#233). See
     /// [`background_strips`] and `crate::clip::ClippedSolid`.
     ClippedSolid = crate::clip::ClippedSolid,
+    /// A piece of a window's own edge, stretched over what its picture does
+    /// not reach (`resize.background = "edge"`). See `crate::edge`.
+    Edge = crate::edge::Edge,
     /// An effect's result in its slot, cut by its part's mask. See
     /// `crate::effect::element`.
     Effect = crate::effect::element::EffectElement,
@@ -1202,7 +1205,14 @@ pub(crate) fn prepare(
         pass: 0,
         drawing,
     };
+    // What the pool makes in the effect phases, for the pass record: a
+    // capture or an effect step at a size it had no target of, which a drag
+    // on a window's edge asks for on every frame (#428).
+    let made = gpu.state.pool.made();
     let slots = effect_phases(&mut gpu);
+    crate::pacing::targets_made(
+        u32::try_from(gpu.state.pool.made().saturating_sub(made)).unwrap_or(u32::MAX),
+    );
     let Gpu {
         state,
         warps,
@@ -1591,16 +1601,25 @@ impl Phases for Gpu<'_> {
             ) else {
                 continue;
             };
+            // The size it is drawn at, in the corner of a target with room
+            // (`offscreen::draw`, #428).
+            let size = (
+                u32::try_from(job.size.w).unwrap_or(1),
+                u32::try_from(job.size.h).unwrap_or(1),
+            );
             match crate::offscreen::kept(state, &job) {
                 Some((texture, _id, commit)) => {
                     self.drawn
-                        .insert(input.owner, input.slot, texture, false, commit);
+                        .insert(input.owner, input.slot, (texture, size), false, commit);
                 }
-                None => jobs.push((job, (input.owner, input.slot))),
+                None => jobs.push((job, (input.owner, input.slot, size))),
             }
         }
-        for ((owner, slot), texture, _id, commit) in crate::offscreen::draw(state, renderer, jobs) {
-            self.drawn.insert(owner, slot, texture, true, commit);
+        for ((owner, slot, size), texture, _id, commit) in
+            crate::offscreen::draw(state, renderer, jobs)
+        {
+            self.drawn
+                .insert(owner, slot, (texture, size), true, commit);
         }
     }
 
@@ -3005,10 +3024,15 @@ pub(crate) fn run_slots(
             continue;
         }
         let (first, redrawn) = match chain.tier {
+            // Read through the corner of its target it was drawn in (#428).
             Tier::Own => match drawn.get(&owner, slot) {
-                Some((texture, captured)) => {
-                    (Some(texture.clone()), input_redrawn(chain.tier, captured))
-                }
+                Some(((texture, size), captured)) => (
+                    Some((
+                        texture.clone(),
+                        BoxMap::corner(*size, texture_size(texture)),
+                    )),
+                    input_redrawn(chain.tier, captured),
+                ),
                 None => continue,
             },
             // A generated chain reads nothing of the frame: no capture, never
@@ -3016,7 +3040,10 @@ pub(crate) fn run_slots(
             // first pass and again only when its params or its padded size
             // change (`tests::twenty_runs_in_a_phase_open_one_region`,
             // `effect::store::tests::a_generated_effect_runs_once_and_not_again_until_its_size_or_params_change`).
-            Tier::Generated => (runner.blank(pool), input_redrawn(chain.tier, false)),
+            Tier::Generated => (
+                runner.blank(pool).map(|blank| (blank, BoxMap::WHOLE)),
+                input_redrawn(chain.tier, false),
+            ),
             // T3 was refused at load (Ruling 14); T2 ran above.
             Tier::Xray | Tier::Live => continue,
         };
@@ -3045,7 +3072,9 @@ pub(crate) fn run_slots(
         cx.waited |= waits;
         if waits || !state.needs_run(redrawn, params, size) {
             if let Some(texture) = state.held.output().cloned()
-                && let Some(ready) = ready_from(state, cx.masked.as_ref(), texture, false, part)
+                && let Some(used) = state.held.output_size()
+                && let Some(ready) =
+                    ready_from(state, cx.masked.as_ref(), texture, used, false, part)
             {
                 slots.set_ready(owner, slot, ready);
             }
@@ -3053,7 +3082,7 @@ pub(crate) fn run_slots(
         }
         let textures: Vec<(&str, GlesTexture, BoxMap)> = first
             .into_iter()
-            .map(|texture| (chain.plan.first_input.as_str(), texture, BoxMap::WHOLE))
+            .map(|(texture, map)| (chain.plan.first_input.as_str(), texture, map))
             .collect();
         let inputs = Inputs {
             padded: size,
@@ -3066,6 +3095,9 @@ pub(crate) fn run_slots(
             // part's own edge beyond it, in `behind` and `front` transparent
             // (`effect::run::tests::the_first_input_is_clamped_to_its_edge_texels`).
             clamp_first: slot.placed() == Slot::Replace && chain.tier == Tier::Own,
+            // A slot's part changes size with its window, so its steps are
+            // drawn into targets with room (#428).
+            room: true,
         };
         if !began {
             runner.begin();
@@ -3082,7 +3114,7 @@ pub(crate) fn run_slots(
             &keys,
         );
         match outcome {
-            Outcome::Done(texture, sync) => {
+            Outcome::Done(texture, used, sync) => {
                 let _ = crate::offscreen::settle(
                     Ok::<_, std::convert::Infallible>(sync),
                     crate::dev::fence_wait(),
@@ -3091,7 +3123,9 @@ pub(crate) fn run_slots(
                 crate::pacing::effect_ran();
                 state.ran(params, size);
                 state.ran_at = Some(instant);
-                if let Some(ready) = ready_from(state, cx.masked.as_ref(), texture, true, part) {
+                if let Some(ready) =
+                    ready_from(state, cx.masked.as_ref(), texture, used, true, part)
+                {
                     slots.set_ready(owner, slot, ready);
                 }
             }
@@ -3283,6 +3317,9 @@ fn run_t2(
                     time: cx.now,
                     transition: crate::effect::run::Transition::default(),
                     clamp_first: false,
+                    // A T2 place's result is drawn whole, beneath a warp as
+                    // well as in its slot: exact targets, as before (#428).
+                    room: false,
                 };
                 let keys = Keys {
                     params: chain.params_hash,
@@ -3303,7 +3340,7 @@ fn run_t2(
                     &inputs,
                     &keys,
                 ) {
-                    Outcome::Done(texture, sync) => {
+                    Outcome::Done(texture, _, sync) => {
                         let _ = crate::offscreen::settle(
                             Ok::<_, std::convert::Infallible>(sync),
                             crate::dev::fence_wait(),
@@ -3581,6 +3618,16 @@ pub(crate) fn t2_key(
 
 /// A part's box in a memo's own pixels.
 /// `tests::a_crop_is_the_parts_box_in_the_memos_pixels`.
+/// A texture's size, as a run's sizes take it.
+fn texture_size(texture: &GlesTexture) -> (u32, u32) {
+    use smithay::backend::renderer::Texture as _;
+    let size = texture.size();
+    (
+        u32::try_from(size.w).unwrap_or(1),
+        u32::try_from(size.h).unwrap_or(1),
+    )
+}
+
 pub(crate) fn crop_of(
     map: crate::effect::run::BoxMap,
     memo: (u32, u32),
@@ -4134,6 +4181,9 @@ pub(crate) fn run_xray(
             time: cx.now,
             transition: crate::effect::run::Transition::default(),
             clamp_first: false,
+            // A memo is a monitor's size, and read whole and cropped: exact
+            // targets, as before (#428).
+            room: false,
         };
         let keys = Keys {
             params: key.upto,
@@ -4164,7 +4214,7 @@ pub(crate) fn run_xray(
             )
         };
         match outcome {
-            Outcome::Done(_, sync) => {
+            Outcome::Done(_, _, sync) => {
                 let _ = crate::offscreen::settle(
                     Ok::<_, std::convert::Infallible>(sync),
                     crate::dev::fence_wait(),
@@ -4196,6 +4246,7 @@ fn ready_from(
     state: &mut crate::effect::store::SlotState,
     masked: Option<&GlesTexProgram>,
     texture: GlesTexture,
+    used: (u32, u32),
     rerun: bool,
     part: crate::effect::plan::PartBox,
 ) -> Option<crate::effect::plan::Ready> {
@@ -4204,13 +4255,11 @@ fn ready_from(
         crate::effect::element::Placement::of(part.padded, None, 1.0),
         rerun,
     );
+    let element =
+        crate::effect::element::EffectElement::new(state.id.clone(), commit, texture, program)
+            .in_corner(used);
     Some(crate::effect::plan::Ready {
-        element: crate::effect::element::EffectElement::new(
-            state.id.clone(),
-            commit,
-            texture,
-            program,
-        ),
+        element,
         padded: part.padded,
         reach: part.reach,
     })
@@ -6541,8 +6590,9 @@ fn panes(
             crate::resizing::trace::line(
                 "drawn",
                 format_args!(
-                    "pane={} frame={},{} {}x{} slot={},{} {}x{} committed={}x{} \
-                     factor={across:.4},{down:.4} fill={fill:?} held={}",
+                    "pane={} frame={},{} {}x{} slot={},{} {}x{} client={:.0},{:.0} \
+                     {:.0}x{:.0} committed={}x{} factor={across:.4},{down:.4} \
+                     fill={fill:?} held={} at_us={}",
                     pane.get(),
                     frame.rect.loc.x,
                     frame.rect.loc.y,
@@ -6552,9 +6602,17 @@ fn panes(
                     slot.loc.y,
                     slot.size.w,
                     slot.size.h,
+                    client.loc.x,
+                    client.loc.y,
+                    client.size.w,
+                    client.size.h,
                     real.size.w,
                     real.size.h,
                     u8::from(state.holding_resize(pane)),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_micros(),
                 ),
             );
         }
@@ -6666,27 +6724,37 @@ fn panes(
         // the client: a picture smaller than its rectangle under a fill that
         // does not stretch (#233), cut at the client's corners when the
         // client is. See [`background_strips`].
+        let strips = background_strips(
+            state.resizing.background,
+            &placed,
+            real.size,
+            // The pane's background where the client's picture does not
+            // reach: it stands in for the client, so it fades with it (#296).
+            frame.client_alpha(),
+            scale,
+            rounded.as_ref().map(|(effect, _)| *effect),
+        );
         let mut background = state
             .panes
             .get(pane)
             .map(|held| {
-                background_elements(
-                    held,
-                    background_strips(
-                        state.resizing.background,
-                        &placed,
-                        real.size,
-                        // The pane's background where the client's picture does
-                        // not reach: it stands in for the client, so it fades
-                        // with it (#296).
-                        frame.client_alpha(),
-                        scale,
-                        rounded.as_ref().map(|(effect, _)| *effect),
-                    ),
-                    rounded.as_ref().map(|(_, programs)| programs),
-                )
+                background_elements(held, strips, rounded.as_ref().map(|(_, programs)| programs))
             })
             .unwrap_or_default();
+        // Under `"edge"`, the default, the picture's own edge stretched over
+        // the same strips instead, built once the client's elements are, when
+        // its picture has been imported for this frame: `crate::edge`. The
+        // solids above are what it falls back to.
+        let edging = state.resizing.background == crate::resizing::Background::Edge;
+        let edge_ids = state.panes.get(pane).map(|held| held.edges().clone());
+        let picture_at = Rectangle::new(
+            placed.origin.to_physical_precise_round(scale),
+            Size::from((
+                f64::from(real.size.w) * placed.fit.factor.x,
+                f64::from(real.size.h) * placed.fit.factor.y,
+            ))
+            .to_physical_precise_round(scale),
+        );
         // With its slots: what is ready this pass goes around the pieces it
         // belongs to, and with none the walk is `PANE_ORDER`
         // (`tests::with_no_slots_the_pane_walk_is_pane_order`).
@@ -6774,7 +6842,21 @@ fn panes(
                     }));
                     // Cut at the same corners: `background_strips` gave them
                     // this clip, taken to the output's pixels.
-                    elements.append(&mut background);
+                    edge_or_background(
+                        elements,
+                        &mut background,
+                        edging.then(|| {
+                            edges(
+                                renderer,
+                                &window,
+                                strips,
+                                picture_at,
+                                edge_ids.as_ref(),
+                                alpha,
+                                Some(programs),
+                            )
+                        }),
+                    );
                     return;
                 }
                 // Cut to the tile when there is anything to cut, and a surface
@@ -6786,9 +6868,53 @@ fn panes(
                 }));
                 // Later in the list is further back: behind the client, in
                 // front of the style's `behind` layers, which follow.
-                elements.append(&mut background);
+                edge_or_background(
+                    elements,
+                    &mut background,
+                    edging.then(|| {
+                        edges(
+                            renderer,
+                            &window,
+                            strips,
+                            picture_at,
+                            edge_ids.as_ref(),
+                            alpha,
+                            None,
+                        )
+                    }),
+                );
             }
         });
+    }
+}
+
+/// A pane's edge pieces (`crate::edge`), or nothing when the pane has no
+/// strips, no identities, or a picture whose edge cannot be stretched.
+fn edges(
+    renderer: &GlesRenderer,
+    window: &Window,
+    strips: Option<Strips>,
+    picture: Rectangle<i32, Physical>,
+    ids: Option<&[Id; crate::edge::PIECES]>,
+    alpha: f32,
+    programs: Option<&crate::pass::ClipPrograms>,
+) -> Option<Vec<Element>> {
+    let strips = strips?;
+    let pieces = crate::edge::elements(renderer, window, &strips, picture, ids?, alpha, programs)?;
+    Some(pieces.into_iter().map(Element::Edge).collect())
+}
+
+/// Behind the client: its own edge stretched, when that was asked for and
+/// could be drawn, and the solid strips otherwise -- which under `"edge"` are
+/// its fallback colour.
+fn edge_or_background(
+    elements: &mut Vec<Element>,
+    background: &mut Vec<Element>,
+    edges: Option<Option<Vec<Element>>>,
+) {
+    match edges.flatten() {
+        Some(mut edges) => elements.append(&mut edges),
+        None => elements.append(background),
     }
 }
 
@@ -7805,12 +7931,18 @@ pub(crate) fn uncovered(
 
 /// `resize.background` as the premultiplied colour a strip of it is drawn in,
 /// at a frame's `opacity`; `None` for `"none"`, which draws no strip at all.
+/// `"edge"` stretches the picture's own edge instead (`crate::edge`), and this
+/// is the colour it falls back to where there is none it can stretch.
 /// `tests::the_background_is_drawn_in_its_configured_colour`.
 pub(crate) fn background_colour(
     background: crate::resizing::Background,
     opacity: f32,
 ) -> Option<[f32; 4]> {
-    let [red, green, blue, alpha] = background?;
+    let [red, green, blue, alpha] = match background {
+        crate::resizing::Background::Colour(colour) => colour,
+        crate::resizing::Background::Edge => crate::resizing::EDGE_FALLBACK,
+        crate::resizing::Background::None => return None,
+    };
     let alpha = f32::from(alpha) / 255.0 * opacity;
     let channel = |value: u8| f32::from(value) / 255.0 * alpha;
     Some([channel(red), channel(green), channel(blue), alpha])
@@ -9958,9 +10090,9 @@ pub(crate) mod tests {
         ///
         /// A live trace caught clients committing `524x1` mid-drag, which the
         /// bridge drew at the pane's full height, 342x. Under the default fill
-        /// it is a one-pixel strip at the top of the pane -- at the bottom
-        /// when the drag pulls the top edge -- and the background is the
-        /// rest.
+        /// it is a one-pixel strip at the top of the pane, whichever edge the
+        /// drag pulls, and the background is the rest; `anchor` keeps it at
+        /// the bottom when the drag pulls the top edge.
         #[test]
         fn a_one_pixel_buffer_is_not_stretched_across_its_pane() {
             let client = logical(0.0, 0.0, 524.0, 342.0);
@@ -9988,8 +10120,13 @@ pub(crate) mod tests {
                     (false, true)
                 )
                 .offset,
+                Point::from((0.0, 0.0)),
+                "a pulled top edge still has it at the top"
+            );
+            assert_eq!(
+                fit(client, AT_REST, sliver, false, Fill::Anchor, (false, true)).offset,
                 Point::from((0.0, 341.0)),
-                "a pulled top edge keeps it against the bottom"
+                "anchored, a pulled top edge keeps it against the bottom"
             );
         }
 
@@ -10051,15 +10188,23 @@ pub(crate) mod tests {
         }
 
         /// **`resize.background` is the colour the strips are drawn in**,
-        /// premultiplied, at the frame's opacity; `none` draws none.
+        /// premultiplied, at the frame's opacity; `none` draws none, and
+        /// `edge` falls back to the colour that was the default before it.
         #[test]
         fn the_background_is_drawn_in_its_configured_colour() {
-            assert_eq!(background_colour(None, 1.0), None);
+            use crate::resizing::Background;
             assert_eq!(
-                background_colour(Some([255, 0, 51, 255]), 1.0),
+                background_colour(Background::Edge, 1.0),
+                Some([28.0 / 255.0, 28.0 / 255.0, 28.0 / 255.0, 1.0]),
+                "the edge's fallback is #1c1c1c"
+            );
+            assert_eq!(background_colour(Background::None, 1.0), None);
+            assert_eq!(
+                background_colour(Background::Colour([255, 0, 51, 255]), 1.0),
                 Some([1.0, 0.0, 0.2, 1.0])
             );
-            let Some([red, green, _, alpha]) = background_colour(Some([255, 255, 0, 255]), 0.5)
+            let Some([red, green, _, alpha]) =
+                background_colour(Background::Colour([255, 255, 0, 255]), 0.5)
             else {
                 panic!("a colour is drawn");
             };
@@ -10113,7 +10258,7 @@ pub(crate) mod tests {
             let rounded = Effect::rounded(Corners::all(12.0));
             let strips = |scale, rounding| {
                 crate::render::background_strips(
-                    Some([0x1c, 0x1c, 0x1c, 0xff]),
+                    crate::resizing::Background::Colour([0x1c, 0x1c, 0x1c, 0xff]),
                     &placed,
                     committed,
                     1.0,
@@ -10218,7 +10363,7 @@ pub(crate) mod tests {
                 None,
                 std::time::Duration::ZERO,
             );
-            let colour = Some([0x10, 0x20, 0x30, 0xff]);
+            let colour = crate::resizing::Background::Colour([0x10, 0x20, 0x30, 0xff]);
             let elements = crate::render::background_elements(
                 &pane,
                 crate::render::background_strips(colour, &placed, committed, 1.0, 1.0, None),
@@ -10251,7 +10396,14 @@ pub(crate) mod tests {
             assert!(
                 crate::render::background_elements(
                     &pane,
-                    crate::render::background_strips(None, &placed, committed, 1.0, 1.0, None),
+                    crate::render::background_strips(
+                        crate::resizing::Background::None,
+                        &placed,
+                        committed,
+                        1.0,
+                        1.0,
+                        None,
+                    ),
                     None,
                 )
                 .is_empty(),
@@ -11712,6 +11864,7 @@ pub(crate) mod tests {
         let map = crate::effect::run::BoxMap {
             offset: [0.25, 0.5],
             scale: [0.125, 0.25],
+            extent: [1.0, 1.0],
         };
         assert_eq!(
             super::crop_of(map, (2560, 1440)),
@@ -11729,6 +11882,7 @@ pub(crate) mod tests {
             map: crate::effect::run::BoxMap {
                 offset: [0.05, 0.05],
                 scale: [0.1, 0.1],
+                extent: [1.0, 1.0],
             },
             own: (200, 100).into(),
             part: crate::effect::plan::PartBox::around((100, 60).into(), 0, [0.0; 4]),

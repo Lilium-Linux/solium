@@ -4,6 +4,18 @@
 
 use super::*;
 
+/// Sends the cleared `resizing` state to every window a drag marked once the
+/// release that cleared it returns, whichever way it returns: the release's own
+/// configures go out first and already carry it, so this only reaches a window
+/// they skipped. See `Solium::mark_resizing`.
+struct Unmarked(Vec<Window>);
+
+impl Drop for Unmarked {
+    fn drop(&mut self) {
+        Solium::send_unmarked(&self.0);
+    }
+}
+
 impl Solium {
     /// Act on a resize an edge drag asked for.
     ///
@@ -55,8 +67,8 @@ impl Solium {
     /// Coalescing is the *rate* the client is asked at, not the rate the
     /// window moves at. Since #113 those are two different numbers:
     /// `hold_resize` puts the pane where the drag says on every one of these
-    /// calls, and `crate::resizing::TELL_EVERY` decides which of them the
-    /// client hears about.
+    /// calls, and `resize.tell_hz` decides which of them the client hears
+    /// about: every one, unless it is capped (`crate::resizing::EVERY_FRAME`).
     ///
     /// Returns whether anything was resized.
     pub(crate) fn settle_resize(&mut self) -> bool {
@@ -107,6 +119,12 @@ impl Solium {
         // paused drag is what every drag is for the moment before the button
         // comes up.
         self.flush_resize(now);
+        // Under `resize.sync` the bridge's panes are told in rounds rather
+        // than on every frame, and drawn where their last round put them:
+        // end the round under way if its answers are all in, and start the
+        // next. Before the bridge settles, which waits on what this tells.
+        // See `crate::state::round`.
+        self.settle_round(now);
         // Whether or not the pointer moved this frame: a hold outlives the
         // gesture by however long the client takes to answer the last
         // configure, and something has to be watching for that answer.
@@ -197,6 +215,35 @@ impl Solium {
         self.held_hold(pane).is_some() || self.answering_for(pane).is_some()
     }
 
+    /// Where a floating drag draws its window when the window follows its
+    /// application (`resize.follow = "app"`): the size the client last
+    /// committed, against the edges the drag is not moving
+    /// (`resizing::Hold::anchored`), so what is drawn and what the client drew
+    /// are the same rectangle on every frame.
+    ///
+    /// `None` -- the drag's own rectangle, the slot -- under `"pointer"`, for a
+    /// pane no floating drag holds (a tiled drag's panes share their edges, and
+    /// drawn each at its own client's size they would gap and overlap along the
+    /// seam), and for a client that has no size yet.
+    pub(crate) fn followed_drag(
+        &self,
+        pane: &Pane,
+        window: &Window,
+    ) -> Option<Rectangle<i32, Logical>> {
+        if self.resizing.follow != crate::resizing::Follow::App {
+            return None;
+        }
+        let held = self
+            .resize_hold
+            .as_ref()
+            .filter(|held| held.pane == pane.id() && &held.window == window)?;
+        let committed = window.geometry().size;
+        if committed.w <= 0 || committed.h <= 0 {
+            return None;
+        }
+        Some(held.hold.anchored(pane.slot(), committed))
+    }
+
     /// This pane's entry in [`Self::answering`], if a fullscreen or maximise
     /// change is holding it until its client answers.
     fn answering_for(&self, pane: crate::pane::PaneId) -> Option<&crate::resizing::Held> {
@@ -228,6 +275,7 @@ impl Solium {
             now,
             Some(lands),
             self.resizing.patience,
+            self.resizing.tell,
         );
         self.answering.retain(|held| held.pane != pane);
         self.answering.push(crate::resizing::Held {
@@ -257,6 +305,7 @@ impl Solium {
             now,
             None,
             self.resizing.patience,
+            self.resizing.tell,
         );
         self.answering.retain(|held| held.pane != pane);
         self.answering.push(crate::resizing::Held {
@@ -582,7 +631,59 @@ impl Solium {
         }
         // Whatever gesture that record belonged to, it is not this one.
         self.resize_ended = None;
+        self.mark_resizing(window);
         self.pane_outer_of(self.panes.id_of(window)?)
+    }
+
+    /// Tell a window's client that a live drag is resizing it: the xdg-shell
+    /// `resizing` state, carried by every configure until the release.
+    ///
+    /// The state says the size is the drag's -- a maximum, still moving -- and
+    /// KWin and Hyprland both set it for the length of a drag; Solium never
+    /// did. Toolkits read it (GTK, Qt, Chromium and foot), and on 2026-10-16,
+    /// nested with one recorded drag, it took a little off every one of them:
+    /// a GTK4 window 70 to 64 px behind the pointer, foot 34 to 28, Dolphin 48
+    /// to 44.
+    ///
+    /// Set on the pending state, so it goes out with the next configure the
+    /// drag sends rather than with one of its own. An X11 window has no such
+    /// state and is left alone.
+    pub(super) fn mark_resizing(&mut self, window: &Window) {
+        if self.resizing_marked.iter().any(|marked| marked == window) {
+            return;
+        }
+        let Some(toplevel) = window.toplevel() else {
+            return;
+        };
+        toplevel.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Resizing);
+        });
+        self.resizing_marked.push(window.clone());
+    }
+
+    /// Take the `resizing` state off every window the drag marked, at its
+    /// release. The release's own configures carry the change; one that sends
+    /// none for a window -- a pane the drag stopped moving -- sends it here.
+    fn unmark_resizing(&mut self) {
+        for window in std::mem::take(&mut self.resizing_marked) {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| {
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                });
+            }
+        }
+    }
+
+    /// Send the cleared state to any marked window the release did not
+    /// configure itself. Smithay sends nothing when nothing has changed.
+    fn send_unmarked(windows: &[Window]) {
+        for window in windows {
+            if window.alive()
+                && let Some(toplevel) = window.toplevel()
+            {
+                toplevel.send_pending_configure();
+            }
+        }
     }
 
     /// Let go of a hold without reconciling anything.
@@ -737,8 +838,7 @@ impl Solium {
         // so it keeps its throttle, its `asked`, and whether it has refused
         // anything. Rebuilding instead reset `Hold::told`, which handed every
         // flip a free configure in each direction; a handler that alternated
-        // therefore restored the sixty a second `crate::resizing::TELL_EVERY`
-        // exists to remove.
+        // therefore escaped a capped `resize.tell_hz` altogether.
         //
         // Taken and not copied: leaving it in the bridge would make two things
         // answer `holding_resize` for one pane with two different opinions
@@ -798,6 +898,7 @@ impl Solium {
                             now,
                             released,
                             self.resizing.patience,
+                            self.resizing.tell,
                         )
                     }
                 };
@@ -826,6 +927,11 @@ impl Solium {
     /// behind, and one configure.
     pub(crate) fn release_resize(&mut self, window: &Window) {
         let now = self.clock.now();
+        // The drag is over for every window it was resizing, before any of the
+        // configures below goes out, so the last one each client hears says so.
+        let marked = self.resizing_marked.clone();
+        self.unmark_resizing();
+        let _unmarked = Unmarked(marked);
         // **Written down first, and unconditionally.** There may be no hold yet
         // — a press, a motion and this release inside one dispatch batch all
         // run before the frame that creates one — and a release that went
@@ -921,8 +1027,16 @@ impl Solium {
             else {
                 continue;
             };
-            let tell = held.hold.release(slot, committed, now);
-            size_window(&client, tell);
+            // Under `resize.sync` the last size goes out in a round like
+            // every other, so the pane does not answer it ahead of its
+            // neighbour: the patience starts here, and `settle_round` tells.
+            // `a_seam_moves_once_both_of_its_clients_have_drawn`.
+            if self.resizing.sync.is_zero() {
+                let tell = held.hold.release(slot, committed, now);
+                size_window(&client, tell);
+            } else {
+                held.hold.rearm(Some(now));
+            }
         }
         self.redraw = true;
     }
@@ -930,8 +1044,9 @@ impl Solium {
     /// Send the configure the throttle is still sitting on, once its interval
     /// has passed.
     ///
-    /// **`crate::resizing::TELL_EVERY` is a rate, and a rate needs a trailing
-    /// edge.** `Hold::dragged` is reached from `move_pane` and from
+    /// **A capped `resize.tell_hz` is a rate, and a rate needs a trailing
+    /// edge.** Uncapped, which is the default, this sends nothing the frame's
+    /// own offer has not already sent. `Hold::dragged` is reached from `move_pane` and from
     /// `hold_resize`, and `settle_resize` reaches either only on a frame whose
     /// `pending_resize` carried a motion. So the offers a drag makes in the
     /// last interval before it stops moving were recorded in the pane's slot,
@@ -959,10 +1074,19 @@ impl Solium {
     /// throttle swallowed. A hold whose slot it has already sent answers `None`
     /// and costs a comparison.
     pub(super) fn flush_resize(&mut self, now: Duration) {
+        // Under `resize.sync` a round is what tells the bridge's panes, and a
+        // flush in between would tell one of them a size its neighbour has not
+        // been told. `crate::state::round`.
+        let rounds = self.syncing();
         let held: Vec<(Window, crate::pane::PaneId)> = self
             .resize_hold
             .iter()
-            .chain(self.resize_bridge.iter().flat_map(|bridge| &bridge.panes))
+            .chain(
+                self.resize_bridge
+                    .iter()
+                    .filter(|_| !rounds)
+                    .flat_map(|bridge| &bridge.panes),
+            )
             .map(|held| (held.window.clone(), held.pane))
             .collect();
         for (window, pane) in held {
@@ -1100,6 +1224,12 @@ impl Solium {
                 continue;
             }
             let committed = crate::resizing::answer(&window);
+            // Under `resize.sync`, a pane whose slot has moved past what it was
+            // last told is waiting for its round, and one in the round under
+            // way is waiting for the round to end: settling it on the answer
+            // to an older round would let go of it before it hears its last.
+            let slot = self.panes.get(pane).map(Pane::slot);
+            let in_round = self.in_round(pane);
             let Some(held) = self
                 .resize_bridge
                 .as_mut()
@@ -1107,6 +1237,9 @@ impl Solium {
             else {
                 continue;
             };
+            if !self.resizing.sync.is_zero() && (in_round || slot != Some(held.hold.asked())) {
+                continue;
+            }
             match held.hold.settle(committed, now) {
                 // Still being dragged, or the client has not answered the last
                 // configure yet. The layout's rectangle stays authoritative.

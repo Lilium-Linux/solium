@@ -634,7 +634,16 @@ impl Solium {
             present::release(held);
             return;
         }
+        // **Except a pane a live drag's rounds pace** (`resize.sync`): it is
+        // drawn where its last round put it, and a glide aimed at the slot
+        // would draw it where the pointer is instead -- the whole of what the
+        // rounds are there to stop. `crate::state::round`,
+        // `a_seam_moves_once_both_of_its_clients_have_drawn`.
         if let Some(held) = self.panes.get(pane).filter(|_| !leaving) {
+            if self.resize_gesture.is_some() && self.seam_shown_of(held).is_some() {
+                present::release(held);
+                return;
+            }
             let start = present::frame(held, was, now);
             present::from(
                 held,
@@ -803,6 +812,12 @@ impl Solium {
         // Whether the sweep reaching this pane is the live drag's own. Read
         // before the borrow below, which needs `self` mutably.
         let dragging = self.resize_gesture.is_some();
+        // Under `resize.sync` a live drag's panes are told in rounds, all at
+        // once, and the sweep only moves their slots: `settle_round` tells
+        // them, and a pending change goes out with the round's configure --
+        // which is where the drag's own `resizing` state, the commonest one,
+        // was always going to go. `a_seam_moves_once_both_of_its_clients_have_drawn`.
+        let rounds = dragging && self.syncing();
         // Case (1). The borrow ends on this line, so the arm below can reach
         // `self` again.
         let bridged = self
@@ -810,7 +825,9 @@ impl Solium {
             .as_mut()
             .and_then(|bridge| bridge.panes.iter_mut().find(|held| held.pane == pane))
             .map(|held| {
-                if dragging && !pending {
+                if rounds {
+                    None
+                } else if dragging && !pending {
                     held.hold.dragged(client, answer, now)
                 } else {
                     held.hold.placed(client, answer, now)
@@ -823,8 +840,8 @@ impl Solium {
         };
         // A pending flush is worth a configure even when the rectangle is one
         // the client has already been told: the size is not what it is waiting
-        // for.
-        let told = told || pending;
+        // for. Not under rounds, whose configure carries it.
+        let told = told || (pending && !rounds);
         if crate::resizing::trace::on() {
             let hold = self.held_hold(pane);
             let asked = hold.map_or(client, crate::resizing::Hold::asked);
@@ -904,6 +921,14 @@ impl Solium {
         // honest "nothing to anchor against".
         let previous = self.panes.get(pane).map_or(client, Pane::slot);
         let edges = crate::resizing::moved_edges(previous, client);
+        // Under `resize.sync` it joins drawn where it is, until a round moves
+        // it, and is told by that round rather than here: see
+        // `crate::state::round`. Read before anything below moves it.
+        let rounds = self.syncing();
+        let drawn = self
+            .panes
+            .get(pane)
+            .map_or(previous, |held| self.pane_geometry(held));
         // **The same drag's hold if this pane already had one, rather than a
         // fresh one.** `settle_resize` forks per frame, so a layout that claims
         // a drag on one frame and not the next hands this pane back and forth
@@ -916,17 +941,27 @@ impl Solium {
         // `released` is reasserted because `arm_resize_gesture` rearms the
         // bridge's holds before the sweep and a floating hold arriving during it
         // missed that: its deadline must stop for the same reason theirs did.
+        // A pane a live drag moves is being resized by it, and its client is
+        // told so before the configure below goes out: see
+        // `Solium::mark_resizing`. Not once the button is up.
+        if released.is_none() {
+            self.mark_resizing(window);
+        }
         let carried = self
             .resize_hold
             .take_if(|held| held.pane == pane && &held.window == window)
             .map(|held| held.hold);
         let (hold, told) = match carried {
+            // Under `resize.sync` the round tells it, as it tells every pane
+            // of the bridge: the hold keeps what it last asked, and the round
+            // finds the slot past it.
             Some(mut hold) => {
                 hold.retargeted(edges);
                 hold.rearm(released);
-                let told = hold
-                    .dragged(client, crate::resizing::answer(window), now)
-                    .is_some();
+                let told = !rounds
+                    && hold
+                        .dragged(client, crate::resizing::answer(window), now)
+                        .is_some();
                 (hold, told)
             }
             // A pane joining the bridge hears immediately, and only the offers
@@ -937,18 +972,25 @@ impl Solium {
             // `real_geometry` builds its size from `window.geometry()` — read
             // from the one source that answers for a window the space has let
             // go of as well.
+            //
+            // Under `resize.sync` it has been told nothing yet: its hold says
+            // it was last asked for where it is, so its round finds it owed.
             None => (
                 crate::resizing::Hold::new(
                     edges,
                     committed,
-                    client,
+                    if rounds { drawn } else { client },
                     now,
                     released,
                     self.resizing.patience,
+                    self.resizing.tell,
                 ),
-                true,
+                !rounds,
             ),
         };
+        if rounds {
+            self.show_from(pane, drawn);
+        }
         let held = crate::resizing::Held {
             window: window.clone(),
             pane,

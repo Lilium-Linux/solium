@@ -117,5 +117,8 @@ The style's other rule puts the [`shade`](../shade/README.md) in front of a
 window without the keyboard.
 
 While a window glides, is dragged or changes size, its refraction runs again
-at most `effects.motion_hz` times a second (60 unless you change it),
-the last result drawn where the window is between.
+on every frame it moved on, so what shows through the glass is where the
+window is on every frame. `effects.motion_hz` caps how many times a second
+it runs (0, no cap, unless you change it), for a GPU too weak for that: the
+last result is then drawn where the window is between, and what shows
+through trails the window by up to that long's worth of its motion.

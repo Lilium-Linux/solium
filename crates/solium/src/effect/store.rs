@@ -428,12 +428,14 @@ impl Store {
     }
 }
 
-/// Each self input this pass: its texture, whether it was drawn this pass or
-/// kept from an earlier one, and its capture's commit. What the runs read
+/// Each self input this pass: its texture and the size it was drawn at in
+/// that texture's corner (a slot's self input is drawn into a target with
+/// room, #428), whether it was drawn this pass or kept from an earlier one,
+/// and its capture's commit. What the runs read
 /// (`render::run_slots`): a chain re-runs only when its input was redrawn.
 /// `tests::drawn_tells_an_input_redrawn_this_pass_from_one_kept`.
 #[derive(Debug)]
-pub(crate) struct Drawn<T = GlesTexture> {
+pub(crate) struct Drawn<T = (GlesTexture, (u32, u32))> {
     inputs: HashMap<(Owner, Slot), (T, bool, CommitCounter)>,
 }
 

@@ -452,6 +452,7 @@
 ---@class sol.QmlOptions
 ---@field renderer? "auto"|"gpu"|"software" `"auto"` tries the GPU in a child process first.
 ---@field probe_timeout? integer Milliseconds the GPU trial may take.
+---@field buffers? { step?: integer, shrink?: integer } On the GPU, how big the buffer a QML scene is drawn into is: each side rounded up to a whole number of `step` pixels (0 to 1024; 0 is a buffer exactly the scene's size, a new one at every size; default 128), so a window being resized draws its frame into the buffer it has until it outgrows it; once a size has held, a buffer `shrink` steps or more larger than its scene on a side (2 to 64; default 2) is replaced by a snug one.
 
 ---Telling systemd and D-Bus that Solium is the session. A key left out, or
 ---one of the wrong kind, keeps the default.
@@ -657,7 +658,7 @@ function sol.problems() end
 ---@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when a reload finds its folder changed while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with; a reload that leaves the folder as it was changes nothing, even one that changes `sandbox`). A deform may say either for itself.
 ---@field xray? sol.XrayOptions What T2 effects read as the backdrop.
 ---@field memo? sol.MemoOptions How a chain's backdrop-only part is shared per monitor.
----@field motion_hz? number How many times a second, at most, an effect's own steps for a part run again while only the part's place or size moves (a glide, a drag, a resize): a T2 effect's (the glass's refraction) as it moves, a T0 effect's (the shade) as it changes size. Between, the last result is drawn where the part is, stretched to its size: what shows through lags the part by at most `1 / motion_hz` of its motion, and is right again within that once it stops. A backdrop redrawn or new params run it at once. 0 runs them on every pass; otherwise 10 to 1000. Default 60.
+---@field motion_hz? number How many times a second, at most, an effect's own steps for a part run again while only the part's place or size moves (a glide, a drag, a resize): a T2 effect's (the glass's refraction) as it moves, a T0 effect's (the shade) as it changes size. 0, the default, runs them on every pass the part moved on, so what shows through is where the part is on every frame. 10 to 1000 is a cap for a weak GPU: between runs the last result is drawn where the part is, stretched to its size, so what shows through lags the part by up to `1 / motion_hz` of its motion and is right again within that once it stops. A backdrop redrawn or new params run it at once.
 
 ---Which effects go where, all at once: a set with a broken rule is refused
 ---whole, its errors listed by `sol.problems()`, and the rules that ran stay.
@@ -1232,22 +1233,34 @@ function sol.client_sizes(options) end
 ---edge or seam drag, a layout's glide, a fullscreen or maximise glide -- and
 ---what fills the part it does not cover.
 ---
----`fill`: `"anchor"` (the default) draws the picture at its own size against
----the edges that are not moving, cut to the window; `"crop"` the same from the
----window's top-left whichever edge moves; `"stretch"` scales it to fill;
+---`fill`: `"crop"` (the default) draws the picture at its own size from the
+---window's top-left whichever edge moves, cut to the window; `"anchor"` the
+---same against the edges that are not moving; `"stretch"` scales it to fill;
 ---`"scene"` draws the window's QML scene, which today reaches only a window
 ---resized before its application painted, and is `"anchor"` elsewhere.
----`background`: `"#rrggbb"`, `"#rrggbbaa"` or `"none"`, what shows where the
----picture does not reach (default `"#1c1c1c"`). Another value is logged and
----the default kept. `patience`: how long, in milliseconds from 0 to 5000, a
+---`background`: what shows where the picture does not reach: `"edge"` (the
+---default: the picture's own edge, stretched), `"#rrggbb"`, `"#rrggbbaa"` or
+---`"none"`. Another value is logged and the default kept. `patience`: how
+---long, in milliseconds from 0 to 5000, a
 ---picture waits for its application once a change is over -- after a drag's
 ---release, a fullscreen or maximise glide's landing, or a layout glide's
 ---landing, while it stays against the edges the glide did not move (default
----250). Each call sets all three, a key left out at its default. `init.lua`
----calls this with `config.resize`, and `modes.lua` again with a mode's own
----fill from `config.resize.modes` whenever the mode changes, when that table
----names any mode.
----@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number }
+---250). `tell_hz`: how often, at most, a window whose edge is being dragged
+---is told its new size, in times a second from 1 to 1000; 0 (the default) tells
+---it on every frame the drag moves. `follow`: what a floating window is drawn
+---at while its edge is dragged, `"app"` (the default: the size its application
+---has drawn, against the edges not moving) or `"pointer"` (the drag's own
+---rectangle, with `fill` covering the difference). `sync`: how long, in
+---milliseconds from 0 to 5000, the windows a layout's drag moves wait for one
+---another's applications, so a seam moves as one (default 0: each follows the
+---pointer at once). `overlap`: whether a window being resized is told to draw
+---its next size as soon as a frame showing its last starts to be drawn
+---(default true; false waits for the screen). Each call sets all seven, a key
+---left out at its default. `init.lua` calls this with `config.resize`, and
+---`modes.lua`
+---again with a mode's own fill from `config.resize.modes` whenever the mode
+---changes, when that table names any mode.
+---@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number, follow?: "app"|"pointer", sync?: number, overlap?: boolean }
 ---@return nil
 function sol.resize(options) end
 

@@ -248,6 +248,14 @@ impl XdgShellHandler for Solium {
             state.states.set(xdg_toplevel::State::Activated);
         });
 
+        // Every commit of the window passes a round first: one answering a
+        // size a layout's drag told it together with its neighbours is held
+        // back until they have answered too. See `state::round`.
+        smithay::wayland::compositor::add_pre_commit_hook::<Self, _>(
+            surface.wl_surface(),
+            |state, _display, surface| state.round_commit(surface),
+        );
+
         let window = Window::new_wayland_window(surface.clone());
         self.map_stacked(window.clone(), (0, 0), true);
         // On the same line as the map, so nothing can observe a mapped window
@@ -264,6 +272,19 @@ impl XdgShellHandler for Solium {
 
         // No keyboard yet. It is given at the window's first frame, once a
         // layout has said where the window goes: see `offer_keyboard`.
+    }
+
+    /// Which configure a toplevel has acknowledged, remembered for the commit
+    /// that follows it: a round holds back the commit that answers its own.
+    /// See `state::round`.
+    fn ack_configure(
+        &mut self,
+        surface: WlSurface,
+        configure: smithay::wayland::shell::xdg::Configure,
+    ) {
+        if let smithay::wayland::shell::xdg::Configure::Toplevel(configure) = configure {
+            super::round::note_acked(&surface, configure.serial);
+        }
     }
 
     /// `xdg_toplevel.set_parent` — a window saying which window it belongs to.

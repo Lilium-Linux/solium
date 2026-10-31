@@ -614,40 +614,54 @@ pub(crate) fn draw<T>(
                                 &mut state.xrays,
                                 &mut state.pool,
                             );
+                            // A slot's self input changes size with its part on
+                            // every frame of a drag on the part's edge, so it is
+                            // drawn into a target with room, in its corner, and
+                            // read through that corner (#428). A warp's capture
+                            // and a monitor's xray cut are read whole.
+                            let room = matches!(job.into, HeldIn::Slot(..));
                             capture_in(panes, store, xrays, &job.into).and_then(|capture| {
-                                capture.target_for(pool, &mut crate::pool::Gl(renderer), job.size)
+                                let alloc = &mut crate::pool::Gl(renderer);
+                                if room {
+                                    capture.target_with_room(pool, alloc, job.size)
+                                } else {
+                                    capture.target_for(pool, alloc, job.size)
+                                }
                             })
                         };
                         let Some(target) = target else {
                             tracing::warn!(size = ?job.size, "no target for a capture");
                             continue;
                         };
-                        let drawn = match crate::pool::frame_for(renderer, &mut bound, &target) {
-                            Err(err) => {
-                                tracing::warn!(?err, "could not open a capture's frame");
-                                false
-                            }
-                            Ok(mut frame) => {
-                                let stamp = state.timer.as_mut().map(|timer| {
-                                    timer.open_in(&mut frame, crate::gputime::Region::Capture)
-                                });
-                                if let Err(err) = crate::pool::paint(
-                                    &mut frame,
-                                    job.size,
-                                    &job.elements,
-                                    job.scale,
-                                ) {
-                                    tracing::warn!(?err, "a window did not render offscreen");
+                        let drawn =
+                            match crate::pool::frame_in(renderer, &mut bound, &target, job.size) {
+                                Err(err) => {
+                                    tracing::warn!(?err, "could not open a capture's frame");
+                                    false
                                 }
-                                if let (Some(timer), Some(stamp)) = (state.timer.as_mut(), stamp) {
-                                    timer.close_in(&mut frame, stamp);
+                                Ok(mut frame) => {
+                                    let stamp = state.timer.as_mut().map(|timer| {
+                                        timer.open_in(&mut frame, crate::gputime::Region::Capture)
+                                    });
+                                    if let Err(err) = crate::pool::paint(
+                                        &mut frame,
+                                        job.size,
+                                        &job.elements,
+                                        job.scale,
+                                    ) {
+                                        tracing::warn!(?err, "a window did not render offscreen");
+                                    }
+                                    if let (Some(timer), Some(stamp)) =
+                                        (state.timer.as_mut(), stamp)
+                                    {
+                                        timer.close_in(&mut frame, stamp);
+                                    }
+                                    // See `settle`: waited on by default, and the
+                                    // window full of garbage that sampling an
+                                    // unfinished texture can show is why.
+                                    settle(frame.finish(), wait, "a capture")
                                 }
-                                // See `settle`: waited on by default, and the
-                                // window full of garbage that sampling an
-                                // unfinished texture can show is why.
-                                settle(frame.finish(), wait, "a capture")
-                            }
-                        };
+                            };
                         if drawn {
                             crate::pacing::captured();
                             if let Some(capture) = capture_in(

@@ -3046,6 +3046,9 @@ mod real_client {
         /// same order: all four `tiled_*` states, for #228. Read through
         /// [`tiled_sent`].
         tiled: Vec<(wayland_client::backend::ObjectId, bool)>,
+        /// The states each of those configures carried, in the same order:
+        /// what says `resizing` while a drag holds the window.
+        configure_states: Vec<(wayland_client::backend::ObjectId, Vec<u32>)>,
 
         /// The monitor, the lock manager and the clipboard, for
         /// `lock_focus`: the only tests that need a surface to lock a
@@ -3877,7 +3880,8 @@ mod real_client {
                     .all(|edge| states.contains(&(edge as u32)));
                     let id = wayland_client::Proxy::id(toplevel);
                     state.tiled.push((id.clone(), tiled));
-                    state.configures.push((id, width, height));
+                    state.configures.push((id.clone(), width, height));
+                    state.configure_states.push((id, states));
                 }
                 xdg_toplevel::Event::Close => {
                     state.closes.push(wayland_client::Proxy::id(toplevel));
@@ -7398,6 +7402,9 @@ end)"#,
         #[test]
         fn an_edge_drag_takes_a_window_its_change_is_holding() {
             let mut desk = Desk::new("dragged", SCRIPT);
+            // The pointer's rectangle is how this test sees which hold has the
+            // window; the default draws it at its client's size.
+            desk.state.resizing.follow = crate::resizing::Follow::Pointer;
             assert!(desk.state.trigger("super+f"));
             desk.pump();
             desk.answer(1920, 1080);
@@ -7925,6 +7932,203 @@ end)"#,
         );
     }
 
+    /// **A window being dragged is told so: the xdg-shell `resizing` state,
+    /// on every configure of the drag, and gone at the release.**
+    ///
+    /// GTK, Qt, Chromium and foot read it, and KWin and Hyprland both set it
+    /// for the length of a drag; Solium never did. The release takes it off so
+    /// the last configure a client hears is an ordinary one.
+    #[test]
+    fn a_dragged_window_is_told_it_is_resizing_until_the_release() {
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        // See the #99 test: a Qt scene in a process holding a libwayland
+        // connection of its own aborts the whole test binary.
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+        let qh = queue.handle();
+        let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        let before = state
+            .pane_outer_of(pane)
+            .expect("a mapped pane has a rectangle");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configure_states.clear();
+        let id = wayland_client::Proxy::id(&toplevel);
+        let resizing = xdg_toplevel::State::Resizing as u32;
+        let states = |client: &Client| -> Vec<Vec<u32>> {
+            client
+                .configure_states
+                .iter()
+                .filter(|(sent_to, _)| sent_to == &id)
+                .map(|(_, states)| states.clone())
+                .collect()
+        };
+
+        state.begin_resize(&window);
+        for step in 1..=3 {
+            let wanted = Rectangle::new(
+                before.loc,
+                (before.size.w + 10 * step, before.size.h).into(),
+            );
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                edge_at: payload_edge(wanted, ResizeEdge::Right),
+                edges: ResizeEdge::Right,
+            });
+            state.settle_resize();
+        }
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let during = states(&client);
+        assert!(
+            !during.is_empty() && during.iter().all(|sent| sent.contains(&resizing)),
+            "every configure of a live drag says the window is being resized; \
+             got {during:?}"
+        );
+
+        client.configure_states.clear();
+        state.release_resize(&window);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let after = states(&client);
+        assert!(
+            after.last().is_some_and(|sent| !sent.contains(&resizing)),
+            "the release's configure is an ordinary one again; got {after:?}"
+        );
+    }
+
+    /// **The window follows its application while an edge is dragged, unless
+    /// `resize.follow` says the pointer.**
+    ///
+    /// Zoomed in on the corner of a fast drag on 2026-10-16, every client
+    /// showed a band of `resize.background` where the window had run ahead of
+    /// its picture, and its picture cut where the window had shrunk past it.
+    /// KWin shows neither: it draws the window at the size its application has
+    /// drawn. Here that is the default, pinned to the edges the drag is not
+    /// moving -- a top-left drag keeps the bottom-right corner where it is, so
+    /// the #113 shake cannot come back -- and the client is still told the
+    /// size the pointer asked for.
+    #[test]
+    fn a_dragged_window_follows_its_application_unless_told_otherwise() {
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        // See the #99 test: a Qt scene in a process holding a libwayland
+        // connection of its own aborts the whole test binary.
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+        let qh = queue.handle();
+        let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        let before = state
+            .pane_outer_of(pane)
+            .expect("a mapped pane has a rectangle");
+        let painted = window.geometry().size;
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configures.clear();
+
+        // The top-left corner, 20 right and 12 down.
+        let wanted = Rectangle::new(
+            (before.loc.x + 20, before.loc.y + 12).into(),
+            (before.size.w - 20, before.size.h - 12).into(),
+        );
+        let drag = |state: &mut Solium| {
+            state.begin_resize(&window);
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                edge_at: payload_edge(wanted, ResizeEdge::TopLeft),
+                edges: ResizeEdge::TopLeft,
+            });
+            state.settle_resize();
+        };
+        drag(&mut state);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_eq!(
+            window.geometry().size,
+            painted,
+            "the fixture's client never draws the new size, which is the moment \
+             this test is about"
+        );
+        let id = wayland_client::Proxy::id(&toplevel);
+        assert!(
+            client
+                .configures
+                .iter()
+                .any(|(to, w, h)| to == &id && (*w, *h) == (wanted.size.w, wanted.size.h)),
+            "the client is told the size the pointer asked for; got {:?}",
+            client.configures
+        );
+        assert_eq!(
+            state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle"),
+            before,
+            "drawn at the size its client has drawn, with the bottom-right corner \
+             it was not dragged by where it was: nothing uncovered, nothing cut"
+        );
+
+        // Told the pointer, the same drag draws the pointer's rectangle.
+        state.release_resize(&window);
+        state.resizing.follow = crate::resizing::Follow::Pointer;
+        drag(&mut state);
+        assert_eq!(
+            state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle"),
+            wanted,
+            "under `follow = \"pointer\"` the window is the rectangle being dragged"
+        );
+    }
+
     /// **This is issue #113, through the compositor rather than beside it.**
     ///
     /// A top-left drag, on the first frame, with a real client that has
@@ -7956,6 +8160,10 @@ end)"#,
         state
             .decorations
             .set_style(&mut state.panes, Some("none".to_string()));
+        // The pointer's rectangle is what this test is about: see
+        // `a_dragged_window_follows_its_application_unless_told_otherwise` for
+        // the default, which draws the window at its client's size instead.
+        state.resizing.follow = crate::resizing::Follow::Pointer;
 
         let (conn, event_queue, client) = connect(&mut display, &mut state);
         let qh = event_queue.handle();
@@ -8085,6 +8293,9 @@ end)"#,
         state
             .decorations
             .set_style(&mut state.panes, Some("none".to_string()));
+        // The pointer's rectangle is what this test measures the insets
+        // against; the default draws the window at its client's size.
+        state.resizing.follow = crate::resizing::Follow::Pointer;
 
         let (conn, event_queue, client) = connect(&mut display, &mut state);
         let qh = event_queue.handle();
@@ -8431,9 +8642,10 @@ end)"#,
     /// the ones at the end of a gesture, because people stop moving before
     /// they let go. The flush is the half `move_pane` cannot do: it is only
     /// reached from a frame that carried a motion, so the offers made in
-    /// the last `TELL_EVERY` of travel have nowhere else to come from.
+    /// the last throttled interval of travel have nowhere else to come from.
     fn paused_frame(state: &mut Solium, now: Duration) {
         state.flush_resize(now);
+        state.settle_round(now);
         state.settle_resize_hold(now);
         state.settle_resize_bridge(now);
     }
@@ -8453,6 +8665,13 @@ end)"#,
             $state
                 .decorations
                 .set_style(&mut $state.panes, Some("none".to_string()));
+            // The bridge's own mechanics, a pane told on every frame and drawn
+            // at its slot: `resize.sync = 0`, the default, said here so a
+            // change of default cannot change what these tests are about.
+            // Rounds have tests of their own,
+            // `a_seam_moves_once_both_of_its_clients_have_drawn` and those
+            // after it.
+            $state.resizing.sync = Duration::ZERO;
             let ($conn, mut $queue, mut $client) = connect(&mut $display, &mut $state);
             let $qh = $queue.handle();
         };
@@ -10380,12 +10599,14 @@ end)"#,
     /// Before #233 the rest of the glide stretched that answer across the
     /// rectangle the glide had reached, glyphs up to twice as wide: no hold
     /// meant no `resize.fill`, and no fill meant a stretch. Now every pane is
-    /// fitted by the configured fill, the default draws the answer 1:1, and
-    /// the glide's own two ends say which edge it stands against: the right,
-    /// so the gap is on the left, where the window is still on its way in.
+    /// fitted by the configured fill, which draws the answer 1:1, and under
+    /// `anchor` the glide's own two ends say which edge it stands against:
+    /// the right, so the gap is on the left, where the window is still on
+    /// its way in. (`crop`, the default, has it at the left throughout.)
     #[test]
     fn a_glide_that_shrinks_a_window_draws_its_answer_at_its_own_size() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, surface, pane, tile) = filled_tile(
             &mut display,
             &mut state,
@@ -10455,8 +10676,10 @@ end)"#,
     ///
     /// The full-width window shrunk to the right half again, by a 240 ms
     /// glide, and a client slower than that: the glide lands with the old,
-    /// full-width picture still the only one. Through the glide it stood
-    /// against the right edge, cut on the left, where the window was moving.
+    /// full-width picture still the only one. Through the glide it stood,
+    /// anchored, against the right edge, cut on the left, where the window
+    /// was moving. (`crop`, the default, keeps it at the left throughout, so
+    /// it has nothing to jump back from.)
     /// The transform is retired the pass it lands, and with nothing left to
     /// say which edge stood still the picture went back to the top-left: the
     /// whole of the window's contents jumped by half a screen at the moment
@@ -10466,6 +10689,7 @@ end)"#,
     #[test]
     fn a_glide_that_lands_before_its_client_answers_keeps_its_picture_where_it_was() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, _surface, pane, tile) = filled_tile(
             &mut display,
             &mut state,
@@ -15527,7 +15751,7 @@ end)"#,
     /// client's.**
     ///
     /// A window under a titlebar has its top edge dragged down by 100. Its
-    /// client has not answered, so under the default fill its 300-tall
+    /// client has not answered, so under `anchor` its 300-tall
     /// picture stays against the bottom edge, which is standing still, and
     /// the top 100 of it is cut away -- under the titlebar that came down
     /// with the edge. The hit test inverted the fit without its cut, so a
@@ -15537,6 +15761,7 @@ end)"#,
     #[test]
     fn a_press_on_what_an_anchored_picture_cuts_away_is_not_the_clients() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, _toplevel, surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -15575,7 +15800,7 @@ end)"#,
         assert_eq!(
             state.resize_fill(pane),
             crate::resizing::Fill::Anchor,
-            "the default fill"
+            "the premise: the anchored fill"
         );
         assert_eq!(
             state.resize_pins(pane),
@@ -15768,11 +15993,80 @@ end)"#,
         );
     }
 
+    /// **A drag tells its client on every frame it moves, by default.**
+    ///
+    /// The same six frames as the capped test below, with no
+    /// `resize.tell_hz` configured: six offers, six configures. Told a tenth of
+    /// a second apart, every client measured on 2026-10-16 -- kitty, Dolphin,
+    /// a GTK4 window and Firefox -- answered within 13 ms and still trailed
+    /// the pointer by 150 px and more, because the interval was the lag.
+    #[test]
+    fn a_tiled_drag_configures_on_every_frame_it_moves_by_default() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configures.clear();
+
+        let request = ResizeRequest {
+            window: window.clone(),
+            wanted: at(400, 300, 300, 200),
+            edge_at: (700.0, 500.0),
+            edges: ResizeEdge::Right,
+        };
+        state.begin_resize(&window);
+        for (millis, width) in [
+            (0, 300),
+            (16, 302),
+            (32, 304),
+            (48, 306),
+            (64, 308),
+            (80, 310),
+        ] {
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, width, 200),
+                Duration::from_millis(millis),
+            );
+        }
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_eq!(
+            client.configures.len(),
+            6,
+            "six frames of a drag that moved each time are six configures when \
+             nothing caps them; got {:?}",
+            client.configures
+        );
+    }
+
     /// **Issue #123, the rate half: a tiled drag configured its client once
     /// per frame.**
     ///
-    /// `crate::resizing::TELL_EVERY` is consulted by `Hold::dragged` and by
-    /// nothing else, and until now a tiled pane had no hold — so `move_pane`
+    /// The throttle — a capped `resize.tell_hz` since every frame became the
+    /// default — is consulted by `Hold::dragged` and by nothing else, and
+    /// until now a tiled pane had no hold — so `move_pane`
     /// sent a configure on every frame of every drag, which is sixty a
     /// second. `resizing.rs` says in its own words why that fails: a client
     /// that cannot render at that rate does not try, it falls behind, and
@@ -15785,6 +16079,10 @@ end)"#,
     #[test]
     fn a_tiled_drag_configures_on_the_throttle_and_not_once_per_frame() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -15843,7 +16141,7 @@ end)"#,
         assert_eq!(
             client.configures.len(),
             1,
-            "six frames of a claimed drag inside one `TELL_EVERY` must be \
+            "six frames of a claimed drag inside one capped interval must be \
              one configure, not six: the first offer goes out on the frame \
              it is decided and the rest wait. Got {:?}",
             client.configures
@@ -15877,6 +16175,380 @@ end)"#,
             Some((340, 200)),
             "and what is sent is the rectangle of the frame that sent it, \
              not a stale one the throttle had been sitting on"
+        );
+    }
+
+    /// Two windows side by side, 400x300 each, the seam between them at
+    /// x = 400: what every round test drags.
+    struct Seam {
+        display: Display<Solium>,
+        state: Solium,
+        conn: Connection,
+        queue: wayland_client::EventQueue<Client>,
+        client: Client,
+        qh: QueueHandle<Client>,
+        left: (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            xdg_surface::XdgSurface,
+        ),
+        right: (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            xdg_surface::XdgSurface,
+        ),
+        panes: (crate::pane::PaneId, crate::pane::PaneId),
+    }
+
+    impl Seam {
+        fn new() -> Self {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+            let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+            let qh = queue.handle();
+            let left = open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            let right = open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            commit_buffer(&client, &qh, &left.2, 400, 300);
+            commit_buffer(&client, &qh, &right.2, 400, 300);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.map_stacked(left.0.clone(), (0, 0), false);
+            state.map_stacked(right.0.clone(), (400, 0), false);
+            state.sync_panes();
+            let panes = (
+                state
+                    .panes
+                    .id_of(&left.0)
+                    .expect("the left window has a pane"),
+                state
+                    .panes
+                    .id_of(&right.0)
+                    .expect("the right window has a pane"),
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+            Self {
+                display,
+                state,
+                conn,
+                queue,
+                client,
+                qh,
+                left,
+                right,
+                panes,
+            }
+        }
+
+        fn pump(&mut self) {
+            pump(
+                &mut self.display,
+                &mut self.state,
+                &self.conn,
+                &self.qh,
+                &mut self.queue,
+                &mut self.client,
+            );
+        }
+
+        /// The drag on the left window's right edge.
+        fn request(&self) -> ResizeRequest {
+            ResizeRequest {
+                window: self.left.0.clone(),
+                wanted: at(0, 0, 400, 300),
+                edge_at: (400.0, 300.0),
+                edges: ResizeEdge::Right,
+            }
+        }
+
+        /// A frame of the drag that put the seam at `x`: both panes moved
+        /// by the layout, then the rest of `settle_resize`.
+        fn seam_at(&mut self, x: i32, now: Duration) {
+            let request = self.request();
+            self.state.arm_resize_gesture(&request);
+            for (pane, outer) in [
+                (self.panes.0, at(0, 0, x, 300)),
+                (self.panes.1, at(x, 0, 800 - x, 300)),
+            ] {
+                let was = self
+                    .state
+                    .pane_outer_of(pane)
+                    .expect("a mapped pane has a rectangle");
+                self.state.move_pane(
+                    pane,
+                    outer,
+                    was,
+                    AnimationSpec {
+                        duration: Duration::ZERO,
+                        ..AnimationSpec::default()
+                    },
+                    now,
+                    Standing::Tile,
+                );
+            }
+            self.state.resize_gesture = None;
+            self.state.drop_resize_hold_for(&request.window);
+            paused_frame(&mut self.state, now);
+        }
+
+        /// A frame with no motion in it.
+        fn frame(&mut self, now: Duration) {
+            paused_frame(&mut self.state, now);
+        }
+
+        /// One side's client acknowledging the last configure it was sent
+        /// and drawing at `width`.
+        fn answer(&mut self, right: bool, width: i32) {
+            let (xdg, surface) = if right {
+                (self.right.3.clone(), self.right.2.clone())
+            } else {
+                (self.left.3.clone(), self.left.2.clone())
+            };
+            let id = wayland_client::Proxy::id(&xdg);
+            let serial = self
+                .client
+                .surface_configures
+                .iter()
+                .rev()
+                .find(|(to, _)| *to == id)
+                .map(|&(_, serial)| serial)
+                .expect("that window was configured");
+            xdg.ack_configure(serial);
+            commit_buffer(&self.client, &self.qh, &surface, width, 300);
+            self.pump();
+        }
+
+        /// Where each pane is drawn: its frame as the renderer resolves it,
+        /// transform and all, and not only the rectangle under it -- a glide
+        /// the layout starts at every move is drawn instead of that.
+        fn drawn(&self) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
+            let of = |pane| {
+                let held = self.state.panes.get(pane).expect("the pane is here");
+                let rect = self
+                    .state
+                    .drawn_at(held, self.state.pane_outer(held), self.state.clock.now())
+                    .rect;
+                Rectangle::new(
+                    (rect.loc.x.round() as i32, rect.loc.y.round() as i32).into(),
+                    (rect.size.w.round() as i32, rect.size.h.round() as i32).into(),
+                )
+            };
+            (of(self.panes.0), of(self.panes.1))
+        }
+
+        /// The size each client has committed, as far as the compositor has
+        /// applied it.
+        fn committed(&self) -> (Size<i32, Logical>, Size<i32, Logical>) {
+            (self.left.0.geometry().size, self.right.0.geometry().size)
+        }
+
+        /// The widths each client has been told, in order: a configure that
+        /// only changes a state -- the release taking `resizing` away -- is
+        /// not a new width, and is not counted again.
+        fn told(&self, right: bool) -> Vec<i32> {
+            let id = wayland_client::Proxy::id(if right { &self.right.1 } else { &self.left.1 });
+            let mut widths: Vec<i32> = self
+                .client
+                .configures
+                .iter()
+                .filter(|(to, _, _)| *to == id)
+                .map(|&(_, width, _)| width)
+                .collect();
+            widths.dedup();
+            widths
+        }
+    }
+
+    /// **A seam moves once both of its clients have drawn (`resize.sync`).**
+    ///
+    /// Both panes are told their new sizes together, and drawn where they
+    /// were until both have answered: the left one's answer, in first, is
+    /// held back rather than shown against a seam its neighbour has not
+    /// reached, and both land in the same pass once the right one's is in.
+    /// Moved at once instead, the frame between the two answers draws the
+    /// left window's new picture cut by the old seam and the right window's
+    /// old picture short of the new one -- the grey band of 2026-10-16.
+    #[test]
+    fn a_seam_moves_once_both_of_its_clients_have_drawn() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "both sides are told their new size in the same round"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "and both are drawn where their pictures are until they answer"
+        );
+
+        seam.answer(false, 450);
+        assert_eq!(
+            seam.committed().0,
+            Size::from((400, 300)),
+            "the left client's answer is held back while the right one's is not in"
+        );
+        seam.frame(Duration::from_millis(16));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "a frame with one answer in still draws the old seam"
+        );
+
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        assert_eq!(
+            seam.committed(),
+            (Size::from((450, 300)), Size::from((350, 300))),
+            "with both answers in, both are applied together"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "and both panes move to the new seam in the same pass"
+        );
+    }
+
+    /// **A slow client holds a seam up for `resize.sync` and no longer.**
+    /// Past it the round ends with whatever is in: the answered side is
+    /// applied, and both are drawn at their new rectangles, the slow one's
+    /// old picture fitted into its own as the bridge always fitted one.
+    #[test]
+    fn a_seam_waits_for_a_slow_client_no_longer_than_resize_sync() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.pump();
+        seam.answer(false, 450);
+        seam.frame(Duration::from_millis(199));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "inside `resize.sync` the seam waits for its slow side"
+        );
+        seam.frame(Duration::from_millis(200));
+        assert_eq!(
+            seam.committed().0,
+            Size::from((450, 300)),
+            "at `resize.sync` the answer that is in is applied"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "and the seam moves without its slow side"
+        );
+    }
+
+    /// **A seam that moves on during a round is told in the next one**,
+    /// never mid-round: a client told twice before its neighbour answered
+    /// once would answer a seam the neighbour is never shown at.
+    #[test]
+    fn a_seam_moved_during_a_round_is_told_in_the_next() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "the second frame's seam waits for the first round"
+        );
+        seam.answer(false, 450);
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450, 470], vec![350, 330]),
+            "the round that ends starts the next, from where the seam has got to"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "drawn where the round that ended put them"
+        );
+    }
+
+    /// **A seam let go of during a round ends where it was let go**: the
+    /// release waits for the round under way like any other move, and the
+    /// gesture ends once the last round's answers are in.
+    #[test]
+    fn a_seam_let_go_of_mid_round_ends_where_it_was_let_go() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.state.release_resize(&seam.left.0);
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "the release does not tell anybody past the round under way"
+        );
+        seam.answer(false, 450);
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        seam.pump();
+        seam.answer(false, 470);
+        seam.answer(true, 330);
+        seam.frame(Duration::from_millis(48));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 470, 300), at(470, 0, 330, 300)),
+            "the gesture ends where the seam was let go"
+        );
+        assert!(
+            !seam.state.holding_resize(seam.panes.0) && !seam.state.holding_resize(seam.panes.1),
+            "and once both answers are in, nothing is held any more"
+        );
+    }
+
+    /// **`resize.sync = 0` moves each pane to the layout's rectangle at
+    /// once**, as the bridge always did: told on every frame, drawn at its
+    /// slot.
+    #[test]
+    fn with_resize_sync_zero_a_seam_is_drawn_where_the_layout_put_it_at_once() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::ZERO;
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450, 470], vec![350, 330]),
+            "every frame tells both sides"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 470, 300), at(470, 0, 330, 300)),
+            "and both are drawn at the layout's rectangles straight away"
         );
     }
 
@@ -16077,6 +16749,10 @@ end)"#,
     #[test]
     fn a_pane_pushed_aside_by_another_panes_drag_is_configured_at_once() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (dragged, dragged_toplevel, _dragged_surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         let (beside, beside_toplevel, _beside_surface) =
@@ -16581,7 +17257,7 @@ end)"#,
     /// `Hold::dragged` is reached from `move_pane` and from `hold_resize`,
     /// and `settle_resize` reaches either only on a frame whose
     /// `pending_resize` carried a motion. So the offers a drag makes inside
-    /// its last `TELL_EVERY` are written into the pane's slot, drawn from
+    /// its last throttled interval are written into the pane's slot, drawn from
     /// the pane's slot, and never put on the wire: the client sits at a size
     /// up to a tenth of a second stale while the pane is drawn where the
     /// pointer is, and the bridge between the two is the visible gap.
@@ -16599,6 +17275,10 @@ end)"#,
     #[test]
     fn a_drag_that_pauses_still_tells_its_client_where_it_stopped() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -17321,7 +18001,7 @@ end)"#,
     /// the floating hold. Each direction built a fresh `Hold` with a fresh
     /// `told`, and a fresh hold is told immediately by design — so an
     /// alternating handler restored the sixty configures a second
-    /// `TELL_EVERY` exists to remove. Carrying the hold across the boundary
+    /// a capped `resize.tell_hz` exists to impose. Carrying the hold across the boundary
     /// is what stops that: it is the same client in the same gesture.
     ///
     /// The fixture has no scripts, so `trigger_resize` returns false and
@@ -17330,6 +18010,10 @@ end)"#,
     #[test]
     fn a_layout_changing_its_mind_does_not_buy_a_configure_each_way() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -22457,6 +23141,80 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 );
             }
 
+            /// **A window being resized is told it may draw again as soon as a
+            /// frame showing it starts to be drawn** (`resize.overlap`), not
+            /// only once that frame reaches the screen, so its application
+            /// draws its next size while the compositor draws its last. A
+            /// window nobody is resizing is not told then -- it waits for the
+            /// refresh, as before -- and neither is anything with the setting
+            /// off.
+            #[test]
+            fn a_window_being_resized_is_told_to_draw_again_when_its_frame_starts() {
+                let mut session = Session::with_monitors(1);
+                let (window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let (_other, _toplevel, other, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let output = session.output(0);
+                session.state.space.refresh();
+                let ask = |session: &mut Session, surface: &wl_surface::WlSurface| {
+                    surface.frame(&session.app.qh, FrameDone);
+                    surface.commit();
+                    session.app.pump(&mut session.display, &mut session.state);
+                };
+                let done = |session: &mut Session| {
+                    session.app.pump(&mut session.display, &mut session.state);
+                    session.app.client.frames_done
+                };
+                let refresh = Duration::from_millis(16);
+
+                ask(&mut session, &surface);
+                ask(&mut session, &other);
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(done(&mut session), 0, "nobody is being resized");
+
+                let pane = session
+                    .state
+                    .panes
+                    .id_of(&window)
+                    .expect("the window has a pane");
+                let size = window.geometry().size;
+                session.state.resize_hold = Some(crate::resizing::Held {
+                    window: window.clone(),
+                    pane,
+                    hold: crate::resizing::Hold::new(
+                        ResizeEdge::BottomRight,
+                        size,
+                        Rectangle::new((0, 0).into(), size),
+                        Duration::ZERO,
+                        None,
+                        crate::resizing::PATIENCE,
+                        crate::resizing::EVERY_FRAME,
+                    ),
+                });
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "the window being resized is told, and the other is not"
+                );
+
+                ask(&mut session, &surface);
+                session.state.resizing.overlap = false;
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "and with resize.overlap off, nobody is"
+                );
+            }
+
             /// **A window on a dark monitor is told to draw once a second, and
             /// not every frame.** A lit monitor's refresh tells it nothing any
             /// more; the dark pass tells it at most once per
@@ -26311,16 +27069,17 @@ end)
         /// client has not drawn at the new size yet. Before #233 its
         /// half-width picture was stretched across the rectangle the glide
         /// had reached, its text up to twice as wide behind the fade. Under
-        /// the default fill the old picture is drawn at its own size against
+        /// `anchor` the old picture is drawn at its own size against
         /// the right edge, and the strip the neighbour has grown into is
         /// `resize.background`'s, behind the fading window; once the client
         /// answers, its new, wider picture stands against that edge too, cut
         /// on the left until the glide gets there, so the neighbour's contents
-        /// do not move at all. `crop` keeps the picture at the rectangle's
-        /// left, going with the moving edge instead.
+        /// do not move at all. `crop`, the default, keeps the picture at the
+        /// rectangle's left, going with the moving edge instead.
         #[test]
         fn a_neighbour_growing_into_a_closed_windows_tile_keeps_its_picture_against_its_far_edge() {
             let mut desk = Desk::new();
+            desk.state.resizing.fill = crate::resizing::Fill::Anchor;
             let (dying, others) = closing_scene(&mut desk, "tiling");
             for opened in others.iter().chain([&dying]) {
                 desk.answer(opened);
@@ -35855,6 +36614,11 @@ end)
                     desk.install("require(\"touch\")");
                     let _touch = desk.client.seat_touch(&desk.qh);
                     desk.pump();
+                    // These measure the rectangle the finger asks for before
+                    // the client answers, which is what a window is drawn at
+                    // under `resize.follow = "pointer"`; the default draws it
+                    // at its client's size.
+                    desk.state.resizing.follow = crate::resizing::Follow::Pointer;
                     run(&mut desk, &opened, window, before);
                 });
             }

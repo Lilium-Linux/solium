@@ -170,6 +170,30 @@ impl<T: Clone> Capture<Target<T>> {
         pool.target(alloc, size, crate::pool::Format::Rgba8)
     }
 
+    /// The target to draw this capture into at `size`, with room
+    /// (`Pool::target_with_room`): its own while it has room for `size`,
+    /// otherwise its own goes back to the pool and one with room is taken.
+    /// Drawn into its top-left `size` corner (`pool::frame_in`) and read
+    /// through that corner (`effect::run::BoxMap::corner`), so a part that
+    /// changes size on every frame of a drag keeps its target (#428).
+    /// `tests::a_capture_with_room_keeps_its_target_while_a_window_is_dragged_wider`.
+    pub(crate) fn target_with_room<A: Alloc<Tex = T>>(
+        &mut self,
+        pool: &mut Pool<T>,
+        alloc: &mut A,
+        size: Size<i32, Physical>,
+    ) -> Option<Target<T>> {
+        if let Some(held) = self.target.as_ref()
+            && crate::pool::has_room_for(held.size(), size)
+        {
+            return Some(held.clone());
+        }
+        if let Some(old) = self.target.take() {
+            pool.give_back(old);
+        }
+        pool.target_with_room(alloc, size, crate::pool::Format::Rgba8)
+    }
+
     /// Give the target back. `tests::a_pane_that_stops_warping_gives_the_texture_back`.
     pub(crate) fn release(&mut self, pool: &mut Pool<T>) {
         if let Some(target) = self.target.take() {
@@ -481,6 +505,28 @@ mod tests {
             "sixty frames of one window made {} textures",
             alloc.made
         );
+    }
+
+    /// **A capture with room keeps its target while a window is dragged
+    /// wider** (#428): a slot's self input widened a pixel a frame from 1150
+    /// to 1300 makes three targets (at 1152, 1280 and 1408 wide: the first,
+    /// and one at each step it grows past), where one made at exactly each
+    /// size made 151.
+    #[test]
+    fn a_capture_with_room_keeps_its_target_while_a_window_is_dragged_wider() {
+        let (mut capture, mut pool, mut alloc) = (
+            Capture::<crate::pool::Target<Handle>>::default(),
+            Pool::new(64 << 20),
+            counting(),
+        );
+        for width in 1150..=1300 {
+            let target = capture
+                .target_with_room(&mut pool, &mut alloc, size(width, 850))
+                .expect("a target");
+            assert!(target.size().w >= width, "a target with room for {width}");
+            capture.drawn(target, nothing(Kind::Pane));
+        }
+        assert_eq!(alloc.made, 3, "one target a step, not one a frame");
     }
 
     /// A window that changes size gives its old target back and holds one.

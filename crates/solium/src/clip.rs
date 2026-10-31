@@ -19,7 +19,7 @@ use smithay::{
             solid::SolidColorRenderElement,
             surface::{WaylandSurfaceRenderElement, WaylandSurfaceTexture},
         },
-        gles::{GlesError, GlesFrame, GlesRenderer, Uniform, UniformValue},
+        gles::{GlesError, GlesFrame, GlesRenderer, GlesTexture, Uniform, UniformValue},
         utils::{CommitCounter, DamageSet, OpaqueRegions},
     },
     utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform},
@@ -284,6 +284,55 @@ pub(crate) fn claim(
         ..*clip
     };
     cut_corners(regions, &local)
+}
+
+/// A texture drawn through a client's rounded rectangle, from `src` to `dst`:
+/// what [`Clipped`] draws a surface with, for something drawn from the
+/// surface's texture that is not the surface -- the edge
+/// `resize.background = "edge"` stretches (`crate::edge`). A matrix that
+/// cannot be inverted draws it square, as `Clipped` does.
+#[expect(clippy::too_many_arguments, reason = "one draw call's own arguments")]
+pub(crate) fn draw_texture(
+    frame: &mut GlesFrame<'_, '_>,
+    texture: &GlesTexture,
+    src: Rectangle<f64, BufferCoords>,
+    dst: Rectangle<i32, Physical>,
+    damage: &[Rectangle<i32, Physical>],
+    alpha: f32,
+    clip: &Clip,
+    programs: &crate::pass::ClipPrograms,
+) -> Result<(), GlesError> {
+    let tex = texture_mat(
+        src,
+        dst,
+        texture.size(),
+        Transform::Normal,
+        texture.is_y_inverted(),
+    );
+    let Some(to_geo) = input_to_geo(tex, dst, clip) else {
+        return frame.render_texture_from_to(
+            texture,
+            src,
+            dst,
+            damage,
+            &[],
+            Transform::Normal,
+            alpha,
+            None,
+            &[],
+        );
+    };
+    frame.render_texture_from_to(
+        texture,
+        src,
+        dst,
+        damage,
+        &[],
+        Transform::Normal,
+        alpha,
+        Some(&programs.texture),
+        &uniforms(clip, to_geo),
+    )
 }
 
 /// The four uniforms the clipped programs share, for `clip` seen through
