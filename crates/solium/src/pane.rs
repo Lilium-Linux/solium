@@ -451,6 +451,18 @@ pub(crate) struct Pane {
     /// Here, it survives every [`Self::set_frame`], which is what
     /// `a_windows_way_back_outlives_its_frame` pins.
     restore: Option<Rectangle<i32, Logical>>,
+    /// Whether the maximise this window is in is one its client asked for:
+    /// an xdg `set_maximized`, or an X11 `_NET_WM_STATE` request (#450).
+    ///
+    /// A layout's tile outranks it. A client maximising itself is an
+    /// application restoring the state it had last time, or its own button,
+    /// and under a tiling layout neither lifts the window out of its tile:
+    /// `Solium::client_maximize` refuses it for a window already in a tile,
+    /// and `Solium::move_pane` lets a window that was maximised this way
+    /// before it had one out of the maximise when the layout gives it its
+    /// tile. A maximise the user asks for, by key or by the frame's button,
+    /// clears it, and is kept over a tile as before (#150).
+    maximized_by_client: bool,
     content: Content,
     /// What is drawn around this pane's client. See [`Frame`].
     ///
@@ -656,6 +668,7 @@ impl Pane {
             let_go: false,
             left_tile: None,
             restore: None,
+            maximized_by_client: false,
             content: Content::Loading {
                 program: program.to_owned(),
                 pid,
@@ -697,6 +710,7 @@ impl Pane {
             let_go: false,
             left_tile: None,
             restore: None,
+            maximized_by_client: false,
             content: Content::Client {
                 window,
                 scene: None,
@@ -994,6 +1008,17 @@ impl Pane {
     /// once.
     pub(crate) const fn take_restore(&mut self) -> Option<Rectangle<i32, Logical>> {
         self.restore.take()
+    }
+
+    /// Whether the window's own client asked for the maximise it is in. See
+    /// the field.
+    pub(crate) const fn maximized_by_client(&self) -> bool {
+        self.maximized_by_client
+    }
+
+    /// Say whose the maximise this window is in is: its client's, or not.
+    pub(crate) const fn set_maximized_by_client(&mut self, by_client: bool) {
+        self.maximized_by_client = by_client;
     }
 
     /// What is drawn around this pane's client. See [`Frame`].

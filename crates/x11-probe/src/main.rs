@@ -27,6 +27,17 @@
 //! `WM_TAKE_FOCUS`, and sets the focus itself when the window manager sends
 //! it one, as the probe does.
 //!
+//!     DISPLAY=:1 cargo run -p x11-probe -- maximized-before-map
+//!     DISPLAY=:1 cargo run -p x11-probe -- maximized-at-map
+//!     DISPLAY=:1 cargo run -p x11-probe -- ask-maximized
+//!
+//! The three ways an application asks to be maximised by itself (#450):
+//! the `_NET_WM_STATE` message sent before the window maps, sent at once
+//! after mapping it, as Steam restoring its last state does, and sent once
+//! the window has been shown. With `X11_PROBE_TILED=1` a tiling layout is
+//! in charge and the window must stay in its tile, not maximised; without
+//! it the window must be maximised, and restored by asking again.
+//!
 //! Each step waits `X11_PROBE_HOLD` milliseconds (1500 by default) for the
 //! compositor to answer and to be captured, then prints the window's state
 //! and rectangle. The exit status is zero only if every answer was the one
@@ -224,7 +235,23 @@ fn main() {
             let failed = focus(&conn, root, monitor, Duration::from_millis(hold));
             std::process::exit(i32::from(failed));
         }
-        other => panic!("no such mode {other:?}: `request`, `mapped` or `focus`"),
+        "maximized-before-map" | "maximized-at-map" | "ask-maximized" => {
+            let tiled = std::env::var("X11_PROBE_TILED").is_ok_and(|tiled| tiled == "1");
+            let failed = maximize(
+                conn,
+                root,
+                atoms,
+                monitor,
+                Duration::from_millis(hold),
+                &mode,
+                tiled,
+            );
+            std::process::exit(i32::from(failed));
+        }
+        other => panic!(
+            "no such mode {other:?}: `request`, `mapped`, `focus`, `maximized-before-map`, \
+             `maximized-at-map` or `ask-maximized`"
+        ),
     };
     let rect = if mapped {
         monitor
@@ -448,4 +475,89 @@ fn focus(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) -> 
         failed |= !ok;
     }
     failed
+}
+
+/// The `maximized-*` and `ask-maximized` modes: see the module header.
+/// Returns whether a step failed.
+fn maximize(
+    conn: RustConnection,
+    root: Window,
+    atoms: Atoms,
+    monitor: Rect,
+    hold: Duration,
+    mode: &str,
+    tiled: bool,
+) -> bool {
+    let window = conn.generate_id().expect("a window id");
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        window,
+        root,
+        i16::try_from(monitor.x + 100).expect("x fits"),
+        i16::try_from(monitor.y + 100).expect("y fits"),
+        800,
+        500,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &CreateWindowAux::new()
+            .background_pixel(0x0033_66cc)
+            .event_mask(EventMask::STRUCTURE_NOTIFY),
+    )
+    .expect("creating the window");
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        format!("x11-probe {mode}").as_bytes(),
+    )
+    .expect("naming the window");
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        b"x11-probe\0x11-probe\0",
+    )
+    .expect("classing the window");
+    let mut probe = Probe {
+        conn,
+        root,
+        window,
+        atoms,
+        hold,
+        failed: false,
+    };
+    if mode == "maximized-before-map" {
+        probe.ask(ADD, probe.atoms.horizontal, probe.atoms.vertical);
+    }
+    probe.conn.map_window(window).expect("mapping the window");
+    probe.conn.flush().expect("flushing");
+    if mode == "maximized-at-map" {
+        probe.ask(ADD, probe.atoms.horizontal, probe.atoms.vertical);
+    }
+    let mut seen = probe.look();
+    if mode == "ask-maximized" {
+        probe.check("mapped as a window", &seen, !seen.maximized);
+        probe.ask(ADD, probe.atoms.horizontal, probe.atoms.vertical);
+        seen = probe.look();
+    }
+    if tiled {
+        let ok = !seen.maximized && !seen.fullscreen && seen.rect != monitor;
+        probe.check(
+            "asked to be maximised under a layout: in its tile",
+            &seen,
+            ok,
+        );
+        return probe.failed;
+    }
+    let ok = seen.maximized && !seen.fullscreen;
+    probe.check("asked to be maximised while floating", &seen, ok);
+    let maximised = seen.rect;
+    probe.ask(REMOVE, probe.atoms.horizontal, probe.atoms.vertical);
+    let seen = probe.look();
+    let ok = !seen.maximized && seen.rect != maximised && seen.rect.w <= 800 && seen.rect.h <= 500;
+    probe.check("asked to be restored", &seen, ok);
+    probe.failed
 }
