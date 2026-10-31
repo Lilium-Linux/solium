@@ -507,6 +507,11 @@ impl Solium {
                         crate::input::grab::grip(self, &window, along, by);
                     }
                 }
+                Command::ResizeHold { id, held } => {
+                    if let Some(window) = self.window_by_id(id) {
+                        crate::input::resize::hold(self, &window, held);
+                    }
+                }
                 // Twice is once: a window already minimized, or one that is
                 // not, is left as it is and nothing is told (#30).
                 // `real_client::reflow_on_close::minimize::minimizing_or_unminimizing_twice_does_nothing_the_second_time`.
@@ -1748,15 +1753,26 @@ impl Solium {
     }
 
     /// Tell scripts a drag finished, so a layout can put the window back.
-    /// Tell the `drag` listeners how a move drag of `window` has got on:
-    /// `crate::input::grab::settle_drags` is the one caller.
-    pub(crate) fn trigger_drag(&mut self, window: &Window, phase: &'static str, x: f64, y: f64) {
+    /// Tell the `drag` or the `resizing` listeners, as `gesture` says, how a
+    /// drag of `window` has got on: `crate::input::grab::settle_drags` is the
+    /// one caller.
+    pub(crate) fn trigger_drag(
+        &mut self,
+        gesture: crate::input::grab::Gesture,
+        window: &Window,
+        phase: &'static str,
+        x: f64,
+        y: f64,
+    ) {
         let id = self.window_id(window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {
             return;
         };
-        let outcome = scripts.dragged(id, phase, x, y, snapshot);
+        let outcome = match gesture {
+            crate::input::grab::Gesture::Move => scripts.dragged(id, phase, x, y, snapshot),
+            crate::input::grab::Gesture::Resize => scripts.resizing(id, phase, x, y, snapshot),
+        };
         self.scripts = Some(scripts);
         self.apply(outcome);
     }

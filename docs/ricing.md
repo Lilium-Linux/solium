@@ -282,6 +282,33 @@ does with one number is hug the window from outside — and a hug has to clear
 the biggest cut or it crosses the curve. A layer that cares about one corner
 reads that corner.
 
+#### Corners that change with the window
+
+The radius is a binding like any other, and it is read for each window: the
+`PaneStyle` is told what its layers are told about their window, its state
+(`maximized`, `fullscreen`, `floating`, `minimized`, `keptAbove`), `focused`,
+`title`, `values` and `windowValues` (what your Lua handed that window with
+`sol.frame(id, { ... })`), and the corners follow as they change:
+
+```qml
+// Pane.qml — square while maximised or snapped, round otherwise
+client.radius: (maximized || windowValues.snapped) ? 0 : 12
+```
+
+Every layer is told the window's own `clientRadius` as it changes, so a border
+hugs the corners that window has. A `Behavior` on the number is followed frame
+by frame:
+
+```qml
+property int corner: maximized ? 0 : 12
+Behavior on corner { NumberAnimation { duration: 160 } }
+client.radius: corner
+```
+
+A radius that is a plain number costs what it always did, and a window whose
+corners are 0 runs no program on its client at all, however its style got
+there.
+
 #### Two ways a titlebar meets a rounded window
 
 The shipped pair, and the reason the corners are separable at all. Both reserve
@@ -338,6 +365,18 @@ once per monitor and shared by every window it is behind
 
 ```lua
 { match = { app_id = "kitty" }, part = "client", slot = "behind", effect = "blur" }
+```
+
+A window's `match` takes `app_id`, `title`, `monitor` and `style` as words,
+`focused`, `fullscreen` and `maximized` as booleans, and `values`: what your
+Lua handed the window with `sol.frame(id, { ... })`, each key given equal to
+the value given. So the configuration can tag a window and have rules follow
+the tag, with nothing in the compositor knowing what the tag means; `false`
+also matches a key never handed:
+
+```lua
+sol.frame(id, { snapped = true })     -- in your snapping script
+{ match = { values = { snapped = false } }, part = "pane", slot = "behind", effect = "outline" }
 ```
 
 The rules are applied whole: one that cannot be, a typo in a key or an

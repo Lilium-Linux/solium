@@ -1105,6 +1105,12 @@ impl Pane {
         &mut self.meshes
     }
 
+    /// What the configuration handed this window with `sol.frame`, as a
+    /// rule's `values` match reads it (#454).
+    pub(crate) const fn frame_values(&self) -> &crate::decoration::Values {
+        &self.frame_values
+    }
+
     /// What the configuration handed this window's frame, to merge into or
     /// clear. See the field; it is read with the frame it is drawn by,
     /// [`Self::decoration_with_values_mut`].

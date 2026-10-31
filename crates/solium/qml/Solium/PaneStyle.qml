@@ -113,7 +113,16 @@ Item {
     // and for the same reason: the compositor writes all four back onto each
     // layer's own root as `clientRadiusTopLeft`, `clientRadiusTopRight`,
     // `clientRadiusBottomLeft` and `clientRadiusBottomRight`, in logical
-    // pixels, once at build — on every layer of every style, zeroes included.
+    // pixels, at build — on every layer of every style, zeroes included.
+    //
+    // **And per window, as a binding says.** These may be bound to anything
+    // this object is told about its window — `client.radius: maximized ? 0 :
+    // 12`, or `windowValues.snapped ? 0 : 12` — and the compositor follows
+    // the binding for that window (a `Behavior` frame by frame), cutting its
+    // client to the new corners and writing them to every one of its layers
+    // again (#454). It reads them from a `PaneStyle` told what the layers
+    // are told: the first inline layer's, or this file built once more for
+    // the window, at 1x1 and never drawn, when every layer is a file.
     //
     // It writes `clientRadius` too, which survives all of this and is the
     // **largest of the four**. That is the number a layer wants when it wants

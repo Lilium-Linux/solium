@@ -14396,6 +14396,78 @@ end)"#,
         );
     }
 
+    /// **A rule on `maximized` applies once the compositor maximises the
+    /// window, and lets go once it restores it** (#454): the state it last
+    /// told the client, as `fullscreen` is; `sol.windows()` says the same.
+    #[test]
+    fn a_rule_on_maximized_follows_the_window_being_maximised_and_restored() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-maximized");
+        let (pane, window) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { maximized = true }, part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        let wanted = |fixture: &mut Fixture| {
+            crate::render::build_slots(&mut fixture.state)
+                .wanted(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind)
+        };
+        assert!(!wanted(&mut fixture), "matched a window not maximised");
+        let id = fixture.state.window_id(&window);
+        let toggle = |fixture: &mut Fixture| {
+            fixture.state.apply(crate::script::Outcome {
+                commands: vec![crate::script::Command::ToggleMaximize { id }],
+                ..Default::default()
+            });
+            pump_all(fixture);
+        };
+        toggle(&mut fixture);
+        assert!(wanted(&mut fixture), "a maximised window was not matched");
+        let snapshot = fixture.state.snapshot();
+        assert!(snapshot.windows.first().expect("one window").maximized);
+        toggle(&mut fixture);
+        assert!(!wanted(&mut fixture), "a restored window was still matched");
+    }
+
+    /// **A rule on `values` follows what `sol.frame` hands the window**
+    /// (#454): the configuration tags a window, and the rule matches it from
+    /// the next pass, and stops when the tag is taken back.
+    #[test]
+    fn a_rule_on_values_follows_what_sol_frame_hands_the_window() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-values");
+        let (pane, window) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { values = { snapped = true } }, part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        let wanted = |fixture: &mut Fixture| {
+            crate::render::build_slots(&mut fixture.state)
+                .wanted(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind)
+        };
+        assert!(!wanted(&mut fixture), "matched a window never tagged");
+        let id = fixture.state.window_id(&window);
+        let tag = |fixture: &mut Fixture, snapped: bool| {
+            fixture.state.apply(crate::script::Outcome {
+                commands: vec![crate::script::Command::FrameValues {
+                    id,
+                    fields: [("snapped".to_owned(), crate::json::Json::Bool(snapped))]
+                        .into_iter()
+                        .collect(),
+                }],
+                ..Default::default()
+            });
+        };
+        tag(&mut fixture, true);
+        assert!(wanted(&mut fixture), "a tagged window was not matched");
+        tag(&mut fixture, false);
+        assert!(!wanted(&mut fixture), "a window untagged was still matched");
+    }
+
     /// **A rule for another app leaves a window with an empty plan**, its
     /// facts asked and matching nothing.
     #[test]
@@ -43777,6 +43849,219 @@ end)
                     told(&desk)
                 );
                 assert!(desk.state.moves.is_empty(), "the drag is over");
+            }
+        }
+
+        /// The configuration's hold over an edge or modifier resize (#454):
+        /// `resizing` told as one begins and ends, and `sol.resize_hold`.
+        mod resize_primitives {
+            use super::*;
+            use smithay::backend::input::{ButtonState, KeyState};
+
+            const SUPER: u32 = 133;
+            const BTN_RIGHT: u32 = 0x111;
+
+            /// Writes down every `resizing` as `"phase id x,y"` and every
+            /// `resize` as `"resize id x,y"`, and does what `on_begin` says
+            /// when one begins, `id` in scope.
+            fn script(on_begin: &str) -> String {
+                format!(
+                    r#"
+told = {{}}
+sol.on("resizing", function(id, phase, x, y)
+    told[#told + 1] = phase .. " " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+    if phase == "begin" then {on_begin} end
+end)
+sol.on("resize", function(id, x, y)
+    told[#told + 1] = "resize " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+end)
+"#
+                )
+            }
+
+            /// A 400 by 300 window at 200,200 with no frame, and `script`.
+            fn desk(script: &str) -> (Desk, Window, crate::pane::PaneId, u64) {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                desk.pump();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(window.clone(), (200, 200), false);
+                desk.state.space.refresh();
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.install(script);
+                (desk, window, opened.pane, opened.pane.get())
+            }
+
+            fn desk_held() -> (Desk, Window, crate::pane::PaneId, u64) {
+                desk(&script("sol.resize_hold(id, true)"))
+            }
+
+            fn told(desk: &Desk) -> String {
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return table.concat(told, \";\")"))
+                    .unwrap_or_default()
+            }
+
+            fn region(desk: &Desk) -> Rectangle<i32, Logical> {
+                crate::monitor::union(&desk.state.space).expect("a monitor")
+            }
+
+            /// Super and the right button down at `at`: the modifier's
+            /// resize, by the corner of the quarter `at` is in.
+            fn take(desk: &mut Desk, at: (f64, f64)) {
+                move_pointer(&mut desk.state, at, 10_000);
+                crate::input::key(&mut desk.state, SUPER.into(), KeyState::Pressed, 11);
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Pressed,
+                    12_000,
+                );
+            }
+
+            fn release(desk: &mut Desk, time: u64) {
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Released,
+                    time,
+                );
+                crate::input::key(&mut desk.state, SUPER.into(), KeyState::Released, 99);
+            }
+
+            /// A pass: what the drag asked for is offered and done.
+            fn pass(desk: &mut Desk) {
+                crate::input::grab::settle_drags(&mut desk.state, false);
+                desk.state.settle_resize();
+            }
+
+            /// The size the window's client was last asked for: what a resize
+            /// changes at once, the client drawing it when it can.
+            fn asked(window: &Window) -> Option<(i32, i32)> {
+                window
+                    .toplevel()
+                    .and_then(|toplevel| toplevel.with_pending_state(|state| state.size))
+                    .map(|size| (size.w, size.h))
+            }
+
+            /// **`begin` as the resize is taken, before its first motion is
+            /// offered to anyone, and `end` after the release and after the
+            /// last motion is offered**, none of it inside the grab: a motion
+            /// let go of within its pass is offered, and then the resize ends.
+            #[test]
+            fn a_resize_is_told_as_it_begins_and_after_the_last_of_it_ends() {
+                let (mut desk, window, _, id) = desk(&script(""));
+                take(&mut desk, (550.0, 450.0));
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450"),
+                    "not told at the press"
+                );
+                move_pointer(&mut desk.state, (570.0, 460.0), 13_000);
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450"),
+                    "a motion was told before its pass"
+                );
+                pass(&mut desk);
+                assert_eq!(asked(&window), Some((420, 310)));
+                move_pointer(&mut desk.state, (590.0, 470.0), 14_000);
+                release(&mut desk, 15_000);
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450;resize {id} 620,510"),
+                    "the end was told before the last motion was offered"
+                );
+                pass(&mut desk);
+                assert_eq!(
+                    told(&desk),
+                    format!(
+                        "begin {id} 550,450;resize {id} 620,510;resize {id} 640,520;\
+                         end {id} 590,470"
+                    )
+                );
+                assert_eq!(asked(&window), Some((440, 320)));
+                assert!(desk.state.resizes.is_empty(), "the resize is not over");
+            }
+
+            /// **A held resize leaves the window as it is and asks the
+            /// layouts nothing, and let go it goes on from where the pointer
+            /// is then**, so nothing jumps; one held to the release ends
+            /// where it began.
+            #[test]
+            fn a_held_resize_keeps_the_window_and_goes_on_from_where_the_pointer_is() {
+                let (mut desk, window, _, id) = desk_held();
+                let before = asked(&window);
+                take(&mut desk, (550.0, 450.0));
+                move_pointer(&mut desk.state, (600.0, 500.0), 13_000);
+                pass(&mut desk);
+                assert_eq!(asked(&window), before, "held, it grew");
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450"),
+                    "a held resize was offered to the layouts"
+                );
+                // Let go, as `sol.resize_hold(id, false)` asks it.
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::ResizeHold { id, held: false }],
+                    ..Default::default()
+                });
+                pass(&mut desk);
+                assert_eq!(asked(&window), before, "let go, it jumped to the pointer");
+                move_pointer(&mut desk.state, (630.0, 520.0), 14_000);
+                pass(&mut desk);
+                assert_eq!(
+                    asked(&window),
+                    Some((430, 320)),
+                    "let go, it did not go on from where the pointer was"
+                );
+                release(&mut desk, 15_000);
+                pass(&mut desk);
+                assert!(
+                    told(&desk).ends_with(&format!("end {id} 630,520")),
+                    "{}",
+                    told(&desk)
+                );
+                assert!(desk.state.resizes.is_empty());
+
+                // Held to the release: as it was, and over.
+                let (mut desk, window_held, _, id) = desk_held();
+                let before = asked(&window_held);
+                take(&mut desk, (550.0, 450.0));
+                move_pointer(&mut desk.state, (650.0, 520.0), 13_000);
+                release(&mut desk, 14_000);
+                pass(&mut desk);
+                assert_eq!(
+                    asked(&window_held),
+                    before,
+                    "held to the end, it was resized"
+                );
+                assert_eq!(
+                    desk.state
+                        .real_geometry(&window_held)
+                        .map(|geometry| geometry.size),
+                    Some((400, 300).into()),
+                    "the client was asked for another size"
+                );
+                assert_eq!(told(&desk), format!("begin {id} 550,450;end {id} 650,520"));
+                assert!(desk.state.resizes.is_empty());
             }
         }
 

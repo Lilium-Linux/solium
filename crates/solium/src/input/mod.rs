@@ -1505,12 +1505,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                         button,
                         location,
                     };
-                    pointer.set_grab(
-                        state,
-                        resize::ResizeGrab::new(start_data, window, edges, began, laid_out),
-                        serial,
-                        Focus::Clear,
-                    );
+                    let grab =
+                        resize::ResizeGrab::new(state, start_data, window, edges, began, laid_out);
+                    pointer.set_grab(state, grab, serial, Focus::Clear);
                 }
                 return;
             }
@@ -1587,12 +1584,8 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                 button,
                 location,
             };
-            pointer.set_grab(
-                state,
-                resize::ResizeGrab::new(start_data, window, edges, outer, laid_out),
-                serial,
-                Focus::Clear,
-            );
+            let grab = resize::ResizeGrab::new(state, start_data, window, edges, outer, laid_out);
+            pointer.set_grab(state, grab, serial, Focus::Clear);
             return;
         }
 

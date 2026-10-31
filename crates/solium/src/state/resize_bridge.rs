@@ -108,6 +108,9 @@ impl Solium {
                     // slots the client never agreed to.
                     self.hold_resize(&request, now);
                 }
+                // A resize let go of before this motion was offered has its
+                // `end` told now, after it (#454): `crate::input::grab::settle_drags`.
+                crate::input::grab::settle_drags(self, true);
                 self.redraw = true;
                 true
             }

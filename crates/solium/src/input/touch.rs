@@ -182,6 +182,7 @@ pub(crate) fn claim(state: &mut Solium, slot: i32, action: crate::script::TouchA
                     .pane_laid_out(&window)
                     .unwrap_or(super::resize::LaidOut(began));
                 TouchTarget::Resize(ResizeDrag::new(
+                    state,
                     window,
                     edges,
                     began,
