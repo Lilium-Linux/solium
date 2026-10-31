@@ -482,6 +482,9 @@ impl Solium {
                     cramped: pane.cramped(),
                     shown: crate::present::was_shown(pane),
                     fullscreen: facts.fullscreen,
+                    maximized: pane
+                        .client()
+                        .is_some_and(|window| super::window_state::states(window).maximized),
                     style: facts.style,
                     // `None` for a Wayland window -- there is no
                     // `_NET_WM_WINDOW_TYPE` to have read -- never `"normal"`

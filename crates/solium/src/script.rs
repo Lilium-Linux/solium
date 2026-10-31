@@ -227,6 +227,11 @@ pub(crate) struct WindowInfo {
     /// configures carry, which a rule's `fullscreen` match reads.
     /// `real_client::sol_windows_carries_every_window_match_key`.
     pub(crate) fullscreen: bool,
+    /// Whether the compositor last told it to be maximised, as `fullscreen`
+    /// says of fullscreen: what a mode switch reads to let a window out of
+    /// the maximise the arrangement it is leaving gave it (#443).
+    /// `real_client::a_window_maximised_while_floating_joins_its_tile_when_a_layout_takes_over`.
+    pub(crate) maximized: bool,
     /// The pane style it is framed in, or `"none"` when it is drawn bare:
     /// fullscreen, drawing its own decorations, or under `pane = "none"`.
     /// What a rule's `style` match reads (`state::style_fact`).
@@ -3928,7 +3933,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `shown` is whether the window's client has been shown yet; see
     // `WindowInfo::shown`. `fullscreen` and `style` are the two match keys of
     // an effect rule (`effects.rules`) nothing else here says, so every key a
-    // rule matches a window by can be read from Lua. `x11_type`,
+    // rule matches a window by can be read from Lua; `maximized` beside
+    // `fullscreen`, for a mode switch (#443). `x11_type`,
     // `accepts_input`, `class` and `instance` are read only from an X11
     // window's own properties (#221) -- `nil` for a Wayland one, except
     // `accepts_input`, which is `true` -- and exist for a window rule (#56) to
@@ -3970,6 +3976,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("cramped", window.cramped)?;
                 entry.set("shown", window.shown)?;
                 entry.set("fullscreen", window.fullscreen)?;
+                entry.set("maximized", window.maximized)?;
                 entry.set("style", window.style.clone())?;
                 entry.set("x11_type", window.x11_type.clone())?;
                 entry.set("accepts_input", window.accepts_input)?;
@@ -8541,6 +8548,7 @@ mod tests {
                 cramped: false,
                 shown: true,
                 fullscreen: false,
+                maximized: false,
                 style: String::new(),
                 x11_type: None,
                 accepts_input: true,
@@ -11599,6 +11607,7 @@ mod tests {
             cramped: false,
             shown: true,
             fullscreen: false,
+            maximized: false,
             style: String::new(),
             x11_type: None,
             accepts_input: true,
@@ -12320,6 +12329,7 @@ mod tests {
                     cramped: false,
                     shown: true,
                     fullscreen: false,
+                    maximized: false,
                     style: String::new(),
                     x11_type: None,
                     accepts_input: true,
@@ -16648,6 +16658,7 @@ mod dialogs {
             cramped: false,
             shown: true,
             fullscreen: false,
+            maximized: false,
             style: String::new(),
             x11_type: None,
             accepts_input: true,
@@ -20276,6 +20287,7 @@ mod directions {
             cramped: false,
             shown: true,
             fullscreen: false,
+            maximized: false,
             style: String::new(),
             x11_type: None,
             accepts_input: true,

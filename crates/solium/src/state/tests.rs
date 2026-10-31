@@ -9510,6 +9510,227 @@ end)"#,
         );
     }
 
+    /// The shipped modes and tiling, loaded into a fixture of two real
+    /// windows, for the two #443 tests below.
+    fn shipped_modes_and_tiling(state: &mut Solium, name: &str) {
+        let directory = std::env::temp_dir().join(format!("solium-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\n\
+                 require(\"modes\")\n\
+                 require(\"workspaces\")\n\
+                 require(\"tiling\")\n\
+                 require(\"direction\")\n",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the shipped layouts"),
+        ));
+    }
+
+    /// **#443: a window maximised while the desktop floated joins its tile
+    /// when a layout takes over.**
+    ///
+    /// Illia maximised Claude Desktop on the floating desktop and later
+    /// switched to tiling. The layout gave it a tile and laid its neighbour
+    /// out beside that tile, while the compositor went on holding the window
+    /// maximised over the whole work area, on top of the neighbour: an empty
+    /// tile, a window drawn full screen, and no seam that could size it.
+    /// Now the switch lets it out of the maximise first, so it is in its
+    /// tile, at the tile's size, and told so.
+    #[test]
+    fn a_window_maximised_while_floating_joins_its_tile_when_a_layout_takes_over() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+        let (window, toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (other, _other_toplevel, other_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        shipped_modes_and_tiling(&mut state, "maximised-joins-its-tile");
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        macro_rules! rest {
+            () => {
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            };
+        }
+        macro_rules! press {
+            ($combo:expr) => {
+                assert!(state.trigger($combo), "{} is bound", $combo);
+                round_trip!();
+            };
+        }
+
+        state.focus_window(
+            &window,
+            SERIAL_COUNTER.next_serial(),
+            crate::script::FocusSource::Script,
+        );
+        press!("super+shift+m");
+        commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+        round_trip!();
+        rest!();
+        assert!(
+            in_state(&window, State::Maximized),
+            "the premise: the floating window is maximised"
+        );
+
+        press!("super+t");
+        let tile_of = |state: &Solium, window: &Window| {
+            state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("the layout has this window in a tile")
+        };
+        let (tile, beside) = (tile_of(&state, &window), tile_of(&state, &other));
+        assert!(
+            tile.intersection(beside).is_none(),
+            "the premise: two tiles side by side: {tile:?} and {beside:?}"
+        );
+        assert!(
+            !in_state(&window, State::Maximized),
+            "the window is still maximised under the layout"
+        );
+        assert_eq!(
+            last_configured(&client, &toplevel),
+            Some((tile.size.w, tile.size.h)),
+            "the window was not told its tile"
+        );
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        commit_buffer(&client, &qh, &other_surface, beside.size.w, beside.size.h);
+        round_trip!();
+        rest!();
+        assert_eq!(
+            state.space.element_location(&window),
+            Some(tile.loc),
+            "the window is not where its tile is"
+        );
+        let pane = state.panes.id_of(&window).expect("the window has a pane");
+        assert_eq!(
+            state.pane_outer_of(pane),
+            Some(tile),
+            "the window is drawn at a size other than its tile's"
+        );
+    }
+
+    /// **#443: a lock and an unlock leave every window as it was.**
+    ///
+    /// Two windows in the shipped tiling, locked and unlocked by Solium's
+    /// own lock: each is in the tile it had, at the place and the size it
+    /// had, told nothing new, and neither maximised nor fullscreen. What
+    /// #443 reported after an unlock was a window maximised half an hour
+    /// before it, which the test above is about; this one holds the lock
+    /// itself to having changed nothing.
+    #[test]
+    fn a_lock_and_an_unlock_leave_every_tiled_window_as_it_was() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _output = one_screen(&mut state);
+        let (first, first_toplevel, first_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (second, second_toplevel, second_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        shipped_modes_and_tiling(&mut state, "lock-leaves-tiles");
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        macro_rules! rest {
+            () => {
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            };
+        }
+        assert!(state.trigger("super+t"), "super+t is bound");
+        round_trip!();
+        let windows = [
+            (&first, &first_toplevel, &first_surface),
+            (&second, &second_toplevel, &second_surface),
+        ];
+        for (window, _, surface) in windows {
+            let tile = state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("the layout has this window in a tile");
+            commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+        }
+        round_trip!();
+        rest!();
+        state.focus_window(
+            &first,
+            SERIAL_COUNTER.next_serial(),
+            crate::script::FocusSource::Script,
+        );
+        round_trip!();
+        let seen = |state: &Solium, client: &Client| {
+            windows.map(|(window, toplevel, _)| {
+                (
+                    state.panes.of(window).and_then(Pane::placed),
+                    state.space.element_location(window),
+                    sizes_sent(client, toplevel).len(),
+                    last_configured(client, toplevel),
+                    in_state(window, State::Maximized),
+                    in_state(window, State::Fullscreen),
+                )
+            })
+        };
+        let before = seen(&state, &client);
+
+        state.lock_natively();
+        round_trip!();
+        for _ in 0..5 {
+            rest!();
+            round_trip!();
+        }
+        state.unlock_natively();
+        round_trip!();
+        for _ in 0..5 {
+            rest!();
+            round_trip!();
+        }
+
+        assert_eq!(
+            seen(&state, &client),
+            before,
+            "a window's tile, place, configures or states changed across a lock"
+        );
+    }
+
     /// **#49: a tiled window leaving fullscreen or maximised stays in front
     /// of its neighbour while it shrinks into its tile**, whichever of the
     /// two the layout's sweep places last, and one leaving fullscreen stays
