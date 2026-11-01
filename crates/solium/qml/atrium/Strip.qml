@@ -204,11 +204,16 @@ Item {
     readonly property int iconGap: 6
 
     // The held card's icons, by name, and how many.
+    // By name, each one's place among them: its place in the hand, which a
+    // card's row for it may already say otherwise, once the card it joins
+    // has been written and the hand not yet emptied.
     readonly property var heldKeys: {
         const out = {}
-        if (root.held)
-            for (const key of root.listOf(root.held.keys))
-                out[String(key)] = true
+        if (root.held) {
+            const keys = root.listOf(root.held.keys)
+            for (let at = 0; at < keys.length; at++)
+                out[String(keys[at])] = at + 1
+        }
         return out
     }
     readonly property int heldCount: root.held ? root.listOf(root.held.keys).length : 0
@@ -232,11 +237,56 @@ Item {
                 continue
             const apart = Math.hypot(root.held.ix - card.ix, root.held.iy - card.iy)
             const amount = Math.max(0, Math.min(1, 1 - apart / Math.max(1, reach)))
-            if (amount > 0 && (!best || amount > best.amount))
-                best = { key: card.key, card: card.card, ix: card.ix, iy: card.iy, amount: amount,
-                         count: root.listOf(card.badges).length }
+            if (amount > 0 && (!best || amount > best.amount)) {
+                // Its own icons, not counting held ones it already holds once
+                // the two are one.
+                let count = 0
+                for (const badge of root.listOf(card.badges))
+                    if (root.heldKeys[String(badge.key)] === undefined)
+                        count++
+                best = { key: card.key, card: card.card, ix: card.ix, iy: card.iy, amount: amount, count: count }
+            }
         }
         return best
+    }
+    // Where the held icons are drawn to, following the card they are nearest
+    // on the cards' own spring rather than jumping with it: that card lifts
+    // as it is hovered and moves to a new place when the two become one, and
+    // a held icon drawn to it directly would jump with it. Taken as it is when
+    // a card first comes near, where the pull is still nothing.
+    readonly property real nearSize: root.iconSize * (root.near && root.hovered === root.near.card ? root.lift : 1)
+    property real aimX: 0
+    property real aimY: 0
+    property real aimSize: root.iconSize
+    property real aimVx: 0
+    property real aimVy: 0
+    property real aimVs: 0
+    property var aimKey: null
+    onNearChanged: {
+        if (root.near && root.near.key !== root.aimKey) {
+            root.aimKey = root.near.key
+            root.aimX = root.near.ix; root.aimY = root.near.iy; root.aimSize = root.nearSize
+            root.aimVx = 0; root.aimVy = 0; root.aimVs = 0
+        } else if (!root.near) {
+            root.aimKey = null
+        }
+    }
+    FrameAnimation {
+        running: root.near !== null
+        onTriggered: {
+            const k = root.motion.stiffness, c = root.motion.damping
+            let left = Math.min(frameTime, 0.05)
+            while (left > 0) {
+                const dt = Math.min(left, 0.004)
+                root.aimVx += (k * (root.near.ix - root.aimX) - c * root.aimVx) * dt
+                root.aimVy += (k * (root.near.iy - root.aimY) - c * root.aimVy) * dt
+                root.aimVs += (k * (root.nearSize - root.aimSize) - c * root.aimVs) * dt
+                root.aimX += root.aimVx * dt
+                root.aimY += root.aimVy * dt
+                root.aimSize += root.aimVs * dt
+                left -= dt
+            }
+        }
     }
     readonly property real pull: {
         if (!root.near)
@@ -330,10 +380,12 @@ Item {
             required property bool hasFrom
             required property bool leaving
 
-            readonly property bool inHand: root.heldKeys[badge.key] === true
+            readonly property bool inHand: root.heldKeys[badge.key] !== undefined
+            readonly property int handSlot: inHand ? root.heldKeys[badge.key] - 1 : 0
             readonly property bool away: root.hidden && !root.peeking
-            // The size of the icons on the card the held one is nearest.
-            readonly property real nearSize: root.iconSize * (root.near && root.hovered === root.near.card ? root.lift : 1)
+            // The size of the icons on the card the held one is nearest, as
+            // they are drawn.
+            readonly property real nearSize: root.aimSize
             // The size it is drawn at: lifted with a hovered card, and, in
             // the hand, growing into the size of those it is drawn to.
             readonly property real size: inHand ? root.iconSize + (nearSize - root.iconSize) * root.pull
@@ -348,12 +400,12 @@ Item {
             // its card's corner, slid off with the strip when it goes.
             readonly property real tx: {
                 if (inHand) {
-                    const own = root.held.ix - size * 0.18 + slot * (size + root.iconGap)
+                    const own = root.held.ix - size * 0.18 + handSlot * (size + root.iconGap)
                     if (!root.near)
                         return own
-                    const there = root.near.ix - nearSize * 0.18 + (root.near.count + slot) * (nearSize + root.iconGap)
+                    const there = root.aimX - nearSize * 0.18 + (root.near.count + handSlot) * (nearSize + root.iconGap)
                     const drawn = own + (there - own) * root.pull
-                    const level = Math.abs(ty - (root.near.iy - nearSize * 0.62))
+                    const level = Math.abs(ty - (root.aimY - nearSize * 0.62))
                     const keep = Math.max(0, Math.min(1, (nearSize + 8 - level) / 8))
                     return drawn + Math.max(0, there - drawn) * keep
                 }
@@ -362,7 +414,7 @@ Item {
             readonly property real ty: {
                 if (inHand) {
                     const own = root.held.iy - size * 0.62
-                    const there = root.near ? root.near.iy - nearSize * 0.62 : own
+                    const there = root.near ? root.aimY - nearSize * 0.62 : own
                     return own + (there - own) * root.pull
                 }
                 return badge.iy - size * 0.62
@@ -441,21 +493,6 @@ Item {
                 }
             }
 
-            // A shadow under it, as macOS gives its icons.
-            Repeater {
-                model: 3
-                Rectangle {
-                    required property int index
-                    readonly property real out: (index + 1) * 1.5
-                    x: -out
-                    y: -out + 2.5
-                    width: badge.shown + 2 * out
-                    height: badge.shown + 2 * out
-                    radius: badge.shown * 0.22 + out
-                    color: "#000000"
-                    opacity: 0.09
-                }
-            }
             Image {
                 anchors.fill: parent
                 sourceSize.width: root.iconSize * 2
