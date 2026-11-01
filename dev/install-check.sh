@@ -240,10 +240,11 @@ check "  after the session's display is exported, before XDG autostart, and stop
     [ "$(grep -c -x -e "PartOf=solium-session.target" -e "After=solium-session.target" \
         -e "Before=solium-autostart.target xdg-desktop-autostart.target" \
         "$units/solium-kwallet-pam.service")" = 3 ]
-check "the portals: gtk, Inhibit to gtk by name, and wlr for ScreenCast and Screenshot" \
+check "the portals: gtk, Inhibit to gtk by name, wlr for ScreenCast and Screenshot, the wallet for Secret" \
     diff <(grep -v '^#' "$portals/lilium-portals.conf") <(printf '%s\n' '[preferred]' default=gtk \
         org.freedesktop.impl.portal.Inhibit=gtk \
-        org.freedesktop.impl.portal.ScreenCast=wlr org.freedesktop.impl.portal.Screenshot=wlr)
+        org.freedesktop.impl.portal.ScreenCast=wlr org.freedesktop.impl.portal.Screenshot=wlr \
+        'org.freedesktop.impl.portal.Secret=kwallet;gnome-keyring')
 check "install.sh names the units and the portal choice" \
     grep -q "portals       $portals/lilium-portals.conf" "$work/install.log"
 check "the session file is mode 644" [ "$(stat -c %a "$staged")" = 644 ]
@@ -371,7 +372,11 @@ check "  and how to take them out, XDG_CONFIG_HOME included" \
 check "  having put the units under that XDG_CONFIG_HOME" [ -f "$work/failed$broken/systemd/user/solium-session.target" ]
 XDG_CONFIG_HOME="$broken" DESTDIR="$work/failed" "$install_sh" --uninstall --session-dir "$sessions" \
     >"$work/failed-uninstall.log" 2>&1
-check "  which removes them" [ "$(count_files "$work/failed")" -eq 0 ]
+# All but the default configuration it copied in, which is the user's now.
+check "  which removes them" \
+    [ "$(count_files "$work/failed")" -eq "$(count_files "$root/crates/solium/default-config")" ]
+check "    but keeps the configuration it copied in" \
+    diff -r "$root/crates/solium/default-config" "$work/failed$broken/solium"
 
 echo "--no-check"
 # For a package built from source, whose binary still finds its build tree
@@ -382,7 +387,8 @@ mkdir -p "$nc_root/dev" "$nc_root/crates/solium" "$nc_root/target/install/releas
 cp "$install_sh" "$nc_root/dev/install.sh"
 cp -R "$root/dev/session" "$nc_root/dev/session"
 cp -R "$root/dev/pam" "$nc_root/dev/pam"
-cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" "$nc_root/crates/solium/"
+cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" \
+    "$root/crates/solium/default-config" "$nc_root/crates/solium/"
 printf '#!/bin/sh\nexit 1\n' >"$nc_root/target/install/release/solium"
 cp "$nc_root/target/install/release/solium" "$nc_root/target/install/release/solium-auth"
 chmod +x "$nc_root/target/install/release/solium" "$nc_root/target/install/release/solium-auth"
@@ -469,8 +475,9 @@ done
 check "nothing went into XDG_CONFIG_HOME" [ ! -e "$sys$broken" ]
 check "share/solium has no session file, no PAM file and no checksums" \
     [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/solium.pam" -a ! -e "$sys_share/config.sha256" ]
-check "exactly those files ($(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 9)))" \
-    [ "$(count_files "$sys")" -eq "$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 9))" ]
+sys_expected=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" \
+    "$root/crates/solium/default-config") + 9))
+check "exactly those files ($sys_expected)" [ "$(count_files "$sys")" -eq "$sys_expected" ]
 check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
 check "--check passed, using the staged /usr/share/solium" \
     grep -qF -- "--check passed (ok: " "$work/system.log"
@@ -713,7 +720,10 @@ check "  and not before" [ -z "$(grep -x "before solium had gone" "$wrap/systemc
 echo "uninstall"
 DESTDIR="$destdir" "$install_sh" --uninstall --session-dir "$sessions" >"$work/uninstall.log" 2>&1
 check "exits 0" [ $? -eq 0 ]
-check "no file is left under DESTDIR" [ "$(count_files "$destdir")" -eq 0 ]
+check "no file is left under DESTDIR but the configuration it copied in" \
+    [ "$(count_files "$destdir")" -eq "$(count_files "$root/crates/solium/default-config")" ]
+check "  which is the user's now, and kept" \
+    diff -r "$root/crates/solium/default-config" "$destdir$config_home/solium"
 check "  the units and the portal choice included" \
     [ ! -e "$units/solium-session.target" -a ! -e "$units/solium-autostart.target" \
         -a ! -e "$units/solium-kwallet-pam.service" -a ! -e "$portals/lilium-portals.conf" ]
