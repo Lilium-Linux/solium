@@ -70,6 +70,21 @@ kept.drag = nil
 kept.moving = nil
 kept.covered = kept.covered or {}
 kept.carded = kept.carded or {}
+-- When each window joined the group it is in, as a count: a group's icons
+-- stand in the order their applications joined it, so a card dropped onto
+-- another puts its icons after the ones already there.
+kept.joined = kept.joined or {}
+kept.joins = kept.joins or 0
+local function joined_now(id)
+    kept.joins = kept.joins + 1
+    kept.joined[tostring(id)] = kept.joins
+end
+local function joined_at(id)
+    if not kept.joined[tostring(id)] then
+        joined_now(id)
+    end
+    return kept.joined[tostring(id)]
+end
 
 atrium.desks = kept.desks
 
@@ -95,7 +110,8 @@ local function settings()
         tilt = number(given.tilt, 26, -89),
         perspective = number(given.perspective, 1100, 100),
         fan = number(given.fan, 14),
-        hide = (given.hide == "never" or given.hide == "overlap") and given.hide or "stage",
+        hide = (given.hide == "never" or given.hide == "overlap" or given.hide == "stage") and given.hide or "edge",
+        linger = number(given.linger, 3000),
         aspect = number(card.aspect, 0.72, 0.1),
         spacing = number(card.spacing, 64),
         behind = math.min(1, number(card.behind, 0.92)),
@@ -461,13 +477,17 @@ local function icon_of(app)
     return icons[lower] or icons[(lower:match("([^.]+)$") or lower)] or app
 end
 
--- Whether the strip slides away: while the stage holds a window (`hide`
--- "stage"), or only while one covers it ("overlap"); never with "never". The strip's icons
+-- Whether the strip slides away: always but at the edge (`hide` "edge"),
+-- while the stage holds a window ("stage"), or only while one covers it
+-- ("overlap"); never with "never". The strip's icons
 -- are drawn over every window, its cards under the stage, so a strip left out
 -- under a stage window would show its icons on top of it.
 local function covering(groups, by_id, strip, set)
     if set.hide == "never" then
         return false
+    end
+    if set.hide == "edge" then
+        return true
     end
     for _, id in ipairs(groups[1] or {}) do
         local window = by_id[id]
@@ -477,6 +497,9 @@ local function covering(groups, by_id, strip, set)
     end
     return false
 end
+
+-- The windows that were cards before this arrangement drew any.
+local was_card = {}
 
 -- One desk's strip: every group but the stage as a card, the groups past
 -- `cards` waiting off the edge, all of them slid away while a stage window
@@ -579,11 +602,23 @@ local function arrange_desk(key, area, by_id, set, children)
             for _, id in ipairs(groups[index]) do
                 local window = by_id[id]
                 local app = window and window.app_id or ""
+                local at = joined_at(id)
                 if not seen[app] then
-                    seen[app] = true
-                    badges[#badges + 1] = { key = tostring(id), icon = icon_of(app) }
+                    seen[app] = { key = tostring(id), icon = icon_of(app), at = at }
+                    -- A window just come off the stage: its icon starts at
+                    -- its corner there and goes with it into the card.
+                    if window and not was_card[tostring(id)] then
+                        seen[app].fromX = window.x - area.x
+                        seen[app].fromY = window.y + window.h - area.y
+                    end
+                    badges[#badges + 1] = seen[app]
+                else
+                    seen[app].at = math.min(seen[app].at, at)
                 end
             end
+            table.sort(badges, function(a, b)
+                return a.at < b.at
+            end)
             -- The group's oldest window names it, whichever is in front.
             local name = math.huge
             for _, id in ipairs(groups[index]) do
@@ -653,6 +688,7 @@ local function declare_strip(monitor, area, set, drawn)
         motion = set.motion,
         softMotion = set.hide_motion,
         iconSize = set.icon,
+        leaveDelay = set.linger,
         dragThreshold = set.threshold,
         lift = set.lift,
     })
@@ -679,6 +715,10 @@ function atrium.arrange(own_timing)
         end
     end
     reconcile(windows, by_id)
+    was_card = {}
+    for key in pairs(kept.carded) do
+        was_card[key] = true
+    end
     if not quiet then
         sol.animate({ easing = { spring = set.motion } })
     end
@@ -736,6 +776,7 @@ local function pick(monitor, card, join)
         table.remove(groups, index)
         for _, id in ipairs(chosen) do
             table.insert(groups[1], 1, id)
+            joined_now(id)
         end
     else
         to_stage(key, index, chosen[1])
@@ -912,14 +953,24 @@ local function draw_held(dt)
     -- the windows they belong to, as the cards name theirs.
     local front = drawn[1]
     if front and kept.surfaces["atrium@" .. held.monitor] then
-        local keys, seen = {}, {}
+        local keys, icons, seen = {}, {}, {}
+        local order = {}
         for _, id in ipairs(it.group) do
             local window = it.by_id[id]
             local app = window and window.app_id or ""
             if not seen[app] then
-                seen[app] = true
-                keys[#keys + 1] = tostring(id)
+                seen[app] = { key = tostring(id), icon = icon_of(app), at = joined_at(id) }
+                order[#order + 1] = seen[app]
+            else
+                seen[app].at = math.min(seen[app].at, joined_at(id))
             end
+        end
+        table.sort(order, function(a, b)
+            return a.at < b.at
+        end)
+        for _, each in ipairs(order) do
+            keys[#keys + 1] = each.key
+            icons[#icons + 1] = each.icon
         end
         local name = math.huge
         for _, id in ipairs(it.group) do
@@ -927,6 +978,7 @@ local function draw_held(dt)
         end
         local badges = {
             keys = keys,
+            icons = icons,
             group = name,
             ix = front.x - it.area.x,
             iy = front.y + front.h - it.area.y,
@@ -1016,6 +1068,9 @@ local function drop(monitor, card, x, y)
             for at = #it.group, 1, -1 do
                 table.insert(into, 1, it.group[at])
             end
+            for _, id in ipairs(it.group) do
+                joined_now(id)
+            end
             table.remove(groups, it.index)
         end
         atrium.arrange()
@@ -1030,6 +1085,9 @@ local function drop(monitor, card, x, y)
     table.remove(groups, it.index)
     for at = #it.group, 1, -1 do
         table.insert(groups[1], 1, it.group[at])
+    end
+    for _, id in ipairs(it.group) do
+        joined_now(id)
     end
     atrium.arrange()
     sol.focus(it.group[1])
@@ -1131,6 +1189,12 @@ local function tick(dt)
     local t = turned(pointer.x)
     if t <= 0 and (not drawn or (math.abs(pointer.x - real.x) < 0.5 and math.abs(pointer.y - real.y) < 0.5)) then
         press.eased = nil
+        if kept.held_badges[window.monitor] then
+            kept.held_badges[window.monitor] = nil
+            if kept.surfaces["atrium@" .. window.monitor] then
+                strip_scene(window.monitor, area, set, { held = false })
+            end
+        end
         if drawn then
             sol.animate({ duration = 0 })
             release(press.id)
@@ -1150,11 +1214,26 @@ local function tick(dt)
     local w, h = window.w * scale, window.h * scale
     -- At the eased point, drawn there this frame: no spring on top of it.
     sol.animate({ duration = 0 })
+    local x, y = pointer.x - press.fx * w, pointer.y - press.fy * h
     present(press.id, {
-        x = pointer.x - press.fx * w, y = pointer.y - press.fy * h, w = w, h = h,
+        x = x, y = y, w = w, h = h,
         rotate_y = set.tilt * t, pivot_x = 0, perspective = set.perspective, z = 300,
     })
     as_card(press.id, scale)
+    -- Its icon comes out at its corner as it turns into a card, held with it
+    -- as a card's are, and drawn into a card it is brought near.
+    if kept.surfaces["atrium@" .. monitor] then
+        local badges = {
+            keys = { tostring(press.id) },
+            icons = { icon_of(window.app_id) },
+            group = -press.id,
+            ix = x - area.x,
+            iy = y + h - area.y,
+            fade = math.max(0, math.min(1, (t - 0.3) / 0.5)),
+        }
+        kept.held_badges[monitor] = badges
+        strip_scene(monitor, area, set, { held = badges })
+    end
 end
 
 -- The button is up: whatever was dragged has been let go. The compositor's
@@ -1163,6 +1242,7 @@ end
 local function released()
     local moving = kept.moving
     press = nil
+    kept.held_badges = {}
     if moving == nil then
         return
     end
@@ -1289,7 +1369,15 @@ sol.on("drop", function(id, x, y)
         if #groups[1] == 0 then
             groups[1].bare = true
         end
-        table.insert(groups, 2, { id })
+        -- Onto a card: it joins that card's group, in front, its icon after
+        -- the ones already there. Anywhere else, a card of its own.
+        local onto = card_at(area, set, #groups - 1, x, y, nil)
+        if onto and groups[onto + 1] then
+            table.insert(groups[onto + 1], 1, id)
+        else
+            table.insert(groups, 2, { id })
+        end
+        joined_now(id)
         for _, window in ipairs(sol.windows()) do
             if window.id == id then
                 sol.place(id, {

@@ -23295,6 +23295,25 @@ mod directions {
             assert_eq!(groups(&desk), "3|2,1", "one group, the dropped card in front, the stage as it was");
         }
 
+        /// **A stage window dropped onto a card joins that card's group**, in
+        /// front, the stage left bare behind it -- not a card of its own.
+        /// One card, so its place is 657 down, 176 by 126 at 22 across.
+        #[test]
+        fn a_stage_window_dropped_onto_a_card_joins_its_group() {
+            let mut desk = desk();
+            desk.drop(2, "DP-1", (100.0, 700.0));
+            assert_eq!(groups(&desk), "|2,1", "a bare stage and one card of both");
+        }
+
+        /// **A stage window dropped on the strip away from every card is a
+        /// card of its own**, just under the stage.
+        #[test]
+        fn a_stage_window_dropped_between_cards_is_a_card_of_its_own() {
+            let mut desk = desk();
+            desk.drop(2, "DP-1", (100.0, 300.0));
+            assert_eq!(groups(&desk), "|2|1");
+        }
+
         /// The stage's group and the cards behind it, as `"3,2|1"`: each
         /// group's windows front first, the stage first.
         fn groups(desk: &Desk) -> String {

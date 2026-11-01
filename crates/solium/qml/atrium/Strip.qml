@@ -22,10 +22,16 @@ Item {
     // `key` (its group), `x`, `y`, `w` and `h` (its slot, where it is
     // picked), `ix` and `iy` (the bottom-left corner of its front window as
     // drawn, where its icons go) and `badges`, one an application in the
-    // order its windows stand: `key`, the id of that application's front
-    // window in the group, and `icon`, a theme icon name.
+    // order the applications joined the group: `key`, the id of that
+    // application's front window in the group, `icon`, a theme icon name,
+    // and, for a window just come off the stage, `fromX` and `fromY`, its
+    // bottom-left corner there, where its icon starts from.
     property var cards: []
-    // The card in the hand, drawn by the Lua where the drag is: `keys` (its
+    // How long the strip stays out after the pointer has left it, in ms:
+    // `floating.atrium.linger`.
+    property int leaveDelay: 3000
+    // The card in the hand, drawn by the Lua where the drag is -- or a window
+    // dragged in from the stage, turning into one: `keys` and `icons` (its
     // icons, named as `badges[].key`), `group` (its card's `key`, which a
     // card keeps while the numbers change under it), `ix` and `iy` (its
     // front window's bottom-left corner as drawn, this frame) and `fade` (1 a
@@ -111,7 +117,6 @@ Item {
     // The strip goes away again once the pointer has been off it, its edge
     // and its cards, for `leaveDelay` ms: passing between two cards, or from
     // the edge out to them, does not send it away.
-    property int leaveDelay: 500
     readonly property bool over: edgeHover.hovered || column.containsMouse || column.pressed
     onOverChanged: over ? leaving.stop() : leaving.restart()
     Timer {
@@ -210,9 +215,10 @@ Item {
     // Magnetism, by distance alone, so that nothing in it ever jumps: the
     // card whose icons are nearest the held card's, within half the distance
     // between two cards (so never two at once), and how near, 0 at that
-    // distance and 1 on top. Its icons part first, as the held icons come
-    // into the near half, so no icon ever lands on another; then the held
-    // icons are drawn into the places they will have there.
+    // distance and 1 on top. The held icons are drawn into the places they
+    // will have there -- after the card's own, as they join it last -- and,
+    // whenever they are level with the card's own, kept to the right of them,
+    // so no icon ever passes over another.
     readonly property var near: {
         if (!root.held)
             return null
@@ -227,35 +233,56 @@ Item {
             const apart = Math.hypot(root.held.ix - card.ix, root.held.iy - card.iy)
             const amount = Math.max(0, Math.min(1, 1 - apart / Math.max(1, reach)))
             if (amount > 0 && (!best || amount > best.amount))
-                best = { key: card.key, card: card.card, ix: card.ix, iy: card.iy, amount: amount }
+                best = { key: card.key, card: card.card, ix: card.ix, iy: card.iy, amount: amount,
+                         count: root.listOf(card.badges).length }
         }
         return best
     }
-    readonly property real room: root.near ? Math.min(1, root.near.amount * 2) : 0
     readonly property real pull: {
         if (!root.near)
             return 0
-        const late = Math.max(0, Math.min(1, (root.near.amount - 0.5) * 2))
-        return late * late * (3 - 2 * late)
+        const amount = root.near.amount
+        return amount * amount * (3 - 2 * amount)
     }
 
     ListModel { id: badges }
+    // The model brought to what the cards and the hand hold. A row no longer
+    // wanted is not removed but marked `leaving`, and goes once its icon has
+    // faded out; one wanted again stays. Nothing appears or goes at once.
     function sync() {
         const wanted = []
+        const seen = {}
         // `cards` itself: `cardList`, a binding on it, is not yet brought up
         // to date when this runs from its change handler.
         for (const card of root.listOf(root.cards)) {
             const list = root.listOf(card.badges)
-            for (let slot = 0; slot < list.length; slot++)
-                wanted.push({ key: String(list[slot].key), icon: String(list[slot].icon || ""),
-                              card: card.card, group: Number(card.key), slot: slot, ix: card.ix, iy: card.iy })
+            for (let slot = 0; slot < list.length; slot++) {
+                const each = list[slot]
+                const from = typeof each.fromX === "number"
+                wanted.push({ key: String(each.key), icon: String(each.icon || ""), card: card.card,
+                              group: Number(card.key), slot: slot, ix: card.ix, iy: card.iy,
+                              fromX: from ? each.fromX : 0, fromY: from ? each.fromY : 0,
+                              hasFrom: from, leaving: false })
+                seen[String(each.key)] = true
+            }
+        }
+        // An icon in the hand that is on no card yet: a window being dragged
+        // in from the stage.
+        if (root.held) {
+            const keys = root.listOf(root.held.keys)
+            const icons = root.listOf(root.held.icons)
+            for (let slot = 0; slot < keys.length; slot++)
+                if (!seen[String(keys[slot])])
+                    wanted.push({ key: String(keys[slot]), icon: String(icons[slot] || ""), card: -1,
+                                  group: Number(root.held.group), slot: slot, ix: root.held.ix, iy: root.held.iy,
+                                  fromX: 0, fromY: 0, hasFrom: false, leaving: false })
         }
         const keys = {}
         for (const each of wanted)
             keys[each.key] = true
-        for (let row = badges.count - 1; row >= 0; row--)
-            if (!keys[badges.get(row).key])
-                badges.remove(row)
+        for (let row = 0; row < badges.count; row++)
+            if (!keys[badges.get(row).key] && !badges.get(row).leaving)
+                badges.setProperty(row, "leaving", true)
         for (const each of wanted) {
             let row = -1
             for (let at = 0; at < badges.count; at++)
@@ -263,12 +290,28 @@ Item {
             if (row < 0)
                 badges.append(each)
             else
-                for (const role of ["icon", "card", "group", "slot", "ix", "iy"])
+                for (const role of ["icon", "card", "group", "slot", "ix", "iy", "leaving"])
                     if (badges.get(row)[role] !== each[role])
                         badges.setProperty(row, role, each[role])
         }
     }
+    function forget(key) {
+        for (let row = 0; row < badges.count; row++)
+            if (badges.get(row).key === key && badges.get(row).leaving) {
+                badges.remove(row)
+                return
+            }
+    }
     onCardsChanged: sync()
+    onHeldChanged: {
+        // Only when what the hand holds changes, not each frame it moves.
+        const keys = root.held ? root.listOf(root.held.keys).join(",") : ""
+        if (keys !== root.heldShape) {
+            root.heldShape = keys
+            sync()
+        }
+    }
+    property string heldShape: ""
     Component.onCompleted: sync()
 
     Repeater {
@@ -282,9 +325,12 @@ Item {
             required property int slot
             required property real ix
             required property real iy
+            required property real fromX
+            required property real fromY
+            required property bool hasFrom
+            required property bool leaving
 
             readonly property bool inHand: root.heldKeys[badge.key] === true
-            readonly property bool joined: !inHand && root.near !== null && root.near.key === badge.group
             readonly property bool away: root.hidden && !root.peeking
             // The size of the icons on the card the held one is nearest.
             readonly property real nearSize: root.iconSize * (root.near && root.hovered === root.near.card ? root.lift : 1)
@@ -296,13 +342,20 @@ Item {
             Behavior on shown { enabled: !badge.inHand; NumberAnimation { duration: Theme.quick } }
 
             // Where it belongs. In the hand: under the held card, drawn into
-            // its place on the card it is nearest by the magnetism. Otherwise
+            // its place on the card it is nearest by the magnetism, after that
+            // card's own icons, and never over them: level with them, it is
+            // kept to their right, and the nearer level the more. Otherwise
             // its card's corner, slid off with the strip when it goes.
             readonly property real tx: {
                 if (inHand) {
                     const own = root.held.ix - size * 0.18 + slot * (size + root.iconGap)
-                    const there = root.near ? root.near.ix - nearSize * 0.18 + slot * (nearSize + root.iconGap) : own
-                    return own + (there - own) * root.pull
+                    if (!root.near)
+                        return own
+                    const there = root.near.ix - nearSize * 0.18 + (root.near.count + slot) * (nearSize + root.iconGap)
+                    const drawn = own + (there - own) * root.pull
+                    const level = Math.abs(ty - (root.near.iy - nearSize * 0.62))
+                    const keep = Math.max(0, Math.min(1, (nearSize + 8 - level) / 8))
+                    return drawn + Math.max(0, there - drawn) * keep
                 }
                 return badge.ix - size * 0.18 + slot * (size + root.iconGap) - (away ? root.strip : 0)
             }
@@ -314,27 +367,35 @@ Item {
                 }
                 return badge.iy - size * 0.62
             }
-            // On the card the held one is nearest: further along by a place
-            // for each icon coming, as far as it has come -- straight from the
-            // distance, not on the spring, so it is always out of the way in
-            // time. When the drag ends, or anything else changes it at once
-            // rather than a little a frame, the change is handed to the
-            // spring, so the icon goes on from exactly where it is.
-            readonly property real roomOffset: joined ? root.heldCount * root.room * (size + root.iconGap) : 0
-            property real lastRoom: 0
-            onRoomOffsetChanged: {
-                const change = roomOffset - lastRoom
-                lastRoom = roomOffset
-                if (!root.held || Math.abs(change) > 8) {
-                    px -= change
-                    follow()
-                }
-            }
-
             width: shown
             height: shown
-            opacity: away ? 0 : inHand ? root.held.fade : 1
-            Behavior on opacity { enabled: !badge.inHand; NumberAnimation { duration: Theme.normal } }
+            // Faded in when it first appears, as it travels to its place, and
+            // out before it goes.
+            property bool born: false
+            opacity: !born || leaving || away ? 0 : inHand ? root.held.fade : 1
+            Behavior on opacity { enabled: !badge.inHand; NumberAnimation { duration: Theme.normal * 2; easing.type: Easing.OutCubic } }
+            scale: leaving ? 0.7 : 1
+            Behavior on scale { NumberAnimation { duration: Theme.normal * 2; easing.type: Easing.OutCubic } }
+            onOpacityChanged: {
+                if (leaving && opacity === 0)
+                    root.forget(key)
+            }
+            // One already out of sight -- the strip away, or faded in the hand
+            // -- has nothing to fade, and goes now.
+            onLeavingChanged: {
+                if (leaving && opacity === 0)
+                    root.forget(key)
+            }
+            Component.onCompleted: {
+                // From its window's corner on the stage, when it has just come
+                // off it; otherwise where it belongs, fading in there.
+                if (hasFrom) {
+                    px = fromX - size * 0.18 + slot * (size + root.iconGap)
+                    py = fromY - size * 0.62
+                    follow()
+                }
+                born = true
+            }
 
             // On the cards' own spring, worked out here a frame at a time, so
             // an icon stays with its card through every move the Lua springs
@@ -343,7 +404,7 @@ Item {
             property real py: ty
             property real vx: 0
             property real vy: 0
-            x: px + roomOffset
+            x: px
             y: py
             function settled() {
                 return Math.abs(px - tx) < 0.1 && Math.abs(py - ty) < 0.1
