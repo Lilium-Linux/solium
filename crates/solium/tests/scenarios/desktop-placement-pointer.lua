@@ -19,7 +19,9 @@ local function at(n, x, y, why)
 end
 
 return {
-    user = [[ return { floating = { placement = { policy = "pointer" } } } ]],
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
+    user = [[ return { floating = { atrium = { enabled = false }, placement = { policy = "pointer" } } } ]],
     init = [[
         require("modes")
         require("open")

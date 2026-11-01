@@ -24,6 +24,9 @@ local function previews(monitor, kind, x, y, w, h)
 end
 
 return {
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
+    user = [[ return { floating = { atrium = { enabled = false } } } ]],
     monitors = { { 1920, 1080 }, { 1920, 1080 } },
     init = [[
         require("modes")

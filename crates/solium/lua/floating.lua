@@ -24,6 +24,9 @@
 --     instead of arriving whatever size its application asked for, wherever
 --     the compositor happened to map it (#222's "every window opens in the
 --     same place, very large").
+--   * Atrium, `config.floating.atrium` (#449): the stage and the strip of
+--     `lua/atrium.lua`, and its key. A new window opens beside the strip
+--     rather than over it.
 
 local config = require("config")
 local modes = require("modes")
@@ -33,6 +36,7 @@ local dialogs = require("dialogs")
 local sizes = require("sizes")
 local workspaces = require("workspaces")
 local snapping = require("snap")
+local atrium = require("atrium")
 
 local floating = {}
 
@@ -359,6 +363,8 @@ local function bind_keys()
     take(keys.right, function() snap("right") end)
     take(keys.maximize, maximize_or_quarter)
     take(keys.restore, restore)
+    local stage = type(config.floating.atrium) == "table" and config.floating.atrium or {}
+    take(stage.key, atrium.toggle)
 end
 
 -- Give back exactly what `bind_keys` bound, then put the plain arrows back
@@ -675,7 +681,7 @@ sol.on("open", function(id)
     -- moment that is the one `window.monitor` names -- and naming it rather
     -- than asking again keeps the window on the monitor `workspaces.lua`'s
     -- own `open` has just filed it under. `desktop-placement-two-monitors.lua`.
-    local area = monitors.named(window.monitor)
+    local area = atrium.stage_area(monitors.named(window.monitor))
     local others = {}
     for _, each in ipairs(workspaces.visible()) do
         if each.id ~= id and each.monitor == window.monitor and not each.leaving

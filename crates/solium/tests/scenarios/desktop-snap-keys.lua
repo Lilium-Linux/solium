@@ -28,6 +28,9 @@ local function snapped(kind)
 end
 
 return {
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
+    user = [[ return { floating = { atrium = { enabled = false } } } ]],
     init = [[
         require("modes")
         require("open")

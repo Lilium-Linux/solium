@@ -25,9 +25,12 @@ local function kind(expected)
 end
 
 return {
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
     user = [[
         return {
             floating = {
+                atrium = { enabled = false },
                 snap = {
                     drag = {
                         edge = 40,

@@ -77,7 +77,9 @@ steps[#steps + 1] = {
 }
 
 return {
-    user = [[ return { floating = { placement = { cascade = { x = 120, y = 100 } } } } ]],
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
+    user = [[ return { floating = { atrium = { enabled = false }, placement = { cascade = { x = 120, y = 100 } } } } ]],
     init = [[
         require("modes")
         require("open")

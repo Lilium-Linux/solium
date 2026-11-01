@@ -62,6 +62,9 @@ steps[#steps + 1] = {
 }
 
 return {
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
+    user = [[ return { floating = { atrium = { enabled = false } } } ]],
     monitors = { { 1920, 110 }, { 210, 1080 } },
     init = [[
         require("modes")

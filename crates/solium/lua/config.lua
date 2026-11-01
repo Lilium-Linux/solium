@@ -1727,6 +1727,75 @@ local defaults = {
             -- and at most 1; anything else is read as 0.6.
             size = 0.6,
         },
+
+        -- Atrium, the desktop as a stage and a strip (#449): `lua/atrium.lua`.
+        -- The window you use, and its group, stay where they live; every
+        -- other group on the desk is a live card in a strip down the left of
+        -- the work area, most recent at the top. A card clicked, or reached
+        -- any other way -- Alt+Tab, the taskbar, the overview -- brings its
+        -- group onto the stage. A card shift-clicked, or dragged onto the
+        -- stage, joins the stage's group; a stage window dropped on the strip
+        -- leaves it. Only while floating is in charge.
+        atrium = {
+            -- On whenever floating is in charge. `key` turns it off and on
+            -- again until you restart (it survives `super+shift+r`).
+            enabled = true,
+            key = "super+a",
+            -- The strip's width, in logical pixels (80 or more), and how many
+            -- cards it shows; older groups wait off the edge.
+            strip = 220,
+            cards = 6,
+            -- How the cards stand: degrees turned about their left edge, and
+            -- the viewer's distance in pixels, as `sol.present` takes them.
+            tilt = 26,
+            perspective = 1100,
+            -- How far apart, in pixels, the windows of one group are fanned,
+            -- up and to the right behind the front one.
+            fan = 14,
+            card = {
+                -- A card's height, as a share of its width.
+                aspect = 0.72,
+                -- Room under each card for its icons, in pixels.
+                spacing = 64,
+                -- How opaque the windows behind a group's front window are.
+                behind = 0.92,
+                -- How large a group's application icons are, in pixels:
+                -- side by side over the front window's bottom-left corner.
+                icon = 48,
+            },
+            -- A card under the pointer comes forward: `lift` times larger,
+            -- keeping `tilt` of its tilt (0, flat), `shift` pixels out
+            -- towards the stage, and the cards above and below it `part`
+            -- pixels further away.
+            hover = { lift = 1.2, tilt = 0, shift = 28, part = 20 },
+            -- A card dragged out of the strip: how far, in pixels, a press
+            -- moves before it is a drag, and over how many pixels past the
+            -- strip it turns from a card into its windows, flat and at their
+            -- own size, the point the pointer holds sliding to the front
+            -- window's centre as it turns. A card or window in the hand is drawn
+            -- once a frame, easing after the pointer: by `steady`
+            -- milliseconds while it is flat -- a mouse is heard every 8 ms or
+            -- so, and a fast screen draws two or three frames between, so a
+            -- window drawn exactly on it moves in steps -- and more the more
+            -- it has turned, up to `smooth` as a full card. Letting go rides
+            -- `motion`.
+            drag = {
+                threshold = 8,
+                reach = 320,
+                steady = 12,
+                smooth = 70,
+            },
+            -- "stage": the strip slides off the edge while the stage holds a
+            -- window, and comes back while the pointer is at the edge, going
+            -- again half a second after it leaves the strip. "overlap": only
+            -- while a stage window covers the strip. "never": it stays,
+            -- under the windows.
+            hide = "stage",
+            -- The spring every move of atrium's rides on, and the softer one
+            -- the strip slides away on.
+            motion = { stiffness = 300, damping = 32 },
+            hide_motion = { stiffness = 120, damping = 22 },
+        },
     },
 
     tiling = {
