@@ -16,8 +16,8 @@ compatibility; [preview criteria](beta.md) describes release readiness.
 The compositor boots nested and on hardware, hosts QML window frames and
 scenes, runs Lua modes, and shares an animation/presentation engine across
 floating, tiling, scrolling and overview. Multi-output support, session
-integration, device settings, user effect folders and the first preview-shell
-components are implemented. These are foundations to improve, not unfinished
+integration, device settings, user effect folders and a default desktop
+configuration are implemented. These are foundations to improve, not unfinished
 epics to start from scratch.
 
 ## Reliable daily use

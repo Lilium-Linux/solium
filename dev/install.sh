@@ -285,7 +285,7 @@ if [[ $uninstall -eq 1 ]]; then
             removed+=("$path")
         fi
     done
-    for path in "$share/qml" "$share/lua" "$share/effects" "$staged_session" "$staged_pam"; do
+    for path in "$share/qml" "$share/lua" "$share/effects" "$share/default-config" "$staged_session" "$staged_pam"; do
         if [[ -e "$path" ]]; then
             rm -rf "$path"
             removed+=("$path")
@@ -363,8 +363,28 @@ install -m755 "$built_helper" "$helper"
 # Copied, not linked, so a later `git checkout` cannot change a running
 # session. dev/install-check.sh diffs the copy against the checkout and asserts
 # there are no symlinks in it.
-rm -rf "$share/qml" "$share/lua" "$share/effects"
-cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" "$share/"
+rm -rf "$share/qml" "$share/lua" "$share/effects" "$share/default-config"
+cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" \
+    "$root/crates/solium/default-config" "$share/"
+
+# The default configuration (#418): a whole desktop, written as configuration
+# on Solium's public API. Copied into the user's configuration directory once,
+# when there is none, and from then on it is theirs to change or delete: an
+# install never writes over it and an uninstall never removes it. Under a
+# system prefix it is only installed beside the shipped QML, for a package or
+# a user to copy.
+user_config="$config_dest/solium"
+config_note_user=""
+if [[ $system -eq 0 ]]; then
+    if [[ -e "$user_config" || -L "$user_config" ]]; then
+        config_note_user="yours, kept"
+    else
+        mkdir -p "$config_dest" 2>/dev/null \
+            || die "cannot write to $config_dest: choose an XDG_CONFIG_HOME you own"
+        cp -R "$share/default-config" "$user_config"
+        config_note_user="the default, copied from $share/default-config"
+    fi
+fi
 
 # The Exec names solium-session by its full path, and solium-session runs the
 # solium beside it. Plasma Login starts a session with
@@ -579,6 +599,8 @@ Installed Solium into $dest
   lock helper   $helper
   PAM service   $staged_pam
   QML, Lua and effects   $share/qml, $share/lua, $share/effects
+  default configuration  $share/default-config${config_note_user:+
+  your configuration     $user_config ($config_note_user)}
                          (copies: rebuilding or checking out another branch does not change them)
   session file  $staged_session
                 ($(grep -m1 '^Exec=' "$staged_session"))

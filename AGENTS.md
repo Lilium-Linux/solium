@@ -25,7 +25,7 @@ file is out of date.
 |---|---|
 | `crates/solium/src/` | The compositor. `state/` is the `Solium` struct and its Wayland handlers; `render.rs` draws a frame; `input/` is libinput, the seat and grabs; `script.rs` is the Lua API; `qml/` hosts Qt; `effect/` and `pass/` run effects; `models/` is what QML scenes read |
 | `crates/solium/lua/` | The shipped configuration. `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, and `meta/sol.lua` documents the Lua API |
-| `crates/solium/qml/` | The QML: the `Solium` module's types, the window frame styles in `panes/`, the preview shell in `preview/` |
+| `crates/solium/qml/` | The QML: the `Solium` module's types, the window frame styles in `panes/` |
 | `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |
 | `crates/animation/`, `crates/layout/`, `crates/effects/` | Crates with no compositor in them: curves and springs, the window arrangements, and the effect format |

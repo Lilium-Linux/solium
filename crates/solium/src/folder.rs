@@ -18,8 +18,7 @@
 //! attribute metadata::trusted not supported", because GIO's `metadata::`
 //! namespace is backed by the gvfs metadata daemon, not a plain extended
 //! attribute, and nothing here can assume that daemon is running. `sol.store`
-//! would be the natural fit once it exists (`lua/preview/dock.lua`'s own
-//! module doc notes it does not yet).
+//! would be the natural fit once it exists.
 
 use std::{
     collections::HashMap,

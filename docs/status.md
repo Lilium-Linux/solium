@@ -16,8 +16,9 @@ for current daily-use priorities.
   monitor, with animated presentation and XWayland support.
 - Reloadable Lua configuration, QML frames and hosted desktop scenes, plus
   effect folders written in Lua and GLSL.
-- A default preview shell with a bottom bar, top dock, application/window
-  search and live desktop icons. It can be disabled or replaced.
+- A default configuration that is a whole desktop: taskbar, floating
+  titlebar with quick settings, snapping, a stage-manager strip, quick search
+  and an editable desktop. It is copied on install and can be changed.
 - Multiple outputs, hotplug, scaling and screen power; keyboard layouts,
   per-device libinput settings and cursor themes; keyboard-shortcuts-inhibit,
   so a VM or remote desktop can have `super`.

@@ -4052,9 +4052,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // Installed, visible applications (03 §3.2.13), by name. A read, the
     // same shape as `sol.windows()` above -- and, like it, only meaningful
     // inside a dispatch: a `.lua` file's top level runs before the first
-    // real snapshot arrives, so this reads empty there
-    // (`lua/preview/dock.lua`'s module doc goes through why its own pin
-    // policy reads `Solium.Apps` in QML instead, live, rather than this).
+    // real snapshot arrives, so this reads empty there (QML that needs the
+    // list at once reads `Solium.Apps`, live, instead).
     sol.set(
         "apps",
         lua.create_function(|lua, ()| {
@@ -9387,27 +9386,21 @@ mod tests {
         Some((scripts, commands))
     }
 
-    /// **With the preview shell off and nothing else configured, no shell is
-    /// hosted**, and the shipped configuration says so every time it runs
-    /// rather than by staying quiet.
+    /// **With nothing configured, no shell is hosted**, and the shipped
+    /// configuration says so every time it runs rather than by staying quiet.
     ///
     /// The second half is what makes taking a shell out of `user.lua` work on
     /// `super+shift+r`: a surface outlives a reload until something removes it
     /// by name, and a reload runs the configuration again, so `shell.lua`
     /// removes `shell` whenever none is configured.
-    ///
-    /// `preview = false` here is what makes this a test of that rather than
-    /// of the preview shell's own default: see
-    /// `the_shipped_configuration_hosts_the_preview_shell_by_default`.
     #[test]
-    fn the_shipped_configuration_hosts_no_shell_with_preview_off() {
+    fn the_shipped_configuration_hosts_no_shell_of_its_own() {
         // The environment has already chosen a shell for this process, and
         // that is what it is for; there is nothing for this test to say.
         if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
             return;
         }
-        let Some((_, commands)) =
-            shell_after_monitors("solium-script-test-no-shell", "return { preview = false }")
+        let Some((_, commands)) = shell_after_monitors("solium-script-test-no-shell", "return {}")
         else {
             return;
         };
@@ -9420,39 +9413,6 @@ mod tests {
             removed,
             "with no shell configured, `shell` must be taken away, or one taken out of \
              user.lua stays on screen after a reload"
-        );
-    }
-
-    /// **The shipped configuration hosts the preview shell by default.**
-    ///
-    /// `lua/preview/init.lua` fills in `config.shell.scene` before
-    /// `shell.lua` reads it, so a fresh install with no `user.lua` at all
-    /// shows the bar rather than a blank desktop. `preview = false` is the
-    /// way back to nothing, checked above.
-    #[test]
-    fn the_shipped_configuration_hosts_the_preview_shell_by_default() {
-        if std::env::var_os("SOLIUM_SHELL_SCENE").is_some() {
-            return;
-        }
-        let Some((_, commands)) =
-            shell_after_monitors("solium-script-test-preview-default", "return {}")
-        else {
-            return;
-        };
-        let (declared, _) = shell_surfaces(&commands);
-        assert_eq!(
-            declared.len(),
-            1,
-            "the shipped configuration did not host the preview shell by default: {declared:?}"
-        );
-        assert_eq!(
-            declared[0].scene,
-            std::path::Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/qml/preview/Shell.qml"
-            )),
-            "hosted the wrong scene: {:?}",
-            declared[0].scene
         );
     }
 
@@ -14414,9 +14374,9 @@ mod tests {
     /// it**: `"open"` is the only event a floating window ever sees, since
     /// nothing arranges it, so a hosted shell reading `Workspaces`/
     /// `WindowList` must learn its workspace from `"open"` alone, not only
-    /// from the `"layout"` a tiling mode would have fired next
-    /// (`qml/preview/WindowChips.qml` read `Workspaces.showing(monitor).id`
-    /// and never saw a window opened this way).
+    /// from the `"layout"` a tiling mode would have fired next (a bar that
+    /// read `Workspaces.showing(monitor).id` never saw a window opened this
+    /// way).
     #[test]
     fn a_window_that_opens_while_floating_is_declared_with_no_relayout_to_ask_for_it() {
         let Some((directory, mut scripts)) = shipped_init_with_user(
