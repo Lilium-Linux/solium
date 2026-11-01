@@ -194,10 +194,17 @@ check "share/solium/qml is a copy of crates/solium/qml" diff -r "$root/crates/so
 check "share/solium/lua is a copy of crates/solium/lua" diff -r "$root/crates/solium/lua" "$share/lua"
 check "share/solium/effects is a copy of crates/solium/effects" diff -r "$root/crates/solium/effects" "$share/effects"
 check "a file left by an earlier install is gone" [ ! -e "$share/qml/removed-since.qml" ]
+check "share/solium/default-config is a copy of crates/solium/default-config" \
+    diff -r "$root/crates/solium/default-config" "$share/default-config"
+check "  and, with no configuration there yet, so is the user's" \
+    diff -r "$root/crates/solium/default-config" "$destdir$config_home/solium"
 check "nothing staged is a symlink" [ -z "$(find "$destdir" -type l)" ]
 # The binary, solium-session, the helper, the session file, the PAM file, four
 # configuration files and the record of them.
-expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") + 10))
+# The default configuration twice: beside the shipped QML, and copied into a
+# configuration directory that had none.
+expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") \
+    + 2 * $(count_files "$root/crates/solium/default-config") + 10))
 check "exactly those files, solium-session, the helper, the session and PAM files, the units, the portal choice and their record ($expected_files)" \
     [ "$(count_files "$destdir")" -eq "$expected_files" ]
 for entry in "${config_files[@]}"; do

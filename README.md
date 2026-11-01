@@ -225,7 +225,16 @@ for setup and the legacy desktop identifiers currently used for compatibility.
 
 ## A first configuration
 
-Create `~/.config/solium/user.lua` with just your changes:
+`dev/install.sh` puts Solium's default configuration in `~/.config/solium`
+when you have none: a whole desktop written as configuration on the public API
+(the bar and its tray, notifications and volume, a titlebar with quick
+settings, Atrium, window snapping, Alt+Tab, screenshots, the lock screen, the
+blur and the violet look). It is yours from then on: change any file, delete
+what you do not want, or delete the folder to start from Solium's bare shipped
+session. An install never writes over it; `share/solium/default-config` keeps
+the original to compare with.
+
+To start smaller, keep only `~/.config/solium/user.lua` with just your changes:
 
 ```lua
 return {

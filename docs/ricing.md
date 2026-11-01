@@ -58,6 +58,13 @@ the session rather than adjusting it.
 
 Almost everything on this page is `user.lua`.
 
+**The default configuration.** An install with no `~/.config/solium` copies
+Solium's default configuration there (`crates/solium/default-config` in the
+repository, `share/solium/default-config` once installed): `user.lua` and the
+modules, scenes, pane style and effects it uses, a complete desktop built from
+what this page describes. Read it as a worked example and change it freely;
+an install never writes over it.
+
 
 Write `~/.config/solium/user.lua` with only what you want changed:
 
