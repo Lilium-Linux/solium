@@ -28,6 +28,9 @@ local function at(n, x, y, area, why)
 end
 
 return {
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
+    user = [[ return { floating = { atrium = { enabled = false } } } ]],
     monitors = { { 1920, 1080 }, { 1280, 1024 } },
     init = [[
         require("modes")

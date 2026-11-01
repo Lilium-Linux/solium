@@ -23761,6 +23761,10 @@ mod directions {
         #[test]
         fn a_hovered_card_picked_up_does_not_jump() {
             let mut desk = desk();
+            // The strip waits off the edge while the stage holds a window, so
+            // a card can only be hovered once the pointer has brought it out.
+            let snapshot = desk.snapshot();
+            act(&mut desk, "edge", "{}", snapshot);
             let snapshot = desk.snapshot();
             let hovered = act(&mut desk, "hover", r#"{"card":1}"#, snapshot);
             let lifted = presented(&hovered.commands, 1).expect("the hovered card is drawn").0.expect("a rect");

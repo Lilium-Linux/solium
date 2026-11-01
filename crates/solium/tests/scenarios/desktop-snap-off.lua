@@ -6,7 +6,9 @@
 -- 1920x1080 monitor with nothing reserved.
 
 return {
-    user = [[ return { floating = { snap = { drag = { enabled = false } } } } ]],
+    -- Atrium off: this tests placement and snapping on the whole work area,
+    -- which its strip would take the left of.
+    user = [[ return { floating = { atrium = { enabled = false }, snap = { drag = { enabled = false } } } } ]],
     init = [[
         require("modes")
         require("open")

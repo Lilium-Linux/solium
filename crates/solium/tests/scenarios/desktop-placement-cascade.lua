@@ -20,7 +20,9 @@ local function at(n, x, y, why)
 end
 
 return {
-    user = [[ return { floating = { placement = { policy = "cascade" } } } ]],
+    -- Atrium off: its strip takes the left of the work area, and this is the
+    -- cascade's own arithmetic on the whole of it.
+    user = [[ return { floating = { placement = { policy = "cascade" }, atrium = { enabled = false } } } ]],
     init = [[
         require("modes")
         require("open")
