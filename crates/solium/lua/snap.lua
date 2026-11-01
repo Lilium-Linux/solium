@@ -104,6 +104,13 @@ local function restore_after()
     return 6
 end
 
+-- Atrium (lua/atrium.lua), which requires floating, which requires this
+-- file: looked up when first needed rather than at load, so neither loads
+-- the other half-built.
+local function atrium()
+    return require("atrium")
+end
+
 -- Whether snapping is this file's to do now: no layout in charge, and not
 -- switched off.
 local function active()
@@ -165,8 +172,12 @@ function snap.zone(x, y)
     end
     local whole = monitor.whole or monitor
     local right_x, bottom_y = whole.x + whole.w, whole.y + whole.h
+    -- While atrium runs, its strip owns the left edge (a window dropped there
+    -- becomes a card), so there is no left zone, and windows snap within its
+    -- stage rather than the whole work area.
+    local strip = atrium().running()
     -- An edge is outer at this point when no screen lies just past it.
-    local outer_left = not screen_at(whole.x - 1, y)
+    local outer_left = not strip and not screen_at(whole.x - 1, y)
     local outer_right = not screen_at(right_x, y)
     local outer_top = not screen_at(x, whole.y - 1)
     local outer_bottom = not screen_at(x, bottom_y)
@@ -197,7 +208,11 @@ function snap.zone(x, y)
     if not kind then
         return nil
     end
-    return { monitor = monitor.name, kind = kind, rect = snap.rect(monitors.named(monitor.name), kind) }
+    local area = monitors.named(monitor.name)
+    if strip then
+        area = atrium().stage_area(area)
+    end
+    return { monitor = monitor.name, kind = kind, rect = snap.rect(area, kind) }
 end
 
 -- What is being dragged, by id: `began`, the rect to remember as the one
