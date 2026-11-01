@@ -380,7 +380,10 @@ Item {
             required property bool hasFrom
             required property bool leaving
 
-            readonly property bool inHand: root.heldKeys[badge.key] !== undefined
+            // In the hand only while there is a hand: the two can be told
+            // apart in either order as the hand empties, and a held icon read
+            // from an emptied hand would be nowhere.
+            readonly property bool inHand: root.held !== false && root.heldKeys[badge.key] !== undefined
             readonly property int handSlot: inHand ? root.heldKeys[badge.key] - 1 : 0
             readonly property bool away: root.hidden && !root.peeking
             // The size of the icons on the card the held one is nearest, as
@@ -466,6 +469,13 @@ Item {
             onTyChanged: follow()
             onInHandChanged: follow()
             function follow() {
+                // Never from or to nowhere: a position that is not a number
+                // is not taken, and one already taken is put right.
+                if (isNaN(tx) || isNaN(ty))
+                    return
+                if (isNaN(px) || isNaN(py)) {
+                    px = tx; py = ty; vx = 0; vy = 0
+                }
                 if (inHand) {
                     px = tx; py = ty; vx = 0; vy = 0
                 } else if (!settled()) {
@@ -475,6 +485,8 @@ Item {
             FrameAnimation {
                 id: spring
                 onTriggered: {
+                    if (isNaN(badge.tx) || isNaN(badge.ty))
+                        return
                     const m = badge.away ? root.softMotion : root.motion
                     const k = m.stiffness, c = m.damping
                     let left = Math.min(frameTime, 0.05)
