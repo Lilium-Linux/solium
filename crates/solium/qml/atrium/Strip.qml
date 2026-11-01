@@ -19,11 +19,24 @@ Item {
     id: root
 
     // Written by `atrium.lua`. Each card: `card` (its number, 1 at the top),
-    // `key` (its group, for telling a card that moved from one that changed),
-    // `x`, `y`, `w` and `h` (its slot, where it is picked), `ix` and `iy`
-    // (the bottom-left corner of its front window as drawn, where its icons
-    // go), `icons`, theme icon names, and `dragged`, while it is.
+    // `key` (its group), `x`, `y`, `w` and `h` (its slot, where it is
+    // picked), `ix` and `iy` (the bottom-left corner of its front window as
+    // drawn, where its icons go) and `badges`, one an application in the
+    // order its windows stand: `key`, the id of that application's front
+    // window in the group, and `icon`, a theme icon name.
     property var cards: []
+    // The card in the hand, drawn by the Lua where the drag is: `card`, `ix`
+    // and `iy` (its front window's bottom-left corner as drawn, this frame)
+    // and `fade` (1 a card, 0 a window); `false` while none is held.
+    property var held: false
+    // The strip's own width; the scene is wider, so that a held card's icons
+    // can go with it.
+    property int strip: 220
+    // The springs the Lua moves the cards on, `{ stiffness, damping }`, for
+    // the icons to move with them: `floating.atrium.motion` and, as the strip
+    // slides away, `hide_motion`.
+    property var motion: ({ stiffness: 300, damping: 32 })
+    property var softMotion: ({ stiffness: 120, damping: 22 })
     // The strip has slid away under a stage window.
     property bool hidden: false
     // It was brought back over the stage window by the pointer.
@@ -33,14 +46,21 @@ Item {
     // How large an application icon is drawn, and how far a press must travel
     // to be a drag rather than a click: `floating.atrium.card.icon` and
     // `floating.atrium.drag.threshold`.
-    property int iconSize: 44
+    property int iconSize: 48
     property int dragThreshold: 8
     // How much a hovered card grows: `floating.atrium.hover.lift`.
     property real lift: 1.06
 
+    // A list as Lua hands it over: a sequence with a length (not a JS array,
+    // to `Array.isArray`), or, empty, an empty object, which is none.
+    function listOf(value) {
+        return value && typeof value.length === "number" ? value : []
+    }
+    readonly property var cardList: listOf(root.cards)
+
     // The card at a point of the scene, 0 for none.
     function cardAt(x, y) {
-        for (const each of root.cards) {
+        for (const each of root.cardList) {
             if (x >= each.x - 12 && x < each.x + each.w + 12
                     && y >= each.y - 12 && y < each.y + each.h + root.iconSize / 2)
                 return each.card
@@ -72,7 +92,7 @@ Item {
     // there still reaches what is under it.
     Item {
         id: edge
-        visible: root.cards.length > 0 && root.hidden
+        visible: root.cardList.length > 0 && root.hidden
         x: 0
         y: 0
         width: 3
@@ -106,7 +126,7 @@ Item {
     // what is under it: the desktop, a window.
     MouseArea {
         id: column
-        visible: root.cards.length > 0 && (!root.hidden || root.peeking)
+        visible: root.cardList.length > 0 && (!root.hidden || root.peeking)
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
@@ -164,62 +184,144 @@ Item {
         }
     }
 
-    // Each group's application icons over the bottom-left corner of its card.
+    // Each group's application icons, side by side over the bottom-left
+    // corner of its front window, as macOS draws them.
     //
-    // One delegate per place in the strip, kept for as long as there are that
-    // many cards, rather than one per card: a model of the cards themselves
-    // is rebuilt whenever they change, and every icon with it, so two cards
-    // swapping would load every icon in the strip again.
+    // One per window rather than one per place in the strip: an icon is named
+    // by its application's front window in its group (`badges[].key`), so
+    // when that window's card is dragged onto another the same icon goes
+    // along, held under the card while it is in the hand and springing from
+    // there to its place beside the icons already on the card it joins. The
+    // model is kept by those names, so an icon whose card moves or changes is
+    // the same item moving, and is not loaded again.
+    readonly property int iconGap: 6
+    ListModel { id: badges }
+    function sync() {
+        const wanted = []
+        // `cards` itself: `cardList`, a binding on it, is not yet brought up
+        // to date when this runs from its change handler.
+        for (const card of root.listOf(root.cards)) {
+            const list = root.listOf(card.badges)
+            for (let slot = 0; slot < list.length; slot++)
+                wanted.push({ key: String(list[slot].key), icon: String(list[slot].icon || ""),
+                              card: card.card, slot: slot, ix: card.ix, iy: card.iy })
+        }
+        const keys = {}
+        for (const each of wanted)
+            keys[each.key] = true
+        for (let row = badges.count - 1; row >= 0; row--)
+            if (!keys[badges.get(row).key])
+                badges.remove(row)
+        for (const each of wanted) {
+            let row = -1
+            for (let at = 0; at < badges.count; at++)
+                if (badges.get(at).key === each.key) { row = at; break }
+            if (row < 0)
+                badges.append(each)
+            else
+                for (const role of ["icon", "card", "slot", "ix", "iy"])
+                    if (badges.get(row)[role] !== each[role])
+                        badges.setProperty(row, role, each[role])
+        }
+    }
+    onCardsChanged: sync()
+    Component.onCompleted: sync()
+
     Repeater {
-        model: root.cards.length
-        delegate: Row {
+        model: badges
+        delegate: Item {
             id: badge
-            required property int index
-            readonly property var card: root.cards[index] || ({ icons: [] })
-            readonly property bool away: (root.hidden && !root.peeking) || card.dragged === true
-            spacing: -root.iconSize / 5
-            x: (card.ix || 0) - root.iconSize / 4 - (root.hidden && !root.peeking ? root.width : 0)
-            y: (card.iy || 0) - root.iconSize * 0.6
-            opacity: away ? 0 : 1
-            scale: root.hovered === card.card ? root.lift : 1
-            transformOrigin: Item.BottomLeft
+            required property string key
+            required property string icon
+            required property int card
+            required property int slot
+            required property real ix
+            required property real iy
 
-            Behavior on x { SpringAnimation { spring: 4; damping: 0.4; epsilon: 0.25 } }
-            Behavior on y { SpringAnimation { spring: 4; damping: 0.4; epsilon: 0.25 } }
-            Behavior on opacity { NumberAnimation { duration: Theme.normal } }
-            Behavior on scale { NumberAnimation { duration: Theme.quick } }
+            readonly property bool inHand: root.held !== false && root.held.card === badge.card
+            readonly property bool away: root.hidden && !root.peeking
+            readonly property real lifted: root.hovered === badge.card && !inHand ? root.lift : 1
+            readonly property real size: root.iconSize * lifted
+            // Where it belongs: its card's corner, or the held card's this
+            // frame, and slid off with the strip when it goes.
+            readonly property real tx: (inHand ? root.held.ix : badge.ix) - size * 0.18
+                + slot * (size + root.iconGap) - (away ? root.strip : 0)
+            readonly property real ty: (inHand ? root.held.iy : badge.iy) - size * 0.62
 
-            // A different group in this place: its icons fade in rather than
-            // changing under a card still on its way.
-            property string key: String(card.key)
-            onKeyChanged: arrive.restart()
-            NumberAnimation {
-                id: arrive
-                target: badge
-                property: "opacity"
-                from: 0
-                to: badge.away ? 0 : 1
-                duration: Theme.normal * 2
+            width: size
+            height: size
+            opacity: away ? 0 : inHand ? root.held.fade : 1
+            Behavior on opacity { enabled: !badge.inHand; NumberAnimation { duration: Theme.normal } }
+
+            // On the cards' own spring, worked out here a frame at a time, so
+            // an icon stays with its card through every move the Lua springs
+            // it through; in the hand, on the card exactly.
+            property real px: tx
+            property real py: ty
+            property real vx: 0
+            property real vy: 0
+            x: px
+            y: py
+            function settled() {
+                return Math.abs(px - tx) < 0.1 && Math.abs(py - ty) < 0.1
+                    && Math.abs(vx) < 1 && Math.abs(vy) < 1
+            }
+            onTxChanged: follow()
+            onTyChanged: follow()
+            onInHandChanged: follow()
+            function follow() {
+                if (inHand) {
+                    px = tx; py = ty; vx = 0; vy = 0
+                } else if (!settled()) {
+                    spring.running = true
+                }
+            }
+            FrameAnimation {
+                id: spring
+                onTriggered: {
+                    const m = badge.away ? root.softMotion : root.motion
+                    const k = m.stiffness, c = m.damping
+                    let left = Math.min(frameTime, 0.05)
+                    while (left > 0) {
+                        const dt = Math.min(left, 0.004)
+                        badge.vx += (k * (badge.tx - badge.px) - c * badge.vx) * dt
+                        badge.vy += (k * (badge.ty - badge.py) - c * badge.vy) * dt
+                        badge.px += badge.vx * dt
+                        badge.py += badge.vy * dt
+                        left -= dt
+                    }
+                    if (badge.settled()) {
+                        badge.px = badge.tx; badge.py = badge.ty; badge.vx = 0; badge.vy = 0
+                        running = false
+                    }
+                }
             }
 
-            // By count too, so an icon whose name is the same is kept as it
-            // is when the cards are written again.
+            // A shadow under it, as macOS gives its icons.
             Repeater {
-                model: badge.card.icons ? badge.card.icons.length : 0
-                delegate: Image {
+                model: 3
+                Rectangle {
                     required property int index
-                    readonly property string modelData: badge.card.icons[index] || ""
-                    width: root.iconSize
-                    height: root.iconSize
-                    sourceSize.width: root.iconSize * 2
-                    sourceSize.height: root.iconSize * 2
-                    smooth: true
-                    mipmap: true
-                    source: modelData === "" ? ""
-                        : modelData.indexOf("://") >= 0 ? modelData
-                        : modelData.charAt(0) === "/" ? "file://" + modelData
-                        : "image://solium/icon/" + encodeURIComponent(modelData) + "?size=" + root.iconSize * 2
+                    readonly property real out: (index + 1) * 1.5
+                    x: -out
+                    y: -out + 2.5
+                    width: badge.size + 2 * out
+                    height: badge.size + 2 * out
+                    radius: badge.size * 0.22 + out
+                    color: "#000000"
+                    opacity: 0.09
                 }
+            }
+            Image {
+                anchors.fill: parent
+                sourceSize.width: root.iconSize * 2
+                sourceSize.height: root.iconSize * 2
+                smooth: true
+                mipmap: true
+                source: badge.icon === "" ? ""
+                    : badge.icon.indexOf("://") >= 0 ? badge.icon
+                    : badge.icon.charAt(0) === "/" ? "file://" + badge.icon
+                    : "image://solium/icon/" + encodeURIComponent(badge.icon) + "?size=" + root.iconSize * 2
             }
         }
     }

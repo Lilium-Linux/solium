@@ -1570,7 +1570,8 @@ local defaults = {
             -- the viewer's distance in pixels, as `sol.present` takes them.
             tilt = 26,
             perspective = 1100,
-            -- How far apart, in pixels, the windows of one group are fanned.
+            -- How far apart, in pixels, the windows of one group are fanned,
+            -- up and to the right behind the front one.
             fan = 14,
             card = {
                 -- A card's height, as a share of its width.
@@ -1579,8 +1580,9 @@ local defaults = {
                 spacing = 64,
                 -- How opaque the windows behind a group's front window are.
                 behind = 0.92,
-                -- How large a group's application icons are, in pixels.
-                icon = 44,
+                -- How large a group's application icons are, in pixels:
+                -- side by side over the front window's bottom-left corner.
+                icon = 48,
             },
             -- A card under the pointer comes forward: `lift` times larger,
             -- keeping `tilt` of its tilt (0, flat), `shift` pixels out

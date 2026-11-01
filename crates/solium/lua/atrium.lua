@@ -99,7 +99,7 @@ local function settings()
         aspect = number(card.aspect, 0.72, 0.1),
         spacing = number(card.spacing, 64),
         behind = math.min(1, number(card.behind, 0.92)),
-        icon = math.floor(number(card.icon, 44, 8)),
+        icon = math.floor(number(card.icon, 48, 8)),
         lift = number(hover.lift, 1.2, 0.1),
         hover_tilt = number(hover.tilt, 0),
         shift = number(hover.shift, 28, -1000),
@@ -343,7 +343,7 @@ end
 -- Where each window of a group is drawn inside its card box. One scale for the
 -- whole group, so a large window stays larger than a small one beside it, as
 -- they are on the stage; the most recent in front, the rest fanned up and to
--- the left behind it, the set centred in the box.
+-- the right behind it, as macOS fans them, the set centred in the box.
 local function fanned(group, by_id, box, fan)
     local wide, tall = 1, 1
     for _, id in ipairs(group) do
@@ -362,7 +362,7 @@ local function fanned(group, by_id, box, fan)
         if window then
             local shift = spread / 2 - fan * (at - 1)
             local w, h = window.w * scale, window.h * scale
-            out[at] = { id = id, x = cx + shift - w / 2, y = cy + shift - h / 2, w = w, h = h }
+            out[at] = { id = id, x = cx - shift - w / 2, y = cy + shift - h / 2, w = w, h = h }
         end
     end
     return out
@@ -571,13 +571,17 @@ local function arrange_desk(key, area, by_id, set, children)
             end
         end
         if not waiting and in_view then
-            local apps, seen = {}, {}
+            -- One icon an application, in the order its windows stand, each
+            -- named by that application's front window in the group: an icon
+            -- belongs to a window, so when its window moves to another card
+            -- the same icon goes along to its new place there.
+            local badges, seen = {}, {}
             for _, id in ipairs(groups[index]) do
                 local window = by_id[id]
                 local app = window and window.app_id or ""
                 if not seen[app] then
                     seen[app] = true
-                    apps[#apps + 1] = icon_of(app)
+                    badges[#badges + 1] = { key = tostring(id), icon = icon_of(app) }
                 end
             end
             -- The group's oldest window names it, whichever is in front.
@@ -599,8 +603,7 @@ local function arrange_desk(key, area, by_id, set, children)
                 h = box.h,
                 ix = fx - area.x,
                 iy = fy + front.h * lift - area.y,
-                icons = apps,
-                dragged = held == k,
+                badges = badges,
             }
         end
     end
@@ -608,6 +611,23 @@ local function arrange_desk(key, area, by_id, set, children)
         return nil
     end
     return { cards = cards, hidden = hidden, peeking = peeking, hovered = hovered or 0 }
+end
+
+-- Where a held card's icons are, kept for its monitor's scene: its front
+-- window's bottom-left corner as drawn, and how much of a card it still is.
+kept.held_badges = {}
+
+-- The strip's scene on one monitor, declared with `properties`: as wide as a
+-- card can be dragged and still be a card, so the icons of one in the hand go
+-- with it, though only the cards take the pointer.
+local function strip_scene(monitor, area, set, properties)
+    sol.surface("atrium@" .. monitor, {
+        scene = "atrium/Strip.qml",
+        layer = "top",
+        on = { x = area.x, y = area.y, w = set.strip + set.reach, h = area.h },
+        interactive = true,
+        properties = properties,
+    })
 end
 
 -- The strip's scene on one monitor: up while atrium is, on the desk in view.
@@ -623,20 +643,18 @@ local function declare_strip(monitor, area, set, drawn)
         return
     end
     kept.surfaces[name] = true
-    sol.surface(name, {
-        scene = "atrium/Strip.qml",
-        layer = "top",
-        on = { x = area.x, y = area.y, w = set.strip, h = area.h },
-        interactive = true,
-        properties = {
-            cards = drawn.cards,
-            hidden = drawn.hidden,
-            peeking = drawn.peeking,
-            hovered = drawn.hovered,
-            iconSize = set.icon,
-            dragThreshold = set.threshold,
-            lift = set.lift,
-        },
+    strip_scene(monitor, area, set, {
+        cards = drawn.cards,
+        hidden = drawn.hidden,
+        peeking = drawn.peeking,
+        hovered = drawn.hovered,
+        held = kept.held_badges[monitor] or false,
+        strip = set.strip,
+        motion = set.motion,
+        softMotion = set.hide_motion,
+        iconSize = set.icon,
+        dragThreshold = set.threshold,
+        lift = set.lift,
     })
 end
 
@@ -889,7 +907,20 @@ local function draw_held(dt)
     local t = atrium.closeness(it.area, pointer.x)
     sol.animate({ duration = 0 })
     local rects = lifted(it.rects, held.lift, held.shift)
-    for at, each in ipairs(morph(it.group, it.by_id, rects, pointer.x, pointer.y, held.fx, held.fy, t)) do
+    local drawn = morph(it.group, it.by_id, rects, pointer.x, pointer.y, held.fx, held.fy, t)
+    -- Its icons go with it, fading as it turns into its windows.
+    local front = drawn[1]
+    if front and kept.surfaces["atrium@" .. held.monitor] then
+        local badges = {
+            card = held.card,
+            ix = front.x - it.area.x,
+            iy = front.y + front.h - it.area.y,
+            fade = math.max(0, math.min(1, (t - 0.3) / 0.5)),
+        }
+        kept.held_badges[held.monitor] = badges
+        strip_scene(held.monitor, it.area, set, { held = badges })
+    end
+    for at, each in ipairs(drawn) do
         present(each.id, {
             x = each.x, y = each.y, w = each.w, h = each.h,
             rotate_y = held.tilt * t, pivot_x = 0, perspective = set.perspective,
@@ -948,6 +979,9 @@ end
 local function drop(monitor, card, x, y)
     local held = kept.drag
     kept.drag = nil
+    -- Its icons are let go where they were, and spring from there to the
+    -- card they end up on.
+    kept.held_badges[monitor] = nil
     local it = dragged_group(monitor, card)
     if not it or not held then
         atrium.arrange()
@@ -1314,6 +1348,7 @@ sol.grab_input = function(grabbed)
     if grabbed and not kept.aside then
         kept.aside = true
         kept.drag = nil
+        kept.held_badges = {}
         for name in pairs(kept.surfaces) do
             sol.surface(name, false)
             kept.surfaces[name] = nil
