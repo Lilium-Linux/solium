@@ -4169,8 +4169,8 @@ pub(crate) mod tests {
     }
 
     /// **A `WindowList` bound to `Workspaces.showing(monitor).id` picks up a
-    /// window mapped after the shell already started**, the preview bar's
-    /// own pattern (`qml/preview/WindowChips.qml`): the workspace a monitor
+    /// window mapped after the shell already started**, a bar's usual
+    /// pattern: the workspace a monitor
     /// shows is declared only once something needs laying out, so a shell
     /// hosted at startup, with no window yet, first binds to the empty
     /// facade `showing` lazily creates; the fix this guards is that the

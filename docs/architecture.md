@@ -24,7 +24,7 @@ modules; their geometry calculations use the layout crate.
 | Layer | Responsibility | Main sources |
 |---|---|---|
 | Configuration | Bindings, modes, workspaces, shell policy | `crates/solium/lua/` |
-| Desktop UI | Frames, wallpaper, preview shell, reusable QML types | `crates/solium/qml/` |
+| Desktop UI | Frames, wallpaper, reusable QML types | `crates/solium/qml/` |
 | Effect definitions | Geometry and fragment effects | `crates/solium/effects/` |
 | Compositor | Protocols, state, input, script API, scene hosting, frame scheduling | `crates/solium/src/` |
 | Reusable calculations | Animation, layout, deformation and effect formats | `crates/animation/`, `crates/layout/`, `crates/effects/` |
@@ -60,7 +60,7 @@ Smithay's `Space` retains mapped-client stacking and damage bookkeeping.
 
 ## Configuration and scripting
 
-The shipped `lua/init.lua` loads configuration, modes and the preview shell.
+The shipped `lua/init.lua` loads configuration and modes.
 `~/.config/solium/user.lua` supplies overrides; `config.lua` documents defaults.
 Lua reads compositor snapshots and issues commands through `script.rs`.
 Commands request changes; subsequent state and events report the result.
@@ -157,8 +157,8 @@ Published data includes monitors, windows, workspaces, keyboard and pointer
 state, applications (`Apps`) and desktop-folder entries (`Folder`). Keyed model
 updates are batched into Qt before the scene renders.
 
-The bundled preview uses these APIs for its bar, dock, search and desktop
-icons. Users can disable it or select another hosted shell. External
+The default configuration uses these APIs for its taskbar, quick search,
+titlebar and desktop. Users can change it or host another shell. External
 `wlr-layer-shell` clients remain supported, but have the protocol limitations
 listed in [gaps](gaps.md#external-shells-and-desktop-tools).
 [Shell hosting and integration](shell-boundary.md) is the detailed API guide.

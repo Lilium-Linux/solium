@@ -23,16 +23,17 @@ reliable daily use. The planned v0.1.0 is a public preview; no release date is
 promised. Check the [current status](docs/status.md) and
 [preview criteria](docs/beta.md) before choosing it for your main session.
 
-The shipped preview shell includes a bottom bar, an autohiding top dock,
-application and window search, and desktop icons. It is configuration built
-on Solium's public API, and can be replaced or disabled. Solium has its own
+The default configuration is a whole desktop: a taskbar, a floating titlebar
+with quick settings, window snapping, a stage-manager strip, quick search,
+Alt+Tab cards and an editable desktop. It is configuration built on Solium's
+public API, copied into `~/.config/solium` on install, and yours to change. Solium has its own
 lock screen, takes touch on its own UI as on windows, and serves notifications
 and audio to scenes and Lua. Media, power, network and Bluetooth services,
 gestures and input methods are still unfinished.
 
 ![An earlier nested Solium session with QML window frames](docs/desktop.png)
 
-This capture predates the current dark theme and preview shell. It shows the
+This capture predates the current dark theme and default configuration. It shows the
 window-frame rendering, rather than the current desktop appearance.
 
 ## What it offers
@@ -239,7 +240,6 @@ To start smaller, keep only `~/.config/solium/user.lua` with just your changes:
 ```lua
 return {
     pane = "left",
-    -- preview = false,  -- disable the bundled preview shell
 }
 ```
 
@@ -265,7 +265,7 @@ startup probe, with software rendering as a fallback and in nested sessions.
 
 Solium can host a shell in its QML engine or run ordinary layer-shell clients.
 It does not require a particular desktop environment or a separate shell
-project. The bundled preview is one configuration of the compositor.
+project. The default configuration is one configuration of the compositor.
 
 ## Find your way around
 

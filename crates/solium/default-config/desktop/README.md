@@ -1,7 +1,7 @@
 # Desktop homescreen
 
-This directory is part of the personal Solium configuration, not another shell
-process. `user.lua` loads `desktop.lua`; the stock preview desktop is disabled.
+This directory is part of the default Solium configuration, not another shell
+process. `user.lua` loads `desktop.lua`.
 The existing wallpaper, taskbar, recents, workspace stack and window modes remain
 the desktop's surrounding UI.
 

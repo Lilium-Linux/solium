@@ -12,8 +12,8 @@ source of work status. This page defines what release readiness means;
 ## What already exists
 
 The window-management modes, QML frames and scene hosting, reloadable
-configuration and user effect folders are implemented. The preview shell has a
-bottom bar, top dock, search and desktop icons. Checkout installation and
+configuration and user effect folders are implemented. The default configuration
+is a whole desktop: taskbar, titlebar, snapping, search and desktop. Checkout installation and
 Fedora RPM build tooling exist. Logind lock/sleep handling and per-device
 input settings are implemented too.
 
@@ -25,7 +25,7 @@ in the repository is not release acceptance.
 | Area | Evidence required |
 |---|---|
 | Daily use | Core application and window-management workflows survive real use; remaining release blockers in the daily-drive queue are resolved |
-| Desktop | The preview shell works with real services and data, including the intended widgets and native lock UI |
+| Desktop | The default configuration works with real services and data, including the intended widgets and native lock UI |
 | Hardware | Recorded long-session and suspend/resume checks, plus input, output hotplug, scaling and GPU behavior on the supported machines |
 | Installation | A fresh system can install, select the session, upgrade and remove the release using its documented packages |
 | Session services | Locking, idle, autostart, authentication and portal workflows are exercised in the installed session |

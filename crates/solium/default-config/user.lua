@@ -17,6 +17,8 @@ require("deskstack")
 require("notification-ripple")
 -- The editable desktop canvas: real files, widgets and saved placement.
 require("desktop")
+-- Quick search on super+d (search.lua, shell/Search.qml).
+require("search")
 
 -- Screenshots: the whole desktop into the corner, or the tool
 -- (screenshot.lua, shell/ScreenshotTool.qml).
@@ -25,7 +27,6 @@ local screenshot = require("screenshot")
 local screens = require("screens")
 
 return {
-    preview = { desktop = { icons = false } },
     -- Monitors: Solium places them itself. To arrange them, name each by its
     -- connector (`solium --probe` lists them), for example:
     --
@@ -88,8 +89,8 @@ return {
     -- unlocks: the longest entry Solium allows, so the flight is seen.
     lock = { scene = "Violet", enter_ms = 600, exit_ms = 700 },
 
-    -- KDE/Windows-style taskbar instead of the preview bar and dock
-    -- (~/.config/solium/shell/Shell.qml, ~/.config/solium/taskbar.lua).
+    -- The shell: pop-ups, banners, quick search and the screenshot tool
+    -- (shell/Shell.qml; the taskbar itself is bar.lua and shell/Bar.qml).
     shell = {
         scene = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config"))
             .. "/solium/shell/Shell.qml",

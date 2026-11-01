@@ -2007,111 +2007,14 @@ return { fullscreen = { covers = "none" } }
 See **[shell-boundary.md](shell-boundary.md)** for why hosting is the design,
 and for both ways a shell attaches.
 
-### The preview shell
+### The default shell
 
-A fresh install is not a blank desktop. `shell.scene` above defaults to the
-compositor's own preview shell -- a bar along the bottom, built the same way
-any other shell is, on the public API `shell-boundary.md` describes and
-nothing else. It shows:
-
-- the workspaces of this monitor, as page dots -- the current one an accent
-  pill, an occupied one filled -- and a click switches;
-- the running windows of this monitor's current workspace, as chips -- icon,
-  title or app id, the focused one highlighted -- and a click focuses one;
-- the tray: applications' icons ([Tray](#tray)), a left click activating
-  one, a middle click its second action, the wheel scrolling it, and a right
-  click opening its menu above the bar, drawn in the bar's look;
-- the keyboard layout, once more than one is configured;
-- a clock;
-- a top dock: pinned apps, then a hairline, then running ones that are not
-  pinned, each a theme icon with a dot under a running one. Autohidden by
-  default -- nothing is reserved, and it slides in when the pointer reaches
-  the top edge, out a little after it leaves. A click on an app that is not
-  running launches it (`Solium.Apps`, 03 §3.2.13); on one that is, focuses its
-  most recently used window.
-
-  ```lua
-  return { preview = { dock = {
-      pinned = { "org.mozilla.firefox", "kitty" }, -- desktop ids, left unset
-                                                    -- the dock picks a
-                                                    -- terminal, a file
-                                                    -- manager and a browser
-                                                    -- from what is installed
-      visibility = "always",                       -- or "autohide" (default)
-      icon_size = 48,                               -- default 40
-  } } }
-  ```
-
-- quick search, `super+d`: a centred panel with a field, the live keyboard
-  layout beside it, and results grouped into applications (matched by name
-  and generic name), open windows (title or app id, with the workspace) and
-  a few compositor commands that already exist -- Overview, Tile windows,
-  Fullscreen window, Reload configuration, Quit Solium. Arrow keys move the
-  selection, Return activates it, Escape or a click outside closes.
-
-  ```lua
-  return { preview = { search = {
-      key = "super+alt+space", -- default "super+d"
-  } } }
-  ```
-
-  Cut from this first version (`lua/preview/search.lua` and
-  `qml/preview/Search.qml` both say why, in full): the detail pane, a row's
-  own actions, Alt+digits, Ctrl+Return, the empty-query suggestions (there
-  is no usage history yet to rank by), app keywords (the plain array this
-  searches, `sol.apps()`, does not carry them -- a real gap, not a corner
-  cut), the settings and desktop-file sources, the container transform from
-  the bar's own search button (the bar has no search button yet either),
-  and the "us,ru" layout-correction pass -- it needs the compositor's own
-  keymap, which nothing here exposes yet.
-
-- desktop icons: `Solium.dirs.desktop` (`$XDG_DESKTOP_DIR`, or
-  `user-dirs.dirs`; nothing drawn, and nothing scanned, when it is unset or
-  is `$HOME`), on their own surface -- `layer = "bottom"`, below ordinary
-  windows, the same as a real desktop, and below the bar above -- 96x100
-  cells with 48 px icons, column by column from the top right, folders
-  first then by name. A click selects (Ctrl or Shift adds), a double-click
-  opens: a regular file through its MIME type's default application, a
-  `.desktop` launcher through its own `Exec=` once trusted, asked for once
-  in a small card. Live through inotify: a file that appears or disappears
-  on the desktop updates the icons at once, no reload needed.
-
-  ```lua
-  return { preview = { desktop = {
-      from = "top-left",                   -- or "top-right" (default)
-      cell = { width = 110, height = 112 }, -- default 96x100
-      labels = 1,                          -- label lines, default 2
-      open = "single",                     -- or "double" (default)
-      show_hidden = true,                  -- default false
-  } } }
-  ```
-
-  Cut from this first version (`crates/solium/src/folder.rs` and
-  `qml/preview/Desktop.qml` both say why, in full): dragging and saved
-  positions (there is nowhere durable to keep them yet), the right-click
-  menus, a rubber band, showing the desktop (`super+ctrl+d` needs a
-  window-presenting pass this compositor does not have), Open With and
-  thumbnails, MIME detection by content rather than by extension, and the
-  arrow-key/Return navigation the design note asks for (nothing yet gives
-  the desktop the keyboard on demand, so claiming it unconditionally would
-  only fight the dock and quick search for focus).
-
-Next pieces -- the island, quick settings and previews -- need
-services this compositor does not have yet, and are not here. `lua/preview/`
-and `qml/preview/` are where all of it lives, so copying one file still
-changes one behaviour, exactly as **[Your own frame](#your-own-frame)** and
-**[Bars, docks and wallpapers](#bars-docks-and-wallpapers)** above do it.
-
-Two ways to turn it off, or replace it:
-
-```lua
-return { preview = false }
-```
-
-turns the whole preview shell off and leaves a blank desktop, as before it
-existed. Naming your own `shell.scene` -- or `SOLIUM_SHELL_SCENE` for one run
--- replaces it outright: the preview shell only ever fills in a default
-nothing else set, and never overrides either one.
+The default configuration hosts its own shell (`shell/Shell.qml` beside its
+`user.lua`): the taskbar's pop-ups, notification banners, the screenshot tool
+and quick search. Quick search opens on `super+d` and searches installed
+applications, open windows and a few compositor commands; the matching is
+`search.lua`, and `search.key` there changes the key. With no `shell.scene`
+at all, no shell is hosted and the desktop is the wallpaper and windows.
 
 ### Your own pointer
 

@@ -1,37 +1,13 @@
-// The shipped quick search (share/solium/qml/preview/Search.qml), recoloured
-// to match the taskbar.
-// Quick search (04-ui.md §4.7), first version: a centred panel on the
-// active monitor, a text field with the live keyboard layout beside it, and
-// results grouped into applications, open windows and a few compositor
-// commands.
+// Quick search (super+d): a centred panel on the active monitor, a text
+// field with the live keyboard layout beside it, and results grouped into
+// applications, open windows and a few compositor commands.
 //
-// **Where the matching happens, and why not here.** `Apps` and `Windows`,
-// the QML models every other piece of this bar reads, are built for live
-// delegates (`qml/preview/Dock.qml`'s own module doc goes through the same
-// choice): there is no documented way to walk either one as a plain array
-// from JavaScript, only through a `Repeater` or `ListView`, and nothing
-// exposes a positional `get(i)` the way `Apps.get(id)` does by name. Lua's
-// `sol.apps()` and `sol.windows()` are exactly that plain array, so this
-// file sends what is typed with `Solium.send("search.query", { text: ... })`
-// and `lua/preview/search.lua` answers with the ranked rows, the same round
-// trip `preview/dock.lua` already uses for its pins (`Shell.qml`'s
-// `searchOpen`/`searchResults` properties). Activating an app or a window
-// row skips that round trip entirely and sends the native action straight,
-// exactly as `qml/preview/DockIcon.qml` already does.
-//
-// **Cut for this first version** (04-ui.md's own Showcase/P1 marks, plus
-// what "small" asked for beyond them, both listed in `search.lua`'s own
-// module doc too): the detail pane, a row's own actions (Tab), Alt+digits,
-// Ctrl+Return, the empty-query suggestions, the settings and desktop-file
-// sources, and the container transform from the bar's own search button --
-// the bar has no search button yet either. The layout-correction pass
-// ("us,ru correction with no table") is not here either; see `search.lua`'s
-// module doc for why.
-//
-// No `QtQuick.Controls` anywhere in this tree (`build.rs` links only
-// `Qt6Quick`), so the field below is a plain `TextInput`, styled by hand,
-// not a Controls `TextField` -- the one difference from `docs/shell-boundary.md`'s
-// own inline example.
+// The matching is in search.lua, where `sol.apps()` and `sol.windows()` are
+// plain arrays (`Apps` and `Windows` here are models for live delegates,
+// with no way to walk them from JavaScript): this panel sends what is typed
+// with `Solium.send("search.query", { text: ... })`, and search.lua answers
+// with the ranked rows as Shell.qml's `searchResults`. Activating an app or
+// a window row sends the native action straight, with no round trip.
 
 import QtQuick
 import Solium
@@ -71,8 +47,7 @@ Item {
     visible: root.shown && Solium.monitor.active
 
     // A `QVariantList` crossing from Lua iterates fine but fails
-    // `Array.isArray` (`qml/preview/Dock.qml`'s own note, measured the same
-    // way): `rows.length` and indexing both want a real array.
+    // `Array.isArray`: `rows.length` and indexing both want a real array.
     function toArray(value) {
         if (Array.isArray(value)) {
             return value

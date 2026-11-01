@@ -137,43 +137,6 @@ local defaults = {
         keyboard = { bindings = "except_claimed" },
     },
 
-    -- The compositor's own preview shell: a bar, built as configuration on
-    -- the same public API `shell` above describes (`lua/preview/`,
-    -- `qml/preview/`; see docs/ricing.md). On by default, so a fresh install
-    -- shows live workspaces, windows, the keyboard layout and a clock rather
-    -- than a blank desktop.
-    --
-    --     preview = false,
-    --
-    -- Turns it off. Naming your own `shell.scene` above, or `user.lua`'s own
-    -- shell, always wins over it either way -- this only ever fills in a
-    -- default nothing else set.
-    --
-    -- A table instead of `true` reaches the top dock
-    -- (`lua/preview/dock.lua`, 04-ui.md §4.6): `preview = { dock = {
-    -- pinned = { "org.mozilla.firefox", "kitty" }, visibility = "always",
-    -- icon_size = 48 } }`. `pinned` is a list of desktop ids; left unset,
-    -- the dock picks the first installed terminal, file manager and browser
-    -- itself. `visibility` is `"always"` or `"autohide"` (the default).
-    --
-    -- Quick search (`lua/preview/search.lua`, 04-ui.md §4.7) opens on
-    -- `super+d`: `preview = { search = { key = "super+alt+space" } }` binds
-    -- a different one instead. It searches installed applications, open
-    -- windows and a few compositor commands; see `docs/ricing.md` for what
-    -- is cut from this first version.
-    --
-    -- Desktop icons (`lua/preview/desktop.lua`, 04-ui.md §4.9) show
-    -- `Solium.dirs.desktop` (`$XDG_DESKTOP_DIR`, or `user-dirs.dirs`; empty
-    -- draws nothing): `preview = { desktop = { icons = true, from =
-    -- "top-right", cell = { width = 96, height = 100 }, labels = 2, open =
-    -- "double", show_hidden = false, reveal_on_click = false } }`. `icons =
-    -- false` turns them off; `from` is `"top-right"` (the default) or
-    -- `"top-left"`; `open` is `"double"` (the default) or `"single"`. See
-    -- `docs/ricing.md` for what is cut from this first version (dragging
-    -- and saved positions, right-click menus, showing the desktop, Open
-    -- With, thumbnails).
-    preview = true,
-
     -- The keyboard: its xkb layouts (`layout`, `variant`, `options`, `model`,
     -- `rules`, `active`), the locks (`caps`, `num`), the repeat rate, and the
     -- keyboard pill.
@@ -2041,10 +2004,6 @@ local defaults = {
         -- Whether a new window joins the workspace you are looking at.
         follow_new_windows = true,
     },
-
-    -- The preview dock is configured under shell.dock. The old top-level
-    -- dock.items and dock.morph keys were never read and are not supported.
-    -- Live icon anchors and launch morphs remain separate future work.
 
     open = {
         -- The animation a window arrives with.

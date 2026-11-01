@@ -3,9 +3,6 @@
 // screenshot tool and thumbnail, and Alt+Tab's badges. The bar itself is a
 // surface of its own (Bar.qml, bar.lua). The tasks' Lua half is
 // ~/.config/solium/taskbar.lua.
-//
-// Based on the shipped preview shell (~/.local/share/solium/qml/preview); its
-// quick search (super+d) is copied here as Search.qml, recoloured.
 
 import QtQuick
 import Solium
@@ -13,11 +10,7 @@ import Solium
 Item {
     id: root
 
-    // Written here by the shipped preview Lua (dock.lua, search.lua); the
-    // dock ones are unused but declared so setting them is not an error.
-    property var dockPinned
-    property string dockVisibility: "autohide"
-    property int dockIconSize: 40
+    // Written by search.lua: quick search (super+d), open, and its rows.
     property bool searchOpen: false
     property var searchResults: []
 

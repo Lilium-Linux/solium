@@ -5,11 +5,10 @@ bars, docks, launchers and other scenes as configuration. It can live in this
 repository or be a separate project; it does not require a separate desktop
 environment.
 
-The default preview shell is hosted in the compositor's QML engine, beside the
-window frames. It includes a bottom bar, top dock, search and desktop icons.
-Set `preview = false` to disable it, or name your own root with
-`shell = { scene = "<path to QML>" }`. `preview = true` supplies the default
-when no shell is explicitly selected.
+A shell is hosted in the compositor's QML engine, beside the window frames:
+name its root with `shell = { scene = "<path to QML>" }`. The default
+configuration (`crates/solium/default-config`, copied into
+`~/.config/solium` on install) hosts its own taskbar and shell this way.
 
 There are two integration paths:
 
@@ -118,9 +117,8 @@ typo in the shell costs a reload rather than the session
 Editing a file under the scene's own directory
 rebuilds the scene with no reload at all: that is checked every half second
 while frames are being drawn.
-With `preview = true` (the default), leaving `shell.scene` unset or false
-selects the bundled preview. To host no shell, set `preview = false` and
-leave `shell.scene` false; reloading then removes the hosted shell.
+Leaving `shell.scene` unset or false hosts no shell; reloading then removes
+one that was hosted.
 
 A reload does not rebuild a hosted scene. `sol.surface` declared again with the
 same scene file writes the properties that changed into the live scene, so an
@@ -609,14 +607,12 @@ until the first scan completes. A row: `id` (the desktop file id), `name`,
 spawn path (`launch.rs`) the same way `windows.focus` is; a running app is
 found by joining `Windows`' `appId` to an `Apps` row's `id` in the scene or in
 Lua, not by anything `Apps` itself tracks (no `running`, no `windowCount`
-here yet -- `qml/preview/Dock.qml` is the one place in this tree that does
-that join, and its own file doc says why it is one `WindowList` per app
-rather than a single pass over `Windows`). `sol.apps()` is the same list,
-read from Lua, for config written against what is actually installed
-(`lua/preview/dock.lua`'s first-run pins) -- but, like `sol.windows()` and
+here yet; one `WindowList` per app does that join). `sol.apps()` is the
+same list, read from Lua, for config written against what is actually
+installed -- but, like `sol.windows()` and
 `sol.monitors()`, only meaningfully inside a dispatch: a `.lua` file's top
 level runs before the first real snapshot arrives, so `sol.apps()` there
-reads empty (`lua/preview/dock.lua`'s own module doc works through this).
+reads empty.
 `image://solium/icon/<name>?size=48&scale=2` is the one provider behind
 `Apps`' own `icon` and anything else a scene wants a theme icon for, by
 plain name (an absolute path is refused, not resolved -- P1, `icon.rs`'s
@@ -1216,12 +1212,10 @@ window grew out of it. Captured frame by frame in `docs/morph.png`, a record
 of 2026-09-06 and of a dock that no longer exists — 460x208 near the dock, then
 928x504, 1192x672, settled at full size about a third of a second later.
 
-`sol.present_from` still provides rectangle-based launch presentation. The
-current preview dock is implemented as configuration, but live icon anchors
-and cross-scene flights/morphs remain planned. The removed `dock.morph`
-setting never controlled an implemented behavior; `--check` reports it as an
-unrecognised key. Use the current `shell.dock` settings for the preview dock,
-not the settings of this historical experiment.
+`sol.present_from` still provides rectangle-based launch presentation. Live
+icon anchors and cross-scene flights/morphs remain planned. The removed
+`dock.morph` setting never controlled an implemented behavior; `--check`
+reports it as an unrecognised key.
 
 None of that is reachable from a separate process. A client dock can pass a
 rectangle over IPC, but by the time the window exists the two are separate

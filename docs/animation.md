@@ -163,8 +163,8 @@ maximize   = { animate = { duration = 220, easing = "outCubic" }, instant = { ap
 
 These defaults come from `config.lua`. Each mode reads its motion settings
 and passes them to the shared animation engine. The old `dock.morph` setting
-was unused and has been removed; `--check` rejects it. The preview dock exists,
-but its live-anchor and launch-morph integration is still planned.
+was unused and has been removed; `--check` rejects it. Live-anchor and
+launch-morph integration with a dock is still planned.
 
 So changing how tiling feels is one line in `~/.config/solium/user.lua`:
 

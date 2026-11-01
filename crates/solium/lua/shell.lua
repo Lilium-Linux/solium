@@ -39,7 +39,7 @@ function shell.apply()
     if not chosen then
         -- A surface outlives a reload until something removes it by name, so
         -- a shell taken out of the configuration would otherwise stay on
-        -- screen. See `the_shipped_configuration_hosts_no_shell_with_preview_off`.
+        -- screen. See `the_shipped_configuration_hosts_no_shell_of_its_own`.
         sol.surface("shell", false)
         return
     end
@@ -58,8 +58,8 @@ function shell.apply()
         -- A generic passthrough: whatever a shell's own Lua put here lands on
         -- its scene's root item, by name (`Instance::set_properties`), so a
         -- scene reads its own settings as plain QML properties rather than
-        -- every shell piece needing a model of its own. `preview/dock.lua`
-        -- is the first user: the dock's pins and visibility.
+        -- every shell piece needing a model of its own (the default
+        -- configuration's search.lua hands its results over this way).
         properties = settings.properties,
     })
 end
