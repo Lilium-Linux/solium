@@ -68,6 +68,24 @@ PaneStyle {
 | `client.shadow` | reserved, and read by nobody: a shadow is an effect rule in the style's `effects.lua` (below) |
 | the `Layer` children | the layers, in declaration order |
 
+**The client's corners are each window's own.** `client.radius` and its four
+corners may be bound to anything the style is told about its window --
+`maximized`, `fullscreen`, `floating`, `focused`, `values`, `windowValues`
+(what the configuration handed that window with `sol.frame`) -- and the
+compositor follows the binding for that window, telling every one of its
+layers the new `clientRadius`, and a `Behavior` on it frame by frame:
+
+```qml
+client.radius: (maximized || windowValues.snapped) ? 0 : 12
+```
+
+They are read from a `PaneStyle` told what the layers are told: the first
+inline layer's scene, which costs nothing more, or, for a style whose layers
+are all files, this `Pane.qml` built once more for each window at 1x1 and
+never drawn. A radius that does not change is read once each time what the
+layers are told changes, and a window whose corners are 0 runs no program on
+its client.
+
 Insets are on the style and never on a layer. The client is placed once and
 every layer sees the same client rect, so three layers each declaring insets
 would be three answers to one question.
@@ -173,7 +191,7 @@ Once, at build, because none of them changes for a style:
 | `insetTop`, `insetRight`, `insetBottom`, `insetLeft` | what `Pane.qml` reserved, so a bar can size itself to its own band without a second copy of the number. `insetTop` is told again whenever the frame grows (`growTop`, below): it is always the top the frame reserves now |
 | `bleedLeft`, `bleedTop` | where the window's own corner is inside this layer's canvas |
 | `clientRadiusTopLeft`, `clientRadiusTopRight`, `clientRadiusBottomLeft`, `clientRadiusBottomRight` | what the compositor is cutting each corner of the client to, in logical pixels, so a bar or a border can hug that curve. Written on every layer of every style, zeroes included — a corner left unwritten reads back 0, which is indistinguishable from one the style really squared |
-| `clientRadius` | the **largest** of the four above, for a layer that wants one number. Its use is an outward hug (`radius: clientRadius + 2`), and a hug has to clear the biggest cut; a layer that needs one particular corner reads it by name. Written on every layer of every style, zero included. `rounded/Frame.qml` is the worked example |
+| `clientRadius` | the **largest** of the four above, for a layer that wants one number. Its use is an outward hug (`radius: clientRadius + 2`), and a hug has to clear the biggest cut; a layer that needs one particular corner reads it by name. Written on every layer of every style, zero included. `rounded/Frame.qml` is the worked example. All five are this window's, told again as a binding on `client.radius` moves |
 
 Of these, `PaneStyle` declares only `bleedLeft` and `bleedTop`. The four
 `inset` names and the five `clientRadius` names reach only a delegated layer

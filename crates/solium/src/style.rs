@@ -192,6 +192,11 @@ pub(crate) struct Style {
     /// so a border can match the curve the compositor is about to cut rather
     /// than squaring it off around it.
     pub(crate) effects: Vec<solium_effects::fragment::Effect>,
+    /// The four client radii as the manifest declared them, before
+    /// [`client_effects`] decides whether they are an effect: what a pane
+    /// starts from, and compares its own reading with, when its style binds
+    /// them to something that changes per window (#454).
+    pub(crate) client_radii: solium_effects::fragment::Corners,
     /// The effect rules this style's `effects.lua` gives its panes, read
     /// once per folder and content by [`rules_of`]; empty for a style with no
     /// such file. Copied onto each pane's `Decoration`, as `effects` is.
@@ -573,6 +578,53 @@ fn requirements_on(manifest: &Path, required: &[String], gpu: bool) -> Result<()
     ))
 }
 
+/// The four client radii a `PaneStyle` declares, as it has them now: the
+/// manifest's in [`load`], and a pane's own `PaneStyle` each frame its
+/// binding may have moved (`decoration::Decoration::follow_corners`, #454).
+///
+/// `client.radius` has been read by `get_int` and consumed by nothing since
+/// the group work landed; this is what consumes it. Through `get_int` and its
+/// dotted path, for the reason set out on the insets in [`load`].
+///
+/// Not clamped here. `is_none_effect` is the one thing that decides what a
+/// radius that is not a radius means -- zero or negative -- and a `.max(0)` in
+/// front of it would be a second answer to that question in a second place,
+/// agreeing today and free to drift. Its third case, NaN, cannot arrive down
+/// this path at all: `get_int` is an `i32` and `f64::from` of one is total.
+pub(crate) fn read_client_radii(
+    scene: &mut crate::qml::Scene,
+) -> solium_effects::fragment::Corners {
+    let all = scene.get_int("client.radius");
+    // A negative means the key was not declared, so the corner takes `radius`.
+    // Reading each with its own `get_int` rather than one dotted walk, because
+    // `QObject::property` takes a name and not a path -- the bug this codebase
+    // has already shipped once, where `get_int("insets.top")` silently read 0
+    // for every style.
+    let mut corner = |name: &str| {
+        let declared = scene.get_int(name);
+        f64::from(if declared < 0 { all } else { declared })
+    };
+    solium_effects::fragment::Corners {
+        top_left: corner("client.radiusTopLeft"),
+        top_right: corner("client.radiusTopRight"),
+        bottom_left: corner("client.radiusBottomLeft"),
+        bottom_right: corner("client.radiusBottomRight"),
+    }
+}
+
+/// What `radii` run on a client: the rounding, or nothing at all when it is
+/// no effect, so a radius of 0 costs no pass.
+pub(crate) fn client_effects(
+    radii: solium_effects::fragment::Corners,
+) -> Vec<solium_effects::fragment::Effect> {
+    let rounded = solium_effects::fragment::Effect::rounded(radii);
+    if rounded.is_none_effect() {
+        Vec::new()
+    } else {
+        vec![rounded]
+    }
+}
+
 /// Read a bundle's `Pane.qml`.
 ///
 /// The manifest scene is loaded at 1x1 and never rendered: it declares
@@ -653,37 +705,8 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
         return Err(anyhow!("{} declares no layers", manifest.display()));
     }
 
-    // `client.radius` has been read by `get_int` and consumed by nothing since
-    // the group work landed; this is what consumes it. Through `get_int` and
-    // its dotted path, for the reason set out on the insets below.
-    //
-    // Not clamped here. `is_none_effect` is the one thing that decides what a
-    // radius that is not a radius means -- zero or negative -- and a `.max(0)`
-    // in front of it would be a second answer to that question in a second
-    // place, agreeing today and free to drift. Its third case, NaN, cannot
-    // arrive down this path at all: `get_int` is an `i32` and `f64::from` of
-    // one is total.
-    let all = scene.get_int("client.radius");
-    // A negative means the key was not declared, so the corner takes `radius`.
-    // Reading each with its own `get_int` rather than one dotted walk, because
-    // `QObject::property` takes a name and not a path -- the bug this codebase
-    // has already shipped once, where `get_int("insets.top")` silently read 0
-    // for every style.
-    let mut corner = |name: &str| {
-        let declared = scene.get_int(name);
-        f64::from(if declared < 0 { all } else { declared })
-    };
-    let radii = solium_effects::fragment::Corners {
-        top_left: corner("client.radiusTopLeft"),
-        top_right: corner("client.radiusTopRight"),
-        bottom_left: corner("client.radiusBottomLeft"),
-        bottom_right: corner("client.radiusBottomRight"),
-    };
-    let mut effects = Vec::new();
-    let rounded = solium_effects::fragment::Effect::rounded(radii);
-    if !rounded.is_none_effect() {
-        effects.push(rounded);
-    }
+    let radii = read_client_radii(&mut scene);
+    let effects = client_effects(radii);
     // The rules of its `effects.lua` (`tests::a_styles_effects_lua_is_read_with_it`),
     // its problems left to whoever applies the style
     // (`Solium::apply_style_rules`, which lists them): a typo there costs its
@@ -707,6 +730,7 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
         },
         layers,
         effects,
+        client_radii: radii,
         rules: read.rules,
         rules_generation: read.generation,
         dir: dir.to_path_buf(),

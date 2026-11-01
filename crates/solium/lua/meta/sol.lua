@@ -510,6 +510,7 @@
 ---| "drag" # A window is being moved by the pointer, a finger, or its own client's move request: `(id, phase, x, y)`, `phase` being `"begin"`, `"move"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion can move the window, so a listener can hold it (`sol.drag_hold`); `"move"` once a frame at most, wherever the pointer got to; `"end"` before the `"drop"`, and also when a drag ends with no drop (the window went fullscreen, a finger was cancelled).
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
 ---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
+---| "resizing" # A window is being resized by a border, the drag modifier, or a finger: `(id, phase, x, y)`, `phase` being `"begin"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion is offered to the `"resize"` listeners, so a listener can hold the window (`sol.resize_hold`); `"end"` after the release and after the last motion is offered. Its motion is the `"resize"` event's.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
 ---| "click" # A pointer or finger press while a script holds input: `(x, y)`.
 ---| "touch" # A raw finger event: `(event)`, a `sol.TouchEvent`. Down precedes delivery so Lua can claim it with `sol.touch`; without a claim it observes normal delivery. Never delivered while locked, nor replayed on unlock.
@@ -617,7 +618,7 @@ function sol.problems() end
 ---which part, for which windows or surfaces. A later rule for the same part
 ---and slot wins over an earlier one, and yours over a pane style's.
 ---@class sol.Rule
----@field match "*"|table `"*"`, or the keys a part's kind matches on, each a word that is exact, `"*"`, or a prefix ending in `*`: `app_id`, `title`, `monitor`, `style` (`"none"` for a bare window), and `focused` and `fullscreen` as booleans, for a window's parts; `surface` for a scripted surface's (a plane such as `shell/dock` waits for planes); `layer_shell` for a layer surface's. No Lua patterns.
+---@field match "*"|table `"*"`, or the keys a part's kind matches on, each a word that is exact, `"*"`, or a prefix ending in `*`: `app_id`, `title`, `monitor`, `style` (`"none"` for a bare window), `focused`, `fullscreen` and `maximized` as booleans, and `values`, a table the window's own values from `sol.frame(id, { ... })` must have, each key equal to the boolean, number or word given (`false` also matching a key never handed), for a window's parts; `surface` for a scripted surface's (a plane such as `shell/dock` waits for planes); `layer_shell` for a layer surface's. No Lua patterns.
 ---@field part string `pane`, `client`, `popup`, `layer:<name>`, `region:titlebar`, `surface:<name>` or `layer_shell:<namespace>`. Other regions, and the titlebar's own pixels as a chain's input, wait for `Solium.region`, and `output` for X4.2.
 ---@field slot "behind"|"front"|"replace" Below the part, above it, or in its place. The part itself is always drawn: a `replace` whose effect fails draws the part.
 ---@field effect string|table|false An effect's name; a link, `{ "blur", passes = 3 }`, its params beside the name, with `reach` and `bleed` overriding the effect's own; a chain of links in order, `{ { "blur" }, { "tint" } }`; or `false`, which empties the slot.
@@ -1492,6 +1493,19 @@ function sol.drag_hold(id, held) end
 ---@return nil
 function sol.drag_grip(id, grip) end
 
+---Keep a window that is being resized as it is, or let the resize go on
+---(#454): the counterpart of `sol.drag_hold`. While it is held the pointer, or
+---the finger, goes on and the window keeps its size and place, and the
+---`"resize"` listeners are offered nothing, so no layout moves a seam for it.
+---Let go, the resize goes on from where the pointer is then, so nothing jumps.
+---A resize let go of while held ends with the window as it was. Hold it on the
+---`"resizing"` event's `"begin"` to hold it from the first motion. Nothing for
+---a window no resize has.
+---@param id integer
+---@param held boolean
+---@return nil
+function sol.resize_hold(id, held) end
+
 ---Move the keyboard to the window beside the focused one. Every `direction`
 ---listener is told `("focus", dir)`, and the layout in charge answers
 ---(`lua/direction.lua`). Anything but the four directions is an error. The
@@ -1742,6 +1756,8 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "open"|"closing"|"close_landed"|"refused"|"close"|"minimize"|"unminimize", handler: fun(id: integer))
 ---@overload fun(event: "focus", handler: fun(id: integer, source: sol.FocusSource, changed: boolean))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
+---@overload fun(event: "drag", handler: fun(id: integer, phase: "begin"|"move"|"end", x: number, y: number))
+---@overload fun(event: "resizing", handler: fun(id: integer, phase: "begin"|"end", x: number, y: number))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
 ---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))

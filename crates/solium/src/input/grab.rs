@@ -84,9 +84,22 @@ pub(crate) struct Moving {
     ending: Option<bool>,
 }
 
-/// What a `drag` listener is told, waiting to be told. See [`settle_drags`].
+/// Which kind of drag a listener is told about, and so which event it hears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gesture {
+    /// A move drag: the `drag` event.
+    Move,
+    /// An edge or modifier resize (#454): the `resizing` event, told as it
+    /// begins and ends. Its motion is the `resize` event's, offered to the
+    /// layouts once a pass (`Solium::settle_resize`), so it has no `move`.
+    Resize,
+}
+
+/// What a `drag` or `resizing` listener is told, waiting to be told. See
+/// [`settle_drags`].
 #[derive(Clone, Debug)]
 pub(crate) struct Told {
+    gesture: Gesture,
     window: Window,
     phase: Phase,
     at: Point<f64, Logical>,
@@ -95,16 +108,24 @@ pub(crate) struct Told {
 /// Note that `window`'s drag reached `phase` at `at`, to be told once the
 /// grab has returned. A move replaces a move of the same window still
 /// waiting, so a pass tells one, wherever the pointer got to.
-fn tell(state: &mut Solium, window: &Window, phase: Phase, at: Point<f64, Logical>) {
+pub(crate) fn tell(
+    state: &mut Solium,
+    gesture: Gesture,
+    window: &Window,
+    phase: Phase,
+    at: Point<f64, Logical>,
+) {
     if phase == Phase::Move
         && let Some(last) = state.drags_told.last_mut()
         && last.phase == Phase::Move
+        && last.gesture == gesture
         && last.window == *window
     {
         last.at = at;
         return;
     }
     state.drags_told.push(Told {
+        gesture,
         window: window.clone(),
         phase,
         at,
@@ -113,7 +134,8 @@ fn tell(state: &mut Solium, window: &Window, phase: Phase, at: Point<f64, Logica
 
 /// Tell the `drag` listeners what move drags have done since they were last
 /// told: `(id, phase, x, y)`, `phase` being `"begin"`, `"move"` or `"end"`,
-/// and `x, y` the pointer.
+/// and `x, y` the pointer; and the `resizing` listeners, in the same order
+/// and on the same terms, the `"begin"` and `"end"` of each resize (#454).
 ///
 /// **Never from inside a grab's callback**, which holds the seat's lock, as
 /// `Solium::pending_drop` says: a listener asking where the pointer is would
@@ -126,6 +148,9 @@ fn tell(state: &mut Solium, window: &Window, phase: Phase, at: Point<f64, Logica
 /// * `edges` false, once a pass, before the frame is decided: everything,
 ///   one `move` a window at most, however many times the mouse reported it,
 ///   as `settle_resize` coalesces an edge drag.
+///
+/// A resize's `end` waits while its last motion is still to be offered to
+/// the `resize` listeners, and is told once it has been.
 ///
 /// A drag is over once its `end` is told, and dropped then unless a script
 /// holds the window: a release within the pass of the last motion has that
@@ -147,10 +172,33 @@ pub(crate) fn settle_drags(state: &mut Solium, edges: bool) {
     } else {
         state.drags_told.len()
     };
+    // A resize's `end` waits for the motion still to be offered to the
+    // `resize` listeners, so they hear the last of it before it is over: the
+    // pass that offers it tells the rest (`Solium::settle_resize`).
+    let upto = state.drags_told[..upto]
+        .iter()
+        .position(|told| {
+            told.gesture == Gesture::Resize
+                && told.phase == Phase::End
+                && state
+                    .pending_resize
+                    .as_ref()
+                    .is_some_and(|request| request.window == told.window)
+        })
+        .unwrap_or(upto);
     let told: Vec<Told> = state.drags_told.drain(..upto).collect();
-    for Told { window, phase, at } in told {
-        state.trigger_drag(&window, phase.name(), at.x, at.y);
-        if phase != Phase::End {
+    for Told {
+        gesture,
+        window,
+        phase,
+        at,
+    } in told
+    {
+        state.trigger_drag(gesture, &window, phase.name(), at.x, at.y);
+        // A resize is over, and forgotten, as its grab ends
+        // (`crate::input::resize::ResizeDrag::finish`); only a move drag is
+        // kept until its `end` is told, for its drop.
+        if phase != Phase::End || gesture != Gesture::Move {
             continue;
         }
         // Over now, and dropped unless a script holds it: a held window
@@ -349,7 +397,7 @@ impl MoveDrag {
             held: false,
             ending: None,
         });
-        tell(state, &window, Phase::Begin, from);
+        tell(state, Gesture::Move, &window, Phase::Begin, from);
         Self { window, drag }
     }
 
@@ -365,7 +413,7 @@ impl MoveDrag {
         };
         moving.at = at;
         let (held, offset) = (moving.held, moving.offset);
-        tell(state, &self.window, Phase::Move, at);
+        tell(state, Gesture::Move, &self.window, Phase::Move, at);
         if held {
             return;
         }
@@ -408,7 +456,7 @@ impl MoveDrag {
         };
         moving.ending = Some(drop);
         moving.at = at;
-        tell(state, &self.window, Phase::End, at);
+        tell(state, Gesture::Move, &self.window, Phase::End, at);
     }
 }
 

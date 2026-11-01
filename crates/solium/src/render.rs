@@ -1256,7 +1256,9 @@ pub(crate) fn prepare(
 /// And then, with every animation where this frame has it, the frames'
 /// `growTop` is followed (#423), so a titlebar growing moves its window's
 /// content in the frame that draws it taller, and everything laid out or hit
-/// from here on sees the frame at that size: `Solium::follow_growth`.
+/// from here on sees the frame at that size: `Solium::follow_growth`. And
+/// their client radii (#454), so a client is cut to the corners its style
+/// gives it this frame: `Solium::follow_corners`.
 pub(crate) fn frame_tick(state: &mut Solium) {
     state.publish_models();
     let now = state.clock.now();
@@ -1265,6 +1267,7 @@ pub(crate) fn frame_tick(state: &mut Solium) {
     }
     crate::qml::tick(now);
     state.follow_growth(now);
+    state.follow_corners();
     state.build_frames(now);
 }
 
@@ -2301,8 +2304,10 @@ fn resolve_slots(
             title: &facts.title,
             focused: facts.focused,
             fullscreen: facts.fullscreen,
+            maximized: facts.maximized,
             monitor: &facts.monitor,
             style: &facts.style,
+            values: Some(held.frame_values().fields()),
             ..Facts::default()
         };
         let mut want = |slot_of: PaneSlot, part: PartRef<'_>| {

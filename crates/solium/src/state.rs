@@ -1108,11 +1108,16 @@ pub(crate) struct Solium {
     /// [`crate::input::grab::Moving`].
     pub(crate) moves: Vec<crate::input::grab::Moving>,
 
-    /// The last move drag's number, so each has its own.
+    /// Every edge or modifier resize under way, the pointer's and each
+    /// finger's: what `sol.resize_hold` changes (#454). See
+    /// [`crate::input::resize::Resizing`].
+    pub(crate) resizes: Vec<crate::input::resize::Resizing>,
+
+    /// The last drag's number, a move's or a resize's, so each has its own.
     pub(crate) next_drag: u64,
 
-    /// What the `drag` listeners have still to hear, recorded inside a grab
-    /// and told after it, for `pending_drop`'s reason. See
+    /// What the `drag` and `resizing` listeners have still to hear, recorded
+    /// inside a grab and told after it, for `pending_drop`'s reason. See
     /// [`crate::input::grab::settle_drags`].
     pub(crate) drags_told: Vec<crate::input::grab::Told>,
 
@@ -1327,6 +1332,9 @@ pub(crate) struct WindowFacts {
     pub(crate) title: String,
     pub(crate) focused: bool,
     pub(crate) fullscreen: bool,
+    /// Whether the compositor last told it to be maximised, as `fullscreen`
+    /// is (#454).
+    pub(crate) maximized: bool,
     pub(crate) monitor: String,
     pub(crate) style: String,
 }
@@ -1544,6 +1552,7 @@ impl Solium {
             closing: None,
             pending_drop: None,
             moves: Vec::new(),
+            resizes: Vec::new(),
             next_drag: 0,
             drags_told: Vec::new(),
             pending_resize: None,
@@ -2160,6 +2169,7 @@ impl Solium {
             },
             focused: self.looks_focused(pane),
             fullscreen: window.is_some_and(workspaces::fullscreen),
+            maximized: window.is_some_and(|window| window_state::states(window).maximized),
             monitor: if keys.monitor {
                 held.and_then(|held| self.output_of(self.pane_outer(held)))
                     .map(|output| output.name())

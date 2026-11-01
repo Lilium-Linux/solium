@@ -693,6 +693,13 @@ pub(crate) enum Command {
         along: (f64, f64),
         by: (f64, f64),
     },
+    /// Keep a window an edge or modifier resize has at its size and place
+    /// while the pointer goes on, or let the resize go on from where the
+    /// pointer is: `sol.resize_hold` (#454).
+    ResizeHold {
+        id: u64,
+        held: bool,
+    },
     /// Minimize a window (#30): `sol.minimize`, and `super+m`. Nothing for
     /// a window already minimized. See `WindowInfo::minimized`.
     Minimize {
@@ -970,6 +977,7 @@ impl Command {
             | Self::ToggleMaximize { .. }
             | Self::DragHold { .. }
             | Self::DragGrip { .. }
+            | Self::ResizeHold { .. }
             | Self::Minimize { .. }
             | Self::Unminimize { .. }
             | Self::ShowMinimized { .. }
@@ -3098,6 +3106,21 @@ impl Scripts {
     ) -> Outcome {
         self.dispatch_as(FocusSource::Drop, snapshot, move |lua, _| {
             call_listeners(lua, "drag", (id, phase, x, y))
+        })
+    }
+
+    /// An edge or modifier resize of a window began or ended (#454): `(id,
+    /// phase, x, y)`, told by `crate::input::grab::settle_drags`.
+    pub(crate) fn resizing(
+        &mut self,
+        id: u64,
+        phase: &'static str,
+        x: f64,
+        y: f64,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "resizing", (id, phase, x, y))
         })
     }
 
@@ -6555,6 +6578,21 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::DragGrip { id, along, by });
+            })
+        })?,
+    )?;
+
+    // Keep a window a resize has as it is, or let the resize go on (#454):
+    // the counterpart of `sol.drag_hold`. While held, the pointer goes on and
+    // the window keeps its size and place, and the `resize` listeners are
+    // offered nothing; let go, the resize goes on from where the pointer is
+    // then. A window no resize has is left alone.
+    // `real_client::reflow_on_close::resize_primitives::a_held_resize_keeps_the_window_and_goes_on_from_where_the_pointer_is`.
+    sol.set(
+        "resize_hold",
+        lua.create_function(|lua, (id, held): (u64, bool)| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ResizeHold { id, held });
             })
         })?,
     )?;

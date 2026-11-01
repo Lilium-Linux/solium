@@ -247,6 +247,7 @@ sol.on("activate", function(id, why) end)          -- a window asked to come for
 sol.on("drag",   function(id, phase, x, y) end)    -- a window being moved: "begin", "move" (once a frame) or "end"
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
 sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side) end)
+sol.on("resizing", function(id, phase, x, y) end) -- an edge or modifier resize: "begin" or "end"
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
 sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
@@ -1119,6 +1120,31 @@ is held has not been moved, and no `drop` is told. `sol.drag_grip`'s `x` and
 them, kept inside the frame; the frame is the size the window was last asked
 for, so a window restored in the same handler is gripped at its new size, and
 a glide it is part of the way through goes there with it.
+
+A resize -- a border dragged, the drag modifier with the right button, a
+finger `sol.touch` gave one -- is told the same way, to the `resizing`
+listeners, `(id, phase, x, y)` with `phase` `"begin"` or `"end"` and `x, y`
+the pointer. Its motion is the `resize` event's, once a frame. `begin` is told
+before the first motion is offered to anyone, and `end` after the release and
+after the last motion is offered. Between them a listener can keep the window
+as it is:
+
+```lua
+sol.resize_hold(id, true)                  -- the window keeps its size and place
+sol.resize_hold(id, false)                 -- the resize goes on from where the pointer is
+```
+
+While held the pointer goes on and nothing is resized: the `resize` listeners
+are offered nothing, so a layout moves no seam either. Let go, the resize goes
+on from the pointer and the window as they are then, so nothing jumps. A
+resize let go of while held ends with the window as it was. A fullscreen
+window that refuses to be resized is the configuration's, in a few lines:
+
+```lua
+sol.on("resizing", function(id, phase)
+    if phase == "begin" and is_fullscreen(id) then sol.resize_hold(id, true) end
+end)
+```
 
 ### Going fullscreen or maximised, and back
 

@@ -216,6 +216,24 @@ impl Solium {
         }
     }
 
+    /// Follow every frame's client radii, as its `PaneStyle` binds them
+    /// (#454): `client.radius: maximized ? 0 : 12` squares that one window's
+    /// corners while it is maximised, and a `Behavior` on it is followed
+    /// frame by frame. A frame whose radii moved, or are still moving, asks
+    /// for the next. See `crate::decoration::Decoration::follow_corners`.
+    /// `decoration::tests::a_pane_s_corners_follow_its_styles_binding_on_maximized`.
+    pub(crate) fn follow_corners(&mut self) {
+        let mut moving = false;
+        for pane in self.panes.iter_mut() {
+            if let Some(decoration) = pane.decoration_mut() {
+                moving |= decoration.follow_corners();
+            }
+        }
+        if moving {
+            self.redraw = true;
+        }
+    }
+
     /// Whether a pane is held in a size: in a layout's tile, or maximised.
     fn held_in_a_size(pane: &Pane) -> bool {
         pane.placed().is_some() || pane.client().is_some_and(over_the_arrangement)

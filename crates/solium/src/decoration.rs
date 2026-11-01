@@ -602,6 +602,18 @@ pub(crate) struct Decoration {
     /// style declares nothing here is drawn exactly as it was before any of
     /// this existed, and every window on an unstyled machine is that window.
     effects: Vec<solium_effects::fragment::Effect>,
+    /// This pane's client radii as last read, raw: its style's to begin with,
+    /// and then whatever its own `PaneStyle` says as its binding moves
+    /// (#454). `effects` is made from them.
+    corners: Corners,
+    /// Where this pane's own `client.radius` is read from. See [`CornersFrom`].
+    corners_from: CornersFrom,
+    /// Whether a layer has been told something since the radii were last
+    /// read, so a binding on it may have moved.
+    corners_unread: bool,
+    /// Whether the radii changed, or their source was animating, when last
+    /// read: a binding with a `Behavior` is followed frame by frame.
+    corners_moving: bool,
     /// The effect rules the style's `effects.lua` gives this pane, and the
     /// generation they were read at, copied from the `Style` for the reason
     /// `effects` is: a frame resolves the pane's slots from here. Shared,
@@ -620,6 +632,24 @@ pub(crate) struct Decoration {
     /// what tells a frame of the style in charge from one a switch has left
     /// behind (#226). Written by `Decorations`, which is what builds frames.
     built: Built,
+}
+
+/// Where a pane reads its own client radii from (#454): a `PaneStyle` told
+/// what every layer of the pane is told, so `client.radius: maximized ? 0 :
+/// 12` or `windowValues.snapped ? 0 : 12` is that window's answer.
+///
+/// An inline layer's scene is already one, so a style with an inline layer
+/// pays nothing for it. A style whose layers are all files has none, and
+/// gets one of its own: the manifest built once more for the pane, at 1x1
+/// and never drawn. A single QML file declares no `client.radius` at all.
+#[derive(Debug)]
+enum CornersFrom {
+    /// A single-file decoration: nothing to read.
+    Nothing,
+    /// The scene of the inline layer at this place in `layers`.
+    Layer(usize),
+    /// The pane's own manifest, never drawn.
+    Own(qml::Scene),
 }
 
 /// What a frame was built from: the style as a script named it (`None` for
@@ -736,6 +766,10 @@ impl Decoration {
             // declared on `PaneStyle`. So a decoration that is one file runs
             // no effects and costs no pass, which is what it has always cost.
             effects: Vec::new(),
+            corners: Corners::all(0.0),
+            corners_from: CornersFrom::Nothing,
+            corners_unread: false,
+            corners_moving: false,
             rules: std::sync::Arc::from(Vec::new()),
             rules_generation: 0,
             buffer_size: (0, 0),
@@ -762,13 +796,28 @@ impl Decoration {
         for spec in &style.layers {
             layers.push(LayerScene::build_named(spec, style, width, height)?);
         }
-        Ok(Self::of_layers(style, layers))
+        Self::of_layers(style, layers)
     }
 
     /// A frame of `style` from its layers, built: the end of
-    /// `from_style`, and of a frame built a layer a pass (#226).
-    fn of_layers(style: &Style, layers: Vec<LayerScene>) -> Self {
-        Self {
+    /// `from_style`, and of a frame built a layer a pass (#226). With the
+    /// `PaneStyle` its client radii are read from: an inline layer's, or the
+    /// pane's own manifest when every layer is a file ([`CornersFrom`]).
+    fn of_layers(style: &Style, layers: Vec<LayerScene>) -> Result<Self> {
+        let corners_from = match style.layers.iter().position(|spec| spec.source.is_none()) {
+            Some(inline) => CornersFrom::Layer(inline),
+            None => CornersFrom::Own(
+                qml::Scene::for_frame(&style.dir.join("Pane.qml"), 1, 1, None).with_context(
+                    || {
+                        format!(
+                            "building the manifest of {} for its radii",
+                            style.dir.display()
+                        )
+                    },
+                )?,
+            ),
+        };
+        Ok(Self {
             layers,
             // From the style and not from a scene. `insets` is declared on
             // `PaneStyle` once for the whole bundle, which is the ruling this
@@ -781,12 +830,16 @@ impl Decoration {
             // is declared on `PaneStyle` once, and every layer is *told* it
             // rather than asked for it. See `LayerScene::build`.
             effects: style.effects.clone(),
+            corners: style.client_radii,
+            corners_from,
+            corners_unread: false,
+            corners_moving: false,
             rules: std::sync::Arc::clone(&style.rules),
             rules_generation: style.rules_generation,
             buffer_size: (0, 0),
             shown: Shown::default(),
             built: Built::default(),
-        }
+        })
     }
 
     /// The style this frame was built from, as a script named it: `None` for
@@ -862,6 +915,57 @@ impl Decoration {
     /// is configured smaller (#423). Spends the answer.
     pub(crate) fn take_grow_settled(&mut self) -> bool {
         std::mem::take(&mut self.grow_settling)
+    }
+
+    /// Read this pane's client radii again, if they may have moved, and when
+    /// they have, make its client's effects of them and tell every layer
+    /// (#454). Whether a later frame is owed: they moved, or a `Behavior` on
+    /// them is still running.
+    ///
+    /// Read only when something may have moved them: a layer told something
+    /// since the last read, the radii moving or their scene animating at the
+    /// last one (a `Behavior` starts as its binding moves, so on a read), or,
+    /// for an inline layer, its scene changed by its own input. So a frame of a window nobody touches reads nothing, and a
+    /// style whose radii are a number pays one read per change of what its
+    /// layers are told. Each frame by `Solium::follow_corners`, after the QML
+    /// clock has moved, and at once after a layer is told
+    /// ([`Self::layer_elements`]).
+    ///
+    /// `tests::a_pane_s_corners_follow_its_styles_binding_on_maximized`,
+    /// `tests::a_pane_s_corners_follow_its_window_values_and_an_inline_layer_reads_them`,
+    /// `tests::a_radius_bound_to_nothing_that_changes_is_read_and_left_alone`.
+    pub(crate) fn follow_corners(&mut self) -> bool {
+        let unread = std::mem::take(&mut self.corners_unread);
+        let (scene, inline) = match &mut self.corners_from {
+            CornersFrom::Nothing => return false,
+            CornersFrom::Layer(index) => match self.layers.get_mut(*index) {
+                Some(layer) => (&mut layer.scene, true),
+                None => return false,
+            },
+            CornersFrom::Own(scene) => (scene, false),
+        };
+        // Cheapest first: whether its scene is animating is a walk of it.
+        if !(unread || self.corners_moving || (inline && scene.needs_render())) {
+            return false;
+        }
+        let animating = scene.animation_in_flight();
+        let corners = crate::style::read_client_radii(scene);
+        let moved = corners != self.corners;
+        self.corners_moving = moved || animating;
+        if moved {
+            self.corners = corners;
+            self.effects = crate::style::client_effects(corners);
+            for layer in &mut self.layers {
+                tell_radii(&mut layer.scene, corners);
+            }
+        }
+        self.corners_moving
+    }
+
+    /// The client radii this pane has now, as its `PaneStyle` last said.
+    #[cfg(test)]
+    pub(crate) const fn corners(&self) -> Corners {
+        self.corners
     }
 
     /// What this style runs on the client's own pixels.
@@ -954,13 +1058,17 @@ impl Decoration {
         // would tell whichever depth came first and silently skip the rest.
         // The size is each layer's own, below, told as it is drawn at it.
         self.tell_look(look);
+        // And at once what that does to the client's corners, so the layers
+        // drawn below hug the new ones; the client is cut to them from the
+        // next frame, which a change asks for.
+        let corners_moved = self.corners_unread && self.follow_corners();
         // The **pane's** pixels and not any layer's canvas. `client_size` reads
         // this to size a client while a style is being swapped, and a bleeding
         // layer's canvas would tell it the window is larger than it is.
         self.buffer_size = (pixels(width), pixels(height));
 
         let insets = self.insets();
-        let mut animating = false;
+        let mut animating = corners_moved;
         for layer in awake_at(self.layers.iter_mut(), depth) {
             // Per layer, because this is the whole of bleed: its own canvas,
             // its own buffer, and its own rectangle on screen.
@@ -1098,7 +1206,10 @@ impl Decoration {
     /// Every layer and not only the frame: a glow behind a window that cannot
     /// tell whether the window is focused is a glow that is always on. The
     /// properties are declared on `PaneStyle` as well as on a delegated layer's
-    /// own root, so an inline layer can bind to them too.
+    /// own root, so an inline layer can bind to them too. And the pane's own
+    /// manifest, when it has one, so its `client.radius` can bind to them as
+    /// well ([`CornersFrom`]); anything written leaves the radii to be read
+    /// again.
     fn tell_look(&mut self, look: &Look<'_>) {
         let Look {
             title,
@@ -1120,34 +1231,37 @@ impl Decoration {
                 .pid
                 .and_then(|pid| i32::try_from(pid).ok())
                 .unwrap_or(-1);
-            for layer in &mut self.layers {
-                layer.scene.set_int("windowId", id);
-                layer.scene.set_int("pid", pid);
-                layer.scene.set_bool("maximized", window.maximized);
-                layer.scene.set_bool("fullscreen", window.fullscreen);
-                layer.scene.set_bool("floating", window.floating);
-                layer.scene.set_bool("minimized", window.minimized);
-                layer.scene.set_bool("keptAbove", window.kept_above);
+            for scene in told_scenes(&mut self.layers, &mut self.corners_from) {
+                scene.set_int("windowId", id);
+                scene.set_int("pid", pid);
+                scene.set_bool("maximized", window.maximized);
+                scene.set_bool("fullscreen", window.fullscreen);
+                scene.set_bool("floating", window.floating);
+                scene.set_bool("minimized", window.minimized);
+                scene.set_bool("keptAbove", window.kept_above);
             }
             self.shown.window = Some(window);
+            self.corners_unread = true;
         }
         // This window's own values, as the configuration's are:
         // `tests::a_layer_is_told_its_windows_own_values`.
         if self.shown.window_values != window_values.generation {
-            for layer in &mut self.layers {
-                layer.scene.set_json("windowValues", &window_values.object);
+            for scene in told_scenes(&mut self.layers, &mut self.corners_from) {
+                scene.set_json("windowValues", &window_values.object);
             }
             self.shown.window_values = window_values.generation;
+            self.corners_unread = true;
         }
         // The caret on its own, written in place whenever it moves, comes or
         // goes, and not on the frames in between:
         // `tests::a_layer_is_told_the_caret_and_told_again_when_it_goes`.
         if self.shown.caret != caret {
             let value = caret_json(caret);
-            for layer in &mut self.layers {
-                layer.scene.set_json("caret", &value);
+            for scene in told_scenes(&mut self.layers, &mut self.corners_from) {
+                scene.set_json("caret", &value);
             }
             self.shown.caret = caret;
+            self.corners_unread = true;
         }
         // The configuration's values the same way, once per change:
         // `tests::a_layer_is_told_the_configurations_values_and_told_again_when_they_change`.
@@ -1155,10 +1269,11 @@ impl Decoration {
         // values with the caret they came with:
         // `tests::values_handed_with_a_caret_are_read_with_that_caret`.
         if self.shown.values != values.generation {
-            for layer in &mut self.layers {
-                layer.scene.set_json("values", &values.object);
+            for scene in told_scenes(&mut self.layers, &mut self.corners_from) {
+                scene.set_json("values", &values.object);
             }
             self.shown.values = values.generation;
+            self.corners_unread = true;
         }
         if self.shown.title == title
             && self.shown.app_id == app_id
@@ -1167,12 +1282,12 @@ impl Decoration {
         {
             return;
         }
-        for layer in &mut self.layers {
-            layer.scene.set_string("title", title);
+        for scene in told_scenes(&mut self.layers, &mut self.corners_from) {
+            scene.set_string("title", title);
             // `tests::a_layer_is_told_the_app_id_and_told_again_when_it_changes`.
-            layer.scene.set_string("appId", app_id);
-            layer.scene.set_bool("focused", focused);
-            layer.scene.set_bool("pointerInside", pointer_inside);
+            scene.set_string("appId", app_id);
+            scene.set_bool("focused", focused);
+            scene.set_bool("pointerInside", pointer_inside);
         }
         self.shown.title.clear();
         self.shown.title.push_str(title);
@@ -1180,6 +1295,7 @@ impl Decoration {
         self.shown.app_id.push_str(app_id);
         self.shown.focused = focused;
         self.shown.pointer_inside = pointer_inside;
+        self.corners_unread = true;
     }
 
     /// Tell the frame the pointer has left the window altogether.
@@ -1570,6 +1686,30 @@ fn whole(radius: f64) -> i32 {
     (radius as i32).max(0)
 }
 
+/// Tell a layer the client radii, in logical pixels: each corner by name, and
+/// `clientRadius`, the largest. See [`LayerScene::build`] for why all five,
+/// and [`whole`] for why a negative is told as 0.
+fn tell_radii(scene: &mut qml::Scene, radii: Corners) {
+    scene.set_int("clientRadiusTopLeft", whole(radii.top_left));
+    scene.set_int("clientRadiusTopRight", whole(radii.top_right));
+    scene.set_int("clientRadiusBottomLeft", whole(radii.bottom_left));
+    scene.set_int("clientRadiusBottomRight", whole(radii.bottom_right));
+    scene.set_int("clientRadius", whole(radii.largest()));
+}
+
+/// Every scene a pane's frame tells about its window: each layer's, and the
+/// pane's own manifest when it has one ([`CornersFrom::Own`]).
+fn told_scenes<'a>(
+    layers: &'a mut [LayerScene],
+    corners_from: &'a mut CornersFrom,
+) -> impl Iterator<Item = &'a mut qml::Scene> {
+    let own = match corners_from {
+        CornersFrom::Own(scene) => Some(scene),
+        CornersFrom::Nothing | CornersFrom::Layer(_) => None,
+    };
+    layers.iter_mut().map(|layer| &mut layer.scene).chain(own)
+}
+
 impl LayerScene {
     /// [`Self::build`], with the layer and the style named in its error.
     fn build_named(spec: &LayerSpec, style: &Style, width: i32, height: i32) -> Result<Self> {
@@ -1691,11 +1831,10 @@ impl LayerScene {
         // Written unconditionally for the same reason, so a style that
         // declares no radius tells its layers zero rather than leaving
         // whatever the file defaulted to.
-        let radii = client_radii(style);
-        scene.set_int("clientRadiusTopLeft", whole(radii.top_left));
-        scene.set_int("clientRadiusTopRight", whole(radii.top_right));
-        scene.set_int("clientRadiusBottomLeft", whole(radii.bottom_left));
-        scene.set_int("clientRadiusBottomRight", whole(radii.bottom_right));
+        //
+        // A pane whose radii its style binds to something per window is told
+        // its own as they change: `Decoration::follow_corners`.
+        //
         // **And the singular survives.** It is not replaced by the four above:
         // `PaneStyle.qml` uses it itself, `docs/ricing.md` documents it, and a
         // bundle nobody in this tree wrote may read it — removing it would
@@ -1709,7 +1848,7 @@ impl LayerScene {
         // around a corner that was cut less; the cost the other way is a border
         // crossing the curve. A layer that wants the real number for one corner
         // now has it by name.
-        scene.set_int("clientRadius", whole(radii.largest()));
+        tell_radii(&mut scene, client_radii(style));
         // A layer at `behind` or `above` paints over the client by definition,
         // and so does any layer of a style that reserved nothing: there is
         // nowhere else for it to paint. Only a `frame` layer inside real insets
@@ -2164,9 +2303,11 @@ impl Work {
                                 layers,
                             }
                         } else {
-                            let decoration = Decoration::of_layers(&style, layers);
-                            say_what_was_built(&dir, &decoration);
-                            Self::Done(Ok(decoration))
+                            let built = Decoration::of_layers(&style, layers);
+                            if let Ok(decoration) = &built {
+                                say_what_was_built(&dir, decoration);
+                            }
+                            Self::Done(built)
                         }
                     }
                     Err(err) => Self::Done(Err(err)),
@@ -2231,6 +2372,12 @@ impl Values {
     #[cfg(test)]
     pub(crate) const fn object(&self) -> &crate::json::Json {
         &self.object
+    }
+
+    /// The values, by key: what a rule's `values` match is checked against
+    /// (#454).
+    pub(crate) const fn fields(&self) -> &std::collections::BTreeMap<String, crate::json::Json> {
+        &self.fields
     }
 
     /// Merge `fields` in; whether anything changed.
@@ -4938,6 +5085,229 @@ mod tests {
                 "the singular is the largest, which here is the only positive one"
             );
 
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// What a frame tells a pane of window `window`, its own values
+    /// `window_values`.
+    fn tell_window(decoration: &mut Decoration, window: FrameWindow, window_values: &Values) {
+        let values = Values::default();
+        decoration.tell(
+            &Look {
+                title: "a terminal",
+                app_id: "",
+                focused: true,
+                pointer_inside: false,
+                caret: None,
+                values: &values,
+                window: Some(window),
+                window_values,
+            },
+            60,
+            88,
+        );
+    }
+
+    /// **A pane's corners follow its style's binding on `maximized`** (#454),
+    /// with every layer a file: its own `PaneStyle` is told the window, the
+    /// client's rounding goes when it is maximised and comes back when it is
+    /// restored, and every layer is told the corners it now has.
+    #[test]
+    fn a_pane_s_corners_follow_its_styles_binding_on_maximized() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture("bound-radius", "client.radius: maximized ? 0 : 12");
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let rounded = [solium_effects::fragment::Effect::rounded(Corners::all(
+                12.0,
+            ))];
+            assert_eq!(
+                decoration.effects(),
+                rounded,
+                "not the style's to begin with"
+            );
+            let saw = |decoration: &mut Decoration| decoration.first_layer_int("sawRadius");
+
+            let window = FrameWindow {
+                id: 7,
+                maximized: true,
+                ..FrameWindow::default()
+            };
+            tell_window(&mut decoration, window, Values::none());
+            assert!(decoration.follow_corners(), "a change asked for no frame");
+            assert!(
+                decoration.effects().is_empty(),
+                "a maximised window's client is still cut round"
+            );
+            assert_eq!(decoration.corners(), Corners::all(0.0));
+            assert_eq!(saw(&mut decoration), 1, "the layer was not told 0");
+            assert!(
+                !decoration.follow_corners(),
+                "standing still, it asks for frames"
+            );
+
+            tell_window(
+                &mut decoration,
+                FrameWindow {
+                    maximized: false,
+                    ..window
+                },
+                Values::none(),
+            );
+            assert!(decoration.follow_corners());
+            assert_eq!(decoration.effects(), rounded, "restored, it stayed square");
+            assert_eq!(saw(&mut decoration), 121);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A pane's corners follow what the configuration hands its window**
+    /// (`sol.frame(id, { snapped = true })`, `windowValues`), and with an
+    /// inline layer they are read from that layer's own `PaneStyle`: one
+    /// corner squared by a value, the others as declared.
+    #[test]
+    fn a_pane_s_corners_follow_its_window_values_and_an_inline_layer_reads_them() {
+        on_the_qt_thread(|| {
+            let dir = fixture(
+                "values-radius",
+                &[
+                    (
+                        "Pane.qml",
+                        r#"
+                        import QtQuick
+                        import Solium
+
+                        PaneStyle {
+                            client.radius: 10
+                            client.radiusTopLeft: windowValues.snapped ? 0 : 10
+                            Layer { depth: "frame"; name: "bar"; source: "Frame.qml" }
+                            Layer { depth: "above"; name: "inline"; Item {} }
+                        }
+                        "#,
+                    ),
+                    (
+                        "Frame.qml",
+                        r"
+                        import QtQuick
+
+                        Item {
+                            property int clientRadius: 7
+                            property int clientRadiusTopLeft: 2
+                        }
+                        ",
+                    ),
+                ],
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("two scenes");
+            assert!(
+                matches!(decoration.corners_from, CornersFrom::Layer(1)),
+                "not read from the inline layer"
+            );
+            let window = FrameWindow {
+                id: 7,
+                ..FrameWindow::default()
+            };
+            let mut values = Values::default();
+            tell_window(&mut decoration, window, &values);
+            let _ = decoration.follow_corners();
+            assert_eq!(decoration.corners(), Corners::all(10.0));
+
+            let _ = values.merge(
+                [("snapped".to_owned(), crate::json::Json::Bool(true))]
+                    .into_iter()
+                    .collect(),
+            );
+            tell_window(&mut decoration, window, &values);
+            assert!(decoration.follow_corners(), "a change asked for no frame");
+            assert_eq!(
+                decoration.corners(),
+                Corners {
+                    top_left: 0.0,
+                    ..Corners::all(10.0)
+                }
+            );
+            assert_eq!(
+                decoration.first_layer_int("clientRadiusTopLeft"),
+                0,
+                "the layer was not told its corner"
+            );
+            assert_eq!(decoration.first_layer_int("clientRadius"), 10);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A radius bound to nothing that changes is read once a change of
+    /// what the layers are told, and left as it is**: no frame is asked for,
+    /// and nothing is read on a frame where nothing was told.
+    #[test]
+    fn a_radius_bound_to_nothing_that_changes_is_read_and_left_alone() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture("still-radius", "client.radius: 12");
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            assert!(!decoration.follow_corners(), "nothing told, something read");
+            tell_window(
+                &mut decoration,
+                FrameWindow {
+                    id: 3,
+                    maximized: true,
+                    ..FrameWindow::default()
+                },
+                Values::none(),
+            );
+            assert!(!decoration.follow_corners(), "a constant asked for a frame");
+            assert_eq!(decoration.corners(), Corners::all(12.0));
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// **A `Behavior` on a bound radius is followed frame by frame**: the
+    /// corners pass through the values between, each frame asks for the
+    /// next while it runs, and once it lands they stand still.
+    #[test]
+    fn an_animated_radius_is_followed_frame_by_frame() {
+        on_the_qt_thread(|| {
+            let dir = radius_fixture(
+                "animated-radius",
+                "property int r: maximized ? 0 : 12
+                 Behavior on r { NumberAnimation { duration: 160 } }
+                 client.radius: r",
+            );
+            let style = crate::style::load(&dir).expect("the fixture loads");
+            let mut decoration = Decoration::from_style(&style, 60, 88).expect("one scene");
+            let mut clock = std::time::Duration::from_secs(6_000_000);
+            crate::qml::tick(clock);
+            tell_window(
+                &mut decoration,
+                FrameWindow {
+                    id: 7,
+                    maximized: true,
+                    ..FrameWindow::default()
+                },
+                Values::none(),
+            );
+            let mut seen = Vec::new();
+            let mut asked = 0;
+            for _ in 0..24 {
+                run_qml_clock(&mut clock, 16);
+                if decoration.follow_corners() {
+                    asked += 1;
+                }
+                seen.push(decoration.corners().top_left);
+            }
+            assert!(
+                seen.iter().any(|radius| *radius > 0.0 && *radius < 12.0)
+                    && seen.windows(2).all(|pair| pair[1] <= pair[0])
+                    && seen.last().is_some_and(|radius| *radius == 0.0),
+                "the corners did not pass from 12 to 0 through the frames: {seen:?}"
+            );
+            assert!(asked >= 4, "the animation asked for {asked} frames");
+            assert!(
+                !decoration.follow_corners(),
+                "landed, it still asks for frames"
+            );
             let _ = std::fs::remove_dir_all(&dir);
         });
     }
