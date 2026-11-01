@@ -23,11 +23,11 @@
 // glass, the client and the bar have one outline, with one rim round it and no
 // seam where the bar meets the client. The shade follows that outline too.
 //
-// **Nothing here is drawn again as the window changes size.** The shade is an
+// **Nothing here is stretched as the window changes size.** The shade is an
 // effect drawn from the window's shape on the GPU, and the bar is drawn again
-// for a new size at most `resizeHz` times a second while the size keeps
-// changing (below), its last picture stretched to the window in between, as
-// the application's own picture is until it has drawn at the new size.
+// at every size, into the buffer it already has: it declares no `resizeHz`
+// (`Solium/Layer.qml`), the knob that would hold it at a picture stretched to
+// the window between sizes.
 //
 // The numbers here, the ones at the top of `Frame.qml` and the shade's in
 // `effects.lua` are the style's to change: copy this folder to

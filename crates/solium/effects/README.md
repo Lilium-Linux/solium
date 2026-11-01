@@ -57,7 +57,7 @@ return {
 
 | Key | What it takes |
 |---|---|
-| `match` | `"*"`, or a table of what to match: `app_id`, `title`, `monitor`, `style` (a bare window's is `"none"`), and `focused` and `fullscreen` as `true` or `false`, for a window's parts; `surface` for a scripted surface's; `layer_shell` for a layer surface's. A word is exact, `"*"`, or a prefix ending in `*` (`"org.gnome.*"`); there are no Lua patterns. A key of another kind of part's is refused. `focused` is whether the window is drawn focused, `fullscreen` whether Solium last told it to be, and `sol.windows()` gives every one of a window's keys, so you can see what a rule will match |
+| `match` | `"*"`, or a table of what to match: `app_id`, `title`, `monitor`, `style` (a bare window's is `"none"`), `focused`, `fullscreen` and `maximized` as `true` or `false`, and `values`, a table of what the configuration handed the window with `sol.frame(id, { ... })` (each key equal to the boolean, number or word given, and `false` also matching a key never handed: `values = { snapped = false }`), for a window's parts; `surface` for a scripted surface's; `layer_shell` for a layer surface's. A word is exact, `"*"`, or a prefix ending in `*` (`"org.gnome.*"`); there are no Lua patterns. A key of another kind of part's is refused. `focused` is whether the window is drawn focused, `fullscreen` and `maximized` whether Solium last told it to be, and `sol.windows()` gives every one of a window's keys, so you can see what a rule will match |
 | `part` | `pane` (the window's frame and client, not its popups), `client`, `popup` (all of a window's popups at once), `layer:<name>` (a pane style's layer), `region:titlebar` (the band along the one side a pane style reserves most for: the window's full width above or below the client, its two outer corners rounded as the client's largest, or square down a side between those; a style that reserves its most on two sides or more, such as `border`, or nothing, and a bare window have none), `surface:<name>` (one scripted surface on one monitor) or `layer_shell:<namespace>` |
 | `slot` | `behind` the part, in `front` of it, or `replace` it. A `pane`'s go around its frame and client and under its popups, so a menu stays on top; a `client`'s between the pane style's layers and the client; a `popup`'s around the popups; `region:titlebar`'s around the pane style's layer named `bar` (else its first `frame` layer) and a `layer:<name>`'s around that layer; a scripted or layer surface's just under and over it |
 | `effect` | an effect's name; a link, `{ "blur", passes = 3 }`, with the effect's params beside its name; a chain of links, run in order, each reading the last one's result, `{ { "blur", source = "self" }, { "tint", amount = 0.1 } }`; or `false`, which empties the slot |
@@ -171,7 +171,7 @@ tier is fixed when the rules are applied: a reload is what changes it.
 
 | Tier | What the chain reads | What it costs | In this build |
 |---|---|---|---|
-| T0 | nothing of the frame: only `shape` and its own states (a border, a glow, a gradient) | no capture. It runs once, and again only when its params or the part's size change, whatever the window draws under it; while the part keeps changing size (a drag on its edge), at most `effects.motion_hz` times a second, its last result stretched over the part between. Its `sol_tex` reads a transparent texel | runs |
+| T0 | nothing of the frame: only `shape` and its own states (a border, a glow, a gradient) | no capture. It runs once, and again only when its params or the part's size change, whatever the window draws under it: on every pass the part changes size (a drag on its edge), unless `effects.motion_hz` caps how many times a second (its last result stretched over the part between). Its `sol_tex` reads a transparent texel | runs |
 | T1 | the part's own pixels: `self`, or its first input given `source = "self"` | a capture of the part, padded by the chain's `reach` or its `bleed`, whichever is further, drawn again only when the part commits. The chain runs again only then, or when its params or the part's size change; otherwise its last result is placed as it was | runs |
 | T2 | the `backdrop`, what is behind the part, from xray: a sharp picture of the layers below the part's own, per monitor (`effects.xray`) | xray is drawn only on a monitor a T2 part is on, and again only when what is in it changes. The chain's start that reads only the backdrop (a blur) runs once per monitor and is shared (*The memo*); the rest runs per part, at the part's own size, again only when the part moves, its params change or xray is redrawn. A plain blur runs nothing per part: each part is a crop of the shared result | runs |
 | T3 | the live backdrop, with `source = "live"` or `"auto"` | | refused, naming X4.1 |
@@ -196,12 +196,15 @@ captured, run or read behind the lock.
 A T2 part reads the backdrop where it is drawn, on every pass. Through a
 glide or a drag (a relayout, `sol.place`, `sol.present` with a rectangle) a
 plain blur only moves its crop of the shared result and runs nothing, and a
-chain with steps of its own per part runs them again as its box moves, and
-not at rest: at most `effects.motion_hz` times a second (60 unless you
-change it; 0 on every pass), its last result drawn where the part is between,
-so what shows through it lags where the part is by at most that long's worth
-of its motion, and is where it is again within one tick of its stopping. A
-backdrop redrawn under it, or its params changed, runs it at once. Under a warp (a tilt, a genie, an open or close that
+chain with steps of its own per part runs them again on every pass its box
+moves, and not at rest, so what shows through it is where the part is on
+every frame. `effects.motion_hz` (0, every pass, unless you change it) is a
+cap for a weak GPU: at 10 to 1000 the steps run at most that many times a
+second, the last result drawn where the part is between, so what shows
+through lags where the part is by up to that long's worth of its motion (at
+60 on a 260 Hz monitor, about four frames) and is where it is again within
+one tick of its stopping. A backdrop redrawn under it, or its params
+changed, runs it at once either way. Under a warp (a tilt, a genie, an open or close that
 warps) the part's `behind` slot is drawn beneath the warp, through the same
 mesh, each pixel reading the backdrop under it on the screen, and the
 window's own picture keeps a hole in the part's shape there, so what is
@@ -424,7 +427,7 @@ is checked as `effect.lua`'s own keys are, and a key a stage does not take is
 refused with the one you probably meant. A name an effect saves or makes a
 state is a new GLSL name, because every pass reads it as `sol_<name>`:
 lower-case letters, digits and `_`, not one of the `sol_` names below, and
-not another of its names followed by `_box` or `_sampler`. An effect may not
+not another of its names followed by `_box`, `_clamp` or `_sampler`. An effect may not
 use itself, directly or through others, and one effect runs at most 256
 passes, its states' included. `depends = "region"`, an outline a region publishes, waits
 for regions, and is refused.
@@ -493,7 +496,7 @@ error at its line.
 | `sol_tex(uv)` | the pass's input: the previous pass's result, or the effect's first input in the first pass, clamped at its edge |
 | `sol_texel`, `sol_size` | one texel of that input, in `uv`; the size of what the pass draws, in pixels |
 | `p_<param>` | each of the effect's params, declared from `params`: a number is a `float` (an `int` with `int = true`), a boolean an `int` 0 or 1, four numbers a `vec4`; a word has none |
-| `sol_<name>(uv)`, `SOL_HAS_<name>` | another texture the effect reads, by name: `sol_self`, `sol_backdrop`, a name it saved, or a state's. One the pass does not list in its `uses` reads transparent and its `SOL_HAS_<name>` is 0, so one file can be written for both cases |
+| `sol_<name>(uv)`, `SOL_HAS_<name>` | another texture the effect reads, by name: `sol_self`, `sol_backdrop`, a name it saved, or a state's. A read past its picture's edge reads that edge, as `sol_tex` does. One the pass does not list in its `uses` reads transparent and its `SOL_HAS_<name>` is 0, so one file can be written for both cases |
 | `sol_shape(uv)`, `sol_sdf(px)` | the part's shape: its coverage, and its signed distance in pixels, negative inside, exact for a rounded box |
 | `sol_content`, `sol_to_content(uv)`, `sol_to_uv(px)`, `sol_sdf_rrect(px, size, radii)` | the part's rectangle inside the box the pass draws, the maps between `uv` and the part's pixels, and the rounded-box distance itself |
 | `sol_box_px`, `sol_radii` | the box the pass draws, in pixels, and the part's four corner radii in pixels, top-left, top-right, bottom-left and bottom-right, which `sol_sdf` rounds it by |

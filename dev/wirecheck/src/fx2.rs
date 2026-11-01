@@ -87,6 +87,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_result_is_cut_by_its_mask(renderer)?;
     a_crossfade_mixes_two_results_in_one_draw(renderer)?;
     a_warp_drawn_through_a_folders_frag(renderer)?;
+    a_chain_with_room_draws_what_exact_targets_draw(renderer)?;
     Ok(())
 }
 
@@ -501,6 +502,7 @@ pub(crate) fn whole<'a>(
         time: 0.0,
         transition: run::Transition::default(),
         clamp_first: false,
+        room: false,
     }
 }
 
@@ -533,7 +535,7 @@ fn run_keyed<'p>(
         let mut bound = renderer.bind(&mut carrier).map_err(|err| anyhow!("{err}"))?;
         run::run(renderer, &mut bound, pool, programs, formats, plan, held, inputs, keys)
     };
-    if let run::Outcome::Done(_, sync) = &outcome {
+    if let run::Outcome::Done(_, _, sync) = &outcome {
         sync.wait().map_err(|err| anyhow!("{err:?}"))?;
     }
     Ok(outcome)
@@ -619,7 +621,7 @@ fn an_identity_pass_returns_its_input(renderer: &mut GlesRenderer) -> Result<()>
         &mut held,
         &whole(size, &textures),
     )?;
-    let run::Outcome::Done(result, _) = outcome else {
+    let run::Outcome::Done(result, _, _) = outcome else {
         return Err(anyhow!("the identity run came to {outcome:?}"));
     };
     let read = read_rgba(renderer, &result)?;
@@ -806,7 +808,7 @@ fn kawase_against_the_cpu(
         &mut held,
         &whole(size, &textures),
     )?;
-    let run::Outcome::Done(result, _) = outcome else {
+    let run::Outcome::Done(result, _, _) = outcome else {
         return Err(anyhow!("the kawase run came to {outcome:?}"));
     };
     if result.size() != (257, 129).into() {
@@ -849,7 +851,7 @@ fn a_pass_reading_three_textures_samples_each(renderer: &mut GlesRenderer) -> Re
         &mut held,
         &whole(size, &textures),
     )?;
-    let run::Outcome::Done(result, _) = outcome else {
+    let run::Outcome::Done(result, _, _) = outcome else {
         return Err(anyhow!("the three-texture run came to {outcome:?}"));
     };
     let read = read_rgba(renderer, &result)?;
@@ -1023,7 +1025,7 @@ fn smithay_draws_as_before_after_a_run(renderer: &mut GlesRenderer) -> Result<()
         &mut held,
         &whole(size, &textures),
     )?;
-    let run::Outcome::Done(result, _) = outcome else {
+    let run::Outcome::Done(result, _, _) = outcome else {
         return Err(anyhow!("the identity run after smithay came to {outcome:?}"));
     };
     if let Some(((x, y), got, want)) = first_difference(&read_rgba(renderer, &result)?, &bytes, size.0) {
@@ -1117,7 +1119,7 @@ fn a_withheld_program_is_pending(renderer: &mut GlesRenderer) -> Result<()> {
             &mut held,
             &inputs,
         )?;
-        let run::Outcome::Done(result, _) = outcome else {
+        let run::Outcome::Done(result, _, _) = outcome else {
             return Err(anyhow!("the run after the compile did not draw (round {round}): {outcome:?}"));
         };
         if let Some(((x, y), got, want)) = first_difference(&read_rgba(renderer, &result)?, &bytes, size.0) {
@@ -1242,7 +1244,7 @@ fn a_state_is_rebuilt_only_when_its_depends_changes(renderer: &mut GlesRenderer)
             &inputs,
             &keys,
         )?;
-        let run::Outcome::Done(result, _) = outcome else {
+        let run::Outcome::Done(result, _, _) = outcome else {
             return Err(anyhow!("the state-count run at {time} came to {outcome:?}"));
         };
         reds.push(centre_red(renderer, &result)?);
@@ -1341,7 +1343,7 @@ fn a_chain_feeds_each_links_result_to_the_next(renderer: &mut GlesRenderer) -> R
             &mut held,
             &inputs,
         )?;
-        let run::Outcome::Done(result, _) = outcome else {
+        let run::Outcome::Done(result, _, _) = outcome else {
             return Err(anyhow!("a run of {} steps came to {outcome:?}", plan.steps.len()));
         };
         reads.push(read_rgba(renderer, &result)?);
@@ -1572,6 +1574,269 @@ fn a_result_is_cut_by_its_mask(renderer: &mut GlesRenderer) -> Result<()> {
          placement says"
     );
     Ok(())
+}
+
+/// **Case 12r: a chain in targets with room draws what exact targets draw**
+/// (#428). A part dragged wider and narrower changes size every frame; its
+/// self input is drawn into the corner of a target with room and its chain's
+/// steps into targets with room (`Inputs::room`), so the targets it has serve
+/// the next size. Each fixture runs at a run of sizes, as a drag would,
+/// twice: once on exact targets with its input a texture of exactly the
+/// part's size, and once with room, its input in the corner of a larger
+/// texture whose room is opaque magenta, which no read may reach. Then each
+/// result is drawn by the compositor's own `EffectElement` (`in_corner`)
+/// under a rounded mask at 0.75, as the walk draws a slot's result, plain and
+/// with the first input clamped into a smaller part under radii (Ruling 6).
+///
+/// **Byte for byte where a chain reads at texel centres**: identity, tint,
+/// three textures and a state, a state, read and drawn. **Within one where
+/// it reads between texels** (a blur's taps): a linear read's sub-texel
+/// weight is rounded on a grid of the texture's own texels, and the same
+/// place in a larger texture is a different fraction of it, so a few bytes
+/// round the other way (on 2026-10-30, 2 to 498 of 1,190,848 bytes, never
+/// more than 1). A read reaching the magenta room would be off by far more.
+/// The run with room makes far fewer targets.
+fn a_chain_with_room_draws_what_exact_targets_draw(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::Frame as _;
+    use smithay::backend::renderer::element::Id;
+    use smithay::backend::renderer::utils::CommitCounter;
+    use smithay::utils::Physical;
+    use solium_effects::fragment::{Corners, MASKED_TEXTURE};
+    println!("\n=== FX2: a chain in targets with room draws what exact targets draw ===");
+    let program = renderer
+        .compile_custom_texture_shader(
+            MASKED_TEXTURE,
+            &crate::uniforms::registration(MASKED_TEXTURE),
+        )
+        .map_err(|err| anyhow!("MASKED_TEXTURE did not compile: {err}"))?;
+    const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+    // A picture with something in every channel that moves across it, and
+    // alpha that does too, so a read one texel off shows.
+    #[allow(clippy::cast_possible_truncation, reason = "bytes of a test picture")]
+    let picture = |x: usize, y: usize| {
+        [
+            (x * 7 + y) as u8,
+            (y * 5 + x * 3) as u8,
+            ((x ^ y) * 3) as u8,
+            (128 + (x * y) % 128) as u8,
+        ]
+    };
+    // Sizes a drag reaches: growing within one step of room, across it,
+    // and back, odd sides included, as a blur's half scale rounds them.
+    let sizes = [
+        (120, 90),
+        (121, 90),
+        (133, 97),
+        (127, 89),
+        (150, 121),
+        (118, 88),
+    ];
+    let fixtures: [(&str, fn() -> Fixture); 7] = [
+        ("identity", identity),
+        ("kawase at its own size", || {
+            let mut flat = kawase(2, 1.5);
+            for stage in &mut flat.stages {
+                if let Stage::Pass { scale, .. } = stage {
+                    *scale = 1.0;
+                }
+            }
+            flat
+        }),
+        ("kawase", || kawase(2, 1.5)),
+        ("the shipped blur", || shipped_blur(3, 4.0)),
+        ("three textures and a state", three),
+        ("a state", state_count),
+        ("tint", || tint(0.5)),
+    ];
+    let mut carrier = pool::Pool::<GlesTexture>::new(0)
+        .carrier(renderer)
+        .ok_or_else(|| anyhow!("no carrier"))?;
+    let (mut made_exact, mut made_room) = (0, 0);
+    let mut draw_pool = pool::Pool::new(0);
+    for &(name, fixture) in &fixtures {
+        let (plan, programs) = build(renderer, fixture())?;
+        let (mut worst, mut differing, mut bytes) = (0u8, 0usize, 0usize);
+        for clamped in [false, true] {
+            let mut exact_pool = pool::Pool::new(1 << 30);
+            let mut room_pool = pool::Pool::new(1 << 30);
+            let (mut exact_held, mut room_held) = (run::Held::default(), run::Held::default());
+            for size in sizes {
+                let (exact_input, _) = upload(renderer, size, picture)?;
+                let room = pool::room_for((i32::try_from(size.0)?, i32::try_from(size.1)?).into());
+                let padded = (usize::try_from(room.w)?, usize::try_from(room.h)?);
+                let (room_input, _) = upload(renderer, padded, |x, y| {
+                    if x < size.0 && y < size.1 {
+                        picture(x, y)
+                    } else {
+                        MAGENTA
+                    }
+                })?;
+                let used = (u32::try_from(size.0)?, u32::try_from(size.1)?);
+                let exact_textures = [(plan.first_input.as_str(), exact_input, run::BoxMap::WHOLE)];
+                let room_textures = [(
+                    plan.first_input.as_str(),
+                    room_input,
+                    run::BoxMap::corner(used, (u32::try_from(room.w)?, u32::try_from(room.h)?)),
+                )];
+                let exact = run_once(
+                    renderer,
+                    &mut exact_pool,
+                    &|key| lookup(&programs, key),
+                    &plan,
+                    &mut exact_held,
+                    &dressed(whole(size, &exact_textures), false, clamped),
+                )?;
+                let with_room = run_once(
+                    renderer,
+                    &mut room_pool,
+                    &|key| lookup(&programs, key),
+                    &plan,
+                    &mut room_held,
+                    &dressed(whole(size, &room_textures), true, clamped),
+                )?;
+                let (
+                    run::Outcome::Done(exact, exact_used, _),
+                    run::Outcome::Done(roomy, room_used, _),
+                ) = (exact, with_room)
+                else {
+                    return Err(anyhow!("{name} at {size:?}: a run did not finish"));
+                };
+                if exact_used != used || room_used != used {
+                    return Err(anyhow!(
+                        "{name} at {size:?}: drawn at {exact_used:?} exact and {room_used:?} with room"
+                    ));
+                }
+                let want = read_rgba(renderer, &exact)?;
+                let whole_room = read_rgba(renderer, &roomy)?;
+                let room_width = usize::try_from(roomy.size().w)?;
+                let got: Vec<u8> = (0..size.1)
+                    .flat_map(|y| {
+                        whole_room[y * room_width * 4..(y * room_width + size.0) * 4].to_vec()
+                    })
+                    .collect();
+                let (off, count) = off_by(&got, &want);
+                worst = worst.max(off);
+                differing += count;
+                bytes += want.len();
+                if off > 1 || got.len() != want.len() {
+                    let (at, g, w) = first_difference(&got, &want, size.0).unwrap_or_default();
+                    return Err(anyhow!(
+                        "{name} at {size:?}{}: the result with room differs from the exact one by \
+                         {off}, first at {at:?}: {g:?}, not {w:?}",
+                        if clamped { ", clamped" } else { "" }
+                    ));
+                }
+                // Each drawn by the compositor's element, under a rounded
+                // mask, as the walk draws a slot's result.
+                let side = (i32::try_from(size.0)?, i32::try_from(size.1)?);
+                let mask = Some((
+                    Rectangle::<f64, Physical>::new(
+                        (5.0, 3.0).into(),
+                        (f64::from(side.0) - 11.0, f64::from(side.1) - 7.0).into(),
+                    ),
+                    Corners::all(9.5),
+                ));
+                let mut drawn = Vec::new();
+                for (texture, corner) in [(exact, None), (roomy, Some(room_used))] {
+                    let made = element::EffectElement::new(
+                        Id::new(),
+                        CommitCounter::default(),
+                        texture,
+                        program.clone(),
+                    );
+                    let made = match corner {
+                        Some(corner) => made.in_corner(corner),
+                        None => made,
+                    };
+                    let placed = made.at(Rectangle::from_size(side.into()), mask, 0.75);
+                    let target = draw_pool
+                        .target(&mut pool::Gl(renderer), side.into(), pool::Format::Rgba8)
+                        .ok_or_else(|| anyhow!("no pooled target"))?;
+                    {
+                        let mut bound = renderer
+                            .bind(&mut carrier)
+                            .map_err(|err| anyhow!("{err}"))?;
+                        let mut frame = pool::frame_for(renderer, &mut bound, &target)
+                            .map_err(|err| anyhow!("{err}"))?;
+                        pool::paint(&mut frame, side.into(), &[placed], 1.0)
+                            .map_err(|err| anyhow!("{err}"))?;
+                        frame
+                            .finish()
+                            .map_err(|err| anyhow!("{err}"))?
+                            .wait()
+                            .map_err(|err| anyhow!("{err:?}"))?;
+                    }
+                    drawn.push(read_rgba(renderer, target.texture())?);
+                }
+                let (off, count) = off_by(&drawn[1], &drawn[0]);
+                worst = worst.max(off);
+                differing += count;
+                bytes += drawn[0].len();
+                if off > 1 || drawn[1].len() != drawn[0].len() {
+                    let (at, g, w) =
+                        first_difference(&drawn[1], &drawn[0], size.0).unwrap_or_default();
+                    return Err(anyhow!(
+                        "{name} at {size:?}: the result with room, drawn in its slot, differs from \
+                         the exact one by {off}, first at {at:?}: {g:?}, not {w:?}"
+                    ));
+                }
+            }
+            made_exact += exact_pool.made();
+            made_room += room_pool.made();
+            exact_held.release(&mut exact_pool);
+            room_held.release(&mut room_pool);
+            exact_pool.sweep(renderer);
+            room_pool.sweep(renderer);
+        }
+        free(renderer, programs)?;
+        draw_pool.sweep(renderer);
+        #[allow(clippy::cast_precision_loss, reason = "a share of bytes, printed")]
+        let share = differing as f64 / bytes.max(1) as f64 * 100.0;
+        println!(
+            "  {name}: every size, plain and clamped, read and drawn: at most {worst} off, \
+             {differing} of {bytes} bytes ({share:.3}%)"
+        );
+    }
+    renderer
+        .with_context(|gl| unsafe { gl.Finish() })
+        .map_err(|err| anyhow!("{err}"))?;
+    println!(
+        "  targets made over {} sizes of {} fixtures, plain and clamped: {made_exact} exact, \
+         {made_room} with room",
+        sizes.len(),
+        fixtures.len()
+    );
+    if made_room * 2 > made_exact {
+        return Err(anyhow!(
+            "a chain with room made {made_room} targets against {made_exact}: room is not kept"
+        ));
+    }
+    Ok(())
+}
+
+/// How far two pictures differ at worst, in one byte, and in how many bytes.
+fn off_by(got: &[u8], want: &[u8]) -> (u8, usize) {
+    got.iter()
+        .zip(want)
+        .map(|(a, b)| a.abs_diff(*b))
+        .filter(|off| *off > 0)
+        .fold((0, 0), |(worst, count), off| (worst.max(off), count + 1))
+}
+
+/// A run's inputs with room or not, and with its first input clamped into a
+/// smaller part under a rounded mask or not: case 12r's two halves.
+fn dressed(inputs: run::Inputs<'_>, room: bool, clamped: bool) -> run::Inputs<'_> {
+    let inputs = run::Inputs { room, ..inputs };
+    if clamped {
+        run::Inputs {
+            content: [0.125, 0.0625, 0.75, 0.875],
+            radii: [12.0, 4.0, 0.0, 9.0],
+            clamp_first: true,
+            ..inputs
+        }
+    } else {
+        inputs
+    }
 }
 
 /// **Case 12k: a crossfade mixes two results in one draw** (#389). The

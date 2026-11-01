@@ -101,10 +101,17 @@ pub(crate) struct Match {
     pub(crate) title: Option<Glob>,
     pub(crate) focused: Option<bool>,
     pub(crate) fullscreen: Option<bool>,
+    pub(crate) maximized: Option<bool>,
     pub(crate) monitor: Option<Glob>,
     pub(crate) style: Option<Glob>,
     pub(crate) surface: Option<Glob>,
     pub(crate) layer_shell: Option<Glob>,
+    /// `values = { key = value }`: what the configuration handed the window
+    /// with `sol.frame(id, { ... })`, each key given equal to the value
+    /// given, and `false` matching a key never handed too (#454). The
+    /// configuration's own way to tag a window for a rule, a snapped one say,
+    /// with no word of it in the compositor.
+    pub(crate) values: Vec<(String, crate::json::Json)>,
 }
 
 /// What a chain's first input is rebound to: `Own` is `source = "self"`.
@@ -261,21 +268,25 @@ const KEYS: [&str; 9] = [
 ];
 const FADE_KEYS: [&str; 2] = ["duration", "easing"];
 const CUTS: [&str; 2] = ["below", "background"];
-const WINDOW_KEYS: [&str; 6] = [
+const WINDOW_KEYS: [&str; 8] = [
     "app_id",
     "title",
     "focused",
     "fullscreen",
+    "maximized",
     "monitor",
     "style",
+    "values",
 ];
-const MATCH_KEYS: [&str; 8] = [
+const MATCH_KEYS: [&str; 10] = [
     "app_id",
     "title",
     "focused",
     "fullscreen",
+    "maximized",
     "monitor",
     "style",
+    "values",
     "surface",
     "layer_shell",
 ];
@@ -653,15 +664,19 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
                 family_keys.join(", ")
             ));
         }
-        if let "focused" | "fullscreen" = key.as_str() {
+        if let "focused" | "fullscreen" | "maximized" = key.as_str() {
             let Tree::Bool(yes) = value else {
                 return Err(format!("`{key}` is true or false"));
             };
-            if key == "focused" {
-                read.focused = Some(*yes);
-            } else {
-                read.fullscreen = Some(*yes);
+            match key.as_str() {
+                "focused" => read.focused = Some(*yes),
+                "fullscreen" => read.fullscreen = Some(*yes),
+                _ => read.maximized = Some(*yes),
             }
+            continue;
+        }
+        if key == "values" {
+            read.values = read_values(value)?;
             continue;
         }
         let Tree::Text(text) = value else {
@@ -685,6 +700,40 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
         }
     }
     Ok(read)
+}
+
+/// `values`: a table of named keys, each a boolean, a number or a word,
+/// which the window's own values must have.
+/// `tests::a_values_match_reads_its_keys_and_refuses_what_it_cannot_compare`.
+fn read_values(value: &Tree) -> Result<Vec<(String, crate::json::Json)>, String> {
+    const SHAPE: &str = "`values` is a table of named keys, such as { snapped = true }";
+    let Tree::Table { list, fields } = value else {
+        return Err(SHAPE.to_owned());
+    };
+    if !list.is_empty() {
+        return Err(SHAPE.to_owned());
+    }
+    fields
+        .iter()
+        .map(|(key, value)| {
+            let value = match value {
+                Tree::Bool(yes) => crate::json::Json::Bool(*yes),
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a value handed from Lua, which is an f64 there too"
+                )]
+                Tree::Int(int) => crate::json::Json::Number(*int as f64),
+                Tree::Number(number) => crate::json::Json::Number(*number),
+                Tree::Text(text) => crate::json::Json::Text(text.clone()),
+                Tree::Table { .. } => {
+                    return Err(format!(
+                        "`values.{key}` is true or false, a number or a word"
+                    ));
+                }
+            };
+            Ok((key.clone(), value))
+        })
+        .collect()
 }
 
 /// `effect`: `false`, a name, a link, or a chain of links; and the `source`
@@ -846,10 +895,14 @@ pub(crate) struct Facts<'a> {
     pub(crate) title: &'a str,
     pub(crate) focused: bool,
     pub(crate) fullscreen: bool,
+    pub(crate) maximized: bool,
     pub(crate) monitor: &'a str,
     pub(crate) style: &'a str,
     pub(crate) surface: &'a str,
     pub(crate) layer_shell: &'a str,
+    /// The window's own values, `sol.frame(id, { ... })`; none for a part
+    /// that is not a window's.
+    pub(crate) values: Option<&'a std::collections::BTreeMap<String, crate::json::Json>>,
 }
 
 /// The facts any rule reads that cost something to gather (a title is a
@@ -903,10 +956,19 @@ impl Match {
             && word(self.title.as_ref(), facts.title)
             && flag(self.focused, facts.focused)
             && flag(self.fullscreen, facts.fullscreen)
+            && flag(self.maximized, facts.maximized)
             && word(self.monitor.as_ref(), facts.monitor)
             && word(self.style.as_ref(), facts.style)
             && word(self.surface.as_ref(), facts.surface)
             && word(self.layer_shell.as_ref(), facts.layer_shell)
+            && self.values.iter().all(|(key, wanted)| {
+                let had = facts.values.and_then(|values| values.get(key));
+                match (had, wanted) {
+                    (Some(had), wanted) => had == wanted,
+                    (None, crate::json::Json::Bool(false)) => true,
+                    (None, _) => false,
+                }
+            })
     }
 }
 
@@ -1299,7 +1361,7 @@ mod tests {
     #[test]
     fn every_match_key_is_read_for_its_family() {
         let read = parse(&rules(
-            r#"{ { match = { app_id = "org.gnome.*", title = "a film", focused = true, fullscreen = false, monitor = "DP-*", style = "top" }, part = "pane", slot = "front", effect = false },
+            r#"{ { match = { app_id = "org.gnome.*", title = "a film", focused = true, fullscreen = false, maximized = true, monitor = "DP-*", style = "top" }, part = "pane", slot = "front", effect = false },
                  { match = { surface = "bar" }, part = "surface:bar", slot = "behind", effect = false },
                  { match = { layer_shell = "waybar*" }, part = "layer_shell:waybar", slot = "behind", effect = false },
                  { match = {}, part = "layer:shadow", slot = "behind", effect = false } }"#,
@@ -1321,8 +1383,8 @@ mod tests {
             )
         );
         assert_eq!(
-            (window.focused, window.fullscreen),
-            (Some(true), Some(false))
+            (window.focused, window.fullscreen, window.maximized),
+            (Some(true), Some(false), Some(true))
         );
         assert_eq!(read[1].matches.surface, Some(Glob::Exact("bar".to_owned())));
         assert_eq!(read[1].part.family(), super::Family::Surface);
@@ -1964,6 +2026,73 @@ mod tests {
         );
     }
 
+    /// **A `values` match reads each key as a boolean, a number or a word**,
+    /// and refuses a list or a nested table, which it could not compare
+    /// (#454).
+    #[test]
+    fn a_values_match_reads_its_keys_and_refuses_what_it_cannot_compare() {
+        use crate::json::Json;
+        let read = parse(&rules(
+            r#"{ { match = { values = { snapped = true, side = "left", order = 2 } }, part = "client", slot = "behind", effect = false } }"#,
+        ))
+        .expect("parses");
+        assert_eq!(
+            read[0].matches.values,
+            vec![
+                ("order".to_owned(), Json::Number(2.0)),
+                ("side".to_owned(), Json::Text("left".to_owned())),
+                ("snapped".to_owned(), Json::Bool(true)),
+            ]
+        );
+        for refused in [
+            r#"{ { match = { values = { 1, 2 } }, part = "client", slot = "behind", effect = false } }"#,
+            r#"{ { match = { values = { snapped = { true } } }, part = "client", slot = "behind", effect = false } }"#,
+            r#"{ { match = { values = true }, part = "client", slot = "behind", effect = false } }"#,
+            r#"{ { match = { values = { snapped = true } }, part = "surface:bar", slot = "behind", effect = false } }"#,
+        ] {
+            assert!(parse(&rules(refused)).is_err(), "{refused} was read");
+        }
+    }
+
+    /// **A `values` match holds a window to what the configuration handed
+    /// it**: each key given equal, and `false` matching a key never handed
+    /// as well as one handed `false` (#454).
+    #[test]
+    fn a_values_match_is_checked_against_the_windows_own_values() {
+        use crate::json::Json;
+        use std::collections::BTreeMap;
+        let rule = |matched: &str| {
+            parse(&rules(&format!(
+                r#"{{ {{ match = {matched}, part = "client", slot = "behind", effect = false }} }}"#
+            )))
+            .expect("parses")
+            .remove(0)
+            .matches
+        };
+        let snapped: BTreeMap<String, Json> = [("snapped".to_owned(), Json::Bool(true))]
+            .into_iter()
+            .collect();
+        let left: BTreeMap<String, Json> = [("snapped".to_owned(), Json::Bool(false))]
+            .into_iter()
+            .collect();
+        let facts = |values| super::Facts { values, ..mpv() };
+        let on = rule("{ values = { snapped = true } }");
+        assert!(on.accepts(&facts(Some(&snapped))));
+        assert!(!on.accepts(&facts(Some(&left))));
+        assert!(
+            !on.accepts(&facts(None)),
+            "a window never handed it matched"
+        );
+        let off = rule("{ values = { snapped = false } }");
+        assert!(!off.accepts(&facts(Some(&snapped))));
+        assert!(off.accepts(&facts(Some(&left))));
+        assert!(
+            off.accepts(&facts(None)),
+            "`false` did not match a key never handed"
+        );
+        assert!(off.accepts(&facts(Some(&BTreeMap::new()))));
+    }
+
     /// Every match key is checked against its own fact; a key not given
     /// matches anything.
     #[test]
@@ -2014,6 +2143,16 @@ mod tests {
                 PartRef::Client,
                 Facts {
                     fullscreen: true,
+                    ..mpv()
+                },
+                mpv(),
+            ),
+            (
+                r#"{ maximized = false }"#,
+                "client",
+                PartRef::Client,
+                Facts {
+                    maximized: true,
                     ..mpv()
                 },
                 mpv(),

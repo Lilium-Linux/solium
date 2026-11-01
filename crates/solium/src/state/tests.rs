@@ -3046,6 +3046,12 @@ mod real_client {
         /// same order: all four `tiled_*` states, for #228. Read through
         /// [`tiled_sent`].
         tiled: Vec<(wayland_client::backend::ObjectId, bool)>,
+        /// The states each of those configures carried, in the same order:
+        /// what says `resizing` while a drag holds the window.
+        configure_states: Vec<(wayland_client::backend::ObjectId, Vec<u32>)>,
+        /// And whether each said it is maximised, in the same order: for
+        /// #445 and #450. Read through [`maximized_sent`].
+        maximized: Vec<(wayland_client::backend::ObjectId, bool)>,
 
         /// The monitor, the lock manager and the clipboard, for
         /// `lock_focus`: the only tests that need a surface to lock a
@@ -3876,8 +3882,12 @@ mod real_client {
                     .into_iter()
                     .all(|edge| states.contains(&(edge as u32)));
                     let id = wayland_client::Proxy::id(toplevel);
+                    state
+                        .maximized
+                        .push((id.clone(), states.contains(&(State::Maximized as u32))));
                     state.tiled.push((id.clone(), tiled));
-                    state.configures.push((id, width, height));
+                    state.configures.push((id.clone(), width, height));
+                    state.configure_states.push((id, states));
                 }
                 xdg_toplevel::Event::Close => {
                     state.closes.push(wayland_client::Proxy::id(toplevel));
@@ -6066,6 +6076,18 @@ end)"#,
 
     /// Whether each configure this toplevel has been sent said it is tiled,
     /// oldest first.
+    /// Whether each configure this toplevel has been sent said it is
+    /// maximised, oldest first.
+    fn maximized_sent(client: &Client, toplevel: &xdg_toplevel::XdgToplevel) -> Vec<bool> {
+        let id = wayland_client::Proxy::id(toplevel);
+        client
+            .maximized
+            .iter()
+            .filter(|(to, _)| *to == id)
+            .map(|&(_, maximized)| maximized)
+            .collect()
+    }
+
     fn tiled_sent(client: &Client, toplevel: &xdg_toplevel::XdgToplevel) -> Vec<bool> {
         let id = wayland_client::Proxy::id(toplevel);
         client
@@ -7368,6 +7390,112 @@ end)"#,
             }
         }
 
+        /// **#452: a maximised window dragged off glides out of its
+        /// maximise into the rectangle under the pointer, as the key's
+        /// restore glides, and the glide goes with the pointer**: a motion
+        /// part of the way through moves the picture as far as the pointer
+        /// went, and it lands where the window is, not where the drag first
+        /// put it.
+        #[test]
+        fn a_window_dragged_off_its_maximise_glides_under_the_pointer() {
+            use smithay::backend::input::ButtonState;
+            use smithay::input::pointer::GrabStartData;
+            // `lua/floating.lua` is what pulls a maximised window off.
+            let script = format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\nrequire(\"floating\")\n{SCRIPT}",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            );
+            let mut desk = Desk::new("dragged-off", &script);
+            assert!(desk.state.trigger("super+shift+m"));
+            desk.pump();
+            desk.answer(1920, 1080);
+            desk.land();
+            assert_eq!(desk.drawn(desk.state.clock.now()), screen());
+
+            let region = Rectangle::new((0, 0).into(), (1920, 1080).into());
+            let pointer = desk
+                .state
+                .seat
+                .get_pointer()
+                .expect("the seat has a pointer");
+            let mut time = 1_000_u64;
+            let mut motion = |state: &mut Solium, by: (f64, f64)| {
+                time += 8_000;
+                crate::synth::send_motion(state, region, by.into(), time);
+            };
+            let at = pointer.current_location();
+            motion(&mut desk.state, (960.0 - at.x, 10.0 - at.y));
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                ButtonState::Pressed,
+                100_000,
+            );
+            let start = GrabStartData {
+                focus: None,
+                button: 0x110,
+                location: pointer.current_location(),
+            };
+            crate::input::grab::MoveGrab::start(
+                &mut desk.state,
+                &pointer,
+                start,
+                desk.window.clone(),
+                (0, 0).into(),
+                SERIAL_COUNTER.next_serial(),
+            );
+            crate::input::grab::settle_drags(&mut desk.state, true);
+            // Half way along and 10 down, so 200 left of the pointer and 10
+            // above it at 400 by 300.
+            motion(&mut desk.state, (40.0, 100.0));
+            crate::input::grab::settle_drags(&mut desk.state, false);
+            let under = Rectangle::new((800, 100).into(), (400, 300).into()).to_f64();
+            let first = desk.drawn(desk.state.clock.now());
+            assert!(
+                (first.loc.x - 0.0).abs() < 1.0
+                    && (first.loc.y - 0.0).abs() < 1.0
+                    && (first.size.w - 1920.0).abs() < 1.0
+                    && (first.size.h - 1080.0).abs() < 1.0,
+                "the glide starts from the maximised rectangle: {first:?}"
+            );
+            desk.frame_after(Duration::from_millis(45));
+            let then = desk.state.clock.now();
+            let part = desk.drawn(then);
+            assert!(
+                between(part, screen(), under),
+                "part of the way out at 45 ms: {part:?}"
+            );
+            motion(&mut desk.state, (100.0, 0.0));
+            crate::input::grab::settle_drags(&mut desk.state, false);
+            let carried = desk.drawn(then);
+            assert_eq!(
+                (
+                    (carried.loc.x - part.loc.x - 100.0).abs() < 1e-6,
+                    (carried.loc.y - part.loc.y).abs() < 1e-6,
+                    carried.size
+                ),
+                (true, true, part.size),
+                "the glide did not go with the pointer"
+            );
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                ButtonState::Released,
+                200_000,
+            );
+            desk.answer(400, 300);
+            desk.land();
+            let moved = Rectangle::new((900, 100).into(), (400, 300).into()).to_f64();
+            assert_eq!(
+                desk.drawn(desk.state.clock.now()),
+                moved,
+                "it landed somewhere other than under the pointer"
+            );
+            assert!(!desk.transformed(), "and holds no transform at rest");
+        }
+
         /// **And one that never answers is held only so long**:
         /// `resizing::PATIENCE` past the landing, as a drag's hold is, and
         /// then drawn at the size it has, where it lives.
@@ -7398,6 +7526,9 @@ end)"#,
         #[test]
         fn an_edge_drag_takes_a_window_its_change_is_holding() {
             let mut desk = Desk::new("dragged", SCRIPT);
+            // The pointer's rectangle is how this test sees which hold has the
+            // window; the default draws it at its client's size.
+            desk.state.resizing.follow = crate::resizing::Follow::Pointer;
             assert!(desk.state.trigger("super+f"));
             desk.pump();
             desk.answer(1920, 1080);
@@ -7925,6 +8056,203 @@ end)"#,
         );
     }
 
+    /// **A window being dragged is told so: the xdg-shell `resizing` state,
+    /// on every configure of the drag, and gone at the release.**
+    ///
+    /// GTK, Qt, Chromium and foot read it, and KWin and Hyprland both set it
+    /// for the length of a drag; Solium never did. The release takes it off so
+    /// the last configure a client hears is an ordinary one.
+    #[test]
+    fn a_dragged_window_is_told_it_is_resizing_until_the_release() {
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        // See the #99 test: a Qt scene in a process holding a libwayland
+        // connection of its own aborts the whole test binary.
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+        let qh = queue.handle();
+        let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        let before = state
+            .pane_outer_of(pane)
+            .expect("a mapped pane has a rectangle");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configure_states.clear();
+        let id = wayland_client::Proxy::id(&toplevel);
+        let resizing = xdg_toplevel::State::Resizing as u32;
+        let states = |client: &Client| -> Vec<Vec<u32>> {
+            client
+                .configure_states
+                .iter()
+                .filter(|(sent_to, _)| sent_to == &id)
+                .map(|(_, states)| states.clone())
+                .collect()
+        };
+
+        state.begin_resize(&window);
+        for step in 1..=3 {
+            let wanted = Rectangle::new(
+                before.loc,
+                (before.size.w + 10 * step, before.size.h).into(),
+            );
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                edge_at: payload_edge(wanted, ResizeEdge::Right),
+                edges: ResizeEdge::Right,
+            });
+            state.settle_resize();
+        }
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let during = states(&client);
+        assert!(
+            !during.is_empty() && during.iter().all(|sent| sent.contains(&resizing)),
+            "every configure of a live drag says the window is being resized; \
+             got {during:?}"
+        );
+
+        client.configure_states.clear();
+        state.release_resize(&window);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let after = states(&client);
+        assert!(
+            after.last().is_some_and(|sent| !sent.contains(&resizing)),
+            "the release's configure is an ordinary one again; got {after:?}"
+        );
+    }
+
+    /// **The window follows its application while an edge is dragged, unless
+    /// `resize.follow` says the pointer.**
+    ///
+    /// Zoomed in on the corner of a fast drag on 2026-10-16, every client
+    /// showed a band of `resize.background` where the window had run ahead of
+    /// its picture, and its picture cut where the window had shrunk past it.
+    /// KWin shows neither: it draws the window at the size its application has
+    /// drawn. Here that is the default, pinned to the edges the drag is not
+    /// moving -- a top-left drag keeps the bottom-right corner where it is, so
+    /// the #113 shake cannot come back -- and the client is still told the
+    /// size the pointer asked for.
+    #[test]
+    fn a_dragged_window_follows_its_application_unless_told_otherwise() {
+        let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        // See the #99 test: a Qt scene in a process holding a libwayland
+        // connection of its own aborts the whole test binary.
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+        let qh = queue.handle();
+        let (window, toplevel) = open_window(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        let before = state
+            .pane_outer_of(pane)
+            .expect("a mapped pane has a rectangle");
+        let painted = window.geometry().size;
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configures.clear();
+
+        // The top-left corner, 20 right and 12 down.
+        let wanted = Rectangle::new(
+            (before.loc.x + 20, before.loc.y + 12).into(),
+            (before.size.w - 20, before.size.h - 12).into(),
+        );
+        let drag = |state: &mut Solium| {
+            state.begin_resize(&window);
+            state.pending_resize = Some(ResizeRequest {
+                window: window.clone(),
+                wanted,
+                edge_at: payload_edge(wanted, ResizeEdge::TopLeft),
+                edges: ResizeEdge::TopLeft,
+            });
+            state.settle_resize();
+        };
+        drag(&mut state);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_eq!(
+            window.geometry().size,
+            painted,
+            "the fixture's client never draws the new size, which is the moment \
+             this test is about"
+        );
+        let id = wayland_client::Proxy::id(&toplevel);
+        assert!(
+            client
+                .configures
+                .iter()
+                .any(|(to, w, h)| to == &id && (*w, *h) == (wanted.size.w, wanted.size.h)),
+            "the client is told the size the pointer asked for; got {:?}",
+            client.configures
+        );
+        assert_eq!(
+            state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle"),
+            before,
+            "drawn at the size its client has drawn, with the bottom-right corner \
+             it was not dragged by where it was: nothing uncovered, nothing cut"
+        );
+
+        // Told the pointer, the same drag draws the pointer's rectangle.
+        state.release_resize(&window);
+        state.resizing.follow = crate::resizing::Follow::Pointer;
+        drag(&mut state);
+        assert_eq!(
+            state
+                .pane_outer_of(pane)
+                .expect("a mapped pane has a rectangle"),
+            wanted,
+            "under `follow = \"pointer\"` the window is the rectangle being dragged"
+        );
+    }
+
     /// **This is issue #113, through the compositor rather than beside it.**
     ///
     /// A top-left drag, on the first frame, with a real client that has
@@ -7956,6 +8284,10 @@ end)"#,
         state
             .decorations
             .set_style(&mut state.panes, Some("none".to_string()));
+        // The pointer's rectangle is what this test is about: see
+        // `a_dragged_window_follows_its_application_unless_told_otherwise` for
+        // the default, which draws the window at its client's size instead.
+        state.resizing.follow = crate::resizing::Follow::Pointer;
 
         let (conn, event_queue, client) = connect(&mut display, &mut state);
         let qh = event_queue.handle();
@@ -8085,6 +8417,9 @@ end)"#,
         state
             .decorations
             .set_style(&mut state.panes, Some("none".to_string()));
+        // The pointer's rectangle is what this test measures the insets
+        // against; the default draws the window at its client's size.
+        state.resizing.follow = crate::resizing::Follow::Pointer;
 
         let (conn, event_queue, client) = connect(&mut display, &mut state);
         let qh = event_queue.handle();
@@ -8431,9 +8766,10 @@ end)"#,
     /// the ones at the end of a gesture, because people stop moving before
     /// they let go. The flush is the half `move_pane` cannot do: it is only
     /// reached from a frame that carried a motion, so the offers made in
-    /// the last `TELL_EVERY` of travel have nowhere else to come from.
+    /// the last throttled interval of travel have nowhere else to come from.
     fn paused_frame(state: &mut Solium, now: Duration) {
         state.flush_resize(now);
+        state.settle_round(now);
         state.settle_resize_hold(now);
         state.settle_resize_bridge(now);
     }
@@ -8453,6 +8789,13 @@ end)"#,
             $state
                 .decorations
                 .set_style(&mut $state.panes, Some("none".to_string()));
+            // The bridge's own mechanics, a pane told on every frame and drawn
+            // at its slot: `resize.sync = 0`, the default, said here so a
+            // change of default cannot change what these tests are about.
+            // Rounds have tests of their own,
+            // `a_seam_moves_once_both_of_its_clients_have_drawn` and those
+            // after it.
+            $state.resizing.sync = Duration::ZERO;
             let ($conn, mut $queue, mut $client) = connect(&mut $display, &mut $state);
             let $qh = $queue.handle();
         };
@@ -9289,6 +9632,915 @@ end)"#,
             last_configured(&client, toplevel),
             Some((left.size.w, left.size.h))
         );
+    }
+
+    /// The shipped modes and tiling, loaded into a fixture of two real
+    /// windows, for the two #443 tests below.
+    /// [`shipped_modes_and_tiling`], and `lua/floating.lua`.
+    fn shipped_modes_tiling_and_floating(state: &mut Solium, name: &str) {
+        shipped_with(state, name, "require(\"floating\")\n");
+    }
+
+    fn shipped_modes_and_tiling(state: &mut Solium, name: &str) {
+        shipped_with(state, name, "");
+    }
+
+    fn shipped_with(state: &mut Solium, name: &str, more: &str) {
+        let directory = std::env::temp_dir().join(format!("solium-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        let entry = directory.join("init.lua");
+        std::fs::write(
+            &entry,
+            format!(
+                "package.path = {shipped:?} .. \"/?.lua\"\n\
+                 require(\"modes\")\n\
+                 require(\"workspaces\")\n\
+                 require(\"tiling\")\n\
+                 require(\"direction\")\n{more}",
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            ),
+        )
+        .expect("writing the entry point");
+        state.start_scripts(Some(
+            Scripts::load(&entry).expect("loading the shipped layouts"),
+        ));
+    }
+
+    /// **#443: a window maximised while the desktop floated joins its tile
+    /// when a layout takes over.**
+    ///
+    /// Illia maximised Claude Desktop on the floating desktop and later
+    /// switched to tiling. The layout gave it a tile and laid its neighbour
+    /// out beside that tile, while the compositor went on holding the window
+    /// maximised over the whole work area, on top of the neighbour: an empty
+    /// tile, a window drawn full screen, and no seam that could size it.
+    /// Now the switch lets it out of the maximise first, so it is in its
+    /// tile, at the tile's size, and told so.
+    #[test]
+    fn a_window_maximised_while_floating_joins_its_tile_when_a_layout_takes_over() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let output = one_screen(&mut state);
+        let screen = state
+            .space
+            .output_geometry(&output)
+            .expect("the monitor is mapped");
+        let (window, toplevel, surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (other, _other_toplevel, other_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        shipped_modes_and_tiling(&mut state, "maximised-joins-its-tile");
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        macro_rules! rest {
+            () => {
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            };
+        }
+        macro_rules! press {
+            ($combo:expr) => {
+                assert!(state.trigger($combo), "{} is bound", $combo);
+                round_trip!();
+            };
+        }
+
+        state.focus_window(
+            &window,
+            SERIAL_COUNTER.next_serial(),
+            crate::script::FocusSource::Script,
+        );
+        press!("super+shift+m");
+        commit_buffer(&client, &qh, &surface, screen.size.w, screen.size.h);
+        round_trip!();
+        rest!();
+        assert!(
+            in_state(&window, State::Maximized),
+            "the premise: the floating window is maximised"
+        );
+
+        press!("super+t");
+        let tile_of = |state: &Solium, window: &Window| {
+            state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("the layout has this window in a tile")
+        };
+        let (tile, beside) = (tile_of(&state, &window), tile_of(&state, &other));
+        assert!(
+            tile.intersection(beside).is_none(),
+            "the premise: two tiles side by side: {tile:?} and {beside:?}"
+        );
+        assert!(
+            !in_state(&window, State::Maximized),
+            "the window is still maximised under the layout"
+        );
+        assert_eq!(
+            last_configured(&client, &toplevel),
+            Some((tile.size.w, tile.size.h)),
+            "the window was not told its tile"
+        );
+        commit_buffer(&client, &qh, &surface, tile.size.w, tile.size.h);
+        commit_buffer(&client, &qh, &other_surface, beside.size.w, beside.size.h);
+        round_trip!();
+        rest!();
+        assert_eq!(
+            state.space.element_location(&window),
+            Some(tile.loc),
+            "the window is not where its tile is"
+        );
+        let pane = state.panes.id_of(&window).expect("the window has a pane");
+        assert_eq!(
+            state.pane_outer_of(pane),
+            Some(tile),
+            "the window is drawn at a size other than its tile's"
+        );
+    }
+
+    /// **#443: a lock and an unlock leave every window as it was.**
+    ///
+    /// Two windows in the shipped tiling, locked and unlocked by Solium's
+    /// own lock: each is in the tile it had, at the place and the size it
+    /// had, told nothing new, and neither maximised nor fullscreen. What
+    /// #443 reported after an unlock was a window maximised half an hour
+    /// before it, which the test above is about; this one holds the lock
+    /// itself to having changed nothing.
+    #[test]
+    fn a_lock_and_an_unlock_leave_every_tiled_window_as_it_was() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let _output = one_screen(&mut state);
+        let (first, first_toplevel, first_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        let (second, second_toplevel, second_surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.sync_panes();
+        shipped_modes_and_tiling(&mut state, "lock-leaves-tiles");
+        macro_rules! round_trip {
+            () => {
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+            };
+        }
+        macro_rules! rest {
+            () => {
+                state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut state);
+            };
+        }
+        assert!(state.trigger("super+t"), "super+t is bound");
+        round_trip!();
+        let windows = [
+            (&first, &first_toplevel, &first_surface),
+            (&second, &second_toplevel, &second_surface),
+        ];
+        for (window, _, surface) in windows {
+            let tile = state
+                .panes
+                .of(window)
+                .and_then(Pane::placed)
+                .expect("the layout has this window in a tile");
+            commit_buffer(&client, &qh, surface, tile.size.w, tile.size.h);
+        }
+        round_trip!();
+        rest!();
+        state.focus_window(
+            &first,
+            SERIAL_COUNTER.next_serial(),
+            crate::script::FocusSource::Script,
+        );
+        round_trip!();
+        let seen = |state: &Solium, client: &Client| {
+            windows.map(|(window, toplevel, _)| {
+                (
+                    state.panes.of(window).and_then(Pane::placed),
+                    state.space.element_location(window),
+                    sizes_sent(client, toplevel).len(),
+                    last_configured(client, toplevel),
+                    in_state(window, State::Maximized),
+                    in_state(window, State::Fullscreen),
+                )
+            })
+        };
+        let before = seen(&state, &client);
+
+        state.lock_natively();
+        round_trip!();
+        for _ in 0..5 {
+            rest!();
+            round_trip!();
+        }
+        state.unlock_natively();
+        round_trip!();
+        for _ in 0..5 {
+            rest!();
+            round_trip!();
+        }
+
+        assert_eq!(
+            seen(&state, &client),
+            before,
+            "a window's tile, place, configures or states changed across a lock"
+        );
+    }
+
+    /// A client's own maximise (#445), and what a layout's tile makes of it
+    /// (#450), with real xdg clients and the shipped modes and tiling.
+    /// The X11 half is `x11-probe`'s `maximized-before-map`,
+    /// `maximized-at-map` and `ask-maximized`, nested: the test binary
+    /// cannot start XWayland.
+    mod client_maximize {
+        use super::*;
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+        /// The desk every test here starts from: one monitor with a bar
+        /// along its top, so the work area is smaller than the monitor, and
+        /// the shipped modes loaded, floating.
+        struct Desk {
+            display: Display<Solium>,
+            state: Solium,
+            conn: Connection,
+            queue: wayland_client::EventQueue<Client>,
+            client: Client,
+            qh: QueueHandle<Client>,
+            area: Rectangle<i32, Logical>,
+            _bar: (
+                wl_surface::WlSurface,
+                zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+            ),
+        }
+
+        impl Desk {
+            fn new(name: &str) -> Self {
+                Self::loading(name, shipped_modes_and_tiling)
+            }
+
+            /// [`Self::new`], with `lua/floating.lua` loaded too: what a
+            /// maximised window's drag does is its (#452).
+            fn with_floating(name: &str) -> Self {
+                Self::loading(name, shipped_modes_tiling_and_floating)
+            }
+
+            fn loading(name: &str, scripts: fn(&mut Solium, &str)) -> Self {
+                tiled_fixture!(display, state, conn, queue, client, qh);
+                let _output = one_screen(&mut state);
+                let bar = bar(&mut display, &mut state, &conn, &client, &qh, 40);
+                pump(
+                    &mut display,
+                    &mut state,
+                    &conn,
+                    &qh,
+                    &mut queue,
+                    &mut client,
+                );
+                scripts(&mut state, name);
+                let area = state.work_area().expect("the monitor has a work area");
+                let desk = Self {
+                    display,
+                    state,
+                    conn,
+                    queue,
+                    client,
+                    qh,
+                    area,
+                    _bar: bar,
+                };
+                assert_eq!(area.size.h, 1080 - 40, "the premise: a bar takes 40 rows");
+                desk
+            }
+
+            fn round_trip(&mut self) {
+                pump(
+                    &mut self.display,
+                    &mut self.state,
+                    &self.conn,
+                    &self.qh,
+                    &mut self.queue,
+                    &mut self.client,
+                );
+            }
+
+            /// A second goes by and a frame is drawn, and the client hears
+            /// what that sent.
+            fn rest(&mut self) {
+                self.state.clock.advance(Duration::from_secs(1));
+                a_frame(&mut self.state);
+                self.round_trip();
+            }
+
+            fn press(&mut self, combo: &str) {
+                assert!(self.state.trigger(combo), "{combo} is bound");
+                self.round_trip();
+            }
+
+            /// An ordinary window, shown at once.
+            fn open(&mut self) -> (Window, xdg_toplevel::XdgToplevel, wl_surface::WlSurface) {
+                let opened = open_surface(
+                    &mut self.display,
+                    &mut self.state,
+                    &self.conn,
+                    &self.client,
+                    &self.qh,
+                );
+                self.round_trip();
+                opened
+            }
+
+            /// A window whose client asks to be maximised before it has
+            /// drawn anything, as an application restoring its last state
+            /// does, and then draws at the size it was told.
+            fn open_maximised(
+                &mut self,
+            ) -> (Window, xdg_toplevel::XdgToplevel, wl_surface::WlSurface) {
+                let compositor = self.client.compositor.clone().expect("wl_compositor bound");
+                let wm_base = self.client.wm_base.clone().expect("xdg_wm_base bound");
+                let before: Vec<Window> = self.state.space.elements().cloned().collect();
+                let surface = compositor.create_surface(&self.qh, ());
+                let xdg_surface = wm_base.get_xdg_surface(&surface, &self.qh, ());
+                let toplevel = xdg_surface.get_toplevel(&self.qh, ());
+                toplevel.set_maximized();
+                surface.commit();
+                self.round_trip();
+                let window = self
+                    .state
+                    .space
+                    .elements()
+                    .find(|window| !before.contains(window))
+                    .cloned()
+                    .expect("new_toplevel mapped a window");
+                let (w, h) =
+                    last_configured(&self.client, &toplevel).expect("the window was configured");
+                commit_buffer(&self.client, &self.qh, &surface, w.max(64), h.max(64));
+                self.round_trip();
+                (window, toplevel, surface)
+            }
+
+            /// The client draws at the size it was last told, or at the one
+            /// it has when it was told none.
+            fn answer(
+                &mut self,
+                toplevel: &xdg_toplevel::XdgToplevel,
+                surface: &wl_surface::WlSurface,
+            ) {
+                let (w, h) = last_configured(&self.client, toplevel)
+                    .filter(|&(w, h)| w > 0 && h > 0)
+                    .unwrap_or((64, 64));
+                commit_buffer(&self.client, &self.qh, surface, w, h);
+                self.round_trip();
+                self.rest();
+            }
+
+            fn tile(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+                self.state.panes.of(window).and_then(Pane::placed)
+            }
+        }
+
+        /// **#445: a client's own `set_maximized` maximises its window, and
+        /// `unset_maximized` puts it back where it was**, on the floating
+        /// desktop. smithay's default answered both with a configure and no
+        /// maximised state, so an Electron window's own maximise button
+        /// emitted `maximize` and `unmaximize` together and nothing moved.
+        #[test]
+        fn a_clients_own_maximise_fills_the_work_area_and_its_restore_goes_back() {
+            let mut desk = Desk::new("client-maximise-floating");
+            let (window, toplevel, surface) = desk.open();
+            desk.answer(&toplevel, &surface);
+            let before = desk
+                .state
+                .real_geometry(&window)
+                .expect("the window is mapped");
+
+            toplevel.set_maximized();
+            desk.round_trip();
+            assert!(
+                in_state(&window, State::Maximized),
+                "the window was not maximised"
+            );
+            assert_eq!(
+                maximized_sent(&desk.client, &toplevel).last(),
+                Some(&true),
+                "the client was not told it is maximised"
+            );
+            assert_eq!(
+                last_configured(&desk.client, &toplevel),
+                Some((desk.area.size.w, desk.area.size.h)),
+                "the client was not told the work area"
+            );
+            desk.answer(&toplevel, &surface);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(desk.area),
+                "the maximised window does not fill the work area"
+            );
+
+            toplevel.unset_maximized();
+            desk.round_trip();
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the window is still maximised"
+            );
+            assert_eq!(
+                maximized_sent(&desk.client, &toplevel).last(),
+                Some(&false),
+                "the client was not told it is restored"
+            );
+            desk.answer(&toplevel, &surface);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(before),
+                "the restored window is not where it was"
+            );
+        }
+
+        /// **#445: a fullscreen client asking to be maximised changes only
+        /// the state underneath**: it stays fullscreen, and leaving
+        /// fullscreen goes to maximised.
+        #[test]
+        fn a_fullscreen_clients_maximise_changes_only_the_state_underneath() {
+            let mut desk = Desk::new("client-maximise-fullscreen");
+            let (window, toplevel, surface) = desk.open();
+            desk.answer(&toplevel, &surface);
+            toplevel.set_fullscreen(None);
+            desk.round_trip();
+            desk.answer(&toplevel, &surface);
+            assert!(
+                in_state(&window, State::Fullscreen),
+                "the premise: fullscreen"
+            );
+
+            toplevel.set_maximized();
+            desk.round_trip();
+            assert!(
+                in_state(&window, State::Fullscreen),
+                "a fullscreen client's maximise took it out of fullscreen"
+            );
+            assert!(
+                in_state(&window, State::Maximized),
+                "the state under the fullscreen one is not maximised"
+            );
+
+            toplevel.unset_fullscreen();
+            desk.round_trip();
+            assert!(!in_state(&window, State::Fullscreen), "still fullscreen");
+            assert!(
+                in_state(&window, State::Maximized),
+                "not maximised after fullscreen"
+            );
+            assert_eq!(
+                last_configured(&desk.client, &toplevel),
+                Some((desk.area.size.w, desk.area.size.h)),
+                "leaving fullscreen did not give the work area"
+            );
+        }
+
+        /// **#450: a window that opens maximised on the floating desktop is
+        /// maximised**, at the whole work area, and restored it picks its
+        /// own size, having been shown at no other.
+        #[test]
+        fn a_window_that_opens_maximised_while_floating_is_maximised_and_restored() {
+            let mut desk = Desk::new("client-maximise-opens-floating");
+            let (window, toplevel, surface) = desk.open_maximised();
+            desk.answer(&toplevel, &surface);
+            assert!(
+                in_state(&window, State::Maximized),
+                "the window is not maximised"
+            );
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(desk.area),
+                "the window opened maximised does not fill the work area"
+            );
+
+            toplevel.unset_maximized();
+            desk.round_trip();
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the window is still maximised"
+            );
+            assert_eq!(
+                last_configured(&desk.client, &toplevel),
+                Some((0, 0)),
+                "a window with no way back is not left to pick its own size"
+            );
+        }
+
+        /// **#450: a window that opens maximised while a layout tiles is in
+        /// its tile, and told it is not maximised.** Steam restoring its
+        /// maximise opened over its tile, where nothing could size it.
+        #[test]
+        fn a_window_that_opens_maximised_while_tiling_is_tiled() {
+            let mut desk = Desk::new("client-maximise-opens-tiling");
+            let (other, other_toplevel, other_surface) = desk.open();
+            desk.press("super+t");
+            desk.answer(&other_toplevel, &other_surface);
+
+            let (window, toplevel, surface) = desk.open_maximised();
+            desk.answer(&toplevel, &surface);
+            desk.answer(&other_toplevel, &other_surface);
+            let tile = desk.tile(&window).expect("the window is in a tile");
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the window is maximised over its tile"
+            );
+            assert_eq!(
+                (
+                    maximized_sent(&desk.client, &toplevel).last(),
+                    tiled_sent(&desk.client, &toplevel).last()
+                ),
+                (Some(&false), Some(&true)),
+                "the client was not told it is tiled and not maximised"
+            );
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(tile),
+                "the window is not at its tile"
+            );
+            let beside = desk.tile(&other).expect("the neighbour is in a tile");
+            assert!(
+                tile.intersection(beside).is_none(),
+                "the two tiles overlap: {tile:?} and {beside:?}"
+            );
+        }
+
+        /// **#450: a tiled window's client asking to be maximised stays in
+        /// its tile**, answered with a configure saying it is tiled and not
+        /// maximised; **the user's maximise still lifts it** out of the tile
+        /// and keeps the tile to come back to (#150).
+        #[test]
+        fn a_tiled_clients_maximise_keeps_its_tile_and_the_users_still_lifts_it() {
+            let mut desk = Desk::new("client-maximise-tiled");
+            let (window, toplevel, surface) = desk.open();
+            let (_other, other_toplevel, other_surface) = desk.open();
+            desk.press("super+t");
+            desk.answer(&toplevel, &surface);
+            desk.answer(&other_toplevel, &other_surface);
+            let tile = desk.tile(&window).expect("the window is in a tile");
+            let configures = sizes_sent(&desk.client, &toplevel).len();
+
+            toplevel.set_maximized();
+            desk.round_trip();
+            desk.rest();
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the client's maximise lifted the window"
+            );
+            assert_eq!(desk.tile(&window), Some(tile), "the window left its tile");
+            assert_eq!(
+                sizes_sent(&desk.client, &toplevel).len(),
+                configures + 1,
+                "the request was not answered with one configure"
+            );
+            assert_eq!(
+                (
+                    last_configured(&desk.client, &toplevel),
+                    maximized_sent(&desk.client, &toplevel).last(),
+                    tiled_sent(&desk.client, &toplevel).last()
+                ),
+                (Some((tile.size.w, tile.size.h)), Some(&false), Some(&true)),
+                "the answer is not the tile, tiled and not maximised"
+            );
+
+            desk.state.focus_window(
+                &window,
+                SERIAL_COUNTER.next_serial(),
+                crate::script::FocusSource::Script,
+            );
+            desk.press("super+shift+m");
+            assert!(
+                in_state(&window, State::Maximized),
+                "super+shift+m did not maximise"
+            );
+            assert_eq!(
+                desk.tile(&window),
+                None,
+                "the user's maximise left it in its tile"
+            );
+            assert_eq!(
+                last_configured(&desk.client, &toplevel),
+                Some((desk.area.size.w, desk.area.size.h)),
+                "the user's maximise did not give the work area"
+            );
+            desk.answer(&toplevel, &surface);
+            desk.press("super+shift+m");
+            assert!(
+                !in_state(&window, State::Maximized),
+                "super+shift+m did not restore"
+            );
+            assert_eq!(
+                desk.tile(&window),
+                Some(tile),
+                "the restore did not go back into the tile"
+            );
+        }
+
+        /// The modifier's move drag (#452): the pointer to `at`, and super
+        /// and the left button down there, as a hand does it. Returns the
+        /// time the next event is at.
+        fn take_by_the_modifier(desk: &mut Desk, at: (f64, f64)) -> u64 {
+            move_pointer(&mut desk.state, at, 10_000);
+            crate::input::key(
+                &mut desk.state,
+                133_u32.into(),
+                smithay::backend::input::KeyState::Pressed,
+                11,
+            );
+            let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                smithay::backend::input::ButtonState::Pressed,
+                12_000,
+            );
+            assert!(
+                desk.state
+                    .seat
+                    .get_pointer()
+                    .is_some_and(|pointer| pointer.is_grabbed()),
+                "the premise: the press started a drag"
+            );
+            13_000
+        }
+
+        /// The pointer to `at`, and a pass: the `drag` listeners hear where
+        /// it got to once a frame (#452).
+        fn drag_to(desk: &mut Desk, at: (f64, f64), time: u64) {
+            move_pointer(&mut desk.state, at, time);
+            crate::input::grab::settle_drags(&mut desk.state, false);
+        }
+
+        /// And the button and super up again.
+        fn let_go(desk: &mut Desk, time: u64) {
+            let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                0x110,
+                smithay::backend::input::ButtonState::Released,
+                time,
+            );
+            crate::input::key(
+                &mut desk.state,
+                133_u32.into(),
+                smithay::backend::input::KeyState::Released,
+                u32::try_from(time / 1000).unwrap_or(u32::MAX),
+            );
+        }
+
+        /// A floating window, shown, maximised by the user and answered:
+        /// the window, its client's handles, and where it stood before.
+        fn maximised_floating(
+            desk: &mut Desk,
+        ) -> (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            Rectangle<i32, Logical>,
+        ) {
+            let (window, toplevel, surface) = desk.open();
+            desk.answer(&toplevel, &surface);
+            let before = desk.state.real_geometry(&window).expect("mapped");
+            desk.state.toggle_maximize(&window);
+            desk.round_trip();
+            desk.answer(&toplevel, &surface);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(desk.area),
+                "the premise: maximised over the work area"
+            );
+            (window, toplevel, surface, before)
+        }
+
+        /// **#452: a maximised window does not move under the threshold**,
+        /// `maximize.restore_after` from where the drag was taken, and comes
+        /// off past it: so a click on its titlebar is a click, and the
+        /// setting is the distance. It was dragged at its maximised size
+        /// while it stayed maximised, half off its monitor.
+        #[test]
+        fn a_maximised_window_stays_put_until_the_drag_passes_the_threshold() {
+            for (restore_after, short, long) in [(6.0, 4.0, 8.0), (50.0, 40.0, 60.0)] {
+                let mut desk = Desk::with_floating("drag-unmaximise-threshold");
+                let set = desk.state.scripts.as_ref().map(|scripts| {
+                    scripts.evaluate(&format!(
+                        "require(\"config\").maximize.restore_after = {restore_after}; return \"\""
+                    ))
+                });
+                assert_eq!(set.as_deref(), Some(""), "setting maximize.restore_after");
+                let (window, _toplevel, _surface, _before) = maximised_floating(&mut desk);
+                let from = (
+                    f64::from(desk.area.loc.x) + 480.0,
+                    f64::from(desk.area.loc.y) + 20.0,
+                );
+                let time = take_by_the_modifier(&mut desk, from);
+                drag_to(&mut desk, (from.0 + short, from.1), time);
+                assert!(
+                    in_state(&window, State::Maximized),
+                    "{restore_after}: a drag of {short} restored it"
+                );
+                assert_eq!(
+                    desk.state.real_geometry(&window),
+                    Some(desk.area),
+                    "{restore_after}: a drag of {short} moved it"
+                );
+                drag_to(&mut desk, (from.0 + long, from.1), time + 1_000);
+                assert!(
+                    !in_state(&window, State::Maximized),
+                    "{restore_after}: a drag of {long} left it maximised"
+                );
+                let_go(&mut desk, time + 2_000);
+            }
+        }
+
+        /// **#452: let go under the threshold, the window stays maximised
+        /// where it is**, and no layout is told it was dropped: a click on a
+        /// maximised window's titlebar is a click.
+        #[test]
+        fn a_maximised_window_let_go_under_the_threshold_stays_maximised() {
+            let mut desk = Desk::with_floating("drag-unmaximise-click");
+            let (window, _toplevel, _surface, _before) = maximised_floating(&mut desk);
+            let from = (
+                f64::from(desk.area.loc.x) + 480.0,
+                f64::from(desk.area.loc.y) + 20.0,
+            );
+            let time = take_by_the_modifier(&mut desk, from);
+            drag_to(&mut desk, (from.0 + 3.0, from.1 + 2.0), time);
+            let_go(&mut desk, time + 1_000);
+            desk.rest();
+            assert!(
+                in_state(&window, State::Maximized),
+                "the click restored the window"
+            );
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(desk.area),
+                "the click moved the window"
+            );
+            assert!(
+                desk.state.pending_drop.is_none()
+                    && desk.state.moves.is_empty()
+                    && desk.state.drags_told.is_empty(),
+                "something is left over from the click"
+            );
+        }
+
+        /// **#452: dragged past the threshold, a maximised window comes off
+        /// at the size it had before, under the pointer, and follows it.**
+        /// Taken a quarter of the way along it, it is a quarter of the way
+        /// along under the pointer, as far down as it was taken; the next
+        /// motion moves it as far as the pointer goes, and it is left where
+        /// it was let go, floating and not maximised.
+        #[test]
+        fn a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer() {
+            let mut desk = Desk::with_floating("drag-unmaximise-floating");
+            let (window, toplevel, surface, before) = maximised_floating(&mut desk);
+            let from = desk.area.loc + Point::from((desk.area.size.w / 4, 20));
+            let time = take_by_the_modifier(&mut desk, (f64::from(from.x), f64::from(from.y)));
+            let at = from + Point::from((30, 40));
+            drag_to(&mut desk, (f64::from(at.x), f64::from(at.y)), time);
+            desk.round_trip();
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the drag did not restore the window"
+            );
+            assert_eq!(
+                maximized_sent(&desk.client, &toplevel).last(),
+                Some(&false),
+                "the client was not told it is restored"
+            );
+            // A quarter of the way along, and 20 down: no frame here, so the
+            // window's own height is the band it is held in.
+            assert_eq!(before.size.w % 4, 0, "the premise: a quarter is whole");
+            let under = Rectangle::new(at - Point::from((before.size.w / 4, 20)), before.size);
+            assert_eq!(
+                desk.state.real_geometry(&window).map(|real| real.loc),
+                Some(under.loc),
+                "the window did not come off under the pointer"
+            );
+            desk.answer(&toplevel, &surface);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(under),
+                "the window did not come off at the size it had"
+            );
+
+            drag_to(
+                &mut desk,
+                (f64::from(at.x) + 100.0, f64::from(at.y) + 50.0),
+                time + 1_000,
+            );
+            let followed = Rectangle::new(under.loc + Point::from((100, 50)), under.size);
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(followed),
+                "the window did not follow the pointer once off"
+            );
+            let_go(&mut desk, time + 2_000);
+            desk.rest();
+            assert!(!in_state(&window, State::Maximized), "maximised again");
+            assert_eq!(
+                desk.state.real_geometry(&window),
+                Some(followed),
+                "the window is not where it was let go"
+            );
+        }
+
+        /// **#452: a window maximised out of its tile comes off at its
+        /// tile's size, back in its tile, and is dragged as any tiled window
+        /// is**: under the pointer while it is held, and let go over its
+        /// neighbour, the layout puts it in the tile it was let go over.
+        #[test]
+        fn a_window_maximised_out_of_its_tile_comes_off_at_its_tiles_size() {
+            let mut desk = Desk::with_floating("drag-unmaximise-tiled");
+            let (window, toplevel, surface) = desk.open();
+            let (other, other_toplevel, other_surface) = desk.open();
+            desk.press("super+t");
+            desk.answer(&toplevel, &surface);
+            desk.answer(&other_toplevel, &other_surface);
+            let tile = desk.tile(&window).expect("the window is in a tile");
+            let beside = desk.tile(&other).expect("the neighbour is in a tile");
+            desk.state.focus_window(
+                &window,
+                SERIAL_COUNTER.next_serial(),
+                crate::script::FocusSource::Script,
+            );
+            desk.press("super+shift+m");
+            desk.answer(&toplevel, &surface);
+            assert!(
+                in_state(&window, State::Maximized) && desk.tile(&window).is_none(),
+                "the premise: maximised out of its tile"
+            );
+
+            let from = desk.area.loc + Point::from((desk.area.size.w / 2, 10));
+            let time = take_by_the_modifier(&mut desk, (f64::from(from.x), f64::from(from.y)));
+            let at = from + Point::from((40, 200));
+            drag_to(&mut desk, (f64::from(at.x), f64::from(at.y)), time);
+            desk.round_trip();
+            assert!(
+                !in_state(&window, State::Maximized),
+                "the drag did not restore the window"
+            );
+            assert_eq!(
+                desk.tile(&window),
+                Some(tile),
+                "the window did not go back into its tile"
+            );
+            assert_eq!(
+                (
+                    last_configured(&desk.client, &toplevel),
+                    tiled_sent(&desk.client, &toplevel).last()
+                ),
+                (Some((tile.size.w, tile.size.h)), Some(&true)),
+                "the client was not told its tile"
+            );
+            assert_eq!(tile.size.w % 2, 0, "the premise: a half is whole");
+            let under = at - Point::from((tile.size.w / 2, 10));
+            assert_eq!(
+                desk.state.real_geometry(&window).map(|real| real.loc),
+                Some(under),
+                "the window is not under the pointer"
+            );
+
+            let over = beside.loc + Point::from((beside.size.w / 2, beside.size.h / 2));
+            drag_to(
+                &mut desk,
+                (f64::from(over.x), f64::from(over.y)),
+                time + 1_000,
+            );
+            assert_eq!(
+                desk.state.real_geometry(&window).map(|real| real.loc),
+                Some(under + (over - at)),
+                "the window did not follow the pointer"
+            );
+            let_go(&mut desk, time + 2_000);
+            desk.answer(&toplevel, &surface);
+            desk.answer(&other_toplevel, &other_surface);
+            assert!(!in_state(&window, State::Maximized), "maximised again");
+            let landed = desk.tile(&window).expect("the window is in a tile");
+            assert!(
+                landed.contains(over),
+                "the window is not in the tile it was let go over: {landed:?}"
+            );
+        }
     }
 
     /// **#49: a tiled window leaving fullscreen or maximised stays in front
@@ -10380,12 +11632,14 @@ end)"#,
     /// Before #233 the rest of the glide stretched that answer across the
     /// rectangle the glide had reached, glyphs up to twice as wide: no hold
     /// meant no `resize.fill`, and no fill meant a stretch. Now every pane is
-    /// fitted by the configured fill, the default draws the answer 1:1, and
-    /// the glide's own two ends say which edge it stands against: the right,
-    /// so the gap is on the left, where the window is still on its way in.
+    /// fitted by the configured fill, which draws the answer 1:1, and under
+    /// `anchor` the glide's own two ends say which edge it stands against:
+    /// the right, so the gap is on the left, where the window is still on
+    /// its way in. (`crop`, the default, has it at the left throughout.)
     #[test]
     fn a_glide_that_shrinks_a_window_draws_its_answer_at_its_own_size() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, surface, pane, tile) = filled_tile(
             &mut display,
             &mut state,
@@ -10455,8 +11709,10 @@ end)"#,
     ///
     /// The full-width window shrunk to the right half again, by a 240 ms
     /// glide, and a client slower than that: the glide lands with the old,
-    /// full-width picture still the only one. Through the glide it stood
-    /// against the right edge, cut on the left, where the window was moving.
+    /// full-width picture still the only one. Through the glide it stood,
+    /// anchored, against the right edge, cut on the left, where the window
+    /// was moving. (`crop`, the default, keeps it at the left throughout, so
+    /// it has nothing to jump back from.)
     /// The transform is retired the pass it lands, and with nothing left to
     /// say which edge stood still the picture went back to the top-left: the
     /// whole of the window's contents jumped by half a screen at the moment
@@ -10466,6 +11722,7 @@ end)"#,
     #[test]
     fn a_glide_that_lands_before_its_client_answers_keeps_its_picture_where_it_was() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, _surface, pane, tile) = filled_tile(
             &mut display,
             &mut state,
@@ -13139,6 +14396,78 @@ end)"#,
         );
     }
 
+    /// **A rule on `maximized` applies once the compositor maximises the
+    /// window, and lets go once it restores it** (#454): the state it last
+    /// told the client, as `fullscreen` is; `sol.windows()` says the same.
+    #[test]
+    fn a_rule_on_maximized_follows_the_window_being_maximised_and_restored() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-maximized");
+        let (pane, window) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { maximized = true }, part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        let wanted = |fixture: &mut Fixture| {
+            crate::render::build_slots(&mut fixture.state)
+                .wanted(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind)
+        };
+        assert!(!wanted(&mut fixture), "matched a window not maximised");
+        let id = fixture.state.window_id(&window);
+        let toggle = |fixture: &mut Fixture| {
+            fixture.state.apply(crate::script::Outcome {
+                commands: vec![crate::script::Command::ToggleMaximize { id }],
+                ..Default::default()
+            });
+            pump_all(fixture);
+        };
+        toggle(&mut fixture);
+        assert!(wanted(&mut fixture), "a maximised window was not matched");
+        let snapshot = fixture.state.snapshot();
+        assert!(snapshot.windows.first().expect("one window").maximized);
+        toggle(&mut fixture);
+        assert!(!wanted(&mut fixture), "a restored window was still matched");
+    }
+
+    /// **A rule on `values` follows what `sol.frame` hands the window**
+    /// (#454): the configuration tags a window, and the rule matches it from
+    /// the next pass, and stops when the tag is taken back.
+    #[test]
+    fn a_rule_on_values_follows_what_sol_frame_hands_the_window() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        use crate::effect::rules::Slot;
+        fx2_fixture!(fixture, "rule-values");
+        let (pane, window) = one_window(&mut fixture);
+        with_tint_folder(&mut fixture);
+        apply_rules(
+            &mut fixture,
+            r#"{ { match = { values = { snapped = true } }, part = "client", slot = "behind", effect = "tint" } }"#,
+        );
+        let wanted = |fixture: &mut Fixture| {
+            crate::render::build_slots(&mut fixture.state)
+                .wanted(&Owner::Pane(pane, PaneSlot::Client), Slot::Behind)
+        };
+        assert!(!wanted(&mut fixture), "matched a window never tagged");
+        let id = fixture.state.window_id(&window);
+        let tag = |fixture: &mut Fixture, snapped: bool| {
+            fixture.state.apply(crate::script::Outcome {
+                commands: vec![crate::script::Command::FrameValues {
+                    id,
+                    fields: [("snapped".to_owned(), crate::json::Json::Bool(snapped))]
+                        .into_iter()
+                        .collect(),
+                }],
+                ..Default::default()
+            });
+        };
+        tag(&mut fixture, true);
+        assert!(wanted(&mut fixture), "a tagged window was not matched");
+        tag(&mut fixture, false);
+        assert!(!wanted(&mut fixture), "a window untagged was still matched");
+    }
+
     /// **A rule for another app leaves a window with an empty plan**, its
     /// facts asked and matching nothing.
     #[test]
@@ -13163,11 +14492,12 @@ end)"#,
     }
 
     /// **`sol.windows()` carries every window match key**: `fullscreen` and
-    /// `style` beside `app_id`, `title`, `focused` and `monitor`.
+    /// `style` beside `app_id`, `title`, `focused` and `monitor`; and the
+    /// room its frame takes, `insets`.
     #[test]
     fn sol_windows_carries_every_window_match_key() {
         fx2_fixture!(fixture, "windows-keys");
-        let (_, window) = one_window(&mut fixture);
+        let (pane, window) = one_window(&mut fixture);
         let snapshot = fixture.state.snapshot();
         let row = snapshot.windows.first().expect("one window");
         assert!(!row.fullscreen);
@@ -13175,6 +14505,8 @@ end)"#,
             row.style,
             fixture.state.decorations.style().unwrap_or("none")
         );
+        // And what its frame takes, which the client is the rest of (#435).
+        assert_eq!(row.insets, fixture.state.insets_of(pane));
         ask_fullscreen(&mut fixture, &window);
         let snapshot = fixture.state.snapshot();
         assert!(snapshot.windows.first().expect("one window").fullscreen);
@@ -15527,7 +16859,7 @@ end)"#,
     /// client's.**
     ///
     /// A window under a titlebar has its top edge dragged down by 100. Its
-    /// client has not answered, so under the default fill its 300-tall
+    /// client has not answered, so under `anchor` its 300-tall
     /// picture stays against the bottom edge, which is standing still, and
     /// the top 100 of it is cut away -- under the titlebar that came down
     /// with the edge. The hit test inverted the fit without its cut, so a
@@ -15537,6 +16869,7 @@ end)"#,
     #[test]
     fn a_press_on_what_an_anchored_picture_cuts_away_is_not_the_clients() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        state.resizing.fill = crate::resizing::Fill::Anchor;
         let (window, _toplevel, surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -15575,7 +16908,7 @@ end)"#,
         assert_eq!(
             state.resize_fill(pane),
             crate::resizing::Fill::Anchor,
-            "the default fill"
+            "the premise: the anchored fill"
         );
         assert_eq!(
             state.resize_pins(pane),
@@ -15768,11 +17101,80 @@ end)"#,
         );
     }
 
+    /// **A drag tells its client on every frame it moves, by default.**
+    ///
+    /// The same six frames as the capped test below, with no
+    /// `resize.tell_hz` configured: six offers, six configures. Told a tenth of
+    /// a second apart, every client measured on 2026-10-16 -- kitty, Dolphin,
+    /// a GTK4 window and Firefox -- answered within 13 ms and still trailed
+    /// the pointer by 150 px and more, because the interval was the lag.
+    #[test]
+    fn a_tiled_drag_configures_on_every_frame_it_moves_by_default() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (400, 300), false);
+        state.sync_panes();
+        let pane = state
+            .panes
+            .id_of(&window)
+            .expect("a client in the space has a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        client.configures.clear();
+
+        let request = ResizeRequest {
+            window: window.clone(),
+            wanted: at(400, 300, 300, 200),
+            edge_at: (700.0, 500.0),
+            edges: ResizeEdge::Right,
+        };
+        state.begin_resize(&window);
+        for (millis, width) in [
+            (0, 300),
+            (16, 302),
+            (32, 304),
+            (48, 306),
+            (64, 308),
+            (80, 310),
+        ] {
+            tiled_frame(
+                &mut state,
+                &request,
+                pane,
+                at(400, 300, width, 200),
+                Duration::from_millis(millis),
+            );
+        }
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_eq!(
+            client.configures.len(),
+            6,
+            "six frames of a drag that moved each time are six configures when \
+             nothing caps them; got {:?}",
+            client.configures
+        );
+    }
+
     /// **Issue #123, the rate half: a tiled drag configured its client once
     /// per frame.**
     ///
-    /// `crate::resizing::TELL_EVERY` is consulted by `Hold::dragged` and by
-    /// nothing else, and until now a tiled pane had no hold — so `move_pane`
+    /// The throttle — a capped `resize.tell_hz` since every frame became the
+    /// default — is consulted by `Hold::dragged` and by nothing else, and
+    /// until now a tiled pane had no hold — so `move_pane`
     /// sent a configure on every frame of every drag, which is sixty a
     /// second. `resizing.rs` says in its own words why that fails: a client
     /// that cannot render at that rate does not try, it falls behind, and
@@ -15785,6 +17187,10 @@ end)"#,
     #[test]
     fn a_tiled_drag_configures_on_the_throttle_and_not_once_per_frame() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -15843,7 +17249,7 @@ end)"#,
         assert_eq!(
             client.configures.len(),
             1,
-            "six frames of a claimed drag inside one `TELL_EVERY` must be \
+            "six frames of a claimed drag inside one capped interval must be \
              one configure, not six: the first offer goes out on the frame \
              it is decided and the rest wait. Got {:?}",
             client.configures
@@ -15877,6 +17283,380 @@ end)"#,
             Some((340, 200)),
             "and what is sent is the rectangle of the frame that sent it, \
              not a stale one the throttle had been sitting on"
+        );
+    }
+
+    /// Two windows side by side, 400x300 each, the seam between them at
+    /// x = 400: what every round test drags.
+    struct Seam {
+        display: Display<Solium>,
+        state: Solium,
+        conn: Connection,
+        queue: wayland_client::EventQueue<Client>,
+        client: Client,
+        qh: QueueHandle<Client>,
+        left: (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            xdg_surface::XdgSurface,
+        ),
+        right: (
+            Window,
+            xdg_toplevel::XdgToplevel,
+            wl_surface::WlSurface,
+            xdg_surface::XdgSurface,
+        ),
+        panes: (crate::pane::PaneId, crate::pane::PaneId),
+    }
+
+    impl Seam {
+        fn new() -> Self {
+            let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+            let mut state = Solium::new(display.handle());
+            state
+                .decorations
+                .set_style(&mut state.panes, Some("none".to_string()));
+            let (conn, mut queue, mut client) = connect(&mut display, &mut state);
+            let qh = queue.handle();
+            let left = open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            let right = open_xdg(&mut display, &mut state, &conn, &client, &qh);
+            commit_buffer(&client, &qh, &left.2, 400, 300);
+            commit_buffer(&client, &qh, &right.2, 400, 300);
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            state.map_stacked(left.0.clone(), (0, 0), false);
+            state.map_stacked(right.0.clone(), (400, 0), false);
+            state.sync_panes();
+            let panes = (
+                state
+                    .panes
+                    .id_of(&left.0)
+                    .expect("the left window has a pane"),
+                state
+                    .panes
+                    .id_of(&right.0)
+                    .expect("the right window has a pane"),
+            );
+            pump(
+                &mut display,
+                &mut state,
+                &conn,
+                &qh,
+                &mut queue,
+                &mut client,
+            );
+            client.configures.clear();
+            Self {
+                display,
+                state,
+                conn,
+                queue,
+                client,
+                qh,
+                left,
+                right,
+                panes,
+            }
+        }
+
+        fn pump(&mut self) {
+            pump(
+                &mut self.display,
+                &mut self.state,
+                &self.conn,
+                &self.qh,
+                &mut self.queue,
+                &mut self.client,
+            );
+        }
+
+        /// The drag on the left window's right edge.
+        fn request(&self) -> ResizeRequest {
+            ResizeRequest {
+                window: self.left.0.clone(),
+                wanted: at(0, 0, 400, 300),
+                edge_at: (400.0, 300.0),
+                edges: ResizeEdge::Right,
+            }
+        }
+
+        /// A frame of the drag that put the seam at `x`: both panes moved
+        /// by the layout, then the rest of `settle_resize`.
+        fn seam_at(&mut self, x: i32, now: Duration) {
+            let request = self.request();
+            self.state.arm_resize_gesture(&request);
+            for (pane, outer) in [
+                (self.panes.0, at(0, 0, x, 300)),
+                (self.panes.1, at(x, 0, 800 - x, 300)),
+            ] {
+                let was = self
+                    .state
+                    .pane_outer_of(pane)
+                    .expect("a mapped pane has a rectangle");
+                self.state.move_pane(
+                    pane,
+                    outer,
+                    was,
+                    AnimationSpec {
+                        duration: Duration::ZERO,
+                        ..AnimationSpec::default()
+                    },
+                    now,
+                    Standing::Tile,
+                );
+            }
+            self.state.resize_gesture = None;
+            self.state.drop_resize_hold_for(&request.window);
+            paused_frame(&mut self.state, now);
+        }
+
+        /// A frame with no motion in it.
+        fn frame(&mut self, now: Duration) {
+            paused_frame(&mut self.state, now);
+        }
+
+        /// One side's client acknowledging the last configure it was sent
+        /// and drawing at `width`.
+        fn answer(&mut self, right: bool, width: i32) {
+            let (xdg, surface) = if right {
+                (self.right.3.clone(), self.right.2.clone())
+            } else {
+                (self.left.3.clone(), self.left.2.clone())
+            };
+            let id = wayland_client::Proxy::id(&xdg);
+            let serial = self
+                .client
+                .surface_configures
+                .iter()
+                .rev()
+                .find(|(to, _)| *to == id)
+                .map(|&(_, serial)| serial)
+                .expect("that window was configured");
+            xdg.ack_configure(serial);
+            commit_buffer(&self.client, &self.qh, &surface, width, 300);
+            self.pump();
+        }
+
+        /// Where each pane is drawn: its frame as the renderer resolves it,
+        /// transform and all, and not only the rectangle under it -- a glide
+        /// the layout starts at every move is drawn instead of that.
+        fn drawn(&self) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
+            let of = |pane| {
+                let held = self.state.panes.get(pane).expect("the pane is here");
+                let rect = self
+                    .state
+                    .drawn_at(held, self.state.pane_outer(held), self.state.clock.now())
+                    .rect;
+                Rectangle::new(
+                    (rect.loc.x.round() as i32, rect.loc.y.round() as i32).into(),
+                    (rect.size.w.round() as i32, rect.size.h.round() as i32).into(),
+                )
+            };
+            (of(self.panes.0), of(self.panes.1))
+        }
+
+        /// The size each client has committed, as far as the compositor has
+        /// applied it.
+        fn committed(&self) -> (Size<i32, Logical>, Size<i32, Logical>) {
+            (self.left.0.geometry().size, self.right.0.geometry().size)
+        }
+
+        /// The widths each client has been told, in order: a configure that
+        /// only changes a state -- the release taking `resizing` away -- is
+        /// not a new width, and is not counted again.
+        fn told(&self, right: bool) -> Vec<i32> {
+            let id = wayland_client::Proxy::id(if right { &self.right.1 } else { &self.left.1 });
+            let mut widths: Vec<i32> = self
+                .client
+                .configures
+                .iter()
+                .filter(|(to, _, _)| *to == id)
+                .map(|&(_, width, _)| width)
+                .collect();
+            widths.dedup();
+            widths
+        }
+    }
+
+    /// **A seam moves once both of its clients have drawn (`resize.sync`).**
+    ///
+    /// Both panes are told their new sizes together, and drawn where they
+    /// were until both have answered: the left one's answer, in first, is
+    /// held back rather than shown against a seam its neighbour has not
+    /// reached, and both land in the same pass once the right one's is in.
+    /// Moved at once instead, the frame between the two answers draws the
+    /// left window's new picture cut by the old seam and the right window's
+    /// old picture short of the new one -- the grey band of 2026-10-16.
+    #[test]
+    fn a_seam_moves_once_both_of_its_clients_have_drawn() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "both sides are told their new size in the same round"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "and both are drawn where their pictures are until they answer"
+        );
+
+        seam.answer(false, 450);
+        assert_eq!(
+            seam.committed().0,
+            Size::from((400, 300)),
+            "the left client's answer is held back while the right one's is not in"
+        );
+        seam.frame(Duration::from_millis(16));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "a frame with one answer in still draws the old seam"
+        );
+
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        assert_eq!(
+            seam.committed(),
+            (Size::from((450, 300)), Size::from((350, 300))),
+            "with both answers in, both are applied together"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "and both panes move to the new seam in the same pass"
+        );
+    }
+
+    /// **A slow client holds a seam up for `resize.sync` and no longer.**
+    /// Past it the round ends with whatever is in: the answered side is
+    /// applied, and both are drawn at their new rectangles, the slow one's
+    /// old picture fitted into its own as the bridge always fitted one.
+    #[test]
+    fn a_seam_waits_for_a_slow_client_no_longer_than_resize_sync() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.pump();
+        seam.answer(false, 450);
+        seam.frame(Duration::from_millis(199));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 400, 300), at(400, 0, 400, 300)),
+            "inside `resize.sync` the seam waits for its slow side"
+        );
+        seam.frame(Duration::from_millis(200));
+        assert_eq!(
+            seam.committed().0,
+            Size::from((450, 300)),
+            "at `resize.sync` the answer that is in is applied"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "and the seam moves without its slow side"
+        );
+    }
+
+    /// **A seam that moves on during a round is told in the next one**,
+    /// never mid-round: a client told twice before its neighbour answered
+    /// once would answer a seam the neighbour is never shown at.
+    #[test]
+    fn a_seam_moved_during_a_round_is_told_in_the_next() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "the second frame's seam waits for the first round"
+        );
+        seam.answer(false, 450);
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450, 470], vec![350, 330]),
+            "the round that ends starts the next, from where the seam has got to"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 450, 300), at(450, 0, 350, 300)),
+            "drawn where the round that ended put them"
+        );
+    }
+
+    /// **A seam let go of during a round ends where it was let go**: the
+    /// release waits for the round under way like any other move, and the
+    /// gesture ends once the last round's answers are in.
+    #[test]
+    fn a_seam_let_go_of_mid_round_ends_where_it_was_let_go() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::from_millis(200);
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.state.release_resize(&seam.left.0);
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450], vec![350]),
+            "the release does not tell anybody past the round under way"
+        );
+        seam.answer(false, 450);
+        seam.answer(true, 350);
+        seam.frame(Duration::from_millis(32));
+        seam.pump();
+        seam.answer(false, 470);
+        seam.answer(true, 330);
+        seam.frame(Duration::from_millis(48));
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 470, 300), at(470, 0, 330, 300)),
+            "the gesture ends where the seam was let go"
+        );
+        assert!(
+            !seam.state.holding_resize(seam.panes.0) && !seam.state.holding_resize(seam.panes.1),
+            "and once both answers are in, nothing is held any more"
+        );
+    }
+
+    /// **`resize.sync = 0` moves each pane to the layout's rectangle at
+    /// once**, as the bridge always did: told on every frame, drawn at its
+    /// slot.
+    #[test]
+    fn with_resize_sync_zero_a_seam_is_drawn_where_the_layout_put_it_at_once() {
+        let mut seam = Seam::new();
+        seam.state.resizing.sync = Duration::ZERO;
+        seam.state.begin_resize(&seam.left.0);
+        seam.seam_at(450, Duration::ZERO);
+        seam.seam_at(470, Duration::from_millis(16));
+        seam.pump();
+        assert_eq!(
+            (seam.told(false), seam.told(true)),
+            (vec![450, 470], vec![350, 330]),
+            "every frame tells both sides"
+        );
+        assert_eq!(
+            seam.drawn(),
+            (at(0, 0, 470, 300), at(470, 0, 330, 300)),
+            "and both are drawn at the layout's rectangles straight away"
         );
     }
 
@@ -16077,6 +17857,10 @@ end)"#,
     #[test]
     fn a_pane_pushed_aside_by_another_panes_drag_is_configured_at_once() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (dragged, dragged_toplevel, _dragged_surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         let (beside, beside_toplevel, _beside_surface) =
@@ -16439,6 +18223,140 @@ end)"#,
         assert_eq!(outer(&state), tile, "and it stays in the rectangle it had");
     }
 
+    /// **#226: a window still answering a placement keeps the placed size
+    /// across a style change.** Tiling turned off, a configuration glides
+    /// every window back where it floated and changes the frame style in the
+    /// same breath. The client had not drawn its floating size yet, so the
+    /// space still had its tile's size; the restyle read that and asked the
+    /// client for it again, and the window went back to the size of its tile
+    /// a moment after it had left it.
+    #[test]
+    fn a_window_still_answering_a_placement_keeps_the_placed_size_when_its_frame_changes() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (0, 0), false);
+        state.sync_panes();
+        let pane = state.panes.id_of(&window).expect("a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let floated = at(100, 100, 800, 500);
+        let now = state.clock.now();
+        let was = state.pane_outer_of(pane).expect("a mapped pane");
+        state.move_pane(
+            pane,
+            floated,
+            was,
+            AnimationSpec::default(),
+            now,
+            Standing::Free,
+        );
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_ne!(
+            window.geometry().size,
+            floated.size,
+            "the premise: its client has not drawn the placed size yet"
+        );
+
+        // The restyle's own two steps around a frame change. No Qt here to
+        // build a frame, so the room it leaves is the same on both sides, and
+        // what is checked is the size: the newest ask must still be the
+        // placed one, whatever the client last drew.
+        let outers = state.outers_before_restyle();
+        state.keep_outers(outers, now);
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let id = wayland_client::Proxy::id(&toplevel);
+        assert_eq!(
+            client
+                .configures
+                .iter()
+                .filter(|(to, ..)| to == &id)
+                .map(|(_, w, h)| (*w, *h))
+                .next_back(),
+            Some((800, 500)),
+            "its client is last asked for the placed size, not the size it is \
+             leaving"
+        );
+    }
+
+    /// **#431: a script reads a window back where it put it.** A layout or
+    /// a configuration that places a window and reads `sol.windows()` before
+    /// the client has answered read the size the client was still drawing:
+    /// toggling tiling and floating quickly, a configuration that remembers
+    /// where each window floated remembered a size it was leaving, and the
+    /// windows drifted a little each time.
+    #[test]
+    fn a_script_reads_a_window_still_answering_a_placement_at_the_placed_size() {
+        tiled_fixture!(display, state, conn, queue, client, qh);
+        let (window, _toplevel, _surface) =
+            open_surface(&mut display, &mut state, &conn, &client, &qh);
+        state.map_stacked(window.clone(), (0, 0), false);
+        state.sync_panes();
+        let pane = state.panes.id_of(&window).expect("a pane");
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        let floated = at(100, 100, 800, 500);
+        let now = state.clock.now();
+        let was = state.pane_outer_of(pane).expect("a mapped pane");
+        state.move_pane(
+            pane,
+            floated,
+            was,
+            AnimationSpec::default(),
+            now,
+            Standing::Free,
+        );
+        pump(
+            &mut display,
+            &mut state,
+            &conn,
+            &qh,
+            &mut queue,
+            &mut client,
+        );
+        assert_ne!(
+            window.geometry().size,
+            inner(floated, state.insets_of(pane)).size,
+            "the premise: its client has not drawn the placed size yet"
+        );
+        let row = state
+            .window_infos()
+            .into_iter()
+            .find(|row| row.id == pane.get())
+            .expect("the window is listed");
+        assert_eq!(
+            (row.rect.x, row.rect.y, row.rect.w, row.rect.h),
+            (100.0, 100.0, 800.0, 500.0),
+            "a script reads the rectangle it placed the window in"
+        );
+    }
+
     /// **Only a live gesture arms a bridge.**
     ///
     /// The keyboard `nudge` reaches `move_pane` through `Scripts::key` and
@@ -16581,7 +18499,7 @@ end)"#,
     /// `Hold::dragged` is reached from `move_pane` and from `hold_resize`,
     /// and `settle_resize` reaches either only on a frame whose
     /// `pending_resize` carried a motion. So the offers a drag makes inside
-    /// its last `TELL_EVERY` are written into the pane's slot, drawn from
+    /// its last throttled interval are written into the pane's slot, drawn from
     /// the pane's slot, and never put on the wire: the client sits at a size
     /// up to a tenth of a second stale while the pane is drawn where the
     /// pointer is, and the bridge between the two is the visible gap.
@@ -16599,6 +18517,10 @@ end)"#,
     #[test]
     fn a_drag_that_pauses_still_tells_its_client_where_it_stopped() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -17321,7 +19243,7 @@ end)"#,
     /// the floating hold. Each direction built a fresh `Hold` with a fresh
     /// `told`, and a fresh hold is told immediately by design — so an
     /// alternating handler restored the sixty configures a second
-    /// `TELL_EVERY` exists to remove. Carrying the hold across the boundary
+    /// a capped `resize.tell_hz` exists to impose. Carrying the hold across the boundary
     /// is what stops that: it is the same client in the same gesture.
     ///
     /// The fixture has no scripts, so `trigger_resize` returns false and
@@ -17330,6 +19252,10 @@ end)"#,
     #[test]
     fn a_layout_changing_its_mind_does_not_buy_a_configure_each_way() {
         tiled_fixture!(display, state, conn, queue, client, qh);
+        // A capped `resize.tell_hz`: what this test is about is a throttle's
+        // own behaviour, and since 2026-10-16 a drag is told every frame unless
+        // one is configured.
+        state.resizing.tell = Duration::from_millis(100);
         let (window, _toplevel, _surface) =
             open_surface(&mut display, &mut state, &conn, &client, &qh);
         state.map_stacked(window.clone(), (400, 300), false);
@@ -22457,6 +24383,80 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                 );
             }
 
+            /// **A window being resized is told it may draw again as soon as a
+            /// frame showing it starts to be drawn** (`resize.overlap`), not
+            /// only once that frame reaches the screen, so its application
+            /// draws its next size while the compositor draws its last. A
+            /// window nobody is resizing is not told then -- it waits for the
+            /// refresh, as before -- and neither is anything with the setting
+            /// off.
+            #[test]
+            fn a_window_being_resized_is_told_to_draw_again_when_its_frame_starts() {
+                let mut session = Session::with_monitors(1);
+                let (window, _toplevel, surface, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let (_other, _toplevel, other, _xdg) =
+                    session.app.open(&mut session.display, &mut session.state);
+                let output = session.output(0);
+                session.state.space.refresh();
+                let ask = |session: &mut Session, surface: &wl_surface::WlSurface| {
+                    surface.frame(&session.app.qh, FrameDone);
+                    surface.commit();
+                    session.app.pump(&mut session.display, &mut session.state);
+                };
+                let done = |session: &mut Session| {
+                    session.app.pump(&mut session.display, &mut session.state);
+                    session.app.client.frames_done
+                };
+                let refresh = Duration::from_millis(16);
+
+                ask(&mut session, &surface);
+                ask(&mut session, &other);
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(done(&mut session), 0, "nobody is being resized");
+
+                let pane = session
+                    .state
+                    .panes
+                    .id_of(&window)
+                    .expect("the window has a pane");
+                let size = window.geometry().size;
+                session.state.resize_hold = Some(crate::resizing::Held {
+                    window: window.clone(),
+                    pane,
+                    hold: crate::resizing::Hold::new(
+                        ResizeEdge::BottomRight,
+                        size,
+                        Rectangle::new((0, 0).into(), size),
+                        Duration::ZERO,
+                        None,
+                        crate::resizing::PATIENCE,
+                        crate::resizing::EVERY_FRAME,
+                    ),
+                });
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "the window being resized is told, and the other is not"
+                );
+
+                ask(&mut session, &surface);
+                session.state.resizing.overlap = false;
+                session
+                    .state
+                    .send_resize_frames_on(&output, Duration::ZERO, refresh);
+                assert_eq!(
+                    done(&mut session),
+                    1,
+                    "and with resize.overlap off, nobody is"
+                );
+            }
+
             /// **A window on a dark monitor is told to draw once a second, and
             /// not every frame.** A lit monitor's refresh tells it nothing any
             /// more; the dark pass tells it at most once per
@@ -26311,16 +28311,17 @@ end)
         /// client has not drawn at the new size yet. Before #233 its
         /// half-width picture was stretched across the rectangle the glide
         /// had reached, its text up to twice as wide behind the fade. Under
-        /// the default fill the old picture is drawn at its own size against
+        /// `anchor` the old picture is drawn at its own size against
         /// the right edge, and the strip the neighbour has grown into is
         /// `resize.background`'s, behind the fading window; once the client
         /// answers, its new, wider picture stands against that edge too, cut
         /// on the left until the glide gets there, so the neighbour's contents
-        /// do not move at all. `crop` keeps the picture at the rectangle's
-        /// left, going with the moving edge instead.
+        /// do not move at all. `crop`, the default, keeps the picture at the
+        /// rectangle's left, going with the moving edge instead.
         #[test]
         fn a_neighbour_growing_into_a_closed_windows_tile_keeps_its_picture_against_its_far_edge() {
             let mut desk = Desk::new();
+            desk.state.resizing.fill = crate::resizing::Fill::Anchor;
             let (dying, others) = closing_scene(&mut desk, "tiling");
             for opened in others.iter().chain([&dying]) {
                 desk.answer(opened);
@@ -35855,6 +37856,11 @@ end)
                     desk.install("require(\"touch\")");
                     let _touch = desk.client.seat_touch(&desk.qh);
                     desk.pump();
+                    // These measure the rectangle the finger asks for before
+                    // the client answers, which is what a window is drawn at
+                    // under `resize.follow = "pointer"`; the default draws it
+                    // at its client's size.
+                    desk.state.resizing.follow = crate::resizing::Follow::Pointer;
                     run(&mut desk, &opened, window, before);
                 });
             }
@@ -35941,6 +37947,80 @@ end)
                     assert!(!desk.state.seat.get_pointer().expect("pointer").is_grabbed());
                     desk.ask();
                     assert!(!desk.client.closes.contains(&opened.toplevel.id()));
+                });
+            }
+
+            /// **#452: a finger on a maximised window's titlebar holds it
+            /// as the pointer does**: a few pixels leave it maximised where
+            /// it is, and past `maximize.restore_after` it comes off at its
+            /// old size under the finger and follows it.
+            #[test]
+            fn a_finger_drags_a_maximised_window_off_its_maximise() {
+                with_touch_window(true, |desk, opened, window, before| {
+                    let region = region(desk);
+                    desk.install("require(\"touch\")\nrequire(\"floating\")");
+                    desk.state.toggle_maximize(&window);
+                    desk.pump();
+                    let (w, h) = last_configured(&desk.client, &opened.toplevel)
+                        .expect("the window was told the work area");
+                    let _buffer =
+                        super::super::commit_buffer(&desk.client, &desk.qh, &opened.surface, w, h);
+                    desk.pump();
+                    let maximised = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    // A twentieth of the way along: clear of the title, which
+                    // is a control a finger does not drag by.
+                    let at = maximised.loc + Point::from((maximised.size.w / 20, 16));
+                    let at = (f64::from(at.x), f64::from(at.y));
+                    crate::synth::touch_down(&mut desk.state, region, 0, at, 20_000);
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (at.0 + 3.0, at.1),
+                        30_000,
+                    );
+                    crate::input::grab::settle_drags(&mut desk.state, false);
+                    assert_eq!(
+                        (
+                            crate::state::window_states(&window).maximized,
+                            desk.state.pane_outer_of(opened.pane)
+                        ),
+                        (true, Some(maximised)),
+                        "three pixels moved or restored it"
+                    );
+                    let to = (at.0 + 50.0, at.1 + 80.0);
+                    crate::synth::touch_motion(&mut desk.state, region, 0, to, 40_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
+                    assert!(
+                        !crate::state::window_states(&window).maximized,
+                        "the finger did not take it off"
+                    );
+                    let off = desk.state.real_geometry(&window).expect("mapped");
+                    let outer = desk.state.pane_outer_of(opened.pane).expect("outer");
+                    // Placed for its old width, which its client has not
+                    // drawn yet.
+                    assert_eq!(
+                        (f64::from(outer.loc.x), f64::from(outer.loc.y)),
+                        (
+                            (to.0 - f64::from(before.size.w) / 20.0).round(),
+                            to.1 - 16.0
+                        ),
+                        "it did not come off under the finger"
+                    );
+                    crate::synth::touch_motion(
+                        &mut desk.state,
+                        region,
+                        0,
+                        (to.0 + 100.0, to.1 + 50.0),
+                        50_000,
+                    );
+                    crate::input::grab::settle_drags(&mut desk.state, false);
+                    crate::synth::touch_up(&mut desk.state, region, 0, 60_000);
+                    assert_eq!(
+                        desk.state.real_geometry(&window).map(|real| real.loc),
+                        Some(off.loc + Point::from((100, 50))),
+                        "it did not follow the finger"
+                    );
                 });
             }
 
@@ -41043,6 +43123,70 @@ Item {
                 });
             }
 
+            /// **#431: a frame that grows while its window is still answering a
+            /// new tile keeps the new tile.** A window tiled a moment ago folds
+            /// or unfolds its bar while its client is still drawing the size it
+            /// had; the frame was kept at that size, so once it stood still the
+            /// client was told it again and the window left its tile.
+            #[test]
+            fn a_frame_grown_while_its_window_answers_a_new_tile_keeps_the_new_tile() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = tiled_by(EASES);
+                    let tile = desk.placed(opened.pane);
+                    let client = client_rect(&desk, opened.pane);
+                    // Drawing a size of its own, smaller than the tile, as a
+                    // window that was floating a moment ago is.
+                    commit_buffer(
+                        &desk.client,
+                        &desk.qh,
+                        &opened.surface,
+                        client.size.w - 120,
+                        client.size.h - 80,
+                    );
+                    desk.pump();
+                    // And placed in a tile of its own again, larger than that,
+                    // as a layout switched on does, its client yet to answer.
+                    let moved =
+                        Rectangle::new(tile.loc, (tile.size.w - 20, tile.size.h - 20).into());
+                    let now = desk.state.clock.now();
+                    desk.state.place(
+                        opened.pane.get(),
+                        crate::state::snapshot::to_rect(moved),
+                        crate::script::AnimationSpec {
+                            duration: Duration::ZERO,
+                            ..crate::script::AnimationSpec::default()
+                        },
+                        now,
+                        crate::state::placement::Standing::Tile,
+                    );
+                    desk.pump();
+                    assert_ne!(
+                        client_rect(&desk, opened.pane).size,
+                        crate::state::inner(moved, desk.state.insets_of(opened.pane)).size,
+                        "the premise: the client has not drawn its tile"
+                    );
+
+                    grow_to(&mut desk, opened.pane, 40);
+                    for _ in 0..30 {
+                        frame(&mut desk, 16);
+                        if desk.state.insets_of(opened.pane).top == 72 {
+                            break;
+                        }
+                    }
+                    frame(&mut desk, 16);
+                    let room = crate::state::inner(moved, desk.state.insets_of(opened.pane));
+                    assert_eq!(
+                        last_configured(&desk.client, &opened.toplevel),
+                        Some((room.size.w, room.size.h)),
+                        "the client is told the room under the grown frame in its new \
+                         tile, not in the one it was leaving"
+                    );
+                    assert_eq!(desk.state.pane_outer_of(opened.pane), Some(moved));
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+
             /// **A `growTop` of 0 is no change at all** (#423): a layer that
             /// declares it and never moves it leaves a held window and a
             /// floating one where they were, their clients configured with
@@ -41078,6 +43222,60 @@ Item {
                         assert_eq!(desk.state.insets_of(opened.pane).top, 32);
                         let _ = std::fs::remove_dir_all(&style);
                     }
+                });
+            }
+
+            /// **#438: a floating window whose frame grows while it glides
+            /// arrives at the size it has.** The frame makes it taller as it
+            /// grows; a glide still aimed at the rectangle it had drew it
+            /// landing there and then jumping to its real size as it let go.
+            #[test]
+            fn a_window_whose_frame_grows_while_it_glides_is_aimed_at_its_grown_size() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let (mut desk, opened, style) = framed_by(GROWS);
+                    let pane = opened.pane;
+                    let outer = desk.state.pane_outer_of(pane).expect("outer");
+                    let away =
+                        Rectangle::new((outer.loc.x + 200, outer.loc.y + 100).into(), outer.size);
+                    let now = desk.state.clock.now();
+                    desk.state.place(
+                        pane.get(),
+                        crate::state::snapshot::to_rect(away),
+                        crate::script::AnimationSpec {
+                            duration: Duration::from_millis(320),
+                            ..crate::script::AnimationSpec::default()
+                        },
+                        now,
+                        crate::state::placement::Standing::Free,
+                    );
+                    frame(&mut desk, 16);
+                    let aimed = |desk: &Desk| {
+                        desk.state
+                            .panes
+                            .get(pane)
+                            .and_then(crate::present::course)
+                            .map(|(_, to)| to)
+                    };
+                    assert!(aimed(&desk).is_some(), "the premise: it is gliding");
+
+                    grow_to(&mut desk, pane, 31);
+                    frame(&mut desk, 16);
+                    let grown = desk.state.pane_outer_of(pane).expect("outer");
+                    assert_eq!(
+                        grown.size.h,
+                        away.size.h + 31,
+                        "the premise: the frame grew it"
+                    );
+                    assert_eq!(
+                        aimed(&desk),
+                        Some(Rectangle::new(
+                            (f64::from(grown.loc.x), f64::from(grown.loc.y)).into(),
+                            (f64::from(grown.size.w), f64::from(grown.size.h)).into(),
+                        )),
+                        "the glide arrives where the window is, its frame grown"
+                    );
+                    let _ = std::fs::remove_dir_all(&style);
                 });
             }
 
@@ -41408,6 +43606,660 @@ Item {
         /// client: the state, what is drawn, what a press and the keyboard
         /// reach, the client's own request, focusing, the shipped layouts,
         /// `super+m`, the overview and `config.minimize`.
+        /// What the compositor gives a configuration over a move drag
+        /// (#452), each on its own and with no maximise in sight: the
+        /// `drag` event, `sol.drag_hold` and `sol.drag_grip`.
+        mod drag_primitives {
+            use super::*;
+            use smithay::backend::input::{ButtonState, KeyState};
+
+            /// Writes down every `drag` and `drop` as `"phase id x,y"`, and
+            /// does to the drag what `on_begin` and `on_move` say, `id`,
+            /// `x` and `y` in scope.
+            fn script(on_begin: &str, on_move: &str) -> String {
+                format!(
+                    r#"
+told = {{}}
+sol.on("drag", function(id, phase, x, y)
+    told[#told + 1] = phase .. " " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+    if phase == "begin" then {on_begin} end
+    if phase == "move" then {on_move} end
+end)
+sol.on("drop", function(id, x, y)
+    told[#told + 1] = "drop " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+end)
+"#
+                )
+            }
+
+            /// A 400 by 300 window at 200,200 with no frame, and `script`.
+            fn desk(script: &str) -> (Desk, Window, u64) {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                desk.pump();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(window.clone(), (200, 200), false);
+                desk.state.space.refresh();
+                // Past its opening, so it is under the pointer where it lives.
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.install(script);
+                (desk, window, opened.pane.get())
+            }
+
+            fn told(desk: &Desk) -> String {
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return table.concat(told, \";\")"))
+                    .unwrap_or_default()
+            }
+
+            fn region(desk: &Desk) -> Rectangle<i32, Logical> {
+                crate::monitor::union(&desk.state.space).expect("a monitor")
+            }
+
+            /// Super and the left button down at `at`: the modifier's move.
+            fn take(desk: &mut Desk, at: (f64, f64)) {
+                move_pointer(&mut desk.state, at, 10_000);
+                crate::input::key(&mut desk.state, 133_u32.into(), KeyState::Pressed, 11);
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Pressed,
+                    12_000,
+                );
+            }
+
+            fn release(desk: &mut Desk, time: u64) {
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    0x110,
+                    ButtonState::Released,
+                    time,
+                );
+                crate::input::key(&mut desk.state, 133_u32.into(), KeyState::Released, 99);
+            }
+
+            fn pass(desk: &mut Desk) {
+                crate::input::grab::settle_drags(&mut desk.state, false);
+            }
+
+            fn at(desk: &Desk, window: &Window) -> Option<Point<i32, Logical>> {
+                desk.state.space.element_location(window)
+            }
+
+            /// **`begin` as the drag starts, one `move` a pass wherever the
+            /// pointer got to, and `end` before the `drop`**, and none of it
+            /// inside the grab: three motions between two passes are one
+            /// `move`, and the window follows every one of them.
+            #[test]
+            fn a_drag_is_told_as_it_begins_moves_once_a_pass_and_ends() {
+                let (mut desk, window, id) = desk(&script("", ""));
+                take(&mut desk, (250.0, 250.0));
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 250,250"),
+                    "told at the press"
+                );
+                for (step, x) in [(1_u64, 260.0), (2, 270.0), (3, 280.0)] {
+                    move_pointer(&mut desk.state, (x, 250.0), 12_000 + step * 1_000);
+                }
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 250,250"),
+                    "a move was told before the pass"
+                );
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((230, 200).into()),
+                    "the window follows"
+                );
+                pass(&mut desk);
+                pass(&mut desk);
+                move_pointer(&mut desk.state, (300.0, 260.0), 20_000);
+                release(&mut desk, 21_000);
+                assert_eq!(
+                    told(&desk),
+                    format!(
+                        "begin {id} 250,250;move {id} 280,250;move {id} 300,260;\
+                         end {id} 300,260;drop {id} 300,260"
+                    )
+                );
+                assert!(desk.state.moves.is_empty(), "the drag is over");
+            }
+
+            /// **A held window stays where it is while the pointer goes on,
+            /// and let go it moves on from where it stands**, with no jump;
+            /// a window let go of while it is held is dropped nowhere.
+            #[test]
+            fn a_held_window_stays_while_the_pointer_moves_and_goes_on_from_where_it_is() {
+                let (mut desk, window, id) = desk(&script(
+                    "sol.drag_hold(id, true)",
+                    "if x >= 400 then sol.drag_hold(id, false) end",
+                ));
+                take(&mut desk, (250.0, 250.0));
+                move_pointer(&mut desk.state, (350.0, 300.0), 13_000);
+                pass(&mut desk);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((200, 200).into()),
+                    "held, it moved"
+                );
+                move_pointer(&mut desk.state, (420.0, 300.0), 14_000);
+                pass(&mut desk);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((200, 200).into()),
+                    "let go, it jumped to the pointer"
+                );
+                move_pointer(&mut desk.state, (450.0, 320.0), 15_000);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((230, 220).into()),
+                    "let go, it did not move on with the pointer"
+                );
+                release(&mut desk, 16_000);
+                assert!(told(&desk).ends_with(&format!("drop {id} 450,320")));
+
+                // Held to the end: no drop.
+                let (mut desk, window, id) = desk_held();
+                take(&mut desk, (250.0, 250.0));
+                move_pointer(&mut desk.state, (300.0, 250.0), 13_000);
+                release(&mut desk, 14_000);
+                assert_eq!(at(&desk, &window), Some((200, 200).into()));
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 250,250;move {id} 300,250;end {id} 300,250"),
+                    "a window held to the end was dropped"
+                );
+            }
+
+            fn desk_held() -> (Desk, Window, u64) {
+                desk(&script("sol.drag_hold(id, true)", ""))
+            }
+
+            /// **A grip puts the window so the point it names is under the
+            /// pointer, and the drag goes on from there**: half along and 10
+            /// down puts the 400-wide window 200 left of the pointer and 10
+            /// above it; a share past the frame is held inside it.
+            #[test]
+            fn a_grip_puts_the_window_under_the_pointer_and_the_drag_goes_on_from_it() {
+                for (grip, gripped) in [
+                    ("{ x = 0.5, dy = 10 }", (500 - 200, 400 - 10)),
+                    ("{ x = 2, y = 2 }", (500 - 400, 400 - 299)),
+                ] {
+                    let (mut desk, window, _) = desk(&script(
+                        "",
+                        &format!(
+                            "if not gripped then gripped = true; sol.drag_grip(id, {grip}) end"
+                        ),
+                    ));
+                    take(&mut desk, (210.0, 210.0));
+                    move_pointer(&mut desk.state, (500.0, 400.0), 13_000);
+                    pass(&mut desk);
+                    assert_eq!(
+                        at(&desk, &window),
+                        Some(gripped.into()),
+                        "{grip}: not under the pointer"
+                    );
+                    move_pointer(&mut desk.state, (540.0, 420.0), 14_000);
+                    assert_eq!(
+                        at(&desk, &window),
+                        Some((gripped.0 + 40, gripped.1 + 20).into()),
+                        "{grip}: the drag did not go on from the grip"
+                    );
+                    release(&mut desk, 15_000);
+                }
+
+                // Let go within the pass of its last motion, as a quick flick
+                // is: the motion is told before the `end`, and the grip still
+                // holds the window where it was let go, and drops it there.
+                let (mut desk, window, id) = desk(&script(
+                    "",
+                    "if not gripped then gripped = true; sol.drag_grip(id, { x = 0.5, dy = 10 }) end",
+                ));
+                take(&mut desk, (210.0, 210.0));
+                move_pointer(&mut desk.state, (500.0, 400.0), 13_000);
+                release(&mut desk, 14_000);
+                assert_eq!(
+                    at(&desk, &window),
+                    Some((300, 390).into()),
+                    "a flick was not gripped"
+                );
+                assert!(
+                    told(&desk).ends_with(&format!(
+                        "move {id} 500,400;end {id} 500,400;drop {id} 500,400"
+                    )),
+                    "{}",
+                    told(&desk)
+                );
+                assert!(desk.state.moves.is_empty(), "the drag is over");
+            }
+        }
+
+        /// The configuration's hold over an edge or modifier resize (#454):
+        /// `resizing` told as one begins and ends, and `sol.resize_hold`.
+        mod resize_primitives {
+            use super::*;
+            use smithay::backend::input::{ButtonState, KeyState};
+
+            const SUPER: u32 = 133;
+            const BTN_RIGHT: u32 = 0x111;
+
+            /// Writes down every `resizing` as `"phase id x,y"` and every
+            /// `resize` as `"resize id x,y"`, and does what `on_begin` says
+            /// when one begins, `id` in scope.
+            fn script(on_begin: &str) -> String {
+                format!(
+                    r#"
+told = {{}}
+sol.on("resizing", function(id, phase, x, y)
+    told[#told + 1] = phase .. " " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+    if phase == "begin" then {on_begin} end
+end)
+sol.on("resize", function(id, x, y)
+    told[#told + 1] = "resize " .. id .. " " .. math.floor(x) .. "," .. math.floor(y)
+end)
+"#
+                )
+            }
+
+            /// A 400 by 300 window at 200,200 with no frame, and `script`.
+            fn desk(script: &str) -> (Desk, Window, crate::pane::PaneId, u64) {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                desk.pump();
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("a client");
+                desk.state
+                    .space
+                    .map_element(window.clone(), (200, 200), false);
+                desk.state.space.refresh();
+                desk.state.clock.advance(Duration::from_secs(1));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+                desk.install(script);
+                (desk, window, opened.pane, opened.pane.get())
+            }
+
+            fn desk_held() -> (Desk, Window, crate::pane::PaneId, u64) {
+                desk(&script("sol.resize_hold(id, true)"))
+            }
+
+            fn told(desk: &Desk) -> String {
+                desk.state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return table.concat(told, \";\")"))
+                    .unwrap_or_default()
+            }
+
+            fn region(desk: &Desk) -> Rectangle<i32, Logical> {
+                crate::monitor::union(&desk.state.space).expect("a monitor")
+            }
+
+            /// Super and the right button down at `at`: the modifier's
+            /// resize, by the corner of the quarter `at` is in.
+            fn take(desk: &mut Desk, at: (f64, f64)) {
+                move_pointer(&mut desk.state, at, 10_000);
+                crate::input::key(&mut desk.state, SUPER.into(), KeyState::Pressed, 11);
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Pressed,
+                    12_000,
+                );
+            }
+
+            fn release(desk: &mut Desk, time: u64) {
+                let region = region(desk);
+                crate::synth::send_button(
+                    &mut desk.state,
+                    region,
+                    BTN_RIGHT,
+                    ButtonState::Released,
+                    time,
+                );
+                crate::input::key(&mut desk.state, SUPER.into(), KeyState::Released, 99);
+            }
+
+            /// A pass: what the drag asked for is offered and done.
+            fn pass(desk: &mut Desk) {
+                crate::input::grab::settle_drags(&mut desk.state, false);
+                desk.state.settle_resize();
+            }
+
+            /// The size the window's client was last asked for: what a resize
+            /// changes at once, the client drawing it when it can.
+            fn asked(window: &Window) -> Option<(i32, i32)> {
+                window
+                    .toplevel()
+                    .and_then(|toplevel| toplevel.with_pending_state(|state| state.size))
+                    .map(|size| (size.w, size.h))
+            }
+
+            /// **`begin` as the resize is taken, before its first motion is
+            /// offered to anyone, and `end` after the release and after the
+            /// last motion is offered**, none of it inside the grab: a motion
+            /// let go of within its pass is offered, and then the resize ends.
+            #[test]
+            fn a_resize_is_told_as_it_begins_and_after_the_last_of_it_ends() {
+                let (mut desk, window, _, id) = desk(&script(""));
+                take(&mut desk, (550.0, 450.0));
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450"),
+                    "not told at the press"
+                );
+                move_pointer(&mut desk.state, (570.0, 460.0), 13_000);
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450"),
+                    "a motion was told before its pass"
+                );
+                pass(&mut desk);
+                assert_eq!(asked(&window), Some((420, 310)));
+                move_pointer(&mut desk.state, (590.0, 470.0), 14_000);
+                release(&mut desk, 15_000);
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450;resize {id} 620,510"),
+                    "the end was told before the last motion was offered"
+                );
+                pass(&mut desk);
+                assert_eq!(
+                    told(&desk),
+                    format!(
+                        "begin {id} 550,450;resize {id} 620,510;resize {id} 640,520;\
+                         end {id} 590,470"
+                    )
+                );
+                assert_eq!(asked(&window), Some((440, 320)));
+                assert!(desk.state.resizes.is_empty(), "the resize is not over");
+            }
+
+            /// **A held resize leaves the window as it is and asks the
+            /// layouts nothing, and let go it goes on from where the pointer
+            /// is then**, so nothing jumps; one held to the release ends
+            /// where it began.
+            #[test]
+            fn a_held_resize_keeps_the_window_and_goes_on_from_where_the_pointer_is() {
+                let (mut desk, window, _, id) = desk_held();
+                let before = asked(&window);
+                take(&mut desk, (550.0, 450.0));
+                move_pointer(&mut desk.state, (600.0, 500.0), 13_000);
+                pass(&mut desk);
+                assert_eq!(asked(&window), before, "held, it grew");
+                assert_eq!(
+                    told(&desk),
+                    format!("begin {id} 550,450"),
+                    "a held resize was offered to the layouts"
+                );
+                // Let go, as `sol.resize_hold(id, false)` asks it.
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::ResizeHold { id, held: false }],
+                    ..Default::default()
+                });
+                pass(&mut desk);
+                assert_eq!(asked(&window), before, "let go, it jumped to the pointer");
+                move_pointer(&mut desk.state, (630.0, 520.0), 14_000);
+                pass(&mut desk);
+                assert_eq!(
+                    asked(&window),
+                    Some((430, 320)),
+                    "let go, it did not go on from where the pointer was"
+                );
+                release(&mut desk, 15_000);
+                pass(&mut desk);
+                assert!(
+                    told(&desk).ends_with(&format!("end {id} 630,520")),
+                    "{}",
+                    told(&desk)
+                );
+                assert!(desk.state.resizes.is_empty());
+
+                // Held to the release: as it was, and over.
+                let (mut desk, window_held, _, id) = desk_held();
+                let before = asked(&window_held);
+                take(&mut desk, (550.0, 450.0));
+                move_pointer(&mut desk.state, (650.0, 520.0), 13_000);
+                release(&mut desk, 14_000);
+                pass(&mut desk);
+                assert_eq!(
+                    asked(&window_held),
+                    before,
+                    "held to the end, it was resized"
+                );
+                assert_eq!(
+                    desk.state
+                        .real_geometry(&window_held)
+                        .map(|geometry| geometry.size),
+                    Some((400, 300).into()),
+                    "the client was asked for another size"
+                );
+                assert_eq!(told(&desk), format!("begin {id} 550,450;end {id} 650,520"));
+                assert!(desk.state.resizes.is_empty());
+            }
+        }
+
+        /// A maximised window's titlebar (#452): a double click on it
+        /// still restores it, a click leaves it, and a drag takes it off.
+        mod drag_off {
+            use super::*;
+            use smithay::backend::input::ButtonState;
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+            /// A frame style with a 32-pixel titlebar that a double tap
+            /// maximises or restores, as Illia's `rounded-violet` does it.
+            fn style() -> std::path::PathBuf {
+                let style = std::env::temp_dir()
+                    .join(format!("solium-frame-drag-off-{}", std::process::id()));
+                std::fs::create_dir_all(&style).expect("a style folder");
+                std::fs::write(
+                    style.join("Pane.qml"),
+                    "import Solium\nPaneStyle {\n    insets.top: 32\n    \
+                     Layer { depth: \"frame\"; name: \"bar\"; source: \"Frame.qml\" }\n}\n",
+                )
+                .expect("writing the manifest");
+                std::fs::write(
+                    style.join("Frame.qml"),
+                    "import QtQuick\nItem {\n    id: frame\n    \
+                     property string action: \"\"\n    \
+                     TapHandler { onDoubleTapped: frame.action = \"maximize\" }\n}\n",
+                )
+                .expect("writing the layer");
+                style
+            }
+
+            fn button(desk: &mut Desk, state: ButtonState, time: u64) {
+                let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+                crate::synth::send_button(&mut desk.state, region, 0x110, state, time);
+            }
+
+            /// The client draws the size it was last told, and a second
+            /// goes by.
+            fn answer(desk: &mut Desk, opened: &Opened) {
+                desk.pump();
+                let (w, h) = last_configured(&desk.client, &opened.toplevel)
+                    .filter(|&(w, h)| w > 0 && h > 0)
+                    .expect("the window was told a size");
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, w, h);
+                desk.pump();
+                desk.state.clock.advance(Duration::from_secs(2));
+                let now = desk.state.clock.now();
+                desk.state.settle(now);
+            }
+
+            /// **#452, on the titlebar a frame draws**: a double click on a
+            /// maximised window's titlebar restores it; a click with a
+            /// hand's few pixels of motion in it leaves it maximised where
+            /// it is; and a drag past `maximize.restore_after` brings it off
+            /// at its old size with the pointer on its titlebar, as far
+            /// along it as it was taken, and moves it on with the pointer.
+            #[test]
+            fn a_maximised_windows_titlebar_takes_a_double_click_a_click_and_a_drag() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    crate::qml::start().expect("Qt starts");
+                    let style = style();
+                    let mut desk = Desk::new();
+                    let opened = desk.open_surface();
+                    let pane = opened.pane;
+                    let window = desk
+                        .state
+                        .panes
+                        .get(pane)
+                        .and_then(Pane::client)
+                        .cloned()
+                        .expect("a client");
+                    desk.install("require(\"floating\")");
+                    desk.state
+                        .decorations
+                        .set_style(&mut desk.state.panes, Some(style.display().to_string()));
+                    desk.state
+                        .decorations
+                        .insert(&mut desk.state.panes, pane, 400, 300);
+                    commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                    desk.pump();
+                    desk.state
+                        .space
+                        .map_element(window.clone(), (200, 200), false);
+                    desk.state.space.refresh();
+                    desk.state.clock.advance(Duration::from_secs(1));
+                    let now = desk.state.clock.now();
+                    desk.state.settle(now);
+                    let before = desk.state.real_geometry(&window).expect("mapped");
+                    assert_eq!(
+                        desk.state.insets_of(pane).top,
+                        32,
+                        "the premise: a titlebar"
+                    );
+
+                    desk.state.toggle_maximize(&window);
+                    desk.pump();
+                    answer(&mut desk, &opened);
+                    let maximised = desk.state.pane_outer_of(pane).expect("outer");
+                    let at = maximised.loc + Point::from((maximised.size.w / 5, 16));
+                    let at = (f64::from(at.x), f64::from(at.y));
+                    assert!(
+                        matches!(
+                            desk.state.chrome_under(at.into()),
+                            Some(under) if matches!(under.chrome, crate::state::Chrome::Frame)
+                        ),
+                        "the premise: the point is on the maximised window's titlebar"
+                    );
+
+                    // A double click.
+                    move_pointer(&mut desk.state, at, 10_000);
+                    button(&mut desk, ButtonState::Pressed, 11_000);
+                    button(&mut desk, ButtonState::Released, 12_000);
+                    button(&mut desk, ButtonState::Pressed, 13_000);
+                    button(&mut desk, ButtonState::Released, 14_000);
+                    assert!(
+                        !in_state(&window, State::Maximized),
+                        "the double click did not restore the window"
+                    );
+                    answer(&mut desk, &opened);
+                    assert_eq!(
+                        desk.state.real_geometry(&window),
+                        Some(before),
+                        "the double click did not put it back where it was"
+                    );
+
+                    // A click, with two or three pixels in it.
+                    desk.state.toggle_maximize(&window);
+                    desk.pump();
+                    answer(&mut desk, &opened);
+                    move_pointer(&mut desk.state, at, 20_000);
+                    button(&mut desk, ButtonState::Pressed, 21_000);
+                    move_pointer(&mut desk.state, (at.0 + 3.0, at.1 + 2.0), 22_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
+                    button(&mut desk, ButtonState::Released, 23_000);
+                    answer(&mut desk, &opened);
+                    assert!(
+                        in_state(&window, State::Maximized),
+                        "the click restored the window"
+                    );
+                    assert_eq!(
+                        desk.state.pane_outer_of(pane),
+                        Some(maximised),
+                        "the click moved the window"
+                    );
+
+                    // A drag.
+                    move_pointer(&mut desk.state, at, 30_000);
+                    button(&mut desk, ButtonState::Pressed, 31_000);
+                    move_pointer(&mut desk.state, (at.0 + 2.0, at.1), 32_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
+                    assert!(
+                        in_state(&window, State::Maximized),
+                        "the first two pixels restored it"
+                    );
+                    let to = (at.0 + 50.0, at.1 + 80.0);
+                    move_pointer(&mut desk.state, to, 33_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
+                    assert!(
+                        !in_state(&window, State::Maximized),
+                        "the drag did not restore the window"
+                    );
+                    answer(&mut desk, &opened);
+                    let off = desk.state.pane_outer_of(pane).expect("outer");
+                    assert_eq!(
+                        (off.size.w, off.size.h),
+                        (before.size.w, before.size.h + 32),
+                        "it did not come off at the size it had"
+                    );
+                    assert_eq!(
+                        (f64::from(off.loc.x), f64::from(off.loc.y)),
+                        ((to.0 - f64::from(off.size.w) / 5.0).round(), to.1 - 16.0),
+                        "it did not come off a fifth of the way along under the \
+                         pointer, 16 down its titlebar"
+                    );
+                    assert!(
+                        matches!(
+                            desk.state.chrome_under(to.into()),
+                            Some(under) if matches!(under.chrome, crate::state::Chrome::Frame)
+                        ),
+                        "the pointer is not on its titlebar"
+                    );
+                    move_pointer(&mut desk.state, (to.0 + 100.0, to.1 + 50.0), 34_000);
+                    crate::input::grab::settle_drags(&mut desk.state, false);
+                    button(&mut desk, ButtonState::Released, 35_000);
+                    answer(&mut desk, &opened);
+                    assert_eq!(
+                        desk.state.pane_outer_of(pane),
+                        Some(Rectangle::new(off.loc + Point::from((100, 50)), off.size)),
+                        "it did not follow the pointer once off"
+                    );
+                    assert!(!in_state(&window, State::Maximized), "maximised again");
+                    drop(desk);
+                    let _ = std::fs::remove_dir_all(&style);
+                });
+            }
+        }
+
         mod minimize {
             use super::*;
             use crate::render::Stacked;
@@ -45796,6 +48648,112 @@ sol.bind("super+y", function() sol.unminimize(last) end)
                 ((132.0, 132.0).into(), (1500.0, 800.0).into(), locked_at),
                 "(where a warp left it with a button held, with the button up, with the \
                  pointer locked)"
+            );
+        }
+
+        /// Two floated windows, `left` at 100,100 and `right` at 600,100,
+        /// the keyboard on `left` and the pointer in its middle, locked there
+        /// by its client (#427). Returns both, and the lock, kept alive.
+        fn a_game_holding_the_pointer(
+            desk: &mut Desk,
+        ) -> (Opened, Opened, zwp_locked_pointer_v1::ZwpLockedPointerV1) {
+            use zwp_pointer_constraints_v1::Lifetime;
+            desk.install("");
+            let left = desk.open();
+            let right = desk.open();
+            let (l, r) = (desk.id(&left), desk.id(&right));
+            desk.apply(vec![
+                floated(l, 100.0, 100.0, 0),
+                floated(r, 600.0, 100.0, 0),
+            ]);
+            desk.rest();
+            desk.state.focus_window(
+                &left.window,
+                SERIAL_COUNTER.next_serial(),
+                FocusSource::Click,
+            );
+            desk.mouse_to((132.0, 132.0).into());
+            let pointer = desk.client.seat_pointer(&desk.qh);
+            let locked = desk
+                .client
+                .pointer_constraints
+                .clone()
+                .expect("zwp_pointer_constraints_v1 bound")
+                .lock_pointer(
+                    &left.surface,
+                    &pointer,
+                    None,
+                    Lifetime::Persistent,
+                    &desk.qh,
+                    (),
+                );
+            desk.pump();
+            desk.nudge((1.0, 0.0));
+            desk.nudge((40.0, 0.0));
+            (left, right, locked)
+        }
+
+        /// **#427: a key that focuses another window lets go of the pointer
+        /// the window it leaves had locked**: only the window with the
+        /// keyboard holds the pointer, so a game cannot keep it once a
+        /// binding has moved the keyboard elsewhere, and it is not granted
+        /// again over the game while the keyboard is on the other window.
+        #[test]
+        fn a_key_focusing_another_window_lets_go_of_the_pointer_a_game_locked() {
+            let mut desk = Desk::new(1);
+            let (left, right, _locked) = a_game_holding_the_pointer(&mut desk);
+            let locked_at = desk.at();
+            assert_eq!(
+                locked_at,
+                (132.0, 132.0).into(),
+                "the premise: the lock holds the pointer still"
+            );
+            desk.state.focus_window(
+                &right.window,
+                SERIAL_COUNTER.next_serial(),
+                FocusSource::Binding,
+            );
+            desk.pump();
+            desk.nudge((10.0, 0.0));
+            desk.nudge((10.0, 0.0));
+            assert_eq!(
+                (desk.focused().as_ref() == Some(&right.window), desk.at()),
+                (true, (152.0, 132.0).into()),
+                "(the keyboard on the other window, the pointer moving over the game)"
+            );
+            let _ = left;
+        }
+
+        /// **#427: `sol.release_pointer` takes the pointer back from the
+        /// window holding it, until that window is pressed on**: the pointer
+        /// moves with the keyboard still on the game, and a click on the game
+        /// gives it the pointer to lock again.
+        #[test]
+        fn release_pointer_lets_go_until_the_window_is_pressed_on() {
+            let mut desk = Desk::new(1);
+            let (left, _right, _locked) = a_game_holding_the_pointer(&mut desk);
+            assert_eq!(desk.at(), (132.0, 132.0).into(), "the premise: locked");
+            desk.state.release_pointer();
+            desk.pump();
+            desk.nudge((10.0, 0.0));
+            desk.nudge((10.0, 0.0));
+            let released = desk.at();
+            assert_eq!(
+                desk.focused().as_ref(),
+                Some(&left.window),
+                "a Wayland window keeps the keyboard; only an X11 one is \
+                 taken off it"
+            );
+            desk.button(true);
+            desk.button(false);
+            desk.nudge((1.0, 0.0));
+            desk.nudge((10.0, 0.0));
+            let pressed = desk.at();
+            assert_eq!(
+                (released, pressed),
+                ((152.0, 132.0).into(), (152.0, 132.0).into()),
+                "(where the pointer went once taken back, and where a press \
+                 on the game left it locked again)"
             );
         }
 

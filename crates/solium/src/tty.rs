@@ -367,10 +367,11 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
-    crate::qml::renderer::decide(
-        crate::qml::renderer::Entry::Tty,
-        &scripts.as_ref().map(Scripts::qml).unwrap_or_default(),
-    );
+    let qml = scripts.as_ref().map(Scripts::qml).unwrap_or_default();
+    crate::qml::renderer::decide(crate::qml::renderer::Entry::Tty, &qml);
+    // How a GPU scene's buffer is sized, before any scene is built:
+    // `qml.buffers` (`qml::buffers`), read here as the renderer is.
+    crate::qml::buffers::configure(qml.buffers.unwrap_or_default());
     // Told once the configuration has said whether to, with the socket
     // already bound. See `session.rs` and its tests.
     let settings = scripts.as_ref().map(Scripts::session).unwrap_or_default();
@@ -867,6 +868,8 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // Before the frame is decided: a drag that moved since the last
             // one is applied once, here, however many times the mouse
             // reported it. See `settle_resize`.
+            // And a move drag's last motion, told once (#452).
+            crate::input::grab::settle_drags(&mut state.solium, false);
             state.solium.settle_resize();
             // What the focused text field said since the last pass, told to the
             // configuration once, so a pill it moves to the caret is in this
@@ -875,6 +878,16 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // And a Wayland client waiting on an X11 client's clipboard, as
             // the nested loop serves it (#362); see `settle_selection`.
             crate::xwayland::settle_selection(&mut state.solium, &state.handle);
+            // **Out to the clients now, not after the frame.** A drag's new size was
+            // decided just above and sat in the clients' buffers until the frame was
+            // drawn, so every configure carried a pointer position that much older
+            // by the time it arrived -- as did every input event this pass delivered.
+            // Measured nested on 2026-10-16 with a client that reads each configure
+            // the moment it arrives: 3.5 ms from the pointer to the configure, 2.1 ms
+            // with this, Hyprland 1.9 ms through the same host. On a monitor it is the
+            // render time of whichever pass drew. The flush at the end of the pass
+            // still sends what drawing adds: the frame callbacks.
+            let _ = state.solium.display_handle.flush_clients();
             // Only when a screen can be drawn: one waiting on its flip, or
             // resting after a pass that queued nothing on it, is drawn by
             // the flip or the end of its rest, which ask for the pass
@@ -1709,6 +1722,13 @@ impl State {
                 continue;
             };
             let output = screen.output.clone();
+            // A window being resized may draw its next size now, while this
+            // frame of its last is drawn, rather than at this frame's flip:
+            // `Solium::send_resize_frames_on`. Out to it at once, since the
+            // drawing below is exactly the time it is meant to have.
+            self.solium
+                .send_resize_frames_on(&output, wall_clock(), frame_interval(&output));
+            let _ = self.solium.display_handle.flush_clients();
             let area = self
                 .solium
                 .space
@@ -1756,6 +1776,12 @@ impl State {
                 .map(|timer| timer.open(renderer, region));
             let frame = crate::qml::frame_in_flight();
             let gles = crate::pacing::span(crate::pacing::Phase::Gles);
+            // `SOLIUM_FULL_REDRAW`: every frame drawn whole, as a capture is,
+            // so a picture that differs between the screen and a capture can
+            // be pinned on damage or ruled out (#436).
+            if full_redraw() {
+                screen.compositor.reset_buffer_ages();
+            }
             let rendered = screen.compositor.render_frame(
                 renderer,
                 &elements,
@@ -1776,6 +1802,19 @@ impl State {
             let _commit = crate::pacing::span(crate::pacing::Phase::Commit);
             let queued = match rendered {
                 Ok(result) if !result.is_empty => {
+                    // `SOLIUM_SCANOUT_DUMP`: this frame as the display gets
+                    // it, beside the same frame drawn as a capture (#436).
+                    if let Some((dir, shot)) = crate::scanout::due(&output.name())
+                        && let Err(err) = crate::scanout::write(
+                            renderer,
+                            &result,
+                            &elements,
+                            &output,
+                            (&dir, shot),
+                        )
+                    {
+                        tracing::warn!(?err, monitor = output.name(), "SOLIUM_SCANOUT_DUMP failed");
+                    }
                     match screen.compositor.queue_frame(built_under) {
                         Ok(()) => {
                             screen.pending = true;
@@ -2082,6 +2121,15 @@ impl State {
             .send_frames_on(&screen.output, now, frame_interval(&screen.output));
         screen.told = Some(now);
     }
+}
+
+/// Whether `SOLIUM_FULL_REDRAW` is set: then every frame on a monitor is
+/// drawn whole, whatever the damage says, as a capture is (#436). Read once.
+fn full_redraw() -> bool {
+    static FULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FULL.get_or_init(|| {
+        std::env::var_os("SOLIUM_FULL_REDRAW").is_some_and(|v| !v.is_empty() && v != "0")
+    })
 }
 
 /// The time frame callbacks are stamped with.

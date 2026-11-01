@@ -418,13 +418,17 @@ impl Solium {
                     return None;
                 }
                 let outer = self.pane_outer(pane);
+                // Where it is going, for a script: the size its client was
+                // last asked for until it draws it (#431). What is drawn
+                // stays `outer`.
+                let asked = self.asked_outer(pane);
                 // The two match keys a rule reads that nothing else here
                 // says, from where the rules read them, so a rule can be
                 // tried in Lua first: `real_client::sol_windows_carries_every_window_match_key`.
                 let facts = self.window_facts(pane.id(), crate::effect::rules::Keys::default());
                 Some(WindowInfo {
                     id: pane.id().get(),
-                    rect: to_rect(outer),
+                    rect: to_rect(asked),
                     drawn: Drawn {
                         slot: outer,
                         frame: self.drawn_at(pane, outer, now),
@@ -478,6 +482,7 @@ impl Solium {
                     cramped: pane.cramped(),
                     shown: crate::present::was_shown(pane),
                     fullscreen: facts.fullscreen,
+                    maximized: facts.maximized,
                     style: facts.style,
                     // `None` for a Wayland window -- there is no
                     // `_NET_WM_WINDOW_TYPE` to have read -- never `"normal"`
@@ -512,6 +517,8 @@ impl Solium {
                     // reserved slot has no client to have said anything.
                     content_type: pane.client().map_or("none", content_type_of),
                     pid: pane.client().and_then(|window| self.window_pid(window)),
+                    // What its frame takes of `rect` right now (#435).
+                    insets: self.insets_of(pane.id()),
                 })
             })
             .collect()

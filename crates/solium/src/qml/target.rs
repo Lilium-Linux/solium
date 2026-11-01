@@ -36,7 +36,14 @@ pub(crate) struct Target {
     pub(crate) dmabuf: Dmabuf,
     pub(crate) width: i32,
     pub(crate) height: i32,
+    /// Which allocation this is, unique in the process: what a picture
+    /// sampled from it is told apart by, now that a scene draws pictures of
+    /// several sizes into one buffer (`paint::Sampled::buffer`).
+    pub(crate) id: u64,
 }
+
+/// The next [`Target::id`].
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Allocate a buffer both sides can use.
 pub(crate) fn allocate(gbm: &GbmDevice<DrmDeviceFd>, width: i32, height: i32) -> Result<Target> {
@@ -81,6 +88,7 @@ pub(crate) fn allocate(gbm: &GbmDevice<DrmDeviceFd>, width: i32, height: i32) ->
         dmabuf,
         width,
         height,
+        id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     })
 }
 

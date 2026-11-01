@@ -155,9 +155,21 @@ pub(crate) struct ResizeGrab {
     drag: ResizeDrag,
 }
 
-/// A resize's geometry, shared by independently captured pointer and touch.
+/// One resize, shared by independently captured pointer and touch: its
+/// window, and which of `Solium::resizes` it is.
 #[derive(Clone, Debug)]
 pub(crate) struct ResizeDrag {
+    window: Window,
+    drag: u64,
+}
+
+/// One resize under way, the pointer's or a finger's: its geometry, and what
+/// the configuration can change about it (#454). Kept on `Solium`, not in the
+/// grab, because a command reaches it from a script, and smithay hands out
+/// its grab only to be read -- as `crate::input::grab::Moving` is.
+#[derive(Clone, Debug)]
+pub(crate) struct Resizing {
+    drag: u64,
     window: Window,
     edges: ResizeEdge,
     /// The window's rectangle when the drag began.
@@ -184,7 +196,13 @@ pub(crate) struct ResizeDrag {
     /// spelling. It is not merely drift — the error is the whole of the
     /// previous frame's travel, every frame.
     laid_out: LaidOut,
+    /// Where the pointer was when the drag began, or when a script last let
+    /// it go on ([`hold`]): the drag's movement is measured from here.
     from: Point<f64, Logical>,
+    /// Where the pointer, or the finger, is now.
+    at: Point<f64, Logical>,
+    /// Whether `sol.resize_hold` keeps the window as it is.
+    held: bool,
 }
 
 /// The rectangle the *layout* put a pane at, as opposed to where the window is.
@@ -202,36 +220,98 @@ pub(crate) struct LaidOut(pub(crate) Rectangle<i32, Logical>);
 
 impl ResizeGrab {
     pub(crate) fn new(
+        state: &mut Solium,
         start_data: GrabStartData<Solium>,
         window: Window,
         edges: ResizeEdge,
         began: Rectangle<i32, Logical>,
         laid_out: LaidOut,
     ) -> Self {
-        let drag = ResizeDrag::new(window, edges, began, laid_out, start_data.location);
+        let drag = ResizeDrag::new(state, window, edges, began, laid_out, start_data.location);
         Self { start_data, drag }
     }
 }
 
 impl ResizeDrag {
+    /// A resize of `window` on `edges`, which stood at `began` and was laid
+    /// out at `laid_out`, taken at `from`: kept on `Solium::resizes`, and its
+    /// `begin` told once the grab has returned, so a `resizing` listener can
+    /// hold it before the first motion (#454).
     pub(crate) fn new(
+        state: &mut Solium,
         window: Window,
         edges: ResizeEdge,
         began: Rectangle<i32, Logical>,
         laid_out: LaidOut,
         from: Point<f64, Logical>,
     ) -> Self {
-        Self {
-            window,
+        state.next_drag += 1;
+        let drag = state.next_drag;
+        state.resizes.push(Resizing {
+            drag,
+            window: window.clone(),
             edges,
             began,
             laid_out,
             from,
-        }
+            at: from,
+            held: false,
+        });
+        super::grab::tell(
+            state,
+            super::grab::Gesture::Resize,
+            &window,
+            super::grab::Phase::Begin,
+            from,
+        );
+        Self { window, drag }
     }
 
+    /// The resize is over, however it ended: released, its `end` told once
+    /// the grab has returned, and forgotten. Twice is once.
     pub(crate) fn finish(&self, state: &mut Solium) {
+        let Some(index) = state
+            .resizes
+            .iter()
+            .position(|resizing| resizing.drag == self.drag)
+        else {
+            return;
+        };
+        let resizing = state.resizes.remove(index);
         state.release_resize(&self.window);
+        super::grab::tell(
+            state,
+            super::grab::Gesture::Resize,
+            &self.window,
+            super::grab::Phase::End,
+            resizing.at,
+        );
+    }
+}
+
+/// A script keeping a window a resize has as it is, or letting the resize go
+/// on (`sol.resize_hold`, #454). While held, a motion asks nothing of the
+/// window or of the layouts. Let go, the resize goes on from where the
+/// pointer is then and from the rectangle the window has then, and the one
+/// the layout gives it, so nothing jumps: what the drag would have done while
+/// it was held is not done after.
+/// `state::tests::real_client::reflow_on_close::resize_primitives::a_held_resize_keeps_the_window_and_goes_on_from_where_the_pointer_is`.
+pub(crate) fn hold(state: &mut Solium, window: &Window, held: bool) {
+    let rebased = state.panes.of(window).map(|pane| state.pane_outer(pane));
+    let laid_out = state.pane_laid_out(window);
+    for resizing in state
+        .resizes
+        .iter_mut()
+        .filter(|resizing| resizing.window == *window)
+    {
+        if resizing.held && !held {
+            resizing.from = resizing.at;
+            if let Some(outer) = rebased {
+                resizing.began = outer;
+                resizing.laid_out = laid_out.unwrap_or(LaidOut(outer));
+            }
+        }
+        resizing.held = held;
     }
 }
 
@@ -556,7 +636,28 @@ pub(crate) fn drag_rect(
 }
 
 impl ResizeDrag {
+    /// The pointer, or the finger, is at `location`: the resize it asks for
+    /// is recorded for the next pass, unless a script holds the window
+    /// (`sol.resize_hold`), when nothing is.
     pub(crate) fn to(&self, data: &mut Solium, location: Point<f64, Logical>) {
+        let Some(resizing) = data
+            .resizes
+            .iter_mut()
+            .find(|resizing| resizing.drag == self.drag)
+        else {
+            return;
+        };
+        resizing.at = location;
+        if resizing.held {
+            return;
+        }
+        let Resizing {
+            edges,
+            began,
+            laid_out,
+            from,
+            ..
+        } = *resizing;
         // Recorded, not applied. A layout may want this to move a seam rather
         // than change one window's size, and asking it from in here would call
         // a script while the seat holds the pointer's lock — the deadlock the
@@ -577,19 +678,12 @@ impl ResizeDrag {
         //
         // `wanted` is held to what the client accepts before anything reads
         // it (#115). See [`drag_rect`].
-        let wanted = drag_rect(
-            data,
-            &self.window,
-            self.began,
-            self.edges,
-            self.from,
-            location,
-        );
+        let wanted = drag_rect(data, &self.window, began, edges, from, location);
         data.pending_resize = Some(crate::state::ResizeRequest {
             window: self.window.clone(),
             wanted,
-            edge_at: dragged_edge(self.laid_out, self.edges, self.from, location),
-            edges: self.edges,
+            edge_at: dragged_edge(laid_out, edges, from, location),
+            edges,
         });
     }
 }

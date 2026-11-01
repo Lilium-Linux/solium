@@ -544,11 +544,11 @@ impl ShellSurface {
         qml::clear_cache();
 
         // 1x1 on the software path, as it always was: the next draw resizes
-        // it. A GPU scene cannot be resized -- its pixel size is its buffer's
-        // -- so rebuilding one at 1x1 would only have it rebound again at the
-        // real size on the next line of `Gpu::render`, two whole Qt scenes and
-        // two buffers for one edit. The size the caller is about to ask for is
-        // known here, which is why it is passed in.
+        // it. A GPU scene cannot grow past its buffer, so rebuilding one at
+        // 1x1 would only have it rebound again at the real size on the next
+        // line of `Gpu::render`, two whole Qt scenes and two buffers for one
+        // edit. The size the caller is about to ask for is known here, which
+        // is why it is passed in.
         let (width, height) = match self.backing {
             Backing::Memory { .. } => (1, 1),
             Backing::Gpu(_) => (wanted.0.max(1), wanted.1.max(1)),

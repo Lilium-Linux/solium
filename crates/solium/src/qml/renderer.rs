@@ -144,6 +144,10 @@ pub(crate) struct Configured {
     pub(crate) renderer: Option<String>,
     /// `qml.probe_timeout`, in milliseconds there.
     pub(crate) probe_timeout: Option<Duration>,
+    /// `qml.buffers`: how a GPU scene's buffer is sized, and when it is
+    /// replaced (`qml::buffers`).
+    /// `script::tests::a_configured_qml_renderer_is_read_before_qt_starts`.
+    pub(crate) buffers: Option<super::buffers::Buffers>,
 }
 
 /// Which entry point is starting Qt.

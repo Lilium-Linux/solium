@@ -40,6 +40,9 @@
 //! | `framed = n` | the n-th window opened may have a frame again, as one leaving fullscreen may: its frame is on its way, and no Qt here builds it |
 //! | `bare = n` | the n-th window opened is drawn bare, as a fullscreen window and one drawing its own decorations are; every window opens bare here, under the style `"none"` |
 //! | `key = "combo"` | keys pressed by name through the real input path, as `SOLIUM_KEY_AT` presses them |
+//! | `press = { x, y }` | the pointer moved there and the left button pressed, through the real input path; with `super = true`, the drag modifier held first, and with `button = "right"` the right button |
+//! | `drag = { x, y }` | the pointer moved there with the button held, and the pass ended as a frame ends one: the `drag` listeners told where it got to, an edge drag settled |
+//! | `release = true` | the button let go, and the drag modifier if it was held, and the pass ended |
 //!
 //! On the Qt thread:
 //!
@@ -58,8 +61,9 @@
 //! `properties`), `panes` (what `sol.pane_values` handed every pane), `field`
 //! (what `sol.text_input()` answers, `framed` included), `windows` (each
 //! window opened: `id`; `x`, `y`, `w`, `h`, where it lives; `drawn` -- the
-//! rectangle it is drawn at now, `x`, `y`, `w`, `h` -- and `transformed`,
-//! whether it holds a presentation transform at all) and `unknown` (each
+//! rectangle it is drawn at now, `x`, `y`, `w`, `h` -- `transformed`,
+//! whether it holds a presentation transform at all, `maximized`, and
+//! `values`, what `sol.frame` handed its frame) and `unknown` (each
 //! setting `solium --check` would report: `key`, and the `meant` it
 //! suggests); or, on the Qt thread,
 //! `pixel(layer, x, y)`, the frame's layer of that name rendered, answering
@@ -255,6 +259,7 @@ fn world(lua: &Lua, desk: &Desk, windows: &[Window]) -> mlua::Result<Table> {
         world.set("field", entry)?;
     }
     let opened = lua.create_table()?;
+    let snapshot = state.snapshot();
     for (index, window) in windows.iter().enumerate() {
         let entry = lua.create_table()?;
         entry.set(
@@ -281,7 +286,16 @@ fn world(lua: &Lua, desk: &Desk, windows: &[Window]) -> mlua::Result<Table> {
             rect.set("h", drawn.size.h)?;
             entry.set("drawn", rect)?;
             entry.set("transformed", crate::present::transformed(pane))?;
+            entry.set("values", lua_of(lua, pane.frame_values().object())?)?;
         }
+        let id = state.panes.id_of(window).map(crate::pane::PaneId::get);
+        entry.set(
+            "maximized",
+            snapshot
+                .windows
+                .iter()
+                .any(|info| Some(info.id) == id && info.maximized),
+        )?;
         opened.set(index + 1, entry)?;
     }
     world.set("windows", opened)?;
@@ -309,6 +323,46 @@ fn pane_of(desk: &Desk, windows: &[Window], n: usize) -> crate::pane::PaneId {
         .expect("that window, with a pane")
 }
 
+/// The pointer moved to `at` through the real input path, from wherever it
+/// is: where it ends up.
+fn point_to(
+    desk: &mut Desk,
+    region: Rectangle<i32, smithay::utils::Logical>,
+    at: (f64, f64),
+    time: u64,
+) -> smithay::utils::Point<f64, smithay::utils::Logical> {
+    let location = |desk: &Desk| {
+        desk.state
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default()
+    };
+    let was = location(desk);
+    crate::synth::send_motion(
+        &mut desk.state,
+        region,
+        smithay::utils::Point::from(at) - was,
+        time,
+    );
+    location(desk)
+}
+
+/// The end of a pass, as each loop ends one: what a drag did told to the
+/// `drag` listeners, an edge drag settled, and the client told what that
+/// sent.
+fn end_pass(desk: &mut Desk) {
+    crate::input::grab::settle_drags(&mut desk.state, false);
+    desk.state.settle_resize();
+    desk.pump();
+}
+
+/// The left button, or the right.
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+/// Super, as evdev numbers it plus xkb's eight.
+const SUPER: u32 = 133;
+
 /// Play a scenario with a real client.
 fn with_a_client(path: &Path) {
     let lua = Lua::new();
@@ -321,9 +375,14 @@ fn with_a_client(path: &Path) {
     // Each window's surface and toplevel, in the order opened, for `answer`.
     let mut clients = Vec::new();
     let mut text_input = None;
+    // The button a `press` holds, and whether with the drag modifier, until
+    // its `release`; and the time each pointer event is stamped with.
+    let mut held: Option<(u32, bool)> = None;
+    let mut time: u64 = 1_000;
     let steps: Vec<Table> = scenario.get("steps").expect("`steps` is a list");
     for (index, step) in steps.iter().enumerate() {
         let index = index + 1;
+        time += 1_000;
         if step.get::<Option<bool>>("open").ok().flatten() == Some(true) {
             let app_id: Option<String> = step.get("app_id").expect("`app_id` is text");
             let (window, surface, _, toplevel) = desk.window_of(app_id.as_deref());
@@ -381,27 +440,73 @@ fn with_a_client(path: &Path) {
                 input.commit();
             }
             desk.pump();
-        } else if let Ok(Some(at)) = step.get::<Option<Table>>("pointer") {
-            let at: (f64, f64) = (at.get(1).expect("x"), at.get(2).expect("y"));
-            let was = desk
-                .state
-                .seat
-                .get_pointer()
-                .map(|pointer| pointer.current_location())
-                .unwrap_or_default();
-            crate::synth::send_motion(
+        } else if let Ok(Some(at)) = step.get::<Option<Table>>("press") {
+            let point: (f64, f64) = (at.get(1).expect("x"), at.get(2).expect("y"));
+            let modifier = at
+                .get::<Option<bool>>("super")
+                .expect("`super` is true or false");
+            let button: Option<String> = at.get("button").expect("`button` is text");
+            let button = if button.as_deref() == Some("right") {
+                BTN_RIGHT
+            } else {
+                BTN_LEFT
+            };
+            let modifier = modifier == Some(true);
+            point_to(&mut desk, region, point, time);
+            desk.pump();
+            if modifier {
+                crate::input::key(
+                    &mut desk.state,
+                    SUPER.into(),
+                    smithay::backend::input::KeyState::Pressed,
+                    u32::try_from(time / 1_000).unwrap_or(u32::MAX),
+                );
+            }
+            crate::synth::send_button(
                 &mut desk.state,
                 region,
-                smithay::utils::Point::from(at) - was,
-                0,
+                button,
+                smithay::backend::input::ButtonState::Pressed,
+                time + 1,
             );
+            held = Some((button, modifier));
+            end_pass(&mut desk);
+        } else if let Ok(Some(at)) = step.get::<Option<Table>>("drag") {
+            let point: (f64, f64) = (at.get(1).expect("x"), at.get(2).expect("y"));
+            assert!(
+                held.is_some(),
+                "{} step {index}: a drag with no button held",
+                path.display()
+            );
+            point_to(&mut desk, region, point, time);
+            end_pass(&mut desk);
+        } else if step.get::<Option<bool>>("release").ok().flatten() == Some(true) {
+            let (button, modifier) = held.take().unwrap_or_else(|| {
+                panic!(
+                    "{} step {index}: a release with no button held",
+                    path.display()
+                )
+            });
+            crate::synth::send_button(
+                &mut desk.state,
+                region,
+                button,
+                smithay::backend::input::ButtonState::Released,
+                time,
+            );
+            if modifier {
+                crate::input::key(
+                    &mut desk.state,
+                    SUPER.into(),
+                    smithay::backend::input::KeyState::Released,
+                    u32::try_from(time / 1_000).unwrap_or(u32::MAX),
+                );
+            }
+            end_pass(&mut desk);
+        } else if let Ok(Some(at)) = step.get::<Option<Table>>("pointer") {
+            let at: (f64, f64) = (at.get(1).expect("x"), at.get(2).expect("y"));
+            let now = point_to(&mut desk, region, at, 0);
             desk.pump();
-            let now = desk
-                .state
-                .seat
-                .get_pointer()
-                .map(|pointer| pointer.current_location())
-                .unwrap_or_default();
             assert!(
                 (now.x - at.0).abs() < 0.5 && (now.y - at.1).abs() < 0.5,
                 "{} step {index}: the pointer did not reach {at:?}: it is at {now:?}",

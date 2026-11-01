@@ -111,8 +111,10 @@ mod minimize;
 mod monitors;
 mod open;
 mod placement;
+mod pointer_hold;
 mod press;
 mod resize_bridge;
+mod round;
 mod snapshot;
 mod window_state;
 mod workspaces;
@@ -660,6 +662,10 @@ pub(crate) struct Solium {
     /// Where a locked pointer's client would like the cursor left when the
     /// lock ends. Advice, taken at unlock. See `cursor_position_hint`.
     pub(crate) constraint_hint: Option<Point<f64, Logical>>,
+    /// The root surface `sol.release_pointer` took the pointer back from:
+    /// none of its constraints is granted again until it is pressed on
+    /// (#427). See `state::pointer_hold`.
+    pub(crate) pointer_released: Option<WlSurface>,
 
     /// Letting a client *name* the cursor it wants instead of drawing one.
     ///
@@ -1006,6 +1012,18 @@ pub(crate) struct Solium {
     /// the pointer grab is the only thing that calls it.
     resize_bridge: Option<Bridged>,
 
+    /// The round the bridge's panes are moving in, under `resize.sync`: the
+    /// sizes they were all told together, and which clients have answered.
+    /// See `Self::settle_round`. Beside the bridge rather than inside it so
+    /// that dropping a bridge cannot drop a round whose answers are still held
+    /// back: only `Self::end_round` lets those go.
+    seam_round: Option<round::Round>,
+
+    /// Where each pane the bridge holds is drawn while rounds pace it: the
+    /// rectangle of the last round it was moved in, or where it was when the
+    /// gesture first moved it. See `Self::settle_round`.
+    seam_shown: Vec<(crate::pane::PaneId, Rectangle<i32, Logical>)>,
+
     /// The windows a fullscreen or maximise change has told a new size, each
     /// held at the rectangle the change gave it until its client answers
     /// (#49): the hold [`Self::resize_hold`] keeps for a drag, made by the
@@ -1061,6 +1079,12 @@ pub(crate) struct Solium {
     /// `Window` kept here is a client kept alive.
     resize_ended: Option<(Window, Duration)>,
 
+    /// Every window a live edge drag has told it is being resized: the
+    /// xdg-shell `resizing` state, set on the dragged window when the drag
+    /// begins and on each pane a tiled drag moves, and taken off them all at
+    /// the release (`Solium::mark_resizing`, `Solium::unmark_resizing`).
+    resizing_marked: Vec<Window>,
+
     /// What `config.lua` said about resizing. See [`crate::resizing::Fill`].
     pub(crate) resizing: crate::resizing::Settings,
 
@@ -1078,6 +1102,24 @@ pub(crate) struct Solium {
     /// compositor holding DRM master, which from the other side of the screen
     /// is indistinguishable from the machine dying.
     pub(crate) pending_drop: Option<(Window, f64, f64)>,
+
+    /// Every move drag under way, the pointer's and each finger's: what
+    /// `sol.drag_hold` and `sol.drag_grip` change (#452). See
+    /// [`crate::input::grab::Moving`].
+    pub(crate) moves: Vec<crate::input::grab::Moving>,
+
+    /// Every edge or modifier resize under way, the pointer's and each
+    /// finger's: what `sol.resize_hold` changes (#454). See
+    /// [`crate::input::resize::Resizing`].
+    pub(crate) resizes: Vec<crate::input::resize::Resizing>,
+
+    /// The last drag's number, a move's or a resize's, so each has its own.
+    pub(crate) next_drag: u64,
+
+    /// What the `drag` and `resizing` listeners have still to hear, recorded
+    /// inside a grab and told after it, for `pending_drop`'s reason. See
+    /// [`crate::input::grab::settle_drags`].
+    pub(crate) drags_told: Vec<crate::input::grab::Told>,
 
     /// Set when anything on screen has changed and not yet been drawn.
     ///
@@ -1260,21 +1302,24 @@ fn inner(outer: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logic
 /// caller of `size_window` funnels through here, so "never size an OR
 /// window" is enforced once, for all four call sites and whatever is added
 /// later, instead of each of them having to remember to ask first.
-fn size_window(window: &Window, client: Rectangle<i32, Logical>) {
+///
+/// Returns the configure that told a Wayland client, when one went out: a
+/// round waits for its acknowledgement (`state::round`). Nothing for a size
+/// the client already had, and nothing for an X11 window, whose configure has
+/// no acknowledgement to wait for.
+fn size_window(window: &Window, client: Rectangle<i32, Logical>) -> Option<Serial> {
     if let Some(toplevel) = window.toplevel() {
         toplevel.with_pending_state(|state| state.size = Some(client.size));
-        toplevel.send_pending_configure();
-        return;
+        return toplevel.send_pending_configure();
     }
-    let Some(x11) = window.x11_surface() else {
-        return;
-    };
+    let x11 = window.x11_surface()?;
     if x11.is_override_redirect() {
-        return;
+        return None;
     }
     if let Err(err) = x11.configure(Some(client)) {
         tracing::warn!(?err, "could not size an X11 window");
     }
+    None
 }
 
 /// What rules match a window against, gathered only for the keys some rule
@@ -1287,6 +1332,9 @@ pub(crate) struct WindowFacts {
     pub(crate) title: String,
     pub(crate) focused: bool,
     pub(crate) fullscreen: bool,
+    /// Whether the compositor last told it to be maximised, as `fullscreen`
+    /// is (#454).
+    pub(crate) maximized: bool,
     pub(crate) monitor: String,
     pub(crate) style: String,
 }
@@ -1398,6 +1446,7 @@ impl Solium {
             relative_pointer_state: RelativePointerManagerState::new::<Self>(&display_handle),
             pointer_constraints_state: PointerConstraintsState::new::<Self>(&display_handle),
             constraint_hint: None,
+            pointer_released: None,
             // Version 2, which smithay's `new` asks for unconditionally: it
             // adds `dnd-ask` and `all-resize` to the shape enum, and a client
             // bound at version 1 simply never sends them. `cursor::shape` maps
@@ -1502,6 +1551,10 @@ impl Solium {
             focusing: false,
             closing: None,
             pending_drop: None,
+            moves: Vec::new(),
+            resizes: Vec::new(),
+            next_drag: 0,
+            drags_told: Vec::new(),
             pending_resize: None,
             retelling_cramped: false,
             telling_change: false,
@@ -1513,8 +1566,11 @@ impl Solium {
             resize_hold: None,
             answering: Vec::new(),
             resize_bridge: None,
+            seam_round: None,
+            seam_shown: Vec::new(),
             resize_gesture: None,
             resize_ended: None,
+            resizing_marked: Vec::new(),
             resizing: crate::resizing::Settings::default(),
             fullscreen_covers: crate::stack::Covers::default(),
             redraw: true,
@@ -1536,6 +1592,20 @@ impl Solium {
     pub(crate) fn real_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
         let location = self.space.element_location(window)?;
         Some(Rectangle::new(location, window.geometry().size))
+    }
+
+    /// Where a window is, at the size it was last asked for while its client
+    /// has not drawn that yet ([`crate::resizing::unanswered`]), and at the
+    /// size it drew otherwise: the rectangle a change of its frame keeps.
+    /// [`Self::real_geometry`] is the size it is leaving while a placement
+    /// is on its way, and a frame change sized from that asked the client for
+    /// it again (#431).
+    pub(crate) fn asked_geometry(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        let real = self.real_geometry(window)?;
+        Some(Rectangle::new(
+            real.loc,
+            crate::resizing::unanswered(window).unwrap_or(real.size),
+        ))
     }
 
     /// A window as drawn, frame included.
@@ -1591,8 +1661,26 @@ impl Solium {
         // ends this the moment the client answers -- with what it was asked for
         // or with anything else -- and on a deadline if it answers nothing.
         // See `crate::resizing`.
+        //
+        // **Unless the window follows its application** (`resize.follow`, the
+        // default): then a floating drag draws it at the size its client last
+        // drew, against the edges the drag is not moving, so the rectangle and
+        // the picture agree on every frame and the edge trails the pointer
+        // instead. The same pinning the end of a drag lands on (`land_on`), so
+        // the #113 shake cannot come back: the edges nobody is dragging stay
+        // where they are. See `crate::resizing::Follow`.
+        //
+        // **And the panes a layout's drag moves move in rounds** under
+        // `resize.sync`: each is drawn where its last round put it, which is
+        // where the picture its client last committed was drawn for, until
+        // every pane's client has drawn the next. See `state::round`.
         if self.holding_resize(pane.id()) {
-            return pane.slot();
+            if let Some(shown) = self.seam_shown_of(pane) {
+                return shown;
+            }
+            return self
+                .followed_drag(pane, window)
+                .unwrap_or_else(|| pane.slot());
         }
         // A client that has mapped and not yet answered the size it was asked
         // for has a window of no size at all. Taking the space's word for that
@@ -1707,6 +1795,26 @@ impl Solium {
     ///
     /// `Option` here is the *lookup* failing, not the geometry: an id whose
     /// pane has been retired has no rectangle because it has no pane.
+    /// [`Self::pane_outer`], at the size its client was last asked for while
+    /// it has not drawn it and nothing holds the pane ([`Self::asked_geometry`]):
+    /// where the window is going rather than the size it is leaving. What a
+    /// change of its frame keeps, and what scripts are told it is, so a
+    /// script that reads a window back after placing it reads the place it
+    /// gave rather than the one the client is still drawing (#431).
+    pub(crate) fn asked_outer(&self, pane: &Pane) -> Rectangle<i32, Logical> {
+        pane.client()
+            .filter(|window| {
+                pane.left().is_none()
+                    && !self.holding_resize(pane.id())
+                    && crate::resizing::unanswered(window).is_some()
+            })
+            .and_then(|window| self.asked_geometry(window))
+            .map_or_else(
+                || self.pane_outer(pane),
+                |asked| grown(asked, self.insets_of(pane.id())),
+            )
+    }
+
     pub(crate) fn pane_outer_of(&self, id: crate::pane::PaneId) -> Option<Rectangle<i32, Logical>> {
         Some(self.pane_outer(self.panes.get(id)?))
     }
@@ -2061,6 +2169,7 @@ impl Solium {
             },
             focused: self.looks_focused(pane),
             fullscreen: window.is_some_and(workspaces::fullscreen),
+            maximized: window.is_some_and(|window| window_state::states(window).maximized),
             monitor: if keys.monitor {
                 held.and_then(|held| self.output_of(self.pane_outer(held)))
                     .map(|output| output.name())
@@ -2068,11 +2177,16 @@ impl Solium {
             } else {
                 String::new()
             },
-            style: style_fact(
-                held.is_some_and(|held| matches!(held.frame(), crate::pane::Frame::Styled(_))),
-                self.decorations.style(),
-            )
-            .to_owned(),
+            // The style of the frame drawn, which while a switch is still
+            // building the next one is the style before it (#226).
+            style: {
+                let frame = held.and_then(crate::pane::Pane::decoration);
+                style_fact(
+                    frame.is_some(),
+                    frame.and_then(crate::decoration::Decoration::built_style),
+                )
+                .to_owned()
+            },
         }
     }
 
@@ -2104,6 +2218,10 @@ impl Solium {
     /// also the moment Smithay drops elements whose client has died — the only
     /// notice we get for a window that went away without telling anyone.
     pub(crate) fn sync_panes(&mut self) -> bool {
+        // An X11 window is told where the space has it, once a pass (#441).
+        self.tell_x11_where_they_are();
+        // And a window the keyboard has left lets go of the pointer (#427).
+        self.settle_pointer_hold();
         // A scene whose application has painted has been replaced, and can go.
         //
         // Here rather than where a client is first shown, because that is not

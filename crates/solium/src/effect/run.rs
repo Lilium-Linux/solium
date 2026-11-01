@@ -31,19 +31,38 @@ use solium_effects::stage::{Depends, Feed, Plan, StatePlan, Step};
 use super::{gl, pool};
 
 /// Where a texture sits in the padded box: `uv` in the box maps to
-/// `offset + uv * scale` in the texture.
-/// `tests::a_texel_is_one_of_the_first_inputs_own_texels_in_uv`.
+/// `offset + uv * scale` in the texture. `extent` is how much of the texture,
+/// from its corner, holds a picture: the whole of it, or the corner a target
+/// with room was drawn in (`pool::Pool::target_with_room`, #428), and every
+/// read is kept inside it, as an edge clamp keeps a read inside a texture of
+/// exactly that size. `tests::a_texel_is_one_of_the_first_inputs_own_texels_in_uv`,
+/// `tests::a_read_stays_inside_the_corner_a_picture_fills`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BoxMap {
     pub(crate) offset: [f32; 2],
     pub(crate) scale: [f32; 2],
+    pub(crate) extent: [f32; 2],
 }
 
 impl BoxMap {
     pub(crate) const WHOLE: Self = Self {
         offset: [0.0, 0.0],
         scale: [1.0, 1.0],
+        extent: [1.0, 1.0],
     };
+
+    /// A picture of `size` in the top-left corner of a `texture`-sized
+    /// target, filling the box: the whole texture when the two are the same.
+    /// `tests::a_corner_of_a_texture_its_own_size_is_the_whole_of_it`.
+    pub(crate) fn corner(size: (u32, u32), texture: (u32, u32)) -> Self {
+        let part = |used: u32, whole: u32| side(used.max(1)) / side(whole.max(1));
+        let scale = [part(size.0, texture.0), part(size.1, texture.1)];
+        Self {
+            offset: [0.0, 0.0],
+            scale,
+            extent: scale,
+        }
+    }
 }
 
 /// The whole padded box, in `uv`: x, y, w, h.
@@ -78,6 +97,12 @@ pub(crate) struct Inputs<'a> {
     /// Clamp the first step's `sol_tex` into the part (Ruling 6's edge rule):
     /// the caller sets it for a T1 chain in a `replace` slot.
     pub(crate) clamp_first: bool,
+    /// Draw each step into a target with room for its size
+    /// (`pool::Pool::target_with_room`), so a part that changes size takes
+    /// the targets it has rather than new ones every frame (#428); `false`
+    /// is a target exactly each step's size. The result is the same either
+    /// way, byte for byte: wirecheck's case 12r.
+    pub(crate) room: bool,
 }
 
 /// What a run's states are kept on, one number for each thing a state may
@@ -157,9 +182,10 @@ pub(crate) struct Held {
     /// Each state's key when it was last made; `None` until it is made, and
     /// for a state that has no key.
     state_keys: Vec<Option<u64>>,
-    /// Each state's result while it stands, inside one of its targets.
-    state_results: Vec<Option<GlesTexture>>,
-    output: Option<GlesTexture>,
+    /// Each state's result while it stands, inside one of its targets, and
+    /// the size it was drawn at in that target's corner.
+    state_results: Vec<Option<(GlesTexture, (u32, u32))>>,
+    output: Option<(GlesTexture, (u32, u32))>,
     failed: bool,
 }
 
@@ -182,7 +208,13 @@ impl Held {
 
     /// The last run's result, while it stands: wirecheck 12q.
     pub(crate) fn output(&self) -> Option<&GlesTexture> {
-        self.output.as_ref()
+        self.output.as_ref().map(|(texture, _)| texture)
+    }
+
+    /// The size the last run's result was drawn at, in the corner of its
+    /// target: its target's whole size unless the run had room (#428).
+    pub(crate) fn output_size(&self) -> Option<(u32, u32)> {
+        self.output.as_ref().map(|(_, size)| *size)
     }
 
     /// Whether the chain failed, latched: wirecheck 12q. The compositor
@@ -248,6 +280,7 @@ pub(crate) fn texel(size: (u32, u32), map: BoxMap) -> [f32; 2] {
 /// `tests::the_first_input_is_clamped_to_its_edge_texels`.
 pub(crate) fn clamp_rect(map: BoxMap, clamp: [f32; 4], size: (u32, u32)) -> [f32; 4] {
     let half = [0.5 / side(size.0.max(1)), 0.5 / side(size.1.max(1))];
+    let filled = filled_rect(map, size);
     let mut out = [0.0; 4];
     for axis in 0..2 {
         let low = map.offset[axis] + clamp[axis] * map.scale[axis] + half[axis];
@@ -259,10 +292,27 @@ pub(crate) fn clamp_rect(map: BoxMap, clamp: [f32; 4], size: (u32, u32)) -> [f32
             let middle = (low + high) / 2.0;
             (middle, middle)
         };
-        out[axis] = low;
-        out[axis + 2] = high;
+        // And inside what the texture holds a picture in: past its edge
+        // texels, an edge clamp reads those texels, and a read clamped to
+        // their centres reads exactly them. On a texture its picture fills
+        // that changes nothing; in a target with room it keeps every read
+        // out of the room (#428).
+        let inside = |at: f32| at.clamp(filled[axis], filled[axis + 2].max(filled[axis]));
+        out[axis] = inside(low);
+        out[axis + 2] = inside(high);
     }
     out
+}
+
+/// Where a `size` texture's picture lies under `map`, in its own
+/// coordinates, half a texel inside: the centres of its edge texels, which
+/// is all an edge clamp lets a linear read reach. `sol_<name>(uv)` is kept
+/// in it (`glsl::clamp_of`), and so is `sol_tex` ([`clamp_rect`]).
+/// `tests::a_read_stays_inside_the_corner_a_picture_fills`.
+pub(crate) fn filled_rect(map: BoxMap, size: (u32, u32)) -> [f32; 4] {
+    let half = [0.5 / side(size.0.max(1)), 0.5 / side(size.1.max(1))];
+    let far = |axis: usize| (map.extent[axis] - half[axis]).max(half[axis]);
+    [half[0], half[1], far(0), far(1)]
 }
 
 /// Keep `slots` at `len`, giving back any target past it. Wirecheck 12l and
@@ -284,19 +334,28 @@ fn take(
     renderer: &mut GlesRenderer,
     size: (u32, u32),
     format: pool::Format,
+    room: bool,
 ) -> Option<pool::Target> {
     let wanted =
         smithay::utils::Size::from((i32::try_from(size.0).ok()?, i32::try_from(size.1).ok()?));
     if let Some(held) = slot.as_ref()
-        && held.size() == wanted
         && held.format() == format
+        && if room {
+            pool::has_room_for(held.size(), wanted)
+        } else {
+            held.size() == wanted
+        }
     {
         return Some(held.clone());
     }
     if let Some(old) = slot.take() {
         pool.give_back(old);
     }
-    let target = pool.target(&mut pool::Gl(renderer), wanted, format)?;
+    let target = if room {
+        pool.target_with_room(&mut pool::Gl(renderer), wanted, format)?
+    } else {
+        pool.target(&mut pool::Gl(renderer), wanted, format)?
+    };
     *slot = Some(target.clone());
     Some(target)
 }
@@ -305,8 +364,10 @@ fn take(
 /// wirecheck 12q.
 #[derive(Debug)]
 pub(crate) enum Outcome {
-    /// Drawn: the result, and the last step's sync point to settle.
-    Done(GlesTexture, SyncPoint),
+    /// Drawn: the result, the size it was drawn at in the corner of its
+    /// texture (its whole size without `Inputs::room`), and the last step's
+    /// sync point to settle.
+    Done(GlesTexture, (u32, u32), SyncPoint),
     /// Not run, and nothing latched: a program not compiled yet, or a format
     /// the probe refused before the rebind (Rulings 10, 11).
     Pending,
@@ -391,9 +452,9 @@ pub(crate) fn run<'p>(
         .with_context(|context| unsafe { context.GetError() })
         .ok();
     match (drawn, error) {
-        (Some((texture, sync)), Some(ffi::NO_ERROR)) => {
-            held.output = Some(texture.clone());
-            Outcome::Done(texture, sync)
+        (Some((texture, size, sync)), Some(ffi::NO_ERROR)) => {
+            held.output = Some((texture.clone(), size));
+            Outcome::Done(texture, size, sync)
         }
         _ => {
             held.failed = true;
@@ -407,18 +468,18 @@ pub(crate) fn run<'p>(
 /// sizes this run: it is in one of the state's own targets, of the size and
 /// format its last step draws. Wirecheck 12m's run at another size.
 fn fits(
-    result: Option<&GlesTexture>,
+    result: Option<&(GlesTexture, (u32, u32))>,
     state: &StatePlan,
     sizes: &[(u32, u32)],
     held: &[Option<pool::Target>],
 ) -> bool {
-    let (Some(result), Some(size)) = (result, sizes.last()) else {
+    let (Some((result, drawn)), Some(size)) = (result, sizes.last()) else {
         return false;
     };
     let format = state.steps.last().map(|step| step.format);
     held.iter().flatten().any(|target| {
         target.texture().tex_id() == result.tex_id() && Some(target.format()) == format
-    }) && size_of(result) == *size
+    }) && drawn == size
 }
 
 /// Every state that must be made, then the steps: the last step's texture
@@ -437,7 +498,7 @@ fn draw_plan<'p>(
     held: &mut Held,
     inputs: &Inputs<'_>,
     keys: &Keys,
-) -> Option<(GlesTexture, SyncPoint)> {
+) -> Option<(GlesTexture, (u32, u32), SyncPoint)> {
     let (sizes, state_sizes) = plan.sizes(inputs.padded);
     let (assignment, count) = Plan::slots(&plan.steps, &sizes);
     fit(&mut held.slots, count, pool);
@@ -468,7 +529,7 @@ fn draw_plan<'p>(
     let make = states_to_make(plan, keys, &held.state_keys, &standing);
     // States first, because a step may read one (wirecheck 12f); each kept
     // unless what it depends on moved (wirecheck 12m).
-    let mut states: Vec<GlesTexture> = Vec::with_capacity(plan.states.len());
+    let mut states: Vec<(GlesTexture, (u32, u32))> = Vec::with_capacity(plan.states.len());
     for (index, state) in plan.states.iter().enumerate() {
         if !make.get(index).copied().unwrap_or(true) {
             states.push(held.state_results.get(index)?.clone()?);
@@ -481,7 +542,7 @@ fn draw_plan<'p>(
         let (assignment, count) = Plan::slots(&state.steps, sizes);
         let slots = held.states.get_mut(index)?;
         fit(slots, count, pool);
-        let (texture, _) = steps(
+        let (texture, size, _) = steps(
             renderer,
             carrier,
             pool,
@@ -495,8 +556,8 @@ fn draw_plan<'p>(
             false,
         )?;
         *held.state_keys.get_mut(index)? = keys.of(state.depends);
-        *held.state_results.get_mut(index)? = Some(texture.clone());
-        states.push(texture);
+        *held.state_results.get_mut(index)? = Some((texture.clone(), size));
+        states.push((texture, size));
     }
     steps(
         renderer,
@@ -536,31 +597,31 @@ fn steps<'p>(
     sizes: &[(u32, u32)],
     assignment: &[usize],
     slots: &mut [Option<pool::Target>],
-    states: &[GlesTexture],
+    states: &[(GlesTexture, (u32, u32))],
     inputs: &Inputs<'_>,
     clamp_first: bool,
-) -> Option<(GlesTexture, SyncPoint)> {
+) -> Option<(GlesTexture, (u32, u32), SyncPoint)> {
     // A step's result stays in `drawn` after its slot is drawn into again,
     // and is never read then: `Plan::slots` frees a slot only once nothing
     // after reads what it holds (`stage::tests::a_saved_result_keeps_its_slot_until_its_last_reader`,
     // wirecheck 12l to 12o).
-    let mut drawn: Vec<GlesTexture> = Vec::with_capacity(steps.len());
+    // Each step's result and the size it was drawn at in its target's
+    // corner: the whole target without `Inputs::room`, and read through
+    // that corner either way (`BoxMap::corner`).
+    let mut drawn: Vec<(GlesTexture, (u32, u32))> = Vec::with_capacity(steps.len());
     let mut last = None;
+    let in_corner = |(texture, size): &(GlesTexture, (u32, u32))| {
+        (texture.clone(), BoxMap::corner(*size, size_of(texture)))
+    };
     for (index, step) in steps.iter().enumerate() {
         let size = *sizes.get(index)?;
         let slot = slots.get_mut(*assignment.get(index)?)?;
-        let target = take(slot, pool, renderer, size, step.format)?;
+        let target = take(slot, pool, renderer, size, step.format, inputs.room)?;
         let program = programs(step.key)?;
         let source = |feed: &Feed| -> Option<(GlesTexture, BoxMap)> {
             match feed {
-                Feed::Step(k) => drawn
-                    .get(*k)
-                    .cloned()
-                    .map(|texture| (texture, BoxMap::WHOLE)),
-                Feed::State(k) => states
-                    .get(*k)
-                    .cloned()
-                    .map(|texture| (texture, BoxMap::WHOLE)),
+                Feed::Step(k) => drawn.get(*k).map(in_corner),
+                Feed::State(k) => states.get(*k).map(in_corner),
                 Feed::Input(name) => inputs
                     .textures
                     .iter()
@@ -588,15 +649,17 @@ fn steps<'p>(
             clamp: clamp_rect(first_map, part, size_of(&first)),
             inputs,
         };
-        let mut frame = pool::frame_for(renderer, carrier, &target).ok()?;
+        let corner =
+            smithay::utils::Size::from((i32::try_from(size.0).ok()?, i32::try_from(size.1).ok()?));
+        let mut frame = pool::frame_in(renderer, carrier, &target, corner).ok()?;
         // SAFETY: inside the frame's own context, with every name this
         // context's; `draw` puts back what smithay expects.
         frame
             .with_context(|context| unsafe { draw.draw(context) })
             .ok()?;
         let sync = frame.finish().ok()?;
-        drawn.push(target.texture().clone());
-        last = Some((target.texture().clone(), sync));
+        drawn.push((target.texture().clone(), size));
+        last = Some((target.texture().clone(), size, sync));
     }
     last
 }
@@ -698,10 +761,14 @@ impl Draw<'_> {
             float("sol_direction", self.inputs.transition.direction);
             float("sol_seed", self.inputs.transition.seed);
             float("sol_time", self.inputs.time);
-            for (name, _, map) in self.more {
+            for (name, texture, map) in self.more {
                 vec4(
                     &solium_effects::glsl::box_of(name),
                     [map.offset[0], map.offset[1], map.scale[0], map.scale[1]],
+                );
+                vec4(
+                    &solium_effects::glsl::clamp_of(name),
+                    filled_rect(*map, size_of(texture)),
                 );
             }
             for (name, value) in &self.step.uniforms {
@@ -770,7 +837,8 @@ mod tests {
                 (100, 50),
                 BoxMap {
                     offset: [0.0, 0.0],
-                    scale: [0.5, 1.0]
+                    scale: [0.5, 1.0],
+                    extent: [1.0, 1.0]
                 }
             ),
             [0.02, 0.02]
@@ -801,6 +869,7 @@ mod tests {
         let right_half = BoxMap {
             offset: [0.5, 0.0],
             scale: [0.5, 1.0],
+            extent: [1.0, 1.0],
         };
         near(
             clamp_rect(right_half, [0.0, 0.0, 1.0, 1.0], (100, 50)),
@@ -809,6 +878,62 @@ mod tests {
         near(
             clamp_rect(BoxMap::WHOLE, [0.5, 0.0, 0.01, 1.0], (100, 50)),
             [0.505, 0.01, 0.505, 0.99],
+        );
+    }
+
+    /// **A corner of a texture its own size is the whole of it**, exactly,
+    /// so a run without room maps every step's result as it always did; a
+    /// smaller corner maps the box onto that corner alone (#428).
+    #[test]
+    fn a_corner_of_a_texture_its_own_size_is_the_whole_of_it() {
+        assert_eq!(BoxMap::corner((1150, 850), (1150, 850)), BoxMap::WHOLE);
+        assert_eq!(
+            BoxMap::corner((64, 32), (128, 128)),
+            BoxMap {
+                offset: [0.0, 0.0],
+                scale: [0.5, 0.25],
+                extent: [0.5, 0.25],
+            }
+        );
+    }
+
+    /// **A read stays inside the corner a picture fills** (#428): the edge
+    /// texels' centres of the corner, which is all an edge clamp lets a
+    /// linear read reach on a texture of exactly the corner's size, so a
+    /// read past the corner reads its edge and never the room beyond it. A
+    /// texture its picture fills is clamped where it always was, and a part
+    /// lying past a texture's edge reads that edge.
+    #[test]
+    fn a_read_stays_inside_the_corner_a_picture_fills() {
+        use super::filled_rect;
+        let near = |got: [f32; 4], want: [f32; 4]| {
+            assert!(
+                got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6),
+                "{got:?} is not {want:?}"
+            );
+        };
+        near(
+            filled_rect(BoxMap::WHOLE, (100, 50)),
+            [0.005, 0.01, 0.995, 0.99],
+        );
+        let corner = BoxMap::corner((64, 32), (128, 128));
+        near(
+            filled_rect(corner, (128, 128)),
+            [0.5 / 128.0, 0.5 / 128.0, 63.5 / 128.0, 31.5 / 128.0],
+        );
+        near(
+            clamp_rect(corner, [0.0, 0.0, 1.0, 1.0], (128, 128)),
+            [0.5 / 128.0, 0.5 / 128.0, 63.5 / 128.0, 31.5 / 128.0],
+        );
+        // A box reaching past the texture's right edge reads that edge.
+        let past = BoxMap {
+            offset: [0.75, 0.0],
+            scale: [0.5, 1.0],
+            extent: [1.0, 1.0],
+        };
+        near(
+            clamp_rect(past, [0.0, 0.0, 1.0, 1.0], (100, 50)),
+            [0.755, 0.01, 0.995, 0.99],
         );
     }
 

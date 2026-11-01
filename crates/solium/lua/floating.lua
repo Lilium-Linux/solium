@@ -17,7 +17,9 @@
 -- What it does, while floating is in charge:
 --
 --   * `config.floating.snap`'s four keys snap the focused window to a half,
---     a quarter or the whole of its monitor, and back.
+--     a quarter or the whole of its monitor, and back; dragged to an edge, a
+--     window snaps there too (`lua/snap.lua`, #455), and either way it is
+--     marked snapped for its frame.
 --   * A new window is placed and sized by `config.floating.placement`,
 --     instead of arriving whatever size its application asked for, wherever
 --     the compositor happened to map it (#222's "every window opens in the
@@ -33,13 +35,16 @@ local direction = require("direction")
 local dialogs = require("dialogs")
 local sizes = require("sizes")
 local workspaces = require("workspaces")
+local snapping = require("snap")
 local atrium = require("atrium")
 
 local floating = {}
 
 -- `before_snap` is the rect a window had before its first snap, by id, so
 -- `restore` can put it back whatever has happened since -- a quarter after a
--- half, or the next monitor after that. `maximized` is whether `sol.windows()`'s
+-- half, or the next monitor after that: `snapping.before`, the one a drag's snap
+-- keeps too, so a window snapped by a drag is restored by the key and the
+-- other way round. `maximized` is whether `sol.windows()`'s
 -- `id` is maximised right now, which nothing else here can ask for directly
 -- (there is no such field; see the `maximize` listener below) and is wanted
 -- for the same reason: `restore` un-maximises rather than placing a rect when
@@ -48,8 +53,8 @@ local floating = {}
 -- mid-snap. Ids are never reused, so a stale entry left by a closed window
 -- only takes up room, never the wrong window's place; `close` below clears it
 -- anyway.
-local kept = sol.keep("floating", { before_snap = {}, maximized = {} })
-local before_snap = kept.before_snap
+local kept = sol.keep("floating", { maximized = {} })
+local before_snap = snapping.before
 local maximized = kept.maximized
 
 -- Numbers out of Lua are `f64` through a divide or two: within a pixel counts
@@ -143,6 +148,7 @@ local function snap(side)
             return
         end
         place(window.id, half(monitors.named(next.name), side))
+        snapping.mark(window.id, side)
         -- The window a layout moved onto another monitor goes to the
         -- workspace that monitor shows (`workspaces.carry`'s own comment) --
         -- the same call `direction.lua`'s own cross-monitor `floating.move`
@@ -168,6 +174,7 @@ local function snap(side)
         before_snap[window.id] = { x = window.x, y = window.y, w = window.w, h = window.h }
     end
     place(window.id, here)
+    snapping.mark(window.id, side)
 end
 
 -- Maximise the focused window, or, from a half, its top quarter.
@@ -180,6 +187,7 @@ local function maximize_or_quarter()
     for _, side in ipairs({ "left", "right" }) do
         if same_rect(window, half(area, side)) then
             place(window.id, quarter(area, side))
+            snapping.mark(window.id, "top_" .. side)
             return
         end
         if same_rect(window, quarter(area, side)) then
@@ -215,30 +223,104 @@ local function restore()
     end
     before_snap[window.id] = nil
     place(window.id, rect)
+    snapping.mark(window.id, nil)
 end
 
--- `sol.windows()` has no field for "is this maximised": `sol.toggle_maximize`
--- is the only thing that asks for one, and asking twice undoes it. The
--- `maximize` event is the compositor's own word on it, true for a maximise
--- from any of its three doors -- this file's own key, `super+shift+m`, or the
--- frame's button -- so `restore` undoes whichever one actually happened.
+-- Which windows are maximised, as the `maximize` event tells it: the
+-- compositor's own word, true for a maximise from any of its three doors --
+-- this file's own key, `super+shift+m`, or the frame's button -- so `restore`
+-- undoes whichever one actually happened. Kept as the events arrive rather
+-- than read from `sol.windows()`'s `maximized`, because `snap` asks about the
+-- window it is handed before its own un-maximise has landed.
 sol.on("maximize", function(id, entering)
     maximized[id] = entering or nil
 end)
 
 sol.on("close", function(id)
-    before_snap[id] = nil
     maximized[id] = nil
+end)
+
+-- A maximised window does not move under a drag (#452). Taken by its
+-- titlebar, by the drag modifier or by a finger, it is held where it is
+-- (`sol.drag_hold`) until the pointer has gone `config.maximize.restore_after`
+-- from where the drag began, so a click or a double click on the titlebar is
+-- still one; past that it is restored, as `super+shift+m` restores it, and
+-- gripped (`sol.drag_grip`) as far along its titlebar as it was taken along
+-- the maximised one and as far down, never below its titlebar. Then the drag
+-- moves it on. A window maximised out of a layout's tile goes back into its
+-- tile, at the tile's size, and is dragged as any tiled window is: let go,
+-- the layout puts it in the tile it was let go over. So this is not only
+-- floating's: it holds under every layout, as the maximise key does. A
+-- fullscreen window is moved as it always was.
+-- `real_client::client_maximize::a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer`,
+-- `real_client::client_maximize::a_window_maximised_out_of_its_tile_comes_off_at_its_tiles_size`.
+local function restore_after()
+    local pixels = config.maximize and config.maximize.restore_after
+    if type(pixels) == "number" and pixels >= 0 then
+        return pixels
+    end
+    return 6
+end
+
+-- Where each held window's drag began, and where on its frame: by id.
+local pulled = {}
+
+local function window_by_id(id)
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then
+            return window
+        end
+    end
+end
+
+sol.on("drag", function(id, phase, x, y)
+    if phase == "begin" then
+        pulled[id] = nil
+        local window = window_by_id(id)
+        if window and window.maximized and not window.fullscreen and window.w > 0 then
+            pulled[id] = {
+                x = x,
+                y = y,
+                along = math.min(math.max((x - window.x) / window.w, 0), 1),
+                down = math.max(y - window.y, 0),
+                titlebar = window.insets.top,
+            }
+            sol.drag_hold(id, true)
+        end
+    elseif phase == "move" then
+        local held = pulled[id]
+        if not held or math.sqrt((x - held.x) ^ 2 + (y - held.y) ^ 2) < restore_after() then
+            return
+        end
+        pulled[id] = nil
+        local window = window_by_id(id)
+        -- Restored already, by the double click that began this drag: it
+        -- moves on from where it is.
+        if window and window.maximized and not window.fullscreen then
+            sol.toggle_maximize(id)
+            local down = held.down
+            if held.titlebar > 0 then
+                down = math.min(down, held.titlebar - 1)
+            end
+            sol.drag_grip(id, { x = held.along, dy = down })
+        end
+        sol.drag_hold(id, false)
+    else
+        pulled[id] = nil
+    end
 end)
 
 -- A window let go over a desk of another workspace -- one switched to
 -- mid-drag, or shown by the monitor it was dragged onto -- belongs to that
 -- workspace now, and is shown where it was let go (#401). The layouts do this
--- in their own `drop`; with none in charge, it is done here.
+-- in their own `drop`; with none in charge, it is done here. Then, let go in
+-- a snap zone, it goes there (`lua/snap.lua`): after, so a window snapped
+-- onto the other monitor ends on the workspace that monitor shows.
 -- `a_floating_window_dropped_on_the_other_monitors_workspace_belongs_to_it`.
 sol.on("drop", function(id, x, y)
     if modes.current() == "floating" then
         workspaces.drop(id, x, y)
+        snapping.dropped(id)
     end
 end)
 

@@ -687,9 +687,13 @@ fn check_known(effect: &str, known: &[String]) -> Result<(), String> {
             ));
         }
         if let Some(other) = known.iter().find(|other| {
-            [glsl::sampler(other), glsl::box_of(other)]
-                .iter()
-                .any(|declared| declared.strip_prefix("sol_") == Some(name.as_str()))
+            [
+                glsl::sampler(other),
+                glsl::box_of(other),
+                glsl::clamp_of(other),
+            ]
+            .iter()
+            .any(|declared| declared.strip_prefix("sol_") == Some(name.as_str()))
         }) {
             return Err(format!(
                 "effect `{effect}` names a result or state \"{name}\", which is `{other}`'s own `sol_{name}`"

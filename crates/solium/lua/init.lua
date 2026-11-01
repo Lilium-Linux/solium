@@ -16,6 +16,9 @@ sol.session(config.session)
 
 -- Settings the compositor itself holds, applied from the same file as
 -- everything else. All of them take effect immediately when reloaded.
+-- How long a frame may spend building frames for a new pane style, before
+-- the style is set. See config.lua's `pane_build`.
+sol.pane_build(config.pane_build)
 sol.pane(config.pane)
 -- How the compositor starts: the first frame waits for what it shows. Before
 -- the effects, which it waits for. See config.lua's `startup`.
@@ -278,9 +281,16 @@ sol.bind("shift+Print", run("sh", "-c", SHOT .. 'area="$(slurp)" && grim -g "$ar
 -- (#58): no binding fires over it but one that asked with `inhibited`. This
 -- one takes the keys back until the keyboard leaves that window. Ctrl+Alt+F*
 -- and Ctrl+Alt+Backspace work whatever holds the keys.
+--
+-- And the pointer, from a game that locked or confined it (#427): the window
+-- holds it again once it is clicked. An X11 game, Proton's included, also
+-- loses the keyboard, which is what makes it let go of its own X grabs.
+-- Moving the keyboard to another window or monitor lets go of the pointer
+-- too, without this key.
 sol.bind("super+Escape", function()
     sol.take_shortcuts_back()
-end, { note = "shortcuts", inhibited = true })
+    sol.release_pointer()
+end, { note = "shortcuts and pointer", inhibited = true })
 
 -- Lock the session, the way `config.lock` says: Solium's own lock screen, or
 -- `lock.command`'s locker. Not `super+l`, which is focus-right with h, j and k

@@ -9,10 +9,11 @@ and the code are Solium's own.
 
 It reads nothing of the frame, only the part's shape (tier T0): no capture,
 and one pass, run once and again only when the part's size or its params
-change, whatever the window draws under it; while a window keeps changing
-size, at most `effects.motion_hz` times a second, its last result stretched
-over the window between. Its result is drawn as it was between those, so a
-window moving, fading or zooming draws the shade it has.
+change, whatever the window draws under it: on every frame of a window
+changing size, unless `effects.motion_hz` caps how many times a second (its
+last result stretched over the window between). Its result is drawn as it
+was between those, so a window moving, fading or zooming draws the shade it
+has.
 
 ## In the `glass` pane style
 

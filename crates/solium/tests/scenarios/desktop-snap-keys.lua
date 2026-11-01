@@ -2,7 +2,8 @@
 -- Russian live, on a window placed by `placement` (#222, kept by #240):
 -- `super+left` and `super+right` snap the focused window to a half,
 -- `super+up` from a half goes to its top quarter, and `super+down` puts it
--- back where it was placed.
+-- back where it was placed. Each snap marks the window for its frame
+-- (`snapped`, #455), and `super+down` takes the mark off.
 --
 -- Played by `scenario::tests::every_scenario_with_a_client_passes`.
 
@@ -16,6 +17,13 @@ local function is(n, x, y, w, h, why)
         assert(window.x == x and window.y == y and window.w == w and window.h == h,
             why .. ": window " .. n .. " at " .. x .. "," .. y .. " " .. w .. "x" .. h .. ": "
                 .. show(window))
+    end
+end
+
+local function snapped(kind)
+    return function(world)
+        local values = world.windows[2].values or {}
+        assert(values.snapped == kind, "snapped " .. tostring(kind) .. ": " .. tostring(values.snapped))
     end
 end
 
@@ -36,14 +44,18 @@ return {
         { key = "super+left" },
         { answer = 2 },
         { expect = is(2, 0, 0, 960, 1080, "super+left: the left half") },
+        { expect = snapped("left") },
         { key = "super+right" },
         { answer = 2 },
         { expect = is(2, 960, 0, 960, 1080, "super+right: the right half") },
+        { expect = snapped("right") },
         { key = "super+up" },
         { answer = 2 },
         { expect = is(2, 960, 0, 960, 540, "super+up from a half: its top quarter") },
+        { expect = snapped("top_right") },
         { key = "super+down" },
         { answer = 2 },
         { expect = is(2, 892, 522, 200, 100, "super+down: back where it was placed") },
+        { expect = snapped(false) },
     },
 }

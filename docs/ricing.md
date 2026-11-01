@@ -132,6 +132,14 @@ the keyboard ([its numbers](../crates/solium/qml/panes/README.md#glass)).
 `pane = "top"` is the opaque titlebar above the window that was the default
 before it. Reload and every open window is re-framed.
 
+`sol.pane("border")` changes it from a script while the session runs: a
+configuration can give floating windows titlebars and tiled ones a border
+only, by calling it whenever the layout changes. Open windows keep the frame
+they have while the new ones are built, a few of their scenes a frame, and
+then all change together, so the windows go on moving meanwhile; each keeps
+the frame it had, so switching back is immediate. `pane_build` is how many
+milliseconds a frame may spend building them, 2 unless you say.
+
 ### No frame at all
 
 ```lua
@@ -274,6 +282,33 @@ does with one number is hug the window from outside — and a hug has to clear
 the biggest cut or it crosses the curve. A layer that cares about one corner
 reads that corner.
 
+#### Corners that change with the window
+
+The radius is a binding like any other, and it is read for each window: the
+`PaneStyle` is told what its layers are told about their window, its state
+(`maximized`, `fullscreen`, `floating`, `minimized`, `keptAbove`), `focused`,
+`title`, `values` and `windowValues` (what your Lua handed that window with
+`sol.frame(id, { ... })`), and the corners follow as they change:
+
+```qml
+// Pane.qml — square while maximised or snapped, round otherwise
+client.radius: (maximized || windowValues.snapped) ? 0 : 12
+```
+
+Every layer is told the window's own `clientRadius` as it changes, so a border
+hugs the corners that window has. A `Behavior` on the number is followed frame
+by frame:
+
+```qml
+property int corner: maximized ? 0 : 12
+Behavior on corner { NumberAnimation { duration: 160 } }
+client.radius: corner
+```
+
+A radius that is a plain number costs what it always did, and a window whose
+corners are 0 runs no program on its client at all, however its style got
+there.
+
 #### Two ways a titlebar meets a rounded window
 
 The shipped pair, and the reason the corners are separable at all. Both reserve
@@ -330,6 +365,18 @@ once per monitor and shared by every window it is behind
 
 ```lua
 { match = { app_id = "kitty" }, part = "client", slot = "behind", effect = "blur" }
+```
+
+A window's `match` takes `app_id`, `title`, `monitor` and `style` as words,
+`focused`, `fullscreen` and `maximized` as booleans, and `values`: what your
+Lua handed the window with `sol.frame(id, { ... })`, each key given equal to
+the value given. So the configuration can tag a window and have rules follow
+the tag, with nothing in the compositor knowing what the tag means; `false`
+also matches a key never handed:
+
+```lua
+sol.frame(id, { snapped = true })     -- in your snapping script
+{ match = { values = { snapped = false } }, part = "pane", slot = "behind", effect = "outline" }
 ```
 
 The rules are applied whole: one that cannot be, a typo in a key or an
@@ -2272,28 +2319,68 @@ with nothing in between, so a fullscreen game or video can be shown directly.
 An instant change is just that: nothing is moved, and the window is drawn as it
 is on the next frame. An app id is what `sol.windows()` calls `app_id`.
 
+A maximised window does not move when you drag it until the pointer has gone
+`maximize.restore_after` pixels, 6 by default; then it comes off at its old
+size under the pointer and follows it. Raise it if a click on a titlebar
+restores windows you meant to leave, or set 0 to have it come off at once:
+
+```lua
+return {
+    maximize = { restore_after = 12 },
+}
+```
+
 While any window changes size — an edge or a seam you drag, a layout gliding
 it to a new tile, a fullscreen or maximise glide — its application is a frame
 or more behind the rectangle on screen. `resize.fill` decides what its picture
-does meanwhile: `"anchor"`, the default, keeps it at its own size against the
-edges that are not moving, so text never changes size; `"crop"` keeps it at
-the window's top-left instead; `"stretch"` scales it to fill, which is smooth
-but draws text up to twice as wide while the application catches up.
-`resize.background` is what shows where the picture does not reach, `"none"`
-to see through. `resize.patience` is how long, in milliseconds (250 by
+does meanwhile: `"crop"`, the default, keeps it at its own size from the
+window's top-left, so text never changes size and the window beside a seam you
+drag keeps its picture against the seam, as in Hyprland; `"anchor"` keeps it
+against the edges that are not moving instead; `"stretch"` scales it to fill,
+which is smooth but draws text up to twice as wide while the application
+catches up.
+`resize.background` is what shows where the picture does not reach:
+`"edge"`, the default, stretches the picture's own edge over it, so a window
+that is behind looks like it has more of its own background and a transparent
+one stays transparent, as in Hyprland; a colour fills it instead, and `"none"`
+lets you see through. `resize.patience` is how long, in milliseconds (250 by
 default), the picture waits for the application once a change is over -- past
 a drag's release, and past a glide's landing, where it keeps to the edges the
 glide did not move -- before the window is shown at the size the application
-has. `resize.modes` gives a mode a fill of its own, for every size change
-while it is in charge, as `focus.modes` does for focus; a mode it does not
-name takes `resize.fill`:
+has. `resize.tell_hz` is how often, at most, the application is told its new
+size while you drag an edge: 0, the default, on every frame the drag moves, so
+its picture is never more than its own drawing time behind the edge; a number
+caps it at that many times a second (10 was the fixed rate before). Either way,
+an application still drawing the last size it was told hears the next once it
+has drawn it, so a slow one draws the newest size each time instead of falling
+behind a queue of them.
+`resize.follow` is what a floating window is drawn at while you drag its edge:
+`"app"`, the default, draws it at the size its application has drawn, against
+the edges you are not moving, so its frame always wraps its content and nothing
+is ever cut off or left uncovered, as in KWin; `"pointer"` draws it exactly
+where the pointer is and lets `resize.fill` cover the difference, as in
+Hyprland. `resize.sync` is how long, in milliseconds, the windows a tiled
+drag moves wait for one another's applications: 0, the default, moves each to
+the pointer at once; a number moves them in rounds, each told its new size at
+once and one whose application has drawn it held where it was until the others
+have too, so a seam moves as one but at the slower application's pace.
+`resize.overlap` (true by default) tells a window being resized it may draw its
+next size as soon as a frame showing its last starts to be drawn, so the
+application draws while the compositor does instead of after it; false waits
+for the screen. `resize.modes`
+gives a mode a fill of its own, for every size change while it is in charge,
+as `focus.modes` does for focus; a mode it does not name takes `resize.fill`:
 
 ```lua
 return {
     resize = {
-        fill = "crop",
-        background = "#000000",
+        fill = "anchor",
+        background = "edge",
         patience = 400,
+        tell_hz = 0,
+        follow = "app",
+        sync = 0,
+        overlap = true,
         modes = { scrolling = "stretch" },
     },
 }
@@ -2314,6 +2401,51 @@ The shipped motion is `{ duration = 220, easing = "outCubic" }`. There is no
 instant switch for it the way `fullscreen.animate` and `maximize.animate` have
 one above: a snap is always a glide, since nothing is waiting on an
 application to draw a new size first.
+
+Dragging a window to an edge snaps it too, as Windows and macOS do (#455):
+while no layout is in charge, drag a window by its titlebar, with the drag
+modifier or with a finger to a screen's left or right edge, and a preview shows
+the half it would fill; to a corner, the quarter; to the top edge, the whole
+work area, as a maximise. Let go there and it glides into place with
+`tiling.snap`'s motion, the one a tiled window settles into its tile with.
+Taken again, a snapped window stays put for `maximize.restore_after` pixels and
+then comes off at its old size under the pointer. Two windows snapped beside
+each other share a seam with a holder drawn on it: drag either window's edge
+there and both resize together, as a tiled seam does. Only a screen's outer
+edges snap: where two screens touch, a window dragged across goes on to the
+other one.
+
+```lua
+return {
+    floating = {
+        snap = {
+            drag = {
+                edge = 8,          -- how near an edge the pointer must be
+                corner = 120,      -- how far along an edge a corner's quarter reaches; 0 for none
+                top = true,        -- false: the top edge does not maximise
+                motion = { duration = 120, easing = "outCubic" },  -- tiling.snap's when left out
+                preview = { fill = "#ffffff24", border = "#ffffff80", radius = 12 },
+                divider = { minimum = 120, thickness = 6, length = 56 },
+                -- enabled = false turns it off; the keys still snap.
+            },
+        },
+    },
+}
+```
+
+The preview and the holders are one QML scene over the windows,
+`qml/snap/snap.qml`, which `drag.scene` replaces with your own; it is handed
+the zone (`monitor`, `kind`, `x`, `y`, `w`, `h` in that screen's pixels, or
+false), the seams, and the two tables above. A snapped window's frame is told
+which zone it fills as `windowValues.snapped` -- `"left"`, `"right"`,
+`"top_left"`, `"top_right"`, `"bottom_left"` or `"bottom_right"`, and `false`
+once it is not -- so a pane style squares its corners by it, as "Corners that
+change with the window" above shows:
+
+```qml
+// Pane.qml
+client.radius: (maximized || windowValues.snapped) ? 0 : 12
+```
 
 ### Your own bindings
 

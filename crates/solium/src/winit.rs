@@ -460,10 +460,11 @@ pub(crate) fn run() -> Result<()> {
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
-    crate::qml::renderer::decide(
-        crate::qml::renderer::Entry::Nested,
-        &scripts.as_ref().map(Scripts::qml).unwrap_or_default(),
-    );
+    let qml = scripts.as_ref().map(Scripts::qml).unwrap_or_default();
+    crate::qml::renderer::decide(crate::qml::renderer::Entry::Nested, &qml);
+    // How a GPU scene's buffer is sized, before any scene is built:
+    // `qml.buffers` (`qml::buffers`), read here as the renderer is.
+    crate::qml::buffers::configure(qml.buffers.unwrap_or_default());
     // Nested, the session this window is in keeps its own environment: this
     // tells nobody unless `SOLIUM_SESSION_BUS` names a bus. See `session.rs`.
     // The wallet's login socket is the host session's, never this one's.
@@ -769,12 +770,12 @@ pub(crate) fn run() -> Result<()> {
                 synth::touch_frame(&mut state, region);
             }
         }
-        while drags.last().is_some_and(|(at, _, _)| now >= *at) {
-            if let Some((_, from, to)) = drags.pop() {
-                tracing::info!(?from, ?to, "scripted drag");
+        while drags.last().is_some_and(|(at, _, _, _)| now >= *at) {
+            if let Some((_, from, to, held)) = drags.pop() {
+                tracing::info!(?from, ?to, held, "scripted drag");
                 let region = crate::monitor::union(&state.space)
                     .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
-                synth::drag(&mut state, region, from.into(), to.into(), 12);
+                synth::drag_holding(&mut state, region, from.into(), to.into(), 12, &held);
             }
         }
         while keys.last().is_some_and(|(at, _)| now >= *at) {
@@ -847,11 +848,24 @@ pub(crate) fn run() -> Result<()> {
         // Before the frame is decided: a drag that moved since the last one is
         // applied once, here, however many times the mouse reported it. See
         // `settle_resize`.
+        // And a move drag's last motion, told once (#452). Before the
+        // resize, so a window a listener restores is placed in this frame.
+        crate::input::grab::settle_drags(&mut state, false);
         state.settle_resize();
         // What the focused text field said since the last pass, told to the
         // configuration once, so a pill it moves to the caret is in this
         // frame: `text_input::tests::text_input_is_told_when_the_caret_moves_once_a_pass`.
         state.settle_text_input();
+        // **Out to the clients now, not after the frame.** A drag's new size was
+        // decided just above and sat in the clients' buffers until the frame was
+        // drawn, so every configure carried a pointer position that much older
+        // by the time it arrived -- as did every input event this pass delivered.
+        // Measured nested on 2026-10-16 with a client that reads each configure
+        // the moment it arrives: 3.5 ms from the pointer to the configure, 2.1 ms
+        // with this, Hyprland 1.9 ms through the same host. On a monitor it is the
+        // render time of whichever pass drew. The flush at the end of the pass
+        // still sends what drawing adds: the frame callbacks.
+        let _ = state.display_handle.flush_clients();
         // And a Wayland client waiting on an X11 client's clipboard. Here
         // because this is where a loop handle exists; see `settle_selection`.
         crate::xwayland::settle_selection(&mut state, &loop_handle);
@@ -919,6 +933,25 @@ pub(crate) fn run() -> Result<()> {
             .min_by_key(|output| frame_interval(output))
         {
             pace.deadline(frame_interval(output), || output.name());
+        }
+
+        // A window being resized may draw its next size now, while this frame
+        // of its last is drawn: `Solium::send_resize_frames_on`, as on the
+        // hardware.
+        if wanted && pictures {
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let lit: Vec<Output> = state
+                .space
+                .outputs()
+                .filter(|each| !state.power.is_off(each))
+                .cloned()
+                .collect();
+            for each in &lit {
+                state.send_resize_frames_on(each, wall, frame_interval(each));
+            }
+            let _ = state.display_handle.flush_clients();
         }
 
         // The renderer borrow must end before submit(), so rendering happens in

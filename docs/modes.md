@@ -74,10 +74,23 @@ a layout letting go, and `modes.use` sends it for every window whenever the
 layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
 window out of its tile on their own, and the way back puts it in again. A
-script cannot see that a window is maximised or fullscreen, so a layout that
-places every window on every pass (as `tiling.apply` does, and `dialogs.lua`
-for every floated window) places those too. The window itself stays where it
-is, over the arrangement. A tile placed is kept as the tile the window goes
+layout that places every window on every pass (as `tiling.apply` does, and
+`dialogs.lua` for every floated window) places those too, whatever
+`sol.windows()` says of their `maximized` and `fullscreen`. The window itself
+stays where it is, over the arrangement. A switch is different: when a layout
+takes over, `modes.use` lets every maximised window out of its maximise first,
+so the tile the new layout gives it is where it goes. Left maximised, a window
+maximised on the floating desktop went on covering the work area over the
+tiles, its own tile empty beside its neighbour, and no seam could size it
+(#443). A maximise the application asks for itself is not the user's, and a
+tile outranks it (#450): an xdg `set_maximized` or an X11 `_NET_WM_STATE`
+request from a window a layout holds in a tile is answered with the tile and
+"not maximised", and a window that opens maximised -- an application restoring
+the state it had last time, as Steam and Electron applications do -- is let out
+of the maximise when the layout gives it its tile, so it opens tiled and can be
+resized. On the floating desktop the application's maximise is carried out.
+`super+shift+m` and the frame's button still lift a tiled window out of its
+tile. A tile placed is kept as the tile the window goes
 back into; a placement with `tile = false` changes nothing, so a floated
 window goes back to where it floated. The one placement that moves such a
 window is a move by key onto another monitor: see
@@ -231,8 +244,10 @@ sol.on("unminimize", function(id) end)             -- it is shown again: take it
 sol.on("close",  function(id) end)                 -- it is gone
 sol.on("focus",  function(id, source, changed) end) -- the keyboard moved, what moved it, and from another window?
 sol.on("activate", function(id, why) end)          -- a window asked to come forward: "launch" or "request"
+sol.on("drag",   function(id, phase, x, y) end)    -- a window being moved: "begin", "move" (once a frame) or "end"
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
 sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side) end)
+sol.on("resizing", function(id, phase, x, y) end) -- an edge or modifier resize: "begin" or "end"
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
 sol.on("click",  function(x, y) end)               -- only while grabbing input
 sol.on("layout", function() end)                   -- the room windows get changed
@@ -1057,7 +1072,10 @@ size it had, until the key puts it back. It stays floated through a reload.
 `super+shift+m` on a fullscreen window leaves fullscreen for maximised, or,
 for one that was maximised before it went fullscreen, for where it was before
 either. Both keys act on an X11 window under XWayland as on a Wayland one,
-and so does the X11 window's own request: a game asking for
+and an application's own request to be maximised or restored is carried out
+for either kind (#445), as its own maximise button or a double click on a
+titlebar it draws itself sends it; under a layout a tiled window stays in its
+tile (above). So does the X11 window's own fullscreen request: a game asking for
 `_NET_WM_STATE_FULLSCREEN` covers its monitor, and one that opens with no
 frame at exactly its monitor's size and position, as Wine and Proton games
 do, opens fullscreen.
@@ -1071,6 +1089,75 @@ its tile there, or with no layout at the same place on the new screen as it
 had on the old one. A window floated with `super+shift+space` and then made
 fullscreen stays fullscreen through every layout pass, and leaving goes back to
 where it floated.
+
+Dragged, a maximised window does not move (#452). Taken by its titlebar, by
+the drag modifier or by a finger, it stays where it is until the pointer has
+gone `maximize.restore_after` pixels (6 as shipped), so a click or a double
+click on the titlebar is still one. Past that it is restored as `super+shift+m`
+restores it, with the same glide, but under the pointer: held as far along its
+titlebar as it was taken along the maximised one, and never lower than its
+titlebar. The drag goes on moving it from there. A window maximised out of a
+layout's tile comes off at its tile's size, back in its tile, and is dragged as
+any tiled window is: let go, the layout puts it in the tile it was let go over.
+A fullscreen window is moved as it always was.
+
+None of that is the compositor's. It tells every move drag -- the titlebar's,
+the drag modifier's, a finger's, a client's own move request -- to the `drag`
+listeners as it begins, moves (once a frame at most) and ends, and gives a
+listener two verbs over it; `lua/floating.lua` is the listener that does the
+above with them:
+
+```lua
+sol.drag_hold(id, true)                    -- the window stays; the pointer goes on
+sol.drag_hold(id, false)                   -- it moves on from where it stands
+sol.drag_grip(id, { x = 0.25, dy = 16 })   -- the pointer holds it a quarter along, 16 px down
+```
+
+`begin` is told before the first motion can move the window, so a hold there
+holds from the start, and `end` before the `drop`. A window let go of while it
+is held has not been moved, and no `drop` is told. `sol.drag_grip`'s `x` and
+`y` are shares of the frame's width and height and `dx`, `dy` pixels on from
+them, kept inside the frame; the frame is the size the window was last asked
+for, so a window restored in the same handler is gripped at its new size, and
+a glide it is part of the way through goes there with it.
+
+A resize -- a border dragged, the drag modifier with the right button, a
+finger `sol.touch` gave one -- is told the same way, to the `resizing`
+listeners, `(id, phase, x, y)` with `phase` `"begin"` or `"end"` and `x, y`
+the pointer. Its motion is the `resize` event's, once a frame. `begin` is told
+before the first motion is offered to anyone, and `end` after the release and
+after the last motion is offered. Between them a listener can keep the window
+as it is:
+
+```lua
+sol.resize_hold(id, true)                  -- the window keeps its size and place
+sol.resize_hold(id, false)                 -- the resize goes on from where the pointer is
+```
+
+While held the pointer goes on and nothing is resized: the `resize` listeners
+are offered nothing, so a layout moves no seam either. Let go, the resize goes
+on from the pointer and the window as they are then, so nothing jumps. A
+resize let go of while held ends with the window as it was. A fullscreen
+window that refuses to be resized is the configuration's, in a few lines:
+
+```lua
+sol.on("resizing", function(id, phase)
+    if phase == "begin" and is_fullscreen(id) then sol.resize_hold(id, true) end
+end)
+```
+
+Snapping a floating window by dragging it to an edge (#455) is configuration
+over the same verbs: `lua/snap.lua`, which `lua/floating.lua` requires. It
+reads the `drag` events for the zone the pointer is in and hands a scene
+(`qml/snap/snap.qml`, declared with `sol.surface` over the windows) the zone to
+preview; on the `drop` it places the window in its zone with `sol.place` and
+marks it with `sol.frame(id, { snapped = <zone> })`; it holds a snapped window
+taken again with `sol.drag_hold` and lets it off at its old size with
+`sol.place` and `sol.drag_grip`, as a maximised one is let off. Two snapped
+windows' shared edge is its `resize` listener's: it moves every window on the
+seam with `sol.place`, which claims the drag the way a layout claims a tiled
+seam, so the seam moves through the same configure path, every frame. The
+compositor knows nothing of zones, halves or holders.
 
 ### Going fullscreen or maximised, and back
 

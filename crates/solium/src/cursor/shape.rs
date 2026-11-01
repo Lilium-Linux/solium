@@ -173,56 +173,59 @@ pub(crate) fn resolve(icon: CursorIcon, mut has: impl FnMut(&str) -> bool) -> Op
         .find(|name| has(name))
 }
 
+/// Every shape `wp_cursor_shape_v1` version 2 can name. Also what
+/// `cursor::x11` walks to know a theme's cursors by their pictures (#442).
+///
+/// Written out rather than iterated, because [`CursorIcon`] is
+/// `#[non_exhaustive]` and has no iterator: there is no way to ask the
+/// crate for its variants, so the list is maintained here and the count
+/// below is what catches it drifting.
+pub(crate) const EVERY: [CursorIcon; 36] = [
+    CursorIcon::Default,
+    CursorIcon::ContextMenu,
+    CursorIcon::Help,
+    CursorIcon::Pointer,
+    CursorIcon::Progress,
+    CursorIcon::Wait,
+    CursorIcon::Cell,
+    CursorIcon::Crosshair,
+    CursorIcon::Text,
+    CursorIcon::VerticalText,
+    CursorIcon::Alias,
+    CursorIcon::Copy,
+    CursorIcon::Move,
+    CursorIcon::NoDrop,
+    CursorIcon::NotAllowed,
+    CursorIcon::Grab,
+    CursorIcon::Grabbing,
+    CursorIcon::EResize,
+    CursorIcon::NResize,
+    CursorIcon::NeResize,
+    CursorIcon::NwResize,
+    CursorIcon::SResize,
+    CursorIcon::SeResize,
+    CursorIcon::SwResize,
+    CursorIcon::WResize,
+    CursorIcon::EwResize,
+    CursorIcon::NsResize,
+    CursorIcon::NeswResize,
+    CursorIcon::NwseResize,
+    CursorIcon::ColResize,
+    CursorIcon::RowResize,
+    CursorIcon::AllScroll,
+    CursorIcon::ZoomIn,
+    CursorIcon::ZoomOut,
+    CursorIcon::DndAsk,
+    CursorIcon::AllResize,
+];
+
 #[cfg(test)]
 pub(crate) mod tests {
     use smithay::input::pointer::CursorIcon;
 
     use super::{names, resolve};
 
-    /// Every shape `wp_cursor_shape_v1` version 2 can name.
-    ///
-    /// Written out rather than iterated, because [`CursorIcon`] is
-    /// `#[non_exhaustive]` and has no iterator: there is no way to ask the
-    /// crate for its variants, so the list is maintained here and the count
-    /// below is what catches it drifting.
-    pub(crate) const EVERY: [CursorIcon; 36] = [
-        CursorIcon::Default,
-        CursorIcon::ContextMenu,
-        CursorIcon::Help,
-        CursorIcon::Pointer,
-        CursorIcon::Progress,
-        CursorIcon::Wait,
-        CursorIcon::Cell,
-        CursorIcon::Crosshair,
-        CursorIcon::Text,
-        CursorIcon::VerticalText,
-        CursorIcon::Alias,
-        CursorIcon::Copy,
-        CursorIcon::Move,
-        CursorIcon::NoDrop,
-        CursorIcon::NotAllowed,
-        CursorIcon::Grab,
-        CursorIcon::Grabbing,
-        CursorIcon::EResize,
-        CursorIcon::NResize,
-        CursorIcon::NeResize,
-        CursorIcon::NwResize,
-        CursorIcon::SResize,
-        CursorIcon::SeResize,
-        CursorIcon::SwResize,
-        CursorIcon::WResize,
-        CursorIcon::EwResize,
-        CursorIcon::NsResize,
-        CursorIcon::NeswResize,
-        CursorIcon::NwseResize,
-        CursorIcon::ColResize,
-        CursorIcon::RowResize,
-        CursorIcon::AllScroll,
-        CursorIcon::ZoomIn,
-        CursorIcon::ZoomOut,
-        CursorIcon::DndAsk,
-        CursorIcon::AllResize,
-    ];
+    pub(crate) use super::EVERY;
 
     /// The two the issue names, pinned as the literal strings they have to be.
     ///

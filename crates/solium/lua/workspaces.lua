@@ -218,6 +218,14 @@ function workspaces.regroup()
     end
 end
 
+-- Told once `apply` has laid the desks out again -- a switch, a window sent
+-- to another workspace, a regroup -- for what is drawn over the desk in view
+-- and has to follow it: `lua/snap.lua`'s holders between snapped windows.
+local applied = {}
+function workspaces.applied(fn)
+    applied[#applied + 1] = fn
+end
+
 -- Carry every desk to where it sits relative to the one its monitor is showing.
 function workspaces.apply(animation)
     local spread = workspaces.settings.spread or 1.0
@@ -261,6 +269,9 @@ function workspaces.apply(animation)
     end
 
     workspaces.declare()
+    for _, fn in ipairs(applied) do
+        fn()
+    end
 end
 
 -- Switch the monitor in front of you, or every monitor when workspaces are

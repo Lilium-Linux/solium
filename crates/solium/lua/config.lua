@@ -464,6 +464,17 @@ local defaults = {
     --                   then SOLIUM_QML, then SOLIUM_QML_GPU override this.
     --   probe_timeout   how long the trial may take, in milliseconds, before
     --                   it is killed and QML renders in software.
+    --   buffers         on the GPU, how big the buffer a scene (a window's
+    --                   frame, a bar, the wallpaper) is drawn into is. Each
+    --                   side is rounded up to a whole number of `step`
+    --                   pixels (0 to 1024), so a window being resized draws
+    --                   its frame into the buffer it has until it outgrows
+    --                   it, rather than into a new one on every frame; 0
+    --                   gives every size a buffer exactly its size, a new
+    --                   one at every size, which costs a few milliseconds a
+    --                   frame through a resize. Once a size has held, a
+    --                   buffer `shrink` steps or more larger than its scene
+    --                   on a side (2 to 64) is replaced by a snug one.
     --
     -- Read when the compositor starts; a reload does not change it, because
     -- Qt cannot change scene graph once started. The last log line that
@@ -472,6 +483,7 @@ local defaults = {
     qml = {
         renderer = "auto",
         probe_timeout = 5000,
+        buffers = { step = 128, shrink = 2 },
     },
 
     -- The monitors.
@@ -1243,6 +1255,18 @@ local defaults = {
     -- name is still read -- see the bottom of this file.
     pane = "glass",
 
+    -- How long, in milliseconds, a frame may spend building the windows'
+    -- frames when the pane style changes -- from here, `sol.pane`, or a
+    -- configuration that frames tiled and floating windows differently.
+    -- Windows keep the frame they have until every new one is built, and then
+    -- change together, so the screen goes on moving meanwhile instead of
+    -- standing still while every frame is built at once. At least one of a
+    -- style's layers is built a frame however small this is; more is a
+    -- shorter switch, paid for in the frames it happens in. A window's frame
+    -- from the style before is kept, so switching back builds nothing.
+    -- `decoration::tests::a_budget_of_nothing_builds_one_scene_a_pass_and_more_builds_more`.
+    pane_build = 2,
+
     -- What a window does between being asked for and its application
     -- arriving. A window's life starts when you ask for it, not when the
     -- program gets around to connecting -- these decide what that looks like.
@@ -1325,17 +1349,19 @@ local defaults = {
     -- answer while the glide is still on its way -- goes into it until the
     -- two agree. This decides how, which is entirely taste.
     resize = {
-        -- "anchor", the default: the picture at its own size, never scaled,
-        -- against the edges that are not moving -- the right edge of a window
-        -- you shrink from the left, the top-left when every edge moves. What
-        -- is larger than the window is cut off on the moving side, and what
-        -- it does not cover is `background` below. Text keeps its size on
-        -- every frame.
+        -- "crop", the default: the picture at its own size, never scaled,
+        -- from the window's top-left corner whichever edge moves, as
+        -- Hyprland draws it. What is larger than the window is cut off along
+        -- the right or the bottom, and what it does not cover is `background`
+        -- below. So the window beside a dragged seam keeps its picture
+        -- against the seam as it moves, and the left of a left-aligned page,
+        -- a prompt or a gutter, moves with a left edge you drag.
         --
-        -- "crop": the same, but always from the window's top-left corner,
-        -- whichever edge moves -- so the left of a left-aligned page, a
-        -- prompt or a gutter, moves with a left edge you drag, and what is
-        -- cut off or uncovered is on the right or the bottom.
+        -- "anchor": the same, against the edges that are not moving instead
+        -- -- the right edge of a window you shrink from the left, the
+        -- top-left when every edge moves. A window's contents stay still
+        -- while one side of it moves, and a gap or a cut opens along the
+        -- edge that does: at a seam, between the two windows.
         --
         -- "stretch": the picture scaled to fill the window, each way on its
         -- own. Nothing is ever uncovered, but text is drawn wider or taller
@@ -1353,15 +1379,20 @@ local defaults = {
         -- stretched once it has said so, and the window takes the size the
         -- client chose when you let go of the edge. Anything else is named in
         -- the log and the default kept.
-        fill = "anchor",
+        fill = "crop",
 
         -- What shows in the part of a window its picture does not cover
-        -- under "anchor", "crop" or "scene": "#rrggbb", or "#rrggbbaa" with
-        -- an alpha. The default is the theme's darkest grey, so the gap reads
-        -- as part of the window. "none" draws nothing there, so what is
-        -- behind the window -- or a style's own `behind` layer -- shows.
-        -- Anything else is named in the log and the default kept.
-        background = "#1c1c1c",
+        -- under "anchor", "crop" or "scene". "edge", the default, stretches
+        -- the picture's own edge over it -- its last column beside it, its
+        -- last row under it -- so a window whose application is behind looks
+        -- like it has more of its own background, and a transparent one
+        -- stays transparent, as Hyprland does it. "#rrggbb", or "#rrggbbaa"
+        -- with an alpha, fills it with a colour instead (the theme's darkest
+        -- grey, "#1c1c1c", was the default before). "none" draws nothing
+        -- there, so what is behind the window -- or a style's own `behind`
+        -- layer -- shows. Anything else is named in the log and the default
+        -- kept.
+        background = "edge",
 
         -- How long, in milliseconds, a window's picture waits at the
         -- rectangle a change gave it for its application to draw at that
@@ -1374,6 +1405,59 @@ local defaults = {
         -- `a_longer_patience_keeps_a_landed_glides_picture_where_it_was_for_longer`.
         patience = 250,
 
+        -- How often, at most, the application is told its new size while you
+        -- drag an edge, in times a second. 0, the default, tells it on every
+        -- frame the drag moves -- as often as your monitor refreshes -- so
+        -- its picture is never more than its own drawing time behind the
+        -- edge. Whatever this says, an application still drawing the last
+        -- size it was told hears the next once it has drawn it (or after a
+        -- tenth of a second of silence), so one slower than your monitor
+        -- draws the newest size each time rather than drowning in them. A
+        -- number caps it: 10 was the fixed rate before. 1 to 1000; anything
+        -- else is named in the log and the default kept.
+        -- `a_drag_tells_its_client_on_every_frame_unless_capped`.
+        tell_hz = 0,
+
+        -- What a window is drawn at while you drag its edge. "app", the
+        -- default, draws it at the size its application has drawn, against
+        -- the edges you are not moving: its frame always wraps its content,
+        -- with no gap and nothing cut off, and the edge is a frame or so
+        -- behind the pointer -- as KWin does. "pointer" draws it exactly where
+        -- the pointer is, and `fill` above decides what covers the difference
+        -- until the application catches up -- as Hyprland does. A floating
+        -- window only: the windows a tiled drag moves share their edges, so
+        -- they follow the pointer, or move in rounds as `sync` below says.
+        -- Anything else is named in the log and the default kept.
+        -- `a_dragged_window_follows_its_application_unless_told_otherwise`.
+        follow = "app",
+
+        -- How long, in milliseconds, the windows a layout's drag moves --
+        -- the two sides of a tiled seam -- wait for one another's
+        -- applications. 0, the default, moves each to the pointer at once,
+        -- as Hyprland does, and `fill` and `background` cover what an
+        -- application has not drawn yet. A number moves them in rounds
+        -- instead: each is told its new size at once, and a window whose
+        -- application has drawn it is held at its old place until the others
+        -- have too, so every frame shows each window drawn for the seam it is
+        -- shown at -- at the slower application's pace, in steps behind the
+        -- pointer. The number is the longest one slow application holds the
+        -- others up for. 0 to 5000; anything else is named in the log and the
+        -- default kept.
+        -- `a_seam_moves_once_both_of_its_clients_have_drawn`.
+        sync = 0,
+
+        -- Whether a window being resized is told to draw its next size the
+        -- moment a frame showing its last one starts to be drawn, rather than
+        -- once that frame has reached the screen. Most applications -- Qt and
+        -- GTK among them -- draw a new size only when told they may draw, so
+        -- with this they draw it while the compositor is still drawing the
+        -- last one, instead of one after the other, and a window can follow
+        -- its edge on every refresh of a fast monitor. false waits for the
+        -- screen, as every other window does. Anything else is named in the
+        -- log and the default kept.
+        -- `a_window_being_resized_is_told_to_draw_again_when_its_frame_starts`.
+        overlap = true,
+
         -- A fill of its own for a mode (the names `modes.register` uses),
         -- for every size change made while that mode is in charge: its
         -- drags, its glides, and a fullscreen glide begun in it. A mode with
@@ -1382,7 +1466,7 @@ local defaults = {
         --
         --     resize = { modes = { scrolling = "stretch" } },
         --
-        -- An entry that is not a fill is named in the log and "anchor"
+        -- An entry that is not a fill is named in the log and the default
         -- kept, as `fill`'s is.
         -- `each_mode_fits_a_resize_by_its_own_fill_or_the_one_for_every_mode`.
         modes = {},
@@ -1461,6 +1545,23 @@ local defaults = {
         -- Applications that are maximised and restored at once whatever
         -- `animate` says, by app id, as `fullscreen.instant` lists them.
         instant = { app_id = {} },
+
+        -- A maximised window does not move. Drag it by its titlebar -- or
+        -- with the drag modifier, or a finger -- and it stays where it is
+        -- until the pointer has gone this many pixels from where you took
+        -- hold of it; then it is restored to the size it had before, under
+        -- the pointer, held where you took it along its titlebar, and the
+        -- drag goes on moving it. It shrinks there with the motion
+        -- `animate` above gives a restore. A window maximised out of a
+        -- layout's tile comes off at its tile's size, and is let go into a
+        -- tile as any tiled window you drag is.
+        --
+        -- A few pixels, so a click or a double click on the titlebar, which
+        -- a hand moves a pixel or two, stays a click. 0 restores it on the
+        -- first motion; anything that is not a number of 0 or more is 6.
+        -- `lua/floating.lua` does all of this, with `sol.drag_hold` and
+        -- `sol.drag_grip`.
+        restore_after = 6,
     },
 
     floating = {
@@ -1502,6 +1603,84 @@ local defaults = {
             -- apart so the two can be tuned differently, as `fullscreen` and
             -- `maximize` above are kept apart from each other.
             motion = { duration = 220, easing = "outCubic" },
+
+            -- Snapping by dragging, as Windows and macOS do (#455):
+            -- `lua/snap.lua`. Drag a window -- by its titlebar, with the drag
+            -- modifier, or by a finger -- to an edge of a screen, and a
+            -- preview shows where it will go: the left or right edge, that
+            -- half of the work area; a corner, that quarter; the top edge,
+            -- the whole of it. Let go there and it glides into place; let go
+            -- elsewhere and it stays where it is. A snapped window's frame is
+            -- told `snapped` (the zone's name, or false), for a pane style to
+            -- square its corners by. The keys above mark their snaps the same.
+            --
+            -- Taken again, a snapped window stays put for
+            -- `maximize.restore_after` pixels, as a maximised one does, and
+            -- then comes off at the size it had before, under the pointer.
+            -- Windows snapped beside each other share a seam with a holder
+            -- drawn on it: drag either window's edge there and both resize
+            -- together, as a tiled seam does. Only while floating is in
+            -- charge: a layout's own drag moves a window between its tiles.
+            drag = {
+                -- false turns dragging into zones off; the keys above stay.
+                enabled = true,
+                -- How near an edge of the screen, in logical pixels, the
+                -- pointer has to be for its zone: a number of 1 or more,
+                -- anything else 8. Only an outer edge has a zone: where two
+                -- screens touch, a window dragged across goes on to the
+                -- other screen rather than snapping.
+                edge = 8,
+                -- How far along an edge from a corner, in logical pixels,
+                -- that corner's quarter reaches; the rest of the edge is its
+                -- half. 0 or more, anything else 120; 0 turns quarters off.
+                corner = 120,
+                -- Whether the top edge maximises; false leaves only its
+                -- corners.
+                top = true,
+                -- How a window glides into its zone and back off it: as a
+                -- tiled window glides into its tile after a drag,
+                -- `tiling.snap`, unless it is set here, as `motion` above is.
+                --
+                --     motion = { duration = 120, easing = "outCubic" },
+
+                -- The scene that draws the preview and the holders, on every
+                -- screen over the windows: a name under
+                -- `~/.config/solium/qml` or the shipped `qml/`, or a path.
+                -- It is handed `zone` (where a window let go now goes:
+                -- `monitor`, `kind`, and `x`, `y`, `w`, `h` in that screen's
+                -- own pixels; false when none), `seams` (each holder's
+                -- `monitor`, `vertical`, `x`, `y`, `w`, `h` and `dragging`),
+                -- and the two tables below as `preview` and `divider`.
+                scene = "snap/snap.qml",
+                -- How the shipped scene draws the preview: its fill, its
+                -- border (each "#rrggbb" or "#rrggbbaa") and that border's width, the rounding of its
+                -- corners, how far inside the zone it is drawn, and how long,
+                -- in milliseconds, it takes to appear, to go and to move from
+                -- one zone to the next.
+                preview = {
+                    fill = "#ffffff24",
+                    border = "#ffffff80",
+                    border_width = 2,
+                    radius = 12,
+                    inset = 6,
+                    duration = 160,
+                },
+                -- The holder between snapped windows. `enabled = false`
+                -- draws none; the seam still moves both windows. `minimum` is
+                -- the narrowest, in logical pixels, a seam leaves a window
+                -- whose application names no minimum of its own -- one that
+                -- does is held to that, unless `client_limits` above is
+                -- "ignore": 1 or more, anything else 120. The rest is how
+                -- the shipped scene draws it.
+                divider = {
+                    enabled = true,
+                    minimum = 120,
+                    color = "#d4d4d4",
+                    thickness = 6,
+                    length = 56,
+                    opacity = 0.75,
+                },
+            },
         },
 
         -- Where a new window goes, and how big, while floating is in charge.
@@ -1958,14 +2137,17 @@ local defaults = {
         -- past a lowered cap is given back.
         memo = { split = "resize", keep_passes = 0, budget_mib = 0 },
         -- While a window glides, is dragged or changes size, an effect's own
-        -- steps for it run again at most `motion_hz` times a second: the
-        -- glass's refraction as it moves, the shade as it changes size (10
-        -- to 1000; 0 on every pass). Between, its last result is drawn where
-        -- the window is, stretched to its size, so what shows through the
-        -- glass trails the window by at most that long's worth of its motion,
-        -- and everything is exact again within it once the window stops. A
-        -- backdrop that changes, or new params, run it at once.
-        motion_hz = 60,
+        -- steps for it (the glass's refraction as it moves, the shade as it
+        -- changes size) run again on every frame it moved on, so what shows
+        -- through the glass is where the window is on every frame: 0. A
+        -- number from 10 to 1000 caps how many times a second they run
+        -- instead, for a GPU too weak to run every frame: between, the last
+        -- result is drawn where the window is, stretched to its size, so
+        -- what shows through the glass trails the window by up to that
+        -- long's worth of its motion (at 60 on a 260 Hz monitor, about four
+        -- frames), and is exact again within it once the window stops. A
+        -- backdrop that changes, or new params, run it at once either way.
+        motion_hz = 0,
     },
 
     -- Starting up. The first desktop frame waits until what it shows is
@@ -2068,6 +2250,13 @@ local open_sections = {
     ["resize.modes"] = true,
     -- `true` rather than a set of names: everything is accepted.
     bindings = true,
+    -- A drag's snap glides with `tiling.snap` unless `motion` says otherwise,
+    -- so `motion` is left out above and named here. And the preview's and
+    -- the holder's look is the scene's own: a scene of yours may read keys
+    -- the shipped one does not.
+    ["floating.snap.drag"] = { motion = true },
+    ["floating.snap.drag.preview"] = true,
+    ["floating.snap.drag.divider"] = true,
 }
 
 -- The one key a user may write that these defaults deliberately do not define.

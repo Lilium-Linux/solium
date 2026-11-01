@@ -134,6 +134,23 @@ pub(super) fn tell(
     }
 }
 
+/// Answer a client's request to be maximised, or not, that changes nothing:
+/// with the state and the size it has, as xdg has the compositor answer
+/// every such request with a configure. An X11 client is sent its own
+/// rectangle again, which is the answer it waits for.
+fn answer_unchanged(window: &Window) {
+    if let Some(toplevel) = window.toplevel() {
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_configure();
+        }
+    } else if let Some(x11) = window.x11_surface()
+        && !x11.is_override_redirect()
+        && let Err(err) = x11.configure(None)
+    {
+        tracing::warn!(?err, "could not answer an X11 window's maximise");
+    }
+}
+
 /// Whether a window's client draws its own frame, so leaving fullscreen
 /// builds none over it.
 ///
@@ -160,6 +177,19 @@ pub(crate) enum MaximizeAnswer {
     /// is where leaving fullscreen goes: maximised, or back to the rect kept
     /// from before either.
     Underneath,
+}
+
+/// Who asked for a maximise, or for one to end: what decides whether a
+/// layout's tile outranks it (`Pane::maximized_by_client`, #450).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asker {
+    /// The person at the machine: super+shift+m, `sol.toggle_maximize`, the
+    /// frame's button or a double click on its titlebar. Lifts a window out
+    /// of its tile (#150).
+    User,
+    /// The window's own client: xdg `set_maximized` and `unset_maximized`,
+    /// or an X11 `_NET_WM_STATE` request.
+    Client,
 }
 
 /// How a window answers its client asking to be maximised (`wants`) or not.
@@ -448,16 +478,83 @@ impl Solium {
     }
 
     /// A client asking to be maximised, or not: [`answer_maximize`]'s answer,
-    /// carried out.
+    /// carried out -- the same for an xdg client (#445) and an X11 one
+    /// (#361).
+    ///
+    /// **Not out of a layout's tile** (#450). A client maximising itself is
+    /// an application restoring the state it had last time -- Steam, every
+    /// Electron application, a browser -- or its own button, and a window
+    /// maximised over its tile sat on top of it, its neighbour laid out
+    /// beside an empty tile, and no seam could size it. So a window a layout
+    /// holds in a tile, or keeps one for while it is fullscreen, stays as the
+    /// layout has it, and is told so: it is tiled and not maximised. One that
+    /// has no tile yet -- asking before its first frame, which is when an
+    /// application restores its state -- is maximised, and the layout's tile
+    /// takes it out of the maximise when it is given (`Solium::move_pane`).
+    /// The user's maximise, by key or the frame's button, still leaves the
+    /// tile and keeps it to come back to (#150); floating, nothing holds the
+    /// window and the client's maximise is carried out.
+    /// `real_client::client_maximize`.
     pub(crate) fn client_maximize(&mut self, window: &Window, wants: bool) {
-        if !self.panes.of(window).is_some_and(Pane::managed) {
+        let Some(pane) = self.panes.of(window).filter(|pane| pane.managed()) else {
+            answer_unchanged(window);
+            return;
+        };
+        let tiled = pane.placed().is_some() || pane.left_tile().is_some();
+        match answer_maximize(states(window), wants) {
+            MaximizeAnswer::Toggle if wants && tiled => answer_unchanged(window),
+            MaximizeAnswer::Toggle => self.maximize_toggled(window, Asker::Client),
+            MaximizeAnswer::Underneath if wants && tiled => answer_unchanged(window),
+            MaximizeAnswer::Underneath => {
+                write_maximized(window, wants);
+                if let Some(pane) = self
+                    .panes
+                    .id_of(window)
+                    .and_then(|id| self.panes.get_mut(id))
+                {
+                    pane.set_maximized_by_client(wants);
+                }
+                answer_unchanged(window);
+            }
+            MaximizeAnswer::Nothing => answer_unchanged(window),
+        }
+    }
+
+    /// A maximised window whose frame has just been built, or dropped, while
+    /// it was maximised: fitted to the work area again, frame included, so
+    /// its titlebar is inside it and nothing of the work area is left over.
+    ///
+    /// A window maximised before its first frame was given the work area less
+    /// the room a frame on its way reserves (`Solium::maximised`), and the
+    /// frame that is built may take another amount: a style whose titlebar
+    /// is grown (`growTop`, #423) reserves a band and grows into the rest, and
+    /// a client that draws its own frame takes none.
+    pub(super) fn refit_maximised(&mut self, window: &Window) {
+        let States {
+            fullscreen,
+            maximized,
+        } = states(window);
+        if fullscreen || !maximized {
             return;
         }
-        match answer_maximize(states(window), wants) {
-            MaximizeAnswer::Nothing => {}
-            MaximizeAnswer::Toggle => self.toggle_maximize(window),
-            MaximizeAnswer::Underneath => write_maximized(window, wants),
+        let Some(id) = self.panes.id_of(window) else {
+            return;
+        };
+        let Some(slot) = self.panes.get(id).map(Pane::slot) else {
+            return;
+        };
+        let Some(filled) = self.maximised(window, slot) else {
+            return;
+        };
+        if filled == slot {
+            return;
         }
+        tell(window, Some(filled), None, Sending::OnceConfigured);
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.set_slot(filled);
+        }
+        self.map_stacked(window.clone(), filled.loc, false);
+        self.redraw = true;
     }
 }
 

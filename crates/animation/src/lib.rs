@@ -358,6 +358,12 @@ impl Animation {
         self.curve.at(elapsed / self.duration.as_secs_f64())
     }
 
+    /// How long is left of it at `now`; nothing once it is done.
+    #[must_use]
+    pub fn remaining(&self, now: Duration) -> Duration {
+        self.duration.saturating_sub(now.saturating_sub(self.start))
+    }
+
     #[must_use]
     pub fn done(&self, now: Duration) -> bool {
         now.saturating_sub(self.start) >= self.duration

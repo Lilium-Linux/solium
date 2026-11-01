@@ -1037,6 +1037,62 @@ pub(crate) fn rebase(
     });
 }
 
+/// Aim a window's glide at `real`, where the window now is, when something
+/// moved it out from under the glide (#438): a frame that grows under a
+/// floating window makes it taller and moves its client down, and a glide
+/// still aimed where it started drew the window arriving at the rectangle it
+/// no longer had, then let go onto the real one, a jump at the end. The rest
+/// of the way from what is drawn, in what is left of the glide, so nothing on
+/// screen jumps; only the easing restarts, as [`rebase`]'s does.
+///
+/// Only a glide that lets go on arrival, the kind a placement plays, and with
+/// one timing for every channel: a mode's transform is aimed at something
+/// other than where the window is, and is not this one's to move.
+pub(crate) fn reaim(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
+    with_slot(pane, |slot| {
+        let Some(transform) = slot
+            .as_mut()
+            .filter(|transform| transform.release && transform.channels.is_none())
+            .filter(|transform| !transform.finished(now))
+        else {
+            return;
+        };
+        *transform = Transform::new(
+            transform.frame_at(now),
+            Frame::real(real),
+            now,
+            transform.animation.remaining(now),
+            transform.animation.curve(),
+            true,
+        );
+    });
+}
+
+/// Carry a window's glide `by` as far as a drag has just moved the window
+/// (#452): both its ends, so it is drawn as far along as it was, that much
+/// further over. A window restored by a drag shrinks from its maximised
+/// rectangle into the one under the pointer, and the pointer goes on moving:
+/// a glide aimed where the drag first put it drew the window there, behind
+/// the pointer, and let go onto where the window had got to, a jump at the
+/// end. The same for a layout's or an opening's glide a drag takes the
+/// window in the middle of.
+///
+/// Only a glide that lets go on arrival, with one timing for every channel,
+/// as [`reaim`]'s: a mode's transform is aimed at something other than where
+/// the window is.
+/// `state::tests::real_client::client_maximize::a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer`.
+pub(crate) fn carry(pane: &Pane, by: Point<f64, Logical>) {
+    with_slot(pane, |slot| {
+        if let Some(transform) = slot
+            .as_mut()
+            .filter(|transform| transform.release && transform.channels.is_none())
+        {
+            transform.from = transform.from.shifted(by.x, by.y);
+            transform.to = transform.to.shifted(by.x, by.y);
+        }
+    });
+}
+
 /// The frame to draw this window in. Real geometry when nothing is animating.
 pub(crate) fn frame(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) -> Frame {
     with_slot(pane, |slot| {

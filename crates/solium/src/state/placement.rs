@@ -375,6 +375,15 @@ impl Solium {
         // The one placement that moves such a window is a move by key onto
         // another monitor, and `carry_across` has made that one by now.
         // `a_fullscreen_or_maximised_window_moved_to_another_monitor_is_so_on_that_one`.
+        //
+        // **Except a maximise its client asked for** (#450): an application
+        // that restored its maximise before the layout had placed it -- Steam
+        // mapping maximised, an Electron window's `maximize()` at startup --
+        // is let out of the maximise and into the tile, where it is placed
+        // and sized as any tile is. See `Solium::client_maximize`.
+        if matches!(standing, Standing::Tile | Standing::Within(_)) {
+            self.leave_client_maximize(pane);
+        }
         if standing != Standing::Kept
             && self
                 .panes
@@ -634,7 +643,16 @@ impl Solium {
             present::release(held);
             return;
         }
+        // **Except a pane a live drag's rounds pace** (`resize.sync`): it is
+        // drawn where its last round put it, and a glide aimed at the slot
+        // would draw it where the pointer is instead -- the whole of what the
+        // rounds are there to stop. `crate::state::round`,
+        // `a_seam_moves_once_both_of_its_clients_have_drawn`.
         if let Some(held) = self.panes.get(pane).filter(|_| !leaving) {
+            if self.resize_gesture.is_some() && self.seam_shown_of(held).is_some() {
+                present::release(held);
+                return;
+            }
             let start = present::frame(held, was, now);
             present::from(
                 held,
@@ -803,6 +821,12 @@ impl Solium {
         // Whether the sweep reaching this pane is the live drag's own. Read
         // before the borrow below, which needs `self` mutably.
         let dragging = self.resize_gesture.is_some();
+        // Under `resize.sync` a live drag's panes are told in rounds, all at
+        // once, and the sweep only moves their slots: `settle_round` tells
+        // them, and a pending change goes out with the round's configure --
+        // which is where the drag's own `resizing` state, the commonest one,
+        // was always going to go. `a_seam_moves_once_both_of_its_clients_have_drawn`.
+        let rounds = dragging && self.syncing();
         // Case (1). The borrow ends on this line, so the arm below can reach
         // `self` again.
         let bridged = self
@@ -810,7 +834,9 @@ impl Solium {
             .as_mut()
             .and_then(|bridge| bridge.panes.iter_mut().find(|held| held.pane == pane))
             .map(|held| {
-                if dragging && !pending {
+                if rounds {
+                    None
+                } else if dragging && !pending {
                     held.hold.dragged(client, answer, now)
                 } else {
                     held.hold.placed(client, answer, now)
@@ -823,8 +849,8 @@ impl Solium {
         };
         // A pending flush is worth a configure even when the rectangle is one
         // the client has already been told: the size is not what it is waiting
-        // for.
-        let told = told || pending;
+        // for. Not under rounds, whose configure carries it.
+        let told = told || (pending && !rounds);
         if crate::resizing::trace::on() {
             let hold = self.held_hold(pane);
             let asked = hold.map_or(client, crate::resizing::Hold::asked);
@@ -904,6 +930,14 @@ impl Solium {
         // honest "nothing to anchor against".
         let previous = self.panes.get(pane).map_or(client, Pane::slot);
         let edges = crate::resizing::moved_edges(previous, client);
+        // Under `resize.sync` it joins drawn where it is, until a round moves
+        // it, and is told by that round rather than here: see
+        // `crate::state::round`. Read before anything below moves it.
+        let rounds = self.syncing();
+        let drawn = self
+            .panes
+            .get(pane)
+            .map_or(previous, |held| self.pane_geometry(held));
         // **The same drag's hold if this pane already had one, rather than a
         // fresh one.** `settle_resize` forks per frame, so a layout that claims
         // a drag on one frame and not the next hands this pane back and forth
@@ -916,17 +950,27 @@ impl Solium {
         // `released` is reasserted because `arm_resize_gesture` rearms the
         // bridge's holds before the sweep and a floating hold arriving during it
         // missed that: its deadline must stop for the same reason theirs did.
+        // A pane a live drag moves is being resized by it, and its client is
+        // told so before the configure below goes out: see
+        // `Solium::mark_resizing`. Not once the button is up.
+        if released.is_none() {
+            self.mark_resizing(window);
+        }
         let carried = self
             .resize_hold
             .take_if(|held| held.pane == pane && &held.window == window)
             .map(|held| held.hold);
         let (hold, told) = match carried {
+            // Under `resize.sync` the round tells it, as it tells every pane
+            // of the bridge: the hold keeps what it last asked, and the round
+            // finds the slot past it.
             Some(mut hold) => {
                 hold.retargeted(edges);
                 hold.rearm(released);
-                let told = hold
-                    .dragged(client, crate::resizing::answer(window), now)
-                    .is_some();
+                let told = !rounds
+                    && hold
+                        .dragged(client, crate::resizing::answer(window), now)
+                        .is_some();
                 (hold, told)
             }
             // A pane joining the bridge hears immediately, and only the offers
@@ -937,18 +981,25 @@ impl Solium {
             // `real_geometry` builds its size from `window.geometry()` — read
             // from the one source that answers for a window the space has let
             // go of as well.
+            //
+            // Under `resize.sync` it has been told nothing yet: its hold says
+            // it was last asked for where it is, so its round finds it owed.
             None => (
                 crate::resizing::Hold::new(
                     edges,
                     committed,
-                    client,
+                    if rounds { drawn } else { client },
                     now,
                     released,
                     self.resizing.patience,
+                    self.resizing.tell,
                 ),
-                true,
+                !rounds,
             ),
         };
+        if rounds {
+            self.show_from(pane, drawn);
+        }
         let held = crate::resizing::Held {
             window: window.clone(),
             pane,
@@ -1121,6 +1172,48 @@ impl Solium {
         self.redraw = true;
     }
 
+    /// A window maximised by its own client and given a tile by a layout:
+    /// out of the maximise, its way back forgotten, and the scripts told as
+    /// for any restore (#450). The placement that gave the tile then places
+    /// it there, glides it from where it is drawn and tells the client its
+    /// size, its tile and its state in one configure.
+    ///
+    /// Not a fullscreen window, which leaves fullscreen on its own terms, nor
+    /// one the user maximised, which keeps the tile to come back to (#150).
+    fn leave_client_maximize(&mut self, pane: crate::pane::PaneId) {
+        let Some(window) = self
+            .panes
+            .get(pane)
+            .filter(|held| held.maximized_by_client())
+            .and_then(Pane::client)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_maximized_by_client(false);
+        }
+        let States {
+            fullscreen,
+            maximized,
+        } = window_states(&window);
+        if fullscreen || !maximized {
+            return;
+        }
+        window_state::write_maximized(&window, false);
+        if let Some(held) = self.panes.get_mut(pane) {
+            held.set_restore(None);
+        }
+        // The `maximize` event, so a script keeping its own account of which
+        // windows are maximised (floating.lua's `restore`) is not left
+        // believing this one still is. Its motion is not this placement's:
+        // the layout's glide moves it.
+        if !self.telling_change {
+            let _ = self.tell_change(pane, Change::Maximize, false);
+        }
+        tracing::debug!("a window its client maximised was given a tile");
+    }
+
     /// Where a window stands, as the way back a fullscreen or a maximise
     /// keeps: the slot a hold is keeping -- the rectangle its client was told
     /// and has not drawn at yet, part of the way out of either -- and where
@@ -1156,8 +1249,16 @@ impl Solium {
         motion
     }
 
-    /// Fill the work area, or go back to where the window was.
+    /// Fill the work area, or go back to where the window was: the user's
+    /// maximise, by key, by `sol.toggle_maximize` or by the frame's button.
     pub(super) fn toggle_maximize(&mut self, window: &Window) {
+        self.maximize_toggled(window, window_state::Asker::User);
+    }
+
+    /// [`Self::toggle_maximize`], saying who asked: a maximise the client
+    /// asked for is marked so on the pane, and a layout's tile takes the
+    /// window out of it (`Pane::maximized_by_client`, #450).
+    pub(super) fn maximize_toggled(&mut self, window: &Window, asker: window_state::Asker) {
         let Some(id) = self.panes.id_of(window) else {
             return;
         };
@@ -1193,10 +1294,29 @@ impl Solium {
         let Some(current) = self.standing(window) else {
             return;
         };
-        let Some(filled) = self.maximised(window, current) else {
+        let start = self.drawn_before(id);
+        // **The way back, for a window that has not been shown yet**: a
+        // client asking to be maximised before its first frame -- an
+        // application restoring the maximise it had last time (#445, #450).
+        // It stands where `new_toplevel` or `map_window_request` put it, at
+        // the monitor's corner, so the way back is where it would have
+        // opened: its own size fitted into the work area, placed as
+        // `show_if_new` places it, and it fills the monitor that is on, the
+        // active one. One with no size yet, an xdg client that has drawn
+        // nothing, keeps none, as `fullscreen` keeps none, and restored it
+        // picks its own size.
+        // `real_client::client_maximize::a_window_that_opens_maximised_while_floating_is_maximised_and_restored`.
+        let shown = self.panes.get(id).is_some_and(present::was_shown);
+        let opening = if shown {
+            current
+        } else {
+            let size = self.fitted_size(window);
+            Rectangle::new(self.initial_placement(window, size), size)
+        };
+        let way_back = Some(opening).filter(|rect| !rect.is_empty());
+        let Some(filled) = self.maximised(window, opening) else {
             return;
         };
-        let start = self.drawn_before(id);
 
         // On the pane and not on its frame, which is where it was until #92.
         // For this toggle a window with no frame to keep it on was latent, not
@@ -1230,8 +1350,9 @@ impl Solium {
         // the next sweep -- which is what a tiled edge drag started from it
         // reads (#124).
         let tiled = self.panes.get_mut(id).is_some_and(|pane| {
+            pane.set_maximized_by_client(maximized && asker == window_state::Asker::Client);
             if maximized {
-                pane.set_restore(Some(current));
+                pane.set_restore(way_back);
                 pane.leave_tile();
                 false
             } else {
@@ -1288,12 +1409,24 @@ impl Solium {
     /// the work area exactly. Asked by [`Self::toggle_maximize`], and by
     /// `unfullscreen` for a window that was maximised when it went
     /// fullscreen and so goes back to being maximised.
+    ///
+    /// **The room a frame on its way reserves, too** (`insets_of`, where
+    /// `frame_insets` answers none for a frame not built yet): a window
+    /// maximised before its first frame -- an X11 application restoring its
+    /// maximise as it maps -- is framed only when it is shown, and a client
+    /// given the whole work area then had its titlebar put above the work
+    /// area's top edge. `Solium::refit_maximised` fits it again to the frame
+    /// that is built.
     pub(super) fn maximised(
         &self,
         window: &Window,
         on: Rectangle<i32, Logical>,
     ) -> Option<Rectangle<i32, Logical>> {
-        Some(inner(self.work_area_of(on)?, self.frame_insets(window)))
+        let insets = self
+            .panes
+            .id_of(window)
+            .map_or(Insets::NONE, |id| self.insets_of(id));
+        Some(inner(self.work_area_of(on)?, insets))
     }
 
     /// A kept rect this window is being put back at, moved onto a screen if

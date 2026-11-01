@@ -25,6 +25,7 @@ mod cursor;
 mod decoration;
 mod dev;
 mod drawing;
+mod edge;
 mod effect;
 mod explicit_sync;
 mod focus;
@@ -61,6 +62,7 @@ mod qml;
 mod remains;
 mod render;
 mod resizing;
+mod scanout;
 #[cfg(test)]
 mod scenario;
 mod screencopy;

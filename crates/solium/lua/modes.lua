@@ -139,7 +139,7 @@ end
 -- for every mode. `init.lua` hands `config.resize` over before any mode is
 -- known, which is all a configuration with no `resize.modes` entry needs, so
 -- nothing is handed over again for one; with an entry, the mode's own fill
--- goes over with the background and the patience -- each call sets every key
+-- goes over with the background, the patience, `tell_hz`, `follow`, `sync` and `overlap` -- each call sets every key
 -- -- whenever the mode changes, and once below at this file's top level, for
 -- the reason `apply_focus_mode` gives.
 -- `each_mode_fits_a_resize_by_its_own_fill_or_the_one_for_every_mode`.
@@ -154,6 +154,10 @@ local function apply_resize_mode(name)
         fill = own ~= nil and own or resize.fill,
         background = resize.background,
         patience = resize.patience,
+        tell_hz = resize.tell_hz,
+        follow = resize.follow,
+        sync = resize.sync,
+        overlap = resize.overlap,
     })
 end
 
@@ -183,8 +187,24 @@ function modes.use(name)
     -- it fades, so it keeps the tile until it has gone, or until a refused
     -- close brings it back, which is when the let-go is taken. See
     -- `a_mode_switched_during_a_fade_does_not_squash_the_window_leaving`.
+    --
+    -- And out of a maximise, when a layout is taking over: its tile is where
+    -- the window goes. A maximise is the floating desktop's way of filling
+    -- the screen, and kept, the window went on covering the work area over
+    -- the tiles while the layout held its own tile empty beside it, and no
+    -- seam could size it, since the compositor holds a maximised window at
+    -- its own rect (#443). Only at the switch: `super+shift+m` under a
+    -- layout leaves that layout's tile on purpose and keeps it to come back
+    -- to (#150). Not a fullscreen window, which leaves fullscreen on its own
+    -- terms, nor one minimized or being closed, which no layout is placing.
+    -- `a_window_maximised_while_floating_joins_its_tile_when_a_layout_takes_over`.
+    local layout_next = modes.registered[name]
     for _, window in ipairs(sol.windows()) do
         sol.unplace(window.id)
+        if layout_next and window.maximized and not window.fullscreen
+            and not window.minimized and not window.leaving then
+            sol.toggle_maximize(window.id)
+        end
     end
     kept.current = name
     apply_focus_mode(name)

@@ -274,6 +274,16 @@ pub fn box_of(name: &str) -> String {
     format!("sol_{name}_box")
 }
 
+/// A known texture's clamp: the centres of the edge texels of the part of
+/// its texture its picture fills, in the texture's own coordinates. A read
+/// through `sol_<name>(uv)` is kept inside them, which is what an edge clamp
+/// does on a texture the picture fills, and keeps a read out of the room a
+/// target is given to grow into (#428).
+/// `tests::a_used_textures_read_is_clamped_to_its_picture`.
+pub fn clamp_of(name: &str) -> String {
+    format!("sol_{name}_clamp")
+}
+
 fn glsl_type(kind: ParamKind) -> &'static str {
     match kind {
         ParamKind::Float => "float",
@@ -290,9 +300,10 @@ pub fn prelude(signature: &Signature) -> String {
     for name in &signature.known {
         if signature.uses.contains(name) {
             text.push_str(&format!(
-                "uniform sampler2D {sampler};\nuniform vec4 {boxed};\nvec4 sol_{name}(vec2 uv) {{ return texture2D({sampler}, {boxed}.xy + uv * {boxed}.zw); }}\n#define SOL_HAS_{name} 1\n",
+                "uniform sampler2D {sampler};\nuniform vec4 {boxed};\nuniform vec4 {clamped};\nvec4 sol_{name}(vec2 uv) {{ return texture2D({sampler}, clamp({boxed}.xy + uv * {boxed}.zw, {clamped}.xy, {clamped}.zw)); }}\n#define SOL_HAS_{name} 1\n",
                 sampler = sampler(name),
                 boxed = box_of(name),
+                clamped = clamp_of(name),
             ));
         } else {
             text.push_str(&format!(
@@ -430,7 +441,7 @@ pub fn lint(signature: &Signature, user: &str) -> Vec<Lint> {
             {
                 // `sol_<name>_sampler` and `sol_<name>_box` are `<name>`'s.
                 // `tests::lint_reads_a_names_sampler_and_box_as_that_name`.
-                let base = ["_sampler", "_box"]
+                let base = ["_sampler", "_box", "_clamp"]
                     .iter()
                     .find_map(|suffix| name.strip_suffix(suffix).filter(|base| is_known(base)))
                     .unwrap_or(name);
@@ -655,8 +666,8 @@ pub fn content_hash(parts: &[&[u8]]) -> u64 {
 mod tests {
     use super::{
         Host, LINE_PROBE, MONITOR_WIDE, PASS_VERTEX, PER_PART, ParamKind, Signature, VOCABULARY,
-        WARP_VERTEX, assemble, compile_log, content_hash, kind_of, line_probe, line_shift, lint,
-        prelude, reads_any,
+        WARP_VERTEX, assemble, clamp_of, compile_log, content_hash, kind_of, line_probe,
+        line_shift, lint, prelude, reads_any,
     };
     use crate::spec::Severity;
 
@@ -703,6 +714,29 @@ mod tests {
         assert!(
             !text.contains("sol_soft_sampler"),
             "no sampler for a name not used"
+        );
+    }
+
+    /// **A used texture's read is clamped to its picture** (#428): `sol_<name>`
+    /// reads through its box and then inside its clamp, a uniform of its own,
+    /// so a picture in the corner of a target with room is read as a texture
+    /// of exactly its size is read with an edge clamp; and the lint takes the
+    /// clamp's name as the name's, as it takes its sampler's and its box's.
+    #[test]
+    fn a_used_textures_read_is_clamped_to_its_picture() {
+        let text = prelude(&signature(&["sharp"], &["sharp"]));
+        assert!(has_line(&text, "uniform vec4 sol_sharp_clamp;"), "{text}");
+        assert!(text.contains(
+            "vec4 sol_sharp(vec2 uv) { return texture2D(sol_sharp_sampler, clamp(sol_sharp_box.xy + uv * sol_sharp_box.zw, sol_sharp_clamp.xy, sol_sharp_clamp.zw)); }"
+        ));
+        assert_eq!(clamp_of("sharp"), "sol_sharp_clamp");
+        assert!(
+            lint(
+                &signature(&["sharp"], &["sharp"]),
+                "vec4 sol_effect(vec2 uv) { return texture2D(sol_sharp_sampler, clamp(uv, sol_sharp_clamp.xy, sol_sharp_clamp.zw)); }\n",
+            )
+            .is_empty(),
+            "the clamp is the name's own"
         );
     }
 

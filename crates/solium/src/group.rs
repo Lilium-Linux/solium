@@ -1083,6 +1083,7 @@ mod desk {
 
     fn window(id: u64, focused: bool) -> WindowInfo {
         WindowInfo {
+            insets: crate::decoration::Insets::default(),
             id,
             rect: Rect {
                 x: 100.0,
@@ -1105,6 +1106,7 @@ mod desk {
             cramped: false,
             shown: true,
             fullscreen: false,
+            maximized: false,
             style: String::new(),
             x11_type: None,
             accepts_input: true,

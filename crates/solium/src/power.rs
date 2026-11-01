@@ -485,6 +485,44 @@ impl Solium {
         });
     }
 
+    /// The windows a live resize holds, told they may draw again the moment a
+    /// frame that shows them starts to be drawn, when `resize.overlap` says so
+    /// -- not only once [`Self::send_frames_on`] says the frame has reached
+    /// the screen.
+    ///
+    /// **Most applications draw a new size only when told they may draw**:
+    /// Qt and GTK both answer a configure and then wait for the frame
+    /// callback of their last frame. Told at the flip, a window being resized
+    /// draws, then the compositor draws, one after the other, and the two
+    /// together have to fit in one refresh for the window to follow its edge
+    /// on every one: on a 260 Hz monitor that is 3.85 ms, and the glass style
+    /// alone took 2.5 ms of it on 2026-10-16. Told as the frame starts, the
+    /// application draws its next size while the compositor draws its last,
+    /// and each only has to fit in a refresh on its own. One callback a frame
+    /// all the same: a client is told only what it asked for with its last
+    /// commit, and that commit is the one being drawn.
+    /// `a_window_being_resized_is_told_to_draw_again_when_its_frame_starts`.
+    pub(crate) fn send_resize_frames_on(
+        &self,
+        output: &Output,
+        time: Duration,
+        throttle: Duration,
+    ) {
+        if !self.resizing.overlap {
+            return;
+        }
+        for window in self.space.elements() {
+            let held = self
+                .panes
+                .id_of(window)
+                .is_some_and(|pane| self.holding_resize(pane));
+            if !held || self.in_the_dark(window) {
+                continue;
+            }
+            Paced::Window(window).send(output, time, throttle, Some(output));
+        }
+    }
+
     /// Frame callbacks for what no lit screen draws -- the windows shown only
     /// on screens that are off, and every layer and lock surface on one -- at
     /// most one per `idle.off_frame_interval` each, and none at all for 0.

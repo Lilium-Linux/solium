@@ -17,8 +17,23 @@
 //! XWayland cursor surface as that shape while the X server says the cursor
 //! has a name we know.
 //!
-//! **A cursor with no name, or a name we do not know, stays the X client's
-//! picture.** A game drawing its own crosshair or sword builds it from pixels
+//! **A cursor with no name is known by its picture (#442).** Chromium, and so
+//! Steam's window, which is Chromium, reads cursor theme files itself and
+//! builds each cursor from the pixels, with no name: over Steam the pointer
+//! was the theme GTK's settings name (Breeze, from KDE) in the middle of the
+//! window and Solium's own at its frame. So the connection also reads the
+//! cursor themes an X client could have loaded from -- Solium's own, if one
+//! is configured, `XCURSOR_THEME`, the X resources' `Xcursor.theme`, GTK's
+//! `gtk-cursor-theme-name`, and `default` -- and keeps every picture in them
+//! by its size, hotspot and pixels. A cursor X reports with no name is asked
+//! for its picture (`GetCursorImage`), and one that is a theme's picture of a
+//! standard cursor is drawn as that shape. That is why this is done here,
+//! rather than by exporting a theme to X clients: Solium's pointer may be a
+//! QML scene, which is no theme an X client can load, and a client that reads
+//! its theme from GTK's settings never looks at an exported one.
+//!
+//! **A cursor with no name we know, and no picture we know, stays the X
+//! client's picture.** A game drawing its own crosshair or sword builds it from pixels
 //! and names it nothing, and it must be left alone. The same holds for a
 //! hidden pointer: XWayland hides it with `wl_pointer.set_cursor` and no
 //! surface, which is `Hidden` and is never touched here, and a client that
@@ -59,7 +74,7 @@ use x11rb::{
     protocol::{
         Event,
         xfixes::{ConnectionExt as _, CursorNotifyMask},
-        xproto::{Atom, ChangeWindowAttributesAux, ConnectionExt as _, Window},
+        xproto::{Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, Window},
     },
 };
 
@@ -196,17 +211,16 @@ impl Named {
 /// Called once XWayland is ready and smithay is its window manager. A failure
 /// is said once and leaves X11 windows with their own pixels, which is how
 /// they were drawn before this existed.
-pub(crate) fn watch<D>(handle: &LoopHandle<'static, D>, display: u32)
+pub(crate) fn watch<D>(handle: &LoopHandle<'static, D>, display: u32, theme: Option<String>)
 where
     D: HasSolium + 'static,
 {
-    let (sender, names) = channel::channel::<Option<String>>();
+    let (sender, names) = channel::channel::<Option<CursorIcon>>();
     let inserted = handle.insert_source(names, |event, (), data| {
-        if let channel::Event::Msg(name) = event {
-            let shape = name.as_deref().and_then(icon);
+        if let channel::Event::Msg(shape) = event {
             let solium = data.solium();
             if solium.pointer.x11(shape) {
-                tracing::debug!(name = name.as_deref(), ?shape, "the X11 cursor changed");
+                tracing::debug!(?shape, "the X11 cursor changed");
                 solium.redraw = true;
             }
         }
@@ -221,7 +235,7 @@ where
     let spawned = std::thread::Builder::new()
         .name("solium-x11-cursor".to_owned())
         .spawn(move || {
-            if let Err(err) = listen(display, &sender) {
+            if let Err(err) = listen(display, theme.as_deref(), &sender) {
                 tracing::warn!(
                     ?err,
                     "stopped hearing X11 cursor names; X11 windows draw their own"
@@ -236,9 +250,10 @@ where
     }
 }
 
-/// The connection's whole life: name the root's cursor, then send the name of
-/// every cursor the X server shows until XWayland or the compositor goes.
-fn listen(display: u32, names: &Sender<Option<String>>) -> Result<()> {
+/// The connection's whole life: name the root's cursor, learn the themes'
+/// pictures, then send the shape of every cursor the X server shows until
+/// XWayland or the compositor goes.
+fn listen(display: u32, theme: Option<&str>, shapes: &Sender<Option<CursorIcon>>) -> Result<()> {
     let (conn, screen) = x11rb::connect(Some(&format!(":{display}")))?;
     let root = conn
         .setup()
@@ -251,12 +266,32 @@ fn listen(display: u32, names: &Sender<Option<String>>) -> Result<()> {
     conn.xfixes_query_version(5, 0)?.reply()?;
     conn.xfixes_select_cursor_input(root, CursorNotifyMask::DISPLAY_CURSOR)?;
     name_the_root(&conn, root)?;
+    let environment = std::env::var("XCURSOR_THEME").ok();
+    let themes = themes(
+        theme,
+        environment.as_deref(),
+        resources(&conn, root).as_deref(),
+        gtk_settings_theme().as_deref(),
+    );
+    let pictures = Pictures::load(&themes);
+    tracing::info!(
+        ?themes,
+        pictures = pictures.len(),
+        "X11 cursors are known by name and by these themes' pictures"
+    );
     // Asked after selecting the events, so a change in between is heard
     // rather than lost.
     let showing = conn.xfixes_get_cursor_image_and_name()?.reply()?;
-    let first = (showing.cursor_atom != x11rb::NONE)
-        .then(|| String::from_utf8_lossy(&showing.name).into_owned());
-    if names.send(first).is_err() {
+    let first = if showing.cursor_atom == x11rb::NONE {
+        pictures.shape(&Picture::of(
+            (showing.width, showing.height),
+            (showing.xhot, showing.yhot),
+            &showing.cursor_image,
+        ))
+    } else {
+        icon(&String::from_utf8_lossy(&showing.name))
+    };
+    if shapes.send(first).is_err() {
         return Ok(());
     }
     let mut last = showing.cursor_atom;
@@ -279,27 +314,226 @@ fn listen(display: u32, names: &Sender<Option<String>>) -> Result<()> {
         let Event::XfixesCursorNotify(notify) = event else {
             continue;
         };
-        // Another cursor by the same name, or, far more often, the next frame
-        // of an animated one, every one of them unnamed: nothing to say.
-        if notify.name == last {
-            continue;
-        }
-        last = notify.name;
-        let name = if notify.name == x11rb::NONE {
-            None
-        } else if let Some(name) = known.get(&notify.name) {
-            Some(name.clone())
+        let shape = if notify.name == x11rb::NONE {
+            // No name: every unnamed cursor is a different picture, so each
+            // is asked for, the next frame of an animated one included.
+            last = x11rb::NONE;
+            let image = conn.xfixes_get_cursor_image()?.reply()?;
+            pictures.shape(&Picture::of(
+                (image.width, image.height),
+                (image.xhot, image.yhot),
+                &image.cursor_image,
+            ))
         } else {
-            let reply = conn.get_atom_name(notify.name)?.reply()?;
-            let name = String::from_utf8_lossy(&reply.name).into_owned();
-            known.insert(notify.name, name.clone());
-            Some(name)
+            // Another cursor by the same name: nothing to say.
+            if notify.name == last {
+                continue;
+            }
+            last = notify.name;
+            let name = if let Some(name) = known.get(&notify.name) {
+                name.clone()
+            } else {
+                let reply = conn.get_atom_name(notify.name)?.reply()?;
+                let name = String::from_utf8_lossy(&reply.name).into_owned();
+                known.insert(notify.name, name.clone());
+                name
+            };
+            icon(&name)
         };
-        if names.send(name).is_err() {
+        if shapes.send(shape).is_err() {
             // The compositor has stopped listening, which is it exiting.
             return Ok(());
         }
     }
+}
+
+/// A cursor's picture as X reports it, `GetCursorImage`'s fields, reduced to
+/// what tells two pictures apart: the size, the hotspot and a hash of the
+/// pixels, premultiplied ARGB words as both the X server and a theme file
+/// keep them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Picture {
+    size: (u16, u16),
+    hotspot: (u16, u16),
+    pixels: u64,
+}
+
+impl Picture {
+    pub(crate) fn of(size: (u16, u16), hotspot: (u16, u16), pixels: &[u32]) -> Self {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pixels.hash(&mut hasher);
+        Self {
+            size,
+            hotspot,
+            pixels: hasher.finish(),
+        }
+    }
+
+    /// A theme file's image, or `None` for one too large for X's sizes or
+    /// carrying fewer pixels than it claims.
+    fn of_file(image: &xcursor::parser::Image) -> Option<Self> {
+        let size = (
+            u16::try_from(image.width).ok()?,
+            u16::try_from(image.height).ok()?,
+        );
+        let hotspot = (
+            u16::try_from(image.xhot).ok()?,
+            u16::try_from(image.yhot).ok()?,
+        );
+        let count = usize::from(size.0) * usize::from(size.1);
+        // Little-endian ARGB words: see `theme::Ready::from_image`.
+        let pixels: Vec<u32> = image
+            .pixels_rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        (pixels.len() == count).then(|| Self::of(size, hotspot, &pixels))
+    }
+}
+
+/// The pictures of every standard cursor in some themes, each by the shape
+/// it stands for. The first theme to draw a picture names its shape.
+#[derive(Debug, Default)]
+pub(crate) struct Pictures(HashMap<Picture, CursorIcon>);
+
+impl Pictures {
+    /// Every image, every size and every frame, of every name [`icon`]
+    /// knows, in `themes`, in order. A theme that is not installed adds
+    /// nothing; a file two names share is read once.
+    fn load(themes: &[String]) -> Self {
+        let mut pictures = Self::default();
+        let mut read = std::collections::HashSet::new();
+        for name in themes {
+            let theme = xcursor::CursorTheme::load(name);
+            for shape in crate::cursor::shape::EVERY {
+                for cursor in crate::cursor::shape::names(shape) {
+                    let (Some(meant), Some(path)) = (icon(cursor), theme.load_icon(cursor)) else {
+                        continue;
+                    };
+                    let path = std::fs::canonicalize(&path).unwrap_or(path);
+                    if !read.insert(path.clone()) {
+                        continue;
+                    }
+                    let Some(images) = std::fs::read(&path)
+                        .ok()
+                        .and_then(|bytes| xcursor::parser::parse_xcursor(&bytes))
+                    else {
+                        continue;
+                    };
+                    for image in &images {
+                        if let Some(picture) = Picture::of_file(image) {
+                            pictures.learn(picture, meant);
+                        }
+                    }
+                }
+            }
+        }
+        pictures
+    }
+
+    fn learn(&mut self, picture: Picture, shape: CursorIcon) {
+        self.0.entry(picture).or_insert(shape);
+    }
+
+    /// The shape a picture is, if it is one a theme draws.
+    pub(crate) fn shape(&self, picture: &Picture) -> Option<CursorIcon> {
+        self.0.get(picture).copied()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// The cursor theme names an X client may have loaded its cursors from,
+/// first to last, each once: Solium's own (`configured`), `XCURSOR_THEME`,
+/// the X resources' `Xcursor.theme` (`resources`, the root window's
+/// `RESOURCE_MANAGER`), GTK's, and `default`, which is what libXcursor and
+/// Chromium load with no theme named.
+/// `tests::the_themes_are_solium_s_then_the_environment_s_then_the_resources_then_gtk_s`.
+pub(crate) fn themes(
+    configured: Option<&str>,
+    environment: Option<&str>,
+    resources: Option<&str>,
+    gtk: Option<&str>,
+) -> Vec<String> {
+    let mut themes: Vec<String> = Vec::new();
+    for theme in [
+        configured.map(str::to_owned),
+        environment.map(str::to_owned),
+        resources.and_then(resource_theme),
+        gtk.map(str::to_owned),
+        Some("default".to_owned()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let theme = theme.trim().to_owned();
+        if !theme.is_empty() && !themes.contains(&theme) {
+            themes.push(theme);
+        }
+    }
+    themes
+}
+
+/// `Xcursor.theme` in an X resources string, as `xrdb -query` prints it.
+pub(crate) fn resource_theme(resources: &str) -> Option<String> {
+    resources.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "Xcursor.theme").then(|| value.trim().to_owned())
+    })
+}
+
+/// The root window's `RESOURCE_MANAGER`, the X resources `xrdb` loaded, if
+/// any were.
+fn resources(conn: &impl x11rb::connection::Connection, root: Window) -> Option<String> {
+    let reply = conn
+        .get_property(
+            false,
+            root,
+            AtomEnum::RESOURCE_MANAGER,
+            AtomEnum::STRING,
+            0,
+            u32::MAX / 4,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    (!reply.value.is_empty()).then(|| String::from_utf8_lossy(&reply.value).into_owned())
+}
+
+/// The cursor theme GTK's own settings name, which GTK, and Chromium beside
+/// it, load X cursors from when nothing else names one:
+/// `gtk-cursor-theme-name` in GTK 3's or 4's `settings.ini`, or in
+/// `~/.gtkrc-2.0`, the first that has one.
+fn gtk_settings_theme() -> Option<String> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|home| home.join(".config")));
+    [
+        config.as_ref().map(|dir| dir.join("gtk-3.0/settings.ini")),
+        config.as_ref().map(|dir| dir.join("gtk-4.0/settings.ini")),
+        home.as_ref().map(|dir| dir.join(".gtkrc-2.0")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|file| std::fs::read_to_string(file).ok())
+    .find_map(|text| gtk_theme(&text))
+}
+
+/// `gtk-cursor-theme-name` in a GTK settings file, quoted (`~/.gtkrc-2.0`)
+/// or not (`settings.ini`).
+pub(crate) fn gtk_theme(settings: &str) -> Option<String> {
+    settings.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "gtk-cursor-theme-name")
+            .then(|| value.trim().trim_matches('"').to_owned())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 /// Give the root window smithay's arrow again, named `left_ptr`.
@@ -338,7 +572,7 @@ fn name_the_root(conn: &impl x11rb::connection::Connection, root: Window) -> Res
 mod tests {
     use smithay::input::pointer::CursorIcon;
 
-    use super::{icon, stands_for};
+    use super::{Picture, Pictures, gtk_theme, icon, resource_theme, stands_for, themes};
     use crate::cursor::shape::{self, tests::EVERY};
 
     /// Every shape is known by its own CSS name, which is what a theme written
@@ -427,7 +661,7 @@ mod tests {
             .expect("and its arm still ends");
         assert!(
             arm.contains("solium.pointer.xwayland(client.id());")
-                && arm.contains("crate::cursor::x11::watch(&loop_handle, display_number);"),
+                && arm.contains("crate::cursor::x11::watch(&loop_handle, display_number, theme);"),
             "XWayland comes up without the pointer hearing its cursor names:\n{arm}"
         );
     }
@@ -466,5 +700,101 @@ mod tests {
             None,
             "any surface, with no XWayland"
         );
+    }
+
+    /// **#442: an unnamed X cursor that is a theme's picture is that
+    /// shape**, and only an exact picture is: the same pixels at another
+    /// hotspot, or one pixel different, is the client's own.
+    #[test]
+    fn an_unnamed_cursor_is_known_by_its_picture() {
+        let arrow: Vec<u32> = (0..24 * 24).map(|pixel| 0xff00_0000 | pixel).collect();
+        let mut pictures = Pictures::default();
+        pictures.learn(Picture::of((24, 24), (4, 4), &arrow), CursorIcon::Default);
+        pictures.learn(Picture::of((24, 24), (4, 4), &arrow), CursorIcon::Text);
+        assert_eq!(
+            pictures.shape(&Picture::of((24, 24), (4, 4), &arrow)),
+            Some(CursorIcon::Default),
+            "the picture Chromium built from the theme's file, and the first \
+             theme to draw it names it"
+        );
+        assert_eq!(
+            pictures.shape(&Picture::of((24, 24), (5, 4), &arrow)),
+            None,
+            "another hotspot"
+        );
+        let mut sword = arrow.clone();
+        sword[100] = 0;
+        assert_eq!(
+            pictures.shape(&Picture::of((24, 24), (4, 4), &sword)),
+            None,
+            "a game's own cursor"
+        );
+    }
+
+    /// **#442: a theme file's image is the picture X reports for it**: the
+    /// file's little-endian ARGB words are the words `GetCursorImage` hands
+    /// back, and the real theme on this machine, if there is one, knows its
+    /// own arrow.
+    #[test]
+    fn a_theme_files_image_is_the_picture_x_reports() {
+        let image = xcursor::parser::Image {
+            size: 2,
+            width: 2,
+            height: 1,
+            xhot: 1,
+            yhot: 0,
+            delay: 0,
+            pixels_rgba: vec![0x10, 0x20, 0x30, 0xff, 0x01, 0x02, 0x03, 0x80],
+            pixels_argb: Vec::new(),
+        };
+        assert_eq!(
+            Picture::of_file(&image),
+            Some(Picture::of((2, 1), (1, 0), &[0xff30_2010, 0x8003_0201])),
+        );
+        let adwaita = Pictures::load(&["Adwaita".to_owned()]);
+        if adwaita.len() > 0 {
+            let theme = xcursor::CursorTheme::load("Adwaita");
+            let path = theme.load_icon("left_ptr").expect("Adwaita has an arrow");
+            let images = xcursor::parser::parse_xcursor(&std::fs::read(path).expect("reading it"))
+                .expect("parsing it");
+            let first = Picture::of_file(&images[0]).expect("a picture");
+            assert_eq!(adwaita.shape(&first), Some(CursorIcon::Default));
+        }
+    }
+
+    /// **#442: the themes are Solium's, then the environment's, then the X
+    /// resources', then GTK's, then `default`**, each once.
+    #[test]
+    fn the_themes_are_solium_s_then_the_environment_s_then_the_resources_then_gtk_s() {
+        assert_eq!(
+            themes(
+                Some("Bibata"),
+                Some("Adwaita"),
+                Some("Xft.dpi:\t96\nXcursor.theme:\tAdwaita\nXcursor.size:\t24\n"),
+                Some("breeze_cursors"),
+            ),
+            ["Bibata", "Adwaita", "breeze_cursors", "default"],
+        );
+        assert_eq!(
+            themes(None, None, None, Some("breeze_cursors")),
+            ["breeze_cursors", "default"],
+            "Illia's: a QML pointer, and KDE's theme in GTK's settings"
+        );
+        assert_eq!(themes(None, Some(""), None, None), ["default"]);
+        assert_eq!(
+            resource_theme("Xcursor.size: 24\nXcursor.theme: Adwaita"),
+            Some("Adwaita".to_owned())
+        );
+        assert_eq!(
+            gtk_theme("[Settings]\ngtk-cursor-theme-name=breeze_cursors\n"),
+            Some("breeze_cursors".to_owned()),
+            "settings.ini"
+        );
+        assert_eq!(
+            gtk_theme("gtk-cursor-theme-size=24\ngtk-cursor-theme-name=\"breeze_cursors\"\n"),
+            Some("breeze_cursors".to_owned()),
+            "~/.gtkrc-2.0"
+        );
+        assert_eq!(gtk_theme("gtk-theme-name=Breeze\n"), None);
     }
 }

@@ -138,6 +138,10 @@ pub(crate) struct WindowInfo {
     /// The window including its frame, which is what "the window" means to
     /// anything positioning it.
     pub(crate) rect: Rect,
+    /// What its frame takes of `rect` on each side right now, a titlebar the
+    /// frame has grown (#423) included; nothing for a window drawn bare
+    /// (#435).
+    pub(crate) insets: crate::decoration::Insets,
     /// Where it is being drawn right now, which in a mode is somewhere else --
     /// in the two terms the compositor's own hit test asks. See [`Drawn`].
     pub(crate) drawn: Drawn,
@@ -223,6 +227,11 @@ pub(crate) struct WindowInfo {
     /// configures carry, which a rule's `fullscreen` match reads.
     /// `real_client::sol_windows_carries_every_window_match_key`.
     pub(crate) fullscreen: bool,
+    /// Whether the compositor last told it to be maximised, as `fullscreen`
+    /// says of fullscreen: what a mode switch reads to let a window out of
+    /// the maximise the arrangement it is leaving gave it (#443).
+    /// `real_client::a_window_maximised_while_floating_joins_its_tile_when_a_layout_takes_over`.
+    pub(crate) maximized: bool,
     /// The pane style it is framed in, or `"none"` when it is drawn bare:
     /// fullscreen, drawing its own decorations, or under `pane = "none"`.
     /// What a rule's `style` match reads (`state::style_fact`).
@@ -670,6 +679,27 @@ pub(crate) enum Command {
     ToggleMaximize {
         id: u64,
     },
+    /// Hold a window a move drag has where it is while the pointer goes on,
+    /// or let it go on from where it stands: `sol.drag_hold` (#452).
+    DragHold {
+        id: u64,
+        held: bool,
+    },
+    /// Where the pointer holds a window a move drag has: `along` of its
+    /// frame's width and height, `by` pixels further. `sol.drag_grip`
+    /// (#452).
+    DragGrip {
+        id: u64,
+        along: (f64, f64),
+        by: (f64, f64),
+    },
+    /// Keep a window an edge or modifier resize has at its size and place
+    /// while the pointer goes on, or let the resize go on from where the
+    /// pointer is: `sol.resize_hold` (#454).
+    ResizeHold {
+        id: u64,
+        held: bool,
+    },
     /// Minimize a window (#30): `sol.minimize`, and `super+m`. Nothing for
     /// a window already minimized. See `WindowInfo::minimized`.
     Minimize {
@@ -705,6 +735,9 @@ pub(crate) enum Command {
     Decoration {
         name: Option<String>,
     },
+    /// How long a pass may spend building the frames of a new pane style:
+    /// `config.pane_build` (#226).
+    PaneBuild(Duration),
     /// Hand every pane's layers these values, merged into what they have.
     /// `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
     PaneValues(std::collections::BTreeMap<String, crate::json::Json>),
@@ -720,6 +753,9 @@ pub(crate) enum Command {
     Reload,
     /// Take back the compositor's shortcuts from the window holding them.
     TakeShortcutsBack,
+    /// Take the pointer back from the window holding it: `sol.release_pointer`
+    /// (#427). See `state::pointer_hold`.
+    ReleasePointer,
     /// Lock the session, as `lock.*` says: `sol.lock_now`. Only ever locks.
     LockNow,
     /// Pull Solium's own lock scenes this far down over the unlocked
@@ -939,6 +975,9 @@ impl Command {
             | Self::Warp(_)
             | Self::ToggleFullscreen { .. }
             | Self::ToggleMaximize { .. }
+            | Self::DragHold { .. }
+            | Self::DragGrip { .. }
+            | Self::ResizeHold { .. }
             | Self::Minimize { .. }
             | Self::Unminimize { .. }
             | Self::ShowMinimized { .. }
@@ -960,6 +999,7 @@ impl Command {
                     || action == "notifications.invoke"
             }
             Self::Decoration { .. }
+            | Self::PaneBuild(_)
             | Self::PaneValues(_)
             // What a frame shows, which is nothing over a lock.
             | Self::FrameValues { .. }
@@ -967,6 +1007,8 @@ impl Command {
             // No window holds the shortcuts at the lock, and taking them back
             // gives a window nothing.
             | Self::TakeShortcutsBack
+            // Nor the pointer: nothing holds it at the lock.
+            | Self::ReleasePointer
             // Over a lock, it changes nothing.
             | Self::LockNow
             // Nor does a peek, which is nothing over a lock.
@@ -3052,6 +3094,36 @@ impl Scripts {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "layout", ()))
     }
 
+    /// A move drag of a window began, moved or ended (#452): `(id, phase,
+    /// x, y)`, told by `crate::input::grab::settle_drags`.
+    pub(crate) fn dragged(
+        &mut self,
+        id: u64,
+        phase: &'static str,
+        x: f64,
+        y: f64,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.dispatch_as(FocusSource::Drop, snapshot, move |lua, _| {
+            call_listeners(lua, "drag", (id, phase, x, y))
+        })
+    }
+
+    /// An edge or modifier resize of a window began or ended (#454): `(id,
+    /// phase, x, y)`, told by `crate::input::grab::settle_drags`.
+    pub(crate) fn resizing(
+        &mut self,
+        id: u64,
+        phase: &'static str,
+        x: f64,
+        y: f64,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| {
+            call_listeners(lua, "resizing", (id, phase, x, y))
+        })
+    }
+
     /// A window was dragged and let go.
     ///
     /// The event a layout needs and could not have: without it a drag in a
@@ -3920,7 +3992,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // `shown` is whether the window's client has been shown yet; see
     // `WindowInfo::shown`. `fullscreen` and `style` are the two match keys of
     // an effect rule (`effects.rules`) nothing else here says, so every key a
-    // rule matches a window by can be read from Lua. `x11_type`,
+    // rule matches a window by can be read from Lua; `maximized` beside
+    // `fullscreen`, for a mode switch (#443). `x11_type`,
     // `accepts_input`, `class` and `instance` are read only from an X11
     // window's own properties (#221) -- `nil` for a Wayland one, except
     // `accepts_input`, which is `true` -- and exist for a window rule (#56) to
@@ -3942,6 +4015,12 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("y", window.rect.y)?;
                 entry.set("w", window.rect.w)?;
                 entry.set("h", window.rect.h)?;
+                let insets = lua.create_table()?;
+                insets.set("top", window.insets.top)?;
+                insets.set("right", window.insets.right)?;
+                insets.set("bottom", window.insets.bottom)?;
+                insets.set("left", window.insets.left)?;
+                entry.set("insets", insets)?;
                 entry.set("title", window.title.clone())?;
                 entry.set("focused", window.focused)?;
                 entry.set("monitor", window.monitor.clone())?;
@@ -3956,6 +4035,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("cramped", window.cramped)?;
                 entry.set("shown", window.shown)?;
                 entry.set("fullscreen", window.fullscreen)?;
+                entry.set("maximized", window.maximized)?;
                 entry.set("style", window.style.clone())?;
                 entry.set("x11_type", window.x11_type.clone())?;
                 entry.set("accepts_input", window.accepts_input)?;
@@ -5452,11 +5532,50 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // The pointer a window holds, taken back until it is pressed on (#427).
+    // See `state::pointer_hold`.
+    sol.set(
+        "release_pointer",
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ReleasePointer);
+            })
+        })?,
+    )?;
+
     sol.set(
         "pane",
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Decoration { name });
+            })
+        })?,
+    )?;
+
+    // How long a pass may spend building the frames of a new pane style, in
+    // milliseconds (#226): `config.pane_build`, handed over by `init.lua`.
+    // Nil says nothing; anything but a number of 0 or more is named in the
+    // log and changes nothing. `tests::sol_pane_build_hands_the_budget_over`.
+    sol.set(
+        "pane_build",
+        lua.create_function(|lua, millis: Value| {
+            let budget = match millis {
+                Value::Nil => return Ok(()),
+                Value::Integer(whole) => u64::try_from(whole).ok().map(Duration::from_millis),
+                Value::Number(part) if part.is_finite() && part >= 0.0 => {
+                    Some(Duration::from_secs_f64(part / 1000.0))
+                }
+                _ => None,
+            };
+            let Some(budget) = budget else {
+                tracing::warn!(
+                    ?millis,
+                    "pane_build is a number of milliseconds, 0 or more; keeping what it was"
+                );
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::PaneBuild(budget));
             })
         })?,
     )?;
@@ -5663,7 +5782,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                     Some(background) => resize.background = background,
                     None => tracing::warn!(
                         background = %name,
-                        "resize.background is \"#rrggbb\", \"#rrggbbaa\" or \"none\"; \
+                        "resize.background is \"edge\", \"#rrggbb\", \"#rrggbbaa\" or \"none\"; \
                          keeping the default"
                     ),
                 }
@@ -5689,6 +5808,69 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                         ),
                     }
                 }
+            }
+            // And how long the windows a layout's drag moves wait for one
+            // another's applications: milliseconds, 0 to `resizing::SYNC_MAX`,
+            // under the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            match options.get::<Value>("sync") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => {
+                    let most = crate::resizing::SYNC_MAX.as_secs_f64() * 1000.0;
+                    match number(&value)
+                        .filter(|millis| (0.0..=most).contains(millis))
+                        .and_then(|millis| {
+                            std::time::Duration::try_from_secs_f64(millis / 1000.0).ok()
+                        }) {
+                        Some(sync) => resize.sync = sync,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            most_ms = most,
+                            "resize.sync is a number of milliseconds from 0 to most_ms; \
+                             keeping the default"
+                        ),
+                    }
+                }
+            }
+            // And whether a window being resized is told to draw its next
+            // size while its last is still being drawn: true or false, under
+            // the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            match options.get::<Value>("overlap") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::Boolean(overlap)) => resize.overlap = overlap,
+                Ok(value) => tracing::warn!(
+                    value = describe(&value),
+                    "resize.overlap is true or false; keeping the default"
+                ),
+            }
+            // What a window being dragged is drawn at: the size its
+            // application has drawn, or the pointer's rectangle. Under the same
+            // contract. `the_shipped_resize_setting_reaches_the_compositor`.
+            if let Ok(Value::String(name)) = options.get::<Value>("follow")
+                && let Ok(name) = name.to_str()
+            {
+                match crate::resizing::Follow::named(&name) {
+                    Some(follow) => resize.follow = follow,
+                    None => tracing::warn!(
+                        follow = %name,
+                        "resize.follow is \"app\" or \"pointer\"; keeping the default"
+                    ),
+                }
+            }
+            // And how often a window being dragged is told its new size: 0 on
+            // every frame, or at most that many times a second. Under the
+            // same contract. `the_shipped_resize_setting_reaches_the_compositor`,
+            // `resize_tell_hz_is_every_frame_or_a_rate`.
+            match options.get::<Value>("tell_hz") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(value) => match number(&value).and_then(crate::resizing::tell_every) {
+                    Some(tell) => resize.tell = tell,
+                    None => tracing::warn!(
+                        value = describe(&value),
+                        most = crate::resizing::TELL_HZ_MAX,
+                        "resize.tell_hz is 0 (every frame) or a number of times a second \
+                         from 1 to most; keeping the default"
+                    ),
+                },
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Resize(resize));
@@ -5864,6 +6046,38 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                          keeping the default"
                     ),
                 },
+            }
+            // How a GPU scene's buffer is sized (`qml::buffers`): a key left
+            // out keeps its default, and a table out of bounds, or with a key
+            // that is not a whole number, keeps both.
+            // `tests::a_configured_qml_renderer_is_read_before_qt_starts`.
+            match options.get::<Value>("buffers") {
+                Ok(Value::Nil) | Err(_) => {}
+                Ok(Value::Table(buffers)) => {
+                    let whole = |key: &str, default: i32| match buffers.get::<Value>(key) {
+                        Ok(Value::Nil) | Err(_) => Some(default),
+                        Ok(value) => value.as_i32(),
+                    };
+                    let step = whole("step", crate::qml::buffers::STEP);
+                    let shrink = whole("shrink", crate::qml::buffers::SHRINK);
+                    match step
+                        .zip(shrink)
+                        .and_then(|(step, shrink)| crate::qml::buffers::Buffers::new(step, shrink))
+                    {
+                        Some(policy) => configured.buffers = Some(policy),
+                        None => tracing::warn!(
+                            ?step,
+                            ?shrink,
+                            "qml.buffers.step is a whole number of pixels from 0 to 1024 and \
+                             qml.buffers.shrink a whole number of steps from 2 to 64; keeping \
+                             the defaults"
+                        ),
+                    }
+                }
+                Ok(other) => tracing::warn!(
+                    buffers = ?other,
+                    "qml.buffers is a table, {{ step = , shrink = }}; keeping the defaults"
+                ),
             }
             lua.set_app_data(configured);
             Ok(())
@@ -6323,6 +6537,62 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             with_pending(lua, |pending| {
                 pending.commands.push(Command::ToggleMaximize { id });
+            })
+        })?,
+    )?;
+
+    // Hold a window a move drag has where it is, or let it go on (#452).
+    // While held, the pointer goes on and the `drag` listeners go on hearing
+    // it; let go, the window moves on from where it stands. A window no drag
+    // has is left alone.
+    // `real_client::reflow_on_close::drag_primitives::a_held_window_stays_while_the_pointer_moves_and_goes_on_from_where_it_is`.
+    sol.set(
+        "drag_hold",
+        lua.create_function(|lua, (id, held): (u64, bool)| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::DragHold { id, held });
+            })
+        })?,
+    )?;
+
+    // Where the pointer holds a window a move drag has (#452): `{ x, y }`
+    // as shares of its frame's width and height, and `{ dx, dy }` pixels
+    // further, each 0 when left out, from the frame's top-left. The window
+    // goes there at once and the drag goes on from there.
+    // `real_client::reflow_on_close::drag_primitives::a_grip_puts_the_window_under_the_pointer_and_the_drag_goes_on_from_it`.
+    sol.set(
+        "drag_grip",
+        lua.create_function(|lua, (id, grip): (u64, mlua::Table)| {
+            let get = |key: &str| -> mlua::Result<f64> {
+                Ok(grip.get::<Option<f64>>(key)?.unwrap_or(0.0))
+            };
+            let along = (get("x")?, get("y")?);
+            let by = (get("dx")?, get("dy")?);
+            if ![along.0, along.1, by.0, by.1]
+                .iter()
+                .all(|value| value.is_finite())
+            {
+                return Err(mlua::Error::RuntimeError(
+                    "sol.drag_grip: x, y, dx and dy are numbers".to_owned(),
+                ));
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::DragGrip { id, along, by });
+            })
+        })?,
+    )?;
+
+    // Keep a window a resize has as it is, or let the resize go on (#454):
+    // the counterpart of `sol.drag_hold`. While held, the pointer goes on and
+    // the window keeps its size and place, and the `resize` listeners are
+    // offered nothing; let go, the resize goes on from where the pointer is
+    // then. A window no resize has is left alone.
+    // `real_client::reflow_on_close::resize_primitives::a_held_resize_keeps_the_window_and_goes_on_from_where_the_pointer_is`.
+    sol.set(
+        "resize_hold",
+        lua.create_function(|lua, (id, held): (u64, bool)| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ResizeHold { id, held });
             })
         })?,
     )?;
@@ -8381,6 +8651,7 @@ mod tests {
             media: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 id: 7,
                 rect: Rect {
                     x: 0.0,
@@ -8403,6 +8674,7 @@ mod tests {
                 cramped: false,
                 shown: true,
                 fullscreen: false,
+                maximized: false,
                 style: String::new(),
                 x11_type: None,
                 accepts_input: true,
@@ -8465,6 +8737,41 @@ mod tests {
             }
             other => panic!("expected a present command, got {other:?}"),
         }
+    }
+
+    /// `sol.pane_build` hands `config.pane_build` over as a duration, whole
+    /// or fractional milliseconds, and a value that is no time at all changes
+    /// nothing (#226).
+    #[test]
+    fn sol_pane_build_hands_the_budget_over() {
+        let directory = std::env::temp_dir().join("solium-script-test-pane-build");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+A", function() sol.pane_build(5) end)
+            sol.bind("Super+B", function() sol.pane_build(0.5) end)
+            sol.bind("Super+C", function() sol.pane_build(-1) end)
+            sol.bind("Super+D", function() sol.pane_build("soon") end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let mut budget = |combo: &str| {
+            let outcome = scripts.key(combo, empty_snapshot());
+            assert!(outcome.handled, "{combo} was not handled");
+            match outcome.commands.as_slice() {
+                [Command::PaneBuild(budget)] => Some(*budget),
+                [] => None,
+                other => panic!("expected at most a budget from {combo}, got {other:?}"),
+            }
+        };
+        assert_eq!(budget("super+a"), Some(Duration::from_millis(5)));
+        assert_eq!(budget("super+b"), Some(Duration::from_micros(500)));
+        assert_eq!(budget("super+c"), None, "a time before now is no budget");
+        assert_eq!(budget("super+d"), None, "nor is a word");
     }
 
     /// **`sol.decoration` is still `sol.pane`.**
@@ -10360,8 +10667,33 @@ mod tests {
             crate::qml::renderer::Configured {
                 renderer: Some("software".to_owned()),
                 probe_timeout: Some(Duration::from_millis(1500)),
+                buffers: None,
             }
         );
+        // `qml.buffers`, each key on its own, the other left at its default.
+        let buffers = |step, shrink| crate::qml::buffers::Buffers::new(step, shrink);
+        for (source, wanted) in [
+            (
+                "sol.qml({ buffers = { step = 256, shrink = 3 } })",
+                buffers(256, 3),
+            ),
+            (
+                "sol.qml({ buffers = { step = 0 } })",
+                buffers(0, crate::qml::buffers::SHRINK),
+            ),
+            (
+                "sol.qml({ buffers = { shrink = 5 } })",
+                buffers(crate::qml::buffers::STEP, 5),
+            ),
+            // Out of bounds, or not whole numbers: warned about, and the
+            // defaults kept.
+            ("sol.qml({ buffers = { step = 2000 } })", None),
+            ("sol.qml({ buffers = { shrink = 1 } })", None),
+            ("sol.qml({ buffers = { step = 64.5 } })", None),
+            ("sol.qml({ buffers = 128 })", None),
+        ] {
+            assert_eq!(configured(source).buffers, wanted, "{source}");
+        }
         // Said nothing, three ways.
         for source in ["", "sol.qml(nil)", "sol.qml({})"] {
             assert_eq!(
@@ -10999,6 +11331,33 @@ mod tests {
         );
     }
 
+    /// **The shipped configuration runs a moving window's effects on every
+    /// pass** (`effects.motion_hz = 0`, 2026-10-16), and that is the Rust
+    /// default too: the glass is read where the window is on every frame of
+    /// a glide, a drag or a resize, and a lower rate is a choice made in
+    /// `config.lua` for a weak GPU. The same parity
+    /// `the_shipped_configuration_s_lock_table_matches_the_rust_default`
+    /// holds for `lock`.
+    #[test]
+    fn the_shipped_configuration_runs_a_moving_windows_effects_on_every_pass() {
+        let Some((directory, scripts)) =
+            shipped_init_with_user("solium-script-test-motion-hz-default", "return {}")
+        else {
+            return;
+        };
+        let settings = scripts.effect_settings_at_load();
+        let _ = std::fs::remove_dir_all(&directory);
+        let Some(Ok(settings)) = settings else {
+            panic!("the shipped init.lua handed over no effects settings: {settings:?}");
+        };
+        let default = crate::effect::settings::Settings::default().motion_hz;
+        assert!(
+            settings.motion_hz.abs() < f64::EPSILON && default.abs() < f64::EPSILON,
+            "the shipped effects.motion_hz is {} and the Rust default {default}, not both 0",
+            settings.motion_hz
+        );
+    }
+
     /// The shipped `config.lua` and `init.lua` tell the session and start
     /// autostart, and `--check` knows both keys. Shipped files only: the
     /// entry points `package.path` at them, past the developer's own
@@ -11077,6 +11436,7 @@ mod tests {
             crate::qml::renderer::Configured {
                 renderer: Some("auto".to_owned()),
                 probe_timeout: Some(crate::qml::renderer::PROBE_TIMEOUT),
+                buffers: Some(crate::qml::buffers::Buffers::default()),
             }
         );
         let shipped = std::fs::read_to_string(crate::assets::lua().join("init.lua"))
@@ -11355,6 +11715,7 @@ mod tests {
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let mut snapshot = empty_snapshot();
         let window = |id: u64, modal: bool, parent: Parentage| WindowInfo {
+            insets: crate::decoration::Insets::default(),
             id,
             rect: Rect::default(),
             drawn: Drawn::default(),
@@ -11372,6 +11733,7 @@ mod tests {
             cramped: false,
             shown: true,
             fullscreen: false,
+            maximized: false,
             style: String::new(),
             x11_type: None,
             accepts_input: true,
@@ -12065,6 +12427,7 @@ mod tests {
             windows: windows
                 .iter()
                 .map(|id| WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     id: *id,
                     rect: Rect {
                         x: 0.0,
@@ -12092,6 +12455,7 @@ mod tests {
                     cramped: false,
                     shown: true,
                     fullscreen: false,
+                    maximized: false,
                     style: String::new(),
                     x11_type: None,
                     accepts_input: true,
@@ -12565,18 +12929,30 @@ mod tests {
     /// `resizing::PATIENCE_MAX`, anything else keeping the quarter second.
     #[test]
     fn the_shipped_resize_setting_reaches_the_compositor() {
-        use crate::resizing::{BACKGROUND, Fill, PATIENCE, Settings};
+        use crate::resizing::{BACKGROUND, EVERY_FRAME, Fill, Follow, PATIENCE, SYNC, Settings};
         let waits = |millis| Settings {
             patience: std::time::Duration::from_millis(millis),
+            ..Settings::default()
+        };
+        let syncs = |millis| Settings {
+            sync: std::time::Duration::from_millis(millis),
+            ..Settings::default()
+        };
+        let tells = |hz: f64| Settings {
+            tell: std::time::Duration::from_secs_f64(1.0 / hz),
             ..Settings::default()
         };
         for (user, wanted) in [
             (
                 "return {}",
                 Settings {
-                    fill: Fill::Anchor,
+                    fill: Fill::Crop,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
@@ -12585,31 +12961,58 @@ mod tests {
                     fill: Fill::Stretch,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
                 "return { resize = { fill = \"crop\", background = \"#10203080\" } }",
                 Settings {
                     fill: Fill::Crop,
-                    background: Some([0x10, 0x20, 0x30, 0x80]),
+                    background: crate::resizing::Background::Colour([0x10, 0x20, 0x30, 0x80]),
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
                 "return { resize = { background = \"none\" } }",
                 Settings {
-                    fill: Fill::Anchor,
-                    background: None,
+                    fill: Fill::Crop,
+                    background: crate::resizing::Background::None,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
             ),
             (
                 "return { resize = { fill = \"hold\", background = \"dark\" } }",
                 Settings {
-                    fill: Fill::Anchor,
+                    fill: Fill::Crop,
                     background: BACKGROUND,
                     patience: PATIENCE,
+                    tell: EVERY_FRAME,
+                    follow: Follow::App,
+                    sync: SYNC,
+                    overlap: true,
                 },
+            ),
+            (
+                "return { resize = { background = \"#1c1c1c\" } }",
+                Settings {
+                    background: crate::resizing::Background::Colour([0x1c, 0x1c, 0x1c, 0xff]),
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { background = \"edge\" } }",
+                Settings::default(),
             ),
             ("return { resize = { patience = 600 } }", waits(600)),
             ("return { resize = { patience = 0 } }", waits(0)),
@@ -12617,6 +13020,52 @@ mod tests {
             ("return { resize = { patience = 5001 } }", waits(250)),
             ("return { resize = { patience = -1 } }", waits(250)),
             ("return { resize = { patience = \"long\" } }", waits(250)),
+            ("return { resize = { sync = 0 } }", syncs(0)),
+            ("return { resize = { sync = 50 } }", syncs(50)),
+            ("return { resize = { sync = 200 } }", syncs(200)),
+            ("return { resize = { sync = 5000 } }", syncs(5000)),
+            ("return { resize = { sync = 5001 } }", syncs(0)),
+            ("return { resize = { sync = -1 } }", syncs(0)),
+            ("return { resize = { sync = \"long\" } }", syncs(0)),
+            (
+                "return { resize = { overlap = false } }",
+                Settings {
+                    overlap: false,
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { overlap = \"no\" } }",
+                Settings::default(),
+            ),
+            ("return { resize = { tell_hz = 30 } }", tells(30.0)),
+            ("return { resize = { tell_hz = 1000 } }", tells(1000.0)),
+            ("return { resize = { tell_hz = 0 } }", Settings::default()),
+            (
+                "return { resize = { tell_hz = 1001 } }",
+                Settings::default(),
+            ),
+            ("return { resize = { tell_hz = 0.5 } }", Settings::default()),
+            ("return { resize = { tell_hz = -1 } }", Settings::default()),
+            (
+                "return { resize = { tell_hz = \"fast\" } }",
+                Settings::default(),
+            ),
+            (
+                "return { resize = { follow = \"pointer\" } }",
+                Settings {
+                    follow: Follow::Pointer,
+                    ..Settings::default()
+                },
+            ),
+            (
+                "return { resize = { follow = \"app\" } }",
+                Settings::default(),
+            ),
+            (
+                "return { resize = { follow = \"edge\" } }",
+                Settings::default(),
+            ),
         ] {
             let Some((directory, mut scripts)) =
                 shipped_init_with_user("solium-script-test-resize", user)
@@ -12670,32 +13119,39 @@ mod tests {
                 ..Settings::default()
             })
         };
+        let capped = |fill: Fill| {
+            Some(Settings {
+                fill,
+                tell: std::time::Duration::from_secs_f64(1.0 / 30.0),
+                ..Settings::default()
+            })
+        };
         // At load (floating), then tiling, then scrolling.
         for (resize, expected) in [
             (
-                r#"{ fill = "crop", modes = { tiling = "stretch" } }"#,
-                [fill(Fill::Crop), fill(Fill::Stretch), fill(Fill::Crop)],
+                r#"{ fill = "anchor", modes = { tiling = "stretch" } }"#,
+                [fill(Fill::Anchor), fill(Fill::Stretch), fill(Fill::Anchor)],
             ),
             (
-                r#"{ modes = { floating = "stretch", scrolling = "crop" } }"#,
-                [fill(Fill::Stretch), fill(Fill::Anchor), fill(Fill::Crop)],
+                r#"{ modes = { floating = "stretch", scrolling = "anchor" } }"#,
+                [fill(Fill::Stretch), fill(Fill::Crop), fill(Fill::Anchor)],
             ),
             (
                 r#"{ background = "none", modes = { scrolling = "stretch" } }"#,
                 [
                     Some(Settings {
-                        fill: Fill::Anchor,
-                        background: None,
+                        fill: Fill::Crop,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                     Some(Settings {
-                        fill: Fill::Anchor,
-                        background: None,
+                        fill: Fill::Crop,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                     Some(Settings {
                         fill: Fill::Stretch,
-                        background: None,
+                        background: crate::resizing::Background::None,
                         ..Settings::default()
                     }),
                 ],
@@ -12703,12 +13159,22 @@ mod tests {
             (
                 r#"{ patience = 600, modes = { tiling = "stretch" } }"#,
                 [
-                    patient(Fill::Anchor),
+                    patient(Fill::Crop),
                     patient(Fill::Stretch),
-                    patient(Fill::Anchor),
+                    patient(Fill::Crop),
                 ],
             ),
-            ("{}", [fill(Fill::Anchor), None, None]),
+            // `tell_hz` goes over with every switch, as the patience does: a
+            // switch that dropped it would put the drag back to every frame.
+            (
+                r#"{ tell_hz = 30, modes = { tiling = "stretch" } }"#,
+                [
+                    capped(Fill::Crop),
+                    capped(Fill::Stretch),
+                    capped(Fill::Crop),
+                ],
+            ),
+            ("{}", [fill(Fill::Crop), None, None]),
         ] {
             let Some((directory, mut scripts)) = shipped_init_with_user(
                 "solium-script-test-resize-modes",
@@ -16295,6 +16761,7 @@ mod dialogs {
     /// chose, in the corner a Wayland toplevel is mapped at.
     fn window(id: u64, w: f64, h: f64) -> WindowInfo {
         WindowInfo {
+            insets: crate::decoration::Insets::default(),
             id,
             rect: Rect {
                 x: 0.0,
@@ -16317,6 +16784,7 @@ mod dialogs {
             cramped: false,
             shown: true,
             fullscreen: false,
+            maximized: false,
             style: String::new(),
             x11_type: None,
             accepts_input: true,
@@ -16346,6 +16814,7 @@ mod dialogs {
 
     fn modal(id: u64, w: f64, h: f64, parent: Parentage) -> WindowInfo {
         WindowInfo {
+            insets: crate::decoration::Insets::default(),
             modal: true,
             parent,
             ..window(id, w, h)
@@ -16389,6 +16858,47 @@ mod dialogs {
             }
         }
         out
+    }
+
+    /// **`sol.windows()` says what a window's frame takes on each side**
+    /// (#435): what a configuration putting a window back needs to tell the
+    /// frame from the client.
+    #[test]
+    fn sol_windows_says_what_a_windows_frame_takes() {
+        let directory = std::env::temp_dir().join("solium-script-test-window-insets");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+I", function()
+                local w = sol.windows()[1]
+                sol.place(w.id, {
+                    x = w.insets.left, y = w.insets.top,
+                    w = w.insets.right, h = w.insets.bottom,
+                })
+            end)
+            "#,
+        )
+        .expect("writing the test script");
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let framed = WindowInfo {
+            insets: crate::decoration::Insets {
+                top: 32,
+                right: 1,
+                bottom: 2,
+                left: 3,
+            },
+            ..window(7, 400.0, 300.0)
+        };
+        let outcome = scripts.key("super+i", snapshot(vec![framed]));
+        assert!(outcome.handled);
+        let rect = placed(&outcome.commands).get(&7).copied().expect("placed");
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (3.0, 32.0, 1.0, 2.0),
+            "left, top, right and bottom, as the compositor has them"
+        );
     }
 
     /// Rects out of Lua are `f64` through a divide or two, so they are compared
@@ -16923,6 +17433,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
                             leaving: leaving.contains(&id),
@@ -17397,6 +17908,7 @@ mod dialogs {
                 .iter()
                 .cloned()
                 .map(|window| WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     leaving: ids.contains(&window.id),
                     ..window
                 })
@@ -17533,6 +18045,7 @@ mod dialogs {
                         vec![second_monitor()],
                         (1..=3)
                             .map(|id| WindowInfo {
+                                insets: crate::decoration::Insets::default(),
                                 leaving: leaving && id == 3,
                                 ..on(&second_monitor(), window(id, 800.0, 600.0))
                             })
@@ -17653,6 +18166,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
                             leaving: leaving.contains(&id),
@@ -18336,6 +18850,7 @@ mod dialogs {
                 scripts.evaluate("return tostring(require(\"workspaces\").vacant(\"DP-1\"))")
             };
             let closing = |id| WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 leaving: true,
                 ..window(id, 800.0, 600.0)
             };
@@ -18573,6 +19088,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go under `min`.
         fn at_least(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 min: size(w, h),
                 ..plain(id)
             }
@@ -18581,6 +19097,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go over `max`.
         fn at_most(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 max: size(w, h),
                 ..plain(id)
             }
@@ -18588,6 +19105,7 @@ mod dialogs {
 
         fn with_app(app_id: &str, window: WindowInfo) -> WindowInfo {
             WindowInfo {
+                insets: crate::decoration::Insets::default(),
                 app_id: app_id.to_owned(),
                 ..window
             }
@@ -18661,6 +19179,7 @@ mod dialogs {
             );
             let windows = vec![
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     max: size(1200, 0),
                     cramped: true,
                     ..with_app("firefox", at_least(1, 820, 0))
@@ -18948,6 +19467,7 @@ mod dialogs {
                 switched_on(&mut scripts, "super+t");
                 let _ = scripts.opened(1, desk(vec![plain(1)], (2000.0, 700.0)));
                 let launched = WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     shown: false,
                     ..plain(2)
                 };
@@ -18958,6 +19478,7 @@ mod dialogs {
                 assert_eq!(workspace(&scripts), "1", "the premise");
 
                 let arrived = WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     shown,
                     ..at_least(2, 2450, 1350)
                 };
@@ -18998,6 +19519,7 @@ mod dialogs {
                         "the launched window stayed in a tile that cannot hold it"
                     );
                     let again = WindowInfo {
+                        insets: crate::decoration::Insets::default(),
                         shown: false,
                         ..at_least(2, 2450, 1350)
                     };
@@ -19178,6 +19700,7 @@ mod dialogs {
         fn at_rest(rects: &HashMap<u64, Rect>, id: u64) -> WindowInfo {
             match rects.get(&id) {
                 Some(rect) => WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     rect: *rect,
                     ..window(id, rect.w, rect.h)
                 },
@@ -19636,6 +20159,7 @@ mod dialogs {
                                 on(&second_monitor(), each)
                             } else if id >= 3 {
                                 WindowInfo {
+                                    insets: crate::decoration::Insets::default(),
                                     monitor: "DP-2".to_owned(),
                                     ..each
                                 }
@@ -19871,6 +20395,7 @@ mod directions {
 
     fn window(id: u64, monitor: &str, rect: Rect) -> WindowInfo {
         WindowInfo {
+            insets: crate::decoration::Insets::default(),
             id,
             rect,
             drawn: Drawn::default(),
@@ -19888,6 +20413,7 @@ mod directions {
             cramped: false,
             shown: true,
             fullscreen: false,
+            maximized: false,
             style: String::new(),
             x11_type: None,
             accepts_input: true,
@@ -21604,6 +22130,7 @@ mod directions {
             windows: vec![
                 window(4, "DP-1", WIDE),
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)
                 },
@@ -21671,15 +22198,18 @@ mod directions {
         let desk = |focused: bool| Snapshot {
             windows: vec![
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(1, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     minimized: true,
                     above: false,
                     ..window(2, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     leaving: true,
                     ..window(3, "DP-1", WIDE)
                 },
@@ -21757,6 +22287,7 @@ mod directions {
             windows: vec![
                 window(4, "DP-1", WIDE),
                 WindowInfo {
+                    insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)
                 },

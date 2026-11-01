@@ -78,7 +78,9 @@
 ---@field cramped boolean Whether the layout last placed it with `cramped = true`.
 ---@field shown boolean Whether its application has shown its first frame yet.
 ---@field fullscreen boolean Whether the compositor last told it to be fullscreen.
+---@field maximized boolean Whether the compositor last told it to be maximised: `sol.toggle_maximize`, `super+shift+m`, the frame's button, or its client's own request, xdg or X11. A layout taking over lets such a window out of it first (`modes.lua`), so it goes into its tile; a client's own maximise never lifts a window out of a tile, and a tile given to a window its client maximised takes it out of the maximise.
 ---@field style string The pane style it is framed in, or `"none"` when it is drawn bare: fullscreen, drawing its own decorations, or under the style `"none"`.
+---@field insets {top: integer, right: integer, bottom: integer, left: integer} What its frame takes of `x`, `y`, `w` and `h` on each side right now, a titlebar the frame has grown (`growTop`) included: the client is that rectangle less these. All 0 for a window drawn bare.
 ---@field x11_type? string Its X11 `_NET_WM_WINDOW_TYPE`, lower case (`"normal"`, `"dialog"`, `"utility"`, `"toolbar"`, `"menu"`, `"dropdown-menu"`, `"popup-menu"`, `"tooltip"`, `"notification"`, `"splash"`); `"normal"` for an X11 window with no type of its own, same as EWMH's own default, and absent for a Wayland window, which has no such property to ask.
 ---@field accepts_input boolean Whether the window may ever be given the keyboard: an X11 client's own `WM_HINTS.input`, or `true` for a Wayland window, which has nothing equivalent to decline with. Not what decides whether a window reaches this list at all (#221) -- an ICCCM 'Globally Active' application can set this `false` and still be an ordinary, shown window -- so a row here can read `false`; it exists for a window rule to act on.
 ---@field class? string Its X11 `WM_CLASS` class, or absent for a Wayland window, which has no such property. `config.x11.hidden` matches against this and `instance` to decide whether the window was shown at all (#221).
@@ -452,6 +454,7 @@
 ---@class sol.QmlOptions
 ---@field renderer? "auto"|"gpu"|"software" `"auto"` tries the GPU in a child process first.
 ---@field probe_timeout? integer Milliseconds the GPU trial may take.
+---@field buffers? { step?: integer, shrink?: integer } On the GPU, how big the buffer a QML scene is drawn into is: each side rounded up to a whole number of `step` pixels (0 to 1024; 0 is a buffer exactly the scene's size, a new one at every size; default 128), so a window being resized draws its frame into the buffer it has until it outgrows it; once a size has held, a buffer `shrink` steps or more larger than its scene on a side (2 to 64; default 2) is replaced by a snug one.
 
 ---Telling systemd and D-Bus that Solium is the session. A key left out, or
 ---one of the wrong kind, keeps the default.
@@ -504,8 +507,10 @@
 ---| "media" # Something changed in media: `(event)`, a `sol.MediaEvent`.
 ---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
+---| "drag" # A window is being moved by the pointer, a finger, or its own client's move request: `(id, phase, x, y)`, `phase` being `"begin"`, `"move"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion can move the window, so a listener can hold it (`sol.drag_hold`); `"move"` once a frame at most, wherever the pointer got to; `"end"` before the `"drop"`, and also when a drag ends with no drop (the window went fullscreen, a finger was cancelled).
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
 ---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
+---| "resizing" # A window is being resized by a border, the drag modifier, or a finger: `(id, phase, x, y)`, `phase` being `"begin"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion is offered to the `"resize"` listeners, so a listener can hold the window (`sol.resize_hold`); `"end"` after the release and after the last motion is offered. Its motion is the `"resize"` event's.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
 ---| "click" # A pointer or finger press while a script holds input: `(x, y)`.
 ---| "touch" # A raw finger event: `(event)`, a `sol.TouchEvent`. Down precedes delivery so Lua can claim it with `sol.touch`; without a claim it observes normal delivery. Never delivered while locked, nor replayed on unlock.
@@ -613,7 +618,7 @@ function sol.problems() end
 ---which part, for which windows or surfaces. A later rule for the same part
 ---and slot wins over an earlier one, and yours over a pane style's.
 ---@class sol.Rule
----@field match "*"|table `"*"`, or the keys a part's kind matches on, each a word that is exact, `"*"`, or a prefix ending in `*`: `app_id`, `title`, `monitor`, `style` (`"none"` for a bare window), and `focused` and `fullscreen` as booleans, for a window's parts; `surface` for a scripted surface's (a plane such as `shell/dock` waits for planes); `layer_shell` for a layer surface's. No Lua patterns.
+---@field match "*"|table `"*"`, or the keys a part's kind matches on, each a word that is exact, `"*"`, or a prefix ending in `*`: `app_id`, `title`, `monitor`, `style` (`"none"` for a bare window), `focused`, `fullscreen` and `maximized` as booleans, and `values`, a table the window's own values from `sol.frame(id, { ... })` must have, each key equal to the boolean, number or word given (`false` also matching a key never handed), for a window's parts; `surface` for a scripted surface's (a plane such as `shell/dock` waits for planes); `layer_shell` for a layer surface's. No Lua patterns.
 ---@field part string `pane`, `client`, `popup`, `layer:<name>`, `region:titlebar`, `surface:<name>` or `layer_shell:<namespace>`. Other regions, and the titlebar's own pixels as a chain's input, wait for `Solium.region`, and `output` for X4.2.
 ---@field slot "behind"|"front"|"replace" Below the part, above it, or in its place. The part itself is always drawn: a `replace` whose effect fails draws the part.
 ---@field effect string|table|false An effect's name; a link, `{ "blur", passes = 3 }`, its params beside the name, with `reach` and `bleed` overriding the effect's own; a chain of links in order, `{ { "blur" }, { "tint" } }`; or `false`, which empties the slot.
@@ -657,7 +662,7 @@ function sol.problems() end
 ---@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when a reload finds its folder changed while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with; a reload that leaves the folder as it was changes nothing, even one that changes `sandbox`). A deform may say either for itself.
 ---@field xray? sol.XrayOptions What T2 effects read as the backdrop.
 ---@field memo? sol.MemoOptions How a chain's backdrop-only part is shared per monitor.
----@field motion_hz? number How many times a second, at most, an effect's own steps for a part run again while only the part's place or size moves (a glide, a drag, a resize): a T2 effect's (the glass's refraction) as it moves, a T0 effect's (the shade) as it changes size. Between, the last result is drawn where the part is, stretched to its size: what shows through lags the part by at most `1 / motion_hz` of its motion, and is right again within that once it stops. A backdrop redrawn or new params run it at once. 0 runs them on every pass; otherwise 10 to 1000. Default 60.
+---@field motion_hz? number How many times a second, at most, an effect's own steps for a part run again while only the part's place or size moves (a glide, a drag, a resize): a T2 effect's (the glass's refraction) as it moves, a T0 effect's (the shade) as it changes size. 0, the default, runs them on every pass the part moved on, so what shows through is where the part is on every frame. 10 to 1000 is a cap for a weak GPU: between runs the last result is drawn where the part is, stretched to its size, so what shows through lags the part by up to `1 / motion_hz` of its motion and is right again within that once it stops. A backdrop redrawn or new params run it at once.
 
 ---Which effects go where, all at once: a set with a broken rule is refused
 ---whole, its errors listed by `sol.problems()`, and the rules that ran stay.
@@ -1162,6 +1167,18 @@ function sol.reload() end
 ---@return nil
 function sol.take_shortcuts_back() end
 
+---
+---Take the pointer back from the window holding it: a game that locked it
+---still or confined it to its window. Only the window with the keyboard ever
+---holds the pointer, so moving the keyboard elsewhere lets go of it too; this
+---is for when the keyboard is still on the game. The window holds the pointer
+---again once it is pressed on. An X11 window (a Proton game) also loses the
+---keyboard, because an X client lets go of its own grabs only when it loses
+---the focus. The shipped `super+Escape` calls it. Nothing happens when no
+---window holds the pointer.
+---@return nil
+function sol.release_pointer() end
+
 ---Choose how every window is framed, at once.
 ---
 ---A name is a folder under `~/.config/solium/qml/panes` or the shipped
@@ -1172,9 +1189,22 @@ function sol.take_shortcuts_back() end
 ---A style folder's `effects.lua`, if it has one, is read here, every time, and
 ---its effect rules bound for the windows it frames; what is wrong with it is
 ---listed by `sol.problems()` under `style:<folder>`.
+---
+---Already open windows keep the frame they have until the new one is built:
+---a few of its scenes a frame, within `sol.pane_build`, and then every window
+---changes at once. A window's frame from the style before is kept, so a switch
+---back to it changes at once with nothing built.
 ---@param name? string
 ---@return nil
 function sol.pane(name) end
+
+---How long a frame may spend building the windows' frames when the pane style
+---changes, in milliseconds: `config.pane_build`. At least one scene is built a
+---frame, however small this is, so a switch always finishes; more time is a
+---shorter switch at the cost of the frames it is built in.
+---@param milliseconds number
+---@return nil
+function sol.pane_build(milliseconds) end
 
 ---The old name for `sol.pane`, from when a style was a single QML file. The
 ---same function.
@@ -1232,22 +1262,34 @@ function sol.client_sizes(options) end
 ---edge or seam drag, a layout's glide, a fullscreen or maximise glide -- and
 ---what fills the part it does not cover.
 ---
----`fill`: `"anchor"` (the default) draws the picture at its own size against
----the edges that are not moving, cut to the window; `"crop"` the same from the
----window's top-left whichever edge moves; `"stretch"` scales it to fill;
+---`fill`: `"crop"` (the default) draws the picture at its own size from the
+---window's top-left whichever edge moves, cut to the window; `"anchor"` the
+---same against the edges that are not moving; `"stretch"` scales it to fill;
 ---`"scene"` draws the window's QML scene, which today reaches only a window
 ---resized before its application painted, and is `"anchor"` elsewhere.
----`background`: `"#rrggbb"`, `"#rrggbbaa"` or `"none"`, what shows where the
----picture does not reach (default `"#1c1c1c"`). Another value is logged and
----the default kept. `patience`: how long, in milliseconds from 0 to 5000, a
+---`background`: what shows where the picture does not reach: `"edge"` (the
+---default: the picture's own edge, stretched), `"#rrggbb"`, `"#rrggbbaa"` or
+---`"none"`. Another value is logged and the default kept. `patience`: how
+---long, in milliseconds from 0 to 5000, a
 ---picture waits for its application once a change is over -- after a drag's
 ---release, a fullscreen or maximise glide's landing, or a layout glide's
 ---landing, while it stays against the edges the glide did not move (default
----250). Each call sets all three, a key left out at its default. `init.lua`
----calls this with `config.resize`, and `modes.lua` again with a mode's own
----fill from `config.resize.modes` whenever the mode changes, when that table
----names any mode.
----@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number }
+---250). `tell_hz`: how often, at most, a window whose edge is being dragged
+---is told its new size, in times a second from 1 to 1000; 0 (the default) tells
+---it on every frame the drag moves. `follow`: what a floating window is drawn
+---at while its edge is dragged, `"app"` (the default: the size its application
+---has drawn, against the edges not moving) or `"pointer"` (the drag's own
+---rectangle, with `fill` covering the difference). `sync`: how long, in
+---milliseconds from 0 to 5000, the windows a layout's drag moves wait for one
+---another's applications, so a seam moves as one (default 0: each follows the
+---pointer at once). `overlap`: whether a window being resized is told to draw
+---its next size as soon as a frame showing its last starts to be drawn
+---(default true; false waits for the screen). Each call sets all seven, a key
+---left out at its default. `init.lua` calls this with `config.resize`, and
+---`modes.lua`
+---again with a mode's own fill from `config.resize.modes` whenever the mode
+---changes, when that table names any mode.
+---@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number, follow?: "app"|"pointer", sync?: number, overlap?: boolean }
 ---@return nil
 function sol.resize(options) end
 
@@ -1423,6 +1465,46 @@ function sol.toggle_fullscreen(id) end
 ---@param id? integer
 ---@return nil
 function sol.toggle_maximize(id) end
+
+---Hold a window that is being dragged where it is, or let it go on (#452).
+---While it is held the pointer, or the finger, goes on, and the `"drag"`
+---listeners go on hearing it; let go, the window moves on from where it
+---stands, so nothing jumps. A window let go of while it is held has not been
+---moved by the drag, and no `"drop"` is told. Nothing for a window no drag
+---has. `lua/floating.lua` holds a maximised window this way until the pointer
+---has gone `maximize.restore_after`.
+---@param id integer
+---@param held boolean
+---@return nil
+function sol.drag_hold(id, held) end
+
+---Say where the pointer holds a window that is being dragged (#452): `x` and
+---`y` are shares of its frame's width and height, and `dx` and `dy` pixels
+---further, each 0 when left out, from the frame's top-left corner. The point
+---is kept inside the frame. The window is put so that point is under the
+---pointer at once, a glide it is part of the way through is aimed there, and
+---the drag goes on from there. The frame's size is the one the window was
+---last asked for, so a window restored a moment ago is gripped at its
+---restored size. Nothing for a window no drag has.
+---
+---    sol.drag_grip(id, { x = 0.25, dy = 16 }) -- a quarter along, 16 down
+---@param id integer
+---@param grip { x?: number, y?: number, dx?: number, dy?: number }
+---@return nil
+function sol.drag_grip(id, grip) end
+
+---Keep a window that is being resized as it is, or let the resize go on
+---(#454): the counterpart of `sol.drag_hold`. While it is held the pointer, or
+---the finger, goes on and the window keeps its size and place, and the
+---`"resize"` listeners are offered nothing, so no layout moves a seam for it.
+---Let go, the resize goes on from where the pointer is then, so nothing jumps.
+---A resize let go of while held ends with the window as it was. Hold it on the
+---`"resizing"` event's `"begin"` to hold it from the first motion. Nothing for
+---a window no resize has.
+---@param id integer
+---@param held boolean
+---@return nil
+function sol.resize_hold(id, held) end
 
 ---Move the keyboard to the window beside the focused one. Every `direction`
 ---listener is told `("focus", dir)`, and the layout in charge answers
@@ -1674,6 +1756,8 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "open"|"closing"|"close_landed"|"refused"|"close"|"minimize"|"unminimize", handler: fun(id: integer))
 ---@overload fun(event: "focus", handler: fun(id: integer, source: sol.FocusSource, changed: boolean))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
+---@overload fun(event: "drag", handler: fun(id: integer, phase: "begin"|"move"|"end", x: number, y: number))
+---@overload fun(event: "resizing", handler: fun(id: integer, phase: "begin"|"end", x: number, y: number))
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
 ---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))

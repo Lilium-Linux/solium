@@ -69,9 +69,17 @@ pub(crate) struct Placement {
 pub(crate) struct Sampled {
     /// The scene's dmabuf, imported into the compositor's context.
     pub(crate) texture: GlesTexture,
-    /// The pixel size of the buffer that texture names — **not** the size the
-    /// caller asked for, when a rebind has failed and the scene is frozen.
+    /// The pixel size of the picture: the corner of that texture, from its
+    /// top-left, the scene was drawn into. The buffer can be larger
+    /// (`qml::buffers`), so this and not the texture's size is what every use
+    /// of it has to state. **Not** the size the caller asked for, when a
+    /// rebind has failed and the scene is frozen.
     pub(crate) size: (i32, i32),
+    /// Which buffer the picture is in (`target::Target::id`). A scene draws
+    /// pictures of several sizes into one buffer, each over the last, so a
+    /// picture kept from a buffer the scene has since drawn into again is not
+    /// that picture any more: [`Gpu::render`] forgets those.
+    pub(crate) buffer: u64,
 }
 
 /// What makes one drawn picture of a scene different from another.
@@ -228,6 +236,16 @@ impl<K: Copy + PartialEq, T> Kept<K, T> {
         self.held.push((key, value));
     }
 
+    /// Forget every picture `stale` names, whatever its key.
+    ///
+    /// What [`Gpu::render`] does before drawing into the buffer a scene is on:
+    /// every picture kept from that buffer, at any size, is about to be drawn
+    /// over, and serving one afterwards would draw the new picture under the
+    /// old one's key. `tests::pictures_drawn_over_are_forgotten_at_every_size`.
+    pub(crate) fn forget(&mut self, stale: impl Fn(&T) -> bool) {
+        self.held.retain(|(_, value)| !stale(value));
+    }
+
     /// How many pictures are being kept.
     ///
     /// Nothing in the compositor asks; the cap is only observable from a test.
@@ -371,13 +389,20 @@ pub(crate) struct Gpu {
     /// permanently new, which repaints its whole area on every frame anything
     /// else draws.
     damage: DamageBag<i32, BufferCoords>,
-    /// The pixel size of the buffer the **scene** is on.
+    /// The pixel size the **scene** is drawn at, in the corner of its buffer.
     ///
-    /// Moves only when a rebind succeeds, so after one that failed it still
-    /// names the buffer Qt is drawing into — which is what makes the freeze
-    /// safe. It is compared against `shown`'s size rather than assumed equal to
-    /// it: between a successful rebind and a successful import they differ.
+    /// Moves only when a rebind or a resize within the buffer succeeds, so
+    /// after a rebind that failed it still names what Qt is drawing — which is
+    /// what makes the freeze safe. It is compared against `shown`'s size rather
+    /// than assumed equal to it: between a successful rebind and a successful
+    /// import they differ.
     bound: (i32, i32),
+    /// The picture the buffer the scene is on holds: what Qt last drew into
+    /// it, or `None` while that is not known (just rebound, or about to be
+    /// drawn over, or a render that failed). What tells a size that has held
+    /// for a frame (`qml::buffers`' `resting`) and a buffer another monitor's
+    /// picture is still drawn from (`occupied`) from the rest.
+    drawn: Option<Drawn>,
     /// What has already been said about this scene, and is therefore not worth
     /// saying again until it works. See [`Complaints`].
     said: Complaints,
@@ -404,6 +429,7 @@ impl Gpu {
             id: Id::new(),
             damage: DamageBag::default(),
             bound: size,
+            drawn: None,
             said: Complaints::default(),
         }
     }
@@ -455,7 +481,19 @@ impl Gpu {
         // would re-import and re-upload an identical texture on every quiet
         // tick of every animation, which is the cost this cache exists to
         // avoid.
-        if !self.kept.current(wanted, scene.needs_render()) {
+        let hit = self.kept.current(wanted, scene.needs_render());
+        // A picture in hand whose size has held, on a buffer far larger than
+        // it, is drawn once more onto a snug one: the shrink of
+        // `qml::buffers`, which a window left still after a drag that
+        // narrowed it would otherwise never reach, holding the larger buffer
+        // for as long as it stayed idle.
+        // `buffers::tests::a_shrinking_scene_draws_in_place_and_is_given_a_snug_buffer_once_at_rest`.
+        let shrink = hit
+            && self.drawn == Some(wanted)
+            && scene
+                .buffer_size()
+                .is_some_and(|buffer| super::buffers::configured().roomy(buffer, size));
+        if !hit || shrink {
             self.refresh(scene, renderer, size, scale)?;
         }
         // One expression, at the end, and in that order. After a miss that
@@ -524,6 +562,12 @@ impl Gpu {
             }
         }
 
+        // What the buffer now holds: this size, drawn or already there; or,
+        // after a render that failed, nothing anyone can name.
+        self.drawn = rendered.as_ref().ok().map(|_| Drawn {
+            pixels: self.bound,
+            scale,
+        });
         match rendered {
             Ok(Some(fence)) => {
                 // A fence inside the `Some` is the driver's; without one the
@@ -582,11 +626,23 @@ impl Gpu {
             // that assignment — or makes a rebind leave the flag alone — breaks
             // this arm silently, in the buffer's contents rather than in a
             // return value.
+            //
+            // And since a scene draws pictures of several sizes into one
+            // buffer (`qml::buffers`), the picture in hand can also have been
+            // forgotten (`Kept::forget`) by a frame that then had nothing to
+            // draw: the scene is still the size and scale it was drawn at, so
+            // its buffer holds exactly that picture, and it is imported and
+            // kept again here.
             Ok(None) => {
-                if self
-                    .shown
-                    .as_ref()
-                    .is_none_or(|held| held.size != self.bound)
+                let here = Drawn {
+                    pixels: self.bound,
+                    scale,
+                };
+                if self.kept.get(here).is_none()
+                    || self
+                        .shown
+                        .as_ref()
+                        .is_none_or(|held| held.size != self.bound)
                 {
                     self.take(scene, renderer, scale);
                 }
@@ -628,7 +684,7 @@ impl Gpu {
     /// next lookup and pay a rebind, rather than hand back a picture laid out at
     /// something else.
     fn take(&mut self, scene: &Scene, renderer: &mut GlesRenderer, scale: f64) {
-        let Some(buffer) = scene.buffer() else {
+        let (Some(buffer), Some(id)) = (scene.buffer(), scene.buffer_id()) else {
             self.said.missing.once(|| {
                 tracing::warn!(
                     "a GPU scene has no buffer to sample. Said once per scene until one appears"
@@ -646,6 +702,7 @@ impl Gpu {
                 let sampled = Sampled {
                     texture,
                     size: self.bound,
+                    buffer: id,
                 };
                 // Both, and the clone is a refcount on one texture. `kept` is
                 // what the next output to ask for this size reads; `shown` is
@@ -694,12 +751,15 @@ impl Gpu {
             let shown = self.sample(scene, renderer, size, scale)?;
             (shown.texture.clone(), shown.size)
         };
-        // The whole buffer in its **own** pixels, which after a failed rebind
-        // is not `size`: `held` is what the texture in hand actually is, and
-        // stating anything else here samples outside it. The element maps that
-        // onto `placement.size` logical pixels, so a frozen scene is stretched
-        // into the geometry it should have had rather than cropped to a corner
-        // of it.
+        // The picture in its **own** pixels, from the texture's top-left
+        // corner: the scene is drawn there and the buffer can be larger
+        // (`qml::buffers`; `dev/wirecheck`'s "a scene in a buffer larger than
+        // itself" reads that corner back). After a failed rebind it is not
+        // `size`: `held` is what the picture in hand actually is, and stating
+        // anything else here samples outside it. The element maps that onto
+        // `placement.size` logical pixels, so a frozen scene is stretched into
+        // the geometry it should have had rather than cropped to a corner of
+        // it.
         let source = Rectangle::from_size((f64::from(held.0), f64::from(held.1)).into());
         Some(TextureRenderElement::from_texture_with_damage(
             self.id.clone(),
@@ -732,9 +792,28 @@ impl Gpu {
         size: (i32, i32),
         scale: f64,
     ) -> Result<Option<Option<OwnedFd>>> {
-        if self.bound != size {
-            // A dmabuf cannot be resized, so changing size means a new buffer —
-            // and *only* a new buffer. Rebuilding the scene around one builds a
+        let wanted = Drawn {
+            pixels: size,
+            scale,
+        };
+        let buffer = scene.buffer_id();
+        // The buffer under the scene holds a picture another monitor is still
+        // drawn from: a window across two monitors at two scales is drawn at
+        // two sizes, and drawing one into the buffer the other is in would
+        // leave that monitor's kept picture showing this one.
+        // `tests::a_picture_another_monitor_is_drawn_from_is_not_drawn_over`.
+        let occupied =
+            drawn_over_elsewhere(&self.kept, self.drawn, scale, buffer, |kept| kept.buffer);
+        let plan = super::buffers::plan(
+            super::buffers::configured(),
+            scene.buffer_size(),
+            size,
+            self.drawn == Some(wanted),
+            occupied,
+        );
+        if let super::buffers::Plan::Rebind(room) = plan {
+            // A dmabuf cannot be resized, so outgrowing one means a new buffer
+            // — and *only* a new buffer. Rebuilding the scene around one builds a
             // new QML object tree, which restarts every animation, transition
             // and stored property in it; a pane's scene is sized from an
             // *animating* rectangle, so that happened once per frame for the
@@ -771,7 +850,7 @@ impl Gpu {
             // a failure repeats on every frame afterwards -- which is exactly
             // the shape of thing the count is there to make visible.
             crate::pacing::scene_rebound();
-            scene.rebind_sized(size.0, size.1, scale)?;
+            scene.rebind_sized(room, size.0, size.1, scale)?;
             self.bound = size;
             // The texture in hand is *not* cleared here, and that is the whole
             // of F4: it is a stale picture rather than a dangling one, and
@@ -803,16 +882,50 @@ impl Gpu {
             // recorded against it means anything.
             self.damage.reset();
         } else {
-            // Only the ratio can have moved; the pixel size is the buffer's and
-            // `solium_qml_scene_resize` refuses to change it.
+            // Into the buffer the scene has, at the new size or ratio, in its
+            // top-left corner (`qml::buffers`): no allocation, no import, no
+            // render-target swap, which on every frame of a drag on a window's
+            // edge was the frame. Every picture kept from this buffer is drawn
+            // over by it, at whatever size it was kept under, so they go now.
+            if let Some(buffer) = buffer {
+                self.kept.forget(|kept| kept.buffer == buffer);
+            }
             scene.resize(size.0, size.1, scale);
+            self.bound = size;
         }
+        // Not known again until the render below says what it drew.
+        self.drawn = None;
         let rendered = scene.render_gpu();
         if rendered.is_ok() {
             self.said.rendering.worked();
         }
         rendered
     }
+}
+
+/// Whether the buffer a scene is on (`buffer`) holds a picture another
+/// monitor is still drawn from: the picture last drawn into it (`drawn`) is
+/// at a scale other than `scale`, and is still kept, from that buffer.
+///
+/// A picture of the same scale and another size is not one: a window is one
+/// size on every monitor of one scale (`Decoration::layer_elements` rounds
+/// `logical * scale`), so it is the size it was before a resize, which nothing
+/// will ask for again. Generic over what is kept, so it is tested without a
+/// GPU. `tests::a_picture_another_monitor_is_drawn_from_is_not_drawn_over`.
+fn drawn_over_elsewhere<T>(
+    kept: &Kept<Drawn, T>,
+    drawn: Option<Drawn>,
+    scale: f64,
+    buffer: Option<u64>,
+    in_buffer: impl Fn(&T) -> u64,
+) -> bool {
+    let (Some(drawn), Some(buffer)) = (drawn, buffer) else {
+        return false;
+    };
+    drawn.scale != scale
+        && kept
+            .get(drawn)
+            .is_some_and(|held| in_buffer(held) == buffer)
 }
 
 /// Put the compositor's EGL context back after Qt has had the thread.
@@ -869,7 +982,70 @@ fn wait_for(renderer: &mut GlesRenderer, fence: OwnedFd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drawn, KEPT, Kept, Said};
+    use super::{Drawn, KEPT, Kept, Said, drawn_over_elsewhere};
+
+    /// **Pictures drawn over are forgotten at every size.** A scene draws
+    /// each new size into the buffer it has (`qml::buffers`), so the pictures
+    /// kept from that buffer at the sizes before are no longer in it, and
+    /// serving one would put this frame's picture under last frame's key —
+    /// the corner of a larger picture, cut to a smaller size. Kept as buffer
+    /// numbers here, which is what `Sampled::buffer` is.
+    #[test]
+    fn pictures_drawn_over_are_forgotten_at_every_size() {
+        let mut kept: Kept<Drawn, u64> = Kept::keeping(KEPT);
+        let a = Drawn {
+            pixels: (1150, 850),
+            scale: 1.0,
+        };
+        let b = Drawn {
+            pixels: (2300, 1700),
+            scale: 2.0,
+        };
+        kept.push(a, 7);
+        kept.push(b, 8);
+        kept.forget(|buffer| *buffer == 7);
+        assert!(kept.get(a).is_none(), "a picture drawn over was kept");
+        assert_eq!(kept.get(b), Some(&8), "a picture in another buffer went");
+    }
+
+    /// **A picture another monitor is drawn from is not drawn over**: the
+    /// 2x monitor's picture of a window across a 1x and a 2x monitor, kept
+    /// and in the buffer the scene is on, is another monitor's when the 1x
+    /// one asks; the picture before a resize, at the same scale, is not, and
+    /// neither is one already forgotten or one in another buffer.
+    #[test]
+    fn a_picture_another_monitor_is_drawn_from_is_not_drawn_over() {
+        let mut kept: Kept<Drawn, u64> = Kept::keeping(KEPT);
+        kept.push(ON_THE_2X, 5);
+        let id = |buffer: &u64| *buffer;
+        assert!(drawn_over_elsewhere(
+            &kept,
+            Some(ON_THE_2X),
+            1.0,
+            Some(5),
+            id
+        ));
+        assert!(
+            !drawn_over_elsewhere(&kept, Some(ON_THE_2X), 2.0, Some(5), id),
+            "the size before a resize, at one scale, is not another monitor's"
+        );
+        assert!(!drawn_over_elsewhere(
+            &kept,
+            Some(ON_THE_2X),
+            1.0,
+            Some(6),
+            id
+        ));
+        assert!(!drawn_over_elsewhere(&kept, None, 1.0, Some(5), id));
+        kept.forget(|buffer| *buffer == 5);
+        assert!(!drawn_over_elsewhere(
+            &kept,
+            Some(ON_THE_2X),
+            1.0,
+            Some(5),
+            id
+        ));
+    }
 
     /// An ordinary 1150x850 window, as the two monitors under it see it.
     ///

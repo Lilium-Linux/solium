@@ -46,6 +46,15 @@ use std::os::fd::{FromRawFd as _, OwnedFd};
 )]
 mod target;
 
+// The compositor's buffer policy (`qml.buffers`), included by path, so
+// `WIRECHECK_TIME_RESIZE` times the rule the compositor draws with.
+#[path = "../../../crates/solium/src/qml/buffers.rs"]
+#[allow(
+    dead_code,
+    reason = "buffers.rs carries the configuration half only the compositor reads"
+)]
+mod buffers;
+
 // The compositor's smithay registrations, read from each shader's own source
 // (#95) and included by path, so cases 11 and 11h register exactly what
 // `pass::Programs::clip` does
@@ -80,6 +89,8 @@ unsafe extern "C" {
         stride: c_int,
         modifier: u64,
         fourcc: c_uint,
+        buffer_width: c_int,
+        buffer_height: c_int,
         width: c_int,
         height: c_int,
         scale: f64,
@@ -1418,6 +1429,462 @@ fn poke(scene: *mut c_void, pixels: i32, scale: f64) {
     unsafe { solium_qml_scene_resize(scene, pixels, pixels, scale) };
 }
 
+/// A scene drawn into a buffer larger than itself lands one to one, at its
+/// scale, in the buffer's top-left corner, and the compositor's element over
+/// that corner draws it as it draws a buffer exactly its size (2026-10-16,
+/// `qml::buffers`).
+///
+/// The question the buffers of `qml::buffers` hang off, asked of Qt rather
+/// than of its documentation: drawing into a texture larger than the scene,
+/// does Qt Quick map the scene's logical coordinates onto the first
+/// `width`x`height` pixels, top row first after `mirror_for_the_compositor`,
+/// or does it stretch the scene, shrink it, or put it at the bottom?
+/// `place_in_buffer` in `host.cpp` declares the render target at
+/// `target_size`: as much of the buffer as is whole logical pixels, so Qt does
+/// not make a new target, a depth-stencil buffer and a framebuffer object at
+/// every size a frame is drawn at (#428). On 2026-10-16 it gave the target
+/// the whole buffer, and this case failed it at scale 2 on this odd-sized
+/// buffer: Qt rounds the target's size over the ratio to whole logical pixels
+/// for its projection, so the 192x160 scene lost its last column and row (894
+/// bytes); `target_size` rounds the target down to whole logical pixels for
+/// that reason.
+///
+/// Three sizes in one buffer, as a window frame being dragged is drawn: the
+/// scene rebound from a buffer its own size onto one larger by an odd amount
+/// on each side, then drawn at a larger size and a smaller one within it
+/// (`solium_qml_scene_resize`, no new buffer), the last two not square so a
+/// transposition shows. Each time the dmabuf is read back whole, and its
+/// corner must be `quadrants.qml`'s picture at that size byte for byte (the
+/// reading the pointer's route already holds to `expected_argb`, case 6),
+/// the same picture must *not* be at the buffer's bottom-left (so the check
+/// can tell top from bottom), and no byte outside the corner may be drawn:
+/// Qt clears what its target covers there, and nothing else.
+/// Then the compositor's own element over the corner (`Gpu::element`'s
+/// source rectangle, from the texture's origin) must draw exactly what the
+/// same picture uploaded with `import_memory` and drawn the same way does.
+/// Run at `WIRECHECK_SCALE=1.25` and `2` as well after touching it.
+fn in_a_larger_buffer(
+    gbm: &GbmDevice<DrmDeviceFd>,
+    renderer: &mut GlesRenderer,
+    qml: &CString,
+    logical: i32,
+    scale: f64,
+) -> Result<()> {
+    println!("\n=== a scene in a buffer larger than itself ===");
+    #[allow(clippy::cast_possible_truncation)]
+    let px = |logical: i32| ((f64::from(logical) * scale).round() as i32).max(1);
+    let first = (px(logical), px(logical));
+    let own = target::allocate(gbm, first.0, first.1).context("the scene's own buffer")?;
+    let (fd, stride, modifier, fourcc) = own.as_ffi().context("as_ffi")?;
+    let scene = unsafe {
+        solium_qml_scene_new_gpu(
+            qml.as_ptr(),
+            first.0,
+            first.1,
+            fd,
+            stride,
+            modifier,
+            fourcc,
+            std::ptr::null(),
+        )
+    };
+    if scene.is_null() {
+        return Err(anyhow!("the larger-buffer case's scene would not build"));
+    }
+    restore(renderer)?;
+    // Odd amounts larger than any size drawn below, so nothing lines up by
+    // accident with the scene's own edges.
+    let room = (px(logical * 2) + 37, px(logical * 2) + 53);
+    let large = target::allocate(gbm, room.0, room.1).context("the larger buffer")?;
+    // Wiped, so what is outside the corner before the first frame is known.
+    wipe(renderer, &large.dmabuf, room.0, room.1)?;
+    let (lfd, lstride, lmodifier, lfourcc) = large.as_ffi().context("as_ffi")?;
+    let ok = unsafe {
+        solium_qml_scene_rebind(
+            scene, lfd, lstride, lmodifier, lfourcc, room.0, room.1, first.0, first.1, scale,
+        )
+    };
+    restore(renderer)?;
+    if !ok {
+        return Err(anyhow!(
+            "solium_qml_scene_rebind refused a {}x{} scene on a {}x{} buffer",
+            first.0,
+            first.1,
+            room.0,
+            room.1
+        ));
+    }
+    // Logical sizes whose pixels are whole at every scale the harness runs
+    // (1, 1.25, 2) for the default 64: the element below is then one to one,
+    // as `Gpu::element` is on a monitor whose scale makes it so.
+    let sizes = [
+        (logical, logical),
+        (logical * 3 / 2, logical * 5 / 4),
+        (logical / 2, logical * 3 / 4),
+    ];
+    // Every element drawn, held to the end: dropping one queues its texture
+    // for smithay to delete, and a delete between the two censuses below
+    // would read as the free's.
+    let mut held = Vec::new();
+    for (index, (lw, lh)) in sizes.into_iter().enumerate() {
+        let (w, h) = (px(lw), px(lh));
+        if index > 0 {
+            // Within the buffer: no new one.
+            unsafe { solium_qml_scene_resize(scene, w, h, scale) };
+        }
+        let before = read_dmabuf(renderer, &large.dmabuf, room.0, room.1)?;
+        let mut fence: c_int = -1;
+        let rendered = unsafe { solium_qml_scene_render_gpu(scene, &raw mut fence) };
+        restore(renderer)?;
+        if rendered != 1 {
+            return Err(anyhow!(
+                "a {w}x{h} scene on a {}x{} buffer: render_gpu returned {rendered}",
+                room.0,
+                room.1
+            ));
+        }
+        if fence >= 0 {
+            wait_for(renderer, unsafe { OwnedFd::from_raw_fd(fence) })?;
+        }
+
+        let raw = read_dmabuf(renderer, &large.dmabuf, room.0, room.1)?;
+        let row = usize::try_from(room.0)? * 4;
+        let width = usize::try_from(w)? * 4;
+        let height = usize::try_from(h)?;
+        let corner = |top: usize| -> Vec<u8> {
+            (top..top + height)
+                .flat_map(|y| raw[y * row..y * row + width].iter().copied())
+                .collect()
+        };
+        let want = expected_argb(w, h);
+        let (bad, first_bad) = differing(&corner(0), &want);
+        let bottom = usize::try_from(room.1)? - height;
+        let (mirrored, _) = differing(&corner(bottom), &want);
+        // What Qt did outside the corner: cleared what its target covers
+        // there, since the target is as much of the buffer as Qt draws one to
+        // one (`target_size` in host.cpp), and drew nothing. A byte there
+        // that changed to anything but transparent is a scene drawn past its
+        // corner, or a corner in the wrong place.
+        let mut outside = 0;
+        let mut cleared = 0;
+        for (y, (line, was)) in raw
+            .chunks_exact(row)
+            .zip(before.chunks_exact(row))
+            .enumerate()
+        {
+            for (x, (byte, old)) in line.iter().zip(was.iter()).enumerate() {
+                if (y >= height || x >= width) && byte != old {
+                    if *byte == 0 {
+                        cleared += 1;
+                    } else {
+                        outside += 1;
+                    }
+                }
+            }
+        }
+        println!(
+            "  {lw}x{lh} logical, {w}x{h} px in a {}x{} buffer: the top-left corner \
+             differs from the picture in {bad} of {} bytes, the bottom-left in {mirrored}; \
+             outside the corner {outside} bytes drawn, {cleared} cleared",
+            room.0,
+            room.1,
+            want.len()
+        );
+        if bad != 0 {
+            return Err(anyhow!(
+                "a {w}x{h} scene drawn into a {}x{} buffer is not its picture in the buffer's \
+                 top-left corner: {bad} of {} bytes differ, the first at byte {first_bad:?}. \
+                 Qt does not draw a scene one to one into the corner of a larger render \
+                 target, which `qml::buffers` depends on",
+                room.0,
+                room.1,
+                want.len()
+            ));
+        }
+        if mirrored == 0 {
+            return Err(anyhow!(
+                "the picture is at the buffer's bottom-left as well as its top-left, so this \
+                 case cannot tell top from bottom"
+            ));
+        }
+        if outside != 0 {
+            return Err(anyhow!(
+                "{outside} bytes outside the {w}x{h} corner of a {}x{} buffer were drawn in a \
+                 frame drawn into the corner",
+                room.0,
+                room.1
+            ));
+        }
+
+        // The compositor's element over the corner, against the same picture
+        // uploaded and drawn the same way.
+        let reference_texture = renderer
+            .import_memory(&want, Fourcc::Argb8888, (w, h).into(), false)
+            .map_err(|err| anyhow!("the corner's reference: {err}"))?;
+        let reference_element = element_for(renderer, reference_texture, (w, h), (lw, lh), scale);
+        let reference = draw_and_read(renderer, &reference_element, w, h, scale)?;
+        let texture = renderer
+            .import_dmabuf(&large.dmabuf, None)
+            .map_err(|err| anyhow!("import_dmabuf on the larger buffer: {err}"))?;
+        let element = element_for(renderer, texture, (w, h), (lw, lh), scale);
+        let got = draw_and_read(renderer, &element, w, h, scale)?;
+        held.push(reference_element);
+        held.push(element);
+        let (drawn_bad, _) = differing(&reference, &got);
+        println!(
+            "    drawn through an element over the corner: {drawn_bad} of {} bytes differ \
+             from the picture uploaded",
+            reference.len()
+        );
+        if drawn_bad != 0 {
+            return Err(anyhow!(
+                "the compositor's element over the {w}x{h} corner of a {}x{} buffer draws \
+                 something else than the picture: {drawn_bad} of {} bytes differ",
+                room.0,
+                room.1,
+                reference.len()
+            ));
+        }
+    }
+    // Freed with the compositor's context current and censused either side,
+    // as the resize case frees its scene, so C-1 below starts from an
+    // undamaged baseline.
+    restore(renderer)?;
+    let live_before_free = gl_names(renderer, 64)?;
+    unsafe { solium_qml_scene_free(scene) };
+    restore(renderer)?;
+    let live_after_free = gl_names(renderer, 64)?;
+    let lost: Vec<_> = live_before_free
+        .iter()
+        .filter(|it| !live_after_free.contains(it))
+        .collect();
+    if !lost.is_empty() {
+        return Err(anyhow!(
+            "freeing the larger-buffer case's scene destroyed {} of the compositor's GL \
+             objects: {lost:?}",
+            lost.len()
+        ));
+    }
+    drop(held);
+    Ok(())
+}
+
+/// What a window frame costs Qt per frame of a drag that widens it a pixel
+/// a frame, with a buffer exactly its size (a new one every frame, the rule
+/// before `qml.buffers`) and with the compositor's buffer policy: printed,
+/// not judged. Opt-in, `WIRECHECK_TIME_RESIZE=1`, because it is a measurement
+/// rather than a check. The shipped glass bar (`panes/glass/Frame.qml`) at
+/// 1150x850 to 1449x850, dressed as `Decoration::tell` dresses it; a frame is
+/// what `Gpu::refresh` spends on a miss: the rebind or resize, the render,
+/// the context put back, Qt's fence waited on and the buffer imported.
+fn resize_cost(
+    gbm: &GbmDevice<DrmDeviceFd>,
+    renderer: &mut GlesRenderer,
+    scale: f64,
+) -> Result<()> {
+    println!("\n=== what a window frame costs per frame of a drag (WIRECHECK_TIME_RESIZE) ===");
+    // `WIRECHECK_FRAME=<path>` times another frame: a configuration's own
+    // layer, as `rounded-violet`'s were timed for #428.
+    let frame = std::env::var_os("WIRECHECK_FRAME").map_or_else(
+        || repo().join("crates/solium/qml/panes/glass/Frame.qml"),
+        std::path::PathBuf::from,
+    );
+    println!("  {}", frame.display());
+    let path = CString::new(frame.as_os_str().as_encoded_bytes())?;
+    // The third is the floor: the size held and the scene changed (a new
+    // title each frame), what a frame redrawn at the size it has costs.
+    for (name, policy, grows) in [
+        (
+            "a buffer its own size",
+            buffers::Buffers::new(0, buffers::SHRINK),
+            1,
+        ),
+        ("qml.buffers' default", Some(buffers::Buffers::default()), 1),
+        (
+            "the same size, a new title each frame",
+            Some(buffers::Buffers::default()),
+            0,
+        ),
+    ] {
+        let policy = policy.ok_or_else(|| anyhow!("a policy out of its bounds"))?;
+        let (w0, h) = (1150, 850);
+        let mut target = target::allocate(gbm, w0, h).context("the frame's first buffer")?;
+        let (fd, stride, modifier, fourcc) = target.as_ffi().context("as_ffi")?;
+        let scene = unsafe {
+            solium_qml_scene_new_gpu(
+                path.as_ptr(),
+                w0,
+                h,
+                fd,
+                stride,
+                modifier,
+                fourcc,
+                std::ptr::null(),
+            )
+        };
+        restore(renderer)?;
+        if scene.is_null() {
+            return Err(anyhow!("{} would not build", frame.display()));
+        }
+        unsafe {
+            solium_qml_scene_resize(scene, w0, h, scale);
+            solium_qml_scene_set_int(scene, c"insetBottom".as_ptr(), 32);
+            solium_qml_scene_set_string(scene, c"title".as_ptr(), c"wirecheck".as_ptr());
+        }
+        let mut drawn: Option<(i32, i32)> = None;
+        let mut spent = Vec::new();
+        let mut rebinds = 0;
+        for step in 0..300 {
+            let size = (w0 + step * grows, h);
+            if grows == 0 {
+                let title = CString::new(format!("wirecheck {step}"))?;
+                unsafe { solium_qml_scene_set_string(scene, c"title".as_ptr(), title.as_ptr()) };
+            }
+            let started = std::time::Instant::now();
+            let room = (target.width, target.height);
+            match buffers::plan(policy, Some(room), size, drawn == Some(size), false) {
+                buffers::Plan::Rebind(next) => {
+                    rebinds += 1;
+                    let fresh = target::allocate(gbm, next.0, next.1).context("a buffer")?;
+                    let (fd, stride, modifier, fourcc) = fresh.as_ffi().context("as_ffi")?;
+                    let ok = unsafe {
+                        solium_qml_scene_rebind(
+                            scene, fd, stride, modifier, fourcc, next.0, next.1, size.0, size.1,
+                            scale,
+                        )
+                    };
+                    if !ok {
+                        return Err(anyhow!("a rebind onto {next:?} was refused"));
+                    }
+                    target = fresh;
+                }
+                buffers::Plan::InPlace => unsafe {
+                    solium_qml_scene_resize(scene, size.0, size.1, scale);
+                },
+            }
+            let mut fence: c_int = -1;
+            let rendered = unsafe { solium_qml_scene_render_gpu(scene, &raw mut fence) };
+            restore(renderer)?;
+            if rendered == 2 && grows == 0 {
+                println!("  {name}: nothing in this scene shows a title");
+                break;
+            }
+            if rendered != 1 {
+                return Err(anyhow!("render_gpu returned {rendered} at {size:?}"));
+            }
+            if fence >= 0 {
+                wait_for(renderer, unsafe { OwnedFd::from_raw_fd(fence) })?;
+            }
+            let _texture = renderer
+                .import_dmabuf(&target.dmabuf, None)
+                .map_err(|err| anyhow!("import_dmabuf: {err}"))?;
+            spent.push(started.elapsed().as_micros());
+            drawn = Some(size);
+        }
+        if spent.is_empty() {
+            restore(renderer)?;
+            unsafe { solium_qml_scene_free(scene) };
+            restore(renderer)?;
+            continue;
+        }
+        spent.sort_unstable();
+        let at = |q: f64| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let i = ((spent.len() as f64) * q) as usize;
+            spent[i.min(spent.len() - 1)]
+        };
+        println!(
+            "  {name}: 300 frames, {rebinds} new buffers, a frame p50 {} us p95 {} us max {} us",
+            at(0.5),
+            at(0.95),
+            spent[spent.len() - 1]
+        );
+        restore(renderer)?;
+        unsafe { solium_qml_scene_free(scene) };
+        restore(renderer)?;
+    }
+    Ok(())
+}
+
+/// What a pane's capture costs per frame of a drag that widens it a pixel a
+/// frame, against the same capture redrawn at the size it has: the pool's
+/// target taken at the new size and the old one given back, as
+/// `keyed::Capture::target_for` does, then cleared through its framebuffer as
+/// a capture is drawn. Printed, not judged, with `WIRECHECK_TIME_RESIZE`.
+/// The budget is the compositor's for a 2560x1440 monitor (twice its bytes),
+/// so what the pool keeps and drops is what it keeps and drops there (#428).
+fn capture_cost(renderer: &mut GlesRenderer) -> Result<()> {
+    use smithay::backend::renderer::{Color32F, Frame as _};
+    println!("\n=== what a pane's capture costs per frame of a drag (WIRECHECK_TIME_RESIZE) ===");
+    let mut carrier = fx0::pool::Pool::<GlesTexture>::new(0)
+        .carrier(renderer)
+        .ok_or_else(|| anyhow!("no carrier"))?;
+    for (name, grows, room) in [
+        ("a new size each frame, exact", 1, false),
+        ("a new size each frame, with room (#428)", 1, true),
+        ("the same size", 0, false),
+    ] {
+        let mut pool = fx0::pool::Pool::new(2 * 2560 * 1440 * 4);
+        let mut held: Option<fx0::pool::Target> = None;
+        let mut spent = Vec::new();
+        let made = pool.made();
+        for step in 0..300 {
+            let size = (1150 + step * grows, 850);
+            let started = std::time::Instant::now();
+            let fits = |target: &fx0::pool::Target| {
+                if room {
+                    fx0::pool::has_room_for(target.size(), size.into())
+                } else {
+                    (target.size().w, target.size().h) == size
+                }
+            };
+            let target = match held.take() {
+                Some(target) if fits(&target) => target,
+                old => {
+                    if let Some(old) = old {
+                        pool.give_back(old);
+                    }
+                    let alloc = &mut fx0::pool::Gl(renderer);
+                    if room {
+                        pool.target_with_room(alloc, size.into(), fx0::pool::Format::Rgba8)
+                    } else {
+                        pool.target(alloc, size.into(), fx0::pool::Format::Rgba8)
+                    }
+                    .ok_or_else(|| anyhow!("no pooled target at {size:?}"))?
+                }
+            };
+            {
+                let mut bound = renderer
+                    .bind(&mut carrier)
+                    .map_err(|err| anyhow!("{err}"))?;
+                let mut frame = fx0::pool::frame_in(renderer, &mut bound, &target, size.into())
+                    .map_err(|err| anyhow!("{err}"))?;
+                frame
+                    .clear(Color32F::TRANSPARENT, &[Rectangle::from_size(size.into())])
+                    .map_err(|err| anyhow!("{err}"))?;
+                let _ = frame.finish().map_err(|err| anyhow!("{err}"))?;
+            }
+            pool.sweep(renderer);
+            spent.push(started.elapsed().as_micros());
+            held = Some(target);
+        }
+        let made = pool.made() - made;
+        drop(held);
+        pool.sweep(renderer);
+        spent.sort_unstable();
+        println!(
+            "  {name}: 300 frames, {made} targets made, a frame p50 {} us p95 {} us max {} us",
+            spent[spent.len() / 2],
+            spent[spent.len() * 95 / 100],
+            spent[spent.len() - 1]
+        );
+    }
+    renderer
+        .with_context(|gl| unsafe { gl.Finish() })
+        .map_err(|err| anyhow!("{err}"))?;
+    Ok(())
+}
+
 fn differing(a: &[u8], b: &[u8]) -> (usize, Option<usize>) {
     let mut bad = 0;
     let mut first = None;
@@ -2173,7 +2640,8 @@ fn main() -> Result<()> {
         } else {
             unsafe {
                 solium_qml_scene_rebind(
-                    counting, fd5, stride5, modifier5, fourcc5, big_pixels, big_pixels, scale,
+                    counting, fd5, stride5, modifier5, fourcc5, big_pixels, big_pixels, big_pixels,
+                    big_pixels, scale,
                 )
             }
         };
@@ -2405,6 +2873,12 @@ fn main() -> Result<()> {
     // renderer first and asks whether anything at all came back -- which does
     // prove Qt built the component, brought up an RHI for it, imported *our*
     // dmabuf and wrote into it, and proves nothing whatever about what it drew.
+    in_a_larger_buffer(&gbm, &mut renderer, &qml, logical, scale)?;
+    if std::env::var_os("WIRECHECK_TIME_RESIZE").is_some() {
+        resize_cost(&gbm, &mut renderer, scale)?;
+        capture_cost(&mut renderer)?;
+    }
+
     println!("\n=== every scene the compositor builds, on a GPU host ===");
     // Kept alive to the end of the run rather than freed, and deliberately.
     //
@@ -2753,7 +3227,9 @@ fn main() -> Result<()> {
         wipe(&mut renderer, &buffer.dmabuf, SIDE, SIDE)?;
         let (fd, stride, modifier, fourcc) = buffer.as_ffi().context("as_ffi")?;
         let rebound = unsafe {
-            solium_qml_scene_rebind(built, fd, stride, modifier, fourcc, SIDE, SIDE, 1.0)
+            solium_qml_scene_rebind(
+                built, fd, stride, modifier, fourcc, SIDE, SIDE, SIDE, SIDE, 1.0,
+            )
         };
         restore(&renderer)?;
         if !rebound {
@@ -2903,7 +3379,7 @@ fn main() -> Result<()> {
         drain_gl_errors(&mut renderer, "the first rebind")?;
         let ok = unsafe {
             solium_qml_scene_rebind(
-                fresh, fd9, stride9, modifier9, fourcc9, pixels, pixels, scale,
+                fresh, fd9, stride9, modifier9, fourcc9, pixels, pixels, pixels, pixels, scale,
             )
         };
         restore(&renderer)?;

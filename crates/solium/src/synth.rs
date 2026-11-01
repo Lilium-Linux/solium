@@ -322,21 +322,48 @@ pub(crate) fn drag(
     );
 }
 
-/// Press a key combination and let it go, through the real input path:
-/// each key down in the order written, then up in reverse, as fingers do.
-/// `combo` is keysym names joined by `+`, as `SOLIUM_KEY_AT` takes them:
-/// `caps_lock`, `shift+alt_l`, `super+return`; `shift`, `ctrl`, `alt` and
-/// `super` are the left-hand keys. Each name is found in the live keymap, in
-/// any of its layouts, so the key is the one a person would press whichever
-/// layout is live. A name the keymap has no key for presses nothing, and
-/// says so. `time` is the moment, in milliseconds, of the first press.
-/// `tests::a_scripted_key_is_pressed_through_the_real_input_path_with_russian_active`.
-pub(crate) fn key(
+/// [`drag`], with the keys `held` names (as [`key`] takes them, `super` for
+/// the drag modifier) down for the whole of it: pressed before the button and
+/// let go after it, as a hand does. Empty holds nothing.
+pub(crate) fn drag_holding(
     state: &mut Solium,
     region: Rectangle<i32, Logical>,
-    combo: &str,
-    time: u64,
-) -> bool {
+    from: Point<f64, Logical>,
+    to: Point<f64, Logical>,
+    steps: u32,
+    held: &str,
+) {
+    let codes = codes(state, held);
+    let mut at = 0_u64;
+    let mut send = |state: &mut Solium, code: Keycode, key_state: KeyState| {
+        at += 4_000;
+        crate::input::handle::<Synthetic>(
+            state,
+            region,
+            InputEvent::Keyboard {
+                event: Key {
+                    code,
+                    state: key_state,
+                    time: at,
+                },
+            },
+        );
+    };
+    for &code in codes.iter().flatten() {
+        send(state, code, KeyState::Pressed);
+    }
+    drag(state, region, from, to, steps);
+    for &code in codes.iter().flatten().rev() {
+        send(state, code, KeyState::Released);
+    }
+    // Where it ended, which is not `to` when something held the pointer: a
+    // locked one stays put (#427).
+    tracing::info!(at = ?current(state), "scripted drag ended");
+}
+
+/// The keycodes of a combination, as [`key`] finds them, or `None` when the
+/// keymap has no key for one of its names (and says so).
+fn codes(state: &mut Solium, combo: &str) -> Option<Vec<Keycode>> {
     let mut codes = Vec::new();
     for name in combo
         .split('+')
@@ -360,10 +387,31 @@ pub(crate) fn key(
                 key = name,
                 "no key in this keymap types that, so nothing was pressed"
             );
-            return false;
+            return None;
         };
         codes.push(code);
     }
+    Some(codes)
+}
+
+/// Press a key combination and let it go, through the real input path:
+/// each key down in the order written, then up in reverse, as fingers do.
+/// `combo` is keysym names joined by `+`, as `SOLIUM_KEY_AT` takes them:
+/// `caps_lock`, `shift+alt_l`, `super+return`; `shift`, `ctrl`, `alt` and
+/// `super` are the left-hand keys. Each name is found in the live keymap, in
+/// any of its layouts, so the key is the one a person would press whichever
+/// layout is live. A name the keymap has no key for presses nothing, and
+/// says so. `time` is the moment, in milliseconds, of the first press.
+/// `tests::a_scripted_key_is_pressed_through_the_real_input_path_with_russian_active`.
+pub(crate) fn key(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    combo: &str,
+    time: u64,
+) -> bool {
+    let Some(codes) = codes(state, combo) else {
+        return false;
+    };
     let mut at = time * 1000;
     let mut send = |state: &mut Solium, code: Keycode, key_state: KeyState| {
         at += 8_000;

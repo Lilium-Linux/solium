@@ -451,6 +451,18 @@ pub(crate) struct Pane {
     /// Here, it survives every [`Self::set_frame`], which is what
     /// `a_windows_way_back_outlives_its_frame` pins.
     restore: Option<Rectangle<i32, Logical>>,
+    /// Whether the maximise this window is in is one its client asked for:
+    /// an xdg `set_maximized`, or an X11 `_NET_WM_STATE` request (#450).
+    ///
+    /// A layout's tile outranks it. A client maximising itself is an
+    /// application restoring the state it had last time, or its own button,
+    /// and under a tiling layout neither lifts the window out of its tile:
+    /// `Solium::client_maximize` refuses it for a window already in a tile,
+    /// and `Solium::move_pane` lets a window that was maximised this way
+    /// before it had one out of the maximise when the layout gives it its
+    /// tile. A maximise the user asks for, by key or by the frame's button,
+    /// clears it, and is kept over a tile as before (#150).
+    maximized_by_client: bool,
     content: Content,
     /// What is drawn around this pane's client. See [`Frame`].
     ///
@@ -462,6 +474,10 @@ pub(crate) struct Pane {
     /// layers' `windowValues`: `sol.frame(id, { ... })` (#417). Kept across a
     /// change of style, and gone with the window.
     frame_values: crate::decoration::Values,
+    /// The frame this pane had in the style before this one, kept so a switch
+    /// back is a swap rather than a build (#226). Only `Decorations` writes
+    /// it, and it leaves with the pane as `frame` does.
+    spare: Option<Box<crate::decoration::Decoration>>,
     /// When this pane's close request goes out, once it has finished leaving.
     ///
     /// A *deadline*, not a start: `Solium::close_pane` animates the window
@@ -619,6 +635,10 @@ pub(crate) struct Pane {
     /// Read by `render::background_elements`:
     /// `render::tests::fitting::the_background_is_drawn_where_the_picture_does_not_reach`.
     background: [smithay::backend::renderer::element::Id; 4],
+    /// The same for the pieces `resize.background = "edge"` stretches the
+    /// picture's own edge over, the default: `crate::edge::pieces`, at most
+    /// `crate::edge::PIECES`. Read by `crate::edge::elements`.
+    edges: [smithay::backend::renderer::element::Id; crate::edge::PIECES],
 }
 
 /// A window going back from fullscreen or maximised, for as long as it is
@@ -656,6 +676,7 @@ impl Pane {
             let_go: false,
             left_tile: None,
             restore: None,
+            maximized_by_client: false,
             content: Content::Loading {
                 program: program.to_owned(),
                 pid,
@@ -665,6 +686,7 @@ impl Pane {
             },
             frame: Frame::Pending,
             frame_values: crate::decoration::Values::default(),
+            spare: None,
             closing_at: None,
             asked_at: None,
             answered: false,
@@ -684,6 +706,7 @@ impl Pane {
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            edges: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         }
     }
 
@@ -697,6 +720,7 @@ impl Pane {
             let_go: false,
             left_tile: None,
             restore: None,
+            maximized_by_client: false,
             content: Content::Client {
                 window,
                 scene: None,
@@ -705,6 +729,7 @@ impl Pane {
             },
             frame: Frame::Pending,
             frame_values: crate::decoration::Values::default(),
+            spare: None,
             closing_at: None,
             asked_at: None,
             answered: false,
@@ -724,6 +749,7 @@ impl Pane {
             shrinking: None,
             x11_refused_once: false,
             background: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            edges: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         }
     }
 
@@ -838,6 +864,14 @@ impl Pane {
     /// [`Self::background`].
     pub(crate) const fn background(&self) -> &[smithay::backend::renderer::element::Id; 4] {
         &self.background
+    }
+
+    /// The identities of the pieces of its own edge this pane's picture is
+    /// stretched over. See [`Self::edges`].
+    pub(crate) const fn edges(
+        &self,
+    ) -> &[smithay::backend::renderer::element::Id; crate::edge::PIECES] {
+        &self.edges
     }
 
     pub(crate) const fn id(&self) -> PaneId {
@@ -996,6 +1030,17 @@ impl Pane {
         self.restore.take()
     }
 
+    /// Whether the window's own client asked for the maximise it is in. See
+    /// the field.
+    pub(crate) const fn maximized_by_client(&self) -> bool {
+        self.maximized_by_client
+    }
+
+    /// Say whose the maximise this window is in is: its client's, or not.
+    pub(crate) const fn set_maximized_by_client(&mut self, by_client: bool) {
+        self.maximized_by_client = by_client;
+    }
+
     /// What is drawn around this pane's client. See [`Frame`].
     pub(crate) const fn frame(&self) -> &Frame {
         &self.frame
@@ -1060,6 +1105,12 @@ impl Pane {
         &mut self.meshes
     }
 
+    /// What the configuration handed this window with `sol.frame`, as a
+    /// rule's `values` match reads it (#454).
+    pub(crate) const fn frame_values(&self) -> &crate::decoration::Values {
+        &self.frame_values
+    }
+
     /// What the configuration handed this window's frame, to merge into or
     /// clear. See the field; it is read with the frame it is drawn by,
     /// [`Self::decoration_with_values_mut`].
@@ -1075,6 +1126,28 @@ impl Pane {
     /// held, which is what makes "the frame leaves with its pane" true.
     pub(crate) fn set_frame(&mut self, frame: Frame) {
         self.frame = frame;
+    }
+
+    /// The frame kept from the style before this one, if any. See the field.
+    pub(crate) fn spare(&self) -> Option<&crate::decoration::Decoration> {
+        self.spare.as_deref()
+    }
+
+    /// Keep `spare` as the frame to swap back to, or forget the one kept.
+    /// Written by `Decorations` alone, as `set_frame` is.
+    pub(crate) fn set_spare(&mut self, spare: Option<Box<crate::decoration::Decoration>>) {
+        self.spare = spare;
+    }
+
+    /// Take the kept frame, to put it up. See the field.
+    pub(crate) const fn take_spare(&mut self) -> Option<Box<crate::decoration::Decoration>> {
+        self.spare.take()
+    }
+
+    /// Say what is drawn around this pane's client, and hand back what was:
+    /// [`Self::set_frame`] for a caller that keeps the frame it replaces.
+    pub(crate) fn replace_frame(&mut self, frame: Frame) -> Frame {
+        std::mem::replace(&mut self.frame, frame)
     }
 
     /// When this pane's close request goes out. See the field.

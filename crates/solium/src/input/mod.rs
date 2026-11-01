@@ -118,6 +118,8 @@ pub(crate) fn handle<B: InputBackend>(
     // delivered it (Ruling 11):
     // `state::tests::real_client::reflow_on_close::hosted::a_reserve_the_scene_changes_at_a_press_reflows_the_tiled_windows_once_from_that_instant`.
     touch::flush(state);
+    // A drag the event began or ended, told now the grab has returned.
+    grab::settle_drags(state, true);
     state.settle_scenes();
 }
 
@@ -915,8 +917,18 @@ fn held(
         .and_then(|window| state.real_geometry(&window))
         .map(|real| real.loc.to_f64());
 
+    // Only the window with the keyboard, and not one `sol.release_pointer`
+    // took it back from (#427): see `state::pointer_hold`. One that holds it
+    // and may no longer is let go of here too, whatever moved the keyboard.
+    let may = state.may_hold_pointer(&surface);
     let holding = with_pointer_constraint(&surface, pointer, |constraint| {
         let constraint = constraint?;
+        if !may {
+            if constraint.is_active() {
+                constraint.deactivate();
+            }
+            return None;
+        }
         // Granted here rather than when it was asked for. A constraint exists
         // from the moment a client requests it; agreeing to it is the
         // compositor's decision, and the honest test is that the pointer is
@@ -1247,6 +1259,11 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     if pressed {
         warp::land(state);
     }
+    // A press on a window the pointer was taken back from is asking for it
+    // to hold the pointer again (#427): `state::pointer_hold`.
+    if pressed && let Some((surface, _)) = state.surface_under(location) {
+        state.pressed_on(&surface);
+    }
     let qt = crate::qml::keys::qt_button(button);
     if let Some(bit) = qt {
         if pressed {
@@ -1488,12 +1505,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                         button,
                         location,
                     };
-                    pointer.set_grab(
-                        state,
-                        resize::ResizeGrab::new(start_data, window, edges, began, laid_out),
-                        serial,
-                        Focus::Clear,
-                    );
+                    let grab =
+                        resize::ResizeGrab::new(state, start_data, window, edges, began, laid_out);
+                    pointer.set_grab(state, grab, serial, Focus::Clear);
                 }
                 return;
             }
@@ -1570,12 +1584,8 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
                 button,
                 location,
             };
-            pointer.set_grab(
-                state,
-                resize::ResizeGrab::new(start_data, window, edges, outer, laid_out),
-                serial,
-                Focus::Clear,
-            );
+            let grab = resize::ResizeGrab::new(state, start_data, window, edges, outer, laid_out);
+            pointer.set_grab(state, grab, serial, Focus::Clear);
             return;
         }
 
@@ -1630,7 +1640,9 @@ fn pointer_button<B: InputBackend>(state: &mut Solium, event: impl PointerButton
     forward_button(state, &pointer, &forward);
 
     // Outside the grab now: the pointer's lock is released, so a script may
-    // ask where the pointer is without stopping the compositor.
+    // ask where the pointer is without stopping the compositor. The drag's
+    // `end` first, and then its drop.
+    grab::settle_drags(state, true);
     if let Some((window, x, y)) = state.pending_drop.take() {
         state.trigger_drop(&window, x, y);
     }
