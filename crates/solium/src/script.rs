@@ -679,6 +679,20 @@ pub(crate) enum Command {
     ToggleMaximize {
         id: u64,
     },
+    /// Hold a window a move drag has where it is while the pointer goes on,
+    /// or let it go on from where it stands: `sol.drag_hold` (#452).
+    DragHold {
+        id: u64,
+        held: bool,
+    },
+    /// Where the pointer holds a window a move drag has: `along` of its
+    /// frame's width and height, `by` pixels further. `sol.drag_grip`
+    /// (#452).
+    DragGrip {
+        id: u64,
+        along: (f64, f64),
+        by: (f64, f64),
+    },
     /// Minimize a window (#30): `sol.minimize`, and `super+m`. Nothing for
     /// a window already minimized. See `WindowInfo::minimized`.
     Minimize {
@@ -954,6 +968,8 @@ impl Command {
             | Self::Warp(_)
             | Self::ToggleFullscreen { .. }
             | Self::ToggleMaximize { .. }
+            | Self::DragHold { .. }
+            | Self::DragGrip { .. }
             | Self::Minimize { .. }
             | Self::Unminimize { .. }
             | Self::ShowMinimized { .. }
@@ -3068,6 +3084,21 @@ impl Scripts {
 
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "layout", ()))
+    }
+
+    /// A move drag of a window began, moved or ended (#452): `(id, phase,
+    /// x, y)`, told by `crate::input::grab::settle_drags`.
+    pub(crate) fn dragged(
+        &mut self,
+        id: u64,
+        phase: &'static str,
+        x: f64,
+        y: f64,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.dispatch_as(FocusSource::Drop, snapshot, move |lua, _| {
+            call_listeners(lua, "drag", (id, phase, x, y))
+        })
     }
 
     /// A window was dragged and let go.
@@ -6483,6 +6514,47 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             with_pending(lua, |pending| {
                 pending.commands.push(Command::ToggleMaximize { id });
+            })
+        })?,
+    )?;
+
+    // Hold a window a move drag has where it is, or let it go on (#452).
+    // While held, the pointer goes on and the `drag` listeners go on hearing
+    // it; let go, the window moves on from where it stands. A window no drag
+    // has is left alone.
+    // `real_client::reflow_on_close::drag_primitives::a_held_window_stays_while_the_pointer_moves_and_goes_on_from_where_it_is`.
+    sol.set(
+        "drag_hold",
+        lua.create_function(|lua, (id, held): (u64, bool)| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::DragHold { id, held });
+            })
+        })?,
+    )?;
+
+    // Where the pointer holds a window a move drag has (#452): `{ x, y }`
+    // as shares of its frame's width and height, and `{ dx, dy }` pixels
+    // further, each 0 when left out, from the frame's top-left. The window
+    // goes there at once and the drag goes on from there.
+    // `real_client::reflow_on_close::drag_primitives::a_grip_puts_the_window_under_the_pointer_and_the_drag_goes_on_from_it`.
+    sol.set(
+        "drag_grip",
+        lua.create_function(|lua, (id, grip): (u64, mlua::Table)| {
+            let get = |key: &str| -> mlua::Result<f64> {
+                Ok(grip.get::<Option<f64>>(key)?.unwrap_or(0.0))
+            };
+            let along = (get("x")?, get("y")?);
+            let by = (get("dx")?, get("dy")?);
+            if ![along.0, along.1, by.0, by.1]
+                .iter()
+                .all(|value| value.is_finite())
+            {
+                return Err(mlua::Error::RuntimeError(
+                    "sol.drag_grip: x, y, dx and dy are numbers".to_owned(),
+                ));
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::DragGrip { id, along, by });
             })
         })?,
     )?;

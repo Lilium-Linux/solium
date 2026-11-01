@@ -21,6 +21,14 @@
 //! window made fullscreen or maximised mid-drag is the compositor's again, and
 //! [`let_go_of`] ends the drag there: a fullscreen window kept following the
 //! pointer and covered its monitor at an offset (#404).
+//!
+//! **The configuration hears every move drag and may steer it** (#452). Each
+//! one is told to the `drag` listeners as it begins, moves and ends
+//! ([`settle_drags`]), and `sol.drag_hold` and `sol.drag_grip` hold its window
+//! still while the pointer goes on, and say where the pointer holds it. That
+//! is all the compositor does: what a drag of a maximised window does --
+//! nothing for a few pixels, then restored under the pointer -- is
+//! `lua/floating.lua`'s.
 
 use smithay::{
     desktop::Window,
@@ -30,10 +38,202 @@ use smithay::{
         GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData,
         MotionEvent, PointerGrab, PointerHandle, PointerInnerHandle, RelativeMotionEvent,
     },
-    utils::{Logical, Point, SERIAL_COUNTER, Serial},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial},
 };
 
 use crate::state::Solium;
+
+/// How far a move drag has got, as the `drag` listeners hear it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Begin,
+    Move,
+    End,
+}
+
+impl Phase {
+    /// The name a listener is handed.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Begin => "begin",
+            Self::Move => "move",
+            Self::End => "end",
+        }
+    }
+}
+
+/// One move drag under way, the pointer's or a finger's: what the
+/// configuration can change about it. Kept on `Solium`, not in the grab,
+/// because a command reaches it from a script, and smithay hands out its
+/// grab only to be read.
+#[derive(Clone, Debug)]
+pub(crate) struct Moving {
+    drag: u64,
+    window: Window,
+    /// From the pointer to the window's origin: the window is drawn at the
+    /// pointer plus this.
+    offset: Point<f64, Logical>,
+    /// Where the pointer, or the finger, is now.
+    at: Point<f64, Logical>,
+    /// Whether `sol.drag_hold` holds the window where it is.
+    held: bool,
+    /// Let go of, and `end` not told yet: whether it is to be dropped. It is
+    /// kept until then, so a motion told after the release -- the pointer let
+    /// go within a frame of its last move -- can still hold or grip it, and
+    /// whether it is dropped is decided by whether it is held then.
+    ending: Option<bool>,
+}
+
+/// What a `drag` listener is told, waiting to be told. See [`settle_drags`].
+#[derive(Clone, Debug)]
+pub(crate) struct Told {
+    window: Window,
+    phase: Phase,
+    at: Point<f64, Logical>,
+}
+
+/// Note that `window`'s drag reached `phase` at `at`, to be told once the
+/// grab has returned. A move replaces a move of the same window still
+/// waiting, so a pass tells one, wherever the pointer got to.
+fn tell(state: &mut Solium, window: &Window, phase: Phase, at: Point<f64, Logical>) {
+    if phase == Phase::Move
+        && let Some(last) = state.drags_told.last_mut()
+        && last.phase == Phase::Move
+        && last.window == *window
+    {
+        last.at = at;
+        return;
+    }
+    state.drags_told.push(Told {
+        window: window.clone(),
+        phase,
+        at,
+    });
+}
+
+/// Tell the `drag` listeners what move drags have done since they were last
+/// told: `(id, phase, x, y)`, `phase` being `"begin"`, `"move"` or `"end"`,
+/// and `x, y` the pointer.
+///
+/// **Never from inside a grab's callback**, which holds the seat's lock, as
+/// `Solium::pending_drop` says: a listener asking where the pointer is would
+/// wait for ever. So the grab records, and this tells:
+///
+/// * `edges` true, after each input event and before a drop is reported:
+///   everything up to the last `begin` or `end` waiting, so a listener holds
+///   a window on `begin` before the first motion can move it, and hears `end`
+///   before `drop`. A `move` after them waits.
+/// * `edges` false, once a pass, before the frame is decided: everything,
+///   one `move` a window at most, however many times the mouse reported it,
+///   as `settle_resize` coalesces an edge drag.
+///
+/// A drag is over once its `end` is told, and dropped then unless a script
+/// holds the window: a release within the pass of the last motion has that
+/// motion told first, and what a listener does with it -- a grip, a hold
+/// let go -- counts.
+///
+/// `state::tests::real_client::reflow_on_close::drag_primitives::a_drag_is_told_as_it_begins_moves_once_a_pass_and_ends`,
+/// `state::tests::real_client::reflow_on_close::drag_primitives::a_grip_puts_the_window_under_the_pointer_and_the_drag_goes_on_from_it`.
+pub(crate) fn settle_drags(state: &mut Solium, edges: bool) {
+    let upto = if edges {
+        match state
+            .drags_told
+            .iter()
+            .rposition(|told| told.phase != Phase::Move)
+        {
+            Some(last) => last + 1,
+            None => return,
+        }
+    } else {
+        state.drags_told.len()
+    };
+    let told: Vec<Told> = state.drags_told.drain(..upto).collect();
+    for Told { window, phase, at } in told {
+        state.trigger_drag(&window, phase.name(), at.x, at.y);
+        if phase != Phase::End {
+            continue;
+        }
+        // Over now, and dropped unless a script holds it: a held window
+        // has not been moved by the drag, so it was dropped nowhere.
+        let Some(index) = state
+            .moves
+            .iter()
+            .position(|moving| moving.window == window && moving.ending.is_some())
+        else {
+            continue;
+        };
+        let moving = state.moves.remove(index);
+        if moving.ending == Some(true) && !moving.held {
+            state.pending_drop = Some((window, at.x, at.y));
+        }
+    }
+}
+
+/// A script holding a dragged window where it is, or letting it go on
+/// (`sol.drag_hold`). Let go, it moves on from where it stands, so nothing
+/// jumps.
+/// `state::tests::real_client::reflow_on_close::drag_primitives::a_held_window_stays_while_the_pointer_moves_and_goes_on_from_where_it_is`.
+pub(crate) fn hold(state: &mut Solium, window: &Window, held: bool) {
+    let Some(location) = state.space.element_location(window) else {
+        return;
+    };
+    for moving in state
+        .moves
+        .iter_mut()
+        .filter(|moving| moving.window == *window)
+    {
+        if moving.held && !held {
+            moving.offset = location.to_f64() - moving.at;
+        }
+        moving.held = held;
+    }
+}
+
+/// Where a script has the pointer hold a dragged window (`sol.drag_grip`):
+/// `along` of its frame's width and `down` of its height, and `by` pixels
+/// further, from the frame's top-left corner, held inside the frame. The
+/// window is put there at once, a glide it is part of the way through is
+/// aimed there, and the drag goes on from there.
+///
+/// The frame's size is the size the window was last asked for while its
+/// client has not drawn it (`Solium::asked_outer`), and the one it has drawn
+/// otherwise: a window just restored has been told its new size and has not
+/// drawn it yet.
+/// `state::tests::real_client::reflow_on_close::drag_primitives::a_grip_puts_the_window_under_the_pointer_and_the_drag_goes_on_from_it`.
+pub(crate) fn grip(state: &mut Solium, window: &Window, along: (f64, f64), by: (f64, f64)) {
+    let Some(at) = state
+        .moves
+        .iter()
+        .find(|moving| moving.window == *window)
+        .map(|moving| moving.at)
+    else {
+        return;
+    };
+    let Some(pane) = state.panes.of(window) else {
+        return;
+    };
+    let id = pane.id();
+    let outer = state.asked_outer(pane);
+    let insets = state.insets_of(id);
+    let width = f64::from(outer.size.w);
+    let height = f64::from(outer.size.h);
+    let x = (along.0 * width + by.0).clamp(0.0, width);
+    let y = (along.1 * height + by.1).clamp(0.0, (height - 1.0).max(0.0));
+    let corner = Point::<f64, Logical>::from((at.x - x, at.y - y)).to_i32_round();
+    let location = corner + Point::from((insets.left, insets.top));
+    state.space.map_element(window.clone(), location, false);
+    if let Some(pane) = state.panes.get(id) {
+        crate::present::reaim(pane, Rectangle::new(corner, outer.size), state.clock.now());
+    }
+    for moving in state
+        .moves
+        .iter_mut()
+        .filter(|moving| moving.window == *window)
+    {
+        moving.offset = location.to_f64() - moving.at;
+    }
+    state.redraw = true;
+}
 
 /// What the pointer shows for as long as a window is being moved (#374):
 /// the closed hand, `grabbing`, because the window is held. `move`, the
@@ -79,15 +279,12 @@ pub(crate) struct MoveGrab {
     drag: MoveDrag,
 }
 
-/// Position maths shared by the pointer and each independently held finger.
+/// One move drag, shared by the pointer and each independently held finger:
+/// its window, and which of `Solium::moves` it is.
 #[derive(Clone, Debug)]
 pub(crate) struct MoveDrag {
     window: Window,
-    /// Pointer-to-window-origin offset, captured when the grab starts.
-    ///
-    /// Without it the window jumps so its corner meets the cursor on the first
-    /// motion event, which reads as the compositor dropping the window.
-    offset: Point<f64, Logical>,
+    drag: u64,
 }
 
 impl MoveGrab {
@@ -110,20 +307,17 @@ impl MoveGrab {
         if state.pointer.assert(Some(SHAPE)) {
             state.redraw = true;
         }
-        pointer.set_grab(
-            state,
-            Self::new(start_data, window, window_location),
-            serial,
-            Focus::Clear,
-        );
+        let grab = Self::new(state, start_data, window, window_location);
+        pointer.set_grab(state, grab, serial, Focus::Clear);
     }
 
     fn new(
+        state: &mut Solium,
         start_data: GrabStartData<Solium>,
         window: Window,
         window_location: Point<i32, Logical>,
     ) -> Self {
-        let drag = MoveDrag::new(window, window_location, start_data.location);
+        let drag = MoveDrag::new(state, window, window_location, start_data.location);
         Self { start_data, drag }
     }
 }
@@ -134,27 +328,87 @@ impl MoveDrag {
         &self.window
     }
 
+    /// A drag of `window`, standing at `window_location`, taken at `from`:
+    /// kept on `Solium::moves`, and its `begin` told once the grab has
+    /// returned.
     pub(crate) fn new(
+        state: &mut Solium,
         window: Window,
         window_location: Point<i32, Logical>,
         from: Point<f64, Logical>,
     ) -> Self {
-        Self {
-            window,
+        state.next_drag += 1;
+        let drag = state.next_drag;
+        state.moves.push(Moving {
+            drag,
+            window: window.clone(),
+            // Without it the window jumps so its corner meets the cursor on
+            // the first motion, which reads as the compositor dropping it.
             offset: window_location.to_f64() - from,
-        }
+            at: from,
+            held: false,
+            ending: None,
+        });
+        tell(state, &window, Phase::Begin, from);
+        Self { window, drag }
     }
 
+    /// The pointer, or the finger, is at `at`: the window follows it, unless
+    /// a script holds it (`sol.drag_hold`).
     pub(crate) fn to(&self, state: &mut Solium, at: Point<f64, Logical>) {
-        let location = (at + self.offset).to_i32_round();
+        let Some(moving) = state
+            .moves
+            .iter_mut()
+            .find(|moving| moving.drag == self.drag && moving.ending.is_none())
+        else {
+            return;
+        };
+        moving.at = at;
+        let (held, offset) = (moving.held, moving.offset);
+        tell(state, &self.window, Phase::Move, at);
+        if held {
+            return;
+        }
+        let location = (at + offset).to_i32_round();
+        let was = state.space.element_location(&self.window);
         // Keep the stacking order alone: dragging does not restack.
         state
             .space
             .map_element(self.window.clone(), location, false);
+        // A glide the window is part of the way through goes with it, so it
+        // is drawn under the pointer while it lands: a restore's shrink, a
+        // layout's or an opening's glide (#452).
+        if let Some(was) = was
+            && was != location
+            && let Some(pane) = state.panes.of(&self.window)
+        {
+            crate::present::carry(pane, (location - was).to_f64());
+        }
     }
 
+    /// Let go at `at`: `end` told once the grab has returned, and then the
+    /// drop ([`settle_drags`]).
     pub(crate) fn finish(&self, state: &mut Solium, at: Point<f64, Logical>) {
-        state.pending_drop = Some((self.window.clone(), at.x, at.y));
+        self.ending(state, at, true);
+    }
+
+    /// Over without a drop, as a drag let go of is (`let_go_of`), or a
+    /// finger cancelled.
+    pub(crate) fn end(&self, state: &mut Solium, at: Point<f64, Logical>) {
+        self.ending(state, at, false);
+    }
+
+    fn ending(&self, state: &mut Solium, at: Point<f64, Logical>, drop: bool) {
+        let Some(moving) = state
+            .moves
+            .iter_mut()
+            .find(|moving| moving.drag == self.drag && moving.ending.is_none())
+        else {
+            return;
+        };
+        moving.ending = Some(drop);
+        moving.at = at;
+        tell(state, &self.window, Phase::End, at);
     }
 }
 
@@ -308,6 +562,17 @@ impl PointerGrab<Solium> for MoveGrab {
     /// pointer (`Solium::reassert_cursor`), which takes [`SHAPE`] away.
     /// Asked then rather than here, where the seat is held: see `button`.
     fn unset(&mut self, data: &mut Solium) {
+        // Ended without a release -- `let_go_of`, or another grab taking the
+        // pointer -- the drag is over all the same. After a release it is
+        // over already, and this does nothing.
+        let at = data
+            .moves
+            .iter()
+            .find(|moving| moving.drag == self.drag.drag && moving.ending.is_none())
+            .map(|moving| moving.at);
+        if let Some(at) = at {
+            self.drag.end(data, at);
+        }
         data.redraw = true;
     }
 }

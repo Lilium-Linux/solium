@@ -244,6 +244,7 @@ sol.on("unminimize", function(id) end)             -- it is shown again: take it
 sol.on("close",  function(id) end)                 -- it is gone
 sol.on("focus",  function(id, source, changed) end) -- the keyboard moved, what moved it, and from another window?
 sol.on("activate", function(id, why) end)          -- a window asked to come forward: "launch" or "request"
+sol.on("drag",   function(id, phase, x, y) end)    -- a window being moved: "begin", "move" (once a frame) or "end"
 sol.on("drop",   function(id, x, y) end)           -- a drag finished
 sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side) end)
 sol.on("scroll", function(dx, dy) end)             -- a modified wheel turn
@@ -1087,6 +1088,37 @@ its tile there, or with no layout at the same place on the new screen as it
 had on the old one. A window floated with `super+shift+space` and then made
 fullscreen stays fullscreen through every layout pass, and leaving goes back to
 where it floated.
+
+Dragged, a maximised window does not move (#452). Taken by its titlebar, by
+the drag modifier or by a finger, it stays where it is until the pointer has
+gone `maximize.restore_after` pixels (6 as shipped), so a click or a double
+click on the titlebar is still one. Past that it is restored as `super+shift+m`
+restores it, with the same glide, but under the pointer: held as far along its
+titlebar as it was taken along the maximised one, and never lower than its
+titlebar. The drag goes on moving it from there. A window maximised out of a
+layout's tile comes off at its tile's size, back in its tile, and is dragged as
+any tiled window is: let go, the layout puts it in the tile it was let go over.
+A fullscreen window is moved as it always was.
+
+None of that is the compositor's. It tells every move drag -- the titlebar's,
+the drag modifier's, a finger's, a client's own move request -- to the `drag`
+listeners as it begins, moves (once a frame at most) and ends, and gives a
+listener two verbs over it; `lua/floating.lua` is the listener that does the
+above with them:
+
+```lua
+sol.drag_hold(id, true)                    -- the window stays; the pointer goes on
+sol.drag_hold(id, false)                   -- it moves on from where it stands
+sol.drag_grip(id, { x = 0.25, dy = 16 })   -- the pointer holds it a quarter along, 16 px down
+```
+
+`begin` is told before the first motion can move the window, so a hold there
+holds from the start, and `end` before the `drop`. A window let go of while it
+is held has not been moved, and no `drop` is told. `sol.drag_grip`'s `x` and
+`y` are shares of the frame's width and height and `dx`, `dy` pixels on from
+them, kept inside the frame; the frame is the size the window was last asked
+for, so a window restored in the same handler is gripped at its new size, and
+a glide it is part of the way through goes there with it.
 
 ### Going fullscreen or maximised, and back
 

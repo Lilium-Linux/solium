@@ -228,6 +228,76 @@ sol.on("close", function(id)
     maximized[id] = nil
 end)
 
+-- A maximised window does not move under a drag (#452). Taken by its
+-- titlebar, by the drag modifier or by a finger, it is held where it is
+-- (`sol.drag_hold`) until the pointer has gone `config.maximize.restore_after`
+-- from where the drag began, so a click or a double click on the titlebar is
+-- still one; past that it is restored, as `super+shift+m` restores it, and
+-- gripped (`sol.drag_grip`) as far along its titlebar as it was taken along
+-- the maximised one and as far down, never below its titlebar. Then the drag
+-- moves it on. A window maximised out of a layout's tile goes back into its
+-- tile, at the tile's size, and is dragged as any tiled window is: let go,
+-- the layout puts it in the tile it was let go over. So this is not only
+-- floating's: it holds under every layout, as the maximise key does. A
+-- fullscreen window is moved as it always was.
+-- `real_client::client_maximize::a_maximised_window_dragged_past_the_threshold_comes_off_under_the_pointer`,
+-- `real_client::client_maximize::a_window_maximised_out_of_its_tile_comes_off_at_its_tiles_size`.
+local function restore_after()
+    local pixels = config.maximize and config.maximize.restore_after
+    if type(pixels) == "number" and pixels >= 0 then
+        return pixels
+    end
+    return 6
+end
+
+-- Where each held window's drag began, and where on its frame: by id.
+local pulled = {}
+
+local function window_by_id(id)
+    for _, window in ipairs(sol.windows()) do
+        if window.id == id then
+            return window
+        end
+    end
+end
+
+sol.on("drag", function(id, phase, x, y)
+    if phase == "begin" then
+        pulled[id] = nil
+        local window = window_by_id(id)
+        if window and window.maximized and not window.fullscreen and window.w > 0 then
+            pulled[id] = {
+                x = x,
+                y = y,
+                along = math.min(math.max((x - window.x) / window.w, 0), 1),
+                down = math.max(y - window.y, 0),
+                titlebar = window.insets.top,
+            }
+            sol.drag_hold(id, true)
+        end
+    elseif phase == "move" then
+        local held = pulled[id]
+        if not held or math.sqrt((x - held.x) ^ 2 + (y - held.y) ^ 2) < restore_after() then
+            return
+        end
+        pulled[id] = nil
+        local window = window_by_id(id)
+        -- Restored already, by the double click that began this drag: it
+        -- moves on from where it is.
+        if window and window.maximized and not window.fullscreen then
+            sol.toggle_maximize(id)
+            local down = held.down
+            if held.titlebar > 0 then
+                down = math.min(down, held.titlebar - 1)
+            end
+            sol.drag_grip(id, { x = held.along, dy = down })
+        end
+        sol.drag_hold(id, false)
+    else
+        pulled[id] = nil
+    end
+end)
+
 -- A window let go over a desk of another workspace -- one switched to
 -- mid-drag, or shown by the monitor it was dragged onto -- belongs to that
 -- workspace now, and is shown where it was let go (#401). The layouts do this

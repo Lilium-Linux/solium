@@ -1103,6 +1103,19 @@ pub(crate) struct Solium {
     /// is indistinguishable from the machine dying.
     pub(crate) pending_drop: Option<(Window, f64, f64)>,
 
+    /// Every move drag under way, the pointer's and each finger's: what
+    /// `sol.drag_hold` and `sol.drag_grip` change (#452). See
+    /// [`crate::input::grab::Moving`].
+    pub(crate) moves: Vec<crate::input::grab::Moving>,
+
+    /// The last move drag's number, so each has its own.
+    pub(crate) next_drag: u64,
+
+    /// What the `drag` listeners have still to hear, recorded inside a grab
+    /// and told after it, for `pending_drop`'s reason. See
+    /// [`crate::input::grab::settle_drags`].
+    pub(crate) drags_told: Vec<crate::input::grab::Told>,
+
     /// Set when anything on screen has changed and not yet been drawn.
     ///
     /// The render loop used to ask "is any window non-empty", which is true of
@@ -1530,6 +1543,9 @@ impl Solium {
             focusing: false,
             closing: None,
             pending_drop: None,
+            moves: Vec::new(),
+            next_drag: 0,
+            drags_told: Vec::new(),
             pending_resize: None,
             retelling_cramped: false,
             telling_change: false,

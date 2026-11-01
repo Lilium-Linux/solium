@@ -848,6 +848,9 @@ pub(crate) fn run() -> Result<()> {
         // Before the frame is decided: a drag that moved since the last one is
         // applied once, here, however many times the mouse reported it. See
         // `settle_resize`.
+        // And a move drag's last motion, told once (#452). Before the
+        // resize, so a window a listener restores is placed in this frame.
+        crate::input::grab::settle_drags(&mut state, false);
         state.settle_resize();
         // What the focused text field said since the last pass, told to the
         // configuration once, so a pill it moves to the caret is in this

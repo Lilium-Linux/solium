@@ -165,7 +165,7 @@ pub(crate) fn claim(state: &mut Solium, slot: i32, action: crate::script::TouchA
             let Some(geometry) = state.real_geometry(&window) else {
                 return;
             };
-            TouchTarget::Move(MoveDrag::new(window, geometry.loc, contact.location))
+            TouchTarget::Move(MoveDrag::new(state, window, geometry.loc, contact.location))
         }
         crate::script::TouchAction::Resize(id, edges) => {
             // The pending resize/hold is shared with pointer input.
@@ -274,10 +274,17 @@ fn target(state: &mut Solium, location: Point<f64, Logical>) -> TouchTarget {
 /// Let go of every finger moving `window`: the rest of its stream is nobody's,
 /// as a swallowed finger's is. See [`super::grab::let_go_of`].
 pub(crate) fn let_go_of(state: &mut Solium, window: &smithay::desktop::Window) {
+    let mut ended = Vec::new();
     for contact in state.touches.values_mut() {
-        if matches!(&contact.target, TouchTarget::Move(drag) if drag.window() == window) {
+        if let TouchTarget::Move(drag) = &contact.target
+            && drag.window() == window
+        {
+            ended.push((drag.clone(), contact.location));
             contact.target = TouchTarget::Swallowed;
         }
+    }
+    for (drag, at) in ended {
+        drag.end(state, at);
     }
 }
 
@@ -575,11 +582,15 @@ fn deliver(
             TouchKind::Motion => drag.to(state, location),
             TouchKind::Up => {
                 drag.finish(state, location);
+                super::grab::settle_drags(state, true);
                 if let Some((window, x, y)) = state.pending_drop.take() {
                     state.trigger_drop(&window, x, y);
                 }
             }
-            TouchKind::Down | TouchKind::Cancel => {}
+            TouchKind::Cancel => {
+                drag.end(state, location);
+            }
+            TouchKind::Down => {}
         },
         TouchTarget::Resize(drag) => match kind {
             TouchKind::Motion => drag.to(state, location),
