@@ -23166,10 +23166,12 @@ mod directions {
             assert_eq!(presented(&outcome.commands, 1), None, "nothing changed for the strip");
         }
 
-        /// Ticks of the strip's frame clock, each `dt` seconds, with the
-        /// pointer at `x`, 720; the held card's front window as last drawn.
+        /// The held card 1 dragged to `x`, 720, as the strip's scene says,
+        /// and ticks of its frame clock, each `dt` seconds; its front window
+        /// as last drawn.
         fn ticks(desk: &mut Desk, x: f64, dt: f64, count: usize) -> (Rect, Duration, bool) {
-            desk.cursor = (x, 720.0);
+            let snapshot = desk.snapshot();
+            act(desk, "drag", &format!(r#"{{"card":1,"x":{x},"y":720}}"#), snapshot);
             let mut last = None;
             for _ in 0..count {
                 let snapshot = desk.snapshot();
@@ -23182,8 +23184,9 @@ mod directions {
 
         /// **A card dragged out of the strip is drawn once a frame, on the
         /// pointer while it is flat and easing after it while it is turned**,
-        /// as macOS has it: the strip's tick draws it, not the scene's
-        /// pointer events, which arrive unevenly between frames, and no
+        /// as macOS has it: the strip's tick draws it where the scene last
+        /// said the drag was -- not at each of the scene's pointer events,
+        /// which arrive unevenly between frames -- and no
         /// spring is put on top -- a present's spring starts again from rest
         /// at each new target, and trailed the pointer.
         #[test]
@@ -23205,8 +23208,11 @@ mod directions {
                 (window.x + 400.0 - 900.0).abs() < 0.5 && (window.y + 300.0 - 720.0).abs() < 0.5,
                 "carried by its centre: {window:?}"
             );
-            // Flat, it is on the pointer at once.
-            let (moved, ..) = ticks(&mut desk, 960.0, 0.004, 1);
+            // Flat, it eases after the pointer only by `steady`: part of the
+            // way in one 4 ms frame, the rest within a few more.
+            let (step, ..) = ticks(&mut desk, 960.0, 0.004, 1);
+            assert!(step.x > window.x + 5.0 && step.x < window.x + 60.0, "{window:?} then {step:?}");
+            let (moved, ..) = ticks(&mut desk, 960.0, 0.05, 5);
             assert!((moved.x - window.x - 60.0).abs() < 0.5, "{window:?} then {moved:?}");
 
             // Back towards the strip, turning: one frame later it is still
@@ -23258,8 +23264,8 @@ mod directions {
             assert!(z.is_some_and(|z| z > 0.0), "over the stage's windows: {z:?}");
         }
 
-        /// **A card dropped onto another card joins its group**, at the
-        /// back, and the stage is left as it is. Two cards, so their places
+        /// **A card dropped onto another card joins its group**, in front,
+        /// settling over its windows, and the stage is left as it is. Two cards, so their places
         /// are 562 and 752 down, 176 by 126 at 22 across.
         #[test]
         fn a_card_dropped_onto_another_card_joins_its_group() {
@@ -23274,8 +23280,9 @@ mod directions {
 
             desk.cursor = (100.0, 620.0);
             let snapshot = desk.snapshot();
-            act(&mut desk, "drag", r#"{"card":1}"#, snapshot);
-            desk.cursor = (100.0, 800.0);
+            act(&mut desk, "drag", r#"{"card":1,"x":100,"y":620}"#, snapshot);
+            let snapshot = desk.snapshot();
+            act(&mut desk, "drag", r#"{"card":1,"x":100,"y":800}"#, snapshot);
             let snapshot = desk.snapshot();
             let over = act(&mut desk, "tick", r#"{"dt":0.004}"#, snapshot);
             assert!(
@@ -23285,7 +23292,7 @@ mod directions {
             );
             let snapshot = desk.snapshot();
             act(&mut desk, "drop", r#"{"card":1,"x":100,"y":800}"#, snapshot);
-            assert_eq!(groups(&desk), "3|1,2", "one group, the stage as it was");
+            assert_eq!(groups(&desk), "3|2,1", "one group, the dropped card in front, the stage as it was");
         }
 
         /// The stage's group and the cards behind it, as `"3,2|1"`: each

@@ -1592,12 +1592,16 @@ local defaults = {
             -- strip it turns from a card into its windows, flat and at their
             -- own size, the point the pointer holds sliding to the front
             -- window's centre as it turns. A card or window in the hand is drawn
-            -- once a frame: on the pointer while it is flat, easing after it
-            -- the more it has turned, with a time constant of `smooth`
-            -- milliseconds as a full card. Letting go rides `motion`.
+            -- once a frame, easing after the pointer: by `steady`
+            -- milliseconds while it is flat -- a mouse is heard every 8 ms or
+            -- so, and a fast screen draws two or three frames between, so a
+            -- window drawn exactly on it moves in steps -- and more the more
+            -- it has turned, up to `smooth` as a full card. Letting go rides
+            -- `motion`.
             drag = {
                 threshold = 8,
                 reach = 320,
+                steady = 12,
                 smooth = 70,
             },
             -- "stage": the strip slides off the edge while the stage holds a
