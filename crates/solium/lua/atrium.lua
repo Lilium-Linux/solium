@@ -908,11 +908,26 @@ local function draw_held(dt)
     sol.animate({ duration = 0 })
     local rects = lifted(it.rects, held.lift, held.shift)
     local drawn = morph(it.group, it.by_id, rects, pointer.x, pointer.y, held.fx, held.fy, t)
-    -- Its icons go with it, fading as it turns into its windows.
+    -- Its icons go with it, fading as it turns into its windows: named by
+    -- the windows they belong to, as the cards name theirs.
     local front = drawn[1]
     if front and kept.surfaces["atrium@" .. held.monitor] then
+        local keys, seen = {}, {}
+        for _, id in ipairs(it.group) do
+            local window = it.by_id[id]
+            local app = window and window.app_id or ""
+            if not seen[app] then
+                seen[app] = true
+                keys[#keys + 1] = tostring(id)
+            end
+        end
+        local name = math.huge
+        for _, id in ipairs(it.group) do
+            name = math.min(name, id)
+        end
         local badges = {
-            card = held.card,
+            keys = keys,
+            group = name,
             ix = front.x - it.area.x,
             iy = front.y + front.h - it.area.y,
             fade = math.max(0, math.min(1, (t - 0.3) / 0.5)),

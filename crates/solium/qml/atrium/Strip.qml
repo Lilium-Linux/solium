@@ -25,9 +25,11 @@ Item {
     // order its windows stand: `key`, the id of that application's front
     // window in the group, and `icon`, a theme icon name.
     property var cards: []
-    // The card in the hand, drawn by the Lua where the drag is: `card`, `ix`
-    // and `iy` (its front window's bottom-left corner as drawn, this frame)
-    // and `fade` (1 a card, 0 a window); `false` while none is held.
+    // The card in the hand, drawn by the Lua where the drag is: `keys` (its
+    // icons, named as `badges[].key`), `group` (its card's `key`, which a
+    // card keeps while the numbers change under it), `ix` and `iy` (its
+    // front window's bottom-left corner as drawn, this frame) and `fade` (1 a
+    // card, 0 a window); `false` while none is held.
     property var held: false
     // The strip's own width; the scene is wider, so that a held card's icons
     // can go with it.
@@ -195,6 +197,48 @@ Item {
     // model is kept by those names, so an icon whose card moves or changes is
     // the same item moving, and is not loaded again.
     readonly property int iconGap: 6
+
+    // The held card's icons, by name, and how many.
+    readonly property var heldKeys: {
+        const out = {}
+        if (root.held)
+            for (const key of root.listOf(root.held.keys))
+                out[String(key)] = true
+        return out
+    }
+    readonly property int heldCount: root.held ? root.listOf(root.held.keys).length : 0
+    // Magnetism, by distance alone, so that nothing in it ever jumps: the
+    // card whose icons are nearest the held card's, within half the distance
+    // between two cards (so never two at once), and how near, 0 at that
+    // distance and 1 on top. Its icons part first, as the held icons come
+    // into the near half, so no icon ever lands on another; then the held
+    // icons are drawn into the places they will have there.
+    readonly property var near: {
+        if (!root.held)
+            return null
+        const list = root.listOf(root.cards)
+        let reach = 150
+        for (let at = 1; at < list.length; at++)
+            reach = Math.min(reach, Math.abs(list[at].iy - list[at - 1].iy) / 2)
+        let best = null
+        for (const card of list) {
+            if (card.key === root.held.group)
+                continue
+            const apart = Math.hypot(root.held.ix - card.ix, root.held.iy - card.iy)
+            const amount = Math.max(0, Math.min(1, 1 - apart / Math.max(1, reach)))
+            if (amount > 0 && (!best || amount > best.amount))
+                best = { key: card.key, card: card.card, ix: card.ix, iy: card.iy, amount: amount }
+        }
+        return best
+    }
+    readonly property real room: root.near ? Math.min(1, root.near.amount * 2) : 0
+    readonly property real pull: {
+        if (!root.near)
+            return 0
+        const late = Math.max(0, Math.min(1, (root.near.amount - 0.5) * 2))
+        return late * late * (3 - 2 * late)
+    }
+
     ListModel { id: badges }
     function sync() {
         const wanted = []
@@ -204,7 +248,7 @@ Item {
             const list = root.listOf(card.badges)
             for (let slot = 0; slot < list.length; slot++)
                 wanted.push({ key: String(list[slot].key), icon: String(list[slot].icon || ""),
-                              card: card.card, slot: slot, ix: card.ix, iy: card.iy })
+                              card: card.card, group: Number(card.key), slot: slot, ix: card.ix, iy: card.iy })
         }
         const keys = {}
         for (const each of wanted)
@@ -219,7 +263,7 @@ Item {
             if (row < 0)
                 badges.append(each)
             else
-                for (const role of ["icon", "card", "slot", "ix", "iy"])
+                for (const role of ["icon", "card", "group", "slot", "ix", "iy"])
                     if (badges.get(row)[role] !== each[role])
                         badges.setProperty(row, role, each[role])
         }
@@ -234,22 +278,61 @@ Item {
             required property string key
             required property string icon
             required property int card
+            required property real group
             required property int slot
             required property real ix
             required property real iy
 
-            readonly property bool inHand: root.held !== false && root.held.card === badge.card
+            readonly property bool inHand: root.heldKeys[badge.key] === true
+            readonly property bool joined: !inHand && root.near !== null && root.near.key === badge.group
             readonly property bool away: root.hidden && !root.peeking
-            readonly property real lifted: root.hovered === badge.card && !inHand ? root.lift : 1
-            readonly property real size: root.iconSize * lifted
-            // Where it belongs: its card's corner, or the held card's this
-            // frame, and slid off with the strip when it goes.
-            readonly property real tx: (inHand ? root.held.ix : badge.ix) - size * 0.18
-                + slot * (size + root.iconGap) - (away ? root.strip : 0)
-            readonly property real ty: (inHand ? root.held.iy : badge.iy) - size * 0.62
+            // The size of the icons on the card the held one is nearest.
+            readonly property real nearSize: root.iconSize * (root.near && root.hovered === root.near.card ? root.lift : 1)
+            // The size it is drawn at: lifted with a hovered card, and, in
+            // the hand, growing into the size of those it is drawn to.
+            readonly property real size: inHand ? root.iconSize + (nearSize - root.iconSize) * root.pull
+                : root.iconSize * (root.hovered === badge.card ? root.lift : 1)
+            property real shown: size
+            Behavior on shown { enabled: !badge.inHand; NumberAnimation { duration: Theme.quick } }
 
-            width: size
-            height: size
+            // Where it belongs. In the hand: under the held card, drawn into
+            // its place on the card it is nearest by the magnetism. Otherwise
+            // its card's corner, slid off with the strip when it goes.
+            readonly property real tx: {
+                if (inHand) {
+                    const own = root.held.ix - size * 0.18 + slot * (size + root.iconGap)
+                    const there = root.near ? root.near.ix - nearSize * 0.18 + slot * (nearSize + root.iconGap) : own
+                    return own + (there - own) * root.pull
+                }
+                return badge.ix - size * 0.18 + slot * (size + root.iconGap) - (away ? root.strip : 0)
+            }
+            readonly property real ty: {
+                if (inHand) {
+                    const own = root.held.iy - size * 0.62
+                    const there = root.near ? root.near.iy - nearSize * 0.62 : own
+                    return own + (there - own) * root.pull
+                }
+                return badge.iy - size * 0.62
+            }
+            // On the card the held one is nearest: further along by a place
+            // for each icon coming, as far as it has come -- straight from the
+            // distance, not on the spring, so it is always out of the way in
+            // time. When the drag ends, or anything else changes it at once
+            // rather than a little a frame, the change is handed to the
+            // spring, so the icon goes on from exactly where it is.
+            readonly property real roomOffset: joined ? root.heldCount * root.room * (size + root.iconGap) : 0
+            property real lastRoom: 0
+            onRoomOffsetChanged: {
+                const change = roomOffset - lastRoom
+                lastRoom = roomOffset
+                if (!root.held || Math.abs(change) > 8) {
+                    px -= change
+                    follow()
+                }
+            }
+
+            width: shown
+            height: shown
             opacity: away ? 0 : inHand ? root.held.fade : 1
             Behavior on opacity { enabled: !badge.inHand; NumberAnimation { duration: Theme.normal } }
 
@@ -260,7 +343,7 @@ Item {
             property real py: ty
             property real vx: 0
             property real vy: 0
-            x: px
+            x: px + roomOffset
             y: py
             function settled() {
                 return Math.abs(px - tx) < 0.1 && Math.abs(py - ty) < 0.1
@@ -305,9 +388,9 @@ Item {
                     readonly property real out: (index + 1) * 1.5
                     x: -out
                     y: -out + 2.5
-                    width: badge.size + 2 * out
-                    height: badge.size + 2 * out
-                    radius: badge.size * 0.22 + out
+                    width: badge.shown + 2 * out
+                    height: badge.shown + 2 * out
+                    radius: badge.shown * 0.22 + out
                     color: "#000000"
                     opacity: 0.09
                 }
