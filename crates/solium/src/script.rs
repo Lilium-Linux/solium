@@ -23619,15 +23619,24 @@ mod directions {
                 w: 800.0,
                 h: 600.0,
             };
-            let mut desk = Desk::floating(one_screen(), &[(2, "DP-1", at(600.0)), (1, "DP-1", at(700.0))]);
+            let mut desk = Desk::floating(
+                one_screen(),
+                &[(2, "DP-1", at(600.0)), (1, "DP-1", at(700.0))],
+            );
             let snapshot = desk.snapshot();
             act(&mut desk, "leave", "{}", snapshot);
             desk
         }
 
-        fn act(desk: &mut Desk, action: &str, data: &str, snapshot: Snapshot) -> super::super::Outcome {
+        fn act(
+            desk: &mut Desk,
+            action: &str,
+            data: &str,
+            snapshot: Snapshot,
+        ) -> super::super::Outcome {
             let data = crate::json::Json::parse(data).expect("valid JSON");
-            desk.scripts.surface_action("atrium@DP-1", action, &data, snapshot)
+            desk.scripts
+                .surface_action("atrium@DP-1", action, &data, snapshot)
         }
 
         fn set_rect(desk: &mut Desk, id: u64, rect: Rect) {
@@ -23638,7 +23647,10 @@ mod directions {
 
         /// Window `id`'s last present in `commands`: its rect, opacity, how
         /// long it moves and whether it named a timing per property.
-        fn presented(commands: &[Command], id: u64) -> Option<(Option<Rect>, Option<f32>, Duration, bool)> {
+        fn presented(
+            commands: &[Command],
+            id: u64,
+        ) -> Option<(Option<Rect>, Option<f32>, Duration, bool)> {
             commands.iter().rev().find_map(|command| match command {
                 Command::Present {
                     id: each,
@@ -23667,7 +23679,11 @@ mod directions {
             let card = presented(&outcome.commands, 1).expect("the card is drawn again");
             assert_eq!(card.1, Some(0.0), "the strip slid away: {card:?}");
             assert!(card.3, "the card names its own timing");
-            assert!(outcome.motion.is_none(), "the maximise keeps its own timing: {:?}", outcome.motion);
+            assert!(
+                outcome.motion.is_none(),
+                "the maximise keeps its own timing: {:?}",
+                outcome.motion
+            );
 
             set_rect(&mut desk, 2, restored);
             let outcome = desk.scripts.maximize(2, false, desk.snapshot());
@@ -23688,13 +23704,29 @@ mod directions {
                 h: 600.0,
             };
             set_rect(&mut desk, 2, wider);
-            let outcome = desk.scripts.resized(2, (100.0, 400.0), (Some("left"), None), desk.snapshot());
+            let outcome =
+                desk.scripts
+                    .resized(2, (100.0, 400.0), (Some("left"), None), desk.snapshot());
             let card = presented(&outcome.commands, 1).expect("the card is drawn again");
             assert_eq!(card.1, Some(0.0), "the strip slid away: {card:?}");
 
-            set_rect(&mut desk, 2, Rect { x: 90.0, w: 1310.0, ..wider });
-            let outcome = desk.scripts.resized(2, (90.0, 400.0), (Some("left"), None), desk.snapshot());
-            assert_eq!(presented(&outcome.commands, 1), None, "nothing changed for the strip");
+            set_rect(
+                &mut desk,
+                2,
+                Rect {
+                    x: 90.0,
+                    w: 1310.0,
+                    ..wider
+                },
+            );
+            let outcome =
+                desk.scripts
+                    .resized(2, (90.0, 400.0), (Some("left"), None), desk.snapshot());
+            assert_eq!(
+                presented(&outcome.commands, 1),
+                None,
+                "nothing changed for the strip"
+            );
         }
 
         /// The held card 1 dragged to `x`, 720, as the strip's scene says,
@@ -23702,7 +23734,12 @@ mod directions {
         /// as last drawn.
         fn ticks(desk: &mut Desk, x: f64, dt: f64, count: usize) -> (Rect, Duration, bool) {
             let snapshot = desk.snapshot();
-            act(desk, "drag", &format!(r#"{{"card":1,"x":{x},"y":720}}"#), snapshot);
+            act(
+                desk,
+                "drag",
+                &format!(r#"{{"card":1,"x":{x},"y":720}}"#),
+                snapshot,
+            );
             let mut last = None;
             for _ in 0..count {
                 let snapshot = desk.snapshot();
@@ -23725,15 +23762,33 @@ mod directions {
             let mut desk = desk();
             desk.cursor = (100.0, 720.0);
             let snapshot = desk.snapshot();
-            act(&mut desk, "drag", r#"{"card":1,"x":100,"y":720,"px":100,"py":712}"#, snapshot);
+            act(
+                &mut desk,
+                "drag",
+                r#"{"card":1,"x":100,"y":720,"px":100,"py":712}"#,
+                snapshot,
+            );
             let snapshot = desk.snapshot();
-            let again = act(&mut desk, "drag", r#"{"card":1,"x":300,"y":720,"px":100,"py":712}"#, snapshot);
-            assert_eq!(presented(&again.commands, 1), None, "a pointer event draws nothing");
+            let again = act(
+                &mut desk,
+                "drag",
+                r#"{"card":1,"x":300,"y":720,"px":100,"py":712}"#,
+                snapshot,
+            );
+            assert_eq!(
+                presented(&again.commands, 1),
+                None,
+                "a pointer event draws nothing"
+            );
 
             // Pulled well past the strip: a window at its own size, carried
             // by its centre, under the pointer.
             let (window, duration, channels) = ticks(&mut desk, 900.0, 0.05, 20);
-            assert_eq!((duration, channels), (Duration::ZERO, false), "drawn, not animated");
+            assert_eq!(
+                (duration, channels),
+                (Duration::ZERO, false),
+                "drawn, not animated"
+            );
             assert_eq!((window.w, window.h), (800.0, 600.0));
             assert!(
                 (window.x + 400.0 - 900.0).abs() < 0.5 && (window.y + 300.0 - 720.0).abs() < 0.5,
@@ -23742,16 +23797,28 @@ mod directions {
             // Flat, it eases after the pointer only by `steady`: part of the
             // way in one 4 ms frame, the rest within a few more.
             let (step, ..) = ticks(&mut desk, 960.0, 0.004, 1);
-            assert!(step.x > window.x + 5.0 && step.x < window.x + 60.0, "{window:?} then {step:?}");
+            assert!(
+                step.x > window.x + 5.0 && step.x < window.x + 60.0,
+                "{window:?} then {step:?}"
+            );
             let (moved, ..) = ticks(&mut desk, 960.0, 0.05, 5);
-            assert!((moved.x - window.x - 60.0).abs() < 0.5, "{window:?} then {moved:?}");
+            assert!(
+                (moved.x - window.x - 60.0).abs() < 0.5,
+                "{window:?} then {moved:?}"
+            );
 
             // Back towards the strip, turning: one frame later it is still
             // nearly where it was, and it gets there over the frames after.
             let (eased, ..) = ticks(&mut desk, 400.0, 0.004, 1);
-            assert!(eased.w > 790.0 && eased.x > moved.x - 200.0, "eased after the pointer: {eased:?}");
+            assert!(
+                eased.w > 790.0 && eased.x > moved.x - 200.0,
+                "eased after the pointer: {eased:?}"
+            );
             let (arrived, ..) = ticks(&mut desk, 400.0, 0.05, 40);
-            assert!(arrived.w < 700.0, "turned the way the pointer's place says: {arrived:?}");
+            assert!(
+                arrived.w < 700.0,
+                "turned the way the pointer's place says: {arrived:?}"
+            );
         }
 
         /// **A hovered card picked up does not move at all**: lifted, out
@@ -23767,12 +23834,28 @@ mod directions {
             act(&mut desk, "edge", "{}", snapshot);
             let snapshot = desk.snapshot();
             let hovered = act(&mut desk, "hover", r#"{"card":1}"#, snapshot);
-            let lifted = presented(&hovered.commands, 1).expect("the hovered card is drawn").0.expect("a rect");
+            let lifted = presented(&hovered.commands, 1)
+                .expect("the hovered card is drawn")
+                .0
+                .expect("a rect");
             desk.cursor = (108.0, 720.0);
             let snapshot = desk.snapshot();
-            let picked = act(&mut desk, "drag", r#"{"card":1,"x":108,"y":720,"px":100,"py":720}"#, snapshot);
-            let held = presented(&picked.commands, 1).expect("the picked card is drawn").0.expect("a rect");
-            for (was, is) in [(lifted.x, held.x), (lifted.y, held.y), (lifted.w, held.w), (lifted.h, held.h)] {
+            let picked = act(
+                &mut desk,
+                "drag",
+                r#"{"card":1,"x":108,"y":720,"px":100,"py":720}"#,
+                snapshot,
+            );
+            let held = presented(&picked.commands, 1)
+                .expect("the picked card is drawn")
+                .0
+                .expect("a rect");
+            for (was, is) in [
+                (lifted.x, held.x),
+                (lifted.y, held.y),
+                (lifted.w, held.w),
+                (lifted.h, held.h),
+            ] {
                 assert!((was - is).abs() < 0.5, "lifted {lifted:?}, held {held:?}");
             }
         }
@@ -23787,7 +23870,11 @@ mod directions {
             let snapshot = desk.snapshot();
             let away = act(&mut desk, "leave", "{}", snapshot);
             let card = presented(&away.commands, 1).expect("the card is drawn");
-            assert_eq!((card.1, card.3), (Some(0.0), true), "off the edge, on its own spring: {card:?}");
+            assert_eq!(
+                (card.1, card.3),
+                (Some(0.0), true),
+                "off the edge, on its own spring: {card:?}"
+            );
             let snapshot = desk.snapshot();
             let out = act(&mut desk, "edge", "{}", snapshot);
             let card = presented(&out.commands, 1).expect("the card is drawn");
@@ -23796,7 +23883,10 @@ mod directions {
                 Command::Present { id: 1, z, .. } => Some(*z),
                 _ => None,
             });
-            assert!(z.is_some_and(|z| z > 0.0), "over the stage's windows: {z:?}");
+            assert!(
+                z.is_some_and(|z| z > 0.0),
+                "over the stage's windows: {z:?}"
+            );
         }
 
         /// **A card dropped onto another card joins its group**, in front,
@@ -23804,10 +23894,19 @@ mod directions {
         /// are 562 and 752 down, 176 by 126 at 22 across.
         #[test]
         fn a_card_dropped_onto_another_card_joins_its_group() {
-            let at = |x: f64| Rect { x, y: 100.0, w: 800.0, h: 600.0 };
+            let at = |x: f64| Rect {
+                x,
+                y: 100.0,
+                w: 800.0,
+                h: 600.0,
+            };
             let mut desk = Desk::floating(
                 one_screen(),
-                &[(3, "DP-1", at(600.0)), (2, "DP-1", at(700.0)), (1, "DP-1", at(800.0))],
+                &[
+                    (3, "DP-1", at(600.0)),
+                    (2, "DP-1", at(700.0)),
+                    (1, "DP-1", at(800.0)),
+                ],
             );
             let snapshot = desk.snapshot();
             act(&mut desk, "leave", "{}", snapshot);
@@ -23827,7 +23926,11 @@ mod directions {
             );
             let snapshot = desk.snapshot();
             act(&mut desk, "drop", r#"{"card":1,"x":100,"y":800}"#, snapshot);
-            assert_eq!(groups(&desk), "3|2,1", "one group, the dropped card in front, the stage as it was");
+            assert_eq!(
+                groups(&desk),
+                "3|2,1",
+                "one group, the dropped card in front, the stage as it was"
+            );
         }
 
         /// **A stage window dropped onto a card joins that card's group**, in
@@ -23878,7 +23981,19 @@ mod directions {
         #[test]
         fn a_window_closed_on_the_stage_keeps_the_stage() {
             let mut desk = desk();
-            desk.windows.insert(0, super::window(3, "DP-1", Rect { x: 640.0, y: 140.0, w: 800.0, h: 600.0 }));
+            desk.windows.insert(
+                0,
+                super::window(
+                    3,
+                    "DP-1",
+                    Rect {
+                        x: 640.0,
+                        y: 140.0,
+                        w: 800.0,
+                        h: 600.0,
+                    },
+                ),
+            );
             for window in &mut desk.windows {
                 if window.id != 1 {
                     window.app_id = "editor".to_owned();
@@ -23886,13 +24001,20 @@ mod directions {
             }
             let snapshot = desk.snapshot();
             act(&mut desk, "leave", "{}", snapshot);
-            assert_eq!(groups(&desk), "2,3|1", "the editor's two windows on the stage");
+            assert_eq!(
+                groups(&desk),
+                "2,3|1",
+                "the editor's two windows on the stage"
+            );
 
             closing(&mut desk, 2);
             let snapshot = desk.snapshot();
             let outcome = desk.scripts.focused(1, FocusSource::Settle, true, snapshot);
             assert!(
-                outcome.commands.iter().any(|command| matches!(command, Command::Focus { id: 3, .. })),
+                outcome
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, Command::Focus { id: 3, .. })),
                 "the keyboard goes to the stage's next window: {:?}",
                 outcome.commands
             );
@@ -23909,7 +24031,11 @@ mod directions {
             assert_eq!(groups(&desk), "|1", "a bare stage and the card behind it");
             let snapshot = desk.snapshot();
             desk.scripts.focused(1, FocusSource::Settle, true, snapshot);
-            assert_eq!(groups(&desk), "|1", "the keyboard handed over brings nothing forward");
+            assert_eq!(
+                groups(&desk),
+                "|1",
+                "the keyboard handed over brings nothing forward"
+            );
         }
     }
 }
