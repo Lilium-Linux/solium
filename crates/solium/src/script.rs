@@ -22557,6 +22557,10 @@ mod directions {
         desk.focus(id);
     }
 
+    /// The atrium off: these check where floating placement puts windows on
+    /// the whole work area, which the atrium's strip would narrow.
+    const NO_ATRIUM: &str = "require(\"config\").floating.atrium.enabled = false\n";
+
     /// Window `id` opens on `DP-1` already `w` by `h`: an application that
     /// has shown a frame of its own size, which placement keeps.
     fn open_shown(desk: &mut Desk, id: u64, w: f64, h: f64) {
@@ -22596,7 +22600,7 @@ mod directions {
     /// it.
     #[test]
     fn desktop_mode_ten_spawned_windows_step_by_cascade_and_wrap_at_the_edge() {
-        let mut desk = Desk::new("", vec![screen("DP-1", NESTED)]);
+        let mut desk = Desk::new(NO_ATRIUM, vec![screen("DP-1", NESTED)]);
         for id in 1..=10 {
             open_unshown(&mut desk, id);
         }
@@ -22630,7 +22634,7 @@ mod directions {
     /// window steps on rather than landing all but on top of it. #240.
     #[test]
     fn desktop_mode_a_spot_a_window_was_nudged_off_is_still_taken() {
-        let mut desk = Desk::new("", vec![screen("DP-1", NESTED)]);
+        let mut desk = Desk::new(NO_ATRIUM, vec![screen("DP-1", NESTED)]);
         open_unshown(&mut desk, 1);
         for each in &mut desk.windows {
             each.rect.x += 5.0;
@@ -22651,7 +22655,8 @@ mod directions {
     #[test]
     fn desktop_mode_a_cascade_of_no_step_is_read_as_the_shipped_one() {
         let mut desk = Desk::new(
-            "local config = require(\"config\")\n\
+            "require(\"config\").floating.atrium.enabled = false\n\
+             local config = require(\"config\")\n\
              config.floating.placement.cascade = { x = 0, y = \"far\" }\n",
             vec![screen("DP-1", NESTED)],
         );
@@ -22672,7 +22677,8 @@ mod directions {
     #[test]
     fn desktop_mode_with_no_free_spot_a_window_lands_where_its_policy_starts() {
         let mut desk = Desk::new(
-            "local config = require(\"config\")\n\
+            "require(\"config\").floating.atrium.enabled = false\n\
+             local config = require(\"config\")\n\
              config.floating.placement.size = 1\n",
             vec![screen("DP-1", NESTED)],
         );
@@ -22695,7 +22701,7 @@ mod directions {
     /// (32, 32), did not fit and the walk gave up.
     #[test]
     fn desktop_mode_windows_nearly_the_work_area_tall_get_spots_of_their_own() {
-        let mut desk = Desk::new("", vec![screen("DP-1", NESTED)]);
+        let mut desk = Desk::new(NO_ATRIUM, vec![screen("DP-1", NESTED)]);
         for id in 1..=4 {
             open_shown(&mut desk, id, 1200.0, 880.0);
         }
@@ -22720,7 +22726,8 @@ mod directions {
     #[test]
     fn desktop_mode_once_every_diagonal_is_spent_a_window_takes_a_free_spot_of_the_grid() {
         let mut desk = Desk::new(
-            "local config = require(\"config\")\n\
+            "require(\"config\").floating.atrium.enabled = false\n\
+             local config = require(\"config\")\n\
              config.floating.placement.wrap = \"center\"\n",
             vec![screen("DP-1", NESTED)],
         );
@@ -22757,7 +22764,8 @@ mod directions {
         for wrap in ["corner", "center"] {
             let mut desk = Desk::new(
                 &format!(
-                    "local config = require(\"config\")\n\
+                    "require(\"config\").floating.atrium.enabled = false\n\
+                     local config = require(\"config\")\n\
                      config.floating.placement.wrap = {wrap:?}\n"
                 ),
                 vec![screen("DP-1", NESTED)],
