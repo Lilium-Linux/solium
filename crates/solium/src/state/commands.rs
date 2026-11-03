@@ -682,6 +682,12 @@ impl Solium {
                 // `real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`,
                 // `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
                 // `crate::models::workspaces::tests::a_workspace_declared_twice_is_one_row`.
+                Command::WorkspacesOffered(offered) => {
+                    if self.ext_workspaces.offered() != offered {
+                        tracing::debug!(offered, "ext-workspace offered set");
+                        self.ext_workspaces.offer(offered);
+                    }
+                }
                 Command::Workspaces(declared) => {
                     let monitors: Vec<String> = self.space.outputs().map(Output::name).collect();
                     let windows: Vec<u64> = self

@@ -1121,6 +1121,16 @@ function sol.lock_peek(progress) end
 ---@return nil
 function sol.x11(options) end
 
+---Whether a shell that is its own program sees the workspaces declared with
+---`sol.workspaces`, through `ext-workspace-v1` (#60): `config.workspaces.offered`,
+---which the shipped `workspaces.lua` hands over. A switch such a client asks
+---for reaches the `surface` listeners as the action `workspaces.go`,
+---`{ id, monitor }`, from the surface `"ext-workspace"`. `false` hides the
+---global and tells every client that bound it that it is finished.
+---@param offered boolean
+---@return nil
+function sol.workspaces_offered(offered) end
+
 ---Which window protocols a shell that is its own program is offered:
 ---`config.toplevels`, which the shipped `init.lua` hands over. A protocol
 ---taken away is hidden from clients and closes every handle it gave out. See

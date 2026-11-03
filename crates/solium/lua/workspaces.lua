@@ -85,6 +85,11 @@ local workspaces = {
     carried = {},
 }
 
+-- Whether a shell that is its own program sees these workspaces, through
+-- ext-workspace-v1 (#60): the declarations below are what it is told, and a
+-- switch it asks for is `workspaces.go`, answered further down.
+sol.workspaces_offered(workspaces.settings.offered ~= false)
+
 local function key(monitor)
     if not workspaces.settings.per_monitor then
         return TOGETHER
