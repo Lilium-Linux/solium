@@ -745,6 +745,17 @@ impl Solium {
                         self.x11 = settings;
                     }
                 }
+                Command::LayerShell(settings) => {
+                    if self.layer_shell != settings {
+                        tracing::debug!(
+                            ?settings,
+                            "which layer surfaces below the windows take input set"
+                        );
+                        self.layer_shell = settings;
+                        // What the pointer is over may have changed under it.
+                        self.repoint_clients();
+                    }
+                }
                 Command::FocusMode {
                     click,
                     follow,

@@ -423,6 +423,10 @@
 ---X11 windows refused a tile, decoration or bar entry outright (#221). A key
 ---left out, or the whole table left out, keeps the default rather than
 ---emptying it.
+---Shells that are their own programs, through wlr-layer-shell (#461).
+---@class sol.LayerShellOptions
+---@field input_below? boolean|string[] Which client layer surfaces on the bottom and background layers take the pointer and touch: `true` every one (the default), `false` none, so a press passes through to what is under them, or a list of namespaces, each exact, `*`, or a prefix ending in `*`. Surfaces above the windows always take input.
+
 ---@class sol.X11Options
 ---@field hidden? string[] WM_CLASS names to hide, matched case-insensitively against either field a client sets (`class` or `instance` on `sol.Window`). Replaces the whole default list rather than adding to it; default `{ "xwaylandvideobridge" }`.
 
@@ -1094,6 +1098,12 @@ function sol.lock_peek(progress) end
 ---@param options? sol.X11Options
 ---@return nil
 function sol.x11(options) end
+
+---Which client layer surfaces below the windows take the pointer and touch:
+---`config.layer_shell`, which the shipped `init.lua` hands over. See #461.
+---@param options? sol.LayerShellOptions
+---@return nil
+function sol.layer_shell(options) end
 
 ---Override the focus input policy: `config.focus`, which `lua/modes.lua`
 ---hands over on every mode change as well as at load. See #219.

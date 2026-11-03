@@ -47,6 +47,46 @@ use smithay::{
     wayland::shell::wlr_layer::Layer,
 };
 
+/// `config.layer_shell`, handed over by `sol.layer_shell` (#461).
+/// `script::tests::sol_layer_shell_reads_input_below_as_a_flag_or_a_list_of_namespaces`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Settings {
+    pub(crate) input_below: InputBelow,
+}
+
+/// Which of a client's layer surfaces below the windows, on the bottom and
+/// background layers, take the pointer and touch: `layer_shell.input_below`.
+///
+/// One that does not is passed through, as a surface with an empty input
+/// region is: a press there reaches what is under it, a script's surface
+/// below or the desktop, and never stops at a picture that cannot answer it.
+/// The layers above the windows are not asked: a bar or a launcher there is
+/// only ever drawn to be used.
+/// `state::tests::real_client::reflow_on_close::stacking::a_client_surface_below_the_windows_takes_input_as_layer_shell_input_below_says`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum InputBelow {
+    /// Every one: `true`, the default. A desktop of icons, a widget layer
+    /// or a dock on the bottom layer is a shell's to be clicked.
+    #[default]
+    Every,
+    /// None of them: `false`.
+    Nothing,
+    /// Only those whose namespace one of these names: a list, each an exact
+    /// namespace, `*`, or a prefix ending in `*`, as effect rules match one.
+    Named(Vec<crate::effect::rules::Glob>),
+}
+
+impl InputBelow {
+    /// Whether a surface of this namespace takes input below the windows.
+    pub(crate) fn takes(&self, namespace: &str) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Nothing => false,
+            Self::Named(names) => names.iter().any(|name| name.matches(namespace)),
+        }
+    }
+}
+
 /// Place every anchored surface and return whether anything moved.
 ///
 /// Called when a layer surface appears, is reconfigured or goes away. The
@@ -112,22 +152,36 @@ pub(crate) fn surface_under(
     layer: crate::scripted::Layer,
     point: Point<f64, Logical>,
 ) -> Option<(WlSurface, Point<f64, Logical>)> {
+    surface_taking(output, layer, point, |_| true)
+}
+
+/// [`surface_under`], among only the surfaces `takes` says take input there:
+/// one it refuses is looked through, to the next surface of the layer under
+/// it. Below the windows that is `layer_shell.input_below` (#461).
+pub(crate) fn surface_taking(
+    output: &Output,
+    layer: crate::scripted::Layer,
+    point: Point<f64, Logical>,
+    takes: impl Fn(&LayerSurface) -> bool,
+) -> Option<(WlSurface, Point<f64, Logical>)> {
     let map = layer_map_for_output(output);
-    on(&map, layer).find_map(|surface| {
-        let geometry = map.layer_geometry(surface)?;
-        surface
-            .surface_under(
-                point - geometry.loc.to_f64(),
-                smithay::desktop::WindowSurfaceType::ALL,
-            )
-            // The subsurface's offset is within the layer surface, so the
-            // layer's own position has to be added back. Returning `point -
-            // offset` here instead -- the surface-local point in place of the
-            // origin -- told every bar and dock that the pointer was somewhere
-            // it was not, and told it a *different* wrong place for each
-            // position of the cursor.
-            .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()))
-    })
+    on(&map, layer)
+        .filter(|surface| takes(surface))
+        .find_map(|surface| {
+            let geometry = map.layer_geometry(surface)?;
+            surface
+                .surface_under(
+                    point - geometry.loc.to_f64(),
+                    smithay::desktop::WindowSurfaceType::ALL,
+                )
+                // The subsurface's offset is within the layer surface, so the
+                // layer's own position has to be added back. Returning `point -
+                // offset` here instead -- the surface-local point in place of the
+                // origin -- told every bar and dock that the pointer was somewhere
+                // it was not, and told it a *different* wrong place for each
+                // position of the cursor.
+                .map(|(surface, offset)| (surface, (geometry.loc + offset).to_f64()))
+        })
 }
 
 /// Tell every bar and dock on a monitor that it is going away.

@@ -894,6 +894,10 @@ pub(crate) enum Command {
     /// outright: `sol.x11`, from `config.x11` (#221). See
     /// `crate::xwayland::Settings`.
     X11(crate::xwayland::Settings),
+    /// Which of a client's layer surfaces below the windows take the pointer
+    /// and touch: `sol.layer_shell`, from `config.layer_shell` (#461). See
+    /// `crate::layer::Settings`.
+    LayerShell(crate::layer::Settings),
     /// Override the input profile's focus policy: `sol.focus_mode`, which
     /// `lua/modes.lua` calls on every mode change and `init.lua` once at
     /// load, both from `config.focus` (#219).
@@ -1036,6 +1040,7 @@ impl Command {
             | Self::Tray(_)
             | Self::Media(_)
             | Self::X11(_)
+            | Self::LayerShell(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
             | Self::Cursor(_)
@@ -5177,6 +5182,62 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 pending.commands.push(Command::Lock(settings));
                 pending.commands.push(Command::LockAuth(auth));
                 pending.commands.push(Command::LockScene(scene));
+            })
+        })?,
+    )?;
+
+    // Which of a client's layer surfaces below the windows take the pointer
+    // and touch (#461): `config.layer_shell`, handed over by `init.lua`.
+    // `input_below` is `true` (every one), `false` (none), or a list of
+    // namespaces, each exact, `*`, or a prefix ending in `*`. Anything else
+    // keeps the default, every one, and says so, the same as `sol.x11` keeps
+    // its list -- see `layer::Settings::default`.
+    // `tests::sol_layer_shell_reads_input_below_as_a_flag_or_a_list_of_namespaces`.
+    sol.set(
+        "layer_shell",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut settings = crate::layer::Settings::default();
+            if let Some(options) = options {
+                match options.get::<Value>("input_below") {
+                    Ok(Value::Boolean(true)) | Ok(Value::Nil) | Err(_) => {}
+                    Ok(Value::Boolean(false)) => {
+                        settings.input_below = crate::layer::InputBelow::Nothing;
+                    }
+                    Ok(Value::Table(list)) => {
+                        let mut names = Vec::new();
+                        let mut every_one_a_string = true;
+                        for value in list.sequence_values::<Value>() {
+                            match value {
+                                Ok(Value::String(name)) => match name.to_str() {
+                                    Ok(name) => {
+                                        names.push(crate::effect::rules::Glob::parse(&name));
+                                    }
+                                    Err(_) => every_one_a_string = false,
+                                },
+                                _ => every_one_a_string = false,
+                            }
+                            if !every_one_a_string {
+                                break;
+                            }
+                        }
+                        if every_one_a_string {
+                            settings.input_below = crate::layer::InputBelow::Named(names);
+                        } else {
+                            tracing::warn!(
+                                "layer_shell.input_below is true, false or a list of \
+                                 namespaces; every surface takes input"
+                            );
+                        }
+                    }
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "layer_shell.input_below is true, false or a list of namespaces; \
+                         every surface takes input"
+                    ),
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::LayerShell(settings));
             })
         })?,
     )?;
@@ -11267,6 +11328,90 @@ mod tests {
     /// `the_shipped_configuration_s_lock_table_matches_the_rust_default`
     /// holds for `lock`: a future edit to one without the other must fail a
     /// test rather than ship a mismatch.
+    #[test]
+    fn sol_layer_shell_reads_input_below_as_a_flag_or_a_list_of_namespaces() {
+        use crate::effect::rules::Glob;
+        use crate::layer::{InputBelow, Settings};
+        let directory = std::env::temp_dir().join("solium-script-test-layer-shell");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::LayerShell(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::LayerShell")
+        };
+        let below = |input_below| Settings { input_below };
+
+        assert_eq!(
+            configured("sol.layer_shell({ input_below = true })"),
+            below(InputBelow::Every)
+        );
+        assert_eq!(
+            configured("sol.layer_shell({ input_below = false })"),
+            below(InputBelow::Nothing)
+        );
+        assert_eq!(
+            configured(r#"sol.layer_shell({ input_below = { "desktop", "dock*", "*" } })"#),
+            below(InputBelow::Named(vec![
+                Glob::parse("desktop"),
+                Glob::parse("dock*"),
+                Glob::Any,
+            ])),
+            "each name is a namespace, a prefix or every one"
+        );
+        assert_eq!(
+            configured("sol.layer_shell({ input_below = {} })"),
+            below(InputBelow::Named(Vec::new())),
+            "an empty list names none"
+        );
+        for broken in [
+            "sol.layer_shell({ input_below = 5 })",
+            r#"sol.layer_shell({ input_below = { "desktop", 5 } })"#,
+            "sol.layer_shell({})",
+            "sol.layer_shell()",
+        ] {
+            assert_eq!(
+                configured(broken),
+                Settings::default(),
+                "{broken} kept the default"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_shipped_configuration_s_layer_shell_table_matches_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-layer-shell-default", "return {}")
+        else {
+            return;
+        };
+        let layer_shell: Vec<crate::layer::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::LayerShell(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            layer_shell,
+            [crate::layer::Settings::default()],
+            "the shipped init.lua did not hand config.layer_shell over as it says"
+        );
+    }
+
     #[test]
     fn the_shipped_configuration_s_x11_table_matches_the_rust_default() {
         let Some((directory, mut scripts)) =
