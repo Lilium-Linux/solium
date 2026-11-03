@@ -56,6 +56,12 @@ Item {
 
     // The window itself (#417), and what titlebar.lua keeps for it.
     property int windowId: 0
+    // Set by the compositor, once (#462): true for a window whose application
+    // draws its own titlebar. Its frame is the outline, the shadow and the
+    // corners; the titlebar, and the quick settings that open from it, are
+    // the application's, so this bar never unfolds and is not drawn.
+    property bool clientSide: false
+    visible: !clientSide
     property int pid: -1
     property bool maximized: false
     property bool fullscreen: false
@@ -83,7 +89,7 @@ Item {
     // out of a tile too (it keeps its tile to go back to, so it does not
     // count as floating): otherwise a maximised tile would have no buttons
     // and nothing to double-click to restore it.
-    readonly property bool titled: frame.floating || frame.maximized
+    readonly property bool titled: !frame.clientSide && (frame.floating || frame.maximized)
     property real barGrow: frame.titled ? Theme.titlebarHeight - frame.border : 0
     Behavior on barGrow {
         enabled: frame.told && !frame.titled
@@ -96,7 +102,7 @@ Item {
     property bool told: false
     onWindowIdChanged: if (frame.windowId !== 0) Qt.callLater(() => frame.told = true)
     // And the quick settings' room under it, animated the same way.
-    property real quickGrow: frame.expanded ? quickSettings.fullHeight : 0
+    property real quickGrow: frame.expanded && !frame.clientSide ? quickSettings.fullHeight : 0
     Behavior on quickGrow { NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
     // The room asked for beyond the style's band, read back by the
     // compositor (#423): it moves the client down by this much.

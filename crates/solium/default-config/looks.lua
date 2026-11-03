@@ -11,11 +11,11 @@
 --     again, animated with the window's glide (qml/panes/rounded-violet/
 --     Frame.qml). The style is never switched, so nothing is rebuilt at a
 --     switch and nothing stalls;
---   * every window has a border, the ones that draw their own titlebar too
---     (Claude, a browser), which no pane style frames: for those an effect
---     draws it just outside the window (effects/outline), and another cuts
---     their corners round (effects/corners), as the frames do -- rounded at
---     12 tiling and floating alike, violet with the keyboard and dim without;
+--   * every window has a border and its corners cut round, the ones that
+--     draw their own titlebar too (Claude, a browser): those are framed in
+--     rounded-violet's client-side frame (#462), the outline and the corners
+--     without the bar, which is the application's -- rounded at 12 tiling
+--     and floating alike, violet with the keyboard and dim without;
 --   * what is behind every window is blurred, so a see-through window is
 --     frosted rather than showing what is under it sharp, and what is behind the bar
 --     (a surface of its own, bar.lua) is blurred under its see-through
@@ -48,8 +48,6 @@ local TITLEBAR = 32
 local BAND = 1
 local TILING_MODES = { tiling = true, scrolling = true }
 
-local VIOLET = { 0.576, 0.427, 1, 1 }   -- #936dff, the frames' focused border
-local DIM = { 0.184, 0.18, 0.2, 1 }      -- #2f2e33, their border without the keyboard
 -- The corners, the same tiling and floating: both pane styles' client.radius.
 local RADIUS = 12
 
@@ -68,10 +66,11 @@ end
 
 local pane_now
 
--- The effect rules: blur behind every window, every window's own pixels a
--- little see-through, and the self-drawn ones bordered and rounded.
+-- The effect rules: blur behind every window and every window's own pixels a
+-- little see-through. A window that draws its own titlebar has the same:
+-- it is framed in this style too, client-side (#462), and the style rounds
+-- and borders it as it does the others.
 local function rules()
-    local radius = RADIUS
     -- A blur that dithers its own last pass against banding
     -- (effects/blur/last.frag): one chain, run once per monitor and shared by
     -- every window on it.
@@ -107,62 +106,6 @@ local function rules()
             effect = { "glass", soften_passes = 5, soften_offset = 6, bezel = 14, bend = 4,
                        shine = 0, shine_back = 0, shade = 0 },
         }
-    end
-    -- A window Solium draws without a frame (`style = "none"`: one that
-    -- draws its own titlebar, a browser, Claude, ChatGPT) gets from effects
-    -- what a frame gives the others: its corners cut round, the same
-    -- see-through, the blur behind it and a border. Every such window, by
-    -- what it is rather than by name; a fullscreen one is left alone.
-    --
-    -- Square while it fills its area, as a framed window's are (Pane.qml):
-    -- maximised, or snapped to a half or a quarter (snap.lua hands it
-    -- `snapped`, the zone's name; a key never handed matches `false`).
-    local shapes = {
-        { match = { maximized = false, values = { snapped = false } }, radius = radius },
-        { match = { maximized = true }, radius = 0 },
-    }
-    for _, zone in ipairs({ "left", "right", "top_left", "top_right", "bottom_left", "bottom_right" }) do
-        shapes[#shapes + 1] = { match = { maximized = false, values = { snapped = zone } }, radius = 0 }
-    end
-    for _, shape in ipairs(shapes) do
-        local function bare(more)
-            local match = { style = "none", fullscreen = false }
-            for key, value in pairs(shape.match) do
-                match[key] = value
-            end
-            for key, value in pairs(more or {}) do
-                match[key] = value
-            end
-            return match
-        end
-        local cut = shape.radius > 0 and { { "corners", radius = shape.radius } } or {}
-        for _, has_keyboard in ipairs({ true, false }) do
-            local client = {}
-            for _, step in ipairs(cut) do
-                client[#client + 1] = step
-            end
-            client[#client + 1] = { "alpha", amount = has_keyboard and ACTIVE or INACTIVE }
-            list[#list + 1] = {
-                match = bare({ focused = has_keyboard }),
-                part = "client", slot = "replace", source = "self",
-                effect = client,
-                fade = FADE,
-            }
-            list[#list + 1] = {
-                match = bare({ focused = has_keyboard }),
-                part = "pane", slot = "front",
-                effect = { "outline", radius = shape.radius, width = 1, color = has_keyboard and VIOLET or DIM },
-                fade = FADE,
-            }
-        end
-        -- The blur behind it, cut to the same corners (the glass cuts its own).
-        local behind = blur
-        if MATERIAL == "glass" then
-            behind = glass
-        elseif shape.radius > 0 then
-            behind = { blur, { "corners", radius = shape.radius } }
-        end
-        list[#list + 1] = { match = bare(), part = "pane", slot = "behind", effect = behind }
     end
     return list
 end
@@ -207,7 +150,7 @@ end
 -- configuration's frame, and what it takes now in any other (a window that
 -- draws its own titlebar has no frame at all).
 local function floating_top(w)
-    if w.style == PANE then
+    if w.style == PANE and not w.client_side then
         return TITLEBAR
     end
     return w.insets and w.insets.top or 0
@@ -227,7 +170,7 @@ local function to_unfold(w, folded)
     local now
     if w.insets then
         now = w.insets.top
-    elseif w.style == PANE then
+    elseif w.style == PANE and not w.client_side then
         now = folded and BAND or TITLEBAR
     else
         now = 0
