@@ -2307,6 +2307,7 @@ fn resolve_slots(
             maximized: facts.maximized,
             monitor: &facts.monitor,
             style: &facts.style,
+            client_side: facts.client_side,
             values: Some(held.frame_values().fields()),
             ..Facts::default()
         };

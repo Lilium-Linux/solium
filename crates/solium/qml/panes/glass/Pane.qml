@@ -51,8 +51,11 @@ PaneStyle {
     // meets it; the glass behind the bar is rounded to this number, and so is
     // the shade.
     client.radius: 16
-    client.radiusBottomLeft: 0
-    client.radiusBottomRight: 0
+    // Square where the bar meets the client; round, as the top two are, for
+    // a window whose application draws its own titlebar and has no bar of
+    // this style's under it (#462).
+    client.radiusBottomLeft: clientSide ? 16 : 0
+    client.radiusBottomRight: clientSide ? 16 : 0
 
     // At `frame`, inside the band it was given: nothing it draws covers the
     // client. `bar` is the name a `region:titlebar` rule's slots go around.

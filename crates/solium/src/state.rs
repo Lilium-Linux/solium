@@ -167,8 +167,8 @@ fn grown(real: Rectangle<i32, Logical>, insets: Insets) -> Rectangle<i32, Logica
 /// one: a frame that has not been built *yet* still reserves what one will
 /// want, because a window that changes shape the moment its frame appears is
 /// worse than one that was always the right size. It must not apply to a pane
-/// that will never have a frame — a client drawing its own decorations, an
-/// override-redirect menu, or `pane = "none"` — which got a titlebar's
+/// that will never have a frame — an override-redirect menu, or
+/// `pane = "none"` — which got a titlebar's
 /// worth of blank space above it with no titlebar in it. That is what an
 /// Electron application looked like here.
 fn insets_for(frame: &crate::pane::Frame) -> Insets {
@@ -253,6 +253,10 @@ pub(crate) struct Solium {
         reason = "registers the xdg-decoration global; dropping it would remove it"
     )]
     pub(crate) xdg_decoration_state: XdgDecorationState,
+    /// KDE's server-decoration global, how GTK3 asks for a frame (#61).
+    /// Server-side is offered as the default, as `xdg-decoration` offers it,
+    /// and `frames` decides what each window gets.
+    pub(crate) kde_decoration_state: smithay::wayland::shell::kde::decoration::KdeDecorationState,
     /// The shell's way in: bars, docks, wallpapers and notification areas are
     /// ordinary clients that anchor to an output edge. See `layer.rs`.
     pub(crate) layer_shell_state: WlrLayerShellState,
@@ -629,6 +633,9 @@ pub(crate) struct Solium {
     /// `map_window_request` refuses a tile, decoration or bar entry to
     /// outright (#221). See `xwayland::Settings`.
     pub(crate) x11: crate::xwayland::Settings,
+    /// `config.frames`, handed over by `sol.frames`: who draws a Wayland
+    /// window's frame, Solium or the application (#462). See `framing`.
+    pub(crate) frames: crate::framing::Settings,
     /// What systemd and D-Bus activation have been told about this session,
     /// and the stop and unset it owes them on exit. See `session.rs`.
     pub(crate) session: crate::session::Session,
@@ -1337,6 +1344,9 @@ pub(crate) struct WindowFacts {
     pub(crate) maximized: bool,
     pub(crate) monitor: String,
     pub(crate) style: String,
+    /// Whether its frame is the style's client-side one: its application
+    /// draws its own titlebar (#462).
+    pub(crate) client_side: bool,
 }
 
 /// A pane's `style` as a rule's match reads it: the configured style's name
@@ -1425,6 +1435,7 @@ impl Solium {
             xwm: None,
             x11_display: None,
             x11: crate::xwayland::Settings::default(),
+            frames: crate::framing::Settings::default(),
             session: crate::session::Session::off(),
             logind: crate::logind::Logind::off(),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
@@ -1465,6 +1476,10 @@ impl Solium {
             presentation_state: PresentationState::new::<Self>(&display_handle, 1),
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(&display_handle),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&display_handle),
+            kde_decoration_state: smithay::wayland::shell::kde::decoration::KdeDecorationState::new::<Self>(
+                &display_handle,
+                smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration_manager::Mode::Server,
+            ),
             layer_shell_state: WlrLayerShellState::new::<Self>(&display_handle),
             idle_state: crate::idle::IdleState::new::<Self>(&display_handle),
             idle_inhibit_state: crate::idle::inhibit_state(&display_handle),
@@ -2187,6 +2202,9 @@ impl Solium {
                 )
                 .to_owned()
             },
+            client_side: held
+                .and_then(crate::pane::Pane::decoration)
+                .is_some_and(crate::decoration::Decoration::client_side),
         }
     }
 

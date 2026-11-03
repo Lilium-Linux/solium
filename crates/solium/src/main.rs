@@ -30,6 +30,7 @@ mod effect;
 mod explicit_sync;
 mod focus;
 mod folder;
+mod framing;
 mod gputime;
 mod group;
 mod icon;

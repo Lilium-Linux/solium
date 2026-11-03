@@ -233,10 +233,13 @@ pub(crate) struct WindowInfo {
     /// `real_client::a_window_maximised_while_floating_joins_its_tile_when_a_layout_takes_over`.
     pub(crate) maximized: bool,
     /// The pane style it is framed in, or `"none"` when it is drawn bare:
-    /// fullscreen, drawing its own decorations, or under `pane = "none"`.
-    /// What a rule's `style` match reads (`state::style_fact`).
+    /// fullscreen, or under `pane = "none"`. What a rule's `style` match
+    /// reads (`state::style_fact`).
     /// `real_client::sol_windows_carries_every_window_match_key`.
     pub(crate) style: String,
+    /// Whether its application draws its own titlebar, and its frame is the
+    /// style's client-side one (#462): what a rule's `client_side` match reads.
+    pub(crate) client_side: bool,
     /// Its `_NET_WM_WINDOW_TYPE`, by the name `xwayland::window_type_name`
     /// gives it -- `"normal"` for an X11 window with none, same as
     /// `xwayland::places_itself` and `floats_over_its_parent` already read it
@@ -894,6 +897,9 @@ pub(crate) enum Command {
     /// outright: `sol.x11`, from `config.x11` (#221). See
     /// `crate::xwayland::Settings`.
     X11(crate::xwayland::Settings),
+    /// Who draws a Wayland window's frame, Solium or the application:
+    /// `sol.frames`, from `config.frames` (#462). See `crate::framing`.
+    Frames(crate::framing::Settings),
     /// Override the input profile's focus policy: `sol.focus_mode`, which
     /// `lua/modes.lua` calls on every mode change and `init.lua` once at
     /// load, both from `config.focus` (#219).
@@ -1036,6 +1042,7 @@ impl Command {
             | Self::Tray(_)
             | Self::Media(_)
             | Self::X11(_)
+            | Self::Frames(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
             | Self::Cursor(_)
@@ -1465,6 +1472,70 @@ fn after_close_words(value: &Value) -> Option<Vec<crate::successor::Successor>> 
 }
 
 /// A Lua value as a log line should name it.
+/// `config.frames` as `sol.frames` reads it, or why it cannot be.
+fn read_frames(options: &mlua::Table) -> Result<crate::framing::Settings, String> {
+    use crate::framing::{Policy, Rule, Settings};
+    let policy = |value: Value, at: &str| -> Result<Option<Policy>, String> {
+        match value {
+            Value::Nil => Ok(None),
+            Value::String(word) => {
+                let word = word.to_string_lossy();
+                Policy::named(&word).map(Some).ok_or_else(|| {
+                    format!("{at} is \"prefer\", \"force\" or \"allow\", not \"{word}\"")
+                })
+            }
+            other => Err(format!(
+                "{at} is \"prefer\", \"force\" or \"allow\", not {}",
+                describe(&other)
+            )),
+        }
+    };
+    let mut settings = Settings::default();
+    if let Some(chosen) = policy(
+        options.get::<Value>("policy").unwrap_or(Value::Nil),
+        "frames.policy",
+    )? {
+        settings.policy = chosen;
+    }
+    match options.get::<Value>("rules").unwrap_or(Value::Nil) {
+        Value::Nil => {}
+        Value::Table(rules) => {
+            for (index, rule) in rules.sequence_values::<Value>().enumerate() {
+                let at = format!("frames.rules[{}]", index + 1);
+                let Ok(Value::Table(rule)) = rule else {
+                    return Err(format!(
+                        "{at} is a table: {{ match = {{ app_id = ... }}, policy = ... }}"
+                    ));
+                };
+                let app_id = match rule.get::<Value>("match").unwrap_or(Value::Nil) {
+                    Value::Table(matching) => match matching.get::<Value>("app_id") {
+                        Ok(Value::String(app_id)) => {
+                            crate::effect::rules::Glob::parse(&app_id.to_string_lossy())
+                        }
+                        _ => return Err(format!("{at}.match.app_id is a string")),
+                    },
+                    _ => return Err(format!("{at}.match is {{ app_id = ... }}")),
+                };
+                let Some(policy) = policy(
+                    rule.get::<Value>("policy").unwrap_or(Value::Nil),
+                    &format!("{at}.policy"),
+                )?
+                else {
+                    return Err(format!("{at} has no policy"));
+                };
+                settings.rules.push(Rule { app_id, policy });
+            }
+        }
+        other => {
+            return Err(format!(
+                "frames.rules is a list of rules, not {}",
+                describe(&other)
+            ));
+        }
+    }
+    Ok(settings)
+}
+
 fn describe(value: &Value) -> String {
     match value {
         Value::Integer(number) => number.to_string(),
@@ -4037,6 +4108,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("fullscreen", window.fullscreen)?;
                 entry.set("maximized", window.maximized)?;
                 entry.set("style", window.style.clone())?;
+                entry.set("client_side", window.client_side)?;
                 entry.set("x11_type", window.x11_type.clone())?;
                 entry.set("accepts_input", window.accepts_input)?;
                 entry.set("class", window.class.clone())?;
@@ -5177,6 +5249,30 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 pending.commands.push(Command::Lock(settings));
                 pending.commands.push(Command::LockAuth(auth));
                 pending.commands.push(Command::LockScene(scene));
+            })
+        })?,
+    )?;
+
+    // Who draws a Wayland window's frame (#462): `config.frames`, handed over
+    // by `init.lua`. `policy` is "prefer", "force" or "allow"; `rules` is a
+    // list of `{ match = { app_id = ... }, policy = ... }`, each `app_id`
+    // exact, `*`, or a prefix ending in `*`, the last matching one winning.
+    // Anything else is refused whole and the default kept, with the reason
+    // logged: half a policy is a frame on the windows nobody meant.
+    // `tests::sol_frames_reads_the_policy_and_its_rules`.
+    sol.set(
+        "frames",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let settings = match options.map(|options| read_frames(&options)) {
+                Some(Ok(settings)) => settings,
+                Some(Err(reason)) => {
+                    tracing::warn!(reason, "frames: keeping the default");
+                    crate::framing::Settings::default()
+                }
+                None => crate::framing::Settings::default(),
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Frames(settings));
             })
         })?,
     )?;
@@ -8650,6 +8746,7 @@ mod tests {
             media: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
+                client_side: false,
                 insets: crate::decoration::Insets::default(),
                 id: 7,
                 rect: Rect {
@@ -11268,6 +11365,98 @@ mod tests {
     /// holds for `lock`: a future edit to one without the other must fail a
     /// test rather than ship a mismatch.
     #[test]
+    fn sol_frames_reads_the_policy_and_its_rules() {
+        use crate::effect::rules::Glob;
+        use crate::framing::{Policy, Rule, Settings};
+        let directory = std::env::temp_dir().join("solium-script-test-frames");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::Frames(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::Frames")
+        };
+
+        assert_eq!(
+            configured(
+                r#"sol.frames({ policy = "force", rules = {
+                    { match = { app_id = "org.gnome.*" }, policy = "prefer" },
+                    { match = { app_id = "firefox" }, policy = "allow" },
+                } })"#
+            ),
+            Settings {
+                policy: Policy::Force,
+                rules: vec![
+                    Rule {
+                        app_id: Glob::parse("org.gnome.*"),
+                        policy: Policy::Prefer,
+                    },
+                    Rule {
+                        app_id: Glob::parse("firefox"),
+                        policy: Policy::Allow,
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            configured(r#"sol.frames({ policy = "allow" })"#),
+            Settings {
+                policy: Policy::Allow,
+                rules: Vec::new(),
+            }
+        );
+        for broken in [
+            r#"sol.frames({ policy = "server" })"#,
+            "sol.frames({ policy = 1 })",
+            r#"sol.frames({ rules = "force" })"#,
+            r#"sol.frames({ rules = { { policy = "force" } } })"#,
+            r#"sol.frames({ rules = { { match = { app_id = "x" } } } })"#,
+            r#"sol.frames({ rules = { { match = { app_id = 5 }, policy = "force" } } })"#,
+            r#"sol.frames({ policy = "force", rules = { { match = { app_id = "x" }, policy = "both" } } })"#,
+        ] {
+            assert_eq!(
+                configured(broken),
+                Settings::default(),
+                "{broken} was not refused whole"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_shipped_configuration_s_frames_table_matches_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-frames-default", "return {}")
+        else {
+            return;
+        };
+        let frames: Vec<crate::framing::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Frames(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            frames,
+            [crate::framing::Settings::default()],
+            "the shipped init.lua did not hand config.frames over as it says"
+        );
+    }
+
+    #[test]
     fn the_shipped_configuration_s_x11_table_matches_the_rust_default() {
         let Some((directory, mut scripts)) =
             shipped_init_with_user("solium-script-test-x11-default", "return {}")
@@ -11675,6 +11864,7 @@ mod tests {
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let mut snapshot = empty_snapshot();
         let window = |id: u64, modal: bool, parent: Parentage| WindowInfo {
+            client_side: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect: Rect::default(),
@@ -12387,6 +12577,7 @@ mod tests {
             windows: windows
                 .iter()
                 .map(|id| WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     id: *id,
                     rect: Rect {
@@ -16721,6 +16912,7 @@ mod dialogs {
     /// chose, in the corner a Wayland toplevel is mapped at.
     fn window(id: u64, w: f64, h: f64) -> WindowInfo {
         WindowInfo {
+            client_side: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect: Rect {
@@ -16774,6 +16966,7 @@ mod dialogs {
 
     fn modal(id: u64, w: f64, h: f64, parent: Parentage) -> WindowInfo {
         WindowInfo {
+            client_side: false,
             insets: crate::decoration::Insets::default(),
             modal: true,
             parent,
@@ -16843,6 +17036,7 @@ mod dialogs {
         .expect("writing the test script");
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let framed = WindowInfo {
+            client_side: false,
             insets: crate::decoration::Insets {
                 top: 32,
                 right: 1,
@@ -17393,6 +17587,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            client_side: false,
                             insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
@@ -17868,6 +18063,7 @@ mod dialogs {
                 .iter()
                 .cloned()
                 .map(|window| WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     leaving: ids.contains(&window.id),
                     ..window
@@ -18005,6 +18201,7 @@ mod dialogs {
                         vec![second_monitor()],
                         (1..=3)
                             .map(|id| WindowInfo {
+                                client_side: false,
                                 insets: crate::decoration::Insets::default(),
                                 leaving: leaving && id == 3,
                                 ..on(&second_monitor(), window(id, 800.0, 600.0))
@@ -18126,6 +18323,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            client_side: false,
                             insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
@@ -18810,6 +19008,7 @@ mod dialogs {
                 scripts.evaluate("return tostring(require(\"workspaces\").vacant(\"DP-1\"))")
             };
             let closing = |id| WindowInfo {
+                client_side: false,
                 insets: crate::decoration::Insets::default(),
                 leaving: true,
                 ..window(id, 800.0, 600.0)
@@ -19048,6 +19247,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go under `min`.
         fn at_least(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                client_side: false,
                 insets: crate::decoration::Insets::default(),
                 min: size(w, h),
                 ..plain(id)
@@ -19057,6 +19257,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go over `max`.
         fn at_most(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                client_side: false,
                 insets: crate::decoration::Insets::default(),
                 max: size(w, h),
                 ..plain(id)
@@ -19065,6 +19266,7 @@ mod dialogs {
 
         fn with_app(app_id: &str, window: WindowInfo) -> WindowInfo {
             WindowInfo {
+                client_side: false,
                 insets: crate::decoration::Insets::default(),
                 app_id: app_id.to_owned(),
                 ..window
@@ -19139,6 +19341,7 @@ mod dialogs {
             );
             let windows = vec![
                 WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     max: size(1200, 0),
                     cramped: true,
@@ -19427,6 +19630,7 @@ mod dialogs {
                 switched_on(&mut scripts, "super+t");
                 let _ = scripts.opened(1, desk(vec![plain(1)], (2000.0, 700.0)));
                 let launched = WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     shown: false,
                     ..plain(2)
@@ -19438,6 +19642,7 @@ mod dialogs {
                 assert_eq!(workspace(&scripts), "1", "the premise");
 
                 let arrived = WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     shown,
                     ..at_least(2, 2450, 1350)
@@ -19479,6 +19684,7 @@ mod dialogs {
                         "the launched window stayed in a tile that cannot hold it"
                     );
                     let again = WindowInfo {
+                        client_side: false,
                         insets: crate::decoration::Insets::default(),
                         shown: false,
                         ..at_least(2, 2450, 1350)
@@ -19660,6 +19866,7 @@ mod dialogs {
         fn at_rest(rects: &HashMap<u64, Rect>, id: u64) -> WindowInfo {
             match rects.get(&id) {
                 Some(rect) => WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     rect: *rect,
                     ..window(id, rect.w, rect.h)
@@ -20119,6 +20326,7 @@ mod dialogs {
                                 on(&second_monitor(), each)
                             } else if id >= 3 {
                                 WindowInfo {
+                                    client_side: false,
                                     insets: crate::decoration::Insets::default(),
                                     monitor: "DP-2".to_owned(),
                                     ..each
@@ -20355,6 +20563,7 @@ mod directions {
 
     fn window(id: u64, monitor: &str, rect: Rect) -> WindowInfo {
         WindowInfo {
+            client_side: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect,
@@ -22090,6 +22299,7 @@ mod directions {
             windows: vec![
                 window(4, "DP-1", WIDE),
                 WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)
@@ -22158,17 +22368,20 @@ mod directions {
         let desk = |focused: bool| Snapshot {
             windows: vec![
                 WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(1, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     minimized: true,
                     above: false,
                     ..window(2, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     leaving: true,
                     ..window(3, "DP-1", WIDE)
@@ -22247,6 +22460,7 @@ mod directions {
             windows: vec![
                 window(4, "DP-1", WIDE),
                 WindowInfo {
+                    client_side: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)

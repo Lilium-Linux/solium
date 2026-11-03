@@ -212,8 +212,8 @@ local defaults = {
             --              `KeyboardPillLayer {}`, and moves, scales and fades
             --              it with the window. A style of your own without
             --              that line draws none. A window drawn with no frame
-            --              -- fullscreen, one drawing its own decorations, or
-            --              any window under `pane = "none"` -- gets the
+            --              -- fullscreen, or any window under
+            --              `pane = "none"` -- gets the
             --              "surface" pill at its caret instead.
             --   "surface"  on a surface of its own over everything, at the
             --              caret on screen, moved after it as the
@@ -1217,6 +1217,47 @@ local defaults = {
     -- This setting was called `decoration` when a style was one file. The old
     -- name is still read -- see the bottom of this file.
     pane = "glass",
+
+    -- Who draws a window's frame: Solium, in the `pane` style above, or the
+    -- application itself (#462). An application says which it wants through
+    -- xdg-decoration, or never says, which by that protocol means it draws
+    -- its own: GTK4 and libadwaita applications and Firefox never say, and
+    -- draw a headerbar whatever they are told.
+    --
+    --   "prefer"  the default: Solium's whole frame, its bar included, for an
+    --             application that leaves it to Solium or asks for it; for one
+    --             that asks to draw its own titlebar or never says, the
+    --             style's client-side frame -- its border, shadow, corners and
+    --             focus around the application's own headerbar. No window has
+    --             two titlebars, and every window looks like one family.
+    --   "force"   Solium's whole frame on every window, and an application
+    --             asking to draw its own titlebar is told Solium draws it. One
+    --             that draws its own anyway has two.
+    --   "allow"   the client-side frame unless an application asks for
+    --             Solium's whole one.
+    --
+    -- A rule gives one application, or several, a policy of their own: each
+    -- `app_id` exact, `*`, or a prefix ending in `*`, and the last rule that
+    -- matches wins. `sol.windows()` lists the ids, and so does `appId` in a
+    -- frame.
+    --
+    --     frames = {
+    --         policy = "force",
+    --         rules = { { match = { app_id = "org.gnome.*" }, policy = "prefer" } },
+    --     },
+    --
+    -- Applications say which they want through xdg-decoration, and GTK3 ones
+    -- (Firefox among them) through KDE's server-decoration protocol, which is
+    -- offered beside it. A pane style says what its client-side frame is, in
+    -- its `clientSideInsets` and its layers' `clientSide`
+    -- (qml/panes/README.md), and an effect rule matches such a window with
+    -- `client_side = true`. X11 windows are not asked: they say whether they
+    -- want a frame through their Motif hints. A change here reframes the
+    -- windows already open.
+    frames = {
+        policy = "prefer",
+        rules = {},
+    },
 
     -- How long, in milliseconds, a frame may spend building the windows'
     -- frames when the pane style changes -- from here, `sol.pane`, or a

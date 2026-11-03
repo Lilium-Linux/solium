@@ -23,6 +23,12 @@ import Solium
 Item {
     id: frame
 
+    // Set by the compositor, once (#462): true for a window whose application
+    // draws its own titlebar, and then this bar is the application's to draw
+    // and is left out of the frame.
+    property bool clientSide: false
+    visible: !clientSide
+
     // Set by the compositor, on every layer of every style.
     property string title: ""
     property bool focused: false

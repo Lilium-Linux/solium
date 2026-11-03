@@ -18,6 +18,11 @@ Item {
     // Zero is what this reads if the file is built outside a pane — by
     // `--check-qml`, say — and drawing nothing is the honest answer there.
     property int insetTop: 0
+    // Set by the compositor, once (#462): true for a window whose application
+    // draws its own titlebar. Its frame reserves the border on all four sides
+    // (`Pane.qml`'s `clientSideInsets`), and the title and the buttons are
+    // the application's.
+    property bool clientSide: false
     property int insetLeft: 0
 
     property string title: ""
@@ -112,7 +117,7 @@ Item {
 
         Text {
             anchors.centerIn: parent
-            visible: frame.roomForTitle
+            visible: frame.roomForTitle && !frame.clientSide
             width: Math.min(implicitWidth, Math.max(frame.width - 120, 0))
             text: frame.title
             elide: Text.ElideRight
@@ -124,6 +129,7 @@ Item {
     Row {
         anchors { right: bar.right; rightMargin: Theme.margin; verticalCenter: bar.verticalCenter }
         spacing: Theme.gap
+        visible: !frame.clientSide
 
         Repeater {
             model: [{ name: "maximize", tint: Theme.warning },

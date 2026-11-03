@@ -280,10 +280,27 @@ is given.
 
 ## Which windows get a frame, and what a failure looks like
 
-Every window is offered a frame drawn by the compositor. A client that insists
-on drawing its own frame gets to, and is left without one; so are menus and
-tooltips, and a fullscreen window. `pane = "none"` (or `SOLIUM_PANE=none`) draws
-no frame at all and builds no QML scene per window.
+Every window gets a frame from the pane style, and `frames.policy` in
+`config.lua` decides which of the style's two (#102, #462). An application that
+leaves it to the compositor, or asks for it, gets the **whole** frame, its bar
+included. One that asks to draw its own titlebar, or never says (by the
+xdg-decoration protocol that means it draws its own, which is what GTK4,
+libadwaita and Firefox do), gets the style's **client-side** frame: what the
+style reserves in `clientSideInsets` (none, unless it says), and its layers
+told `clientSide`, so they leave the bar to the application and still draw the
+border, the shadow, the corners and the focus. No window has two titlebars, and
+both kinds look like one family. That is the default, `"prefer"`; `"force"`
+gives every window the whole frame, and `"allow"` the client-side one unless an
+application asks. `frames.rules` gives one application a policy of its own by
+`app_id`, and a change reframes the windows already open. Applications ask
+through xdg-decoration, and GTK3 ones through KDE's server-decoration protocol,
+offered beside it. An effect rule matches a window framed client-side with
+`client_side = true`.
+
+Menus, tooltips and a fullscreen window are never framed. `pane = "none"` (or
+`SOLIUM_PANE=none`) draws no frame at all and builds no QML scene per window. A
+single-file decoration (below) has no client-side frame, so a window drawing
+its own titlebar is left bare under one.
 
 A style that cannot be loaded (a name that is nowhere, a layer whose QML does
 not build, or a `requires` this session cannot meet) leaves each window it

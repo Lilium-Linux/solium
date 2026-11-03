@@ -67,6 +67,9 @@ sol.lock(config.lock)
 -- WM_CLASS names refused a tile, decoration or bar entry outright (#221).
 -- See `config.lua`.
 sol.x11(config.x11)
+-- Who draws a window's frame, Solium or the application (#462). See
+-- `config.lua`.
+sol.frames(config.frames)
 -- The pointer's theme and size. An empty table here is not "reset it": it
 -- means the configuration says nothing, and `XCURSOR_THEME`/`XCURSOR_SIZE`
 -- are what the pointer follows -- which is what the rest of the machine

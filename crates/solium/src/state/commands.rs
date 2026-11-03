@@ -745,6 +745,15 @@ impl Solium {
                         self.x11 = settings;
                     }
                 }
+                Command::Frames(settings) => {
+                    if self.frames != settings {
+                        tracing::debug!(?settings, "who draws the windows' frames set");
+                        self.frames = settings;
+                        // The windows already open follow it, as they follow a
+                        // change of pane style.
+                        self.decide_frames();
+                    }
+                }
                 Command::FocusMode {
                     click,
                     follow,
