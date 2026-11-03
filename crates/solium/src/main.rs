@@ -28,6 +28,7 @@ mod drawing;
 mod edge;
 mod effect;
 mod explicit_sync;
+mod ext_workspace;
 mod focus;
 mod folder;
 mod gputime;

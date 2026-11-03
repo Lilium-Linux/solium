@@ -1095,6 +1095,16 @@ function sol.lock_peek(progress) end
 ---@return nil
 function sol.x11(options) end
 
+---Whether a shell that is its own program sees the workspaces declared with
+---`sol.workspaces`, through `ext-workspace-v1` (#60): `config.workspaces.offered`,
+---which the shipped `workspaces.lua` hands over. A switch such a client asks
+---for reaches the `surface` listeners as the action `workspaces.go`,
+---`{ id, monitor }`, from the surface `"ext-workspace"`. `false` hides the
+---global and tells every client that bound it that it is finished.
+---@param offered boolean
+---@return nil
+function sol.workspaces_offered(offered) end
+
 ---Override the focus input policy: `config.focus`, which `lua/modes.lua`
 ---hands over on every mode change as well as at load. See #219.
 ---@param options? sol.FocusModeOptions

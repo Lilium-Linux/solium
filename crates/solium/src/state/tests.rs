@@ -2924,6 +2924,9 @@ mod real_client {
     use wayland_protocols::ext::session_lock::v1::client::{
         ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
     };
+    use wayland_protocols::ext::workspace::v1::client::{
+        ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+    };
     use wayland_protocols::wp::content_type::v1::client::{
         wp_content_type_manager_v1, wp_content_type_v1,
     };
@@ -2998,6 +3001,13 @@ mod real_client {
         dmabuf: Option<explicit_sync::ZwpLinuxDmabufV1>,
         compositor: Option<wl_compositor::WlCompositor>,
         wm_base: Option<xdg_wm_base::XdgWmBase>,
+        /// `ext_workspace_manager_v1`'s global name, as the registry announced
+        /// it: bound only by a test that asks, with [`Self::bind_workspaces`]
+        /// (#60).
+        workspace_global: Option<u32>,
+        registry: Option<wl_registry::WlRegistry>,
+        /// What the workspace manager told this client.
+        workspaces_told: WorkspacesTold,
         shm: Option<wl_shm::WlShm>,
         /// For #126: a window whose picture is more than its root surface.
         subcompositor: Option<wl_subcompositor::WlSubcompositor>,
@@ -3217,7 +3227,44 @@ mod real_client {
         touches: Vec<wl_touch::Event>,
     }
 
+    /// What `ext_workspace_manager_v1` told a client (#60).
+    #[derive(Debug, Default)]
+    struct WorkspacesTold {
+        manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
+        /// Each group, in the order announced: its handle, the monitors it
+        /// entered less those it left, its workspaces, and whether it went.
+        groups: Vec<(
+            ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+            i32,
+            Vec<ext_workspace_handle_v1::ExtWorkspaceHandleV1>,
+            bool,
+        )>,
+        /// Each workspace, in the order announced, and what it was told.
+        workspaces: Vec<(ext_workspace_handle_v1::ExtWorkspaceHandleV1, WorkspaceTold)>,
+        done: u32,
+        finished: bool,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct WorkspaceTold {
+        id: String,
+        name: String,
+        coordinates: Vec<u32>,
+        state: u32,
+        capabilities: u32,
+        removed: bool,
+    }
+
     impl Client {
+        /// Bind the workspace manager, as a bar does.
+        fn bind_workspaces(&mut self, qh: &QueueHandle<Self>) {
+            let registry = self.registry.clone().expect("the registry");
+            let name = self
+                .workspace_global
+                .expect("ext_workspace_manager_v1 offered");
+            self.workspaces_told.manager = Some(registry.bind(name, 1, qh, ()));
+        }
+
         fn seat_touch(&self, qh: &QueueHandle<Self>) -> wl_touch::WlTouch {
             self.seat.as_ref().expect("wl_seat bound").get_touch(qh, ())
         }
@@ -3388,7 +3435,9 @@ mod real_client {
                 }
                 _ => return,
             };
+            state.registry = Some(registry.clone());
             match interface.as_str() {
+                "ext_workspace_manager_v1" => state.workspace_global = Some(name),
                 "wp_linux_drm_syncobj_manager_v1" => {
                     state.syncobj = Some(registry.bind(name, 1, qh, ()))
                 }
@@ -3603,6 +3652,108 @@ mod real_client {
     wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
     wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
     wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
+
+    impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _manager: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+            event: ext_workspace_manager_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            use ext_workspace_manager_v1::Event;
+            let told = &mut state.workspaces_told;
+            match event {
+                Event::WorkspaceGroup { workspace_group } => {
+                    told.groups.push((workspace_group, 0, Vec::new(), false));
+                }
+                Event::Workspace { workspace } => {
+                    told.workspaces.push((workspace, WorkspaceTold::default()));
+                }
+                Event::Done => told.done += 1,
+                Event::Finished => told.finished = true,
+                _ => {}
+            }
+        }
+
+        wayland_client::event_created_child!(Client, ext_workspace_manager_v1::ExtWorkspaceManagerV1, [
+            ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()),
+            ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()),
+        ]);
+    }
+
+    impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            group: &ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+            event: ext_workspace_group_handle_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            use ext_workspace_group_handle_v1::Event;
+            let Some((_, outputs, workspaces, removed)) = state
+                .workspaces_told
+                .groups
+                .iter_mut()
+                .find(|(each, ..)| each == group)
+            else {
+                return;
+            };
+            match event {
+                Event::OutputEnter { .. } => *outputs += 1,
+                Event::OutputLeave { .. } => *outputs -= 1,
+                Event::WorkspaceEnter { workspace } => workspaces.push(workspace),
+                Event::WorkspaceLeave { workspace } => workspaces.retain(|each| *each != workspace),
+                Event::Removed => *removed = true,
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            workspace: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+            event: ext_workspace_handle_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            use ext_workspace_handle_v1::Event;
+            let Some((_, told)) = state
+                .workspaces_told
+                .workspaces
+                .iter_mut()
+                .find(|(each, _)| each == workspace)
+            else {
+                return;
+            };
+            match event {
+                Event::Id { id } => told.id = id,
+                Event::Name { name } => told.name = name,
+                Event::Coordinates { coordinates } => {
+                    told.coordinates = coordinates
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|four| u32::from_ne_bytes(*four))
+                        .collect();
+                }
+                Event::State {
+                    state: wayland_client::WEnum::Value(bits),
+                } => told.state = bits.bits(),
+                Event::Capabilities {
+                    capabilities: wayland_client::WEnum::Value(bits),
+                } => {
+                    told.capabilities = bits.bits();
+                }
+                Event::Removed => told.removed = true,
+                _ => {}
+            }
+        }
+    }
     wayland_client::delegate_noop!(Client: ignore wl_subcompositor::WlSubcompositor);
     wayland_client::delegate_noop!(Client: ignore wl_subsurface::WlSubsurface);
 
@@ -35449,6 +35600,196 @@ end)
         /// everything `render::elements` draws below the drag icon, in its
         /// order -- `elements` needs a GPU and only turns each entry into
         /// elements. The pointer is asked of the hit tests themselves.
+        /// The workspaces for a shell that is its own program (#60):
+        /// `ext-workspace-v1` against a real client binding it as a bar does.
+        mod ext_workspace {
+            use super::*;
+            use ext_workspace_handle_v1::State;
+
+            /// The desk's monitor, by name.
+            fn monitor(desk: &Desk) -> String {
+                desk.state
+                    .space
+                    .outputs()
+                    .next()
+                    .map(|output| output.name())
+                    .expect("the desk's monitor")
+            }
+
+            /// A script declaring one group on the desk's monitor, showing
+            /// `showing`, with workspaces "1" and "2", and recording every
+            /// `surface` action it hears in `heard`.
+            fn declare(desk: &mut Desk, showing: &str) {
+                let monitor = monitor(desk);
+                desk.install(&format!(
+                    r#"heard = ""
+sol.on("surface", function(surface, action, data)
+    heard = heard .. surface .. " " .. action .. " " .. tostring(data.id) .. " " .. tostring(data.monitor) .. ";"
+end)
+sol.workspaces({{ groups = {{ {{ id = "g", monitors = {{ "{monitor}" }}, showing = {{ "{showing}" }},
+    workspaces = {{ {{ id = "1", name = "one", col = 1, row = 1 }}, {{ id = "2", name = "two", col = 2, row = 1 }} }} }} }} }})"#
+                ));
+                // What the script declared as it loaded, carried out.
+                let outcome = desk
+                    .state
+                    .scripts
+                    .as_mut()
+                    .map(crate::script::Scripts::startup)
+                    .unwrap_or_default();
+                desk.state.apply(outcome);
+                publish(desk);
+            }
+
+            fn publish(desk: &mut Desk) {
+                desk.pump();
+                desk.state.publish_ext_workspaces();
+                desk.pump();
+            }
+
+            /// The desk's monitor as a `wl_output` global, which the client
+            /// binds: a monitor the fixture maps has none, and a client can
+            /// only be told it entered an output it holds.
+            fn advertise_monitor(
+                desk: &mut Desk,
+            ) -> smithay::reexports::wayland_server::backend::GlobalId {
+                let output = desk
+                    .state
+                    .space
+                    .outputs()
+                    .next()
+                    .cloned()
+                    .expect("the desk's monitor");
+                let global = output.create_global::<Solium>(&desk.display.handle());
+                desk.pump();
+                global
+            }
+
+            fn told(desk: &Desk) -> Vec<WorkspaceTold> {
+                desk.client
+                    .workspaces_told
+                    .workspaces
+                    .iter()
+                    .map(|(_, told)| told.clone())
+                    .collect()
+            }
+
+            /// **A bar is told each declared group and its workspaces, and
+            /// which is shown, and again when that changes.**
+            #[test]
+            fn a_bar_is_told_each_group_and_workspace_and_which_is_shown() {
+                let mut desk = Desk::new();
+                let _monitor = advertise_monitor(&mut desk);
+                declare(&mut desk, "1");
+                desk.client.bind_workspaces(&desk.qh);
+                publish(&mut desk);
+                let groups = &desk.client.workspaces_told.groups;
+                assert_eq!(groups.len(), 1, "one group");
+                assert_eq!(
+                    (groups[0].1, groups[0].2.len(), groups[0].3),
+                    (1, 2, false),
+                    "(its monitors, its workspaces, removed)"
+                );
+                let ids_names: Vec<(String, String, Vec<u32>, u32, u32)> = told(&desk)
+                    .into_iter()
+                    .map(|told| {
+                        (
+                            told.id,
+                            told.name,
+                            told.coordinates,
+                            told.state,
+                            told.capabilities,
+                        )
+                    })
+                    .collect();
+                let activate = ext_workspace_handle_v1::WorkspaceCapabilities::Activate.bits();
+                assert_eq!(
+                    ids_names,
+                    [
+                        (
+                            "g/1".to_owned(),
+                            "one".to_owned(),
+                            vec![1, 1],
+                            State::Active.bits(),
+                            activate
+                        ),
+                        ("g/2".to_owned(), "two".to_owned(), vec![2, 1], 0, activate),
+                    ]
+                );
+                let done = desk.client.workspaces_told.done;
+                assert!(done >= 1, "never done");
+                publish(&mut desk);
+                assert_eq!(
+                    desk.client.workspaces_told.done, done,
+                    "nothing changed, nothing told"
+                );
+                declare(&mut desk, "2");
+                assert_eq!(
+                    told(&desk)
+                        .iter()
+                        .map(|told| told.state)
+                        .collect::<Vec<_>>(),
+                    [0, State::Active.bits()],
+                    "the switch"
+                );
+                assert_eq!(desk.client.workspaces_told.done, done + 1);
+            }
+
+            /// **A bar's `activate` reaches Lua at its `commit` as
+            /// `workspaces.go` from the surface "ext-workspace"**, with the
+            /// workspace's own id and its group's monitor.
+            #[test]
+            fn activate_reaches_lua_as_workspaces_go_at_commit() {
+                let mut desk = Desk::new();
+                declare(&mut desk, "1");
+                desk.client.bind_workspaces(&desk.qh);
+                publish(&mut desk);
+                let second = desk.client.workspaces_told.workspaces[1].0.clone();
+                second.activate();
+                desk.pump();
+                let heard = |desk: &Desk| {
+                    desk.state
+                        .scripts
+                        .as_ref()
+                        .map(|scripts| scripts.evaluate("return heard"))
+                        .unwrap_or_default()
+                };
+                assert_eq!(heard(&desk), "", "nothing before the commit");
+                desk.client
+                    .workspaces_told
+                    .manager
+                    .clone()
+                    .expect("bound")
+                    .commit();
+                desk.pump();
+                assert_eq!(
+                    heard(&desk),
+                    format!("ext-workspace workspaces.go 2 {};", monitor(&desk))
+                );
+            }
+
+            /// **`workspaces.offered = false` takes the global away**: every
+            /// group and workspace removed, the manager finished, and a
+            /// client connecting afterwards not offered it.
+            #[test]
+            fn taking_it_away_finishes_every_manager_and_hides_it() {
+                let mut desk = Desk::new();
+                declare(&mut desk, "1");
+                desk.client.bind_workspaces(&desk.qh);
+                publish(&mut desk);
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::WorkspacesOffered(false)],
+                    ..crate::script::Outcome::default()
+                });
+                desk.pump();
+                let told = &desk.client.workspaces_told;
+                assert!(told.finished, "the manager was not finished");
+                assert!(told.groups.iter().all(|(.., removed)| *removed));
+                assert!(told.workspaces.iter().all(|(_, each)| each.removed));
+                let (_conn, _queue, late) = connect(&mut desk.display, &mut desk.state);
+                assert_eq!(late.workspace_global, None);
+            }
+        }
+
         mod stacking {
             use super::*;
             use crate::render::{Stacked, Walked};

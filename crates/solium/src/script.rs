@@ -894,6 +894,9 @@ pub(crate) enum Command {
     /// outright: `sol.x11`, from `config.x11` (#221). See
     /// `crate::xwayland::Settings`.
     X11(crate::xwayland::Settings),
+    /// Whether `ext-workspace-v1` is offered: `sol.workspaces_offered`, from
+    /// `config.workspaces.offered` (#60). See `crate::ext_workspace`.
+    WorkspacesOffered(bool),
     /// Override the input profile's focus policy: `sol.focus_mode`, which
     /// `lua/modes.lua` calls on every mode change and `init.lua` once at
     /// load, both from `config.focus` (#219).
@@ -1036,6 +1039,7 @@ impl Command {
             | Self::Tray(_)
             | Self::Media(_)
             | Self::X11(_)
+            | Self::WorkspacesOffered(_)
             | Self::FocusMode { .. }
             | Self::Power { .. }
             | Self::Cursor(_)
@@ -6837,6 +6841,18 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Whether a shell that is its own program sees the workspaces, through
+    // `ext-workspace-v1` (#60): `config.workspaces.offered`, which the shipped
+    // `workspaces.lua` hands over. `tests::sol_workspaces_offered_is_a_flag`.
+    sol.set(
+        "workspaces_offered",
+        lua.create_function(|lua, offered: bool| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::WorkspacesOffered(offered));
+            })
+        })?,
+    )?;
+
     // `sol.workspaces{ arrangement, groups, windows }`: the compositor does
     // not know what a workspace is, so Lua says, each time it changes
     // (03 §3.2.17). `tests::sol_workspaces_declares_groups_and_windows`.
@@ -11267,6 +11283,53 @@ mod tests {
     /// `the_shipped_configuration_s_lock_table_matches_the_rust_default`
     /// holds for `lock`: a future edit to one without the other must fail a
     /// test rather than ship a mismatch.
+    #[test]
+    fn sol_workspaces_offered_is_a_flag() {
+        let directory = std::env::temp_dir().join("solium-script-test-workspaces-offered");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let offered = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::WorkspacesOffered(offered) => Some(offered),
+                    _ => None,
+                })
+        };
+        assert_eq!(offered("sol.workspaces_offered(false)"), Some(false));
+        assert_eq!(offered("sol.workspaces_offered(true)"), Some(true));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_shipped_workspaces_offer_ext_workspace() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-workspaces-offered-default", "return {}")
+        else {
+            return;
+        };
+        let offered: Vec<bool> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::WorkspacesOffered(offered) => Some(offered),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            offered,
+            [true],
+            "the shipped workspaces.lua did not offer them"
+        );
+    }
+
     #[test]
     fn the_shipped_configuration_s_x11_table_matches_the_rust_default() {
         let Some((directory, mut scripts)) =

@@ -440,6 +440,9 @@ pub(crate) struct Solium {
     /// recording and screen sharing. See `screencopy.rs`.
     #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
     pub(crate) screencopy_state: crate::screencopy::ScreencopyState,
+    /// `ext-workspace-v1`: the declared workspaces, for a shell that is its
+    /// own program (#60). See `ext_workspace.rs`.
+    pub(crate) ext_workspaces: crate::ext_workspace::ExtWorkspaces,
     /// Registers `ext_output_image_capture_source_manager_v1` and
     /// `ext_image_copy_capture_manager_v1`, the successor to the one above,
     /// which screen sharing through the portal asks for first. See
@@ -1504,6 +1507,7 @@ impl Solium {
             rescan_outputs: false,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
+            ext_workspaces: crate::ext_workspace::ExtWorkspaces::new(&display_handle),
             image_copy_state: crate::image_copy::ImageCopyState::new::<Self>(&display_handle),
             pending_captures: Vec::new(),
             space: Space::default(),

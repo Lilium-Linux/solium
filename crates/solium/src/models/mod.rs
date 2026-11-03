@@ -96,6 +96,9 @@ impl crate::state::Solium {
     /// `tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
     /// `tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
     pub(crate) fn publish_models(&mut self) {
+        // The workspaces a shell that is its own program sees, from the same
+        // declaration the `Workspaces` model is built from (#60).
+        self.publish_ext_workspaces();
         // The caret each decoration is told this frame:
         // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
         self.settle_caret();

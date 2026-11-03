@@ -2003,6 +2003,14 @@ local defaults = {
         motion = { duration = 300, easing = "outCubic" },
         -- Whether a new window joins the workspace you are looking at.
         follow_new_windows = true,
+        -- Whether a shell that is its own program -- a bar or a dock over
+        -- wlr-layer-shell -- sees the workspaces, through ext-workspace-v1
+        -- (#60): each monitor's group, its workspaces by name and place, and
+        -- which it shows. A click there that switches arrives here as the
+        -- action `workspaces.go` from the surface "ext-workspace", what the
+        -- shipped shell's own workspace buttons send, and this file answers
+        -- it. `false` hides them from every client.
+        offered = true,
     },
 
     open = {
